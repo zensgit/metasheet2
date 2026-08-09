@@ -46,6 +46,84 @@ const ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 const CLI_PATH = join(process.cwd(), '..', '..', 'scripts', 'ops', 'attendance-w4c5-rollout-transition.ts')
 const TSX_CLI = join(process.cwd(), '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs')
 
+function hex64(seed: string): string {
+  return crypto.createHash('sha256').update(seed).digest('hex')
+}
+
+/** Arbitrary fixed namespace UUID for `attendance_w4_uuidv5(...)` derivations in test fixtures. */
+const IMPORT_NS_V1 = '6f67fdaa-e2aa-48b3-b76c-c4aab9723173'
+
+/**
+ * Hardened write detector for the statement-level zero-write sweep (P2-3, PR #4839 gate,
+ * 20260809). The original sweep used a bare `/^(INSERT|UPDATE|DELETE|...)\b/` anchor —
+ * deliberately anchored at the START of the statement, never a whole-statement scan, because a
+ * whole-statement `\bUPDATE\b` search would false-positive on every `FOR UPDATE`/`FOR UPDATE OF
+ * j` locking clause this file's own read-only predicates issue routinely. That anchor is still
+ * correct for a bare DML statement, but it CANNOT see a write hidden inside a CTE
+ * (`WITH x AS (INSERT INTO ... ) SELECT ...`) — such a statement starts with `WITH`, not
+ * `INSERT`, so the anchor alone would pass it through undetected. Nothing on the actual `plan`
+ * path issues a CTE today (verified: every predicate helper in w4c3a-rollout-control.ts issues a
+ * plain `SELECT ... FOR UPDATE`), so this is defense-in-depth against a future edit, not a fix
+ * for a live gap. Matches EITHER the statement-start form OR a write verb immediately inside a
+ * CTE's `AS (...)` open — `\bAS\s*\(` requires a literal open-paren right after `AS`, which a
+ * read-only CTE's own `(SELECT ...) AS "alias"` shape (parenthesis BEFORE `AS`) never produces,
+ * so it does not false-positive on that either. See the self-test directly below for both the
+ * must-catch and must-NOT-catch cases.
+ */
+const WRITE_VERBS_V1 =
+  'INSERT\\s+INTO|UPDATE\\s+\\S+\\s+SET|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?\\s|ALTER\\s+(?:TABLE|SEQUENCE|DATABASE)|DROP\\s+(?:TABLE|SEQUENCE|DATABASE)|CREATE\\s+(?:TABLE|SEQUENCE|DATABASE)'
+const WRITE_STATEMENT_PATTERN_V1 = new RegExp(
+  `(^\\s*(?:${WRITE_VERBS_V1}))|(\\bAS\\s*\\(\\s*(?:${WRITE_VERBS_V1}))`,
+  'i',
+)
+
+function isWriteStatementV1(text: string): boolean {
+  return WRITE_STATEMENT_PATTERN_V1.test(text)
+}
+
+// Ungated (not behind describeIfDatabase): this detector is pure string matching, needs no
+// database, and its own correctness — including the exact false-positive it must avoid — should
+// never be skippable just because DATABASE_URL happens to be unset in a given CI leg.
+describe('isWriteStatementV1 (hardened statement-sweep write detector, P2-3)', () => {
+  it('flags a bare DML statement at the start (the pre-existing shallow case)', () => {
+    for (const text of [
+      'INSERT INTO t (a) VALUES (1)',
+      'UPDATE t SET a = 1 WHERE id = $1',
+      'DELETE FROM t WHERE id = $1',
+      'TRUNCATE TABLE t',
+      'ALTER TABLE t ADD COLUMN a int',
+      'DROP TABLE t',
+      'CREATE TABLE t (a int)',
+    ]) {
+      expect(isWriteStatementV1(text)).toBe(true)
+    }
+  })
+
+  it('flags a CTE-wrapped write that the shallow start-anchor alone would miss', () => {
+    for (const text of [
+      'WITH x AS (INSERT INTO t (a) VALUES (1) RETURNING id) SELECT * FROM x',
+      'WITH a AS (SELECT 1), b AS (UPDATE t SET a = 1 WHERE id = $1 RETURNING id) SELECT * FROM b',
+      'WITH x AS (\n  DELETE FROM t WHERE id = $1 RETURNING id\n) SELECT * FROM x',
+    ]) {
+      expect(isWriteStatementV1(text)).toBe(true)
+    }
+  })
+
+  it('does NOT flag a real read-only statement, including one using FOR UPDATE (the exact false-positive this detector must avoid)', () => {
+    for (const text of [
+      'SELECT id FROM attendance_records WHERE org_id = $1 ORDER BY id FOR UPDATE',
+      'SELECT j.id FROM attendance_import_jobs j WHERE j.org_id = $1 ORDER BY j.id FOR UPDATE OF j',
+      'SELECT state, version, prior_state FROM attendance_calculation_rollout_state WHERE org_id = $1',
+      'WITH target(user_id, work_date) AS (\n  SELECT * FROM unnest($2::uuid[], $3::date[])\n)\nSELECT r.id FROM attendance_records r JOIN target t ON true FOR UPDATE',
+      'BEGIN ISOLATION LEVEL SERIALIZABLE',
+      'ROLLBACK',
+      'COMMIT',
+    ]) {
+      expect(isWriteStatementV1(text)).toBe(false)
+    }
+  })
+})
+
 async function createBase(pool: Pool): Promise<void> {
   await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
   await pool.query(`
@@ -158,6 +236,107 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     return result.rows[0].n as number
   }
 
+  // ---------------------------------------------------------------------------
+  // P2-3 deep-branch fixtures (PR #4839 gate, 20260809). Same shapes as the sibling
+  // attendance-w4c3a-rollout-control.db.test.ts's own fixture builders (not invented fresh) —
+  // just enough of each to make ONE deep predicate see a real row, never intended to model a
+  // realistic org. Called AFTER an org has been driven to its target state cleanly, so seeding
+  // never blocks the drive-up transitions themselves.
+  // ---------------------------------------------------------------------------
+
+  async function insertUnclosedBatchFixture(orgId: string): Promise<void> {
+    const batchId = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_import_batches (id, org_id, status, row_count, meta)
+       VALUES ($1::uuid, $2, 'committed', 1, '{"source":"w4c5-tool-test"}'::jsonb)`,
+      [batchId, orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_import_items (batch_id, org_id, user_id, work_date, preview_snapshot)
+       VALUES ($1::uuid, $2, $3, '2026-08-01', '{}'::jsonb)`,
+      [batchId, orgId, crypto.randomUUID()],
+    )
+  }
+
+  /** A retryable (queued) V1 job — `w4_accepted_write_posture: 'shadow'` deliberately, so it
+   * can be reused as a genuine RETRYABLE_JOB_POSTURE_MISMATCH candidate against a 'shadow'
+   * comparison posture and as an INCOMPLETE_OPERATION / RETRYABLE_JOB_HAS_OPERATION_ROWS
+   * candidate regardless of the pair's own comparison posture. */
+  async function insertRetryableV1JobFixture(orgId: string): Promise<void> {
+    const batchCommandId = crypto.randomUUID()
+    const fp = hex64(`${orgId}:${batchCommandId}`)
+    await pool.query(
+      `INSERT INTO attendance_import_jobs
+         (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
+          w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+          w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+          w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
+       SELECT $1, $2::uuid, 'actor-control', 'queued', '{}'::jsonb, 1, 'import_batch',
+              $2::uuid, 'import_batch', 'batch:control', 'actor-control', 'delegated_import',
+              $3, 'shadow', 1, $3, $3,
+              jsonb_build_array(jsonb_build_object(
+                'ordinal', 0,
+                'semanticFingerprint', $3::text,
+                'derivedOperationId', attendance_w4_uuidv5($4::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $3))::text,
+                'commandFingerprint', $3::text))`,
+      [orgId, batchCommandId, fp, IMPORT_NS_V1],
+    )
+  }
+
+  async function insertUnresolvedIngressReviewFixture(orgId: string): Promise<void> {
+    const recordId = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_records (id, user_id, work_date, org_id) VALUES ($1::uuid, $2, '2026-08-01', $3)`,
+      [recordId, crypto.randomUUID(), orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_record_calculations (
+         id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
+         engine_version, snapshot_schema_version, operation_id, semantic_input_fingerprint,
+         provenance_fingerprint, attribution_snapshot, segment_snapshot, evidence_snapshot,
+         approved_facts_snapshot, input_provenance, merge_policy, calculation_tier, outcome,
+         outcome_reason_code, projection_effect, expected_segment_count, actor_id, correlation_id)
+       VALUES (
+         $1::uuid, $2, $3::uuid, 1, 'calculation', 'shadow', 'legacy_import',
+         'w4c5-tool-test', 1, $4::uuid, $5, $6,
+         '{"posture":"unsupported","sourceSchemaVersion":null,"reason":"missing","sourceFingerprint":null}'::jsonb,
+         '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'append', 'legacy_shadow',
+         'review_required', 'legacy_time_ingress_not_authoritative', 'none', 0, $7, $8)`,
+      [
+        crypto.randomUUID(),
+        orgId,
+        recordId,
+        crypto.randomUUID(),
+        hex64(`${orgId}:${recordId}:semantic`),
+        hex64(`${orgId}:${recordId}:provenance`),
+        actorId,
+        crypto.randomUUID(),
+      ],
+    )
+  }
+
+  /** A 'missing-snapshot' defective pending request with a LIVE `approval_instances` link — the
+   * combination that exercises BOTH the `attendance_request_calculation_snapshots` lookup AND
+   * the per-row `approval_instances ... FOR UPDATE` sub-loop
+   * (`classifyAttendanceRequestSnapshotDefectsV1`, w4c3a-rollout-control.ts:1023), which only
+   * fires when a matched request row carries a non-null `approval_instance_id`. */
+  async function insertDefectiveRequestFixture(orgId: string): Promise<void> {
+    const requestId = crypto.randomUUID()
+    const approvalInstanceId = `appr-${requestId}`
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, requested_in_at, requested_out_at,
+          reason, metadata, approval_instance_id)
+       VALUES ($1::uuid, $2, '2026-08-01', 'time_correction', 'pending', $3, NULL, NULL, 'fixture', '{}'::jsonb, $4)`,
+      [requestId, crypto.randomUUID(), orgId, approvalInstanceId],
+    )
+    await pool.query(`INSERT INTO approval_instances (id, status, version) VALUES ($1, 'pending', 1)`, [
+      approvalInstanceId,
+    ])
+    // Deliberately NO attendance_request_calculation_snapshots row inserted — this is the
+    // 'missing' defect kind, which is enough on its own to trip DEFECTIVE_REQUEST_SNAPSHOT.
+  }
+
   beforeAll(async () => {
     workdir = mkdtempSync(join(tmpdir(), 'w4c5-tool-'))
     const adminUrl = new URL(dbUrl as string)
@@ -199,9 +378,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         const plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'shadow' })
         expect(plan.rowExists).toBe(false)
         expect(plan.canBootstrap).toBe(true)
+        expect(plan.priorState).toBeNull()
 
         for (const statement of statements) {
-          expect(statement.toUpperCase()).not.toMatch(/^(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ALTER|DROP|CREATE)\b/)
+          expect(isWriteStatementV1(statement)).toBe(false)
         }
         expect(statements.at(-1)?.toUpperCase()).toBe('ROLLBACK')
         expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(false)
@@ -232,6 +412,205 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       } finally {
         client.release()
       }
+    })
+  })
+
+  describe('plan reporter: zero-write proof over the DEEP predicate branch (P2-3)', () => {
+    it('target=eligible from a seeded shadow org: INCOMPLETE_OPERATION / UNRESOLVED_INGRESS_REVIEW / DEFECTIVE_REQUEST_SNAPSHOT all become applicable, and plan is STILL zero-write', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const driveClient = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+          orgId,
+          actorId,
+          correlationId: crypto.randomUUID(),
+          engineVersion: 'w4c5-tool-test',
+          targetState: 'shadow',
+          expectedState: 'legacy',
+          expectedVersion: 1,
+          evidenceManifestSha256: hex64(`${orgId}:p2-3-eligible:bootstrap`),
+          evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        driveClient.release()
+      }
+      expect(await rolloutRow(orgId)).toEqual({ state: 'shadow', version: 2 })
+
+      // Seeded AFTER the clean drive-up, so these rows never block it. One batch, one job, one
+      // review, one request — matching the gate's own fix text.
+      await insertUnclosedBatchFixture(orgId)
+      await insertRetryableV1JobFixture(orgId)
+      await insertUnresolvedIngressReviewFixture(orgId)
+      await insertDefectiveRequestFixture(orgId)
+
+      const before = await rolloutRow(orgId)
+      const beforeEvents = await eventCount(orgId)
+
+      const sweepClient = await pool.connect()
+      const statements: string[] = []
+      const spy: AttendanceW4TransactionClientV1 = {
+        query: (text, values) => {
+          statements.push(text.trim())
+          return sweepClient.query(text, values as unknown[]) as unknown as Promise<{
+            rows: Array<Record<string, unknown>>
+          }>
+        },
+      }
+      let plan: AttendanceRolloutTransitionPlanV1
+      try {
+        plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'eligible' })
+      } finally {
+        sweepClient.release()
+      }
+
+      expect(plan.currentState).toBe('shadow')
+      expect(plan.priorState).toBe('legacy')
+      expect(plan.legalPair).toBe(true)
+
+      const byCode = Object.fromEntries(plan.predicates.map((p) => [p.code, p])) as Record<
+        string,
+        { applicable: boolean; pass: boolean; count: number | null }
+      >
+      const applicableCodes = Object.entries(byCode)
+        .filter(([, p]) => p.applicable)
+        .map(([code]) => code)
+        .sort()
+      expect(applicableCodes).toEqual(
+        [
+          'DEFECTIVE_REQUEST_SNAPSHOT',
+          'INCOMPLETE_OPERATION',
+          'LEGAL_TRANSITION_PAIR',
+          'NONTERMINAL_LEGACY_JOB',
+          'ORG_ALLOWLISTED',
+          'RETRYABLE_JOB_POSTURE_MISMATCH',
+          'ROLLOUT_ROW_RESOLVABLE',
+          'UNCLOSED_LEGACY_BATCH',
+          'UNRESOLVED_INGRESS_REVIEW',
+        ].sort(),
+      )
+      // RETRYABLE_JOB_HAS_OPERATION_ROWS is resume-only: not applicable for shadow -> eligible.
+      expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.applicable).toBe(false)
+
+      // Every deep predicate that reached a real seeded row reports a genuine non-zero count —
+      // proving the query actually examined the row, not merely that its branch was entered.
+      expect(byCode.UNCLOSED_LEGACY_BATCH.count).toBe(1)
+      expect(byCode.INCOMPLETE_OPERATION.count).toBe(1)
+      expect(byCode.UNRESOLVED_INGRESS_REVIEW.count).toBe(1)
+      expect(byCode.DEFECTIVE_REQUEST_SNAPSHOT.count).toBe(1)
+      expect(plan.blocked).toBe(true)
+
+      for (const statement of statements) {
+        expect(isWriteStatementV1(statement)).toBe(false)
+      }
+      expect(statements.at(-1)?.toUpperCase()).toBe('ROLLBACK')
+      expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(false)
+
+      // Row-level zero-write proof across every table this deep branch actually reads.
+      expect(await rolloutRow(orgId)).toEqual(before)
+      expect(await eventCount(orgId)).toBe(beforeEvents)
+      const jobCount = await pool.query(`SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1`, [
+        orgId,
+      ])
+      expect(jobCount.rows[0].n).toBe(1)
+      const requestCount = await pool.query(`SELECT count(*)::int AS n FROM attendance_requests WHERE org_id = $1`, [
+        orgId,
+      ])
+      expect(requestCount.rows[0].n).toBe(1)
+      const approvalRow = await pool.query(`SELECT status FROM approval_instances`)
+      expect(approvalRow.rows.every((r) => r.status === 'pending')).toBe(true)
+      const snapshotCount = await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_request_calculation_snapshots WHERE org_id = $1`,
+        [orgId],
+      )
+      expect(snapshotCount.rows[0].n).toBe(0)
+    })
+
+    it('target=authoritative from a seeded suspended org (resume pair): RETRYABLE_JOB_HAS_OPERATION_ROWS becomes applicable, and plan is STILL zero-write', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const driveClient = await pool.connect()
+      try {
+        const chain: ReadonlyArray<readonly [string, string, number]> = [
+          ['shadow', 'legacy', 1],
+          ['eligible', 'shadow', 2],
+          ['authoritative', 'eligible', 3],
+          ['suspended', 'authoritative', 4],
+        ]
+        for (const [targetState, expectedState, expectedVersion] of chain) {
+          await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+            orgId,
+            actorId,
+            correlationId: crypto.randomUUID(),
+            engineVersion: 'w4c5-tool-test',
+            targetState,
+            expectedState,
+            expectedVersion,
+            evidenceManifestSha256: hex64(`${orgId}:p2-3-resume:${targetState}:${expectedVersion}`),
+            evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+            reasonCode: 'rollout_transition',
+          })
+        }
+      } finally {
+        driveClient.release()
+      }
+      expect(await rolloutRow(orgId)).toEqual({ state: 'suspended', version: 5 })
+
+      // A retryable V1 job present WITHOUT a matching attendance_result_operations row: enough
+      // for the resume-only JOIN this predicate issues to execute against a non-empty candidate
+      // set. Zero matching operation rows is the CORRECT count here — the point being proven is
+      // that the statement fires at all (it never did on an empty org before this fix), not that
+      // it finds a match.
+      await insertRetryableV1JobFixture(orgId)
+
+      const before = await rolloutRow(orgId)
+      const beforeEvents = await eventCount(orgId)
+
+      const sweepClient = await pool.connect()
+      const statements: string[] = []
+      const spy: AttendanceW4TransactionClientV1 = {
+        query: (text, values) => {
+          statements.push(text.trim())
+          return sweepClient.query(text, values as unknown[]) as unknown as Promise<{
+            rows: Array<Record<string, unknown>>
+          }>
+        },
+      }
+      let plan: AttendanceRolloutTransitionPlanV1
+      try {
+        plan = await planAttendanceCalculationRolloutTransitionV1(spy, { orgId, targetState: 'authoritative' })
+      } finally {
+        sweepClient.release()
+      }
+
+      expect(plan.currentState).toBe('suspended')
+      expect(plan.priorState).toBe('authoritative')
+      expect(plan.legalPair).toBe(true)
+
+      const byCode = Object.fromEntries(plan.predicates.map((p) => [p.code, p])) as Record<
+        string,
+        { applicable: boolean; pass: boolean; count: number | null }
+      >
+      // All ten predicates are applicable on a resume pair whose target is also an
+      // eligibility/authority target: every ELIGIBILITY_AUTHORITY_TARGETS +
+      // CALCULATION_ENTRY_TARGETS + resume-only branch is reached simultaneously.
+      expect(Object.values(byCode).filter((p) => p.applicable)).toHaveLength(10)
+      expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.applicable).toBe(true)
+      expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.count).toBe(0)
+
+      for (const statement of statements) {
+        expect(isWriteStatementV1(statement)).toBe(false)
+      }
+      expect(statements.at(-1)?.toUpperCase()).toBe('ROLLBACK')
+      expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(false)
+
+      expect(await rolloutRow(orgId)).toEqual(before)
+      expect(await eventCount(orgId)).toBe(beforeEvents)
+      const jobCount = await pool.query(`SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1`, [
+        orgId,
+      ])
+      expect(jobCount.rows[0].n).toBe(1)
     })
   })
 
@@ -325,6 +704,138 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     })
   })
 
+  describe('P2-1 (PR #4839 gate, 20260809): the idempotency short-circuit can no longer bypass --expected-state', () => {
+    async function directTransition(
+      client: PoolClient,
+      orgId: string,
+      targetState: string,
+      expectedState: string,
+      expectedVersion: number,
+    ): Promise<void> {
+      await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        orgId,
+        actorId,
+        correlationId: crypto.randomUUID(),
+        engineVersion: 'w4c5-tool-test',
+        targetState,
+        expectedState,
+        expectedVersion,
+        evidenceManifestSha256: hex64(`${orgId}:${targetState}:${expectedVersion}`),
+        evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+        reasonCode: 'rollout_transition',
+      })
+    }
+
+    it('D1 reproduction (illegal pair, stale zeros digest): refuses PLAN_DIGEST_MISMATCH, never a no-op', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await directTransition(client, orgId, 'shadow', 'legacy', 1) // -> shadow v2, prior_state='legacy'
+      } finally {
+        client.release()
+      }
+
+      const manifestPath = writeManifest('p2-1-d1', baseManifest({ orgId, targetState: 'shadow' }))
+      const applyResult = spawnCli([
+        'apply',
+        '--org', orgId,
+        '--target', 'shadow',
+        '--expected-state', 'authoritative', // never this org's real prior state
+        '--expected-version', '1', // currentVersion(2) - 1: satisfies the OLD buggy arithmetic exactly
+        '--plan-digest', '0'.repeat(64),
+        '--confirm', ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
+        '--manifest', manifestPath,
+        '--actor-id', actorId,
+        '--correlation-id', crypto.randomUUID(),
+        '--engine-version', 'w4c5-tool-test',
+      ])
+
+      expect(applyResult.status).toBe(5)
+      expect(applyResult.stderr).toContain('W4C5_TOOL_PLAN_DIGEST_MISMATCH')
+      expect(await rolloutRow(orgId)).toEqual({ state: 'shadow', version: 2 })
+      expect(await eventCount(orgId)).toBe(1)
+    })
+
+    it('D1-SHARP (illegal pair, FRESH matching digest): reaches the boundary and is refused there — mutation-exclusive proof for the priorState conjunct', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await directTransition(client, orgId, 'shadow', 'legacy', 1) // -> shadow v2, prior_state='legacy'
+      } finally {
+        client.release()
+      }
+
+      // A genuinely fresh, matching digest for the ACTUAL current plan — so the refusal below
+      // CANNOT be explained by a stale/wrong digest. This is the exact D1-SHARP shape: with the
+      // priorState conjunct removed, this invocation exits 0 noop_already_at_target; with it
+      // restored, it must fall through past the digest check (which passes) to the boundary,
+      // which refuses the pair.
+      const planResult = spawnCli(['plan', '--org', orgId, '--target', 'shadow'])
+      const plan = JSON.parse(planResult.stdout) as { planDigest: string }
+
+      const manifestPath = writeManifest('p2-1-d1-sharp', baseManifest({ orgId, targetState: 'shadow' }))
+      const applyResult = spawnCli([
+        'apply',
+        '--org', orgId,
+        '--target', 'shadow',
+        '--expected-state', 'authoritative', // authoritative -> shadow is NOT one of the seven ratified pairs
+        '--expected-version', '1',
+        '--plan-digest', plan.planDigest,
+        '--confirm', ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
+        '--manifest', manifestPath,
+        '--actor-id', actorId,
+        '--correlation-id', crypto.randomUUID(),
+        '--engine-version', 'w4c5-tool-test',
+      ])
+
+      expect(applyResult.status).toBe(7)
+      expect(applyResult.stderr).toContain('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
+      expect(await rolloutRow(orgId)).toEqual({ state: 'shadow', version: 2 })
+      expect(await eventCount(orgId)).toBe(1)
+    })
+
+    it('A17 reproduction (weak manifest key set): a base-only manifest cannot buy an exit-0 no-op for an authoritative org under the wrong --expected-state', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await directTransition(client, orgId, 'shadow', 'legacy', 1) // v2, prior='legacy'
+        await directTransition(client, orgId, 'eligible', 'shadow', 2) // v3, prior='shadow'
+        await directTransition(client, orgId, 'authoritative', 'eligible', 3) // v4, prior='eligible'
+      } finally {
+        client.release()
+      }
+      expect(await rolloutRow(orgId)).toEqual({ state: 'authoritative', version: 4 })
+
+      // 13 base keys only — no sevenDistinctCalendarDaysObserved / criticalDiffCount /
+      // unresolvedReviewCount. Validates cleanly because expectedState='shadow' makes
+      // isAuthorityPromotionPairV1('shadow','authoritative') false: the manifest validator never
+      // even asks for the authority-only fields for THIS claimed pair, exactly the A17 gap.
+      const manifestPath = writeManifest('p2-1-a17', baseManifest({ orgId, targetState: 'authoritative' }))
+      const applyResult = spawnCli([
+        'apply',
+        '--org', orgId,
+        '--target', 'authoritative',
+        '--expected-state', 'shadow', // this org's REAL prior_state is 'eligible', not 'shadow'
+        '--expected-version', '3', // currentVersion(4) - 1: satisfies the OLD buggy arithmetic exactly
+        '--plan-digest', '0'.repeat(64),
+        '--confirm', ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
+        '--manifest', manifestPath,
+        '--actor-id', actorId,
+        '--correlation-id', crypto.randomUUID(),
+        '--engine-version', 'w4c5-tool-test',
+      ])
+
+      expect(applyResult.status).not.toBe(0)
+      expect(applyResult.status).toBe(5)
+      expect(applyResult.stderr).toContain('W4C5_TOOL_PLAN_DIGEST_MISMATCH')
+      expect(await rolloutRow(orgId)).toEqual({ state: 'authoritative', version: 4 })
+      expect(await eventCount(orgId)).toBe(3)
+    })
+  })
+
   describe('refusal matrix — one test per class, each asserting its SPECIFIC failure code', () => {
     it('unknown org: no row and not bootstrap-eligible (target != shadow) refuses with STATE_MISSING and zero DML', async () => {
       const orgId = crypto.randomUUID()
@@ -389,6 +900,58 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       } finally {
         client.release()
       }
+    })
+
+    it('org not in expected current state, driven through the actual CLI subprocess: apply refuses STALE_EXPECTED_STATE (P3-3, CLI-level proof)', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          orgId,
+          actorId,
+          correlationId: crypto.randomUUID(),
+          engineVersion: 'w4c5-tool-test',
+          targetState: 'shadow',
+          expectedState: 'legacy',
+          expectedVersion: 1,
+          evidenceManifestSha256: hex64(`${orgId}:p3-3-cli-stale`),
+          evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        client.release()
+      }
+      expect(await rolloutRow(orgId)).toEqual({ state: 'shadow', version: 2 })
+
+      // eligible -> shadow IS one of the seven ratified pairs (so the boundary's input-time
+      // matrix check clears and the real staleness comparison runs), but this org's TRUE current
+      // state is 'shadow', not 'eligible'. --expected-version 2 also keeps this off the
+      // idempotency short-circuit (currentVersion=2 !== expectedVersion(2)+1=3), so the refusal
+      // below is provably the STALE_EXPECTED_STATE guard, not the no-op path or a digest issue —
+      // and unlike the sibling test above, this one goes through the real CLI subprocess end to
+      // end, never calling the boundary directly.
+      const planResult = spawnCli(['plan', '--org', orgId, '--target', 'shadow'])
+      const plan = JSON.parse(planResult.stdout) as { planDigest: string }
+      const manifestPath = writeManifest('p3-3-cli-stale', baseManifest({ orgId, targetState: 'shadow' }))
+      const applyResult = spawnCli([
+        'apply',
+        '--org', orgId,
+        '--target', 'shadow',
+        '--expected-state', 'eligible',
+        '--expected-version', '2',
+        '--plan-digest', plan.planDigest,
+        '--confirm', ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
+        '--manifest', manifestPath,
+        '--actor-id', actorId,
+        '--correlation-id', crypto.randomUUID(),
+        '--engine-version', 'w4c5-tool-test',
+      ])
+
+      expect(applyResult.status).toBe(7)
+      expect(applyResult.stderr).toContain('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
+      expect(await rolloutRow(orgId)).toEqual({ state: 'shadow', version: 2 })
+      expect(await eventCount(orgId)).toBe(1)
     })
 
     it('transition pair absent from the ratified matrix refuses with ILLEGAL_TRANSITION and zero DML', async () => {
