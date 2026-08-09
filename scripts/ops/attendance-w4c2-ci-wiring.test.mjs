@@ -3020,6 +3020,21 @@ test('P1-1 frozen rows: a narrowing flag is READ on an invocation that selects a
 //     which is what the shared `argsUseIntegrationConfig` matches. A config named through a shell
 //     variable (`--config $CFG`) is outside it — and outside every other leg in this file too,
 //     because the shared helper cannot see it either. Stated, not hidden.
+//   • ALSO OUTSIDE IT, and stated for the same reason: a foreign step running the attendance suites
+//     under a DIFFERENT config file of its own. The three real-DB steps cannot do that (the
+//     governing-config resolver pins their `--config` to the canonical file by name), and the no-DB
+//     job cannot (every family member is excluded there), but nothing in this file forbids a
+//     fifteenth step from introducing a third config whose `include` collects
+//     `tests/integration/attendance-*`. Closing that needs the DERIVED domain deferred above plus a
+//     rule about which configs may collect the family — one owner ruling, not a reviewer-local
+//     widening. MEASURED at this head rather than assumed, and the measurement is not "there are
+//     none": packages/core-backend holds SEVEN vitest configs, five besides the two this file
+//     reads, and two of those five (`vitest.collab-ux-flow.config.ts`, `vitest.comment-flow.
+//     config.ts`) DO collect under tests/integration. Each names exactly one non-attendance file in
+//     its `include`, and NO workflow step invokes either (nothing under .github/workflows names
+//     their basenames — checked with a positive control on the governing config's own basename, so
+//     the empty result is an absence rather than an unread path). That is a measurement of today,
+//     explicitly not a gate.
 // ---------------------------------------------------------------------------------------------
 
 /** The three step ids `realDbSteps()` covers — the set this leg is the complement OF. */
@@ -3232,11 +3247,30 @@ test('COMPLEMENT is non-vacuous: workflow steps outside the three real-DB steps 
   for (const id of IN_DOMAIN_STEP_IDS) {
     assert.ok(!ids.has(id), `${id} is covered by realDbSteps() and must not appear in its complement`)
   }
-  // …and the domain must reach beyond the workflow the rest of this file reads, or the "jointly
-  // total" claim above is narrower than it says.
+  // The invocation set must include the workflow the rest of this file reads — the one carrying the
+  // required `test (20.x)` context, the shared Postgres service, and therefore the executed attack.
   assert.ok(
-    new Set(invocations.map((m) => m.file)).size > 1,
-    'the complement domain covers only one workflow file — the discovery scan narrowed',
+    invocations.some((m) => m.file === 'plugin-tests.yml'),
+    'plugin-tests.yml contributes no non-domain invocation of the governing config — that is where '
+      + 'the executed double-run attack lives, so a domain without it is asserting over the wrong set',
+  )
+  // The DISCOVERY scan must not be truncating. Cross-checked against an independent readdir+text
+  // pass rather than pinned to a count: "more than one file" would red the day the sealed-export
+  // workflows are legitimately retired, while a scan that silently returned only its first hit
+  // would satisfy a count pin just as well. Equality with the independent pass catches the
+  // truncation and survives the retirement.
+  const basename = posix.basename(governingIntegrationConfig())
+  const namingFiles = readdirSync(WORKFLOWS_DIR)
+    .filter((name) => /\.ya?ml$/.test(name))
+    .filter((name) => readFileSync(join(WORKFLOWS_DIR, name), 'utf8').includes(basename))
+    .sort()
+  assert.ok(namingFiles.length > 0, `no workflow file names ${basename} at all — an empty scan is not an absence`)
+  assert.deepEqual(
+    workflowFilesNamingGoverningConfig(basename).map((e) => e.file),
+    namingFiles,
+    'the shipped discovery scan and an independent readdir+text pass disagree about which workflow '
+      + 'files name the governing config — a scan that stops early would make this leg total over a '
+      + 'subset while reading as total over the repository',
   )
 })
 
