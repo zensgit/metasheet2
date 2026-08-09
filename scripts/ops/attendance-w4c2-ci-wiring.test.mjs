@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   REAL_DB_STEP_IDS,
@@ -158,6 +158,144 @@ function isAttendanceIntegrationArg(arg) {
   if (rel.length === 0 || rel.startsWith('/')) return false
   const base = rel.slice(rel.lastIndexOf('/') + 1)
   return base.startsWith(ATTENDANCE_BASENAME_PREFIX)
+}
+
+// ---------------------------------------------------------------------------------------------
+// SELECTION — what a vitest invocation actually RUNS, as opposed to what it spells.
+//
+// `isAttendanceIntegrationArg` above answers a DOMAIN question ("is this argument a member of the
+// attendance family, in the canonical spelling this repo writes"). It was also being used as the
+// COUNTING KEY of the "executed exactly once" assertion, and as the gate for whether an invocation
+// was even examined for narrowing flags. That is a category error, and it was executed: a domain
+// predicate is allowed to say NO to a spelling; a counting key that says NO to a spelling vitest
+// says YES to simply loses the execution.
+//
+// Nine spellings were reproduced against vitest 1.6.1, every one of them selecting a real suite
+// while the guard stayed green — `tests/integration//attendance-x.db.test.ts`,
+// `tests/integration/./…`, `…/sub/../…`, `ATTENDANCE-x.db.test.ts`, the bare directory
+// `tests/integration`, the bare basename, the 11-character fragment `attendance-`, and the first of
+// those with `-t zzz` attached (the owner's nested-suite probe in a different spelling, invisible
+// because an empty filtered list was `continue`d rather than examined).
+//
+// ENUMERATING THOSE SPELLINGS IS THE MOVE THIS FILE KEEPS DELETING. The fix is to stop asking "is
+// this token one of the spellings I recognise" and instead ask vitest's own question: WHICH SUITES
+// DOES THIS INVOCATION SELECT? `vitestFilterSelects` below transcribes vitest 1.6.1's `filterFiles()`
+// — normalise the filter, lowercase BOTH sides, and match by SUBSTRING — so a directory argument, a
+// bare family fragment and every punctuation variant all resolve to the set of corpus suites they
+// really select, and each of those suites is counted under its OWN canonical path. A spelling nobody
+// has thought of is handled because it is never named: it is run through the same matcher vitest
+// runs it through.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Does vitest select the corpus suite `suiteArg` when handed the CLI filter `filter`?
+ *
+ * Transcribed from vitest 1.6.1 `filterFiles()` (dist/vendor/cli-api.OdDWuB7Y.js):
+ *
+ *     const testFile = relative(dir, t).toLocaleLowerCase()
+ *     return filters.some((f) => {
+ *       if (isAbsolute(f) && t.startsWith(f)) return true
+ *       const relativePath = f.endsWith('/') ? join(relative(dir, f), '/') : relative(dir, f)
+ *       return testFile.includes(f.toLocaleLowerCase())
+ *         || testFile.includes(relativePath.toLocaleLowerCase())
+ *     })
+ *
+ * Three properties the previous key modelled none of: `relative(dir, f)` NORMALISES the filter (so
+ * `//`, `./` and `sub/..` collapse), both sides are lowercased (so case is irrelevant), and the
+ * match is `includes` — a SUBSTRING, which is why a bare directory or a bare `attendance-` fragment
+ * selects whole families rather than nothing.
+ *
+ * `dir` is vitest's root, which is the package directory these args are already relative to (the
+ * steps run via `pnpm --filter @metasheet/core-backend exec`, so cwd == root); `test.root`/`test.dir`
+ * and the top-level `root` are PINNED absent below so that equivalence cannot silently break.
+ *
+ * ABSOLUTE FILTERS ARE NOT MODELLED — the runner's checkout prefix is not knowable here. Rather than
+ * guess, an absolute filter selects EVERYTHING (fail closed: it can only over-count, never hide an
+ * execution) and is refused by name in the positional-safety leg below.
+ *
+ * @param {string} suiteArg package-relative POSIX path of a corpus suite
+ * @param {string} filter one positional CLI argument
+ * @returns {boolean}
+ */
+function vitestFilterSelects(suiteArg, filter) {
+  if (filter.startsWith('/')) return true // unmodellable → over-select, and refused by name below
+  const haystack = suiteArg.toLocaleLowerCase()
+  const normalised = filter.endsWith('/')
+    ? `${posix.normalize(filter).replace(/\/+$/, '')}/`
+    : posix.normalize(filter)
+  return haystack.includes(filter.toLocaleLowerCase()) || haystack.includes(normalised.toLocaleLowerCase())
+}
+
+/**
+ * ONE traversal of a vitest invocation's argument list, classifying every token — read by BOTH the
+ * argument allowlist and the positional extraction the selection model needs.
+ *
+ * A second copy would let the two disagree, and the disagreement has an obvious shape: the VALUE of
+ * `--config` (`vitest.integration.config.ts`) does not start with `-`, so a naive "not a flag" test
+ * calls it a file filter that selects nothing. `run` is likewise a substring of several real suite
+ * names. Both are consumed here, once.
+ *
+ * @param {{ args: string[] }} inv
+ * @returns {{ token: string, kind: 'subcommand'|'permittedFlag'|'flagValue'|'unknownFlag'|'positional' }[]}
+ */
+function classifyInvocationArgs(inv) {
+  const consumesValue = (flag) => flag === '--config' || flag === '-c' || flag === '--reporter'
+  const out = []
+  for (let i = 0; i < inv.args.length; i++) {
+    const arg = inv.args[i]
+    if (arg === 'run') {
+      out.push({ token: arg, kind: 'subcommand' })
+      continue
+    }
+    if (consumesValue(arg)) {
+      out.push({ token: arg, kind: 'permittedFlag' })
+      const value = inv.args[i + 1]
+      // A separate-form flag consumes its value ONLY when the next token does not itself start with
+      // `-`, so `--reporter -t zzz` cannot swallow the `-t`.
+      if (typeof value === 'string' && !value.startsWith('-')) {
+        out.push({ token: value, kind: 'flagValue' })
+        i += 1
+      }
+      continue
+    }
+    if (/^(?:--config|--reporter)=/.test(arg)) {
+      out.push({ token: arg, kind: 'permittedFlag' })
+      continue
+    }
+    if (arg.startsWith('-')) {
+      out.push({ token: arg, kind: 'unknownFlag' })
+      continue
+    }
+    out.push({ token: arg, kind: 'positional' })
+  }
+  return out
+}
+
+/**
+ * The FILE FILTERS of one invocation — the tokens vitest passes to `filterFiles()`.
+ *
+ * @param {{ args: string[] }} inv
+ * @returns {string[]}
+ */
+function positionalFiltersOfInvocation(inv) {
+  return classifyInvocationArgs(inv).filter((t) => t.kind === 'positional').map((t) => t.token)
+}
+
+/**
+ * The corpus suites one invocation ACTUALLY selects, under vitest's own matching.
+ *
+ * NO POSITIONAL AT ALL selects EVERYTHING the config collects — that is vitest's behaviour, and it
+ * is also the shape a "run the whole integration directory a second time" line would take, so it
+ * must count as selecting the whole corpus rather than as selecting nothing.
+ *
+ * @param {{ args: string[] }} inv
+ * @param {string[]} corpusArgs the suites in question, in their canonical package-relative spelling
+ * @returns {string[]} a subset of `corpusArgs`, in corpus order
+ */
+function selectedCorpusSuites(inv, corpusArgs) {
+  const filters = positionalFiltersOfInvocation(inv)
+  if (filters.length === 0) return [...corpusArgs]
+  return corpusArgs.filter((arg) => filters.some((f) => vitestFilterSelects(arg, f)))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -378,9 +516,19 @@ function executableVitestInvocations(step) {
  * @returns {string[]}
  */
 function executableWholeFileArgs(step) {
-  return executableVitestInvocations(step)
-    .filter((inv) => inv.usesIntegrationConfig)
-    .flatMap((inv) => inv.wholeFileArgs)
+  return executableIntegrationInvocations(step).flatMap((inv) => inv.wholeFileArgs)
+}
+
+/**
+ * The provably-executed invocations of a step that run under the integration config — the
+ * invocation objects themselves, because the multiplicity counter needs to ask each one WHICH
+ * SUITES IT SELECTS, a question its whole-file arg list cannot answer (a bare directory or a bare
+ * `attendance-` fragment selects suites and appears in no whole-file arg list at all).
+ *
+ * @param {Record<string, unknown>} step
+ */
+function executableIntegrationInvocations(step) {
+  return executableVitestInvocations(step).filter((inv) => inv.usesIntegrationConfig)
 }
 const W4C3C_TOOLING_STEP_ID = 'attendance-w4c3c-tooling-contracts'
 const W4C3C_TOOLING_FILES = Object.freeze([
@@ -529,21 +677,17 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
  */
 function unpermittedArgsOfInvocation(inv) {
   const fileArgs = new Set(inv.wholeFileArgs)
-  const consumesValue = (flag) => flag === '--config' || flag === '-c' || flag === '--reporter'
-  const out = []
-  for (let i = 0; i < inv.args.length; i++) {
-    const arg = inv.args[i]
-    if (arg === 'run') continue
-    if (consumesValue(arg)) {
-      const value = inv.args[i + 1]
-      if (typeof value === 'string' && !value.startsWith('-')) i += 1
-      continue
-    }
-    if (/^(?:--config|--reporter)=/.test(arg)) continue
-    if (fileArgs.has(arg)) continue
-    out.push(arg)
-  }
-  return out
+  return classifyInvocationArgs(inv)
+    .filter((t) => {
+      if (t.kind === 'subcommand' || t.kind === 'permittedFlag' || t.kind === 'flagValue') return false
+      if (t.kind === 'unknownFlag') return true
+      // A POSITIONAL is permitted only when it is one of THIS invocation's canonical whole-file
+      // args. Deliberately NOT "any positional that selects at least one suite": `attendance-` and
+      // the bare directory `tests/integration` both select real suites, and both must red here as
+      // well as in the multiplicity counter — two independent legs, not one.
+      return !fileArgs.has(t.token)
+    })
+    .map((t) => t.token)
 }
 
 /**
@@ -558,22 +702,19 @@ function unpermittedArgsOfInvocation(inv) {
 // still worth reporting, and reporting it is strictly more conservative than dropping it. The two
 // mechanisms are orthogonal and each keeps its own red — a `$NAME_FILTER` on a real-DB step reds
 // BOTH the argument allowlist (unrecognised token) and the control-flow leg (non-inert word).
-function attendanceCarryingInvocations() {
-  const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  const steps = [
-    [STEP_ID, requireAttendanceRealDbStepExecutable()],
-    [REAL_DB_STEP_IDS.approval, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.approval)],
-    [REAL_DB_STEP_IDS.multitable, requireExecutableRealDbStep(wf, REAL_DB_STEP_IDS.multitable)],
-  ]
+function attendanceCarryingInvocations({ corpusArgs = attendanceCorpusArgs() } = {}) {
   const out = []
-  for (const [stepId, step] of steps) {
+  for (const [stepId, step] of realDbSteps()) {
     for (const inv of vitestInvocations(step)) {
       if (!inv.usesIntegrationConfig) continue
-      // The SHARED predicate (owner P1-1). This filter used to be an inline
-      // `startsWith('tests/integration/attendance-')`, which answered NO for a SUBDIRECTORY suite
-      // the corpus had already claimed by basename — so a `-t` on the invocation that carried only
-      // nested suites was never even looked at.
-      const attendanceFiles = inv.wholeFileArgs.filter(isAttendanceIntegrationArg)
+      // MEMBERSHIP IS BY SELECTION, not by spelling. This filter was
+      // `inv.wholeFileArgs.filter(isAttendanceIntegrationArg)` with a `continue` on the empty
+      // result, so an invocation that selected attendance suites through ANY spelling the domain
+      // predicate declined — `tests/integration//attendance-x.db.test.ts`, `ATTENDANCE-x…`, the
+      // bare directory, the bare `attendance-` fragment — was never examined at all, and the `-t`
+      // sitting next to it went unread. Asking vitest's own question instead means there is no
+      // spelling left to decline.
+      const attendanceFiles = selectedCorpusSuites(inv, corpusArgs)
       if (attendanceFiles.length === 0) continue
       out.push({ stepId, inv, attendanceFiles })
     }
@@ -638,15 +779,28 @@ test(`every attendance-carrying real-DB invocation runs its files with no execut
  * @param {string} runScript
  * @returns {string[]}
  */
-function detectUnpermittedAttendanceArgs(runScript) {
+function detectUnpermittedAttendanceArgs(runScript, corpusArgs = SYNTHETIC_CORPUS) {
   const hits = []
   for (const inv of vitestInvocations({ run: runScript })) {
     if (!inv.usesIntegrationConfig) continue
-    if (!inv.wholeFileArgs.some(isAttendanceIntegrationArg)) continue
+    // The SAME selection routine the live leg uses (`selectedCorpusSuites`), over a synthetic
+    // corpus. Re-implementing the domain test here would drive a COPY of the predicate: the live
+    // leg's empty-skip bug is exactly the kind that survives when the control has its own copy.
+    if (selectedCorpusSuites(inv, corpusArgs).length === 0) continue
     hits.push(...unpermittedArgsOfInvocation(inv))
   }
   return hits
 }
+
+/**
+ * The corpus the synthetic controls are driven over: two attendance suites (one TOP-LEVEL, one
+ * NESTED — the owner's P1-1 probe shape) and one suite of another family, so "selects an attendance
+ * suite" and "selects some suite" are distinguishable.
+ */
+const SYNTHETIC_CORPUS = Object.freeze([
+  'tests/integration/attendance-x.db.test.ts',
+  'tests/integration/sub/attendance-y.db.test.ts',
+])
 
 test('issue 4828 hole 2 detector positive control: the allowlist accepts the real argument vocabulary and rejects every executed bypass family', () => {
   const detect = detectUnpermittedAttendanceArgs
@@ -748,11 +902,8 @@ test('P1-1: the corpus, the carried-arg computation and the argument-safety doma
     // (1) corpus derivation (disk → arg)
     mkdirSync(join(dir, 'sub'), { recursive: true })
     writeFileSync(join(dir, 'sub/attendance-probe-nested.db.test.ts'), GATED)
-    assert.deepEqual(
-      attendanceCorpus({ dir }).map((e) => e.arg),
-      [NESTED],
-      'the recursive corpus walk claims the nested suite',
-    )
+    const derived = attendanceCorpus({ dir }).map((e) => e.arg)
+    assert.deepEqual(derived, [NESTED], 'the recursive corpus walk claims the nested suite')
     // (2) the run-list "carried" computation (arg → wiring)
     const step = { run: `pnpm exec vitest --config vitest.integration.config.ts run ${NESTED}` }
     assert.deepEqual(
@@ -761,9 +912,11 @@ test('P1-1: the corpus, the carried-arg computation and the argument-safety doma
       'the carried-arg computation must see the same file the corpus claimed',
     )
     // (3) the argument safety check (arg → command safety). THIS is the leg the owner's probe
-    // walked through: with the prefix test in place the `-t` was invisible here.
+    // walked through: with the prefix test in place the `-t` was invisible here. The domain is now
+    // entered by SELECTION over the corpus derived in (1), so the three steps are chained rather
+    // than each re-deciding what an attendance argument is.
     assert.deepEqual(
-      detectUnpermittedAttendanceArgs(`${step.run} -t zzz`),
+      detectUnpermittedAttendanceArgs(`${step.run} -t zzz`, derived),
       ['-t', 'zzz'],
       'a name filter on an invocation carrying ONLY nested attendance suites must be caught',
     )
@@ -774,7 +927,7 @@ test('P1-1: the corpus, the carried-arg computation and the argument-safety doma
     assert.deepEqual(attendanceCorpus({ dir }), [])
     const other = { run: 'pnpm exec vitest --config vitest.integration.config.ts run tests/integration/sub/multitable-probe-nested.db.test.ts' }
     assert.deepEqual(executableWholeFileArgs(other).filter(isAttendanceIntegrationArg), [])
-    assert.deepEqual(detectUnpermittedAttendanceArgs(`${other.run} -t zzz`), [])
+    assert.deepEqual(detectUnpermittedAttendanceArgs(`${other.run} -t zzz`, derived), [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1446,20 +1599,28 @@ const SUITE_API_CALL_RE = /(?:^|[^.\w$])(?:describe|it|test|suite|bench)\s*(?:\.
  * from an imported module. Either derivation going narrow leaves the other one standing, and
  * neither is a list of names.
  */
-function attendanceCorpus({ dir = INTEGRATION_DIR, includeRegexes = suiteIncludeRegexes() } = {}) {
+function integrationSuiteCorpus({ dir = INTEGRATION_DIR, includeRegexes = suiteIncludeRegexes() } = {}) {
   const out = []
   for (const rel of walkFiles(dir)) {
     const arg = `${INTEGRATION_ARG_PREFIX}${rel}`
-    // The SHARED predicate (owner P1-1), so the corpus cannot claim a file that the run-list and
-    // argument-safety derivations would then decline to recognise — that disagreement is exactly
-    // what the nested-suite probe walked through.
-    if (!isAttendanceIntegrationArg(arg)) continue
     const source = readFileSync(join(dir, rel), 'utf8')
     const matchesInclude = includeRegexes.some((re) => re.test(arg))
     if (!matchesInclude && !SUITE_API_CALL_RE.test(maskSourceNoise(source))) continue
     out.push({ rel, arg })
   }
   return out
+}
+
+/**
+ * The attendance family, as the same union restricted by the family predicate.
+ *
+ * The restriction happens HERE and nowhere downstream: the corpus cannot claim a file that the
+ * run-list and argument-safety derivations would then decline to recognise — that disagreement is
+ * exactly what the nested-suite probe walked through.
+ */
+function attendanceCorpus(options) {
+  // The SHARED predicate (owner P1-1).
+  return integrationSuiteCorpus(options).filter((e) => isAttendanceIntegrationArg(e.arg))
 }
 
 /**
@@ -1543,13 +1704,195 @@ test('suite-API detector: any member form counts, prose and test titles do not',
   assert.ok(!detects('const scratch = process.env.ATTENDANCE_TEST_DATABASE_URL\n'))
 })
 
+// ---------------------------------------------------------------------------------------------
+// P2-2 — the non-vacuity FLOORS had 17-27 members of slack, and the slack was executed.
+//
+// The three floors were `corpus.length >= 70`, `carried.length >= 60` and `counts.size >= 70`
+// against a real 87 / 87 / 87. Narrowing the family predicate by `&& !base.startsWith(
+// 'attendance-w4c2-')` — dropping the twelve suites this guard is NAMED after out of the corpus,
+// the carried set, the multiplicity domain and every per-member leg at once — left it at
+// 175 tests / 175 pass / 0 fail. FULLY GREEN. The only observable difference was the test count
+// falling 199 → 175, and no CI step compares that against anything.
+//
+// A floor cannot fix this: any floor low enough to survive a legitimate deletion is high enough to
+// hide one. So the family is PINNED as an exact set.
+//
+// WHY THIS IS NOT THE 33-ENTRY `FILES` ALLOWLIST COMING BACK. That allowlist WAS the corpus: a file
+// it had never been told about was invisible, got no wiring legs, and the guard stayed green — the
+// defect the OBS-1 conversion exists to have removed. This list is not the corpus and is never read
+// as one. The corpus is still derived TOTALLY from disk, every derived member still registers its
+// own two-point wiring leg whether or not it appears below, and this pin is a tripwire ACROSS that
+// derivation: it reds in BOTH directions, so a new suite is announced rather than absorbed and a
+// disappearing suite cannot be absorbed either. The old failure mode — a file nobody listed being
+// silently unguarded — is not reachable through it.
+//
+// Updating it is deliberate and cheap: `EMIT_ATTENDANCE_CORPUS=1 node --test <this file>` prints the
+// derived set, which is the value that belongs here. Same discipline as the s6a hash pin.
+// ---------------------------------------------------------------------------------------------
+const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
+  'tests/integration/attendance-approval-action-authorization.db.test.ts',
+  'tests/integration/attendance-approval-dept-head-s7-3.db.test.ts',
+  'tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts',
+  'tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts',
+  'tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts',
+  'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
+  'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
+  'tests/integration/attendance-csv-export-bom.test.ts',
+  'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
+  'tests/integration/attendance-expiry-service.test.ts',
+  'tests/integration/attendance-files-acl.test.ts',
+  'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
+  'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
+  'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
+  'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
+  'tests/integration/attendance-import-template-prefs.test.ts',
+  'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',
+  'tests/integration/attendance-makeup-punch-policy.test.ts',
+  'tests/integration/attendance-notification-deliveries.test.ts',
+  'tests/integration/attendance-notification-redelivery-route.db.test.ts',
+  'tests/integration/attendance-notification-redelivery.db.test.ts',
+  'tests/integration/attendance-outdoor-punch.test.ts',
+  'tests/integration/attendance-plugin.test.ts',
+  'tests/integration/attendance-result-edit.test.ts',
+  'tests/integration/attendance-schedule-dispatch.test.ts',
+  'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
+  'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
+  'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
+  'tests/integration/attendance-shift-segments-migration.db.test.ts',
+  'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
+  'tests/integration/attendance-shift-swap.test.ts',
+  'tests/integration/attendance-unscheduled-reminder.test.ts',
+  'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
+  'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',
+  'tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts',
+  'tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts',
+  'tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts',
+  'tests/integration/attendance-w4c0-operation-registry.db.test.ts',
+  'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+  'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
+  'tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts',
+  'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+  'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
+  'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
+  'tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts',
+  'tests/integration/attendance-w4c2-p2-remediation.db.test.ts',
+  'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+  'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
+  'tests/integration/attendance-w4c2-sweep-fairness.db.test.ts',
+  'tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts',
+  'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+  'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+  'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
+  'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
+  'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+  'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+  'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+  'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+  'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
+  'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+  'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
+  'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
+  'tests/integration/attendance-w4c3b-central-approval.db.test.ts',
+  'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
+  'tests/integration/attendance-w4c3b-request-snapshots.db.test.ts',
+  'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
+  'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
+  'tests/integration/attendance-w4c4-calculation-detail.db.test.ts',
+  'tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts',
+  'tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts',
+  'tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts',
+  'tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts',
+  'tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts',
+  'tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts',
+  'tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts',
+  'tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts',
+  'tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts',
+  'tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts',
+  'tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts',
+  'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
+  'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
+  'tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts',
+  'tests/integration/attendance-work-date-resolver-w2.db.test.ts',
+])
+
+// P1-1, the other half: "this argument selects nothing" was treated as "this argument is harmless".
+// It is not — vitest exits 0 on a filter that matches no file, so a stale, typo'd or renamed path
+// leaves the run-list looking fully wired while the suite runs nowhere, and the previous domain
+// entered by SPELLING skipped the whole invocation rather than reporting it. Every positional of
+// every provably-executed real-DB invocation must therefore select at least one COLLECTED suite,
+// across all families — not just the attendance ones, because the attendance step carries ~20
+// non-attendance suites and the multitable step ~230, none of which had an existence leg at all.
+//
+// Absolute filters are refused rather than modelled: vitest matches them with
+// `isAbsolute(f) && t.startsWith(f)` against the runner's real checkout prefix, which is not
+// knowable from here. They over-select in the counter (fail closed) and red by name here.
+test('P1-1: every positional of every real-DB invocation is package-relative and selects at least one collected suite', () => {
+  const suiteArgs = integrationSuiteCorpus().map((e) => e.arg)
+  assert.ok(suiteArgs.length > 0, 'the integration suite corpus is empty — an empty scan is not an absence')
+  const offenders = []
+  for (const [stepId, step] of realDbSteps()) {
+    for (const inv of executableIntegrationInvocations(step)) {
+      for (const positional of positionalFiltersOfInvocation(inv)) {
+        if (positional.startsWith('/')) {
+          offenders.push({ stepId, positional, reason: 'absolute path — this guard cannot resolve the runner checkout prefix' })
+          continue
+        }
+        if (!suiteArgs.some((arg) => vitestFilterSelects(arg, positional))) {
+          offenders.push({ stepId, positional, reason: 'selects no collected integration suite' })
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'a vitest file filter that matches nothing is not a no-op that can be waved through: vitest '
+      + 'exits 0 on it, so the run-list still reads as wiring while the suite it was meant to name '
+      + 'executes nowhere. This is the direction a rename or a deletion breaks in',
+  )
+})
+
+test('P1-1 positional-safety positive control: the leg can see a dead filter and an absolute one', () => {
+  const CORPUS_ARGS = ['tests/integration/attendance-x.db.test.ts']
+  const dead = (positional) => !CORPUS_ARGS.some((arg) => vitestFilterSelects(arg, positional))
+  assert.ok(dead('tests/integration/attendance-renamed-away.db.test.ts'), 'a stale path selects nothing')
+  assert.ok(dead('tests/integration/attendance-x.db.test.tsx'), 'a near-miss suffix selects nothing')
+  assert.ok(dead('../outside/attendance-x.db.test.ts'), 'an escaping relative path selects nothing')
+  // …and the same leg does NOT fire on the spellings that really do select, or the check would be
+  // reporting everything and proving nothing.
+  assert.ok(!dead('tests/integration/attendance-x.db.test.ts'))
+  assert.ok(!dead('tests/integration//attendance-x.db.test.ts'))
+  assert.ok(!dead('tests/integration/ATTENDANCE-x.db.test.ts'))
+  assert.ok(!dead('attendance-'))
+  assert.ok(!dead('tests/integration'))
+})
+
+test('P2-2: the derived attendance family is EXACTLY the pinned member set', () => {
+  assert.deepEqual(
+    attendanceCorpus().map((e) => e.arg).sort(),
+    [...EXPECTED_ATTENDANCE_SUITES],
+    'the attendance corpus derived from disk no longer equals the pinned family. Both directions '
+      + 'are deliberate. FEWER members: the family predicate, the disk walk or the suite-API '
+      + 'detector narrowed, and every dropped suite silently left the corpus, the carried set, the '
+      + 'multiplicity domain and its own per-member wiring leg — the floors this replaced tolerated '
+      + '17 such members. MORE members: a new attendance suite landed, which is fine and expected — '
+      + 're-run `EMIT_ATTENDANCE_CORPUS=1 node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs` '
+      + 'and paste the printed set here in the same commit that wires it',
+  )
+})
+
 test('OBS-1 corpus derivation is non-vacuous and both wiring sides parse', () => {
   const corpus = attendanceCorpus()
-  assert.ok(
-    corpus.length >= 70,
-    `attendance corpus scan under tests/integration found only ${corpus.length} suites (87 at this `
-      + `head) — a near-empty scan means the directory path, the include globs or the suite-API `
-      + `detector broke, not that the family shrank by that much`,
+  assert.equal(
+    corpus.length,
+    EXPECTED_ATTENDANCE_SUITES.length,
+    `attendance corpus scan under tests/integration found ${corpus.length} suites, pinned at `
+      + `${EXPECTED_ATTENDANCE_SUITES.length} — a scan that shrank means the directory path, the `
+      + `include globs or the suite-API detector broke, not that the family shrank by that much`,
   )
   const union = realDbWholeFileArgUnion()
   assert.ok(union.length > 0, 'real-DB steps carry no whole-file args at all — run-list parsing broke')
@@ -1602,6 +1945,18 @@ try {
 } catch (err) {
   CORPUS_DERIVATION_ERROR = err
 }
+if (process.env.EMIT_ATTENDANCE_CORPUS === '1') {
+  console.log(JSON.stringify((CORPUS ?? []).map((e) => e.arg).sort(), null, 2))
+}
+
+/**
+ * The derived corpus as plain args. Throws if the derivation failed, so nothing downstream can
+ * quietly reason over an empty family — the named leg below reports the captured error verbatim.
+ */
+function attendanceCorpusArgs() {
+  if (CORPUS_DERIVATION_ERROR != null) throw CORPUS_DERIVATION_ERROR
+  return (CORPUS ?? []).map((e) => e.arg)
+}
 
 test('attendance corpus derivation succeeds — the walk REFUSES (never skips) any non-regular entry', () => {
   if (CORPUS_DERIVATION_ERROR != null) throw CORPUS_DERIVATION_ERROR
@@ -1640,29 +1995,45 @@ for (const entry of CORPUS ?? []) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * How many times each attendance suite is executed, over ALL provably-executed real-DB invocations.
+ * How many times each attendance suite is SELECTED, over the provably-executed real-DB invocations.
  *
- * @param {string[]} carriedArgs whole-file args, DUPLICATES INTACT (`realDbWholeFileArgUnion()`)
+ * THE KEY IS THE SUITE, NOT THE ARGUMENT. It used to be the argument string, filtered by
+ * `isAttendanceIntegrationArg` — so `tests/integration/./attendance-x.db.test.ts` and
+ * `tests/integration/attendance-x.db.test.ts` were two keys each counting 1 (executed: 200/200
+ * green), and `ATTENDANCE-x.db.test.ts`, `tests/integration` and `attendance-` were counted under
+ * no key at all because the domain predicate declined them (executed: 199/199 green) while vitest
+ * ran the suites. Counting what vitest SELECTS collapses every spelling onto the one suite it
+ * names, so a second execution is a second count whatever it is spelled like.
+ *
+ * @param {{ args: string[] }[]} invocations provably-executed invocations under the pinned config
  * @param {string[]} corpusArgs every attendance suite on disk — seeded at 0 so "never" is in domain
  * @returns {Map<string, number>}
  */
-function attendanceExecutionCounts(carriedArgs, corpusArgs) {
+function attendanceExecutionCounts(invocations, corpusArgs) {
   const counts = new Map()
   for (const arg of corpusArgs) counts.set(arg, 0)
-  for (const arg of carriedArgs) {
-    if (!isAttendanceIntegrationArg(arg)) continue
-    counts.set(arg, (counts.get(arg) ?? 0) + 1)
+  for (const inv of invocations) {
+    for (const arg of selectedCorpusSuites(inv, corpusArgs)) {
+      counts.set(arg, (counts.get(arg) ?? 0) + 1)
+    }
   }
   return counts
 }
 
+/** Every provably-executed integration-config invocation across the three real-DB steps. */
+function realDbExecutableInvocations() {
+  return realDbSteps().flatMap(([, step]) => executableIntegrationInvocations(step))
+}
+
 test('P2: every attendance suite is executed EXACTLY ONCE across all provably-executed real-DB invocations', () => {
-  const counts = attendanceExecutionCounts(realDbWholeFileArgUnion(), (CORPUS ?? []).map((e) => e.arg))
-  assert.ok(
-    counts.size >= 70,
-    `the multiplicity domain holds only ${counts.size} attendance suites (87 at this head) — a `
-      + `near-empty domain means the corpus or the run-list parsing broke, and \`=== 1\` would pass `
-      + `over almost nothing`,
+  const corpusArgs = attendanceCorpusArgs()
+  const counts = attendanceExecutionCounts(realDbExecutableInvocations(), corpusArgs)
+  assert.equal(
+    counts.size,
+    EXPECTED_ATTENDANCE_SUITES.length,
+    `the multiplicity domain holds ${counts.size} attendance suites, but the pinned family has `
+      + `${EXPECTED_ATTENDANCE_SUITES.length} — a domain that shrank silently would make \`=== 1\` `
+      + `pass over the members it dropped`,
   )
   const offenders = [...counts.entries()]
     .filter(([, executions]) => executions !== 1)
@@ -1680,35 +2051,114 @@ test('P2: every attendance suite is executed EXACTLY ONCE across all provably-ex
   )
 })
 
+const CFG_FLAG = '--config vitest.integration.config.ts'
+const PROBE_ONE = 'tests/integration/attendance-x.db.test.ts'
+const PROBE_NESTED = 'tests/integration/sub/attendance-y.db.test.ts'
+const PROBE_OTHER = 'tests/integration/multitable-z.db.test.ts'
+const PROBE_CORPUS = Object.freeze([PROBE_ONE, PROBE_NESTED])
+
+/** Counts for a synthetic run script over the two-member probe corpus. */
+const probeCounts = (run, corpus = PROBE_CORPUS) =>
+  [...attendanceExecutionCounts(executableIntegrationInvocations({ run }), corpus).entries()].sort()
+
 test('P2 multiplicity counter positive control: it distinguishes 0, 1 and 2, and ignores other families', () => {
-  const CFG = '--config vitest.integration.config.ts'
-  const ONE = 'tests/integration/attendance-x.db.test.ts'
-  const NESTED = 'tests/integration/sub/attendance-y.db.test.ts'
-  const OTHER = 'tests/integration/multitable-z.db.test.ts'
-  const once = { run: `pnpm exec vitest ${CFG} run ${ONE} ${NESTED} ${OTHER}` }
-  // Two SEPARATE executable invocations repeating one file — the owner's probe shape.
-  const twice = { run: `pnpm exec vitest ${CFG} run ${ONE} ${NESTED}\npnpm exec vitest ${CFG} run ${ONE}` }
   assert.deepEqual(
-    [...attendanceExecutionCounts(executableWholeFileArgs(once), [ONE, NESTED]).entries()].sort(),
-    [[ONE, 1], [NESTED, 1]],
+    probeCounts(`pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE} ${PROBE_NESTED} ${PROBE_OTHER}`),
+    [[PROBE_ONE, 1], [PROBE_NESTED, 1]],
     'the clean shape must count 1 for both, including the NESTED suite (P1-1 predicate)',
   )
+  // Two SEPARATE executable invocations repeating one file — the owner's probe shape.
   assert.deepEqual(
-    [...attendanceExecutionCounts(executableWholeFileArgs(twice), [ONE, NESTED]).entries()].sort(),
-    [[ONE, 2], [NESTED, 1]],
+    probeCounts(`pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE} ${PROBE_NESTED}\npnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE}`),
+    [[PROBE_ONE, 2], [PROBE_NESTED, 1]],
     'a file carried by two executable invocations must count 2 — a Set would have said 1',
   )
-  // Carried zero times: the corpus seed is what makes this visible at all.
-  assert.deepEqual([...attendanceExecutionCounts([], [ONE]).entries()], [[ONE, 0]])
+  // Selected zero times: the corpus seed is what makes this visible at all.
+  assert.deepEqual([...attendanceExecutionCounts([], [PROBE_ONE]).entries()], [[PROBE_ONE, 0]])
   // Another family is not counted, and a short-circuited second invocation contributes nothing.
-  assert.equal(attendanceExecutionCounts(executableWholeFileArgs(once), []).has(OTHER), false)
-  const shortCircuitedTwice = { run: `pnpm exec vitest ${CFG} run ${ONE}\ntrue || pnpm exec vitest ${CFG} run ${ONE}` }
+  assert.equal(
+    attendanceExecutionCounts(
+      executableIntegrationInvocations({ run: `pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE}` }),
+      [],
+    ).has(PROBE_OTHER),
+    false,
+  )
   assert.deepEqual(
-    [...attendanceExecutionCounts(executableWholeFileArgs(shortCircuitedTwice), [ONE]).entries()],
-    [[ONE, 0]],
+    probeCounts(`pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE}\ntrue || pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE}`, [PROBE_ONE]),
+    [[PROBE_ONE, 0]],
     'an unprovable script carries NOTHING at all — including the line that would have been fine, '
       + 'because the flatness verdict is a property of the whole script',
   )
+})
+
+// ---------------------------------------------------------------------------------------------
+// P1-1 FROZEN ROWS — every spelling that was executed against vitest 1.6.1 and found to select a
+// real suite while this guard stayed green (199/199 or 200/200). Each is a SECOND selection of a
+// suite the clean run-list already selects once, so the correct answer is 2, and each is asserted
+// here rather than left to a transcript: the transcripts age out, these do not.
+//
+// They are NOT the mechanism. The mechanism is `vitestFilterSelects`, which asks vitest's own
+// question; these rows are its non-vacuity proof — evidence that the transcription actually matches
+// the behaviour that was measured, on the exact inputs that were measured. A tenth spelling nobody
+// has written down is handled by the matcher, not by this list growing.
+// ---------------------------------------------------------------------------------------------
+test('P1-1 frozen rows: every executed bypass spelling now counts as the SECOND execution of the suite it selects', () => {
+  const clean = `pnpm exec vitest ${CFG_FLAG} run ${PROBE_ONE} ${PROBE_NESTED}`
+  /** @param {string} spelling the positional appended as a second, independent invocation */
+  const withSecondInvocation = (spelling) => probeCounts(`${clean}\npnpm exec vitest ${CFG_FLAG} run ${spelling}`)
+
+  // 1. double slash — normalised away by `relative(dir, f)`; the OLD key rejected `rel` starting `/`
+  assert.deepEqual(withSecondInvocation('tests/integration//attendance-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 1]])
+  // 2. `./` — normalised; the OLD key made it a SECOND map entry counting 1
+  assert.deepEqual(withSecondInvocation('tests/integration/./attendance-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 1]])
+  // 3. `sub/..` — normalised, same as 2
+  assert.deepEqual(withSecondInvocation('tests/integration/sub/../attendance-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 1]])
+  // 4. case variant — vitest lowercases BOTH sides; the OLD key compared case-sensitively
+  assert.deepEqual(withSecondInvocation('tests/integration/ATTENDANCE-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 1]])
+  // 5. bare directory — selects EVERY integration suite, and was not a whole-file arg at all
+  assert.deepEqual(withSecondInvocation('tests/integration'), [[PROBE_ONE, 2], [PROBE_NESTED, 2]])
+  // 6. the 11-character family fragment — selects the WHOLE family, invisible to every old leg
+  assert.deepEqual(withSecondInvocation('attendance-'), [[PROBE_ONE, 2], [PROBE_NESTED, 2]])
+  // …and its relatives: a bare basename, a trailing-slash directory, and NO positional at all
+  assert.deepEqual(withSecondInvocation('attendance-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 1]])
+  assert.deepEqual(withSecondInvocation('tests/integration/'), [[PROBE_ONE, 2], [PROBE_NESTED, 2]])
+  assert.deepEqual(probeCounts(`${clean}\npnpm exec vitest ${CFG_FLAG} run`), [[PROBE_ONE, 2], [PROBE_NESTED, 2]])
+  // An absolute filter is not modellable here, so it OVER-selects (fail closed) and is refused by
+  // name in the positional-safety leg below — it can never quietly reduce a count.
+  assert.deepEqual(withSecondInvocation('/checkout/tests/integration/attendance-x.db.test.ts'), [[PROBE_ONE, 2], [PROBE_NESTED, 2]])
+  // NEGATIVE CONTROL — the counter is not simply saying 2 to everything: a fragment that selects
+  // nothing, and another family's suite, leave the clean counts alone.
+  assert.deepEqual(withSecondInvocation('multitable-'), [[PROBE_ONE, 1], [PROBE_NESTED, 1]])
+  assert.deepEqual(withSecondInvocation(PROBE_OTHER), [[PROBE_ONE, 1], [PROBE_NESTED, 1]])
+})
+
+// The other half of row 8 of the executed table: a `-t` on an invocation that selects an attendance
+// suite through a spelling the domain predicate declines. The `-t` was never even read, because the
+// domain was entered by spelling and the empty filtered list was `continue`d.
+test('P1-1 frozen rows: a narrowing flag is READ on an invocation that selects attendance suites by ANY spelling', () => {
+  const BASE = `pnpm exec vitest ${CFG_FLAG} run`
+  for (const spelling of [
+    'tests/integration//attendance-x.db.test.ts',
+    'tests/integration/./attendance-x.db.test.ts',
+    'tests/integration/sub/../attendance-x.db.test.ts',
+    'tests/integration/ATTENDANCE-x.db.test.ts',
+    'tests/integration',
+    'attendance-',
+    'attendance-x.db.test.ts',
+  ]) {
+    assert.deepEqual(
+      detectUnpermittedAttendanceArgs(`${BASE} ${spelling} -t zzz`),
+      spelling === 'tests/integration//attendance-x.db.test.ts' || spelling === 'tests/integration/./attendance-x.db.test.ts'
+        || spelling === 'tests/integration/sub/../attendance-x.db.test.ts' || spelling === 'tests/integration/ATTENDANCE-x.db.test.ts'
+        ? ['-t', 'zzz']
+        : [spelling, '-t', 'zzz'],
+      `the \`-t\` must be REPORTED on an invocation selecting attendance suites spelled "${spelling}"`,
+    )
+  }
+  // NEGATIVE CONTROL: a spelling that selects NO attendance suite is still not reported, so this
+  // leg has not simply been widened to "report every invocation".
+  assert.deepEqual(detectUnpermittedAttendanceArgs(`${BASE} ${PROBE_OTHER} -t zzz`), [])
+  assert.deepEqual(detectUnpermittedAttendanceArgs(`${BASE} multitable- -t zzz`), [])
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -2011,11 +2461,15 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
     .sort()
 
   test('OBS-1 corpus part 2 is non-vacuous (real-DB run-lists carry attendance files)', () => {
-    assert.ok(
-      carried.length >= 60,
-      `real-DB run-lists carry only ${carried.length} attendance files (87 at conversion time) — `
-        + `a near-empty result means the run-list parsing broke, not that the wiring shrank by `
-        + `that much`,
+    // P2-2: was `>= 60` against a real 87 — 27 members of slack, so the run-list side could lose a
+    // third of the family without a red. Pinned to the same exact set as the disk side, which also
+    // makes the two sides unable to shrink together and still agree.
+    assert.deepEqual(
+      carried,
+      [...EXPECTED_ATTENDANCE_SUITES],
+      `real-DB run-lists carry ${carried.length} attendance files; the pinned family has `
+        + `${EXPECTED_ATTENDANCE_SUITES.length}. A shortfall means the run-list parsing broke or `
+        + `wiring was deleted, not that the family shrank by that much`,
     )
   })
 
