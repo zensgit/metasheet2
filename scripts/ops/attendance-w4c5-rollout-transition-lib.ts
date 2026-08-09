@@ -13,7 +13,7 @@
  * competing transition implementations are forbidden"). This module only: parses CLI arguments,
  * canonicalizes/hashes the evidence manifest and the plan digest, validates manifest SHAPE
  * (never re-validates a database precondition), and orchestrates the plan-then-apply sequencing
- * (idempotency-first, then digest match, then local blocked short-circuit) against an INJECTED
+ * (idempotency-first, then digest match, then the boundary call itself) against an INJECTED
  * `plan`/`transition` pair of async functions — so the sequencing logic itself is unit-testable
  * with fakes, and the real CLI wires the real core-backend functions.
  */
