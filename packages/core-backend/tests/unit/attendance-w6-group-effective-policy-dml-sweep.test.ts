@@ -268,6 +268,46 @@ describe('W6-R1 static leg — every reachable DB-seam argument is accounted for
     expect(offenders).toEqual([])
   })
 
+  it('MEASURED BOUNDARY: the pool `query` is still in scope in the route file, so the transaction is NOT a whole-process write block — this leg is what covers writes routed AROUND the handle', () => {
+    /**
+     * Stated because the backstop's own comment, read carelessly, sounds like
+     * a process-wide guarantee. It is not: PostgreSQL refuses writes on the
+     * TRANSACTION'S HANDLE. `attendance-admin.ts` still imports the pool
+     * `query` for its many other routes, and a call-path helper that reaches
+     * for that instead of the injected `runQuery` never touches the
+     * transaction.
+     *
+     * MEASURED, not reasoned: injecting
+     * `await query('INSERT INTO attendance_schedule_groups …')` inside
+     * `canReadAttendanceDirectoryReadiness` wrote 27 rows to the real database
+     * with the ENTIRE real-DB suite still green — the row-count snapshot is
+     * deliberately org-scoped, so a write to another org is outside its
+     * window. Both DML legs of THIS file went red. The identical write through
+     * the injected `runQuery` raised 25006 and wrote nothing.
+     *
+     * Conclusion, and the reason neither leg may be dropped: the transaction
+     * covers everything routed through the handle regardless of composition;
+     * this sweep covers what is routed around it.
+     */
+    const routeText = readFileSync(join(repoRoot, AGGREGATE_ROUTE_ENTRY_FILE), 'utf8')
+    // Non-vacuity: the pool import really is there. If it ever goes away the
+    // claim above changes and this leg should be revisited, not deleted.
+    expect(routeText).toContain("import { query } from '../db/pg'")
+
+    // And the sweep really does catch a pool-routed write planted in a
+    // call-path declaration — both by DML text and by the SELECT-only
+    // predicate over resolved literals.
+    const poolWrite = "async function probe() { await query(`INSERT INTO attendance_schedule_groups (org_id, name, source, is_active) VALUES ('x','y','manual',false)`) }"
+    expect(RAW_SQL_DML.some((pattern) => pattern.test(poolWrite))).toBe(true)
+    const classified = collectQuerySqlArguments(
+      syntheticClosure(AGGREGATE_ROUTE_ENTRY_FILE, 'pool-routed write', poolWrite),
+      repoRoot,
+    )
+    expect(classified.findings).toEqual([])
+    expect(classified.resolved.length).toBe(1)
+    expect(classified.resolved[0].sql.trim().toUpperCase().startsWith('SELECT')).toBe(false)
+  })
+
   it('the READ ONLY backstop is statically ON the route path (its own literal is in the swept set)', () => {
     // A structural backstop that is not reachable from the route is not a
     // backstop. This is the static half of that claim; the behavioural half

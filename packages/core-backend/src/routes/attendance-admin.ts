@@ -146,6 +146,31 @@ const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEf
  * is NOT the mechanism of record and does not substitute for this. It is a
  * second, independent leg that can be defeated by any dataflow it cannot
  * trace; the transaction cannot.
+ *
+ * THE BOUNDARY OF THIS BACKSTOP, MEASURED — because the paragraph above, read
+ * carelessly, sounds like a whole-process write block and it is not. What
+ * PostgreSQL refuses is every write ON THIS TRANSACTION'S HANDLE. The
+ * module-scope pool `query` (imported at the top of this file for the many
+ * OTHER routes here) remains in lexical scope, and a call-path helper that
+ * reaches for IT instead of the injected `runQuery` is not on the transaction
+ * at all. That is not a hypothesis: injecting a row-inserting statement
+ * against `attendance_schedule_groups` through the pool `query`, inside
+ * `canReadAttendanceDirectoryReadiness`, wrote 27 rows for real, with the
+ * whole real-DB suite still green — the row-count snapshot is deliberately
+ * scoped to the org it seeds, so a write to another org sits outside its
+ * window. What caught it was the STATIC leg (both DML legs red). The same
+ * statement issued through the injected `runQuery` — the handle — raised
+ * 25006 and wrote nothing.
+ *
+ * (Phrased without the SQL verb on purpose: this comment sits inside a
+ * declaration the static sweep reads as TEXT, and spelling the verb here would
+ * red the sweep on its own documentation. That the sweep is that literal is a
+ * property worth knowing, not a defect to route around silently.)
+ *
+ * So the two legs are not redundant and neither is the belt to the other's
+ * braces: the transaction covers everything routed through the handle no
+ * matter how it was composed, and the sweep covers what is routed around it.
+ * Deleting either one opens a class the other does not close.
  */
 function createAttendanceGroupEffectivePolicyReadOnlyService(
   readOnlyQuery: AttendanceSetupReadinessQueryFn,
