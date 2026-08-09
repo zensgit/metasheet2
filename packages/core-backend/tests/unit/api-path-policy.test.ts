@@ -12,6 +12,7 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, it, expect } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 import {
   GLOBAL_GATE_EXCEPTIONS,
   apiPathEquals,
@@ -50,10 +51,13 @@ function buildProbeApp(): express.Express {
 }
 
 describe('API path policy — the predicate recognises what the router routes', () => {
-  const app = buildProbeApp()
+  // One pinned listener for the whole file (tests/utils/pinned-server.ts): `request(app)` would make
+  // supertest bind a fresh ephemeral port per request, which the app-mode tripwire bans.
+  const pinned = usePinnedServer()
+  pinned.setApp(buildProbeApp())
 
   it('has probe routes the router actually serves (positive control for the sweep below)', async () => {
-    const res = await request(app).get(PROBE_API_PATH)
+    const res = await request(pinned.url()).get(PROBE_API_PATH)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ routed: true })
   })
@@ -61,7 +65,7 @@ describe('API path policy — the predicate recognises what the router routes', 
   for (const spelling of SPELLINGS) {
     it(`agrees with the router about an API path spelled ${spelling.name}`, async () => {
       const candidate = spelling.of(PROBE_API_PATH)
-      const res = await request(app).get(candidate)
+      const res = await request(pinned.url()).get(candidate)
       const routerServesIt = res.status === 200
 
       if (routerServesIt) {
@@ -81,7 +85,7 @@ describe('API path policy — the predicate recognises what the router routes', 
   it('at least one spelling other than the literal one is routed (the sweep is not vacuous)', async () => {
     const routed: string[] = []
     for (const spelling of SPELLINGS.filter((s) => s.name !== 'as written')) {
-      const res = await request(app).get(spelling.of(PROBE_API_PATH))
+      const res = await request(pinned.url()).get(spelling.of(PROBE_API_PATH))
       if (res.status === 200) routed.push(spelling.name)
     }
     expect(routed.length, 'no alternative spelling was routed — the agreement sweep proves nothing').toBeGreaterThan(0)
