@@ -27,6 +27,19 @@ PostgreSQL 15.17 instance on `localhost:54329` and Node v25.9.0. Substitute your
 below cannot be run as written in your environment, do not attempt to work around it silently;
 treat that as a defect in this document.
 
+**Re-rehearsed cold (PR #4839 gate P3-1/P3-2, 20260809)**: the original version of this document
+was rehearsed from an already-`pnpm install`ed checkout with a leftover `cd packages/core-backend`
+in step 2 that steps 4/6/7/8's repo-root-relative `scripts/ops/...` paths never undid — reproduced
+by an independent adversarial gate as `ERR_MODULE_NOT_FOUND` when run literally in sequence, and
+by a missing `pnpm install` prerequisite reproducing as `tsx: command not found` from a genuinely
+fresh checkout. Both are fixed below: every command in this document now runs from the **repository
+root**, with no `cd` anywhere, and step 2 states the install prerequisite explicitly. This was
+re-rehearsed end to end, cold, in a **new worktree with no pre-existing `node_modules`** against a
+**freshly `initdb`'d scratch PostgreSQL instance**, at head `44803c10ab` on this branch — every
+output below (including both `planDigest` values, which changed from the first version of this
+document because `AttendanceRolloutTransitionPlanV1` gained a `priorState` field that is now also
+part of the digest, see P2-1) was captured verbatim from that rehearsal, not edited by hand.
+
 ## Prerequisites (NOT executable steps — separately owner-authorized, listed for context only)
 
 - Staging/production access, a seven-day soak, any `ATTENDANCE_*` flag change, and a real
@@ -49,11 +62,23 @@ createdb -h localhost -p 54329 -U postgres ms2_w4c5_runbook_demo
 Expected: `pg_ctl` prints `waiting for server to start.... done` / `server started`; `createdb`
 prints nothing on success.
 
-## Step 2 — run the real migration chain against the scratch database
+## Step 2 — install dependencies (if needed) and run the real migration chain
+
+Every command in this runbook runs from the **repository root** — there is no `cd` anywhere
+below. A fresh checkout has no `node_modules`; if `ls node_modules` in the repo root shows nothing,
+install first:
 
 ```bash
-cd packages/core-backend
-DATABASE_URL="postgresql://postgres@localhost:54329/ms2_w4c5_runbook_demo" pnpm run db:migrate
+pnpm install --frozen-lockfile
+```
+
+Then run the migration chain, targeting the `core-backend` workspace package by `--filter` rather
+than `cd`-ing into it (so every later step's repo-root-relative `scripts/ops/...` path keeps
+working without an explicit `cd` back):
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:54329/ms2_w4c5_runbook_demo" \
+  pnpm --filter @metasheet/core-backend run db:migrate
 ```
 
 Expected: one `migration "<name>" was executed successfully` line per migration, ending with the
@@ -65,10 +90,11 @@ migration "zzzz20260805120000_w4c2_scheduled_run_sweep_fairness" was executed su
 migration "zzzz20260808090000_deprovision_effect_grant_row_created" was executed successfully
 ```
 
-313 `"... was executed successfully"` lines (one per migration; verified twice, both a first run
-and a from-scratch rehearsal while writing this document, both landing on the identical last two
-migrations shown above), zero `failed to execute migration` lines. This is the same migration
-chain a real staging/production database runs — not a test-only fixture.
+313 `"... was executed successfully"` lines (one per migration), zero `failed to execute migration`
+lines — reproduced identically across three separate from-scratch rehearsals of this document
+(the original two, plus the P3-1/P3-2 cold re-rehearsal noted above), all landing on the identical
+last two migrations shown above. This is the same migration chain a real staging/production
+database runs — not a test-only fixture.
 
 ## Step 3 — allowlist the example synthetic org for this scratch database's session
 
@@ -89,6 +115,9 @@ pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts plan \
   --target shadow
 ```
 
+(Run from the repository root, with `DATABASE_URL` and `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`
+still exported from step 3 in the same shell.)
+
 Expected (exact output captured while writing this document — `planDigest` is
 deterministic for an identical database state and will reproduce byte-for-byte if you replay
 these exact steps from a freshly migrated database):
@@ -100,6 +129,7 @@ these exact steps from a freshly migrated database):
   "rowExists": false,
   "currentState": "legacy",
   "currentVersion": null,
+  "priorState": null,
   "targetState": "shadow",
   "legalPair": true,
   "comparisonWritePosture": "shadow",
@@ -117,17 +147,27 @@ these exact steps from a freshly migrated database):
     { "code": "DEFECTIVE_REQUEST_SNAPSHOT", "applicable": false, "pass": true, "count": null }
   ],
   "blocked": false,
-  "planDigest": "bf968898cfd2e85aa3e04979b2f635aa78ae0102c15d77b4e8e69a0677053958"
+  "planDigest": "3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867"
 }
 ```
 
-Exit code `0` (an unblocked plan). This command performed zero writes — see
+Exit code `0` (an unblocked plan). This command performed zero **durable writes** — see
 `packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts` for
 the mechanical proof (a dynamic query sweep asserting no `INSERT`/`UPDATE`/`DELETE`/… statement
 and an always-`ROLLBACK`-never-`COMMIT` transaction, plus a before/after row-count invariance
-check). You can verify it yourself right now: `psql -h localhost -p 54329 -U postgres -d
-ms2_w4c5_runbook_demo -c "SELECT count(*) FROM attendance_calculation_rollout_state"` returns `0`
-before and after this step.
+check, exercised over both a shallow and a seeded-deep predicate branch). You can verify it
+yourself right now: `psql -h localhost -p 54329 -U postgres -d ms2_w4c5_runbook_demo -c "SELECT
+count(*) FROM attendance_calculation_rollout_state"` returns `0` before and after this step.
+
+**Locking (PR #4839 gate P3-1, measured via `pg_locks`, not merely asserted):** although `plan`
+writes nothing, it is not lock-free. It runs inside `BEGIN ISOLATION LEVEL SERIALIZABLE` and its
+section-3 predicate queries take `RowShareLock` on up to 7 relations (plus row-level locks on any
+matched job/operation/review/request/approval rows), held until the transaction's own `ROLLBACK`.
+`RowShareLock` does **not** conflict with the `RowExclusiveLock` ordinary `INSERT`/`UPDATE`/`DELETE`
+statements take, so `plan` does not block normal application writes — but it **does** conflict with
+`ExclusiveLock`/`AccessExclusiveLock`, i.e. a concurrent schema migration (`ALTER TABLE`, etc.) on
+one of those same relations. Avoid running `plan` (or `apply`, which calls `plan` internally as its
+first step) concurrently with a migration window against the same database.
 
 ## Step 5 — prepare the evidence manifest
 
@@ -178,7 +218,7 @@ pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \
   --target shadow \
   --expected-state legacy \
   --expected-version 1 \
-  --plan-digest bf968898cfd2e85aa3e04979b2f635aa78ae0102c15d77b4e8e69a0677053958 \
+  --plan-digest 3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867 \
   --confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_ONLY \
   --manifest /tmp/w4c5-manifest-legacy-to-shadow.json \
   --actor-id runbook-demo-operator \
@@ -198,11 +238,14 @@ Expected output (captured verbatim):
   "outcome": "transitioned",
   "orgId": "00000000-0000-4000-8000-000000000001",
   "state": "shadow",
-  "planDigest": "bf968898cfd2e85aa3e04979b2f635aa78ae0102c15d77b4e8e69a0677053958"
+  "planDigest": "3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867"
 }
 ```
 
-Exit code `0`. Verify the persisted state directly:
+Exit code `0` (`planDigest` here is the pre-transition, `legacy`-state plan's digest — the same
+value you supplied, captured before the boundary call, not recomputed after; contrast with step
+7's no-op output below, which reflects the NEW post-transition plan). Verify the persisted state
+directly:
 
 ```bash
 psql -h localhost -p 54329 -U postgres -d ms2_w4c5_runbook_demo \
@@ -242,13 +285,20 @@ pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \
   --target shadow \
   --expected-state legacy \
   --expected-version 1 \
-  --plan-digest bf968898cfd2e85aa3e04979b2f635aa78ae0102c15d77b4e8e69a0677053958 \
+  --plan-digest 3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867 \
   --confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_ONLY \
   --manifest /tmp/w4c5-manifest-legacy-to-shadow.json \
   --actor-id runbook-demo-operator \
   --correlation-id 00000000-0000-4000-8000-0000000000c2 \
   --engine-version w4c5-runbook-demo-v1
 ```
+
+This still no-ops after the P2-1 fix (PR #4839 gate, 20260809): the idempotency short-circuit now
+additionally requires the persisted `prior_state` column to equal `--expected-state`, and this
+org's real `prior_state` genuinely is `legacy` (it transitioned `legacy -> shadow` in step 6) —
+exactly what `--expected-state legacy` above claims. A re-apply that claimed a DIFFERENT
+`--expected-state` here (one that was never this org's real prior state) is refused instead of
+silently no-op'd; see that finding for the two exact attack shapes this closes.
 
 Expected (the `planDigest` field now reflects the CURRENT already-transitioned plan, not the
 `--plan-digest` argument you supplied — that argument is intentionally never echoed back for a
@@ -259,7 +309,7 @@ no-op, only the freshly recomputed one):
   "outcome": "noop_already_at_target",
   "orgId": "00000000-0000-4000-8000-000000000001",
   "state": "shadow",
-  "planDigest": "b1e4efcd1172e0065e3d081729dfe6cce4338b1d71da248ac922065e19dae9cd"
+  "planDigest": "9355be2445d11c327baea68ef3781edc8251dea54abe049d6fa4a10ac106b3dc"
 }
 ```
 
