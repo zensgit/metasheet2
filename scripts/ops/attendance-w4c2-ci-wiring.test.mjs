@@ -1525,14 +1525,74 @@ function maskSourceNoise(src) {
 }
 
 /**
- * Entries of the DIRECT `test.<key>: [ … ]` array of a vitest config, or `null` when the key is
- * absent as a direct property of `test` (a nested `coverage.exclude`, a commented-out key, or a
- * free-text mention does not count). Same depth-1 discipline as the shared
- * `extractTestExcludeArrayBody`, generalised to any key because this guard needs `include` too.
+ * Source with COMMENTS blanked but STRING BODIES INTACT, positions preserved.
+ *
+ * The counterpart of `maskSourceNoise`, and the reason both exist: entry extraction needs the
+ * quoted text (that IS the entry) but must not see text that is commented out, while structural
+ * questions need the opposite. Reading entries off the ORIGINAL source — which is what this file
+ * did, on purpose, with the comment "Slice the ORIGINAL source so quoted entries survive the mask."
+ * — meant a `/* 'tests/integration/attendance-X.db.test.ts', *​/` line still read as an exclude
+ * entry while vitest cheerfully collected the file. Executed: 199/199 green with the suite
+ * collected again by the no-DB job.
+ *
+ * String-aware, so a `//` or `/*` INSIDE a quoted path is not mistaken for a comment.
  */
-function directTestArrayEntries(src, key) {
+function stripCommentsPreservingStrings(src) {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    if (src[i] === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') {
+        out += ' '
+        i += 1
+      }
+      continue
+    }
+    if (src[i] === '/' && src[i + 1] === '*') {
+      out += '  '
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' '
+        i += 1
+      }
+      if (i < src.length) {
+        out += '  '
+        i += 2
+      }
+      continue
+    }
+    if (src[i] === "'" || src[i] === '"' || src[i] === '`') {
+      const quote = src[i]
+      out += src[i]
+      i += 1
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === '\\' && i + 1 < src.length) {
+          out += src[i] + src[i + 1]
+          i += 2
+          continue
+        }
+        out += src[i]
+        i += 1
+      }
+      if (i < src.length) {
+        out += src[i]
+        i += 1
+      }
+      continue
+    }
+    out += src[i]
+    i += 1
+  }
+  return out
+}
+
+/**
+ * The `[ … ]` span of a direct `test.<key>` array, as indices into the source, or `null` when the
+ * key is not a direct property of `test` (a nested `coverage.exclude`, a commented-out key, or a
+ * free-text mention does not count).
+ */
+function directTestArraySpan(masked, key) {
   const keyRe = new RegExp(`^${key}\\s*:\\s*\\[`)
-  const masked = maskSourceNoise(src)
   const testKey = /\btest\s*:\s*\{/.exec(masked)
   if (!testKey) return null
   const openBrace = masked.indexOf('{', testKey.index + testKey[0].length - 1)
@@ -1554,17 +1614,8 @@ function directTestArrayEntries(src, key) {
     if (depth === 1) {
       const m = keyRe.exec(masked.slice(i))
       if (m) {
-        const bracketOpen = i + m[0].length - 1
-        let bDepth = 0
-        for (let j = bracketOpen; j < masked.length; j++) {
-          if (masked[j] === '[') bDepth += 1
-          else if (masked[j] === ']') {
-            bDepth -= 1
-            // Slice the ORIGINAL source so quoted entries survive the mask.
-            if (bDepth === 0) return quotedExcludeEntries(src.slice(bracketOpen + 1, j))
-          }
-        }
-        return null
+        const open = i + m[0].length - 1
+        return { open, close: matchingBracket(masked, open, '[', ']') }
       }
     }
     i += 1
@@ -1572,22 +1623,155 @@ function directTestArrayEntries(src, key) {
   return null
 }
 
-/** True when the config declares a direct `test.<key>` of ANY value shape. */
-function declaresDirectTestKey(src, key) {
-  const keyRe = new RegExp(`^${key}\\s*:`)
-  const masked = maskSourceNoise(src)
-  const testKey = /\btest\s*:\s*\{/.exec(masked)
-  if (!testKey) return false
-  const openBrace = masked.indexOf('{', testKey.index + testKey[0].length - 1)
-  if (openBrace < 0) return false
-  let depth = 1
-  let i = openBrace + 1
-  while (i < masked.length && depth > 0) {
+/** Depth-0 element spans of a bracketed body, split on commas that are not inside a nested group. */
+function topLevelElementSpans(masked, start, end) {
+  const spans = []
+  let depth = 0
+  let elementStart = start
+  for (let i = start; i < end; i++) {
     const ch = masked[i]
-    if (ch === '{' || ch === '[' || ch === '(') depth += 1
-    else if (ch === '}' || ch === ']' || ch === ')') depth -= 1
-    else if (depth === 1 && keyRe.test(masked.slice(i))) return true
-    i += 1
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+    else if (ch === ',' && depth === 0) {
+      spans.push([elementStart, i])
+      elementStart = i + 1
+    }
+  }
+  spans.push([elementStart, end])
+  return spans
+}
+
+const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/
+
+/**
+ * The literal string entries of an array body — with every element that is NOT a literal string
+ * either RESOLVED (a spread of a `const` array literal in the same file) or REFUSED.
+ *
+ * The old parser returned only the quoted literals it could see and silently ignored everything
+ * else, so `exclude: [ …, ...HIDDEN_EXCLUDE ]` hid an entry completely: the suite was removed from
+ * the very run meant to execute it while the guard reported the wiring as satisfied (executed:
+ * 199/199 green). Reading what you can and ignoring the rest is fail-OPEN; this reads what it can,
+ * resolves what it can resolve, and refuses the rest.
+ */
+function arrayEntriesInSpan(stripped, masked, start, end, seen) {
+  const entries = []
+  for (const [a, b] of topLevelElementSpans(masked, start, end)) {
+    const raw = stripped.slice(a, b).trim()
+    const code = masked.slice(a, b).trim()
+    if (raw === '') continue // empty element, trailing comma, or an element that was ALL comment
+    if (code === '') {
+      // No code outside quotes: the element is one quoted literal, and nothing else.
+      const m = /^(['"])((?:\\.|(?!\1)[^\\])*)\1$/.exec(raw)
+      if (!m) {
+        throw new Error(
+          `vitest config array: failing CLOSED — element ${JSON.stringify(raw)} is quoted but is not `
+            + `a single ordinary string literal (a template literal or concatenation cannot be read `
+            + `statically, and guessing at its value is how an entry goes missing)`,
+        )
+      }
+      entries.push(m[2].replace(/\\(.)/g, '$1'))
+      continue
+    }
+    if (code.startsWith('...')) {
+      const ident = code.slice(3).trim()
+      if (!IDENTIFIER_RE.test(ident)) {
+        throw new Error(
+          `vitest config array: failing CLOSED — cannot resolve the spread ${JSON.stringify(raw)}; `
+            + `only a spread of a plain \`const\` array literal in the same file can be read here`,
+        )
+      }
+      entries.push(...resolveConstArrayEntries(stripped, masked, ident, seen))
+      continue
+    }
+    throw new Error(
+      `vitest config array: failing CLOSED — element ${JSON.stringify(raw)} is not a string literal `
+        + `and not a resolvable spread. An identifier, a call or a computed entry is invisible to a `
+        + `static read, and an entry this guard cannot see is an entry it cannot reconcile`,
+    )
+  }
+  return entries
+}
+
+/** Entries of `const IDENT = [ … ]` in the same source. Throws when it cannot be resolved. */
+function resolveConstArrayEntries(stripped, masked, ident, seen) {
+  if (seen.has(ident)) {
+    throw new Error(`vitest config array: failing CLOSED — spread of ${ident} is self-referential`)
+  }
+  const decl = new RegExp(`\\bconst\\s+${ident}\\s*(?::[^=;]*)?=\\s*\\[`).exec(masked)
+  if (!decl) {
+    throw new Error(
+      `vitest config array: failing CLOSED — spread \`...${ident}\` has no \`const ${ident} = [ … ]\` `
+        + `array literal in the same file, so its entries cannot be read`,
+    )
+  }
+  const open = decl.index + decl[0].length - 1
+  const close = matchingBracket(masked, open, '[', ']')
+  return arrayEntriesInSpan(stripped, masked, open + 1, close, new Set([...seen, ident]))
+}
+
+/**
+ * Entries of the DIRECT `test.<key>: [ … ]` array of a vitest config, or `null` when the key is
+ * absent as a direct property of `test`.
+ */
+function directTestArrayEntries(src, key) {
+  const masked = maskSourceNoise(src)
+  const span = directTestArraySpan(masked, key)
+  if (span == null) return null
+  return arrayEntriesInSpan(stripCommentsPreservingStrings(src), masked, span.open + 1, span.close, new Set())
+}
+
+/**
+ * True when an object declares a direct `<key>` of ANY value shape — SEEING THROUGH SPREADS.
+ *
+ * `test: { ...NARROW, globals: true, … }` carries `testNamePattern` without spelling it, and the
+ * key scan that only looked for the literal spelling returned false: executed, 199/199 green, with
+ * every carried suite running zero assertions. So a spread is resolved to its source object and
+ * searched too, and a spread that cannot be resolved is REFUSED rather than passed over — the
+ * failure direction matters, because "I did not find the key" and "I could not look" were being
+ * reported as the same answer.
+ *
+ * @param {string} src
+ * @param {string} key
+ * @param {RegExp} objectOpener matches the object whose direct keys are in question
+ */
+function declaresDirectTestKey(src, key, objectOpener = /\btest\s*:\s*\{/) {
+  const masked = maskSourceNoise(src)
+  const opener = objectOpener.exec(masked)
+  if (!opener) return false
+  const openBrace = masked.indexOf('{', opener.index + opener[0].length - 1)
+  if (openBrace < 0) return false
+  return objectDeclaresKey(masked, openBrace, key, new Set())
+}
+
+function objectDeclaresKey(masked, openBrace, key, seen) {
+  const keyRe = new RegExp(`^${key}\\s*:`)
+  const close = matchingBracket(masked, openBrace, '{', '}')
+  for (const [a, b] of topLevelElementSpans(masked, openBrace + 1, close)) {
+    const code = masked.slice(a, b).trim()
+    if (code === '') continue
+    if (keyRe.test(code)) return true
+    if (!code.startsWith('...')) continue
+    const ident = code.slice(3).trim()
+    if (!IDENTIFIER_RE.test(ident)) {
+      throw new Error(
+        `vitest config object: failing CLOSED — cannot resolve the spread ${JSON.stringify(code)} `
+          + `while looking for \`${key}\`; a spread carries keys without spelling them, so an `
+          + `unreadable one cannot be reported as "the key is absent"`,
+      )
+    }
+    if (seen.has(ident)) {
+      throw new Error(`vitest config object: failing CLOSED — spread of ${ident} is self-referential`)
+    }
+    const decl = new RegExp(`\\bconst\\s+${ident}\\s*(?::[^=;]*)?=\\s*\\{`).exec(masked)
+    if (!decl) {
+      throw new Error(
+        `vitest config object: failing CLOSED — spread \`...${ident}\` has no `
+          + `\`const ${ident} = { … }\` object literal in the same file, so whether it carries `
+          + `\`${key}\` cannot be read`,
+      )
+    }
+    const nested = masked.indexOf('{', decl.index + decl[0].length - 1)
+    if (objectDeclaresKey(masked, nested, key, new Set([...seen, ident]))) return true
   }
   return false
 }
@@ -2094,16 +2278,90 @@ test('OBS-1 corpus derivation is non-vacuous and both wiring sides parse', () =>
   const excluded = noDbExcludedArgs()
   assert.ok(excluded.size > 0, 'vitest.config.ts test.exclude parsed as empty — the config parse broke')
   // This file parses `test.exclude` locally (it needs `test.include` too, which the shared module
-  // does not expose). Prove the local parse agrees with the shared, already-gated
-  // `isQuotedInTestExclude` on every corpus member, so the two cannot drift apart.
+  // does not expose), and cross-checks the result against the shared, already-gated
+  // `isQuotedInTestExclude` on every corpus member.
+  //
+  // P2-1: this leg USED TO SHARE THE BUG IT EXISTS TO CATCH. Both sides read entries off the
+  // original source with only `//` line comments stripped, so a `/* … */`-commented entry read as
+  // excluded on BOTH sides, they agreed, and the leg confirmed the defect instead of catching it —
+  // a consistency check between two copies of one mistake is not a second opinion. The local side
+  // now strips block comments and resolves (or refuses) spreads; the shared side still does
+  // neither, which is deliberate — the shared module is untouched here (repo-level issue 4829).
+  // A DISAGREEMENT IS THEREFORE A REAL FINDING in either direction, and the message says which.
   const cfg = readCoreBackendFile(NO_DB_CONFIG)
   for (const { arg } of corpus) {
+    const local = excluded.has(arg)
+    const shared = isQuotedInTestExclude(cfg, arg)
     assert.equal(
-      excluded.has(arg),
-      isQuotedInTestExclude(cfg, arg),
-      `local test.exclude parse disagrees with the shared isQuotedInTestExclude for ${arg}`,
+      local,
+      shared,
+      `the two test.exclude reads disagree about ${arg}: this file says ${local}, the shared `
+        + `isQuotedInTestExclude says ${shared}. Shared-true / local-false means the entry is `
+        + `present in the text but NOT in effect — a block comment around it, which vitest ignores `
+        + `while the shared parser (which strips only \`//\`) counts it, so the suite is collected `
+        + `by the no-DB job and skip-greened there. Shared-false / local-true means the entry is `
+        + `reached through a spread the shared parser cannot follow. Either way the exclude side of `
+        + `the two-point wiring is not what it reads like`,
     )
   }
+})
+
+// P2-1 FROZEN ROWS: the executed bypasses, driven over synthetic configs so the parsers are proven
+// to SEE them rather than proven to agree with themselves.
+test('P2-1: the config array parser sees through block comments and refuses what it cannot resolve', () => {
+  const ENTRY = 'tests/integration/attendance-x.db.test.ts'
+  const cfg = (body) => `import { defineConfig } from 'vitest/config'\nexport default defineConfig({\n  test: {\n    exclude: [\n${body}\n    ],\n  },\n})\n`
+  // Baseline: a plain entry is read.
+  assert.deepEqual(directTestArrayEntries(cfg(`      '${ENTRY}',`), 'exclude'), [ENTRY])
+  // ROW: a BLOCK-commented entry is NOT an exclude entry — vitest collects the file, and so must
+  // this parser conclude. This is the row that was 199/199 green.
+  assert.deepEqual(directTestArrayEntries(cfg(`      /* '${ENTRY}', */`), 'exclude'), [])
+  assert.deepEqual(directTestArrayEntries(cfg(`      /*\n       * '${ENTRY}',\n       */`), 'exclude'), [])
+  // …and the line-comment case the shared parser already handled stays handled.
+  assert.deepEqual(directTestArrayEntries(cfg(`      // '${ENTRY}',`), 'exclude'), [])
+  // A `//` or `/*` INSIDE a quoted path is part of the path, not a comment — the stripper is
+  // string-aware, or fixing the comment bug would have introduced a truncation bug.
+  assert.deepEqual(directTestArrayEntries(cfg(`      'tests/integration//attendance-x.db.test.ts',`), 'exclude'), [
+    'tests/integration//attendance-x.db.test.ts',
+  ])
+  // ROW: a spread is RESOLVED when it can be, so a hidden entry is still an entry…
+  const withConst = `import { defineConfig } from 'vitest/config'\nconst HIDDEN = ['${ENTRY}']\nexport default defineConfig({\n  test: {\n    exclude: ['**/dist/**', ...HIDDEN],\n  },\n})\n`
+  assert.deepEqual(directTestArrayEntries(withConst, 'exclude'), ['**/dist/**', ENTRY])
+  // …and REFUSED when it cannot, rather than silently reading only the literals in view.
+  assert.throws(() => directTestArrayEntries(cfg('      ...ELSEWHERE,'), 'exclude'), /failing CLOSED/)
+  assert.throws(() => directTestArrayEntries(cfg('      ...loadExcludes(),'), 'exclude'), /failing CLOSED/)
+  assert.throws(() => directTestArrayEntries(cfg('      SOME_ENTRY,'), 'exclude'), /failing CLOSED/)
+  assert.throws(() => directTestArrayEntries(cfg('      `tests/${dir}/x.test.ts`,'), 'exclude'), /failing CLOSED/)
+  // Absent key is still `null`, not `[]` — the two mean different things to every caller.
+  assert.equal(directTestArrayEntries(cfg(`      '${ENTRY}',`), 'include'), null)
+})
+
+test('P1-2 face (b): the direct-key scan sees a narrowing key carried by a spread', () => {
+  const withSpread = "import { defineConfig } from 'vitest/config'\nconst NARROW = { testNamePattern: 'no-such-test-zz' }\nexport default defineConfig({\n  test: { ...NARROW, globals: true },\n})\n"
+  assert.ok(
+    declaresDirectTestKey(withSpread, 'testNamePattern'),
+    'a `testNamePattern` reached through `test: { ...NARROW }` must be found — this shape was '
+      + '199/199 green while every carried suite executed zero assertions',
+  )
+  // Nested one level deeper, and via a spread inside the spread source.
+  const nested = "const INNER = { testNamePattern: 'zz' }\nconst NARROW = { ...INNER }\nexport default defineConfig({ test: { ...NARROW } })\n"
+  assert.ok(declaresDirectTestKey(nested, 'testNamePattern'))
+  // Directly spelled still works, and an unrelated config still answers false — the scan has not
+  // simply been widened to "true".
+  assert.ok(declaresDirectTestKey("export default defineConfig({ test: { testNamePattern: 'zz' } })", 'testNamePattern'))
+  assert.ok(!declaresDirectTestKey("export default defineConfig({ test: { globals: true } })", 'testNamePattern'))
+  // A key that only appears NESTED or in a comment/string is still not a direct key.
+  assert.ok(!declaresDirectTestKey("export default defineConfig({ test: { coverage: { testNamePattern: 'zz' } } })", 'testNamePattern'))
+  assert.ok(!declaresDirectTestKey("export default defineConfig({ test: { /* testNamePattern: 'zz' */ globals: true } })", 'testNamePattern'))
+  // An unresolvable spread is REFUSED — "I could not look" must not be reported as "absent".
+  assert.throws(
+    () => declaresDirectTestKey('export default defineConfig({ test: { ...imported, globals: true } })', 'testNamePattern'),
+    /failing CLOSED/,
+  )
+  assert.throws(
+    () => declaresDirectTestKey('export default defineConfig({ test: { ...makeNarrow(), globals: true } })', 'testNamePattern'),
+    /failing CLOSED/,
+  )
 })
 
 // The no-DB job's config declares no `include`, so vitest's own default decides what it collects
@@ -2706,6 +2964,26 @@ test('P2: the corpus walk refuses symlinks and other non-regular entries instead
         + `silences every carried suite exactly as \`-t\` does on the command line, and the argument `
         + `allowlist above cannot see it`,
     )
+    // The selection model (`vitestFilterSelects`) transcribes vitest's `relative(dir, f)` on the
+    // assumption that `dir` — vitest's root — IS the package directory these arguments are already
+    // relative to. That holds because the steps run through `pnpm --filter @metasheet/core-backend
+    // exec`, so cwd == root. It is PINNED rather than assumed: a `root`/`dir` in the config would
+    // re-base every filter and every corpus path at once, silently, underneath a matcher that
+    // would go on comparing the old strings.
+    for (const [key, opener, where] of [
+      ['root', undefined, 'test'],
+      ['dir', undefined, 'test'],
+      ['root', /\bdefineConfig\s*\(\s*\{/, 'the top-level config object'],
+    ]) {
+      assert.ok(
+        !declaresDirectTestKey(cfg, key, opener),
+        `${governing} must not declare \`${key}\` on ${where}: it re-bases vitest's \`dir\`, and `
+          + `every path this guard reasons about — the run-list arguments, the corpus, the `
+          + `include/exclude globs — is relative to packages/core-backend. Changing the root without `
+          + `re-deriving them makes the whole selection model compare strings from two coordinate `
+          + `systems`,
+      )
+    }
   })
 
   // The resolved path is ALSO pinned to the canonical one. The resolution above already makes a
