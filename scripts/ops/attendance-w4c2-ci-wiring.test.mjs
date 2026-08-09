@@ -179,18 +179,32 @@ function isAttendanceIntegrationArg(arg) {
 //
 // ENUMERATING THOSE SPELLINGS IS THE MOVE THIS FILE KEEPS DELETING. The fix is to stop asking "is
 // this token one of the spellings I recognise" and instead ask vitest's own question: WHICH SUITES
-// DOES THIS INVOCATION SELECT? `vitestFilterSelects` below transcribes vitest 1.6.1's `filterFiles()`
-// — normalise the filter, lowercase BOTH sides, and match by SUBSTRING — so a directory argument, a
+// DOES THIS INVOCATION SELECT? `vitestFilterSelects` below MODELS vitest 1.6.1's `filterFiles()` —
+// normalise the filter, lowercase BOTH sides, and match by SUBSTRING — so a directory argument, a
 // bare family fragment and every punctuation variant all resolve to the set of corpus suites they
-// really select, and each of those suites is counted under its OWN canonical path. A spelling nobody
-// has thought of is handled because it is never named: it is run through the same matcher vitest
-// runs it through.
+// really select, and each of those suites is counted under its OWN canonical path.
+//
+// THE THESIS, STATED EXACTLY, because the sentence that used to close this paragraph overstated it.
+// It said: "a spelling nobody has thought of is handled because it is never named: it is run through
+// THE SAME MATCHER vitest runs it through." That is FALSE, and it was executed as false — the model
+// was run differentially against the REAL vitest 1.6.1 binary over one corpus, and 30 filters
+// produced NINE divergences (every row frozen below, with the mechanism). It is not the same
+// matcher; two pipeline stages are deliberately not modelled, and the docblock names them.
+//
+// What IS true, and is the whole reason the counting key was rewritten: THE KEY IS SELECTION, NOT
+// SPELLING, and every point where this model's selection diverges from vitest's is REFUSED BY NAME
+// rather than silently absorbed. A spelling nobody has thought of therefore has exactly two fates:
+// the model agrees with vitest and the suite is counted under its own canonical path, or the model
+// cannot resolve it — it selects ZERO — and the invocation carrying it REDS, in-domain through the
+// positional-safety leg and out-of-domain through the complement leg. What enumerating spellings
+// kept producing was a third fate, "counted wrong and green", and that is the one now closed.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Does vitest select the corpus suite `suiteArg` when handed the CLI filter `filter`?
+ * Does this guard's model select the corpus suite `suiteArg` when handed the CLI filter `filter`?
  *
- * Transcribed from vitest 1.6.1 `filterFiles()` (dist/vendor/cli-api.OdDWuB7Y.js):
+ * MODELLED ON, NOT EQUAL TO, vitest 1.6.1 `filterFiles()` (dist/vendor/cli-api.OdDWuB7Y.js), which
+ * is transcribed here verbatim:
  *
  *     const testFile = relative(dir, t).toLocaleLowerCase()
  *     return filters.some((f) => {
@@ -200,18 +214,45 @@ function isAttendanceIntegrationArg(arg) {
  *         || testFile.includes(relativePath.toLocaleLowerCase())
  *     })
  *
- * Three properties the previous key modelled none of: `relative(dir, f)` NORMALISES the filter (so
- * `//`, `./` and `sub/..` collapse), both sides are lowercased (so case is irrelevant), and the
- * match is `includes` — a SUBSTRING, which is why a bare directory or a bare `attendance-` fragment
- * selects whole families rather than nothing.
+ * WHAT IS MODELLED. Three properties the previous counting key had none of: the filter is
+ * NORMALISED (so `//`, `./` and `sub/..` collapse), both sides are lowercased (so case is
+ * irrelevant), and the match is `includes` — a SUBSTRING, which is why a bare directory or a bare
+ * `attendance-` fragment selects whole families rather than nothing. `dir` is vitest's root, which
+ * is the package directory these args are already relative to (the steps run via
+ * `pnpm --filter @metasheet/core-backend exec`, so cwd == root); `test.root`/`test.dir` and the
+ * top-level `root` are PINNED absent below so that equivalence cannot silently break.
  *
- * `dir` is vitest's root, which is the package directory these args are already relative to (the
- * steps run via `pnpm --filter @metasheet/core-backend exec`, so cwd == root); `test.root`/`test.dir`
- * and the top-level `root` are PINNED absent below so that equivalence cannot silently break.
+ * WHAT IS NOT MODELLED — two stages, both stated because the model was measured against the binary
+ * rather than read:
  *
- * ABSOLUTE FILTERS ARE NOT MODELLED — the runner's checkout prefix is not knowable here. Rather than
- * guess, an absolute filter selects EVERYTHING (fail closed: it can only over-count, never hide an
- * execution) and is refused by name in the positional-safety leg below.
+ *   (1) `pathe.normalize`. vitest's CLI does not hand raw argv to `filterFiles()`; it runs every
+ *       filter through `normalize` from `pathe` first (`dist/vendor/cac.cdAtVkJZ.js`:
+ *       `startVitest(mode, cliFilters.map(normalize), …)`), which FOLDS `\` to `/`. This model uses
+ *       `posix.normalize`, which does not. So `tests\integration\x.db.test.ts` selects one file in
+ *       vitest and NOTHING here.
+ *   (2) `relative(dir, f)`. This model substitutes `posix.normalize(f)`. They are different
+ *       functions: `relative` RESOLVES against the root, so a filter that escapes and comes back
+ *       (`../<pkg>/tests/…`) lands inside the root and matches, while `posix.normalize` keeps the
+ *       leading `../` and matches nothing; and a filter that resolves TO the root yields `''`, so
+ *       vitest's trailing-slash branch computes `join('', '/')` === `'/'`, a substring of EVERY
+ *       collected path — which is why `./` selects the ENTIRE corpus in vitest and nothing here.
+ *
+ * Modelling (2) faithfully would require the runner's real checkout prefix (`relative` resolves
+ * against an absolute root, and whether `../foo/…` returns inside it depends on the directory names
+ * above the package). That prefix is exactly the unknowable this file already refuses to guess for
+ * absolute filters, so it is not guessed here either.
+ *
+ * WHAT IS THEREFORE CLAIMED, AND WHAT IS NOT. Claimed: over the 30 filters executed against the real
+ * binary, every divergence is one where this model selects ZERO (under) or EVERYTHING (over) — never
+ * a non-empty PROPER subset — and both of those are refused by name by the two legs that consume it,
+ * so neither can silently under-count. NOT claimed: that no filter exists for which this model
+ * selects a non-empty proper subset of vitest's answer. That shape would under-count silently, and
+ * the frozen differential below is evidence that none of the 30 executed spellings does it, not a
+ * proof that none can. If one is ever found, the fix is another refusal, not another spelling.
+ *
+ * ABSOLUTE FILTERS ARE NOT MODELLED AT ALL — same missing prefix. Rather than guess, an absolute
+ * filter selects EVERYTHING (fail closed: it can only over-count, never hide an execution) and is
+ * refused by name in the positional-safety leg below and in the complement leg.
  *
  * @param {string} suiteArg package-relative POSIX path of a corpus suite
  * @param {string} filter one positional CLI argument
@@ -2206,6 +2247,34 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
 // Absolute filters are refused rather than modelled: vitest matches them with
 // `isAbsolute(f) && t.startsWith(f)` against the runner's real checkout prefix, which is not
 // knowable from here. They over-select in the counter (fail closed) and red by name here.
+/**
+ * Reasons a real-DB positional is refused. ONE definition, read by the live leg below AND by the
+ * frozen differential rows, so a row cannot claim a consequence the shipped predicate does not have.
+ *
+ * The zero-selection wording is deliberate and was CORRECTED: it used to read "selects no collected
+ * integration suite", which is an assertion about VITEST that the differential proved false — `./`
+ * resolves to zero here and selects the ENTIRE corpus there. The refusal is a statement about this
+ * model's ability to resolve the argument, not a claim about what vitest would run.
+ */
+const REAL_DB_POSITIONAL_REASONS = Object.freeze({
+  absolute: 'absolute path — this guard cannot resolve the runner checkout prefix',
+  zero: "this guard's selection model resolves it to ZERO collected integration suites — measured "
+    + 'against the real vitest 1.6.1 binary, an argument in that class selects nothing, or ONE file '
+    + '(`tests\\integration\\…`, `../<pkg>/…`), or the WHOLE corpus (`./`, `tests/../`, `./././`), '
+    + 'and all three are inadmissible on a real-DB run-list',
+})
+
+/**
+ * @param {string} positional one file filter of a real-DB invocation
+ * @param {string[]} suiteArgs the collected integration corpus
+ * @returns {string|null} the refusal reason, or null when the positional is admissible
+ */
+function realDbPositionalRefusal(positional, suiteArgs) {
+  if (positional.startsWith('/')) return REAL_DB_POSITIONAL_REASONS.absolute
+  if (!suiteArgs.some((arg) => vitestFilterSelects(arg, positional))) return REAL_DB_POSITIONAL_REASONS.zero
+  return null
+}
+
 test("P1-1: every positional of the three real-DB steps' invocations is package-relative and selects at least one collected suite", () => {
   const suiteArgs = integrationSuiteCorpus().map((e) => e.arg)
   assert.ok(suiteArgs.length > 0, 'the integration suite corpus is empty — an empty scan is not an absence')
@@ -2213,22 +2282,22 @@ test("P1-1: every positional of the three real-DB steps' invocations is package-
   for (const [stepId, step] of realDbSteps()) {
     for (const inv of executableIntegrationInvocations(step)) {
       for (const positional of positionalFiltersOfInvocation(inv)) {
-        if (positional.startsWith('/')) {
-          offenders.push({ stepId, positional, reason: 'absolute path — this guard cannot resolve the runner checkout prefix' })
-          continue
-        }
-        if (!suiteArgs.some((arg) => vitestFilterSelects(arg, positional))) {
-          offenders.push({ stepId, positional, reason: 'selects no collected integration suite' })
-        }
+        const reason = realDbPositionalRefusal(positional, suiteArgs)
+        if (reason != null) offenders.push({ stepId, positional, reason })
       }
     }
   }
   assert.deepEqual(
     offenders,
     [],
-    'a vitest file filter that matches nothing is not a no-op that can be waved through: vitest '
-      + 'exits 0 on it, so the run-list still reads as wiring while the suite it was meant to name '
-      + 'executes nowhere. This is the direction a rename or a deletion breaks in',
+    'a real-DB file filter this guard cannot resolve to at least one COLLECTED suite is not a no-op '
+      + 'that can be waved through. If vitest also matches nothing, it exits 0 on it — so the '
+      + 'run-list still reads as wiring while the suite it was meant to name executes nowhere, which '
+      + 'is the direction a rename or a deletion breaks in. And if vitest matches something this '
+      + 'model cannot see, the count is wrong in the other direction: `./` resolves to zero here and '
+      + 'selects the ENTIRE collected corpus in real vitest 1.6.1 (executed; frozen below). Both are '
+      + 'refused by the same rule, which is why the rule is "resolves to zero" and not "vitest would '
+      + 'run nothing"',
   )
 })
 
@@ -2245,6 +2314,154 @@ test('P1-1 positional-safety positive control: the leg can see a dead filter and
   assert.ok(!dead('tests/integration/ATTENDANCE-x.db.test.ts'))
   assert.ok(!dead('attendance-'))
   assert.ok(!dead('tests/integration'))
+})
+
+// ---------------------------------------------------------------------------------------------
+// FROZEN DIFFERENTIAL — `vitestFilterSelects` vs the REAL vitest 1.6.1 binary (gate finding P2).
+//
+// The docblock beside `vitestFilterSelects` used to claim the model was "the same matcher vitest
+// runs it through". It is not. This table is the executed evidence of exactly where it is not, and
+// it is a GATE rather than a transcript: every row asserts the model's own count AND the
+// CONSEQUENCE — which refusal the shipped predicates return for that spelling. A row cannot go
+// stale by quietly becoming wrong; changing the model without changing the table reds here.
+//
+// HOW IT WAS MEASURED (executed 2026-08-09, not read off the source). A sandbox with the REAL
+// `vitest@1.6.1` binary, a byte-equivalent `include` (`tests/integration/**/*.{test,spec}.?(c|m)
+// [jt]s?(x)`, no `root`, no `dir`) and the six suites below at the corpus's real path shapes (one
+// NESTED). Each filter was run as `vitest --config … run --reporter=json --passWithNoTests <filter>`
+// and the selected files read out of `testResults[].name`. The model was NOT retyped: the
+// `vitestFilterSelects` function body was sliced byte-for-byte out of THIS file and imported.
+// Result: 30 filters, 21 MATCH, 9 DIVERGE.
+//
+// Both divergence directions are represented, and neither can under-count silently:
+//   • model 0 / vitest ≥1  → `realDbPositionalRefusal` returns `zero` and the complement returns
+//     `zero`, so the invocation carrying it REDS in both domains.
+//   • model ALL / vitest 1 → absolute filters, refused by name as `absolute` in both domains.
+// The shape that WOULD under-count silently — model selects a non-empty PROPER subset of vitest's
+// answer — does not occur in any of the 30, and that is evidence, not proof (docblock).
+// ---------------------------------------------------------------------------------------------
+
+/** The sandbox corpus the differential was executed over, in its canonical package-relative form. */
+const DIFFERENTIAL_CORPUS = Object.freeze([
+  'tests/integration/attendance-plugin.test.ts',
+  'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+  'tests/integration/attendance-w4c2-sweep-fairness.db.test.ts',
+  'tests/integration/multitable-context.api.test.ts',
+  'tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts',
+  'tests/integration/sub/attendance-nested.db.test.ts',
+])
+
+/**
+ * The executed table. `vitest` and `model` are the number of files each SELECTED out of the six.
+ * `refusal` is the reason the shipped predicates must return — `null` for an admissible filter.
+ */
+const VITEST_161_DIFFERENTIAL = Object.freeze([
+  // ---- DIVERGE, model under-selects: it resolves to zero, vitest selects one file or all six ----
+  { id: 'C23', filter: './', vitest: 6, model: 0, refusal: 'zero', why: "relative(dir,'./')='' → join('','/')='/' → substring of every path" },
+  { id: 'D01', filter: 'tests/../', vitest: 6, model: 0, refusal: 'zero', why: 'resolves to the root, same as C23' },
+  { id: 'D02', filter: './././', vitest: 6, model: 0, refusal: 'zero', why: 'resolves to the root, same as C23' },
+  { id: 'D05', filter: 'nope/../', vitest: 6, model: 0, refusal: 'zero', why: 'resolves to the root even through a directory that does not exist' },
+  { id: 'C10', filter: 'tests\\integration\\attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 0, refusal: 'zero', why: 'pathe.normalize folds \\ to / before filterFiles; posix.normalize does not' },
+  { id: 'C08', filter: '../gt-vitest/tests/integration/attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 0, refusal: 'zero', why: 'relative() resolves the escape back inside the root; posix.normalize keeps the ../' },
+  { id: 'C29', filter: '../gt-vitest/../gt-vitest/tests/integration/attendance-plugin.test.ts', vitest: 1, model: 0, refusal: 'zero', why: 'same as C08, through two escapes' },
+  // ---- DIVERGE, model over-selects: absolute filters are not modelled at all (fail closed) ----
+  { id: 'C07', filter: '<ABS>/tests/integration/attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 6, refusal: 'absolute', why: 'the runner checkout prefix is unknowable here' },
+  { id: 'C27', filter: '<ABS>//tests/integration/attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 6, refusal: 'absolute', why: 'same, with a doubled separator' },
+  // ---- MATCH, including every spelling this file advertises ----
+  { id: 'M01', filter: 'tests/integration/attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M02', filter: 'tests/integration//attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M03', filter: 'tests/integration/./attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M04', filter: 'tests/integration/sub/../attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M05', filter: 'tests/integration/ATTENDANCE-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M06', filter: 'tests/integration', vitest: 6, model: 6, refusal: null },
+  { id: 'M07', filter: 'tests/integration/', vitest: 6, model: 6, refusal: null },
+  { id: 'M08', filter: 'attendance-', vitest: 4, model: 4, refusal: null },
+  { id: 'M09', filter: 'attendance-w4c2-posture-matrix.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M10', filter: 'TESTS/INTEGRATION', vitest: 6, model: 6, refusal: null },
+  { id: 'M11', filter: '.', vitest: 6, model: 6, refusal: null },
+  { id: 'M12', filter: '..', vitest: 0, model: 0, refusal: 'zero' },
+  { id: 'M13', filter: 'no-such-suite-zzz', vitest: 0, model: 0, refusal: 'zero' },
+  { id: 'M14', filter: 'tests/integratio', vitest: 6, model: 6, refusal: null },
+  { id: 'M15', filter: '.db.test.ts', vitest: 3, model: 3, refusal: null },
+  { id: 'M16', filter: 'multitable-', vitest: 1, model: 1, refusal: null },
+  { id: 'M17', filter: 'sub/attendance-nested.db.test.ts', vitest: 1, model: 1, refusal: null },
+  { id: 'M18', filter: 'tests/integration/sub', vitest: 1, model: 1, refusal: null },
+  { id: 'M19', filter: 'tests/integration/attendance-w4c2-posture-matrix.db.test.tsx', vitest: 0, model: 0, refusal: 'zero' },
+  { id: 'M20', filter: 'attendance-w4c2', vitest: 2, model: 2, refusal: null },
+  { id: 'M21', filter: 'tests/integration/attendance-w4c2-posture-matrix.db.test.ts/..', vitest: 6, model: 6, refusal: null },
+])
+
+test('P2 frozen differential: every executed vitest-1.6.1 divergence is reproduced by the model AND refused by both consumers', () => {
+  // Sanity on the table itself, so a row cannot be silently dropped or duplicated.
+  assert.equal(VITEST_161_DIFFERENTIAL.length, 30, 'the executed differential had 30 rows')
+  assert.equal(new Set(VITEST_161_DIFFERENTIAL.map((r) => r.id)).size, 30, 'row ids must be unique')
+  const diverging = VITEST_161_DIFFERENTIAL.filter((r) => r.vitest !== r.model)
+  assert.equal(diverging.length, 9, 'the executed differential found 9 divergences over 30 filters')
+  assert.ok(
+    diverging.every((r) => r.model === 0 || r.model === DIFFERENTIAL_CORPUS.length),
+    'every divergence must be a total under-select or a total over-select — a non-empty PROPER '
+      + 'subset would under-count silently, and no leg would see it',
+  )
+
+  const ABS_PREFIXES = ['/checkout', '/home/runner/work/metasheet2/metasheet2/packages/core-backend', '/a']
+  const expand = (filter, abs) => filter.replace('<ABS>', abs)
+
+  for (const row of VITEST_161_DIFFERENTIAL) {
+    for (const abs of row.filter.includes('<ABS>') ? ABS_PREFIXES : ['']) {
+      const filter = expand(row.filter, abs)
+      // (1) the MODEL's own answer, over the same corpus the binary was run against.
+      const selected = DIFFERENTIAL_CORPUS.filter((arg) => vitestFilterSelects(arg, filter))
+      assert.equal(
+        selected.length,
+        row.model,
+        `${row.id} ${JSON.stringify(filter)}: the model selected ${selected.length}, the frozen row `
+          + `says ${row.model}. Real vitest 1.6.1 selected ${row.vitest} when this was executed — if `
+          + `the model changed, re-run the differential and re-freeze BOTH columns`,
+      )
+      // (2) the CONSEQUENCE in the in-domain leg: which refusal the shipped predicate returns.
+      const expected = row.refusal == null ? null : REAL_DB_POSITIONAL_REASONS[row.refusal]
+      assert.equal(
+        realDbPositionalRefusal(filter, DIFFERENTIAL_CORPUS),
+        expected,
+        `${row.id} ${JSON.stringify(filter)}: expected the real-DB positional refusal `
+          + `${JSON.stringify(row.refusal)}. A divergence that is NOT refused is a silent miscount`,
+      )
+      // (3) …and in the COMPLEMENT leg, over a synthetic non-domain invocation. Args are supplied
+      // directly rather than through a run script: the shared `shellTokens` reads `\` as bash's
+      // escape and would drop it before the model ever saw C10, which is a property of the shell,
+      // not of the matcher this table is about.
+      const complement = outOfDomainPositionalOffenders({
+        invocations: [{
+          file: 'probe.yml',
+          job: 'probe',
+          index: 0,
+          id: null,
+          inv: { args: ['--config', INTEGRATION_CONFIG, 'run', filter] },
+        }],
+        corpusArgs: DIFFERENTIAL_CORPUS.filter(isAttendanceIntegrationArg),
+        suiteArgs: DIFFERENTIAL_CORPUS,
+      }).map((o) => o.reason)
+      if (row.refusal === 'absolute') {
+        assert.deepEqual(complement, [OUT_OF_DOMAIN_REASONS.absolute], `${row.id}: complement must refuse the absolute filter`)
+      } else if (row.refusal === 'zero') {
+        assert.deepEqual(complement, [OUT_OF_DOMAIN_REASONS.zero], `${row.id}: complement must refuse the unresolvable filter`)
+      } else if (selected.length === DIFFERENTIAL_CORPUS.length) {
+        assert.deepEqual(complement, [OUT_OF_DOMAIN_REASONS.wholeCorpus], `${row.id}: a whole-corpus widener must be refused`)
+      } else if (selected.some((arg) => isAttendanceIntegrationArg(arg))) {
+        assert.deepEqual(complement, [OUT_OF_DOMAIN_REASONS.attendance], `${row.id}: a second attendance execution must be refused`)
+      } else {
+        assert.deepEqual(complement, [], `${row.id}: a filter selecting only other families is admissible outside the domain`)
+      }
+    }
+  }
+
+  // NEGATIVE CONTROL on the table's discriminating power: the corpus must actually distinguish the
+  // rows, or "model = 0" and "model = 6" would be the only two answers and the M-rows would prove
+  // nothing. Three distinct non-trivial counts are present.
+  assert.deepEqual(
+    [...new Set(VITEST_161_DIFFERENTIAL.map((r) => r.model))].sort((a, b) => a - b),
+    [0, 1, 2, 3, 4, 6],
+  )
 })
 
 test('P2-2: the derived attendance family is EXACTLY the pinned member set', () => {
@@ -2692,7 +2909,9 @@ const OUT_OF_DOMAIN_REASONS = Object.freeze({
   absolute: 'absolute path — this guard cannot resolve the runner checkout prefix, so what it selects is unknown',
   attendance: 'selects attendance suites, which are already executed by the three real-DB steps — a SECOND execution',
   wholeCorpus: 'selects the WHOLE collected corpus, so every attendance suite runs a second time',
-  zero: 'resolves to ZERO collected suites under this guard\'s selection model, which cannot be admitted here',
+  zero: "resolves to ZERO collected suites under this guard's selection model, which cannot be "
+    + 'admitted here — an argument in that class selects nothing, or one file, or (`./`) the WHOLE '
+    + 'corpus in real vitest 1.6.1, and the last of those double-runs every attendance suite',
 })
 
 /**
@@ -2838,7 +3057,12 @@ function outOfDomainPositionalOffenders({ invocations, corpusArgs, suiteArgs }) 
       continue
     }
     for (const positional of filters) {
-      if (positional.startsWith('/')) {
+      // The "absolute" and "resolves to zero" boundaries have ONE definition in this file — the
+      // same `realDbPositionalRefusal` the in-domain positional-safety leg uses. Two copies could
+      // be fixed independently, and the disagreement would be the defect. Only the WORDING differs,
+      // so the two legs stay distinguishable in a failure diff.
+      const shared = realDbPositionalRefusal(positional, suiteArgs)
+      if (shared === REAL_DB_POSITIONAL_REASONS.absolute) {
         offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.absolute })
         continue
       }
@@ -2852,7 +3076,7 @@ function outOfDomainPositionalOffenders({ invocations, corpusArgs, suiteArgs }) 
         offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.attendance })
         continue
       }
-      if (selected.length === 0) {
+      if (shared === REAL_DB_POSITIONAL_REASONS.zero) {
         offenders.push({ ...at(member), positional, reason: OUT_OF_DOMAIN_REASONS.zero })
       }
     }
