@@ -492,7 +492,7 @@ test('runAttendanceW4C5ApplyOrchestrationV1: a genuinely stale plan (diverged to
   assert.equal(deps.transitionCalls.length, 0)
 })
 
-test('runAttendanceW4C5ApplyOrchestrationV1: a matching-digest but blocked plan refuses locally and never calls transition', async () => {
+test('runAttendanceW4C5ApplyOrchestrationV1: a matching-digest plan whose predicates report blocked still calls the boundary — the boundary decides, not a second tool-level classification', async () => {
   const blockedPlan = fakePlan({
     currentState: 'legacy',
     currentVersion: 1,
@@ -503,11 +503,12 @@ test('runAttendanceW4C5ApplyOrchestrationV1: a matching-digest but blocked plan 
   const matchingArgs = { ...APPLY_ARGS, planDigest: computeAttendanceW4C5PlanDigestV1(blockedPlan as never) }
   const deps = countingDeps(blockedPlan)
 
-  await assert.rejects(
-    () => runAttendanceW4C5ApplyOrchestrationV1(deps, matchingArgs, VALIDATED_MANIFEST),
-    (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_PLAN_BLOCKED',
-  )
-  assert.equal(deps.transitionCalls.length, 0)
+  // No local short-circuit: the orchestration calls the boundary exactly as it would for a
+  // clean plan. In production the REAL boundary would reject this with its own
+  // W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH; this fake simply proves the call happens at all.
+  const outcome = await runAttendanceW4C5ApplyOrchestrationV1(deps, matchingArgs, VALIDATED_MANIFEST)
+  assert.equal(outcome.outcome, 'transitioned')
+  assert.equal(deps.transitionCalls.length, 1)
 })
 
 test('runAttendanceW4C5ApplyOrchestrationV1: happy path calls transition with the exact expected shape', async () => {
@@ -567,11 +568,17 @@ test('exitCodeForAttendanceW4C5ErrorV1 maps every tool-level code to its own exi
     ['W4C5_TOOL_MANIFEST_TARGET_MISMATCH', ATTENDANCE_W4C5_EXIT_MANIFEST_INVALID_V1],
     ['W4C5_TOOL_MANIFEST_STALE', ATTENDANCE_W4C5_EXIT_PLAN_STALE_V1],
     ['W4C5_TOOL_PLAN_DIGEST_MISMATCH', ATTENDANCE_W4C5_EXIT_PLAN_STALE_V1],
-    ['W4C5_TOOL_PLAN_BLOCKED', ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1],
   ]
   for (const [code, expected] of cases) {
     assert.equal(exitCodeForAttendanceW4C5ErrorV1(new AttendanceW4C5ToolError(code)), expected, code)
   }
+})
+
+test('ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1 is reserved for the read-only `plan` command exit code (not thrown by apply orchestration)', () => {
+  // `plan` (read-only) uses this exit code directly from `report.blocked`, never via
+  // exitCodeForAttendanceW4C5ErrorV1 — apply never locally classifies "blocked" as its own
+  // tool-level refusal (see the orchestration's own doc comment for why).
+  assert.equal(typeof ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1, 'number')
 })
 
 test('exitCodeForAttendanceW4C5ErrorV1 maps a boundary-shaped error to the boundary-refused exit code', () => {

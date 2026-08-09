@@ -449,8 +449,8 @@ export function parseAttendanceW4C5ApplyArgsV1(argv: readonly string[]): Attenda
 
 // ---------------------------------------------------------------------------
 // Apply orchestration — pure, DB-agnostic. `deps.plan`/`deps.transition` are injected so this
-// sequencing (the actual hard part: idempotency BEFORE digest comparison, blocked short-circuit
-// AFTER digest match, and the boundary call as the sole write) is unit-testable with fakes.
+// sequencing (the actual hard part: idempotency BEFORE digest comparison) is unit-testable with
+// fakes, and so it never re-implements a SINGLE refusal condition the boundary already owns.
 //
 // Ordering, deliberately in this order:
 //   1. Re-run plan fresh (in THIS invocation — a stale plan from an earlier process can never be
@@ -464,12 +464,13 @@ export function parseAttendanceW4C5ApplyArgsV1(argv: readonly string[]): Attenda
 //      every idempotent re-apply as `PLAN_DIGEST_MISMATCH`, making "re-apply is a no-op" untestable.
 //      Divergence to any OTHER state is never treated as a no-op — only this exact
 //      (targetState, expectedVersion + 1) tuple short-circuits.
-//   3. Digest match: the supplied `--plan-digest` must equal the freshly recomputed digest.
-//   4. Local blocked short-circuit: refuse before ever calling the boundary if the fresh plan
-//      itself reports `blocked: true` — strictly an optimization for a more diagnosable message;
-//      the boundary transaction is the only thing that actually enforces anything, and always
-//      re-evaluates from scratch regardless of this check.
-//   5. Call the boundary's own `transitionAttendanceCalculationRolloutV1` — the sole DML path.
+//   3. Digest match: the supplied `--plan-digest` must equal the freshly recomputed digest. There
+//      is deliberately no separate local "blocked"/"illegal pair"/"not allowlisted" check here —
+//      see the comment directly above the digest comparison below for why folding those into a
+//      second, tool-owned classification would itself be the forbidden second implementation.
+//   4. Call the boundary's own `transitionAttendanceCalculationRolloutV1` — the sole DML path,
+//      and the sole place org-allowlist, row-resolvability, pair-legality, and every section 3
+//      precondition are actually enforced, each with the boundary's own specific code.
 // ---------------------------------------------------------------------------
 
 export type AttendanceW4C5ApplyOutcomeV1 = Readonly<{
@@ -517,19 +518,27 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
     })
   }
 
-  // Step 3: digest match against the caller-supplied plan.
+  // Step 3: digest match against the caller-supplied plan. The digest is computed over EVERY
+  // observable field of the plan (org allowlist status, row existence, current state/version,
+  // pair legality, comparison posture, and every predicate's applicability/pass/count) — so ANY
+  // change plan can observe (state drifted, a new precondition started failing, the org fell out
+  // of the allowlist) already changes this digest. There is deliberately no SEPARATE local
+  // "blocked"/"illegal pair" short-circuit here: every one of those refusal classes is instead
+  // left to surface as the BOUNDARY's own specific code in step 4 below (`ORG_NOT_ALLOWLISTED`,
+  // `STATE_MISSING`, `ILLEGAL_TRANSITION`, `UNCLOSED_LEGACY_BATCH`, etc.) — adding a second,
+  // locally-classified refusal code for the SAME conditions the boundary already names
+  // precisely would be exactly the kind of second, narrower classification this line's own
+  // discipline forbids (amendment section 2: no second competing implementation). This digest
+  // check exists ONLY to catch drift a stale plan digest encodes — not to pre-empt the
+  // boundary's own verdict on a plan that never went stale in the first place.
   const freshDigest = computeAttendanceW4C5PlanDigestV1(freshPlan)
   if (freshDigest !== args.planDigest) failTool('W4C5_TOOL_PLAN_DIGEST_MISMATCH')
 
-  // Step 4: local, non-authoritative fast refusal for a better message than the boundary alone
-  // would give — the boundary itself re-evaluates every one of these from scratch regardless.
-  if (freshPlan.blocked) failTool('W4C5_TOOL_PLAN_BLOCKED')
-  if (!freshPlan.legalPair) failTool('W4C5_TOOL_PLAN_BLOCKED')
-  if (freshPlan.currentState !== args.expectedState) failTool('W4C5_TOOL_PLAN_DIGEST_MISMATCH')
-
-  // Step 5: the ONLY write. Whatever this throws (illegal pair, stale expected state, an
-  // in-flight concurrent transition, a predicate that regressed in the window since freshPlan
-  // was read) propagates unchanged — the caller maps it to an exit code, never retried or masked.
+  // Step 4: the ONLY write, and the ONLY place any of section 1/3's predicates are actually
+  // enforced. Whatever this throws (org not allowlisted, unknown/unresolvable org, illegal
+  // pair, stale expected state, an in-flight concurrent transition, or any section 3 predicate
+  // that regressed in the window since freshPlan was read) propagates unchanged — the caller
+  // maps it to an exit code, never retried or masked.
   const result = await deps.transition({
     orgId: args.orgId,
     actorId: args.actorId,
@@ -580,8 +589,6 @@ export function exitCodeForAttendanceW4C5ErrorV1(error: unknown): number {
       case 'W4C5_TOOL_MANIFEST_STALE':
       case 'W4C5_TOOL_PLAN_DIGEST_MISMATCH':
         return ATTENDANCE_W4C5_EXIT_PLAN_STALE_V1
-      case 'W4C5_TOOL_PLAN_BLOCKED':
-        return ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1
       default:
         return ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1
     }
