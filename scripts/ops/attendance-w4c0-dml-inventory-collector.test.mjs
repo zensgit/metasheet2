@@ -1467,6 +1467,34 @@ test('W4C-3c whole-file scanner catches multiline DML verb/table boundaries', ()
   }
 })
 
+test('W4C-3c scanner resolves schema-qualified write targets to the real table, not the qualifier', () => {
+  // Found by feeding the scanner an evasion battery while converting approval to exact site
+  // identity. Before the fix the capture group took the FIRST identifier after the verb, so
+  // `INSERT INTO public.attendance_records` produced a site on the table `public` — which is not
+  // attendance-owned, so the write fell out of the tracked buckets entirely and no identity, no
+  // count and no allowlist was ever consulted. A one-token bypass of the whole §8.4 gate.
+  //
+  // Exact-identity approval cannot help here: a write the scanner never turns into a site has no
+  // identity to be approved or refused. This leg therefore guards the SCANNER, and it is the
+  // reason the fix belongs with the identity conversion rather than after it.
+  const shapes = [
+    ['async function q1() { await db.query(`INSERT INTO public.attendance_records (id) VALUES ($1)`) }', 'insert', 'attendance_records'],
+    ['async function q2() { await db.query(`DELETE FROM public."attendance_events" WHERE id = $1`) }', 'delete', 'attendance_events'],
+    ['async function q3() { await db.query(`UPDATE "public".attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q4() { await db.query(`INSERT INTO db.public.attendance_records (id) VALUES ($1)`) }', 'insert', 'attendance_records'],
+  ]
+  for (const [source, verb, table] of shapes) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.deepEqual([sites[0].verb, sites[0].table], [verb, table], source)
+  }
+
+  // Negative control: the qualifier group must not swallow the table when there IS no qualifier,
+  // and must not invent a site out of a bare dotted expression that is not a DML target.
+  const bare = scanFileForDmlSites('probe.cjs', 'async function q5() { await db.query(`INSERT INTO attendance_records (id) VALUES ($1)`) }')
+  assert.deepEqual([bare.length, bare[0]?.table], [1, 'attendance_records'])
+})
+
 test('W4C-3c comment masker tracks nested braces inside template expressions', () => {
   const source = [
     'const sql = `SELECT ${render({ nested: { value: 1 } })}`',

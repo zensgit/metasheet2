@@ -135,8 +135,17 @@ function discoverRuntimeRoots(source) {
 // census with non-SQL noise. A lowercase/mixed-case SQL keyword bypassing this scan is a stated
 // collector limitation (see the collector's own CI test and the Stage D handoff note), not a
 // silently-claimed guarantee.
+//
+// SCHEMA QUALIFIERS: `INSERT INTO public.attendance_records` must resolve to the table
+// `attendance_records`, not to `public`. Without the qualifier group below, the capture took the
+// FIRST identifier, so a schema prefix silently renamed the site to a non-attendance table and the
+// write left the tracked buckets entirely — a one-token bypass of the whole gate, and one this
+// repository's other DML scanner (multitable-revision-disposition) already handles. The group is
+// `*`, not `?`, so `db.schema.table` resolves to `table` too. This can only ever WIDEN what the
+// scan sees (a previously mis-captured qualifier now resolves to its real table), never narrow it,
+// so the change direction is fail-closed.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
 
 const P25_READ_TABLE_PATTERN = new RegExp(
   `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?(?![A-Za-z0-9_])`,
