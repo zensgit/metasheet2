@@ -28,7 +28,20 @@ describe('jwt auth whitelist', () => {
 
   it('allows DingTalk launch without a bearer token', () => {
     expect(isWhitelisted('/api/auth/dingtalk/launch')).toBe(true)
-    expect(isWhitelisted('/api/auth/dingtalk/launch?redirect=%2Fdashboard')).toBe(true)
+    // The gate passes `req.path`, which Express has ALREADY stripped of the query string — a launch
+    // request carrying `?redirect=...` still arrives here as the bare path asserted above. The
+    // query-suffixed string is therefore not an input this predicate can receive, and the exception
+    // table is anchored, so it does not match: an exception covers the path it names, not strings that
+    // merely begin with it.
+    expect(isWhitelisted('/api/auth/dingtalk/launch?redirect=%2Fdashboard')).toBe(false)
+  })
+
+  it('an exception covers the path it names, not longer paths that start with it', () => {
+    // Positive control first: without this, a globally broken matcher would satisfy the negatives below.
+    expect(isWhitelisted('/api/auth/dingtalk/callback')).toBe(true)
+    expect(isWhitelisted('/api/auth/dingtalk/callback-relay')).toBe(false)
+    expect(isWhitelisted('/api/health')).toBe(true)
+    expect(isWhitelisted('/api/healthcheck')).toBe(false)
   })
 
   it('allows DingTalk callback without a bearer token', () => {
