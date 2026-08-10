@@ -1,10 +1,11 @@
 # DingTalk lifecycle six-step closeout execution
 
 - Date: 2026-08-10
-- Status: **CODE CANDIDATE / OPS AND EXTERNAL GATES NOT EXECUTED**
-- Baseline: `origin/main @ 775d537e616e325000c7578d7e2432d838da0801`
+- Updated: 2026-08-11
+- Status: **CODE + STAGING OFF-PREFLIGHT COMPLETE / ON CANARY AND EXTERNAL GATES NOT EXECUTED**
+- Baseline: `origin/main @ ddec28b12ebff97fae33af45553d77c149d816e1`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
-- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — **not executed** by this closeout
+- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status` and `preflight -> off` executed; no transition applied
 
 ## 1. OPS-01 explicit compensation
 
@@ -45,7 +46,9 @@ The route is platform-admin-only. Unexpected backend failures return a fixed mes
 | TypeScript | PASS: core-backend `tsc --noEmit` |
 | CI wiring | PASS: suite excluded from no-DB Vitest and run as a whole file in approval real-DB step |
 | Independent review | APPROVE after delta re-review; no remaining P1/P2 |
-| Exact-head required CI | PENDING until the held PR is pushed |
+| Exact-head required CI | PASS at `9d84c3f70130f5fa38d26247d45fa922e0f830db` |
+
+Landed as [#4850](https://github.com/zensgit/metasheet2/pull/4850), merge commit `b55c682748e3010cb70837770c298843a96e1019`.
 
 Load-bearing mutations reproduced before restoration:
 
@@ -88,15 +91,18 @@ Merge is not an enablement instruction. **Lifecycle canary is NOT EXECUTED** and
 
 `action=off` is an **emergency operational rollback of the env gate only**. Design lock Rev 4.2 §4.2 / §4.4 permanently forbids reintroducing OR-column fallback on `users.email` / `username` / `mobile` as a long-term design after T2b. OFF is not “canary stage 1 complete.”
 
-### 3.2 Current staging blockers (owner review 2026-08-11)
+### 3.2 Staging preparation result (2026-08-11)
 
-Lifecycle ON canaries remain **NOT EXECUTED**. Current staging preparation evidence and blocker:
+Lifecycle ON canaries remain **NOT EXECUTED**. The safe OFF baseline is now proven:
 
-1. [Attendance staging runner 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed host backup, clone rehearsal, isolation check, real migration, and auth round-trip. Migration state is now `314 applied / 0 pending` (`migrations_pending_zero=true`).
-2. **Exact-build provenance is still blocked live:** the running image tag is `b55c682748e3010cb70837770c298843a96e1019`, but `/api/health` reports old commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. Image/health disagreement is a hard `build_provenance_conflict`. This PR makes staging compose override stale env-file metadata from the exact `IMAGE_TAG`; merge + redeploy/recreate + agreement proof is still required.
-3. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
+1. [Attendance staging runner 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed host backup, clone rehearsal, isolation check, real migration, and auth round-trip. Migration state moved from `296 applied / 18 pending` to `314 applied / 0 pending`. The backup is retained on the deploy host; only its values-free metadata and SHA-256 entered the artifact.
+2. [#4853](https://github.com/zensgit/metasheet2/pull/4853), merge commit `ddec28b12ebff97fae33af45553d77c149d816e1`, made the staging runner install and validate the checked-out staging Compose file before deploy. It also pins Compose project-directory and exact `IMAGE_TAG` metadata. Exact-head CI passed 15/15.
+3. [Attendance staging deploy 31418871030](https://github.com/zensgit/metasheet2/actions/runs/31418871030) force-recreated only backend/web from exact SHA `ddec28b12ebff97fae33af45553d77c149d816e1`, with `set_window_env=none`. Backend and web health both reported that exact commit and image tag; migrations were `314/0`; auth and settings returned HTTP 200; Postgres and Redis container IDs were unchanged.
+4. [Lifecycle status 31418997337](https://github.com/zensgit/metasheet2/actions/runs/31418997337) reported `mode=off`, all three lifecycle flags `false`, exact build SHA, zero pending migrations, healthy backend, and `transition_applied=false`.
+5. [Lifecycle preflight 31419066036](https://github.com/zensgit/metasheet2/actions/runs/31419066036) reported `preflight_target_mode=off`, `preflight_ok=true`, all flags still OFF, and `transition_applied=false`.
+6. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
 
-Until those clear **and** a real verifier exists, do not claim lifecycle canary progress. Future ON sequence (alias → pending → deprovision) is documentation-only and **NOT EXECUTABLE** here.
+The former image-tag/health-commit conflict is resolved. ON remains blocked by the absence of secret-backed real verifiers and owner GO. Future ON sequence (alias → pending → deprovision) is documentation-only and **NOT EXECUTABLE** here.
 
 ### 3.3 Future stages (NOT EXECUTABLE in this lane today)
 
@@ -114,7 +120,8 @@ Real enterprise evidence is unavailable in this development lane. Therefore thes
 - U11-a real callback corp-anchor;
 - named owners and final production switch decisions;
 - lifecycle canary ON stages (alias/pending/deprovision);
-- live staging status/preflight/off dispatches from this development lane (blockers in §3.2).
+
+Staging `status` and `preflight -> off` are complete per §3.2. Emergency `action=off` was not needed because live mode was already exactly OFF; no env write was performed.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
@@ -134,8 +141,17 @@ Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this
 
 ## 6. Test infrastructure lane
 
-Issue #4820 remains a separate test-infrastructure item. Shared `metasheet_test` can be reset by parallel sessions, so this implementation used the lane-owned scratch database `codex_ops01_comp2_20260810`. The durable follow-up is per-lane scratch DB provisioning and cleanup; it does not change the lifecycle product verdict, but future runtime evidence must not rely on a concurrently shared database.
+Issue #4820 remains open for recurrence observation. [#4852](https://github.com/zensgit/metasheet2/pull/4852), merge commit `f0745831fe5385ccacf8fe6d6e5fd51174c02117`, added per-lane scratch DB provisioning and cleanup for the affected startup fail-closed real-DB suite. This closeout also used the lane-owned database `codex_ops01_comp2_20260810`. The mitigation does not change the lifecycle product verdict; future runtime evidence must not rely on a concurrently shared database.
 
 ## 7. Closure rule
 
-This goal is complete only when the held PR has independent review, exact-head required CI, and a reviewable head. It remains unarmed. Canary, U1-U13/corp-anchor, T2-Gate, Transfer T3-T5, and #4820 are deliberately external or separate gates and are not represented as completed by this code PR.
+The code and safe staging OFF-preflight portions of this six-step closeout are complete:
+
+| Delivery | Merge commit |
+|---|---|
+| OPS-01 explicit compensation, #4850 | `b55c682748e3010cb70837770c298843a96e1019` |
+| Staging operator lane, #4851 | `0083621f5dd1fd6dbeb0a5b71815156804e20a3b` |
+| Per-lane scratch DB mitigation, #4852 | `f0745831fe5385ccacf8fe6d6e5fd51174c02117` |
+| Exact staging Compose/provenance sync, #4853 | `ddec28b12ebff97fae33af45553d77c149d816e1` |
+
+Lifecycle ON canaries, U1-U13/corp-anchor, named owner decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Issue #4820 remains open for recurrence observation. None of those gates is represented as PASS by this closeout.
