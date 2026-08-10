@@ -1203,20 +1203,50 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     })
   })
 
-  describe('P2-1 auto-coverage (PR #4839 gate, 20260809): a REAL plan object exercises every field the digest must cover', () => {
+  describe('P2-1 auto-coverage (PR #4839 gate, 20260809; domain narrowed by F4, PR #4839 P3 gate, 20260810): every DECLARED plan field survives the digest', () => {
     // Complements the fixture-driven table in
-    // scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts. That unit test's fixture is
-    // typed against `AttendanceRolloutTransitionPlanV1`, but `scripts/ops` is outside every pnpm
-    // workspace and no CI step runs `tsc` over it (verified: pnpm-workspace.yaml lists only
-    // `packages/*`, `apps/*`, `tools/*`, `plugins/*`) — so that fixture's own completeness against
-    // the type is NOT mechanically enforced in CI; a human must remember to update it if the type
-    // gains a field. THIS test needs no human to remember anything: its field list comes from
-    // `Object.keys()` of an ACTUAL plan object `planAttendanceCalculationRolloutTransitionV1`
-    // (real production code) produced at runtime, so a field added to the type later is present in
-    // that list automatically. If no alternate-value case is registered for it yet, this test
-    // THROWS loudly rather than silently passing without covering it — forcing a human to add
-    // coverage is the honest failure mode here, not a false green.
-    it('mutating ANY field a real plan object carries changes the digest — a field with no registered alternate here fails loudly, never silently', async () => {
+    // scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts.
+    //
+    // F4 (PR #4839 P3 gate, 20260810): this test used to iterate `Object.keys(plan)` — i.e. what
+    // ONE runtime plan instance (a fresh, non-existent-row org, target 'shadow') HAS, never what
+    // `AttendanceRolloutTransitionPlanV1` (the TYPE) DECLARES. A field that is OPTIONAL and
+    // emitted only under some OTHER condition (e.g. only when `persisted.rowExists`) is silently
+    // absent from THIS fixture's own `Object.keys()` and so never reaches the loop's
+    // alternate-registration check at all — EXECUTED by the gate: adding
+    // `futureOptionalField?: string` to the type, emitted only when `rowExists`, and omitting it
+    // from `computeAttendanceW4C5PlanDigestV1`'s own `canonical` object, escaped this test
+    // silently on exactly this fixture. The shipped claim this test's own comment used to make —
+    // "fails loudly (not silently) if a future field has no registered alternate-value case" —
+    // was therefore only true for fields present on THIS ONE plan object, not for the type.
+    //
+    // Fixed by switching the iteration DOMAIN from `Object.keys(plan)` to
+    // `Object.keys(PLAN_FIELD_ALTERNATES)`, where `PLAN_FIELD_ALTERNATES` is now typed
+    // `Record<keyof AttendanceRolloutTransitionPlanV1, ...>` — TypeScript's structural typing
+    // requires an entry for EVERY key of the type (optional keys included: `keyof` does not
+    // exclude them), independent of what any one plan instance happens to carry. Mutating a key
+    // the real plan never set still proves coverage: the MUTATED object has it, the baseline
+    // (computed from the real, unmutated plan) does not — a digest function that never reads that
+    // field produces the SAME digest for both, and the assertion reds. A second, independent
+    // runtime check (below) still verifies the REVERSE direction — every key the real `plan`
+    // object actually carries is present in `PLAN_FIELD_ALTERNATES` — catching the table going
+    // stale the other way (a field the type already has but this table forgot).
+    //
+    // Honest limitation, checked rather than assumed (same shape as the sibling unit-test file's
+    // own disclosure): `packages/core-backend/tsconfig.json`'s own `exclude` list contains
+    // `**/*.test.ts`, and no `.github/workflows/*.yml` step type-checks `tests/integration/**` —
+    // grepped, zero hits (`pnpm type-check` runs `tsc --noEmit` per package, per
+    // `.github/workflows/plugin-tests.yml`'s "Run type checking" step, but THIS file is excluded
+    // from that package's own compile unit). So the `Record<keyof
+    // AttendanceRolloutTransitionPlanV1, ...>` completeness this test now relies on is real for a
+    // developer's own local `tsc`/editor, but is NOT mechanically enforced by this repo's CI
+    // today — a future field silently added to the type without extending
+    // `PLAN_FIELD_ALTERNATES` would not be caught by a CI run of THIS test; only the reverse
+    // runtime check below would catch it, and only once that field is actually SET on this
+    // fixture. This test is strictly STRONGER than the one-runtime-instance version it replaces
+    // (it now catches a conditionally-omitted field too, via the type-level table), but it no
+    // longer offers unconditional "no human needs to remember anything, in CI" — that property
+    // was never actually true for a conditionally-emitted field, which is exactly what F4 found.
+    it('mutating ANY declared plan field changes the digest — a table entry missing for a type field fails a local tsc; a table entry missing for a REAL plan field throws here', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
       const client = await pool.connect()
@@ -1231,12 +1261,16 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       }
       // Sanity on the fixture this test relies on: a bootstrap-eligible legacy->shadow plan
       // reaches the deep predicate branch, so `predicates` has more than one real, distinct entry
-      // to mutate below (never an empty/degenerate array).
+      // to mutate below (never an empty/degenerate array), and includes at least one predicate
+      // with a non-null `count` (the deep branch's `UNCLOSED_LEGACY_BATCH` et al. — the first
+      // three predicates, `ORG_ALLOWLISTED`/`ROLLOUT_ROW_RESOLVABLE`/`LEGAL_TRANSITION_PAIR`, are
+      // always `count: null` by construction; see `w4c3a-rollout-control.ts`'s `passVerdict`
+      // calls).
       expect(plan.predicates.length).toBeGreaterThan(1)
 
       const baseline = computeAttendanceW4C5PlanDigestV1(plan)
 
-      const PLAN_FIELD_ALTERNATES: Record<string, (current: unknown) => unknown> = {
+      const PLAN_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPlanV1, (current: unknown) => unknown> = {
         orgId: () => crypto.randomUUID(),
         orgAllowlisted: (v) => !v,
         rowExists: (v) => !v,
@@ -1254,16 +1288,24 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         },
       }
 
+      // Reverse-direction check (runtime, independent of tsc): every field the REAL plan object
+      // actually carries must be accounted for — catches the table going stale the other way.
       for (const key of Object.keys(plan)) {
-        const alt = PLAN_FIELD_ALTERNATES[key]
-        if (!alt) {
+        if (!(key in PLAN_FIELD_ALTERNATES)) {
           throw new Error(
-            `No alternate-value generator registered for plan field '${key}' in this test's ` +
-              `PLAN_FIELD_ALTERNATES — a field was added to AttendanceRolloutTransitionPlanV1 without ` +
-              `extending this P2-1 auto-coverage test. Add an entry before this can be proven covered ` +
-              `by computeAttendanceW4C5PlanDigestV1.`,
+            `Real plan object has field '${key}' with no registered alternate-value generator in ` +
+              `PLAN_FIELD_ALTERNATES — the coverage table has gone stale relative to the real boundary ` +
+              `output. Add an entry before this can be proven covered by computeAttendanceW4C5PlanDigestV1.`,
           )
         }
+      }
+
+      // Forward-direction coverage: iterate the TYPE-COMPLETE table, not the one runtime object —
+      // this is the actual F4 fix. A field the real plan never set (e.g. a future
+      // conditionally-emitted optional field) is still mutated and still proven to move the
+      // digest, because the alternate is applied to a COPY, never read back from `plan` itself.
+      for (const key of Object.keys(PLAN_FIELD_ALTERNATES) as Array<keyof AttendanceRolloutTransitionPlanV1>) {
+        const alt = PLAN_FIELD_ALTERNATES[key]
         const mutated = { ...plan, [key]: alt((plan as Record<string, unknown>)[key]) } as AttendanceRolloutTransitionPlanV1
         const digest = computeAttendanceW4C5PlanDigestV1(mutated)
         expect(digest, `mutating '${key}' must change the digest`).not.toBe(baseline)
@@ -1272,21 +1314,34 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       // Predicate sub-fields: mutate the FIRST predicate's own fields one at a time (structure
       // otherwise unchanged) — the loop above only proves the `predicates` array AS A WHOLE
       // participates; this proves each of `code`/`applicable`/`pass`/`count` individually does.
-      const PREDICATE_FIELD_ALTERNATES: Record<string, (current: unknown) => unknown> = {
+      const PREDICATE_FIELD_ALTERNATES: Record<
+        keyof AttendanceRolloutTransitionPredicateV1,
+        (current: unknown) => unknown
+      > = {
         code: () => plan.predicates[1].code, // a genuinely different REAL code, never a fabricated enum value
         applicable: (v) => !v,
         pass: (v) => !v,
+        // F3-class straddle (PR #4839 P3 gate, 20260810): `firstPredicate.count` (below) is
+        // `null` by construction (`ORG_ALLOWLISTED` never carries a count) — mutating null to
+        // ANY non-null value proves `count` is PRESENT in the digest, never that its VALUE
+        // survives (a bucketing mutant collapsing every non-null count to one constant would
+        // still redden this row, for the wrong reason: the null/non-null boundary, not the
+        // value). See the dedicated `count`-only assertion below, which uses a predicate with a
+        // non-null baseline instead.
         count: (v) => (typeof v === 'number' ? v + 999 : 999),
       }
       const firstPredicate = plan.predicates[0]
       for (const key of Object.keys(firstPredicate)) {
-        const alt = PREDICATE_FIELD_ALTERNATES[key]
-        if (!alt) {
+        if (!(key in PREDICATE_FIELD_ALTERNATES)) {
           throw new Error(
-            `No alternate-value generator registered for predicate field '${key}' — a field was added to ` +
+            `Real predicate object has field '${key}' with no registered alternate — a field was added to ` +
               `AttendanceRolloutTransitionPredicateV1 without extending this P2-1 auto-coverage test.`,
           )
         }
+      }
+      for (const key of Object.keys(PREDICATE_FIELD_ALTERNATES) as Array<keyof AttendanceRolloutTransitionPredicateV1>) {
+        if (key === 'count') continue // covered by the dedicated non-null-baseline assertion below
+        const alt = PREDICATE_FIELD_ALTERNATES[key]
         const mutatedPredicate = {
           ...firstPredicate,
           [key]: alt((firstPredicate as Record<string, unknown>)[key]),
@@ -1298,6 +1353,24 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         const digest = computeAttendanceW4C5PlanDigestV1(mutatedPlan)
         expect(digest, `mutating predicate field '${key}' must change the digest`).not.toBe(baseline)
       }
+
+      // count, VALUE preservation (not mere presence): use a REAL predicate from the deep branch
+      // whose baseline count is already non-null, mutated to a DIFFERENT non-null value. Under a
+      // bucketing mutant that collapses every non-null count to one constant, both baseline and
+      // mutated collapse to the same value and this assertion reds — unlike a null -> non-null
+      // mutation, which would redden even under that mutant.
+      const nonNullCountIndex = plan.predicates.findIndex((p) => p.count !== null)
+      expect(nonNullCountIndex, 'fixture drifted — expected at least one deep-branch predicate with a non-null count').toBeGreaterThanOrEqual(0)
+      const nonNullCountPredicate = plan.predicates[nonNullCountIndex]
+      const mutatedCountPredicate = {
+        ...nonNullCountPredicate,
+        count: (nonNullCountPredicate.count as number) + 999,
+      }
+      const mutatedCountPlan: AttendanceRolloutTransitionPlanV1 = {
+        ...plan,
+        predicates: plan.predicates.map((p, i) => (i === nonNullCountIndex ? mutatedCountPredicate : p)),
+      }
+      expect(computeAttendanceW4C5PlanDigestV1(mutatedCountPlan), "mutating predicate field 'count' (non-null -> different non-null) must change the digest").not.toBe(baseline)
     })
   })
 })
