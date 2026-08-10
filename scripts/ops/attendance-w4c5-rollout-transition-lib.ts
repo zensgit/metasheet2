@@ -542,11 +542,25 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
   }
 
   // Step 3: digest match against the caller-supplied plan. The digest is computed over EVERY
-  // observable field of the plan (org allowlist status, row existence, current state/version,
-  // pair legality, comparison posture, and every predicate's applicability/pass/count) — so ANY
-  // change plan can observe (state drifted, a new precondition started failing, the org fell out
-  // of the allowlist) already changes this digest. There is deliberately no SEPARATE local
-  // "blocked"/"illegal pair" short-circuit here: every one of those refusal classes is instead
+  // observable field of `AttendanceRolloutTransitionPlanV1` — EXHAUSTIVELY, not by example:
+  // `orgId`, `orgAllowlisted`, `rowExists`, `currentState`, `currentVersion`, `priorState`,
+  // `targetState`, `legalPair`, `comparisonWritePosture`, `canBootstrap`, `blocked`, and every
+  // predicate's `code`/`applicable`/`pass`/`count` — so ANY change plan can observe (state
+  // drifted, a new precondition started failing, the org fell out of the allowlist) already
+  // changes this digest. W4C-5 P2-1 (PR #4839 gate, 20260809): this claim used to be asserted but
+  // untested — a per-field deletion sweep found only 2 of the 11 top-level fields (`currentVersion`,
+  // `priorState`) actually reddened any test on removal; the other 9, INCLUDING `orgId` and
+  // `targetState`, did not, because nothing exercised them. The fields THEMSELVES were always all
+  // present in `computeAttendanceW4C5PlanDigestV1`'s `canonical` object (verified field-by-field
+  // against this type below) — the gap was test coverage, not a missing field — closed by the
+  // table-driven fixture-mutation test in `attendance-w4c5-rollout-transition-lib.test.ts` (covers
+  // the 12 fields of a hand-typed fixture, current as of this writing) and, because that fixture is
+  // not compiler-enforced against future type changes (`scripts/ops` is outside every pnpm
+  // workspace and no CI step runs `tsc` over it — verified, not assumed), by the companion
+  // real-plan-object test in `attendance-w4c5-rollout-transition-tool.db.test.ts`, which derives
+  // its field list from `Object.keys()` of an ACTUAL plan the boundary produced and fails loudly
+  // (not silently) if a future field has no registered alternate-value case. There is deliberately
+  // no SEPARATE local "blocked"/"illegal pair" short-circuit here: every one of those refusal classes is instead
   // left to surface as the BOUNDARY's own specific code in step 4 below (`ORG_NOT_ALLOWLISTED`,
   // `STATE_MISSING`, `ILLEGAL_TRANSITION`, `UNCLOSED_LEGACY_BATCH`, etc.) — adding a second,
   // locally-classified refusal code for the SAME conditions the boundary already names

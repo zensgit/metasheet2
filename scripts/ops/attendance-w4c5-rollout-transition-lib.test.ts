@@ -35,6 +35,13 @@ import {
   validateAttendanceW4C5ManifestV1,
   type AttendanceW4C5ApplyDepsV1,
 } from './attendance-w4c5-rollout-transition-lib'
+// TYPE-ONLY import (erased at compile time, zero runtime dependency) — see the identical
+// discipline note at the top of attendance-w4c5-rollout-transition-lib.ts for why this crosses
+// the core-backend boundary as a type import only, never a value import.
+import type {
+  AttendanceRolloutTransitionPlanV1,
+  AttendanceRolloutTransitionPredicateV1,
+} from '../../packages/core-backend/src/attendance/w4c3a-rollout-control'
 
 const ORG = '11111111-1111-1111-1111-111111111111'
 const OTHER_ORG = '22222222-2222-2222-2222-222222222222'
@@ -346,6 +353,119 @@ test('computeAttendanceW4C5PlanDigestV1 changes when priorState changes, state/v
   const digest1 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'legacy' }))
   const digest2 = computeAttendanceW4C5PlanDigestV1(fakePlan({ currentState: 'shadow', currentVersion: 2, priorState: 'eligible' }))
   assert.notEqual(digest1, digest2)
+})
+
+// ---------------------------------------------------------------------------
+// computeAttendanceW4C5PlanDigestV1 — field-coverage table (P2-1, PR #4839 gate, 20260809).
+//
+// The gate's finding: deleting fields from `computeAttendanceW4C5PlanDigestV1`'s internal
+// `canonical` object one at a time — ONLY `currentVersion` and `priorState` reddened this suite;
+// the other nine top-level fields, INCLUDING `orgId` and `targetState`, left every test above
+// green. The fields were always all present in the source (verified field-by-field against
+// `AttendanceRolloutTransitionPlanV1` below — all 12 top-level fields of the type, including
+// `predicates`, already appear in `canonical`) — the gap was test coverage, not a missing field.
+//
+// `FULL_PLAN` below is a plain object literal ASSIGNED TO the real `AttendanceRolloutTransitionPlanV1`
+// type (not `fakePlan()`'s `as never` shape used elsewhere in this file), so TypeScript itself
+// would refuse to compile this file if a required field of that type were left out of the literal.
+// The key list this test iterates comes from `Object.keys(FULL_PLAN)` — i.e. from THIS fixture,
+// never from `computeAttendanceW4C5PlanDigestV1`'s own `canonical` object — so deleting a field
+// from `canonical` cannot also delete it from what this test checks (the exact circularity trap
+// the gate warned against).
+//
+// Honest limitation, checked rather than assumed: `scripts/ops` is NOT a member of any pnpm
+// workspace (`pnpm-workspace.yaml` lists only `packages/*`, `apps/*`, `tools/*`, `plugins/*`) and
+// no `.github/workflows/*.yml` step runs `tsc`/`tsc --noEmit` over this directory — grepped, zero
+// hits. `tsx --test` (this file's own runner) strips TypeScript types via esbuild; it does not
+// type-check them. So the "TypeScript itself would refuse to compile" property above is true for
+// a developer's own local `tsc`, but is NOT mechanically enforced by this repo's CI today — a
+// future field silently added to `AttendanceRolloutTransitionPlanV1` without updating `FULL_PLAN`
+// and `PLAN_FIELD_ALTERNATES` below would NOT be caught by this test in CI. The
+// `keys.length === 12` assertion is a manual tripwire for a human editing this file, not a
+// substitute for real enforcement. The test that DOES close this without depending on any human
+// remembering anything is the companion one in
+// `packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts`,
+// which derives its key list from `Object.keys()` of a REAL plan object the boundary produced at
+// runtime (so a newly added field is present automatically, with no source edit to this test
+// needed to be DETECTED) and THROWS if that field has no registered alternate-value case yet
+// (forcing a human to add coverage, rather than silently passing without it).
+// ---------------------------------------------------------------------------
+const FULL_PLAN: AttendanceRolloutTransitionPlanV1 = {
+  orgId: ORG,
+  orgAllowlisted: true,
+  rowExists: true,
+  currentState: 'shadow',
+  currentVersion: 2,
+  priorState: 'legacy',
+  targetState: 'eligible',
+  legalPair: true,
+  comparisonWritePosture: 'shadow',
+  canBootstrap: false,
+  predicates: [
+    { code: 'ORG_ALLOWLISTED', applicable: true, pass: true, count: null },
+    { code: 'UNCLOSED_LEGACY_BATCH', applicable: true, pass: true, count: 0 },
+  ],
+  blocked: false,
+}
+
+/** One distinguishable, LEGAL alternate value per top-level `AttendanceRolloutTransitionPlanV1`
+ * field — never `undefined` (canonicalJsonV1 goes through `JSON.stringify`, which silently drops
+ * `undefined`-valued keys, which would conflate "field mutated" with "field absent"). */
+const PLAN_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPlanV1, unknown> = {
+  orgId: OTHER_ORG,
+  orgAllowlisted: false,
+  rowExists: false,
+  currentState: 'eligible',
+  currentVersion: 5,
+  priorState: 'eligible',
+  targetState: 'authoritative',
+  legalPair: false,
+  comparisonWritePosture: 'authoritative',
+  canBootstrap: true,
+  predicates: [{ code: 'ORG_ALLOWLISTED', applicable: true, pass: true, count: null }],
+  blocked: true,
+}
+
+test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single top-level plan field changes the digest (P2-1)', () => {
+  const baseline = computeAttendanceW4C5PlanDigestV1(FULL_PLAN)
+  const keys = Object.keys(FULL_PLAN) as Array<keyof AttendanceRolloutTransitionPlanV1>
+  assert.equal(
+    keys.length,
+    12,
+    'AttendanceRolloutTransitionPlanV1 field count changed — update FULL_PLAN and PLAN_FIELD_ALTERNATES above (and see the DB-suite companion test for the mechanically-enforced version of this check)',
+  )
+  for (const key of keys) {
+    const mutated = { ...FULL_PLAN, [key]: PLAN_FIELD_ALTERNATES[key] } as AttendanceRolloutTransitionPlanV1
+    const digest = computeAttendanceW4C5PlanDigestV1(mutated)
+    assert.notEqual(digest, baseline, `mutating plan field '${key}' must change the digest`)
+  }
+})
+
+const PREDICATE_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPredicateV1, unknown> = {
+  code: 'RETRYABLE_JOB_POSTURE_MISMATCH',
+  applicable: false,
+  pass: false,
+  count: 999,
+}
+
+test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single predicate sub-field changes the digest (P2-1)', () => {
+  const baseline = computeAttendanceW4C5PlanDigestV1(FULL_PLAN)
+  const firstPredicate = FULL_PLAN.predicates[0]
+  const keys = Object.keys(firstPredicate) as Array<keyof AttendanceRolloutTransitionPredicateV1>
+  assert.equal(
+    keys.length,
+    4,
+    'AttendanceRolloutTransitionPredicateV1 field count changed — update PREDICATE_FIELD_ALTERNATES above',
+  )
+  for (const key of keys) {
+    const mutatedPredicate = { ...firstPredicate, [key]: PREDICATE_FIELD_ALTERNATES[key] } as AttendanceRolloutTransitionPredicateV1
+    const mutatedPlan: AttendanceRolloutTransitionPlanV1 = {
+      ...FULL_PLAN,
+      predicates: [mutatedPredicate, FULL_PLAN.predicates[1]],
+    }
+    const digest = computeAttendanceW4C5PlanDigestV1(mutatedPlan)
+    assert.notEqual(digest, baseline, `mutating predicate field '${key}' must change the digest`)
+  }
 })
 
 // ---------------------------------------------------------------------------
