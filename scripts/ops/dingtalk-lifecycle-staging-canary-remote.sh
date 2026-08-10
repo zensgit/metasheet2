@@ -72,10 +72,15 @@ resolve_home_path() {
 
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
-STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
+LEGACY_STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 
 ATTENDANCE_PERSIST_DIR="${HOME}/.metasheet2/window-runner"
 ATTENDANCE_OVERRIDE_FILE="${ATTENDANCE_PERSIST_DIR}/docker-compose.window-runner.override.yml"
+PERSISTENT_STAGING_COMPOSE_FILE="${ATTENDANCE_PERSIST_DIR}/docker-compose.app.staging.yml"
+STAGING_COMPOSE_FILE="$LEGACY_STAGING_COMPOSE_FILE"
+if [[ -f "$PERSISTENT_STAGING_COMPOSE_FILE" ]]; then
+  STAGING_COMPOSE_FILE="$PERSISTENT_STAGING_COMPOSE_FILE"
+fi
 
 LIFECYCLE_PERSIST_DIR="${HOME}/.metasheet2/lifecycle-canary"
 LIFECYCLE_OVERRIDE_FILE="${LIFECYCLE_PERSIST_DIR}/docker-compose.lifecycle-canary.override.yml"
@@ -159,7 +164,8 @@ compose_staging_cmd() {
     fi
     read -r image_owner image_tag <<< "$image_pin"
   fi
-  (cd "$STAGING_DIR" && IMAGE_OWNER="$image_owner" IMAGE_TAG="$image_tag" docker compose "${files[@]}" "$@")
+  (cd "$STAGING_DIR" && IMAGE_OWNER="$image_owner" IMAGE_TAG="$image_tag" \
+    docker compose --project-directory "$STAGING_DIR" "${files[@]}" "$@")
 }
 
 pin_live_backend_image_for_transition() {

@@ -112,7 +112,7 @@ resolve_home_path() {
 
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
-STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
+LEGACY_STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 # The override MUST persist across runs. `docker compose up -d` stamps each container's
 # com.docker.compose.project.config_files label with the -f paths it was given, so any later
 # `docker compose config` (e.g. the recovery-flag containment check) re-reads THIS file BY PATH.
@@ -125,6 +125,11 @@ STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 # preserving the removal semantic.
 RUNNER_PERSIST_DIR="${HOME}/.metasheet2/window-runner"
 OVERRIDE_FILE="${RUNNER_PERSIST_DIR}/docker-compose.window-runner.override.yml"
+PERSISTENT_STAGING_COMPOSE_FILE="${RUNNER_PERSIST_DIR}/docker-compose.app.staging.yml"
+STAGING_COMPOSE_FILE="$LEGACY_STAGING_COMPOSE_FILE"
+if [[ -f "$PERSISTENT_STAGING_COMPOSE_FILE" ]]; then
+  STAGING_COMPOSE_FILE="$PERSISTENT_STAGING_COMPOSE_FILE"
+fi
 
 # --- staging-only guard (fail closed) -------------------------------------------------
 assert_staging_only() {
@@ -152,7 +157,30 @@ require_compose_v2() {
 
 compose_staging() {
   # The ONLY compose entry point in this script: staging compose file + runner override.
-  (cd "$STAGING_DIR" && docker compose -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@")
+  (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
+    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@")
+}
+
+prepare_staging_compose_for_deploy() {
+  local candidate="${HERE}/docker-compose.app.staging.yml"
+  [[ -f "$candidate" ]] || fail "checked-out staging compose candidate missing: ${candidate}"
+  for name in "$BACKEND_CONTAINER" "$WEB_CONTAINER" "$POSTGRES_CONTAINER" "$REDIS_CONTAINER"; do
+    grep -q "container_name: ${name}" "$candidate" \
+      || fail "staging compose candidate does not define ${name}; refusing install"
+  done
+  if grep -qE 'container_name: metasheet-(backend|web|postgres|redis)[[:space:]]*$' "$candidate"; then
+    fail "staging compose candidate defines PROD-track container names; refusing install"
+  fi
+
+  mkdir -p "$RUNNER_PERSIST_DIR"
+  STAGING_COMPOSE_CANDIDATE_TMP="$(mktemp "${RUNNER_PERSIST_DIR}/.staging-compose.XXXXXX")"
+  cp "$candidate" "$STAGING_COMPOSE_CANDIDATE_TMP"
+  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
+    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" config) >/dev/null 2>&1; then
+    rm -f "$STAGING_COMPOSE_CANDIDATE_TMP"
+    STAGING_COMPOSE_CANDIDATE_TMP=""
+    fail "checked-out staging compose candidate failed validation; kept ${STAGING_COMPOSE_FILE}"
+  fi
 }
 
 staging_exec() {
@@ -342,6 +370,8 @@ auth_round_trip() {
 action_deploy() {
   require_sha
   require_compose_v2
+  local STAGING_COMPOSE_CANDIDATE_TMP=""
+  prepare_staging_compose_for_deploy
 
   local backend_image="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}"
   local web_image="ghcr.io/${IMAGE_OWNER}/metasheet2-web:${DEPLOY_SHA}"
@@ -381,15 +411,21 @@ action_deploy() {
   # Validate the candidate renders against the staging compose file BEFORE it goes live — a broken
   # override would otherwise dangle EVERY container's config_files label. On failure, keep the
   # previous known-good override untouched and fail closed.
-  # Validate in the SAME cwd as compose_staging() (line ~155): staging compose uses relative
+  # Validate in the SAME cwd as compose_staging() above: staging compose uses relative
   # env_file + .env interpolation, so `cd "$STAGING_DIR"` first — otherwise we'd validate a
   # different resolved config than the one `up -d` actually executes.
-  if ! (cd "$STAGING_DIR" && docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config) >/dev/null 2>&1; then
-    rm -f "$override_tmp"
-    fail "candidate override failed 'docker compose config' validation; kept previous override at ${OVERRIDE_FILE}"
+  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
+    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config) >/dev/null 2>&1; then
+    rm -f "$override_tmp" "$STAGING_COMPOSE_CANDIDATE_TMP"
+    fail "candidate base/override pair failed 'docker compose config' validation; kept previous persistent files"
   fi
-  # Same-directory rename ⇒ atomic replace; a concurrent reader never sees a partial file.
+  # Both candidates are validated as one pair before either persistent file changes. Each
+  # same-directory rename is atomic; workflow concurrency serializes staging transitions.
+  mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"
+  STAGING_COMPOSE_FILE="$PERSISTENT_STAGING_COMPOSE_FILE"
   mv -f "$override_tmp" "$OVERRIDE_FILE"
+  hash_value "$STAGING_COMPOSE_FILE" > "${OUTPUT_DIR}/staging-compose.sha256"
+  log "staging compose installed atomically at persistent path: ${STAGING_COMPOSE_FILE}"
   log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
