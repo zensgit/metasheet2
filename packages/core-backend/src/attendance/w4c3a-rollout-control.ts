@@ -1080,9 +1080,9 @@ export const ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1 = Object.freeze([
   'UNRESOLVED_INGRESS_REVIEW',
   'DEFECTIVE_REQUEST_SNAPSHOT',
   // Gate D (owner completion gate, PR #4839, 20260810): applicable only when `targetState ===
-  // 'authoritative'` (covers BOTH legal rows that target it — promotion `:91` and resume `:94`
+  // 'authoritative'` (covers BOTH legal rows that target it — promotion `:92` and resume `:95`
   // — via that single condition, never via the pair or via `comparisonWritePosture`, which is
-  // also `'authoritative'` for the `authoritative -> suspended` de-escalation row `:93` and
+  // also `'authoritative'` for the `authoritative -> suspended` de-escalation row `:94` and
   // would wrongly block it). See `transitionAttendanceCalculationRolloutV1` for the enforced
   // check; this reporter reads the identical `attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()`.
   'AUTHORITATIVE_ENTRYPOINTS_DELIVERED',
@@ -1553,12 +1553,12 @@ export async function transitionAttendanceCalculationRolloutV1(
       }
 
       // Gate D (owner completion gate, PR #4839, 20260810): a promotion INTO 'authoritative' —
-      // covers BOTH legal rows that target it, promotion (:91) and resume (:94), via this single
+      // covers BOTH legal rows that target it, promotion (:92) and resume (:95), via this single
       // `targetState` condition — is refused while either W4C-2 authoritative-mode entrypoint
       // (`live_punch`, `scheduled`) remains undelivered
       // (`packages/core-backend/src/attendance/w4c2-authoritative-delivery.ts`). Deliberately
       // NOT keyed on `legal.comparisonWritePosture === 'authoritative'`: that posture is ALSO
-      // true for the `authoritative -> suspended` de-escalation row (:93), and keying on it
+      // true for the `authoritative -> suspended` de-escalation row (:94), and keying on it
       // would block the only escape hatch out of a stuck `authoritative` org. Placed as the LAST
       // precondition, after every section-3 predicate above and strictly before the event INSERT
       // below: existing pinned refusal codes for an authoritative target

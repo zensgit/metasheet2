@@ -257,7 +257,9 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
 })
 
 // ---------------------------------------------------------------------------
-// Gate D (owner completion gate, PR #4839, 20260810): the declaration/code correspondence guard.
+// Gate D (owner completion gate, PR #4839, 20260810; hardened to per-key + unrepresented-site
+// detection in the same PR's fresh-gate round, 20260810). The declaration/code correspondence
+// guard.
 //
 // `w4c2-authoritative-delivery.ts` is a pure, filesystem-free leaf that declares whether each
 // W4C-2 authoritative-mode entrypoint is delivered. That declaration is what
@@ -266,17 +268,65 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
 // suite's job is narrower and complementary: prove the declaration cannot silently disagree with
 // the actual refusal-call-site count in `w4c2-live-scheduled-boundary.ts` — the exact drift this
 // module's own docblock says is enforced "not here."
+//
+// P2 (fresh-gate round): the original correspondence assertion compared an AGGREGATE — a
+// hand-maintained per-key weight table SUMMED, checked against a single whole-file call count.
+// An aggregate is blind to a CROSS-KEY edit: swap the two keys' weights and the sum is
+// unchanged, so the guard stays green while the per-key meaning has silently inverted. Fixed by
+// attributing each INDIVIDUAL refusal call to the specific function it lexically sits inside
+// (brace-matched source-range extraction, never a hand count), then comparing PER KEY —
+// `toEqual` on a `{key: count}` object, not a sum — so a cross-key edit now reds (proven directly
+// by a dedicated mutation test below, distinct from the pre-existing delivered-flip mutation).
+//
+// P3 (fresh-gate round): the two-key tuple had no mechanical link to the boundary source — a
+// THIRD authoritative-writing dispatch site added later (a new named function containing the
+// same refusal call this file's `REFUSAL_CALL_PATTERN` matches — not spelled literally here, to
+// avoid this very comment self-matching that pattern, see the "exactly one file" test below)
+// would be invisible to both the declaration and the old guard, which would keep reporting
+// "fully accounted for" over an incomplete domain. Fixed by attributing EVERY refusal call in
+// the file to its innermost enclosing named function (not just the two currently expected) and
+// failing closed if that
+// discovers a function outside `KEY_TO_FUNCTION_NAME`'s image, OR a call inside no named function
+// at all — a bare `continue`/drop on the "no enclosing function found" case would silently
+// reopen this exact hole (a module-level arrow function's refusal call would vanish rather than
+// count as unrepresented), so it is bucketed as `unattributedCount` and asserted `=== 0`
+// explicitly, with its own negative control proving the bucket isn't just always empty by
+// construction.
+//
+// Disclosed scope — what this does NOT cover, stated rather than left for a reader to find:
+//   - Only THIS ONE file (`w4c2-live-scheduled-boundary.ts`) is scanned for attribution. A
+//     refusal call added to a DIFFERENT file is caught by the sibling "exactly one git-tracked
+//     src file" test below (which reds if that pattern ever appears in a second file), not by
+//     the attribution logic here.
+//   - Attribution is by LEXICAL nesting inside a NAMED `function` declaration, located by regex
+//     plus brace-depth counting — not a real parser. It is verified safe for THIS file's actual
+//     content (no string/comment hides an unbalanced brace inside either target function's
+//     range), not proven safe in general.
+//   - The map from declared key to function name (`KEY_TO_FUNCTION_NAME`) is still a reviewed,
+//     hand-maintained pair — a rename of `executeLivePunch`/`executeScheduledRunInternal`
+//     without updating that map fails closed (the old name vanishes from the discovered set, the
+//     per-key comparison mismatches) rather than being auto-followed.
+//   - This proves the DECLARATION does not silently drift from the CALL-SITE COUNT. It does not
+//     independently prove those call sites are the semantically correct ones — that is the
+//     real-DB behavioural suite's job.
 // ---------------------------------------------------------------------------
 describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundary-source correspondence', () => {
   const BOUNDARY_RELATIVE_FILE = 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts'
 
-  // Independently counted by reading the boundary source at PR #4839 head
-  // `2d35fdeb09a36d3b9ecbadfc4c645d12231e9be5`: `live_punch` (inside `executeLivePunch`) has
-  // exactly 1 refusal call site; `scheduled` (inside `executeScheduledRunInternal`, both its
-  // org-wide probe and its per-target loop — the SAME command kind per that module's own header)
-  // has exactly 2. This weighting, not per-function source-range slicing, is what the aggregate
-  // count below is checked against — see the comment on the second `it` for why an aggregate is
-  // still sufficient to catch a PARTIAL removal within a multi-site key.
+  // The ONE hand-maintained mapping this guard trusts: which named function in the boundary file
+  // implements each declared entrypoint key. Typed as `Record<Key, string>` so TypeScript itself
+  // refuses to compile this file if a key is ever added to
+  // `ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1` without a matching entry added here.
+  const KEY_TO_FUNCTION_NAME: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, string>> = Object.freeze({
+    live_punch: 'executeLivePunch',
+    scheduled: 'executeScheduledRunInternal',
+  })
+
+  // Independently counted by reading the boundary source at this PR's reviewed head: `live_punch`
+  // (inside `executeLivePunch`) has exactly 1 refusal call site; `scheduled` (inside
+  // `executeScheduledRunInternal`, both its org-wide probe and its per-target loop — the SAME
+  // command kind per that module's own header) has exactly 2. Checked PER KEY against a
+  // source-range-scoped count below (`attributeRefusalCallsV1`), never against a whole-file sum.
   const REFUSAL_SITE_WEIGHT: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, number>> = Object.freeze({
     live_punch: 1,
     scheduled: 2,
@@ -288,6 +338,99 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
 
   function countRefusalCalls(content: string): number {
     return (content.match(REFUSAL_CALL_PATTERN) ?? []).length
+  }
+
+  // ---- brace-matched function-range extraction: source of truth for per-key attribution ----
+
+  type FunctionRange = { readonly name: string; readonly bodyStart: number; readonly bodyEnd: number }
+
+  /**
+   * Every NAMED `function` declaration in `content`, with its brace-matched body range (the
+   * opening '{' index through its matching closing '}' index). Deliberately regex + brace-depth
+   * counting, not a real parser. A declaration whose parameter list or opening brace cannot be
+   * located is skipped, never silently mis-ranged.
+   */
+  function findAllFunctionRanges(content: string): FunctionRange[] {
+    const declPattern = /(?:async\s+)?function\s*\*?\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g
+    const ranges: FunctionRange[] = []
+    let decl: RegExpExecArray | null
+    while ((decl = declPattern.exec(content)) !== null) {
+      const name = decl[1]
+      const parenOpenIdx = declPattern.lastIndex - 1 // index of the '(' the match just consumed
+      let parenDepth = 0
+      let i = parenOpenIdx
+      for (; i < content.length; i += 1) {
+        if (content[i] === '(') parenDepth += 1
+        else if (content[i] === ')') {
+          parenDepth -= 1
+          if (parenDepth === 0) break
+        }
+      }
+      if (parenDepth !== 0) continue // unbalanced parens locating this decl — skip, don't guess
+      const braceStart = content.indexOf('{', i + 1)
+      if (braceStart === -1) continue
+      let braceDepth = 0
+      let bodyEnd = -1
+      for (let j = braceStart; j < content.length; j += 1) {
+        if (content[j] === '{') braceDepth += 1
+        else if (content[j] === '}') {
+          braceDepth -= 1
+          if (braceDepth === 0) {
+            bodyEnd = j
+            break
+          }
+        }
+      }
+      if (bodyEnd === -1) continue
+      ranges.push({ name, bodyStart: braceStart, bodyEnd })
+    }
+    return ranges
+  }
+
+  /**
+   * Attributes every refusal-call occurrence in `content` to its INNERMOST enclosing named
+   * function (the smallest body range among every range that contains the call's index). A call
+   * inside NO named-function range at all (e.g. a module-level arrow function body) is counted in
+   * `unattributedCount`, never silently dropped — closing the exact fail-open hole a bare
+   * `continue` would reopen.
+   */
+  function attributeRefusalCallsV1(content: string): { counts: Record<string, number>; unattributedCount: number } {
+    const ranges = findAllFunctionRanges(content)
+    const counts: Record<string, number> = {}
+    let unattributedCount = 0
+    const re = new RegExp(REFUSAL_CALL_PATTERN.source, 'g')
+    let m: RegExpExecArray | null
+    while ((m = re.exec(content)) !== null) {
+      const idx = m.index
+      let innermost: FunctionRange | null = null
+      for (const range of ranges) {
+        if (idx < range.bodyStart || idx > range.bodyEnd) continue
+        if (innermost === null || range.bodyEnd - range.bodyStart < innermost.bodyEnd - innermost.bodyStart) {
+          innermost = range
+        }
+      }
+      if (innermost === null) {
+        unattributedCount += 1
+      } else {
+        counts[innermost.name] = (counts[innermost.name] ?? 0) + 1
+      }
+    }
+    return { counts, unattributedCount }
+  }
+
+  function actualByKeyV1(counts: Record<string, number>): Record<AttendanceW4C2AuthoritativeEntrypointV1, number> {
+    return Object.fromEntries(
+      ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.map((key) => [key, counts[KEY_TO_FUNCTION_NAME[key]] ?? 0]),
+    ) as Record<AttendanceW4C2AuthoritativeEntrypointV1, number>
+  }
+
+  function expectedByKeyV1(): Record<AttendanceW4C2AuthoritativeEntrypointV1, number> {
+    return Object.fromEntries(
+      ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.map((key) => [
+        key,
+        isAttendanceW4C2AuthoritativeEntrypointDeliveredV1(key) ? 0 : REFUSAL_SITE_WEIGHT[key],
+      ]),
+    ) as Record<AttendanceW4C2AuthoritativeEntrypointV1, number>
   }
 
   afterEach(() => {
@@ -304,39 +447,66 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     expect(matches).toEqual([BOUNDARY_RELATIVE_FILE])
   })
 
-  it('declared-undelivered-weighted call count equals the ACTUAL call count in the boundary file (load-bearing: a declaration/code mismatch reds this)', () => {
+  it('attribution machinery negative control: every refusal call is either attributed or counted unattributed — none silently dropped', () => {
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
-    const actual = countRefusalCalls(content)
-    // Computed from the CURRENT declaration (production value unless a test overrides it), never
-    // hardcoded — so this assertion tracks whatever `w4c2-authoritative-delivery.ts` actually
-    // declares. A partial removal within the 2-site `scheduled` key (e.g. deleting only the
-    // per-target-loop call while leaving the org-wide-probe call and the declaration both
-    // unchanged) still reds this: actual would drop to 2 while expected stays 3.
-    const expected = ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.filter(
-      (key) => !isAttendanceW4C2AuthoritativeEntrypointDeliveredV1(key),
-    ).reduce((sum, key) => sum + REFUSAL_SITE_WEIGHT[key], 0)
-    expect(actual).toBe(expected)
+    const { counts, unattributedCount } = attributeRefusalCallsV1(content)
+    const attributedTotal = Object.values(counts).reduce((sum, n) => sum + n, 0)
+    expect(attributedTotal + unattributedCount).toBe(countRefusalCalls(content))
   })
 
-  it('positive control: production declaration is fully undelivered and the boundary carries all 3 refusal calls today', () => {
+  it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (an unmapped/4th dispatch site fails closed)', () => {
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts, unattributedCount } = attributeRefusalCallsV1(content)
+    const knownFunctionNames = new Set(Object.values(KEY_TO_FUNCTION_NAME))
+    const unrepresented = Object.keys(counts).filter((name) => !knownFunctionNames.has(name))
+    expect(unrepresented).toEqual([])
+    expect(unattributedCount).toBe(0)
+  })
+
+  it('P2: declared-undelivered weight equals the ACTUAL per-key call count in the boundary file, key by key (not an aggregate — a single-key mismatch reds this even when the total is unchanged)', () => {
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts } = attributeRefusalCallsV1(content)
+    expect(actualByKeyV1(counts)).toEqual(expectedByKeyV1())
+  })
+
+  it('positive control: production declaration is fully undelivered and each function carries its exact expected count (live_punch=1, scheduled=2, total=3)', () => {
     expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false)
     expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts } = attributeRefusalCallsV1(content)
+    expect(counts).toEqual({ executeLivePunch: 1, executeScheduledRunInternal: 2 })
     expect(countRefusalCalls(content)).toBe(3)
   })
 
-  it('drift guard is load-bearing: declaring "live_punch" delivered (via the test seam) while the boundary source is unchanged mismatches and reds the correspondence assertion', () => {
+  it('drift guard is load-bearing (delivered-flip class): declaring "live_punch" delivered via the test seam while the boundary source is unchanged mismatches on that key specifically', () => {
     __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true })
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
-    const actual = countRefusalCalls(content)
-    const expected = ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.filter(
-      (key) => !isAttendanceW4C2AuthoritativeEntrypointDeliveredV1(key),
-    ).reduce((sum, key) => sum + REFUSAL_SITE_WEIGHT[key], 0)
-    // live_punch declared delivered => expected drops to 2 (scheduled's 2 sites only), but the
-    // boundary source still carries all 3 calls — this is the mismatch the correspondence
-    // assertion above exists to catch, demonstrated here directly rather than only asserted.
-    expect(expected).toBe(2)
-    expect(actual).toBe(3)
-    expect(actual).not.toBe(expected)
+    const { counts } = attributeRefusalCallsV1(content)
+    const actual = actualByKeyV1(counts)
+    const expected = expectedByKeyV1()
+    // live_punch declared delivered => expected drops to 0 for that key, but the boundary source
+    // still carries its 1 refusal call — mismatched on THAT key specifically, demonstrated here
+    // directly rather than only asserted by the correspondence test above.
+    expect(expected.live_punch).toBe(0)
+    expect(actual.live_punch).toBe(1)
+    expect(actual).not.toEqual(expected)
+  })
+
+  it('P2 fix is load-bearing (cross-key class — the aggregate blind spot the old guard missed): a hand-maintained-weight swap across the two keys preserves the SUM but reds a per-key comparison', () => {
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts } = attributeRefusalCallsV1(content)
+    const actual = actualByKeyV1(counts)
+    // A mutation of REFUSAL_SITE_WEIGHT that swaps the two keys' weights (live_punch<-2,
+    // scheduled<-1) preserves the aggregate SUM (3) the pre-fix, aggregate-only assertion
+    // checked — that old guard would have stayed green on exactly this edit, because add-to-one/
+    // remove-from-another leaves the total unchanged.
+    const swapped: Record<AttendanceW4C2AuthoritativeEntrypointV1, number> = {
+      live_punch: REFUSAL_SITE_WEIGHT.scheduled,
+      scheduled: REFUSAL_SITE_WEIGHT.live_punch,
+    }
+    const realAggregate = actual.live_punch + actual.scheduled
+    const swappedAggregate = swapped.live_punch + swapped.scheduled
+    expect(realAggregate).toBe(swappedAggregate) // the old aggregate-only check would stay green on this mutation
+    expect(actual).not.toEqual(swapped) // the new per-key check reds on the exact same mutation
   })
 })
