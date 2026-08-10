@@ -65,6 +65,31 @@ const {
   assertP25Use,
 } = require(path.join(toolDir, 'table-classification.cjs'))
 
+// #4556 W4C-0 follow-up — owner ruling on the report-sync job control-plane writes (#4835 lane):
+// migrations-derived plugin_attendance_* domain + exact-site operational_control_plane registry.
+const {
+  derivePluginAttendanceTableDomain,
+  deriveAllCreatedTables,
+  findMigrationDirs,
+} = require(path.join(toolDir, 'plugin-attendance-table-domain.cjs'))
+const {
+  UnresolvableConstantBindingError,
+  resolveModuleLevelConstantBindings,
+  resolveIdentifierToTable,
+} = require(path.join(toolDir, 'constant-table-binding-resolver.cjs'))
+const {
+  PLUGIN_ATTENDANCE_TABLE_PREFIX_PATTERN,
+  substituteResolvedDynamicTargets,
+  buildOperationalControlPlaneCensus,
+} = require(path.join(toolDir, 'operational-control-plane-census.cjs'))
+const {
+  identityKey,
+  classifyOperationalControlPlaneSites,
+} = require(path.join(toolDir, 'operational-control-plane-classify.cjs'))
+const {
+  OPERATIONAL_CONTROL_PLANE_REGISTRY,
+} = require(path.join(toolDir, 'operational-control-plane-registry.cjs'))
+
 const PINNED_REF = PINNED_BASELINE_REF
 const BASELINE_ARTIFACT_RELPATH = PINNED_BASELINE_ARTIFACT_RELPATH
 const WORKFLOW_PATH = path.join(rootDir, '.github/workflows/plugin-tests.yml')
@@ -1428,4 +1453,357 @@ test('W4C-3c mutation: reintroducing live second UPDATE after result edit is cau
   const classified = classifyCensus(sites)
   const { unclaimed } = classifyTrackedSites(classified.trackedSites)
   assert.equal(unclaimed.length, 1, 'reintroduced post-write UPDATE must be unclaimed open debt')
+})
+
+// -------------------------------------------------------------------------------------------
+// #4556 W4C-0 follow-up — owner ruling on the report-sync job control-plane writes: migrations-
+// derived plugin_attendance_* domain, module-level constant-binding resolution, and the
+// operational_control_plane exact-site registry for the four report-sync job writes.
+// -------------------------------------------------------------------------------------------
+
+test('plugin_attendance_* domain: derived mechanically from migrations, not a hand-kept list', () => {
+  const source = createWorktreeSource(rootDir)
+  const domain = derivePluginAttendanceTableDomain(source)
+  assert.deepEqual(domain.tables, ['plugin_attendance_report_sync_jobs'])
+  assert.deepEqual(
+    [...domain.creatingFiles.get('plugin_attendance_report_sync_jobs')],
+    ['packages/core-backend/src/db/migrations/zzzz20260519070000_create_plugin_attendance_report_sync_jobs.ts'],
+  )
+  // Both migration directories are scanned; the legacy raw-SQL dir contributes zero
+  // plugin_attendance_* names today (a positive-and-negative control on the walk itself).
+  assert.ok(domain.migrationDirs.includes('packages/core-backend/src/db/migrations'))
+  assert.ok(domain.migrationDirs.includes('packages/core-backend/migrations'))
+  assert.ok(domain.scannedFileCount > 100, 'the migration walk must not be silently empty')
+})
+
+test('plugin_attendance_* domain: raw-SQL CREATE TABLE form is also recognised (positive control)', () => {
+  // Lower-level unit test of findMigrationDirs alone, with an explicit roots array (bypasses
+  // discoverRuntimeRoots — that mechanism is covered by its own collector.cjs test coverage).
+  const dirs = findMigrationDirs(
+    { listDir: (rel) => (rel === '' ? ['migrations'] : []) },
+    [''],
+  )
+  assert.deepEqual(dirs, ['migrations'])
+
+  // Full deriveAllCreatedTables(source) path, which calls discoverRuntimeRoots itself — the fake
+  // source's directory shape must match what that discovery actually returns: EXTRA_NAMED_ROOTS
+  // always includes 'scripts' (no pnpm-workspace.yaml package pattern is needed for that), so the
+  // fixture's migrations dir lives under 'scripts/migrations'.
+  const fakeSource = {
+    readFile: (rel) => {
+      if (rel === 'pnpm-workspace.yaml') return 'packages:\n'
+      if (rel === 'scripts/migrations/001_raw.sql') {
+        return "-- CREATE TABLE plugin_attendance_fake_from_comment (id int);\nCREATE TABLE IF NOT EXISTS \"plugin_attendance_raw_sql_table\" (id int);\n"
+      }
+      if (rel === 'scripts/migrations/002_kysely.ts') {
+        return "await db.schema.createTable('plugin_attendance_kysely_table').execute()\n"
+      }
+      return null
+    },
+    listDir: (rel) => (rel === 'scripts' ? ['migrations'] : []),
+    listAllFiles: (rel) =>
+      rel === 'scripts/migrations' ? ['scripts/migrations/001_raw.sql', 'scripts/migrations/002_kysely.ts'] : [],
+  }
+  const { creatingFiles } = deriveAllCreatedTables(fakeSource)
+  assert.deepEqual(
+    [...creatingFiles.keys()].sort(),
+    ['plugin_attendance_kysely_table', 'plugin_attendance_raw_sql_table'],
+    'a commented-out raw-SQL CREATE TABLE must not mint a domain entry; a live one (either form) must',
+  )
+})
+
+test('constant-binding resolver: direct literal, alias, single-interpolation template, and object-property forms all resolve', () => {
+  const content = [
+    "const BASE_TABLE = 'plugin_attendance_report_sync_jobs'",
+    'const ALIAS_TABLE = BASE_TABLE',
+    'const TEMPLATE_TABLE = `${BASE_TABLE}`',
+    "const OBJECT_TABLES = { reportSyncJobs: 'plugin_attendance_report_sync_jobs', other: 'plugin_attendance_other' }",
+    "export const EXPORTED_TABLE = 'plugin_attendance_report_sync_jobs'",
+  ].join('\n')
+  const bindings = resolveModuleLevelConstantBindings(content)
+  assert.equal(resolveIdentifierToTable(bindings, 'BASE_TABLE'), 'plugin_attendance_report_sync_jobs')
+  assert.equal(resolveIdentifierToTable(bindings, 'ALIAS_TABLE'), 'plugin_attendance_report_sync_jobs')
+  assert.equal(resolveIdentifierToTable(bindings, 'TEMPLATE_TABLE'), 'plugin_attendance_report_sync_jobs')
+  assert.equal(resolveIdentifierToTable(bindings, 'OBJECT_TABLES.reportSyncJobs'), 'plugin_attendance_report_sync_jobs')
+  assert.equal(resolveIdentifierToTable(bindings, 'OBJECT_TABLES.other'), 'plugin_attendance_other')
+  assert.equal(resolveIdentifierToTable(bindings, 'EXPORTED_TABLE'), 'plugin_attendance_report_sync_jobs')
+})
+
+test('constant-binding resolver: unsupported forms are tagged, not dropped, and MUST FAIL (not skip) on resolve', () => {
+  const content = [
+    'const FUNCTION_DERIVED = getTableName()',
+    "const TERNARY_DERIVED = cond ? 'plugin_attendance_a' : 'plugin_attendance_b'",
+    "const CONCATENATED = PREFIX + '_jobs'",
+    'const MULTI_INTERP = `${A}${B}`',
+    'let REASSIGNED = "plugin_attendance_x"',
+  ].join('\n')
+  const bindings = resolveModuleLevelConstantBindings(content)
+  // Every module-level `const` gets an explicit entry — nothing is silently omitted.
+  assert.equal(bindings.get('FUNCTION_DERIVED').status, 'unresolvable')
+  assert.equal(bindings.get('TERNARY_DERIVED').status, 'unresolvable')
+  assert.equal(bindings.get('CONCATENATED').status, 'unresolvable')
+  assert.equal(bindings.get('MULTI_INTERP').status, 'unresolvable')
+  // `let` is not a module-level const binding at all — no entry, not a false "resolved".
+  assert.equal(bindings.has('REASSIGNED'), false)
+
+  for (const identifier of ['FUNCTION_DERIVED', 'TERNARY_DERIVED', 'CONCATENATED', 'MULTI_INTERP']) {
+    assert.throws(
+      () => resolveIdentifierToTable(bindings, identifier),
+      UnresolvableConstantBindingError,
+      `${identifier} must throw, not silently resolve to "unknown"/null`,
+    )
+  }
+  assert.throws(() => resolveIdentifierToTable(bindings, 'REASSIGNED'), UnresolvableConstantBindingError)
+})
+
+test('operational-control-plane census: positive control against the real repo — exactly the four registered sites plus the one known unregistered site', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  assert.deepEqual(
+    sites.map((s) => `${s.relPath}:${s.line}:${s.enclosingSymbol}:${s.table}:${s.verb}`).sort(),
+    [
+      'plugins/plugin-attendance/index.cjs:3378:createAttendanceReportSyncJob:plugin_attendance_report_sync_jobs:insert',
+      'plugins/plugin-attendance/index.cjs:3579:lockAttendanceReportSyncJobForRun:plugin_attendance_report_sync_jobs:update',
+      'plugins/plugin-attendance/index.cjs:3611:persistAttendanceReportSyncJobPageState:plugin_attendance_report_sync_jobs:update',
+      'plugins/plugin-attendance/index.cjs:3762:cancelAttendanceReportSyncJob:plugin_attendance_report_sync_jobs:update',
+      'scripts/ops/staging-attendance-report-sync-a2-smoke.mjs:724:cleanup:plugin_attendance_report_sync_jobs:delete',
+    ].sort(),
+    'the scan must be non-vacuous and must not silently miss the known 5th (unregistered) write',
+  )
+  for (const site of sites) {
+    assert.equal(typeof site.fingerprint, 'string')
+    assert.equal(site.fingerprint.length, 64, 'fingerprint must be a sha256 hex digest')
+  }
+})
+
+test('operational-control-plane classify: real repo — the owners four are claimed; the fifth site is unclaimed by name, not silently absorbed', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const domain = derivePluginAttendanceTableDomain(source)
+  const result = classifyOperationalControlPlaneSites(sites, OPERATIONAL_CONTROL_PLANE_REGISTRY, domain.tables)
+
+  assert.equal(result.claimed.length, 4)
+  assert.deepEqual(
+    result.claimed.map((s) => s.enclosingSymbol).sort(),
+    OPERATIONAL_CONTROL_PLANE_REGISTRY.map((e) => e.symbol).sort(),
+  )
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.relPath}:${s.line}:${s.enclosingSymbol}:${s.verb}`),
+    ['scripts/ops/staging-attendance-report-sync-a2-smoke.mjs:724:cleanup:delete'],
+    'the staging-smoke cleanup DELETE is a real, pre-existing 5th write the owner did not name — ' +
+      'it must surface as unclaimed, not be silently registered (scope creep) or silently dropped',
+  )
+  assert.deepEqual(result.undomained, [])
+  assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.fingerprintDrift, [])
+})
+
+test('operational-control-plane registry: exact JSON-array identity keys (no separator-collision risk)', () => {
+  for (const entry of OPERATIONAL_CONTROL_PLANE_REGISTRY) {
+    assert.equal(entry.relPath, 'plugins/plugin-attendance/index.cjs')
+    assert.equal(entry.table, 'plugin_attendance_report_sync_jobs')
+    assert.equal(entry.multiplicity, 1)
+    assert.equal(entry.fingerprint.length, 64)
+  }
+  assert.deepEqual(
+    OPERATIONAL_CONTROL_PLANE_REGISTRY.map((e) => e.symbol).sort(),
+    [
+      'cancelAttendanceReportSyncJob',
+      'createAttendanceReportSyncJob',
+      'lockAttendanceReportSyncJobForRun',
+      'persistAttendanceReportSyncJobPageState',
+    ],
+  )
+  assert.deepEqual(
+    OPERATIONAL_CONTROL_PLANE_REGISTRY.map((e) => e.verb).sort(),
+    ['insert', 'update', 'update', 'update'],
+  )
+  // A symbol containing the old `::`-join separator must not alias a different tuple.
+  const collidable = { relPath: 'plugins/plugin-attendance/index.cjs', symbol: 'a::b', table: 'x', verb: 'insert' }
+  const collidableTwin = { relPath: 'plugins/plugin-attendance/index.cjs::a', symbol: 'b', table: 'x', verb: 'insert' }
+  assert.notEqual(identityKey(collidable), identityKey(collidableTwin))
+})
+
+// --- mutation probes (item 4): each executed against SYNTHETIC content mirroring the real call
+// sites' shape, using the SAME resolver/census/classify functions the real-repo tests above use.
+// A matching hand-executed mutation of the real file is recorded in the handoff scratchpad log.
+
+function fakeSourceForSingleFile(relPath, content) {
+  return {
+    readFile: (p) => {
+      if (p === relPath) return content
+      if (p === 'pnpm-workspace.yaml') return 'packages:\n' // empty list — 'scripts' (EXTRA_NAMED_ROOTS) suffices
+      return null
+    },
+    listAllFiles: (root) => (relPath === root || relPath.startsWith(`${root}/`) ? [relPath] : []),
+    listDir: () => [],
+  }
+}
+
+const REGISTRY_TABLE = 'plugin_attendance_report_sync_jobs'
+function baselineReportSyncFixture() {
+  return [
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'",
+    '',
+    'async function createAttendanceReportSyncJob(db) {',
+    '  return db.query(`INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} (org_id) VALUES ($1)`, [1])',
+    '}',
+    '',
+    'async function lockAttendanceReportSyncJobForRun(db) {',
+    '  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1`, [1])',
+    '}',
+    '',
+    'async function persistAttendanceReportSyncJobPageState(db) {',
+    "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET cursor = $1`, [1])",
+    '}',
+    '',
+    'async function cancelAttendanceReportSyncJob(db) {',
+    "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'canceled'`, [])",
+    '}',
+    '',
+  ].join('\n')
+}
+
+function fingerprintFixtureRegistry(content) {
+  // Builds a registry pinned to whatever fingerprints the (unmutated) fixture actually produces,
+  // so the baseline itself is proven "claimed" before every mutation leg is tried against it.
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', content)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  return sites.map((s) => ({
+    relPath: s.relPath,
+    symbol: s.enclosingSymbol,
+    table: s.table,
+    verb: s.verb,
+    fingerprint: s.fingerprint,
+    multiplicity: 1,
+  }))
+}
+
+test('mutation probe baseline: the synthetic fixture is fully claimed before any mutation', () => {
+  const content = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(content)
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', content)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  assert.equal(result.claimed.length, 4)
+  assert.deepEqual(result.unclaimed, [])
+  assert.deepEqual(result.undomained, [])
+  assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.fingerprintDrift, [])
+})
+
+test('mutation probe 1: a NEW plugin_attendance_* table written anywhere REDs (undomained, since no migration creates it)', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const mutated = baseline + [
+    'async function newSideDoorWrite(db) {',
+    "  return db.query(`INSERT INTO plugin_attendance_side_door_table (org_id) VALUES ($1)`, [1])",
+    '}',
+    '',
+  ].join('\n')
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE]) // domain unchanged: no migration creates the new table
+  assert.equal(result.claimed.length, 4, 'the original four must still be claimed — this is a NEW site, not a regression of the old ones')
+  assert.equal(result.undomained.length, 1)
+  assert.equal(result.undomained[0].table, 'plugin_attendance_side_door_table')
+})
+
+test('mutation probe 2: one of the four sites changing its VERB REDs on both legs (unclaimed new identity + missing old identity)', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const anchor = 'async function createAttendanceReportSyncJob(db) {\n  return db.query(`INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} (org_id) VALUES ($1)`, [1])'
+  assert.equal(baseline.split(anchor).length - 1, 1, 'the INSERT anchor must match exactly once before mutating it')
+  const mutated = baseline.replace(
+    'INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} (org_id) VALUES ($1)',
+    'UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET org_id = $1',
+  )
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  assert.equal(result.claimed.length, 3, 'the three untouched sites stay claimed')
+  assert.equal(result.missing.length, 1, 'the registered INSERT identity now has zero observed occurrences')
+  assert.equal(result.missing[0].verb, 'insert')
+  assert.equal(result.missing[0].symbol, 'createAttendanceReportSyncJob')
+  assert.ok(
+    result.unclaimed.some((s) => s.enclosingSymbol === 'createAttendanceReportSyncJob' && s.verb === 'update'),
+    'the mutated UPDATE at that symbol is a new, unregistered identity',
+  )
+})
+
+test('mutation probe 3: the module-level constant re-pointed at a different table REDs on both legs (undomained new table + missing old identity)', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const declarationLine = "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'"
+  assert.equal(baseline.split(declarationLine).length - 1, 1, 'the declaration anchor must match exactly once before mutating it')
+  const mutated = baseline.replace(
+    declarationLine,
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs_v2'",
+  )
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE]) // domain unchanged: no migration creates the "_v2" table
+  assert.equal(result.claimed.length, 0, 'nothing should still be claimed against the OLD table name')
+  assert.equal(result.missing.length, 4, 'all four registered identities now observe zero occurrences')
+  assert.equal(result.undomained.length, 4, 'all four sites now target a prefix-matched table no migration creates')
+  assert.ok(result.undomained.every((s) => s.table === 'plugin_attendance_report_sync_jobs_v2'))
+})
+
+test('mutation probe 4: a FIFTH write added inside an already-registered symbol REDs as overCount (multiplicity is load-bearing)', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const anchor = "async function cancelAttendanceReportSyncJob(db) {\n  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'canceled'`, [])\n}"
+  assert.equal(baseline.split(anchor).length - 1, 1, 'the function-body anchor must match exactly once before mutating it')
+  const mutated = baseline.replace(
+    anchor,
+    [
+      "async function cancelAttendanceReportSyncJob(db) {",
+      "  await db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET locked_at = NULL`, [])",
+      "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'canceled'`, [])",
+      "}",
+    ].join('\n'),
+  )
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  assert.equal(result.claimed.length, 3, 'the three untouched symbols stay claimed')
+  assert.equal(result.overCount.length, 1)
+  assert.equal(result.overCount[0].entry.symbol, 'cancelAttendanceReportSyncJob')
+  assert.equal(result.overCount[0].observed, 2)
+  assert.deepEqual(result.missing, [], 'overCount and missing are different failure modes — this leg must not also read as missing')
+})
+
+test('mutation probe 5 (resolver "must FAIL not skip"): an unresolvable module-level binding used at a DML target throws rather than silently vanishing', () => {
+  const content = [
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'",
+    'const DERIVED_TABLE = computeTableName(ATTENDANCE_REPORT_SYNC_JOB_TABLE)',
+    '',
+    'async function opaqueWrite(db) {',
+    '  return db.query(`INSERT INTO ${DERIVED_TABLE} (org_id) VALUES ($1)`, [1])',
+    '}',
+    '',
+  ].join('\n')
+  assert.throws(
+    () => substituteResolvedDynamicTargets(content),
+    UnresolvableConstantBindingError,
+    'a plugin_attendance_-flavoured file with an unresolvable dynamic DML-target binding must fail loudly, not silently omit the site from the census',
+  )
+})
+
+test('operational-control-plane census: files without the plugin_attendance_ substring are never even attempted (scope stays narrow)', () => {
+  // A file that dynamically targets some OTHER unrelated table via an unresolvable binding must
+  // NOT throw here — this proves the substring pre-filter, not the resolver's leniency, is what
+  // keeps this module from touching the ~112 other disclosed dynamic write targets in the repo.
+  const content = [
+    'const OTHER_TABLE = computeSomeOtherTableName()',
+    'async function unrelatedWrite(db) {',
+    '  return db.query(`INSERT INTO ${OTHER_TABLE} (id) VALUES ($1)`, [1])',
+    '}',
+    '',
+  ].join('\n')
+  const source = fakeSourceForSingleFile('scripts/unrelated.cjs', content)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  assert.deepEqual(sites, [])
 })
