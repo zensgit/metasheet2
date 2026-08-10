@@ -13,19 +13,17 @@ authority, not the header text).
 This runbook and the CLI it documents (`scripts/ops/attendance-w4c5-rollout-transition.ts`)
 authorize **no** staging access, **no** flag change, **no** deployment, **no** seven-day soak,
 **no** production/customer data use, **no** external notification, and **no** closure of issue
-4556. Every step below runs only against a **locally migrated scratch PostgreSQL database** and
-a **single example synthetic org ID** you must replace with the owner-designated one before any
-real use. `SEGMENT_CALCULATION_IMPLEMENTED`
+4556. Every step below is a local preparation/refusal exercise against a **locally migrated scratch
+PostgreSQL database** and an illustrative synthetic org. Reusing the command shape against staging
+requires the separate owner authorization described below. `SEGMENT_CALCULATION_IMPLEMENTED`
 (`plugins/plugin-attendance/lib/attendance-shift-service.cjs:60`) is untouched by this line of
 work — flipping it is a separate implementation-readiness decision the owner has not made, and
 this runbook does not depend on it (the rollout-state machine this tool drives is independent of
 that constant; see the amendment's §0 finding).
 
-Every command below was executed verbatim while writing this document, against a local scratch
-PostgreSQL 15.17 instance on `localhost:54329` and Node v25.9.0. Substitute your own scratch
-`DATABASE_URL` throughout — do **not** point any of this at staging or production. If a step
-below cannot be run as written in your environment, do not attempt to work around it silently;
-treat that as a defect in this document.
+The commands were executed while writing earlier revisions of this document against PostgreSQL
+15.17 on `localhost:54329` and Node v25.9.0. Do not point the local preparation steps at staging or
+production.
 
 **Re-rehearsed cold (PR #4839 gate P3-1/P3-2, 20260809)**: the original version of this document
 was rehearsed from an already-`pnpm install`ed checkout with a leftover `cd packages/core-backend`
@@ -33,8 +31,9 @@ in step 2 that steps 4/6/7/8's repo-root-relative `scripts/ops/...` paths never 
 by an independent adversarial gate as `ERR_MODULE_NOT_FOUND` when run literally in sequence, and
 by a missing `pnpm install` prerequisite reproducing as `tsx: command not found` from a genuinely
 fresh checkout. Both are fixed below: every command in this document now runs from the **repository
-root**, with no `cd` anywhere, and step 2 states the install prerequisite explicitly. This was
-re-rehearsed end to end, cold, in a **new worktree with no pre-existing `node_modules`** against a
+root**, with no `cd` anywhere, and step 2 states the install prerequisite explicitly. At that
+historical head it was re-rehearsed end to end, cold, in a **new worktree with no pre-existing
+`node_modules`** against a
 **freshly `initdb`'d scratch PostgreSQL instance**, at head `44803c10ab` on this branch — every
 output below (including both `planDigest` values, which changed from the first version of this
 document because `AttendanceRolloutTransitionPlanV1` gained a `priorState` field that is now also
@@ -46,8 +45,8 @@ predicate `buildAttendanceRolloutTransitionPlanV1` appends to `plan.predicates` 
 target state — `applicable: false, pass: true, count: null` for a non-`authoritative` target like
 this worked example) changed the canonical predicate array `computeAttendanceW4C5PlanDigestV1`
 hashes, which changes **every** `planDigest` this document prints, byte-content-of-the-plan
-unrelated. Re-rehearsed steps 4/6/7 end to end at head `2ec9c165c6` on this branch, against a
-freshly migrated scratch database with the identical illustrative org ID and correlation IDs this
+unrelated. At that historical head, steps 4/6/7 were re-rehearsed end to end at `2ec9c165c6` on
+this branch, against a freshly migrated scratch database with the identical illustrative org ID and correlation IDs this
 document already used — every `planDigest` and predicate array below is the real captured output
 of that rehearsal, not derived by inspection. `computeAttendanceW4C5PlanDigestV1` includes
 `plan.orgId` in its canonical object, so these digests are specific to the illustrative org ID
@@ -202,7 +201,7 @@ cat > /tmp/w4c5-manifest-legacy-to-shadow.json <<EOF
   "collectedAt": "$NOW",
   "orgId": "00000000-0000-4000-8000-000000000001",
   "targetState": "shadow",
-  "imageSha": "runbook-demo-image-sha",
+  "imageSha": "1111111111111111111111111111111111111111",
   "pendingMigrations": 0,
   "serviceHealthy": true,
   "ownerAuthorizationRef": "runbook-demo-owner-authorization",
@@ -215,7 +214,8 @@ cat > /tmp/w4c5-manifest-legacy-to-shadow.json <<EOF
 EOF
 ```
 
-For a **real** transition, every `*Ref` field must be a real, checkable reference (not the
+For a **real** transition, `imageSha` must be the exact 40-character deployed backend/web release
+SHA from the separately authorized owner packet, and every `*Ref` field must be a real, checkable reference (not the
 `runbook-demo-*` placeholders above), `pendingMigrations` must reflect an actually-verified
 pending-migration count of the real target environment, `serviceHealthy` must reflect an actually
 -verified health check, and `customerData` must be an honest `false`. This tool validates the
@@ -223,7 +223,7 @@ manifest's *shape* only — it cannot verify that these fields are true of the r
 verification is the operator's own responsibility, performed before writing this file (amendment
 §4).
 
-A transition into `eligible`/`authoritative` additionally requires
+A transition specifically from `eligible` to `authoritative` additionally requires
 `sevenDistinctCalendarDaysObserved` (exactly seven distinct `YYYY-MM-DD` strings),
 `criticalDiffCount: 0`, and `unresolvedReviewCount: 0`. A resume (`suspended` -> `authoritative`)
 additionally requires `ownerIncidentReviewRef`, `offlineReplayArtifactRef`,
@@ -231,6 +231,13 @@ additionally requires `ownerIncidentReviewRef`, `offlineReplayArtifactRef`,
 the `legacy -> shadow` worked example above.
 
 ## Step 6 — apply: legacy -> shadow for the example org
+
+The worked command below is executable only against the local scratch database prepared above. A
+real staging invocation remains separately owner-gated. Its manifest must carry the exact deployed
+backend/web SHA from the owner-authorized evidence packet. The CLI validates that value's canonical
+40-character shape and binds it into the stored manifest hash; as amendment section 4 states, it
+does **not** independently establish which image is running. Deployment verification is an external
+operator responsibility and must not be inferred from a successful CLI exit.
 
 ```bash
 pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \
@@ -298,6 +305,9 @@ Exactly one row in each table — `apply` called
 w4c3a-rollout-control.ts`) exactly once; this tool never writes a rollout row directly.
 
 ## Step 7 — re-apply the SAME invocation: idempotent no-op, not a second transition
+
+This remains a local scratch rehearsal here; using the same shape against staging is separately
+owner-gated.
 
 ```bash
 pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \

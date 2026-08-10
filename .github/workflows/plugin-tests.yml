@@ -560,11 +560,11 @@ jobs:
       # attendance-legacy-membership-overlap-audit-contract.test.mjs's shape). `if:
       # matrix.node-version == '20.x'` (same pin as the "Run K3-line ops suites" step above,
       # same reason: 20.x is the required leg; this is unproven on 18.x and narrows nothing that
-      # was ever proven there). A SUBTEST-COUNT FLOOR (same shape as "Integration Guard
+      # was ever proven there). An EXACT SUBTEST COUNT (stronger than the former floor; same shape as "Integration Guard
       # required-wiring contract" below, same reason: `node --test` — and `tsx --test`, which
       # delegates to the identical runner — treats a child process that exits 0 as a PASSING
       # FILE, so a collection-time abort before any subtest body runs would silently collapse
-      # this into a green zero-test file) refuses to report green below MIN_LIB_TESTS.
+      # this into a green zero-test file) refuses both missing and silently deleted test cases.
       #
       # The real-PostgreSQL half (zero-write proof, full legacy -> shadow cycle, idempotent
       # re-apply, and the refusal matrix) is
@@ -576,7 +576,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MIN_LIB_TESTS=46
+          EXPECTED_LIB_TESTS=67
           if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
             printf '%s\n' "$lib_out"
             echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
@@ -588,11 +588,11 @@ jobs:
             echo "W4C-5 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
             exit 1
           fi
-          if [ "$lib_tests" -lt "$MIN_LIB_TESTS" ]; then
-            echo "W4C-5 tooling unit tests: only $lib_tests subtests ran, expected at least $MIN_LIB_TESTS" >&2
+          if [ "$lib_tests" -ne "$EXPECTED_LIB_TESTS" ]; then
+            echo "W4C-5 tooling unit tests: $lib_tests subtests ran, expected exactly $EXPECTED_LIB_TESTS" >&2
             exit 1
           fi
-          echo "W4C-5 tooling unit tests: $lib_tests subtests ran (floor $MIN_LIB_TESTS)."
+          echo "W4C-5 tooling unit tests: exactly $lib_tests subtests ran."
 
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is

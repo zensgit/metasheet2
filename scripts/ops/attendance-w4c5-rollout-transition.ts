@@ -143,7 +143,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       'Usage: attendance-w4c5-rollout-transition.ts plan --org <uuid> --target <state>\n' +
         '       attendance-w4c5-rollout-transition.ts apply --org <uuid> --target <state> ' +
         '--expected-state <state> --expected-version <n> --plan-digest <hex64> ' +
-        '--confirm <token> --manifest <path> --actor-id <text> --correlation-id <uuid> ' +
+        '--confirm <token> --manifest <path> ' +
+        '--actor-id <text> --correlation-id <uuid> ' +
         '--engine-version <text>\n',
     )
     return ATTENDANCE_W4C5_EXIT_ARGS_INVALID_V1

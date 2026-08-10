@@ -50,6 +50,7 @@ const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 const ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 const CLI_PATH = join(process.cwd(), '..', '..', 'scripts', 'ops', 'attendance-w4c5-rollout-transition.ts')
 const TSX_CLI = join(process.cwd(), '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs')
+const IMAGE_SHA = '1'.repeat(40)
 
 function hex64(seed: string): string {
   return crypto.createHash('sha256').update(seed).digest('hex')
@@ -198,7 +199,7 @@ function baseManifest(overrides: Record<string, unknown> = {}): Record<string, u
     collectedAt: new Date().toISOString(),
     orgId: overrides.orgId,
     targetState: overrides.targetState,
-    imageSha: 'sha-tool-test',
+    imageSha: IMAGE_SHA,
     pendingMigrations: 0,
     serviceHealthy: true,
     ownerAuthorizationRef: 'owner-ref-tool-test',
@@ -228,7 +229,11 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     const result = spawnSync(process.execPath, [TSX_CLI, CLI_PATH, ...argv], {
       encoding: 'utf8',
       cwd: join(process.cwd()),
-      env: { ...process.env, DATABASE_URL: dbUrl?.replace(/\/[^/]+$/, `/${scratchName}`), [ALLOWLIST_ENV]: [...allowlisted].join(',') },
+      env: {
+        ...process.env,
+        DATABASE_URL: dbUrl?.replace(/\/[^/]+$/, `/${scratchName}`),
+        [ALLOWLIST_ENV]: [...allowlisted].join(','),
+      },
       timeout: 30_000,
     })
     return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }

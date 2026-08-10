@@ -129,16 +129,15 @@ export function isAuthorityPromotionPairV1(from: AttendanceRolloutStateV1, to: A
 
 // ---------------------------------------------------------------------------
 // Evidence manifest (amendment section 4). Collected by the operator immediately before
-// transition; this module validates its SHAPE only (presence, type, pattern, freshness,
-// cross-match against the claimed org/target) — it never independently re-verifies a fact this
-// manifest asserts against the real world (that a deployed image SHA is actually running, that
-// migrations are actually zero-pending, etc.). Those verifications are the operator's own,
-// outside this tool's reach; this tool only refuses a manifest that is absent, malformed, stale,
-// or names a different org/target than the CLI invocation claims — exactly section 4's own words.
+// transition; this module validates its SHAPE only (presence, type, pattern, freshness, and
+// cross-match against the claimed org/target). It never independently re-verifies facts asserted
+// by the separately authorized evidence packet, including which image is deployed. That external
+// verification remains the operator's responsibility under amendment section 4.
 // ---------------------------------------------------------------------------
 const REF_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const WORK_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+const DEPLOYED_IMAGE_SHA_PATTERN = /^[0-9a-f]{40}$/
 
 export const ATTENDANCE_W4C5_MANIFEST_BASE_KEYS_V1 = Object.freeze([
   'schemaVersion',
@@ -221,6 +220,25 @@ function requireRefString(value: unknown): string {
   return value
 }
 
+function requireDeployedImageSha(value: unknown): string {
+  if (typeof value !== 'string' || !DEPLOYED_IMAGE_SHA_PATTERN.test(value)) {
+    failTool('W4C5_TOOL_MANIFEST_INVALID')
+  }
+  return value
+}
+
+function isCanonicalWorkDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !WORK_DATE_PATTERN.test(value)) return false
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(0)
+  date.setUTCHours(0, 0, 0, 0)
+  date.setUTCFullYear(year, month - 1, day)
+  const roundTrip = [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()]
+    .map((part, index) => String(part).padStart(index === 0 ? 4 : 2, '0'))
+    .join('-')
+  return roundTrip === value
+}
+
 function requireLiteralZero(value: unknown): 0 {
   if (value !== 0) failTool('W4C5_TOOL_MANIFEST_INVALID')
   return 0
@@ -237,9 +255,9 @@ function requireLiteralFalse(value: unknown): false {
 }
 
 /**
- * Validates manifest SHAPE and cross-matches it against the CLI-claimed org/target/expected
- * pair, then derives the boundary's small opaque `evidenceReferences` object and the manifest
- * hash FROM the validated manifest — the operator never enters those reference strings twice.
+ * Validates manifest SHAPE and cross-matches it against the CLI-claimed org/target/expected pair,
+ * then derives the boundary's small opaque `evidenceReferences` object and the manifest hash FROM
+ * the validated manifest — the operator never enters those reference strings twice.
  * `nowMs` is injected (never `Date.now()` read internally) so freshness is testable without
  * real-clock flakiness.
  */
@@ -276,7 +294,7 @@ export function validateAttendanceW4C5ManifestV1(
   }
   if (input.targetState !== context.targetState) failTool('W4C5_TOOL_MANIFEST_TARGET_MISMATCH')
 
-  const imageSha = requireRefString(input.imageSha)
+  const imageSha = requireDeployedImageSha(input.imageSha)
   requireLiteralZero(input.pendingMigrations)
   requireLiteralTrue(input.serviceHealthy)
   const ownerAuthorizationRef = requireRefString(input.ownerAuthorizationRef)
@@ -291,7 +309,7 @@ export function validateAttendanceW4C5ManifestV1(
     if (!Array.isArray(days) || days.length !== 7) failTool('W4C5_TOOL_MANIFEST_INVALID')
     const seen = new Set<string>()
     for (const day of days) {
-      if (typeof day !== 'string' || !WORK_DATE_PATTERN.test(day) || !Number.isFinite(Date.parse(day))) {
+      if (!isCanonicalWorkDate(day)) {
         failTool('W4C5_TOOL_MANIFEST_INVALID')
       }
       seen.add(day)

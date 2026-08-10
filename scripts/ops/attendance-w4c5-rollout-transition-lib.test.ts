@@ -63,6 +63,15 @@ const ORG = '11111111-1111-1111-1111-111111111111'
 const OTHER_ORG = '22222222-2222-2222-2222-222222222222'
 const CORR = '33333333-3333-3333-3333-333333333333'
 const NOW = Date.parse('2026-08-09T12:00:00.000Z')
+const IMAGE_SHA = '1'.repeat(40)
+
+function manifestContext(
+  expectedState: 'legacy' | 'shadow' | 'eligible' | 'authoritative' | 'suspended',
+  targetState: 'legacy' | 'shadow' | 'eligible' | 'authoritative' | 'suspended',
+  orgId = ORG,
+) {
+  return { orgId, expectedState, targetState }
+}
 
 function baseManifest(overrides: Record<string, unknown> = {}) {
   return {
@@ -70,7 +79,7 @@ function baseManifest(overrides: Record<string, unknown> = {}) {
     collectedAt: new Date(NOW).toISOString(),
     orgId: ORG,
     targetState: 'shadow',
-    imageSha: 'sha-image-123',
+    imageSha: IMAGE_SHA,
     pendingMigrations: 0,
     serviceHealthy: true,
     ownerAuthorizationRef: 'owner-ref-1',
@@ -124,11 +133,11 @@ test('isAuthorityPromotionPairV1 is true only for eligible -> authoritative', ()
 test('validateAttendanceW4C5ManifestV1 accepts a well-formed base manifest and derives evidence', () => {
   const result = validateAttendanceW4C5ManifestV1(
     baseManifest(),
-    { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' },
+    manifestContext('legacy', 'shadow'),
     NOW,
   )
   assert.deepEqual(result.evidenceReferences, {
-    imageSha: 'sha-image-123',
+    imageSha: IMAGE_SHA,
     ownerAuthorizationRef: 'owner-ref-1',
     syntheticOrgRef: 'synthetic-ref-1',
   })
@@ -136,11 +145,21 @@ test('validateAttendanceW4C5ManifestV1 accepts a well-formed base manifest and d
   assert.equal(result.evidenceManifestSha256.length, 64)
 })
 
+test('validateAttendanceW4C5ManifestV1 rejects a non-canonical image identity', () => {
+  for (const bad of ['sha-image-123', 'A'.repeat(40), '1'.repeat(39), `sha256:${'1'.repeat(64)}`]) {
+    assert.throws(
+      () => validateAttendanceW4C5ManifestV1(baseManifest({ imageSha: bad }), manifestContext('legacy', 'shadow'), NOW),
+      (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
+      `expected ${JSON.stringify(bad)} to be rejected`,
+    )
+  }
+})
+
 test('validateAttendanceW4C5ManifestV1 rejects a missing required field', () => {
   const manifest = baseManifest() as Record<string, unknown>
   delete manifest.imageSha
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -148,7 +167,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a missing required field', () => 
 test('validateAttendanceW4C5ManifestV1 rejects an extra unexpected field', () => {
   const manifest = baseManifest({ unexpectedField: 'x' })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -156,7 +175,7 @@ test('validateAttendanceW4C5ManifestV1 rejects an extra unexpected field', () =>
 test('validateAttendanceW4C5ManifestV1 rejects pendingMigrations !== 0', () => {
   const manifest = baseManifest({ pendingMigrations: 1 })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -164,7 +183,7 @@ test('validateAttendanceW4C5ManifestV1 rejects pendingMigrations !== 0', () => {
 test('validateAttendanceW4C5ManifestV1 rejects customerData !== false', () => {
   const manifest = baseManifest({ customerData: true })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -172,7 +191,7 @@ test('validateAttendanceW4C5ManifestV1 rejects customerData !== false', () => {
 test('validateAttendanceW4C5ManifestV1 rejects an org mismatch with its own exclusive code', () => {
   const manifest = baseManifest()
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: OTHER_ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow', OTHER_ORG), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_ORG_MISMATCH',
   )
 })
@@ -180,7 +199,7 @@ test('validateAttendanceW4C5ManifestV1 rejects an org mismatch with its own excl
 test('validateAttendanceW4C5ManifestV1 rejects a target mismatch with its own exclusive code', () => {
   const manifest = baseManifest({ targetState: 'shadow' })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'eligible' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'eligible'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_TARGET_MISMATCH',
   )
 })
@@ -189,7 +208,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a stale manifest (older than the 
   const stale = new Date(NOW - 16 * 60 * 1000).toISOString()
   const manifest = baseManifest({ collectedAt: stale })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_STALE',
   )
 })
@@ -198,7 +217,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a manifest timestamped in the fut
   const future = new Date(NOW + 5 * 60 * 1000).toISOString()
   const manifest = baseManifest({ collectedAt: future })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_STALE',
   )
 })
@@ -206,7 +225,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a manifest timestamped in the fut
 test('validateAttendanceW4C5ManifestV1 accepts a manifest just inside the freshness window', () => {
   const fresh = new Date(NOW - 14 * 60 * 1000).toISOString()
   const manifest = baseManifest({ collectedAt: fresh })
-  const result = validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' }, NOW)
+  const result = validateAttendanceW4C5ManifestV1(manifest, manifestContext('legacy', 'shadow'), NOW)
   assert.equal(result.manifest.collectedAt, fresh)
 })
 
@@ -217,7 +236,7 @@ function authorityManifest(overrides: Record<string, unknown> = {}) {
   return baseManifest({
     targetState: 'authoritative',
     sevenDistinctCalendarDaysObserved: [
-      '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07',
+      '2024-02-23', '2024-02-24', '2024-02-25', '2024-02-26', '2024-02-27', '2024-02-28', '2024-02-29',
     ],
     criticalDiffCount: 0,
     unresolvedReviewCount: 0,
@@ -228,7 +247,7 @@ function authorityManifest(overrides: Record<string, unknown> = {}) {
 test('validateAttendanceW4C5ManifestV1 accepts a well-formed authority-promotion manifest', () => {
   const result = validateAttendanceW4C5ManifestV1(
     authorityManifest(),
-    { orgId: ORG, expectedState: 'eligible', targetState: 'authoritative' },
+    manifestContext('eligible', 'authoritative'),
     NOW,
   )
   assert.equal((result.manifest as unknown as { criticalDiffCount: number }).criticalDiffCount, 0)
@@ -239,7 +258,7 @@ test('validateAttendanceW4C5ManifestV1 rejects fewer than seven distinct calenda
     sevenDistinctCalendarDaysObserved: ['2026-08-01', '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'],
   })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'eligible', targetState: 'authoritative' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('eligible', 'authoritative'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -251,15 +270,30 @@ test('validateAttendanceW4C5ManifestV1 rejects seven days that are not all disti
     ],
   })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'eligible', targetState: 'authoritative' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('eligible', 'authoritative'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
+})
+
+test('validateAttendanceW4C5ManifestV1 rejects non-leap February and month-overflow calendar dates', () => {
+  for (const bad of ['2026-02-29', '2026-02-30', '2026-13-01']) {
+    const days = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', bad]
+    assert.throws(
+      () => validateAttendanceW4C5ManifestV1(
+        authorityManifest({ sevenDistinctCalendarDaysObserved: days }),
+        manifestContext('eligible', 'authoritative'),
+        NOW,
+      ),
+      (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
+      `expected ${bad} to be rejected`,
+    )
+  }
 })
 
 test('validateAttendanceW4C5ManifestV1 rejects an authority manifest missing the authority-only fields (base shape on an authority pair)', () => {
   const manifest = baseManifest({ targetState: 'authoritative' })
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'eligible', targetState: 'authoritative' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('eligible', 'authoritative'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -283,11 +317,11 @@ function resumeManifest(overrides: Record<string, unknown> = {}) {
 test('validateAttendanceW4C5ManifestV1 accepts a well-formed resume manifest and derives the five-key resume evidence', () => {
   const result = validateAttendanceW4C5ManifestV1(
     resumeManifest(),
-    { orgId: ORG, expectedState: 'suspended', targetState: 'authoritative' },
+    manifestContext('suspended', 'authoritative'),
     NOW,
   )
   assert.deepEqual(result.evidenceReferences, {
-    imageSha: 'sha-image-123',
+    imageSha: IMAGE_SHA,
     ownerAuthorizationRef: 'owner-ref-1',
     syntheticOrgRef: 'synthetic-ref-1',
     ownerIncidentReviewRef: 'incident-ref-1',
@@ -299,7 +333,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a resume-pair manifest missing of
   const manifest = resumeManifest() as Record<string, unknown>
   delete manifest.offlineReplayArtifactRef
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'suspended', targetState: 'authoritative' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('suspended', 'authoritative'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -307,7 +341,7 @@ test('validateAttendanceW4C5ManifestV1 rejects a resume-pair manifest missing of
 test('validateAttendanceW4C5ManifestV1 rejects resume-only fields present on a non-resume pair (closed key set)', () => {
   const manifest = resumeManifest()
   assert.throws(
-    () => validateAttendanceW4C5ManifestV1(manifest, { orgId: ORG, expectedState: 'eligible', targetState: 'authoritative' }, NOW),
+    () => validateAttendanceW4C5ManifestV1(manifest, manifestContext('eligible', 'authoritative'), NOW),
     (error: unknown) => error instanceof AttendanceW4C5ToolError && error.code === 'W4C5_TOOL_MANIFEST_INVALID',
   )
 })
@@ -633,7 +667,7 @@ test('parseAttendanceW4C5ApplyArgsV1 rejects a wildcard org (no wildcard admitte
 const APPLY_ARGS = parseAttendanceW4C5ApplyArgsV1(validApplyArgv())
 const VALIDATED_MANIFEST = validateAttendanceW4C5ManifestV1(
   baseManifest(),
-  { orgId: ORG, expectedState: 'legacy', targetState: 'shadow' },
+  manifestContext('legacy', 'shadow'),
   NOW,
 )
 
