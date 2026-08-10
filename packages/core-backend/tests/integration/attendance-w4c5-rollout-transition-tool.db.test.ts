@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
@@ -38,7 +38,10 @@ import {
   ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
   computeAttendanceW4C5PlanDigestV1,
 } from '../../../../scripts/ops/attendance-w4c5-rollout-transition-lib'
-import { __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests } from '../../src/attendance/w4c2-authoritative-delivery'
+import {
+  __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
+  isAttendanceW4C2AuthoritativeEntrypointDeliveredV1,
+} from '../../src/attendance/w4c2-authoritative-delivery'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -741,6 +744,21 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
   })
 
   describe('P2-1 (PR #4839 gate, 20260809): the idempotency short-circuit can no longer bypass --expected-state', () => {
+    // P3 fix (PR #4839 fresh-gate round, 20260810): the Gate D test seam
+    // (`__setAttendanceW4C2AuthoritativeDeliveryOverrideForTests`) is a module-level singleton
+    // with NO reset between vitest test cases. The A17 test below sets it, does one more DB call,
+    // then clears it — all inline in the `try` body, not in a `finally`. If that DB call ever
+    // throws, the clear is skipped and the override LEAKS into every subsequent test in this
+    // describe (and file), silently masking Gate D's production-default (undelivered) behaviour
+    // for tests that never touch the seam themselves. This `afterEach` is the backstop: it
+    // guarantees the override is reset after EVERY test in this describe regardless of how that
+    // test exits, so a future inline set-without-finally in this describe still cannot leak past
+    // its own test. See the "Gate D test-seam hygiene" sub-describe below for the regression
+    // proof that this backstop is actually load-bearing (not dead code).
+    afterEach(() => {
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+    })
+
     async function directTransition(
       client: PoolClient,
       orgId: string,
@@ -843,10 +861,17 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         // an A17-manifest-weakness reproduction, unrelated to Gate D — override on for just this
         // one call, off immediately after, so it never leaks into the assertions below (which
         // must observe production-default behaviour for everything else in this test).
+        //
+        // P3 fix (PR #4839 fresh-gate round, 20260810): the clear used to sit inline in the try
+        // body, right after the call it guards — if `directTransition` below ever threw, the
+        // clear was skipped and the override leaked into every later test in this file (no
+        // afterEach existed at all before this fix). Moved into the enclosing `finally` so the
+        // module-level singleton is reset REGARDLESS of how this block exits; the describe-level
+        // `afterEach` added above is a second, independent backstop.
         __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
         await directTransition(client, orgId, 'authoritative', 'eligible', 3) // v4, prior='eligible'
-        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
       } finally {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
         client.release()
       }
       expect(await rolloutRow(orgId)).toEqual({ state: 'authoritative', version: 4 })
@@ -875,6 +900,28 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(applyResult.stderr).toContain('W4C5_TOOL_PLAN_DIGEST_MISMATCH')
       expect(await rolloutRow(orgId)).toEqual({ state: 'authoritative', version: 4 })
       expect(await eventCount(orgId)).toBe(3)
+    })
+
+    // P3 regression (PR #4839 fresh-gate round, 20260810): proves the describe-level `afterEach`
+    // added above is an actual, load-bearing safety net — not dead code sitting next to a fixed
+    // call site. Test (A) deliberately sets the Gate D test seam and does NOT clear it itself
+    // (simulating a throw between set and clear, the exact class of bug fixed above). Test (B),
+    // which vitest always runs after (A)'s `afterEach` fires regardless of (A)'s outcome, asserts
+    // production-default (undelivered) values are observed. If the file-level backstop is ever
+    // removed AND the A17 fix above is ever reverted to its unguarded inline form, (B) reds.
+    describe('Gate D test-seam hygiene: the describe-level afterEach backstop is load-bearing', () => {
+      it('(A) sets the Gate D override and relies ENTIRELY on the surrounding afterEach to clear it (no explicit clear in this test)', () => {
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false) // sanity: starts clean
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true) // sanity: override is live
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(true)
+        // No clear here, deliberately — proving the afterEach above is what cleans this up.
+      })
+
+      it('(B) the override set by (A) has not leaked into this test — proves the afterEach backstop actually ran', () => {
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false)
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
+      })
     })
   })
 
