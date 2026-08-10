@@ -46,7 +46,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { dropScratchDatabase, formatScratchDropFailure, formatScratchDropOutcome } from '../helpers/scratch-database'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 import type { MetaSheetServer } from '../../src/index'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -137,6 +142,8 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   let pool: Pool
   let adminPool: Pool
   let scratchName: string
+  /** MetaSheetServer singleton internal Pool — the #4820 57P01 emitter after forced scratch drop. */
+  let serverInternalPool: Pool | undefined
   let baseUrl = ''
   let token = ''
 
@@ -236,7 +243,10 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
     // Default-off, unset — the exact shipped state this fix targets.
     delete process.env.ENABLE_BPMN_TIMER_POLLER
 
+    // Import AFTER DATABASE_URL is rebound so poolManager binds to the scratch DB.
     const loaded = await import('../../src/index')
+    const { poolManager } = await import('../../src/integration/db/connection-pool')
+    serverInternalPool = poolManager.get().getInternalPool()
     server = new loaded.MetaSheetServer({ port: 0, host: '127.0.0.1' })
     await server.start()
     const address = server.getAddress()
@@ -249,6 +259,11 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   }, 120000)
 
   afterAll(async () => {
+    // #4820: teardown-scoped handlers on the server singleton internal Pool (primary) and the
+    // suite data Pool. Attach only here so body-time FATALs stay loud; keep through stop+drop.
+    const teardownHandlers = [serverInternalPool, pool]
+      .filter((p): p is Pool => Boolean(p))
+      .map((p) => attachOwnedPoolTerminationHandler(p))
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
     // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
@@ -270,6 +285,7 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
       }
     }
     await adminPool?.end().catch(() => undefined)
+    for (const h of teardownHandlers) h.detach()
     for (const [key, value] of Object.entries({
       DATABASE_URL: priorEnv.databaseUrl,
       SKIP_PLUGINS: priorEnv.skipPlugins,
