@@ -445,6 +445,8 @@ const PREDICATE_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPredic
   code: 'RETRYABLE_JOB_POSTURE_MISMATCH',
   applicable: false,
   pass: false,
+  // Deliberately NOT compared against `firstPredicate`'s `count` (which is `null`, see below) —
+  // see the `count`-specific branch in the loop for why.
   count: 999,
 }
 
@@ -458,6 +460,31 @@ test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY singl
     'AttendanceRolloutTransitionPredicateV1 field count changed — update PREDICATE_FIELD_ALTERNATES above',
   )
   for (const key of keys) {
+    if (key === 'count') {
+      // F3 (PR #4839 P3 gate, 20260810): `firstPredicate.count` is `null` in `FULL_PLAN`, so
+      // mutating it to ANY non-null value (including a value-bucketing mutant that collapses
+      // every non-null count to the same constant) crosses the null/non-null boundary and makes
+      // the digest change for that reason alone — proving `count` is PRESENT in the digest, never
+      // that its VALUE is preserved. A mutant that replaced `count: predicate.count` with
+      // `count: predicate.count === null ? null : 1` (bucketing every non-null count to `1`)
+      // left this row green. Prove VALUE preservation instead, using the SECOND predicate, whose
+      // baseline `count` is the non-null `0`, mutated to a DIFFERENT non-null value — the
+      // bucketing mutant collapses both to `1` and this assertion reds.
+      const secondPredicate = FULL_PLAN.predicates[1]
+      assert.equal(
+        secondPredicate.count,
+        0,
+        'fixture drifted — this row assumes a non-null baseline count on predicates[1]; update it or re-pick a non-null baseline predicate',
+      )
+      const mutatedSecond = { ...secondPredicate, count: PREDICATE_FIELD_ALTERNATES.count } as AttendanceRolloutTransitionPredicateV1
+      const mutatedPlan: AttendanceRolloutTransitionPlanV1 = {
+        ...FULL_PLAN,
+        predicates: [FULL_PLAN.predicates[0], mutatedSecond],
+      }
+      const digest = computeAttendanceW4C5PlanDigestV1(mutatedPlan)
+      assert.notEqual(digest, baseline, `mutating predicate field 'count' (non-null baseline 0 -> non-null 999) must change the digest`)
+      continue
+    }
     const mutatedPredicate = { ...firstPredicate, [key]: PREDICATE_FIELD_ALTERNATES[key] } as AttendanceRolloutTransitionPredicateV1
     const mutatedPlan: AttendanceRolloutTransitionPlanV1 = {
       ...FULL_PLAN,
