@@ -645,7 +645,7 @@ export const ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 = 1
 //    `transitionAttendanceCalculationRolloutV1`, whenever the target is an
 //    ELIGIBILITY_AUTHORITY_TARGETS state) calls the live-side
 //    `computeAttendanceRequestPayloadFingerprintV1` UNWRAPPED (no try/catch — unlike its
-//    stored-side sibling call two lines above, which deliberately swallows the same throw into
+//    stored-side sibling call two lines below, which deliberately swallows the same throw into
 //    `null`). That class's constructor takes `(code, statusCode, message)` and calls
 //    `super(message)` — a fixed human sentence, never equal to `code` — so it never matched the
 //    marker and fell to the internal-error bucket anyway. It is DELIBERATELY not in this list
@@ -683,9 +683,15 @@ export const ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 = 1
 // core-backend (file-header comment, CJS/ESM interop hazard) — none of these three classes can
 // be `instanceof`-checked here. This IS the fragile shape the marker round tried to fix (a new
 // class in this family needs a human decision to be added here) — the companion "mechanical
-// sweep" test in this file's `.test.ts` fails closed if a new `Attendance*Error` class shows up
-// in any of the files that trace covered, without an explicit decision recorded there, so the
-// rot is caught rather than silent. Exported (not module-private) so that same test asserts THIS
+// sweep" test in this file's `.test.ts` narrows the window in which that rot stays silent.
+// Its domain, stated exactly rather than as "any new class", because an earlier version of this
+// sentence claimed more than the regex delivered and a subclass declaration walked straight
+// through it (MUT-2, PR #4839 gate, 20260810): the sweep reads the FIVE files listed in the test
+// (the depth-1 imports of `w4c3a-rollout-control.ts`) and fails closed on any declaration
+// spelled `export class Attendance<...>Error extends Error` or
+// `export class Attendance<...>Error extends Attendance<...>Error` that is not decided there.
+// It does NOT cover: a class in a depth-2 file, a class named outside the `Attendance*Error`
+// convention, or one extending some other base. Those remain silent. Exported (not module-private) so that same test asserts THIS
 // production list — never a hand-copied duplicate, which would drift silently exactly like the
 // defect this whole exercise is closing.
 export const ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 = Object.freeze([

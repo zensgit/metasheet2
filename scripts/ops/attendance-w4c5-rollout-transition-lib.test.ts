@@ -894,12 +894,25 @@ const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
   'AttendanceRequestSnapshotError',
   'AttendanceW4RegistryError',
 ]
-const ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE = /export class (Attendance\w*Error) extends Error/g
+// The base-class alternation is load-bearing, not defensive breadth. With `extends Error` alone,
+// `export class AttendanceW4FooError extends AttendanceW4IdentityError` — a subclass of a class
+// this sweep already decided — did NOT match, stayed undecided, and silently took the
+// internal-error bucket while every test remained green (EXECUTED as MUT-2, PR #4839 gate,
+// 20260810: the sweep test stayed 58/58 under exactly that declaration).
+const ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE =
+  /export class (Attendance\w*Error) extends (?:Error|Attendance\w*Error)/g
 
 test('mechanical sweep control: the error-class-declaration regex actually fires on a synthetic sentence (a clean sweep below means "every class decided", not "the regex matched nothing")', () => {
   const synthetic = 'export class AttendanceSyntheticProbeError extends Error {\n  readonly code: string\n}'
   const matches = [...synthetic.matchAll(ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE)].map((m) => m[1])
   assert.deepEqual(matches, ['AttendanceSyntheticProbeError'])
+})
+
+test('mechanical sweep control: the regex also fires on a SUBCLASS declaration (the form that escaped it before — a subclass of an already-decided class is still a new, undecided class)', () => {
+  const synthetic =
+    'export class AttendanceW4SubclassProbeError extends AttendanceW4IdentityError {\n  readonly code: string\n}'
+  const matches = [...synthetic.matchAll(ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE)].map((m) => m[1])
+  assert.deepEqual(matches, ['AttendanceW4SubclassProbeError'])
 })
 
 test('mechanical sweep: every Attendance*Error class declared in the reachable call-graph files is explicitly decided (boundary-refused or not) — no silent default for a new class', () => {

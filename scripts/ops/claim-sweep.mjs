@@ -52,6 +52,15 @@ import { execFileSync } from 'node:child_process'
 // Pattern definitions
 // ---------------------------------------------------------------------------
 
+// A NAMED LIST, not a closed one. This is the sweep's own load-bearing limitation and it is stated
+// here rather than left for a reader to discover: the `--self-test` battery proves each phrase
+// BELOW fires, which is evidence that the implemented patterns work — it is NOT evidence that the
+// vocabulary is complete, and a clean run therefore means "no listed phrase found", never "this
+// text makes no absolute claims". Measured, not asserted (PR #4839 gate, 20260810): the original
+// ten-phrase list scored ZERO rows on the sentence "none of the reachable classes is impossible to
+// bucket, and this module is the sole arbiter; any subclass must inherit the exact same bucket
+// without exception" — five absolute claims, all invisible. The six phrases that sentence exposed
+// are now listed; the next such sentence will expose more. Add them when it does.
 const QUANTIFIER_PHRASES = [
   'every',
   'all',
@@ -63,6 +72,14 @@ const QUANTIFIER_PHRASES = [
   'exhaustively',
   'only',
   'guaranteed',
+  // Added after the miss described above.
+  'none',
+  'any',
+  'must',
+  'impossible',
+  'sole',
+  'solely',
+  'without exception',
 ]
 
 function buildQuantifierRegex() {
@@ -103,6 +120,13 @@ const SELF_TESTS = [
   { name: 'quantifier: exhaustively', re: buildQuantifierRegex, positive: 'Checked exhaustively.', negative: 'The search was thorough.' },
   { name: 'quantifier: only', re: buildQuantifierRegex, positive: 'It only matches boundary classes.', negative: 'This is a commonly used pattern.' },
   { name: 'quantifier: guaranteed', re: buildQuantifierRegex, positive: 'This is guaranteed to work.', negative: 'This is not guaranteed-sounding at all, wait — drop this line.', skipNegative: true },
+  { name: 'quantifier: none', re: buildQuantifierRegex, positive: 'None of the classes match.', negative: 'The nonexistent file was skipped.' },
+  { name: 'quantifier: any', re: buildQuantifierRegex, positive: 'Any subclass inherits the bucket.', negative: 'The build anyway completed.' },
+  { name: 'quantifier: must', re: buildQuantifierRegex, positive: 'It must fail closed.', negative: 'The mustard jar sat there.' },
+  { name: 'quantifier: impossible', re: buildQuantifierRegex, positive: 'That state is impossible.', negative: 'The task was difficult.' },
+  { name: 'quantifier: sole', re: buildQuantifierRegex, positive: 'This module is the sole arbiter.', negative: 'The console logged it.' },
+  { name: 'quantifier: solely', re: buildQuantifierRegex, positive: 'It relies solely on the pin.', negative: 'The solenoid clicked.' },
+  { name: 'quantifier: without exception', re: buildQuantifierRegex, positive: 'It holds without exception.', negative: 'Without exceptions listed, review stalls.' },
   {
     name: 'sha-like token',
     re: () => SHA_CANDIDATE_RE,
@@ -116,6 +140,23 @@ const SELF_TESTS = [
 
 function runSelfTests() {
   const failures = []
+  // Coverage control, and the reason it exists: SELF_TESTS is a hand-written list, and
+  // QUANTIFIER_PHRASES is a hand-written list, and nothing forced them to agree. They drifted the
+  // first time a phrase was added — seven new phrases landed with zero new controls and the banner
+  // still reported the OLD pattern count, which is the precise shape ("a hand-copied duplicate that
+  // drifts silently") this tool's own sibling docblock condemns. Derived from the vocabulary now,
+  // so adding a phrase without a control fails the sweep instead of quietly widening its blind spot.
+  const controlled = new Set(
+    SELF_TESTS.filter((t) => t.name.startsWith('quantifier: ')).map((t) => t.name.slice('quantifier: '.length)),
+  )
+  for (const phrase of QUANTIFIER_PHRASES) {
+    if (!controlled.has(phrase)) {
+      failures.push(
+        `quantifier vocabulary: ${JSON.stringify(phrase)} is in QUANTIFIER_PHRASES but has no self-test — ` +
+          'add one (a synthetic positive AND a near-miss negative) so a clean sweep still means "none found"',
+      )
+    }
+  }
   for (const test of SELF_TESTS) {
     const re = test.re()
     const positiveMatches = [...test.positive.matchAll(re)].map((m) => m[0]).filter((t) => (test.filter ? test.filter(t) : true))
