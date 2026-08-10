@@ -149,13 +149,16 @@ describe('W6-R1 static leg — the swept DOMAIN is derived and complete', () => 
  * performs — is the mechanism that keeps it inside W6-R1's "no write
  * anywhere on the call path" claim.
  *
- * `REQUIRED_IN_DOMAIN` above pins `rbac/service.ts` at FILE granularity;
- * that alone is not enough, because a different declaration in the same
- * file (`userHasPermission`) could keep the FILE in-domain even if THIS
- * declaration's own reachability broke. This block pins the declaration
- * itself — narrower than a file floor, not a whole-file scan: everything
- * here operates on `isAdmin`'s own extracted unit text, never on
- * `rbac/service.ts`'s full source.
+ * `rbac/service.ts` is NOT in `REQUIRED_IN_DOMAIN` above — that list has no
+ * entry for it at any granularity. The assertions in this block are what pin
+ * it, and they do so at DECLARATION granularity: everything here operates on
+ * `isAdmin`'s own extracted unit text, never on `rbac/service.ts`'s full
+ * source, so this is deliberately not a whole-file scan.
+ *
+ * Declaration granularity is also the right level independently of that: a
+ * file-level floor would stay satisfied by a different declaration in the same
+ * file (`userHasPermission`) even if THIS declaration's own reachability
+ * broke.
  */
 describe('W6-R1 static leg — the platform-admin short-circuit (rbac/service.ts::isAdmin) is pinned by DECLARATION', () => {
   const ISADMIN_FILE = 'packages/core-backend/src/rbac/service.ts'
