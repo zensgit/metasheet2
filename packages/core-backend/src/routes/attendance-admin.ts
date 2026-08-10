@@ -19,6 +19,7 @@ import {
   runAttendanceSetupReadinessReadOnly,
   type AttendanceSetupReadinessOrgCounts,
   type AttendanceSetupReadinessNotify,
+  type AttendanceSetupReadinessQueryFn,
   type AttendanceSetupReadinessPerStepEntry,
   type AttendanceSetupStepId,
   type AttendancePunchPolicyPosture,
@@ -50,8 +51,133 @@ import {
   readAttendanceCalculationDetail,
   readAttendanceW4ShadowBacklog,
 } from '../services/AttendanceW4CalculationDetail'
+import {
+  AttendanceGroupEffectivePolicyServiceError,
+  createAttendanceGroupEffectivePolicyAggregateService,
+  type AttendanceGroupEffectivePolicyFserServiceLike,
+} from '../attendance/w6-group-effective-policy-aggregate'
+import { requirePluginAttendanceLib } from '../util/resolve-plugin-attendance-lib'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// W6-1 (#4556): the aggregate composes the existing FSER service, required
+// directly from its canonical `.cjs` module (the same pattern the real-DB
+// tests already use:
+// `packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts`).
+// No second effectiveness derivation (W6-R4) and no plugin-activation side
+// effects: this file only defines pure functions and a factory.
+//
+// Resolved via `requirePluginAttendanceLib(__dirname, …)` rather than a
+// literal relative path, because the compiled output's directory depth
+// differs from the source tree's — see `../util/resolve-plugin-attendance-lib`.
+const attendanceGroupFixedScheduleEffectivenessServiceLib = requirePluginAttendanceLib<{
+  createAttendanceGroupFixedScheduleEffectivenessService: (deps: {
+    HttpError: new (status: number, code: string, message: string) => Error
+    buildAttendanceGroupFixedScheduleProducerKey: (input: {
+      groupId: string
+      shiftId: string
+      startDate: string
+      endDate: string | null
+    }) => string
+    now?: () => string
+  }) => AttendanceGroupEffectivePolicyFserServiceLike
+}>(__dirname, 'attendance-group-fixed-schedule-effectiveness-service.cjs')
+const attendanceShiftServiceLib = requirePluginAttendanceLib<{
+  SEGMENT_CALCULATION_IMPLEMENTED: boolean
+}>(__dirname, 'attendance-shift-service.cjs')
+// W6-R4: the canonical producer key, the same function
+// `plugins/plugin-attendance/index.cjs` delegates to. Injecting it here is
+// what makes the two FSER instances (this route's and the plugin's) key on
+// one implementation instead of on an argued equivalence between two.
+const attendanceGroupFixedScheduleProducerKeyLib = requirePluginAttendanceLib<{
+  buildAttendanceGroupFixedScheduleProducerKey: (input: {
+    groupId: string
+    shiftId: string
+    startDate: string
+    endDate: string | null
+  }) => string
+}>(__dirname, 'attendance-group-fixed-schedule-producer-key.cjs')
+
+/**
+ * One injected clock for both timestamps in a `/effective-policy` body: the
+ * aggregate's own `evaluatedAt` and the embedded
+ * `domains.schedule.fixedSchedule.evaluatedAt` are both provably equal under
+ * a fixed clock, which the unit suite asserts. (In production the two
+ * `now()` calls still happen at slightly different moments — this makes one
+ * injection point, not one atomic read.)
+ */
+const attendanceGroupEffectivePolicyNow = (): string => new Date().toISOString()
+
+const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEffectivenessServiceLib.createAttendanceGroupFixedScheduleEffectivenessService(
+  {
+    HttpError: AttendanceGroupEffectivePolicyServiceError,
+    buildAttendanceGroupFixedScheduleProducerKey:
+      attendanceGroupFixedScheduleProducerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+    now: attendanceGroupEffectivePolicyNow,
+  },
+)
+
+/**
+ * W6-R1 structural backstop. The aggregate service is built PER REQUEST,
+ * inside the read-only transaction, bound to that transaction's client —
+ * there is no pool-bound aggregate service anywhere in this file.
+ *
+ * `runAttendanceSetupReadinessReadOnly` (W4-0, `services/AttendanceSetupReadinessAggregate.ts`)
+ * is reused rather than reinvented: it issues `SET TRANSACTION READ ONLY` as
+ * the first statement of the transaction, so PostgreSQL itself refuses every
+ * subsequent write on that handle with SQLSTATE 25006, regardless of
+ * statement shape or how it was composed.
+ *
+ * The static sweep in `tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`
+ * is a second, independent leg over this module's own call-path closure —
+ * not a substitute for the transaction, which is the mechanism of record.
+ */
+function createAttendanceGroupEffectivePolicyReadOnlyService(
+  readOnlyQuery: AttendanceSetupReadinessQueryFn,
+): ReturnType<typeof createAttendanceGroupEffectivePolicyAggregateService> {
+  return createAttendanceGroupEffectivePolicyAggregateService({
+    // Named `query` deliberately: the DB-seam sweep resolves an adapter's
+    // name from its object-literal property, and this is the seam.
+    query: async (sql: string, params?: unknown[]) => (await readOnlyQuery(sql, params)).rows,
+    fser: attendanceGroupEffectivePolicyFserService,
+    now: attendanceGroupEffectivePolicyNow,
+    segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
+  })
+}
+
+/**
+ * W6-1 (#4556) §4.1: org identity for the group effective-policy route comes
+ * only from the authenticated principal — the #4711 §3.2 rules applied
+ * verbatim, mirroring `resolveAttendanceFixedScheduleRouteActorContext` in
+ * `plugins/plugin-attendance/index.cjs` so the same JWT authenticates
+ * identically on both the CJS FSER route and this TS route. Never
+ * `req.query.orgId` — this route accepts no query parameters at all.
+ */
+function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): string | null {
+  const raw = req.user as Record<string, unknown> | undefined
+  const claim = raw?.orgId ?? raw?.workspaceId
+  if (typeof claim === 'string' && claim.trim()) return claim.trim()
+  if (typeof claim === 'number' && Number.isFinite(claim)) return String(claim)
+  const tenant = req.authenticatedTenantId
+  if (typeof tenant === 'string' && tenant.trim()) return tenant.trim()
+  return null
+}
+
+/**
+ * True when a client-supplied `x-org-id` header is present and does not
+ * byte-equal the authenticated org — the request must fail before any
+ * aggregate SQL (W6-R3).
+ *
+ * A present-but-empty `x-org-id` is treated as a mismatch (the predicate
+ * tests presence, not non-empty presence). That is fail-closed by
+ * construction; relaxing it to ignore an empty header is a separate,
+ * deliberate change this route does not make.
+ */
+function attendanceGroupEffectivePolicyOrgSelectorMismatch(req: Request, orgId: string): boolean {
+  const headerValue = req.headers['x-org-id']
+  const header = Array.isArray(headerValue) ? headerValue[0] : headerValue
+  return header !== undefined && String(header) !== orgId
+}
 
 function readStrictString(value: unknown): string | null {
   return typeof value === 'string' ? value.trim() : null
@@ -1582,6 +1708,89 @@ export function attendanceAdminRouter(): Router {
       return jsonError(res, 500, 'CALCULATION_SHADOW_BACKLOG_FAILED', 'Failed to load shadow backlog')
     }
   })
+
+  // W6-1 (#4556): group effective-policy READ aggregate. GET-only (W6-R1);
+  // permission `attendance:admin` (aligned with the FSER v1 read route per
+  // design-lock §4.1); org identity from the authenticated principal only,
+  // with a delegated-admin active-org-membership gate on top (W6-R3, parent
+  // lock §3.5 — full/platform admins bypass this second gate via
+  // `canReadAttendanceDirectoryReadiness`'s own bypass, but never bypass
+  // org-identity derivation itself); composes the existing FSER service
+  // (W6-R4); accepts no state-selecting query parameter and no
+  // state-bearing request body (W6-R7).
+  r.get(
+    '/api/attendance/groups/:groupId/effective-policy',
+    rbacGuard('attendance', 'admin'),
+    async (req: Request, res: Response) => {
+      try {
+        // W6-R7: the route accepts no state-selecting query parameter and
+        // no state-bearing body. Presence of either is rejected before
+        // aggregate SQL runs. This also covers a `?orgId=` "query-org"
+        // spoofing attempt, since there is no legitimate query parameter on
+        // this route at all.
+        //
+        // An empty JSON body (`{}`, or an unparsed content type) carries no
+        // state and is deliberately allowed — the lock states this
+        // verbatim. Both boundaries are pinned by tests.
+        if (Object.keys(req.query).length > 0) {
+          return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no query parameters')
+        }
+        if (req.body && typeof req.body === 'object' && Object.keys(req.body as Record<string, unknown>).length > 0) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no request body fields')
+        }
+
+        const userId = getAttendanceAdminRequestUserId(req)
+        if (!userId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+
+        const orgId = getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req)
+        if (!orgId) return jsonError(res, 403, 'FORBIDDEN', 'Authenticated organization not found')
+        if (attendanceGroupEffectivePolicyOrgSelectorMismatch(req, orgId)) {
+          return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
+        }
+
+        // W6-R1: everything from here on that runs through `readOnlyQuery`
+        // shares one `SET TRANSACTION READ ONLY` transaction — the
+        // membership check, the groupId validation, and the aggregate's and
+        // FSER's reads, all on the same handle. The membership gate is
+        // deliberately inside the transaction rather than before it, so its
+        // read shares the aggregate's and FSER's read-only client rather
+        // than running on the pool.
+        //
+        // A delegated-non-member 403 and an invalid-groupId 400 still open a
+        // transaction (read-only, rolled back with nothing in it); the
+        // ordering guarantee this route asserts is "no aggregate SQL before
+        // authorization", not "zero transactions" (that guarantee belongs to
+        // the setup-readiness route, not this one).
+        const aggregate = await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId, readOnlyQuery)
+          if (!allowed) {
+            throw new AttendanceGroupEffectivePolicyServiceError(
+              403,
+              'FORBIDDEN',
+              'Org membership required for effective-policy',
+            )
+          }
+
+          const groupId = String(req.params.groupId || '').trim()
+          if (!UUID_RE.test(groupId)) {
+            throw new AttendanceGroupEffectivePolicyServiceError(400, 'GROUP_ID_INVALID', 'groupId must be a UUID')
+          }
+
+          return createAttendanceGroupEffectivePolicyReadOnlyService(readOnlyQuery).getAggregate({ orgId, groupId })
+        })
+        return jsonOk(res, aggregate)
+      } catch (error) {
+        if (error instanceof AttendanceGroupEffectivePolicyServiceError) {
+          return jsonError(res, error.status, error.code, error.message)
+        }
+        if (isDatabaseSchemaError(error)) {
+          return jsonError(res, 503, 'DB_NOT_READY', 'Attendance group tables missing')
+        }
+        // Values-free seam: never leak raw DB / driver messages to the client.
+        return jsonError(res, 500, 'EFFECTIVE_POLICY_FAILED', 'Failed to load group effective policy')
+      }
+    },
+  )
 
   return r
 }

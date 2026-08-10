@@ -133,7 +133,13 @@ components:
         kind:
           type: string
           description: Closed configuration-source kinds (config IDs only, never user IDs).
-          enum: [shift, rule_set, fixed_schedule_config, schedule_group]
+          # AUTHORITY: `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1` in
+          # `packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts`.
+          # The runtime validator imports it and the exported TS `kind` union is derived
+          # from it. This YAML enum is a hand-kept third face; a unit test
+          # (`…-response-contract.test.ts`) parses this enum and asserts set-equality
+          # with that constant, so it reds if either side moves.
+          enum: [shift, rule_set, fixed_schedule_config]
         id:
           type: string
           format: uuid
@@ -173,7 +179,9 @@ components:
           properties:
             shiftId: { type: string, format: uuid }
             startDate: { type: string, format: date }
-            endDate: { type: string, format: date }
+            # Nullable by construction: the producer emits null for an
+            # open-ended managed row, and the underlying column is nullable.
+            endDate: { type: string, format: date, nullable: true }
             revision: { type: integer, minimum: 1 }
         coverage:
           type: object
@@ -202,7 +210,8 @@ components:
                 properties:
                   shiftId: { type: string, format: uuid }
                   startDate: { type: string, format: date }
-                  endDate: { type: string, format: date }
+                  # Nullable for the same reason as `desired.endDate` above.
+                  endDate: { type: string, format: date, nullable: true }
                   producerKey: { type: string }
                   rowCount: { type: integer, minimum: 1 }
         evaluatedAt:
