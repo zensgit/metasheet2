@@ -39,13 +39,19 @@
 //
 // A REAL fifth write to this table exists in the repository today, outside the owner's named
 // four: `scripts/ops/staging-attendance-report-sync-a2-smoke.mjs:724`, a `DELETE FROM
-// ${REPORT_SYNC_JOB_TABLE} ...` inside that staging smoke tool's own `cleanup()` routine. It is
-// NOT registered here — the owner named exactly four, and adding a fifth on this module's own
-// authority would be exactly the "broad debt waiver" the ruling forbids. It is intentionally left
-// to classify as `unclaimed` by operational-control-plane-classify.cjs against the real repo, so
-// it stays visible rather than silently absorbed or silently dropped. See the collector test
-// file's own assertion of this fact, and the handoff note for the disposition question this
-// leaves open for the owner.
+// ${REPORT_SYNC_JOB_TABLE} WHERE org_id = ANY($1::text[])` inside that staging smoke tool's own
+// `cleanup()` routine. The evidence read for this fifth site is WEAKER and of a DIFFERENT KIND
+// than the owner's four (which were checked against sanitizeAttendanceReportSyncJobLastResult's
+// explicit allowlist and executeAttendanceReportSyncJobPage's delegation, above): all that was
+// read here is the enclosing `cleanup()` function and the `WHERE org_id = ANY(...)` scoping —
+// enough to say it deletes job-cursor rows the smoke test itself created, scoped by org, and
+// nothing more. It is NOT registered here — the owner named exactly four, and adding a fifth on
+// this module's own authority would be exactly the "broad debt waiver" the ruling forbids, and
+// this thinner evidence read would not support that claim on its own even if scope allowed it.
+// It is intentionally left to classify as `unclaimed` by operational-control-plane-classify.cjs
+// against the real repo, so it stays visible rather than silently absorbed or silently dropped.
+// See the collector test file's own assertion of this fact — an open disposition question for
+// the owner, not resolved by this module.
 
 const OPERATIONAL_CONTROL_PLANE_REGISTRY = Object.freeze([
   Object.freeze({

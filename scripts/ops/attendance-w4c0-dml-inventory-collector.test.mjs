@@ -1775,6 +1775,30 @@ test('mutation probe 4: a FIFTH write added inside an already-registered symbol 
   assert.deepEqual(result.missing, [], 'overCount and missing are different failure modes — this leg must not also read as missing')
 })
 
+test('mutation probe 4b: the SQL around a registered site changing shape (same verb/table/symbol/count) REDs in isolation as fingerprintDrift', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const anchor = "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1`, [1])"
+  assert.equal(baseline.split(anchor).length - 1, 1, 'the statement anchor must match exactly once before mutating it')
+  const mutated = baseline.replace(
+    anchor,
+    "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2`, [1, 2])",
+  )
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  // Isolation is the point: verb/table/symbol/count are all unchanged, so ONLY fingerprintDrift
+  // may fire — if this leg were shadowed by (or indistinguishable from) an identity leg, the
+  // `fingerprint` field of the registry tuple would be decorative, not load-bearing.
+  assert.equal(result.claimed.length, 3, 'the three untouched sites stay claimed')
+  assert.equal(result.fingerprintDrift.length, 1)
+  assert.equal(result.fingerprintDrift[0].entry.symbol, 'lockAttendanceReportSyncJobForRun')
+  assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.unclaimed, [])
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.undomained, [])
+})
+
 test('mutation probe 5 (resolver "must FAIL not skip"): an unresolvable module-level binding used at a DML target throws rather than silently vanishing', () => {
   const content = [
     "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'",
