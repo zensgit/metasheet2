@@ -40,6 +40,21 @@ output below (including both `planDigest` values, which changed from the first v
 document because `AttendanceRolloutTransitionPlanV1` gained a `priorState` field that is now also
 part of the digest, see P2-1) was captured verbatim from that rehearsal, not edited by hand.
 
+**Digests recomputed again (owner completion gate "Gate D", PR #4839, 20260810)**: landing the
+authoritative-entrypoint delivery readiness check (`AUTHORITATIVE_ENTRYPOINTS_DELIVERED`, a new
+predicate `buildAttendanceRolloutTransitionPlanV1` appends to `plan.predicates` for **every**
+target state — `applicable: false, pass: true, count: null` for a non-`authoritative` target like
+this worked example) changed the canonical predicate array `computeAttendanceW4C5PlanDigestV1`
+hashes, which changes **every** `planDigest` this document prints, byte-content-of-the-plan
+unrelated. Re-rehearsed steps 4/6/7 end to end at head `2ec9c165c6` on this branch, against a
+freshly migrated scratch database with the identical illustrative org ID and correlation IDs this
+document already used — every `planDigest` and predicate array below is the real captured output
+of that rehearsal, not derived by inspection. `computeAttendanceW4C5PlanDigestV1` includes
+`plan.orgId` in its canonical object, so these digests are specific to the illustrative org ID
+`00000000-0000-4000-8000-000000000001` above — a real transition against a different org will
+print a different digest, which is expected and is exactly why `apply` always recomputes and
+compares fresh rather than trusting a supplied literal.
+
 ## Prerequisites (NOT executable steps — separately owner-authorized, listed for context only)
 
 - Staging/production access, a seven-day soak, any `ATTENDANCE_*` flag change, and a real
@@ -144,12 +159,17 @@ these exact steps from a freshly migrated database):
     { "code": "NONTERMINAL_LEGACY_JOB", "applicable": true, "pass": true, "count": 0 },
     { "code": "INCOMPLETE_OPERATION", "applicable": false, "pass": true, "count": null },
     { "code": "UNRESOLVED_INGRESS_REVIEW", "applicable": false, "pass": true, "count": null },
-    { "code": "DEFECTIVE_REQUEST_SNAPSHOT", "applicable": false, "pass": true, "count": null }
+    { "code": "DEFECTIVE_REQUEST_SNAPSHOT", "applicable": false, "pass": true, "count": null },
+    { "code": "AUTHORITATIVE_ENTRYPOINTS_DELIVERED", "applicable": false, "pass": true, "count": null }
   ],
   "blocked": false,
-  "planDigest": "3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867"
+  "planDigest": "82742c3c4137175bb5af92bc685fca23bfaa561086d359480ffb53afff972fb7"
 }
 ```
+
+(`AUTHORITATIVE_ENTRYPOINTS_DELIVERED` — Gate D, owner completion gate, PR #4839, 20260810 —
+is `applicable` only when `--target authoritative`; for this `shadow` target it always reports
+`applicable: false, pass: true, count: null`, and never blocks a non-authoritative transition.)
 
 Exit code `0` (an unblocked plan). This command performed zero **durable writes** — see
 `packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts` for
@@ -218,7 +238,7 @@ pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \
   --target shadow \
   --expected-state legacy \
   --expected-version 1 \
-  --plan-digest 3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867 \
+  --plan-digest 82742c3c4137175bb5af92bc685fca23bfaa561086d359480ffb53afff972fb7 \
   --confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_ONLY \
   --manifest /tmp/w4c5-manifest-legacy-to-shadow.json \
   --actor-id runbook-demo-operator \
@@ -238,7 +258,7 @@ Expected output (captured verbatim):
   "outcome": "transitioned",
   "orgId": "00000000-0000-4000-8000-000000000001",
   "state": "shadow",
-  "planDigest": "3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867"
+  "planDigest": "82742c3c4137175bb5af92bc685fca23bfaa561086d359480ffb53afff972fb7"
 }
 ```
 
@@ -285,7 +305,7 @@ pnpm exec tsx scripts/ops/attendance-w4c5-rollout-transition.ts apply \
   --target shadow \
   --expected-state legacy \
   --expected-version 1 \
-  --plan-digest 3831731090710ac589e96de367248800a683afaf3f3fb1826177bcd04bbd7867 \
+  --plan-digest 82742c3c4137175bb5af92bc685fca23bfaa561086d359480ffb53afff972fb7 \
   --confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_ONLY \
   --manifest /tmp/w4c5-manifest-legacy-to-shadow.json \
   --actor-id runbook-demo-operator \
@@ -309,7 +329,7 @@ no-op, only the freshly recomputed one):
   "outcome": "noop_already_at_target",
   "orgId": "00000000-0000-4000-8000-000000000001",
   "state": "shadow",
-  "planDigest": "9355be2445d11c327baea68ef3781edc8251dea54abe049d6fa4a10ac106b3dc"
+  "planDigest": "4b5b212582ccae074136c8f8cf4bc9bb6ee395a7e2e9dbbdd61bd3e3b36fc0c1"
 }
 ```
 
