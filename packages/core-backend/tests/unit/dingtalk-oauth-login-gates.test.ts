@@ -406,9 +406,10 @@ describe('dingtalk oauth login gates', () => {
       statusCode: 503,
       code: 'grant_state_unavailable',
     })
-    // Fail-closed: the login did NOT fall through to auto-provision a fresh account.
-    expect(defaultTransactionStatements.some((sql) =>
-      /INSERT INTO users\b/i.test(sql))).toBe(false)
+    // Fail-closed and DISCRIMINATING (review NIT): exactly ONE query ran — findIdentityUser —
+    // and it threw. Under the fail-open mutation control reaches findUserByEmail (a 2nd query),
+    // so this call-count is what actually proves no fall-through to email-link/auto-provision.
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
   })
 
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
