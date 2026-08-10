@@ -20,6 +20,10 @@ import {
   down as grantRowCreatedDown,
   up as grantRowCreatedUp,
 } from '../../src/db/migrations/zzzz20260808090000_deprovision_effect_grant_row_created'
+import {
+  down as compensationStatusDown,
+  up as compensationStatusUp,
+} from '../../src/db/migrations/zzzz20260810100000_deprovision_effect_compensation_status'
 
 const dbUrl = process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -231,6 +235,137 @@ describeDb('directory deprovision ledger hardening (real DB, isolated schema)', 
     await sql`DELETE FROM directory_deprovision_effects WHERE grant_row_created = TRUE`.execute(db)
     await grantRowCreatedDown(db)
     expect(await columnExists('directory_deprovision_effects', 'grant_row_created')).toBe(false)
+  })
+
+  it('OPS-01 compensation status replays and refuses downgrade while compensation evidence exists', async () => {
+    await hardenedLedgerUp(db)
+    await grantRowCreatedUp(db)
+    await compensationStatusUp(db)
+    await compensationStatusUp(db)
+    expect(
+      await constraintDefinition('directory_deprovision_effects', 'ddef_status_check'),
+    ).toMatch(/compensated/)
+    expect(await columnDataType('directory_deprovision_effects', 'compensation_note')).toBe('text')
+    expect(
+      await constraintDefinition(
+        'directory_deprovision_effects',
+        'ddfx_compensation_scope_check',
+      ),
+    ).toMatch(/grant_row_created/)
+
+    const authority = await seedAuthority()
+    const eventId = await insertValidEvent(authority)
+    await expect(
+      sql`
+        INSERT INTO directory_deprovision_effects (
+          event_id, local_user_id, org_id, effect_type, before_active,
+          after_active, grant_row_created, access_generation_at_apply, status,
+          reversed_at, reversed_by, compensation_note
+        ) VALUES (
+          ${eventId}, ${authority.userId}, ${authority.orgId}, 'membership_changed',
+          TRUE, FALSE, FALSE, 1, 'compensated', NOW(), 'admin-test',
+          'invalid compensation target'
+        )
+      `.execute(db),
+    ).rejects.toThrow(/ddfx_compensation_scope_check/)
+    await sql`
+      INSERT INTO directory_deprovision_effects (
+        event_id, local_user_id, org_id, effect_type, before_active,
+        after_active, grant_row_created, access_generation_at_apply, status,
+        reversed_at, reversed_by, compensation_note
+      ) VALUES (
+        ${eventId}, ${authority.userId}, NULL, 'grant_changed',
+        FALSE, FALSE, TRUE, 1, 'compensated', NOW(), 'admin-test',
+        'owner verified cleanup'
+      )
+    `.execute(db)
+    await expect(
+      sql`
+        UPDATE directory_deprovision_effects
+           SET compensation_note = 'tampered owner note'
+         WHERE event_id = ${eventId}
+      `.execute(db),
+    ).rejects.toThrow(/compensated deprovision effect evidence is immutable/)
+    await expect(
+      sql`
+        UPDATE directory_deprovision_effects
+           SET reversed_by = 'different-admin'
+         WHERE event_id = ${eventId}
+      `.execute(db),
+    ).rejects.toThrow(/compensated deprovision effect evidence is immutable/)
+    await expect(
+      sql`
+        UPDATE directory_deprovision_effects
+           SET reversed_at = NOW() + INTERVAL '1 hour'
+         WHERE event_id = ${eventId}
+      `.execute(db),
+    ).rejects.toThrow(/compensated deprovision effect evidence is immutable/)
+    await expect(
+      sql`
+        UPDATE directory_deprovision_effects
+           SET status = 'superseded'
+         WHERE event_id = ${eventId}
+      `.execute(db),
+    ).rejects.toThrow(/compensated deprovision effect evidence is immutable/)
+
+    const secondEventId = await insertValidEvent(authority)
+    await expect(
+      sql`
+        INSERT INTO directory_deprovision_effects (
+          event_id, local_user_id, org_id, effect_type, before_active,
+          after_active, grant_row_created, access_generation_at_apply, status,
+          reversed_at, reversed_by, compensation_note
+        ) VALUES (
+          ${secondEventId}, ${authority.userId}, NULL, 'grant_changed',
+          FALSE, FALSE, TRUE, 1, 'compensated', NOW(), '   ',
+          'owner verified cleanup'
+        )
+      `.execute(db),
+    ).rejects.toThrow(/ddfx_compensation_scope_check/)
+
+    const nullActorEventId = await insertValidEvent(authority)
+    await expect(
+      sql`
+        INSERT INTO directory_deprovision_effects (
+          event_id, local_user_id, org_id, effect_type, before_active,
+          after_active, grant_row_created, access_generation_at_apply, status,
+          reversed_at, reversed_by, compensation_note
+        ) VALUES (
+          ${nullActorEventId}, ${authority.userId}, NULL, 'grant_changed',
+          FALSE, FALSE, TRUE, 1, 'compensated', NOW(), NULL,
+          'owner verified cleanup'
+        )
+      `.execute(db),
+    ).rejects.toThrow(/ddfx_compensation_scope_check/)
+
+    const nullNoteEventId = await insertValidEvent(authority)
+    await expect(
+      sql`
+        INSERT INTO directory_deprovision_effects (
+          event_id, local_user_id, org_id, effect_type, before_active,
+          after_active, grant_row_created, access_generation_at_apply, status,
+          reversed_at, reversed_by, compensation_note
+        ) VALUES (
+          ${nullNoteEventId}, ${authority.userId}, NULL, 'grant_changed',
+          FALSE, FALSE, TRUE, 1, 'compensated', NOW(), 'admin-test', NULL
+        )
+      `.execute(db),
+    ).rejects.toThrow(/ddfx_compensation_scope_check/)
+
+    await expect(compensationStatusDown(db)).rejects.toThrow(
+      /refusing to drop compensated effect status/,
+    )
+    expect(
+      await constraintDefinition('directory_deprovision_effects', 'ddef_status_check'),
+    ).toMatch(/compensated/)
+
+    await sql`DELETE FROM directory_deprovision_effects WHERE event_id = ${eventId}`.execute(db)
+    await compensationStatusDown(db)
+    expect(
+      await constraintDefinition('directory_deprovision_effects', 'ddef_status_check'),
+    ).not.toMatch(/compensated/)
+    expect(await columnExists('directory_deprovision_effects', 'compensation_note')).toBe(false)
+    await compensationStatusUp(db)
   })
 
   it('upgrades the weak scaffold to the exact typed FK/check vocabulary', async () => {
