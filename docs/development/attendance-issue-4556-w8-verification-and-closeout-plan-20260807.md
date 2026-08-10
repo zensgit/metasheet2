@@ -98,7 +98,11 @@ Expected-but-absent, verified honestly:
 4. the **closure checklist** mapping parent §10 + W4 §15 to evidence slots,
    handed to the owner for the §14-10 ruling (§6);
 5. the operator migration/rollback **runbook** (parent §9.9) as a reviewed
-   document.
+   document;
+6. the **issue acceptance ledger** (parent §9.9's third deliverable — missing
+   from this list before this round; §5A) — acceptance text mapped to slice/
+   PR/decision, contingent on `OD-W8-8` establishing what an "acceptance
+   item" is.
 
 ### 2.2 OUT (unchanged by this document)
 
@@ -169,6 +173,114 @@ discharged, the executed-evidence obligation is not.
 | Migrations | Fresh-migration + upgrade + replay pass (W4 lock §11); pending migrations zero against the deploy image. |
 | CI wiring contract | Green with the guard converted to a **derived-completeness assertion** (a suite missing from run-list or exclude is red by construction — the hardcoded-allowlist form is the mechanism that let L8 stay invisible), extended to every W6/W7 suite added since; run-list + path-filter wiring is itself asserted, not assumed. **Landed**: `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`'s own header, re-read at `origin/main@d78b27d3`, records the OBS-1 conversion from the hardcoded `FILES` allowlist to a disk-walk-derived corpus; this leg is executed green on the W8 head, not merely asserted landed here. |
 | Mutation ledger | Every red line of the W6/W7 locks has its named mutation leg re-run on the named head; each leg's anchor-hit is verified (mutation actually landed in executed code) before its red is counted. |
+
+### 3.4 Parent lock §7 discharge table (NEW — W8's roll-up job per parent §9.9)
+
+Parent lock §7 ("Required verification") is cited in this document and the
+W7 draft only at their red-line/§9.9 sections; §7 itself was never
+enumerated or mapped, and W8 (whose scope under parent §9.9 makes this
+roll-up its job) built its own §3 matrix from scratch instead. This table is
+that mapping.
+
+**Count, derived independently rather than assumed**: §7.1 Database = 12
+bulleted checks; §7.2 Calculation = 15 bulleted checks; §7.3 Entry-point
+parity = **one prose rule, not a bulleted list** (no numbered items to map —
+noted below, not silently folded into the 42); §7.4 Mutation = 8 bulleted
+checks; §7.5 Frontend = 7 bulleted checks. **12 + 15 + 8 + 7 = 42.**
+(Derivation: `git grep -n '^## 7\.\|^### 7\.\|^## 8' origin/main --
+attendance-shift-group-advanced-capability-design-lock-20260723.md` locates
+`## 7.` at `:538` and `## 8.` at `:619` (`### 7.1` `:540`, `7.2` `:566`, `7.3`
+`:588`, `7.4` `:594`, `7.5` `:609`); `sed -n '538,618p' <file>` then counted
+by hand per subsection — 12 / 15 / prose / 8 / 7.)
+
+Each row below carries one of three verdicts, per parent §10 item 1's own
+two-verdict shape (borrowed here because §7 has no shape of its own): **D**
+(discharged — named suite/slice cited, verified by test title at minimum, not
+by re-running); **R** (owner removal under parent §10 item 1 — none claimed
+in this round; this document proposes zero removals); or **EMPTY** (not
+substantiated this round — left empty and marked, not guessed). Every citation
+below is a **test title match** against `origin/main@d78b27d3`, not a
+full-body re-read of every assertion in the named test — a materially weaker
+form of evidence than the mutation-leg verification this document otherwise
+requires, and stated as such rather than presented as equivalent.
+
+**§7.1 Database (12)**
+
+| # | Check | Verdict | Discharged by |
+| --- | --- | --- | --- |
+| 1 | fresh migration and upgrade from pre-segment schema | D | `attendance-shift-segments-migration.db.test.ts`: "FRESH: up() on an empty schema creates table, constraints, and the org-integrity FK" (`~L122`), "UPGRADE + BACKFILL: every legacy shift becomes segment 0..." (`~L150`) |
+| 2 | one segment backfill for every legacy shift | D | same file, "UPGRADE + BACKFILL..." (`~L150`) |
+| 3 | replay idempotency | D | same file, "REPLAY: a second up() is a no-op for already-covered shifts" (`~L166`) |
+| 4 | concurrent membership overlap rejection | D | `attendance-calculation-group-membership-w1.db.test.ts`: "lets the database reject one of two concurrent direct overlapping writes" (`~L456`) |
+| 5 | inclusive boundary transition (D-1 to D) without a gap or double winner | D | same w1 file, "closes the prior inclusive interval at D-1, starts the next at D, and records audit context" (`~L238`) |
+| 6 | cross-org FK and query isolation | D | `attendance-shift-segments-migration.db.test.ts` "CROSS-ORG INTEGRITY: the composite FK rejects a segment whose org differs from the parent shift" (`~L207`); `attendance-shift-segments-writer-matrix.db.test.ts` "cross-org: a shift is invisible and unreferenceable from another org" (`~L714`) |
+| 7 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | D | `attendance-shift-segments-writer-matrix.db.test.ts`, nine `matrix: ... typed 422 with zero writes` legs covering every named surface (`~L734, 789, 819, 913, 946, 966, 1498, 1541, 1578`) |
+| 8 | existing-reference delete 409 + zero writes per durable blocker; rejected/cancelled/history fixtures prove non-blocking evidence intact + redacted UUID | D | same file, "delete: typed 409 with zero writes for every durable blocker class" (`~L1642`), "delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID" (`~L1722`) |
+| 9 | concurrent shift delete + reference insertion cannot cascade-delete a newly created reference | D | same file, "concurrency: a reference insert racing a delete is serialized by the shared lock protocol" (`~L1892`) |
+| 10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | **PARTIAL / half EMPTY** | Second half only: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — **no matching test title found this round; EMPTY, not guessed.** |
+| 11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | **PARTIAL / half EMPTY** | Schema-rollback-forbidden half: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — **no matching test title found this round; EMPTY.** |
+| 12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | D | same file, `~L224` (same test as item 11's schema half — it discharges both) |
+
+**§7.2 Calculation (15)**
+
+| # | Check | Verdict | Discharged by |
+| --- | --- | --- | --- |
+| 1 | `08:00-12:00` + `13:00-17:00` = 480, not 540 | D | `w4c1-segment-calculator.test.ts`: "two-segment day with a break: exact full result body (no envelope arithmetic, W4C-R1)" (`~L185`) |
+| 2 | missing afternoon in/out produces a segment anomaly | D | same file, "missing_check_in / missing_check_out statuses and daily partial" (`~L446`) |
+| 3 | duplicate punches resolve deterministically | D | same file, "two check-in candidates in one directional cell are duplicate_check_in" (`~L659`), "identical-instant duplicates..." (`~L675`), "two check-out candidates..." (`~L682`) |
+| 4 | a segment crossing midnight preserves the originating work date | D | same file, "overnight segment (endDayOffset=1) resolves across midnight" (`~L286`) |
+| 5 | same-day slots select by containing segment window, not first assignment row | D | same file, "a check-in exactly on the in-partition midpoint belongs to the LATER segment" (`~L635`) |
+| 6 | no-window and multiple-window matches return the ratified unresolved/ambiguous outcome | D | same file, "evidence outside the frozen attribution window is review" (`~L647`), "duplicates in BOTH directions escalate to ambiguous_segment_match" (`~L693`) |
+| 7 | approved overtime extends only the named window | D | same file, "bounded approved overtime WITH a punch extends payable time, clipped to the exact approved interval" (`~L926`) |
+| 8 | next-day shift overlap → ratified precedence/ambiguity | D | `attendance-work-date-resolver-w2.db.test.ts`: "open previous-night record wins over current-day containing shift at boundary" (`~L192`), "same date multiple published shifts with overlapping windows → ambiguous (no row-order)" (`~L219`) |
+| 9 | flex late-arrive/late-leave and early-arrive/early-leave | D | `w5-flex-segment-calculator.test.ts`: "resolves late-arrive / late-leave flex expectation and applies grace after" (`~L275`), "resolves early-arrive / early-leave flex expectation" (`~L355`) |
+| 10 | core-hours violation | **UNCERTAIN, not full D** | same flex file, "fail-closes corrupt frozen core policy as review_required/input_schema_invalid..." (`~L193, 212`), "runs authoring-valid core-hours flex without inventing a core reasonCode" (`~L410`) — plausible core-hours coverage, but no test title uses the word "violation"; flagged rather than counted clean. |
+| 11 | DST gap/fold and two non-UTC timezones | **PARTIAL** | DST half: `w4c1-segment-calculator.test.ts` describe block `~L752-845` — gap (`~L762`), fold-start (`~L779`), fold-end (`~L801`), shared-fold (`~L828`), invalid timezone (`~L845`). "Two non-UTC timezones" specifically — no test title distinguishes two vs. one non-UTC zone; **EMPTY for that half.** |
+| 12 | group switch at the effective boundary | **EMPTY** | Not found this round in the files checked (`w4c1-segment-calculator.test.ts`, `attendance-calculation-group-membership-w1.db.test.ts`). Not guessed. |
+| 13 | historical record snapshot unchanged after configuration edits | D | QA handoff G4 pattern, already cited at this document's §3.1 "Frozen evidence immutability" row (post-freeze policy edits do not move stored bytes; trigger rejection `W4C0_IMMUTABLE`) |
+| 14 | a backdated import/correction uses policy as-of the business work date, not the submission timestamp | **EMPTY** | Not found this round. Not guessed. |
+| 15 | a legacy daily result remains `envelope_legacy` and receives no fabricated segment rows | **PARTIAL** | `attendance-shift-segments-writer-matrix.db.test.ts` "creates a legacy-envelope shift with a persisted segment 0 (dual-write)" (`~L358`) — about shift creation, not a daily calculation *result* row; plausible but not a confirmed match. |
+
+**§7.3 Entry-point parity** — prose rule, not a numbered check (confirmed
+above); no discharge row. No suite was found this round asserting the full
+cross-entrypoint parity property as stated ("replacing any caller with
+calendar-date fallback must make its parity test fail") as a single
+mechanism; left as an explicit gap rather than mapped to a partial proxy.
+
+**§7.4 Mutation (8) — ALL EMPTY this round.** "reintroduce first-to-last
+work-minute arithmetic"; "remove one segment from the sum"; "select the first
+overlapping group"; "use grace as attribution tail"; "choose the previous
+work date on ambiguity"; "remove org scope from every new query"; "recompute
+with current rather than frozen policy"; "accept multi-segment flex in v1" —
+none of these eight named mutation legs were found as titled tests in the
+files checked this round. This is consistent with, though not proof of, Gate
+A (§5 ledger L10): the segment calculator's mutation-tested surface found
+above (`w4c1-segment-calculator.test.ts`) exercises the pure function, but
+§7.4's mutations are phrased against an *authoritative* calculation path that
+`SEGMENT_CALCULATION_IMPLEMENTED = false` keeps from ever running in
+production. Whether any of the eight already exist as untitled assertions
+inside a broader `it()` block is unverified — a title-level sweep cannot see
+that — so these stay EMPTY rather than credited from the absence of a
+negative finding.
+
+**§7.5 Frontend (7) — ALL EMPTY this round**, exactly as this line's own
+review anticipated: "editor keyboard and screen-reader flow"; "segment order
+and overlap validation"; "responsive 375, 768, and 1440 pixel views";
+"source/effect labels in every group policy summary"; "no save request from
+preview-only controls"; "no raw ID fallback"; "route return preserves group
+and stage." No `apps/web` test file was searched for these this round (out of
+this round's budget) — an absence-of-search, not a confirmed absence of
+tests; recorded as EMPTY-and-unsearched rather than EMPTY-and-confirmed-absent
+so a later round does not read this as "checked, found nothing."
+
+**Verdict tally over the 42** (counted directly from the two tables above,
+not estimated): **20 D** (§7.1: items 1-9, 12 = 10; §7.2: items 1-9, 13 = 10);
+**5 PARTIAL/UNCERTAIN** (§7.1 items 10, 11; §7.2 items 10, 11, 15 — each has
+at least one discharged half and at least one undischarged half or an
+unconfirmed match); **17 EMPTY** (§7.2 items 12, 14 = 2; §7.4 all 8; §7.5 all
+7). `20 + 5 + 17 = 42`. Zero **R** (owner-removal) verdicts proposed this
+round — this document asks the owner to rule on gaps, not to pre-clear any of
+them as removed.
 
 ## 4. Soak entry and exit criteria
 
@@ -243,11 +355,57 @@ from this summary binds exactly as if it were listed.
 6. off-roster diffs each dispositioned (defect filed or roster amended by its
    own reviewed change) — an undispositioned diff fails exit.
 
+**Executability at the W8 head, per rung — NEW this round.** As written,
+this contract can neither start nor exit: day 1, a two-segment shift gets 422
+from `assertSegmentCalculationAllowed` (§5 ledger L10, Gate A); there is no
+shipped command to leave `legacy` (§5 ledger L11, Gate C); once
+`authoritative`, the first live or scheduled punch 503s
+(`W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED`, §5 ledger L12, Gate D). This is not
+softened into "pending" language below — an unexecutable step is stated as
+unexecutable, not as a step awaiting scheduling.
+
+| Rung | Executable at the W8 head? | Blocked on |
+| --- | --- | --- |
+| Entry 1 (owner authorization for staging org) | Executable — governance action, no code dependency | — |
+| Entry 2 (deployed SHA / migrations / health) | Executable — infra check | — |
+| Entry 3 (named synthetic org only, no wildcard/customer data) | Executable — scoping decision | — |
+| Entry 4 (every entrypoint represented) | **Blocked** — live punch and scheduled entrypoints 503 the instant posture is `authoritative`; any multi-segment shift 422s regardless of posture | Gate A (multi-segment 422) + Gate D (live/scheduled 503) |
+| Entry 5 (W4C-5 §3 predicate set, all-clear inside the transition transaction) | **Blocked as a live-soak action** — "inside the transition transaction" presupposes a transition is being attempted against a real deployment; the predicate function itself is unit/integration-testable today, but nothing in production calls it | Gate C (no production caller) |
+| Entry 6 (expected-differences roster finalized) | Executable — doc/config work | — |
+| Entry 7 (sweep observability counters healthy) | Executable — counters read regardless of posture | — |
+| Entry 8 (P16 inventory) | Executable — static review | — |
+| Entry 9 (negative transition test exists for the zero-unresolved-review gate) | Executable **as a test-suite property** (the rollout-control test suite already calls the transition writer via a test harness); not executable as a *live* soak observation for the same reason as entry 5 | Gate C, for the live-observation half only |
+| Entry 10 (evidence manifest carries authorization ref + target state + entrypoint inventory + dates) | **Blocked as a live-soak artifact** — the manifest is populated at transition time; its field *shape* is testable, a real populated manifest is not, absent a caller | Gate C |
+| Entry 11 (standing: no production deploy/flag action) | Executable — a prohibition requires no action to satisfy | — |
+| Exit 1 (≥ 7 days in target posture) | **Blocked** — cannot occupy a posture nothing can transition into | Gate C |
+| Exit 2 (zero critical diffs / zero unresolved reviews over the window) | **Blocked** — no window exists without exit 1 | Gate C |
+| Exit 3 (reversal + suspend/resume drills) | **Blocked** — drills exercise the transition boundary and, once authoritative, the entrypoints | Gate C + Gate D |
+| Exit 4 (valid pointers, unchanged historical hashes across the window) | **Blocked** — no window | Gate C |
+| Exit 5 (PASS marker + residue zero) | **Blocked** — nothing to mark PASS | Gate C |
+| Exit 6 (off-roster diffs dispositioned) | **Blocked** — no diffs are generated without a real run | Gate C |
+
+**Net**: of 11 entry items, 8 are executable today and 3 are blocked (4, 5's
+live half, 10's live half — plus entry 9's live half); of 6 exit items,
+**all 6** are blocked. Landing PR #4839 (Gate C's named remedy) does not by
+itself clear entries 4/exit-3 — Gate A and Gate D remain independent
+blockers even after a transition command exists.
+
 Conditional: if the owner adopts W7, the same contract runs a second time for
 the W7 cutover posture (the W7 lock's OD-W7-8/soak markers); OD-W8-2 decides
 whether the two soaks may overlap on the calendar.
 
-## 5. Reconciliation ledger (parked debts — every one, with disposition slots)
+## 5. Reconciliation ledger (parked debts enumerated to date, with disposition slots)
+
+This heading previously read "every one" — an absolute claim this document
+cannot back mechanically (there is no enumerable universe of "every possible
+parked debt" to check against) and which this exact round falsified in
+practice: gates A, C, and D (L10-L12) existed and were mechanically verifiable
+before this round, named nowhere in this ledger despite W7 recording Gate A's
+fact directly. "Every one" is retired in favor of the honest claim this
+section can actually stand behind: every debt found by the #4804 gate and
+every debt this document's own re-verification surfaces is listed, and W8-R7
+re-derives the set against the then-current main before execution rather than
+trusting this list's completeness.
 
 Each row: what, where tracked, and what W8 requires. "Owner-accepted
 residual" is a disposition **only the owner can stamp**; this plan cannot
@@ -265,9 +423,66 @@ pre-accept anything.
 | L8 | CI wiring gap: two of the 40 `attendance-w4c*.db.test.ts` suites (`attendance-w4c3b-request-snapshots.db.test.ts`, `attendance-w4c3b-central-approval.db.test.ts`) were in neither the plugin-tests real-DB run-list nor the vitest no-DB exclude — their DB-gated blocks skip-greened and executed nowhere in CI. The request-snapshots suite is the real-DB proof of the 8-cell soak-entry precondition (#4775 arc, PR #4780). The wiring guard (`attendance-w4c2-ci-wiring.test.mjs`) could not catch this: its `FILES` constant was a hardcoded allowlist, not a completeness assertion. | This document (§1 spine row; found by the #4804 adversarial gate); fix **PR 4805 MERGED** `4c28467c54f376ad5a68718d3dbe6ad50c76a917` (2026-08-10T06:59:23Z) | **Fixed and landed** (an earlier round of this cell read "PR 4805 OPEN, unmerged" — accurate at that round's rebase base, superseded here). Re-verified 2026-08-10 against `origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`: both named files now appear in the real-DB run-list (step `id: attendance-real-db-integration`) **and** in `vitest.config.ts` `test.exclude` — two-point wired; 40 files on disk match `attendance-w4c*.db.test.ts`, all 40 carried; the run-list carries 101 total whole-file args (widened past the `attendance-w4c*` family — see W8-R4); `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`'s own header records the conversion from the hardcoded `FILES` allowlist to a derived-completeness assertion (OBS-1, re-read at the current tip). | **Row stays live; its requirement changed from fix to re-verify-and-execute.** The wiring gap that blocked *starting* §3 is closed. What remains, per this section's preamble (which this plan cannot pre-stamp): the two previously-orphaned suites must actually run green on the W8 head with non-zero per-file counts (W8-R3/R4) before their evidence counts — a merged wiring fix is not the same claim as an executed green run, and W8-R7 re-derives this row's landed-state against the then-current main rather than trusting this round's re-count. |
 | L9 | Parent §10 item 8 has **no landed implementation** at this baseline: the four-label group workflow (effective / inherited / preview-only / conflicting) is W6's scope, and `conflict_action_required` exists only in the types-only contract module, the W6 JSON fixtures, and the out-of-build OpenAPI draft — no runtime, no route, and the panel shell is imported nowhere. W6 is item 8's only planned vehicle. | Parent lock §10 (`:764-777`, item 8 `:776-777`); W6 lock (`Status: RATIFIED (W6-1 backend aggregate only)` on `origin/main`, ratified via PR 4821 `ecf77d2433596bbdd8b67c312a37178dbc97f715`, merged 2026-08-08) | Verified at this baseline and re-verified against `origin/main@d78b27d3` (grep: label in types/fixtures/draft only; panel referenced nowhere; zero source drift over the attendance/W6 paths between the pinned baseline and current main) | **The decision half of this row is now settled; the implementation half has not moved.** OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED, not merely recorded pending a merge. On that ratified direction the declining branch below is foreclosed for the W6-1 scope, but the coupling itself is unchanged: item 8 still has **no landed implementation**, W6 remains its only planned vehicle, and only the W6-1 *backend* slice is prospectively authorized (PR 4814, Draft/HOLD, unmerged) — the four-label workflow is W6-3 UI scope, which is explicitly still withheld and has no authorization at all yet, ratified or otherwise. The original warning now applies to a narrower future: **were the W6 runtime beyond W6-1 (specifically W6-3 UI) not to land, item 8 could not be satisfied and issue 4556 could not close under §10 as ratified** — closure would then require an owner amendment to parent §10, routed through OD-W8-1(b); see §6 item 8. W8-R7 re-derives this row on the W8 head |
 
+| L10 | **Gate A — multi-segment calculation is OFF, and no org-level value can turn it on.** `plugins/plugin-attendance/lib/attendance-shift-service.cjs:60` — `const SEGMENT_CALCULATION_IMPLEMENTED = false`, short-circuited at `:495` (`if (!SEGMENT_CALCULATION_IMPLEMENTED) return false`) **before** the org env-allowlist is even read (the allowlist read is unreachable code for this purpose). Its call site, `assertSegmentCalculationAllowed` (`:1075`, invoked via `assertWorkContextSegmentCalculationAllowed`, `index.cjs:8351`), throws `HttpError(422, SHIFT_SERVICE_ERROR.MULTI_SEGMENT_CALCULATION_DISABLED)` for any shift with more than one persisted segment. The comment at `:57-59` names the discipline: an env value alone must never make reference writers accept multi-segment shifts, and W4 "must flip this only in the same reviewed change that adds the calculator." W4C-1 landed the calculator; the constant was never flipped in the same or any later change. | `attendance-shift-service.cjs:57-60, 495, 1075`; `index.cjs:8351` | Verified 2026-08-10 against `origin/main@d78b27d3`: constant is `false`, short-circuit precedes the allowlist read, `assertSegmentCalculationAllowed` throws 422 unconditionally for `segmentCount > 1`. W7 §1.1 records this fact and stops there (no ledger row, no soak-blocking consequence drawn); this document was silent on it entirely before this round. | **New, OPEN.** This is a hard blocker to §4 soak entry item 4 ("every entrypoint represented") for any multi-segment shift and to §4 exit generally, until the owner either (i) authorizes flipping the constant in the same reviewed change W4's own comment requires, or (ii) explicitly re-scopes the soak to single-segment shifts only via OD-W8-1(b). Silence is not a disposition. |
+| L11 | **Gate C — the rollout-transition writer has no production caller; only tests call it.** `transitionAttendanceCalculationRolloutV1` is exported at `w4c3a-rollout-control.ts:1125`, and `eligible → authoritative` is a legal pair in its closed matrix, but `git grep -ln transitionAttendanceCalculationRolloutV1 origin/main` filtered to exclude every `*.test.ts`/`*.db.test.ts` path and the defining module itself returns **zero** files — verified 2026-08-10: exactly 3 files in the entire tree reference the symbol (the defining module + 2 integration test files), none of them a route, CLI, or scheduled job. The operator CLI that would call it in production is **not on `main`** — it lives only in Draft PR **#4839** (`[HOLD] feat(attendance-w4c5): operator transition tooling + executable runbook`, OPEN, head `2d35fdeb09a36d3b9ecbadfc4c645d12231e9be5`). | `w4c3a-rollout-control.ts:1125`; PR #4839 | Verified 2026-08-10 against `origin/main@d78b27d3` (grep above). W7 §1.3 describes the transition boundary's write discipline in full but never states that it has zero production callers; W8 §4 (pre-this-round) named the soak's operational steps without noting there is no shipped command to execute any of them. | **New, OPEN. Flagged explicitly for the owner, as this line's own review demanded**: landing PR #4839 removes this gate — it is the one row on this ledger with a named, already-open remedy. Until #4839 (or an equivalent) merges, no rollout transition beyond a test harness can execute against a real deployment, which makes §4 exit item 1 ("≥ 7 calendar days in the target posture") structurally unreachable — there is no way to enter a target posture outside a test process. This also means the claim-sweep tool this line borrows for step E (below) lives on that same unmerged branch, a fact recorded rather than hidden. |
+| L12 | **Gate D — authoritative write execution is undelivered at exactly the two entrypoints §4 names first, deliberately and by design.** `w4c2-live-scheduled-boundary.ts:1272` (live punch), `:1878` (scheduled absence), `:2072` (scheduled run) each call `boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', 503)` when posture/write-posture is `authoritative`; module header `:69-72` states this in prose ("effective `authoritative` write execution itself is NOT delivered by this slice ... the state is unreachable in production"). This is a deliberate, **tested** fail-closed state, not a bug: `attendance-w4c2-gate-matrix-e5.db.test.ts:1079-1091` asserts 503 + the exact code + zero rows written for both the live and the scheduled path. Scope stays honest in both directions: authoritative mode **IS** delivered by four other modules verified to branch on `mode === 'authoritative'` without this short-circuit — `w4c3b-approved-leave-cancellation.ts`, `w4c3c-manual-edit-apply.ts`, `w4c3c-recompute.ts`, `w4c3a-legacy-plan-processor.ts`. It is precisely the two entrypoints W8 §4 entry item 4 names first (live punch, scheduled) that are not. | `w4c2-live-scheduled-boundary.ts:69-72, 1272, 1878, 2072`; `attendance-w4c2-gate-matrix-e5.db.test.ts:1079-1091` | Verified 2026-08-10 against `origin/main@d78b27d3`: all three call sites confirmed byte-for-byte; test assertions confirmed at the cited lines; the four delivering modules confirmed to branch on `mode === 'authoritative'` without the boundary short-circuit. W8 §4 (pre-this-round) named live punch and scheduled as the first two soak-entry entrypoints without disclosing this. | **New, OPEN.** This is a hard blocker to §4 exit generally (an org cannot spend 7 days "in the target posture" if the two highest-volume entrypoints 503 the instant posture reaches `authoritative`) and specifically undermines entry item 4's "every entrypoint represented." Disposition is the owner's: (i) authorize delivering the live/scheduled authoritative write path (its own gated PR, its own real-DB + mutation gate, same class as W4C-3a/b/c), or (ii) explicitly re-scope soak entry to the four already-delivering entrypoints only, via OD-W8-1(b), with live punch and scheduled named as a residual not yet in scope. |
+
 Any debt discovered between this baseline and W8 execution joins the ledger;
 an empty-looking ledger at W8 time triggers a re-scan against the then-current
 main, not a celebration (empty-read ≠ absence).
+
+### 5A. Issue acceptance ledger (parent §9.9 deliverable 3 — NEW in this round)
+
+Parent lock §9.9 names three W8 deliverables: verification MD, operator
+migration/rollback runbook, and **issue acceptance ledger**. §2.1 (as drafted
+before this round) listed five deliverables and the acceptance ledger was not
+among them; §5 above is a *different* artifact (parked debts — engineering
+residue this line owes itself), not the acceptance ledger (acceptance text →
+slice/PR → evidence, feeding parent §10 item 1). §2.1 is corrected to list
+this as item 6.
+
+**§10 item 1's denominator does not exist yet, and this document cannot
+supply it — only the owner can.** Neither this document nor the W7 draft ever
+defines what an "acceptance item" *is*, so "every acceptance item is mapped to
+a merged slice or explicitly removed" (parent §10 item 1) has no countable
+set to map. `OD-W8-7` (below) asks only the ledger's *form* (one MD table vs.
+an issue comment); it never asked whether an acceptance-item set exists to put
+in that form. `OD-W8-8` is new and asks that prior question.
+
+Two real candidate sources exist in the tree today — not invented for this
+row, both read from issue #4556's own body 2026-08-10:
+
+- issue #4556's **验收标准 (Acceptance Criteria)** section: 7 numbered
+  sentences authored by the issue's creator, e.g. "一个班次可配置多个时间段，
+  并能正确计算各段工时和缺卡状态" (a shift may configure multiple time
+  segments, with correct per-segment hours/anomaly computation). The most
+  literal reading of "acceptance item" — but the sentences are prose, not
+  independently PR-linkable, so "mapped to a merged slice" requires manual
+  per-sentence adjudication, and there is no existing cross-reference from
+  any of the 7 sentences to a slice/PR/decision.
+- issue #4556's **建议实施拆分 (Suggested Implementation Breakdown)**
+  checklist: 7 GitHub checkbox items (`- [ ]`), all 7 still unchecked as of
+  2026-08-10 (`gh issue view 4556 --json body`, grep count). These are
+  implementation-task-shaped, not acceptance-shaped — arguably not
+  "acceptance items" in parent §10 item 1's sense at all — but they are
+  already a checkbox-trackable denominator living on the issue, and GitHub
+  itself would show "0/7" progress against them without any new artifact.
+
+A third candidate is parent lock §10's own items 2-8 (the seven closure
+conditions the checklist below already maps evidence slots to). Reading §10
+items 2-8 side by side with #4556's 验收标准, they closely paraphrase each
+other item-for-item (multi-segment minutes ~ AC #2; flex distinct from grace ~
+AC #3; effective-dated group switch ~ AC #4; etc.) — suggesting §10 items 2-8
+may already **be** the lock's own elaboration of the issue's 验收标准, which
+would make item 1 self-referential rather than pointing at a fourth,
+undiscovered list. That reading is offered as evidence for `OD-W8-8`, not
+adopted here.
+
+**The acceptance ledger table itself** (once `OD-W8-8` and `OD-W8-7` are both
+answered): one row per acceptance item (from whichever source the owner
+names), columns `acceptance text → owning slice/PR → evidence link →
+disposition (merged / explicitly removed by owner decision, citing which)`.
+Every cell empty until execution; this document does not pre-fill it.
 
 ## 6. Closure checklist feeding the owner's §14-10 ruling
 
@@ -276,7 +491,7 @@ item by item, to evidence slots. W8 fills slots; **the owner rules**.
 
 | §10 item | Evidence slot (filled by) |
 | --- | --- |
-| 1. Every acceptance item mapped to a merged slice or explicitly removed by an owner decision | Acceptance ledger (§2.1.4) with per-item PR/decision references |
+| 1. Every acceptance item mapped to a merged slice or explicitly removed by an owner decision | Issue acceptance ledger (§2.1 item 6, §5A) with per-item PR/decision references. **Corrected pointer**: an earlier draft of this cell cited "§2.1.4", which is the closure checklist (this section), not any ledger — a broken self-reference, not merely a stale one. §5A also records the deeper defect the broken pointer was masking: the acceptance ledger did not exist as a deliverable at all before this round, and "acceptance item" itself is undefined (`OD-W8-8`) — so this slot cannot be filled until both are resolved. |
 | 2. Multi-segment actual minutes exclude breaks; segment anomalies exposed | W4C-1 calculator gates + §3.1 goldens |
 | 3. Flex distinct from grace | W5 verification (`w5-flex-policy` suites) + §3.2 cases |
 | 4. Calculation-group changes effective-dated and historically explainable | W1 membership gates + (conditional) W7 provenance legs |
@@ -307,7 +522,7 @@ owner's separate final decision under W4 lock §14 item 10."
 
 ## 8. Decision points (owner menu)
 
-OD-W8-1, OD-W8-2, and OD-W8-4..7 are **OPEN**. OD-W8-3 is **SATISFIED** — it
+OD-W8-1, OD-W8-2, OD-W8-4..7, and OD-W8-8 (new this round) are **OPEN**. OD-W8-3 is **SATISFIED** — it
 is kept in place, with its ID unchanged and its row rewritten as a record, so
 that every cross-reference to an OD-W8-*n* elsewhere in this document keeps
 pointing at the same question.
@@ -321,6 +536,7 @@ pointing at the same question.
 | OD-W8-5 | FSER-4 §3-§4 relative to #4556 closure | **(a)** Track under #4709, outside the #4556 closure set; the ledger row records the owner's explicit exclusion. (b) Pull into the #4556 closure set — couples closure to an amendment whose own owner decision is still OPEN. |
 | OD-W8-6 | Customer-acceptance evidence standard (parent §9.9) | **(a)** Closure checklist item 1 may complete with synthetic-staging evidence only, and the verification MD states plainly that no customer-acceptance claim is made. (b) Require a named customer evidence artifact before the checklist is handed over — delays closure input until a customer engagement exists. |
 | OD-W8-7 | Acceptance-ledger form | **(a)** One MD table in `docs/development/` (per-item: acceptance text → slice PR/owner decision → evidence link), reviewed like code. (b) Issue-comment ledger on #4556 — closer to the issue but unreviewable and mutable; rejected by default. |
+| OD-W8-8 | **New this round (§5A).** What is an "acceptance item" — the denominator parent §10 item 1 requires but never defines, and that neither the parent lock, W7, nor this document (before this round) ever supplied. No option is recommended-first here: the two real candidates carry genuinely different W8 cost and neither is this document's to pick. **(a)** Issue #4556's own **验收标准** section — 7 numbered prose sentences authored on the issue. Most literal reading of "acceptance item"; costs a manual per-sentence adjudication pass (no existing PR/decision cross-references) to populate the ledger, and the sentences may not partition cleanly against landed PRs (a PR can satisfy part of one sentence and part of another). **(b)** Issue #4556's own **建议实施拆分** checklist — 7 GitHub checkboxes, currently 0/7 checked. Already checkbox-trackable with zero new tooling, but these are implementation *tasks*, not acceptance *criteria* — adopting this reframes closure around "was the planned work done" rather than "does the result meet the stated bar," which is a different question than parent §10 item 1 asks. **(c)** Treat parent lock §10 items 2-8 (already itemized, already the closure checklist's own spine) as the acceptance-item set, on the observed near-1:1 paraphrase with #4556's 验收标准 (§5A) — costs nothing new to enumerate, since §6 already builds evidence slots against these 7 items, but risks item 1 becoming self-referential (mapping the §10 checklist to itself) rather than checking against the issue's own stated bar, and does not resolve whether #4556's 验收标准 wording independently matters. Whichever the owner picks, the acceptance ledger (§5A) is built against that denominator, not a fourth invented one. |
 
 ## 9. Landing sequence
 
