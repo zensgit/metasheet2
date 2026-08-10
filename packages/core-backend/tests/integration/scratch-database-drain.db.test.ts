@@ -420,6 +420,20 @@ describeIfDatabase('#4791 scratch-database teardown drain', () => {
       expect(
         isAdministratorTerminationError(new Error('terminating connection due to administrator command')),
       ).toBe(true)
+      expect(
+        isAdministratorTerminationError(new Error('prefix terminating connection due to administrator command')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(new Error('terminating connection due to administrator command suffix')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(new Error(' terminating connection due to administrator command')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(
+          Object.assign(new Error('terminating connection due to administrator command'), { code: 'ECONNRESET' }),
+        ),
+      ).toBe(false)
       expect(isAdministratorTerminationError(new Error('Connection terminated unexpectedly'))).toBe(false)
       expect(
         isAdministratorTerminationError(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' })),
@@ -442,16 +456,20 @@ describeIfDatabase('#4791 scratch-database teardown drain', () => {
       nonTerm.detach()
     })
 
-    it('wiring: both real-server suites capture poolManager.get().getInternalPool() and attach the handler', () => {
+    it('source contract: both real-server suites require the post-start internal pool during teardown', () => {
       const dir = dirname(fileURLToPath(import.meta.url))
       for (const file of [
         'bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
         'attendance-w4c2-sweep-call-through.db.test.ts',
       ]) {
         const src = readFileSync(join(dir, file), 'utf8')
-        expect(src, file).toMatch(/poolManager\.get\(\)\.getInternalPool\(\)/)
+        const startAt = src.indexOf('await server.start()')
+        const captureAt = src.indexOf('poolManager.get().getInternalPool()')
+        expect(startAt, file).toBeGreaterThan(-1)
+        expect(captureAt, file).toBeGreaterThan(startAt)
         expect(src, file).toMatch(/attachOwnedPoolTerminationHandler/)
-        expect(src, file).toMatch(/serverInternalPool/)
+        expect(src, file).toMatch(/new Error\('[A-Z0-9_]+SERVER_INTERNAL_POOL_NOT_CAPTURED'\)/)
+        expect(src, file).toMatch(/if \(poolCaptureError\) throw poolCaptureError/)
       }
     })
   })

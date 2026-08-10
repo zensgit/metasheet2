@@ -239,11 +239,12 @@ export function assertDroppableScratchDatabaseName(scratchName: string): void {
  * "Connection terminated unexpectedly" (that is broader than admin terminate).
  */
 export function isAdministratorTerminationError(err: unknown): boolean {
-  if (err != null && typeof err === 'object' && 'code' in err && (err as { code: unknown }).code === '57P01') {
-    return true
+  if (err != null && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code: unknown }).code
+    if (code != null) return code === '57P01'
   }
   const message = err instanceof Error ? err.message : String(err ?? '')
-  return /terminating connection due to administrator command/i.test(message)
+  return /^terminating connection due to administrator command$/i.test(message)
 }
 
 /** Structural surface for `pg.Pool` / EventEmitter-shaped doubles. */
