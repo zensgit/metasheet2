@@ -173,6 +173,21 @@ function transactionClient(client: PoolClient): AttendanceW4TransactionClientV1 
   }
 }
 
+/**
+ * Same adapter as `transactionClient`, but also appends every statement TEXT to `log` before
+ * delegating — used by the P2-2/F2 ordering proofs (PR #4839 P3 gate, 20260810) to assert that
+ * the idle-connection guard's own `SAVEPOINT w4c5_idle_probe` is genuinely the FIRST statement
+ * `plan` issues on a caller-supplied connection, never a predicate SELECT that ran before it.
+ */
+function loggingTransactionClient(client: PoolClient, log: string[]): AttendanceW4TransactionClientV1 {
+  return {
+    query: (text, values) => {
+      log.push(text)
+      return client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>
+    },
+  }
+}
+
 function baseManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -1091,29 +1106,81 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     // EXISTING mechanism (`assertConnectionIsIdleV1`, generalized off
     // `assertConnectionIsIdleForSessionExclusiveRolloutLockV1` in w4c0-identity.ts) rather than
     // building a second one — see that function's own doc comment for the SAVEPOINT-probe proof.
-    it('rejects a plan called on a connection that already has an open transaction, before any DB read', async () => {
+    //
+    // F1 (PR #4839 P3 gate, 20260810) rewrote the assertions below: the original
+    // `SELECT 1 AS still_alive` cannot distinguish a live caller transaction from one whose
+    // transaction was DESTROYED (`SELECT 1` resolves identically either way) — mutating the
+    // guard's own cleanup from `ROLLBACK TO SAVEPOINT` to a bare `ROLLBACK` (which destroys the
+    // caller's WHOLE transaction) left that assertion green. Now a temp table + row are created
+    // in the caller's transaction BEFORE the guard runs, and required still visible afterward —
+    // state a destroyed transaction would actually lose. The original `rolloutRow(orgId) ===
+    // null` check was zero information (`plan` never issues DML on ANY path — see the dedicated
+    // "plan reporter: zero-write proof" suite above — so it is null regardless of whether the
+    // guard fired correctly) and has been dropped. The "before any DB read" ordering claim is now
+    // asserted for real via `loggingTransactionClient`, which records every statement `plan`
+    // issues: the FIRST one recorded must be the guard's own `SAVEPOINT`.
+    it('rejects a plan called on a connection that already has an open, non-aborted transaction, before any DB read (real query-order proof)', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
       const client = await pool.connect()
       try {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
         await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
+        await client.query('CREATE TEMP TABLE w4c5_p22_probe_marker (id int)')
+        await client.query('INSERT INTO w4c5_p22_probe_marker VALUES (1)')
+        const queryLog: string[] = []
         await expect(
-          planAttendanceCalculationRolloutTransitionV1(transactionClient(client), { orgId, targetState: 'shadow' }),
+          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(client, queryLog), {
+            orgId,
+            targetState: 'shadow',
+          }),
         ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
-        // The caller's own pre-opened transaction is still open and usable afterward — the
-        // probe's `ROLLBACK TO SAVEPOINT` cleanup must not have touched it (same proof shape as
-        // the sibling test for the session-exclusive lock in
-        // attendance-w4c3a-rollout-control.db.test.ts).
-        await expect(client.query('SELECT 1 AS still_alive')).resolves.toMatchObject({
-          rows: [{ still_alive: 1 }],
+        // F1(c): the FIRST statement `plan` issued at all is the idle probe's own SAVEPOINT —
+        // never a predicate SELECT that ran before it.
+        expect(queryLog[0]).toBe('SAVEPOINT w4c5_idle_probe')
+        // F1(a): the caller's own pre-opened transaction — including the row inserted before the
+        // guard ran — is still intact afterward. A bare `ROLLBACK` (destroying the whole
+        // transaction) instead of the correct `ROLLBACK TO SAVEPOINT` would make this SELECT fail
+        // (transaction aborted / temp table gone), not merely return something different.
+        await expect(client.query('SELECT id FROM w4c5_p22_probe_marker')).resolves.toMatchObject({
+          rows: [{ id: 1 }],
         })
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
         client.release()
       }
-      // No rollout row was ever created — the refusal happened before plan's own BEGIN, let alone
-      // any predicate read inside it.
+    })
+
+    // F2 (PR #4839 P3 gate, 20260810): the state `isNoActiveTransactionForSavepoint` used to get
+    // wrong. A transaction already ABORTED by an earlier failed statement makes the SAME
+    // `SAVEPOINT` probe raise SQLSTATE `25P02` (`in_failed_sql_transaction`), not `25P01` — the
+    // old code rethrew that raw driver code instead of refusing with the product code. An aborted
+    // transaction is emphatically NOT idle (there IS an open transaction block); `plan` must
+    // refuse it exactly the same way it refuses an open, non-aborted one.
+    it('F2: rejects a plan called on a connection whose transaction is ABORTED by an earlier failed statement — the product code, never the raw driver SQLSTATE 25P02', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await expect(client.query('SELECT 1/0')).rejects.toMatchObject({ code: '22012' }) // division_by_zero -> aborts the transaction
+        const queryLog: string[] = []
+        await expect(
+          planAttendanceCalculationRolloutTransitionV1(loggingTransactionClient(client, queryLog), {
+            orgId,
+            targetState: 'shadow',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' }) // never the raw '25P02'
+        expect(queryLog[0]).toBe('SAVEPOINT w4c5_idle_probe')
+        // The guard must not have tried to "fix" the aborted transaction (no COMMIT/ROLLBACK of
+        // its own on this path — there is nothing to clean up, the probe SAVEPOINT never actually
+        // ran either). The connection is left EXACTLY as the caller left it: still open, still
+        // aborted, still refusing every statement with 25P02 until the caller's own ROLLBACK.
+        await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
       expect(await rolloutRow(orgId)).toBeNull()
     })
 
