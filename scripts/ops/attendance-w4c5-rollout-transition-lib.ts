@@ -547,20 +547,40 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
   // `targetState`, `legalPair`, `comparisonWritePosture`, `canBootstrap`, `blocked`, and every
   // predicate's `code`/`applicable`/`pass`/`count` — so ANY change plan can observe (state
   // drifted, a new precondition started failing, the org fell out of the allowlist) already
-  // changes this digest. W4C-5 P2-1 (PR #4839 gate, 20260809): this claim used to be asserted but
-  // untested — a per-field deletion sweep found only 2 of the 11 top-level fields (`currentVersion`,
-  // `priorState`) actually reddened any test on removal; the other 9, INCLUDING `orgId` and
-  // `targetState`, did not, because nothing exercised them. The fields THEMSELVES were always all
-  // present in `computeAttendanceW4C5PlanDigestV1`'s `canonical` object (verified field-by-field
-  // against this type below) — the gap was test coverage, not a missing field — closed by the
+  // changes this digest. W4C-5 P2-1-DIGEST-COVERAGE (PR #4839 gate, 20260809; NIT-3, PR #4839 P3
+  // gate, 20260810: renamed from the bare tag "P2-1", which the operator runbook already uses
+  // for the UNRELATED `priorState`/idempotency-short-circuit finding above and at this module's
+  // `runAttendanceW4C5ApplyOrchestrationV1` — see that finding's own comments): this claim used
+  // to be asserted but untested — a per-field deletion sweep found only 2 of the 16 fields (the
+  // type's 12 top-level fields plus the 4 predicate sub-fields `code`/`applicable`/`pass`/`count`
+  // — `currentVersion`, `priorState`) actually reddened any test on removal; the other 14,
+  // INCLUDING `orgId`, `targetState`, and every predicate sub-field, did not, because nothing
+  // exercised them. The fields THEMSELVES were always all present in
+  // `computeAttendanceW4C5PlanDigestV1`'s `canonical` object (verified field-by-field against
+  // this type below) — the gap was test coverage, not a missing field — closed by the
   // table-driven fixture-mutation test in `attendance-w4c5-rollout-transition-lib.test.ts` (covers
-  // the 12 fields of a hand-typed fixture, current as of this writing) and, because that fixture is
-  // not compiler-enforced against future type changes (`scripts/ops` is outside every pnpm
-  // workspace and no CI step runs `tsc` over it — verified, not assumed), by the companion
-  // real-plan-object test in `attendance-w4c5-rollout-transition-tool.db.test.ts`, which derives
-  // its field list from `Object.keys()` of an ACTUAL plan the boundary produced and fails loudly
-  // (not silently) if a future field has no registered alternate-value case. There is deliberately
-  // no SEPARATE local "blocked"/"illegal pair" short-circuit here: every one of those refusal classes is instead
+  // all 16 fields — 12 top-level plus 4 predicate sub-fields — of a hand-typed fixture, current
+  // as of this writing) and, because that fixture is not compiler-enforced against future type
+  // changes (`scripts/ops` is outside every pnpm workspace and no CI step runs `tsc` over it —
+  // verified, not assumed), by the companion real-plan-object test in
+  // `attendance-w4c5-rollout-transition-tool.db.test.ts`. F4 (PR #4839 P3 gate, 20260810): that
+  // companion test used to derive its field list from `Object.keys()` of ONE runtime plan
+  // instance — what that object HAS, not what the type DECLARES — so a conditionally-emitted
+  // OPTIONAL field absent from that one instance would have escaped it silently, which made the
+  // "fails loudly, never silently" claim previously written here false as stated. Its domain is
+  // now the DECLARED type (`Record<keyof AttendanceRolloutTransitionPlanV1, ...>`, which
+  // TypeScript refuses to compile incomplete), with an independent runtime check for the reverse
+  // direction (a real field the table forgot). That type-level completeness is real for a
+  // developer's own local `tsc`/editor — verified: adding a field to the type and leaving it out
+  // of the table produces a `tsc` error at exactly that table's literal — but, like this
+  // fixture's own limitation one sentence up, is NOT mechanically enforced by this repo's CI
+  // today (`packages/core-backend/tsconfig.json` excludes `**/*.test.ts`, and no
+  // `.github/workflows/*.yml` step type-checks `tests/integration/**` — grepped, zero hits): a
+  // `vitest` run alone does not "fail loudly" on an unregistered field unless a human also
+  // updates the table — the same honest limitation already disclosed for the sibling unit-test
+  // fixture one sentence up.
+  //
+  // There is deliberately no SEPARATE local "blocked"/"illegal pair" short-circuit here: every one of those refusal classes is instead
   // left to surface as the BOUNDARY's own specific code in step 4 below (`ORG_NOT_ALLOWLISTED`,
   // `STATE_MISSING`, `ILLEGAL_TRANSITION`, `UNCLOSED_LEGACY_BATCH`, etc.) — adding a second,
   // locally-classified refusal code for the SAME conditions the boundary already names

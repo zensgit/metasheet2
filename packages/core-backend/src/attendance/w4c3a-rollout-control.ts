@@ -1310,8 +1310,12 @@ async function buildAttendanceRolloutTransitionPlanV1(
  * On a dirty connection, PostgreSQL only WARNs on this function's nested `BEGIN` (never errors),
  * so this function's own unconditional `finally` ROLLBACK would then abort the CALLER's entire
  * outer transaction, and the `SELECT set_config('statement_timeout', ...)` call below would
- * override the caller's own statement timeout for the rest of it) as this function's own first
- * statement, before `BEGIN`, fail-closed.
+ * override the caller's own statement timeout for the rest of it) — fail-closed, BEFORE `BEGIN`.
+ * NIT-1 (PR #4839 P3 gate, 20260810): this used to say "as this function's own first statement" —
+ * false as written; the idle check is the FOURTH statement in the function body, run only after
+ * `rawInput`'s shape, `orgId`, and `targetState` are all validated (deliberately: reject a
+ * malformed call before touching the connection at all). The load-bearing property is "before
+ * `BEGIN`" — nothing between the idle check and `BEGIN` issues any query — not "first".
  */
 export async function planAttendanceCalculationRolloutTransitionV1(
   connection: AttendanceW4TransactionClientV1,

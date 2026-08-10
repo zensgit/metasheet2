@@ -356,14 +356,19 @@ test('computeAttendanceW4C5PlanDigestV1 changes when priorState changes, state/v
 })
 
 // ---------------------------------------------------------------------------
-// computeAttendanceW4C5PlanDigestV1 — field-coverage table (P2-1, PR #4839 gate, 20260809).
+// computeAttendanceW4C5PlanDigestV1 — field-coverage table (P2-1-DIGEST-COVERAGE, PR #4839 gate,
+// 20260809; NIT-3, PR #4839 P3 gate, 20260810: tagged distinctly from the bare "P2-1" used
+// elsewhere in this file and in the operator runbook for the UNRELATED `priorState`/idempotency
+// finding — see the test above this block).
 //
 // The gate's finding: deleting fields from `computeAttendanceW4C5PlanDigestV1`'s internal
 // `canonical` object one at a time — ONLY `currentVersion` and `priorState` reddened this suite;
-// the other nine top-level fields, INCLUDING `orgId` and `targetState`, left every test above
-// green. The fields were always all present in the source (verified field-by-field against
-// `AttendanceRolloutTransitionPlanV1` below — all 12 top-level fields of the type, including
-// `predicates`, already appear in `canonical`) — the gap was test coverage, not a missing field.
+// the other 14 fields (10 remaining top-level fields plus all 4 predicate sub-fields —
+// `code`/`applicable`/`pass`/`count`, see the SECOND table below), INCLUDING `orgId` and
+// `targetState`, left every test above green — 2 of 16 total, not 2 of 11. The fields were always
+// all present in the source (verified field-by-field against `AttendanceRolloutTransitionPlanV1`
+// below — all 12 top-level fields of the type, including `predicates`, already appear in
+// `canonical`) — the gap was test coverage, not a missing field.
 //
 // `FULL_PLAN` below is a plain object literal ASSIGNED TO the real `AttendanceRolloutTransitionPlanV1`
 // type (not `fakePlan()`'s `as never` shape used elsewhere in this file), so TypeScript itself
@@ -382,13 +387,19 @@ test('computeAttendanceW4C5PlanDigestV1 changes when priorState changes, state/v
 // future field silently added to `AttendanceRolloutTransitionPlanV1` without updating `FULL_PLAN`
 // and `PLAN_FIELD_ALTERNATES` below would NOT be caught by this test in CI. The
 // `keys.length === 12` assertion is a manual tripwire for a human editing this file, not a
-// substitute for real enforcement. The test that DOES close this without depending on any human
-// remembering anything is the companion one in
-// `packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts`,
-// which derives its key list from `Object.keys()` of a REAL plan object the boundary produced at
-// runtime (so a newly added field is present automatically, with no source edit to this test
-// needed to be DETECTED) and THROWS if that field has no registered alternate-value case yet
-// (forcing a human to add coverage, rather than silently passing without it).
+// substitute for real enforcement.
+//
+// F4 (PR #4839 P3 gate, 20260810): the companion test in
+// `packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts`
+// USED TO claim it "close[d] this without depending on any human remembering anything" — false as
+// written: it derived its key list from `Object.keys()` of ONE real plan object the boundary
+// produced at runtime, i.e. what THAT object HAS, not what the type DECLARES, so a
+// conditionally-emitted OPTIONAL field absent from that one instance would have escaped it
+// silently too. Its domain is now `Object.keys()` of a `Record<keyof
+// AttendanceRolloutTransitionPlanV1, ...>`-typed alternate-generator table, the same
+// type-completeness discipline as `FULL_PLAN`/`PLAN_FIELD_ALTERNATES` here — real for a
+// developer's own local `tsc`, same CI-enforcement caveat as this file. See that test's own
+// updated comment for the full account.
 // ---------------------------------------------------------------------------
 const FULL_PLAN: AttendanceRolloutTransitionPlanV1 = {
   orgId: ORG,
@@ -426,7 +437,7 @@ const PLAN_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPlanV1, unk
   blocked: true,
 }
 
-test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single top-level plan field changes the digest (P2-1)', () => {
+test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single top-level plan field changes the digest (P2-1-DIGEST-COVERAGE)', () => {
   const baseline = computeAttendanceW4C5PlanDigestV1(FULL_PLAN)
   const keys = Object.keys(FULL_PLAN) as Array<keyof AttendanceRolloutTransitionPlanV1>
   assert.equal(
@@ -450,7 +461,7 @@ const PREDICATE_FIELD_ALTERNATES: Record<keyof AttendanceRolloutTransitionPredic
   count: 999,
 }
 
-test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single predicate sub-field changes the digest (P2-1)', () => {
+test('computeAttendanceW4C5PlanDigestV1 field-coverage table: mutating ANY single predicate sub-field changes the digest (P2-1-DIGEST-COVERAGE)', () => {
   const baseline = computeAttendanceW4C5PlanDigestV1(FULL_PLAN)
   const firstPredicate = FULL_PLAN.predicates[0]
   const keys = Object.keys(firstPredicate) as Array<keyof AttendanceRolloutTransitionPredicateV1>
