@@ -10,7 +10,7 @@
  * snapshot).
  */
 import crypto from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
@@ -38,6 +38,10 @@ import {
   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
   computeAttendanceRequestPayloadFingerprintV1,
 } from '../../src/attendance/w4c3b-request-snapshots'
+import {
+  __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
+  ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1,
+} from '../../src/attendance/w4c2-authoritative-delivery'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -755,6 +759,11 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           evidenceManifestSha256: hex64(`walk-${walkOrg}-${expectedVersion}`), evidenceReferences: refs,
           reasonCode: 'rollout_transition',
         })
+      // Gate D (owner completion gate, PR #4839, 20260810): two of the seven legal pairs this
+      // test walks target `authoritative` (steps 7 and 9 below) — unrelated to what this test
+      // proves (that the closed matrix permits all seven pairs), so the override is set for the
+      // whole walk rather than threading it through `step`.
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
       try {
         await expect(step('shadow', 'legacy', 1)).resolves.toMatchObject({ state: 'shadow' })
         await expect(step('eligible', 'shadow', 2)).resolves.toMatchObject({ state: 'eligible' })
@@ -776,6 +785,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           [walkOrg],
         )).resolves.toMatchObject({ rows: [{ n: 9 }] })
       } finally {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
         client.release()
       }
     })
@@ -1482,6 +1492,21 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
   })
 
   describe('resume "preserved authoritative jobs remain retryable without operation rows" predicate (gate 5, P2-4 PR #4773 gate)', () => {
+    // Gate D (owner completion gate, PR #4839, 20260810): `advanceOrgToAuthoritative` below
+    // drives a REAL `eligible -> authoritative` promotion as SETUP, unrelated to what either
+    // test in this block actually exercises. Without the override, that setup step would now
+    // itself refuse with the new `AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED` code. Both tests'
+    // actual assertions target a LATER predicate (`RETRYABLE_JOB_HAS_OPERATION_ROWS` /
+    // `INCOMPLETE_OPERATION`), which fires before the new Gate D check regardless of override
+    // state (Gate D is the LAST precondition) — so leaving the override on through the whole
+    // test body does not mask what either test is actually proving.
+    beforeEach(() => {
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+    })
+    afterEach(() => {
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+    })
+
     async function step(
       client: PoolClient,
       org: string,
@@ -2265,6 +2290,295 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )).resolves.toMatchObject({ rows: [{ n: 0 }] })
       } finally {
         __setW4C3aRolloutControlBeforeStateUpdateForTests(null)
+        client.release()
+      }
+    })
+  })
+
+  describe('Gate D: authoritative-entrypoint delivery readiness (owner completion gate, PR #4839, 20260810)', () => {
+    // Same detector idiom as attendance-w4c5-rollout-transition-tool.db.test.ts:81 (P2-3
+    // hardened statement-sweep write detector) — a write verb anchored at statement-start OR
+    // immediately inside a CTE's `AS (` open, so it does not false-positive on a `SELECT ... FOR
+    // UPDATE` locking read every section-3 predicate in this file issues routinely.
+    const WRITE_VERBS =
+      'INSERT\\s+INTO|UPDATE\\s+\\S+\\s+SET|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE(?:\\s+TABLE)?\\s|ALTER\\s+(?:TABLE|SEQUENCE|DATABASE)|DROP\\s+(?:TABLE|SEQUENCE|DATABASE)|CREATE\\s+(?:TABLE|SEQUENCE|DATABASE)'
+    const WRITE_STATEMENT_PATTERN = new RegExp(
+      `(^\\s*(?:${WRITE_VERBS}))|(\\bAS\\s*\\(\\s*(?:${WRITE_VERBS}))`,
+      'i',
+    )
+    function isWriteStatementLocal(text: string): boolean {
+      return WRITE_STATEMENT_PATTERN.test(text)
+    }
+
+    function recordingTransactionClient(
+      client: PoolClient,
+      statements: string[],
+    ): AttendanceW4TransactionClientV1 {
+      return {
+        query: (text, values) => {
+          statements.push(text.trim())
+          return client.query(text, values as unknown[]) as unknown as Promise<{
+            rows: Array<Record<string, unknown>>
+          }>
+        },
+      }
+    }
+
+    afterEach(() => {
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+    })
+
+    async function step(
+      client: PoolClient,
+      org: string,
+      target: AttendanceRolloutStateV1,
+      expectedState: AttendanceRolloutStateV1,
+      expectedVersion: number,
+      seed: string,
+      refs = baseRefs(seed),
+    ) {
+      return transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+        targetState: target, expectedState, expectedVersion,
+        evidenceManifestSha256: hex64(seed), evidenceReferences: refs,
+        reasonCode: 'rollout_transition',
+      })
+    }
+
+    async function advanceToEligible(client: PoolClient, org: string): Promise<void> {
+      await step(client, org, 'shadow', 'legacy', 1, `${org}-gated-1`)
+      await step(client, org, 'eligible', 'shadow', 2, `${org}-gated-2`)
+    }
+
+    async function advanceToSuspended(client: PoolClient, org: string): Promise<void> {
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+      await advanceToEligible(client, org)
+      await step(client, org, 'authoritative', 'eligible', 3, `${org}-gated-3`)
+      await step(client, org, 'suspended', 'authoritative', 4, `${org}-gated-4`)
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+    }
+
+    it('non-vacuity probe: the statement-sweep detector fires on a real legal transition through the exact recording wrapper the refusal tests below reuse', async () => {
+      const nonVacuousOrg = crypto.randomUUID()
+      allow(nonVacuousOrg)
+      const client = await pool.connect()
+      const statements: string[] = []
+      try {
+        await transitionAttendanceCalculationRolloutV1(recordingTransactionClient(client, statements), {
+          orgId: nonVacuousOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64('gate-d-nonvacuous'), evidenceReferences: baseRefs('gate-d-nonvacuous'),
+          reasonCode: 'rollout_transition',
+        })
+        const writes = statements.filter((s) => isWriteStatementLocal(s))
+        // The bootstrap INSERT (fresh org), the event INSERT, and the state UPDATE — and no
+        // more — proves the detector actually fires (not vacuously false on every statement
+        // this function ever issues).
+        expect(writes.length).toBe(3)
+        expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(true)
+        expect(statements.some((s) => s.toUpperCase() === 'ROLLBACK')).toBe(false)
+      } finally {
+        client.release()
+      }
+    })
+
+    describe('promotion (eligible -> authoritative)', () => {
+      // Two legs, distinguishable: leg P1 is red iff `live_punch` stops being tracked; leg P2 is
+      // red iff `scheduled` stops being tracked. Neither leg reds under the other's mutation.
+      it.each([
+        ['P1', { live_punch: false, scheduled: true }],
+        ['P2', { live_punch: true, scheduled: false }],
+        ['P3 (production default)', null],
+      ] as const)('%s: refuses with the values-free code and writes NOTHING when an entrypoint is undelivered', async (_label, override) => {
+        const org = crypto.randomUUID()
+        allow(org)
+        const client = await pool.connect()
+        try {
+          await advanceToEligible(client, org)
+          __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(override)
+          const statements: string[] = []
+          const before = await pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [org],
+          )
+          const beforeEvents = await pool.query(
+            'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+            [org],
+          )
+          await expect(
+            transitionAttendanceCalculationRolloutV1(recordingTransactionClient(client, statements), {
+              orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+              targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
+              evidenceManifestSha256: hex64(`${org}-promo-refuse`), evidenceReferences: baseRefs(`${org}-promo-refuse`),
+              reasonCode: 'rollout_transition',
+            }),
+          ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED' })
+          for (const statement of statements) {
+            expect(isWriteStatementLocal(statement)).toBe(false)
+          }
+          expect(statements.some((s) => s.toUpperCase() === 'ROLLBACK')).toBe(true)
+          expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(false)
+          // The ONLY statement issued after ROLLBACK is this function releasing the
+          // session-exclusive advisory lock it itself acquired before the transaction began —
+          // not a second transaction, not a retry, not anything else.
+          const rollbackIndex = statements.findIndex((s) => s.toUpperCase() === 'ROLLBACK')
+          expect(statements.slice(rollbackIndex + 1)).toEqual(['SELECT pg_advisory_unlock($1::bigint)'])
+          await expect(pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [org],
+          )).resolves.toEqual(before)
+          await expect(pool.query(
+            'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+            [org],
+          )).resolves.toEqual(beforeEvents)
+        } finally {
+          client.release()
+        }
+      })
+    })
+
+    describe('resume (suspended -> authoritative)', () => {
+      it.each([
+        ['R1', { live_punch: false, scheduled: true }],
+        ['R2', { live_punch: true, scheduled: false }],
+        ['R3 (production default)', null],
+      ] as const)('%s: refuses with the values-free code and writes NOTHING when an entrypoint is undelivered', async (_label, override) => {
+        const org = crypto.randomUUID()
+        allow(org)
+        const client = await pool.connect()
+        try {
+          await advanceToSuspended(client, org)
+          __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(override)
+          const statements: string[] = []
+          const before = await pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [org],
+          )
+          const beforeEvents = await pool.query(
+            'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+            [org],
+          )
+          await expect(
+            transitionAttendanceCalculationRolloutV1(recordingTransactionClient(client, statements), {
+              orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+              targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
+              evidenceManifestSha256: hex64(`${org}-resume-refuse`), evidenceReferences: resumeRefs(`${org}-resume-refuse`),
+              reasonCode: 'rollout_transition',
+            }),
+          ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED' })
+          for (const statement of statements) {
+            expect(isWriteStatementLocal(statement)).toBe(false)
+          }
+          expect(statements.some((s) => s.toUpperCase() === 'ROLLBACK')).toBe(true)
+          expect(statements.some((s) => s.toUpperCase() === 'COMMIT')).toBe(false)
+          // The ONLY statement issued after ROLLBACK is this function releasing the
+          // session-exclusive advisory lock it itself acquired before the transaction began —
+          // not a second transaction, not a retry, not anything else.
+          const rollbackIndex = statements.findIndex((s) => s.toUpperCase() === 'ROLLBACK')
+          expect(statements.slice(rollbackIndex + 1)).toEqual(['SELECT pg_advisory_unlock($1::bigint)'])
+          await expect(pool.query(
+            'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+            [org],
+          )).resolves.toEqual(before)
+          await expect(pool.query(
+            'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+            [org],
+          )).resolves.toEqual(beforeEvents)
+        } finally {
+          client.release()
+        }
+      })
+    })
+
+    it('positive control (gate 4): with BOTH entrypoints delivered, promotion AND resume still succeed — "it refuses" and "it is broken" are distinguishable', async () => {
+      const promoOrg = crypto.randomUUID()
+      allow(promoOrg)
+      const resumeOrg = crypto.randomUUID()
+      allow(resumeOrg)
+      const client = await pool.connect()
+      try {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+
+        await advanceToEligible(client, promoOrg)
+        const beforeEvents = await pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [promoOrg],
+        )
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: promoOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
+            evidenceManifestSha256: hex64(`${promoOrg}-promo-ok`), evidenceReferences: baseRefs(`${promoOrg}-promo-ok`),
+            reasonCode: 'rollout_transition',
+          }),
+        ).resolves.toEqual({ orgId: promoOrg, state: 'authoritative', batchId: null })
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [promoOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'authoritative', version: 4 }] })
+        await expect(pool.query(
+          'SELECT count(*)::int AS n, array_agg(new_state) AS states FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [promoOrg],
+        )).resolves.toMatchObject({
+          rows: [{ n: beforeEvents.rows[0].n + 1, states: expect.arrayContaining(['authoritative']) }],
+        })
+
+        await advanceToEligible(client, resumeOrg)
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+        await step(client, resumeOrg, 'authoritative', 'eligible', 3, `${resumeOrg}-resume-setup-3`)
+        await step(client, resumeOrg, 'suspended', 'authoritative', 4, `${resumeOrg}-resume-setup-4`)
+        const beforeResumeEvents = await pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [resumeOrg],
+        )
+        await expect(
+          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
+            evidenceManifestSha256: hex64(`${resumeOrg}-resume-ok`), evidenceReferences: resumeRefs(`${resumeOrg}-resume-ok`),
+            reasonCode: 'rollout_transition',
+          }),
+        ).resolves.toEqual({ orgId: resumeOrg, state: 'authoritative', batchId: null })
+        await expect(pool.query(
+          'SELECT state, version FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [resumeOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'authoritative', version: 6 }] })
+        await expect(pool.query(
+          'SELECT count(*)::int AS n FROM attendance_calculation_rollout_events WHERE org_id = $1',
+          [resumeOrg],
+        )).resolves.toMatchObject({ rows: [{ n: beforeResumeEvents.rows[0].n + 1 }] })
+      } finally {
+        client.release()
+      }
+    })
+
+    it('gate 5: legacy/shadow/eligible transitions AND the authoritative -> suspended de-escalation are unaffected under PRODUCTION-DEFAULT (undelivered) values', async () => {
+      const org = crypto.randomUUID()
+      allow(org)
+      const client = await pool.connect()
+      try {
+        // Explicitly production default — no override set at any point in this test.
+        await expect(step(client, org, 'shadow', 'legacy', 1, `${org}-g5-1`))
+          .resolves.toMatchObject({ state: 'shadow' })
+        await expect(step(client, org, 'eligible', 'shadow', 2, `${org}-g5-2`))
+          .resolves.toMatchObject({ state: 'eligible' })
+        await expect(step(client, org, 'shadow', 'eligible', 3, `${org}-g5-3`))
+          .resolves.toMatchObject({ state: 'shadow' })
+        await expect(step(client, org, 'legacy', 'shadow', 4, `${org}-g5-4`))
+          .resolves.toMatchObject({ state: 'legacy' })
+
+        // De-escalation out of a (seam-reached) authoritative org must NOT be blocked by
+        // production-default (undelivered) values — this is the trap: `comparisonWritePosture`
+        // for `authoritative -> suspended` is ALSO `'authoritative'`, so a guard keyed on
+        // posture instead of `targetState` would wrongly strand this org.
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
+        await step(client, org, 'shadow', 'legacy', 5, `${org}-g5-5`)
+        await step(client, org, 'eligible', 'shadow', 6, `${org}-g5-6`)
+        await step(client, org, 'authoritative', 'eligible', 7, `${org}-g5-7`)
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+        await expect(step(client, org, 'suspended', 'authoritative', 8, `${org}-g5-8`))
+          .resolves.toMatchObject({ state: 'suspended' })
+      } finally {
         client.release()
       }
     })

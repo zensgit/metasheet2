@@ -38,6 +38,7 @@ import {
   ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
   computeAttendanceW4C5PlanDigestV1,
 } from '../../../../scripts/ops/attendance-w4c5-rollout-transition-lib'
+import { __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests } from '../../src/attendance/w4c2-authoritative-delivery'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -554,6 +555,12 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
           ['authoritative', 'eligible', 3],
           ['suspended', 'authoritative', 4],
         ]
+        // Gate D (owner completion gate, PR #4839, 20260810): the third step above is a REAL
+        // `eligible -> authoritative` promotion, driven as SETUP for a test whose actual subject
+        // is `RETRYABLE_JOB_HAS_OPERATION_ROWS` (asserted below, under PRODUCTION-DEFAULT
+        // (undelivered) Gate D values — the override is reset before the plan call this test
+        // actually exercises, so it never masks what this test proves).
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
         for (const [targetState, expectedState, expectedVersion] of chain) {
           await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
             orgId,
@@ -569,6 +576,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
           })
         }
       } finally {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
         driveClient.release()
       }
       expect(await rolloutRow(orgId)).toEqual({ state: 'suspended', version: 5 })
@@ -608,12 +616,24 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         string,
         { applicable: boolean; pass: boolean; count: number | null }
       >
-      // All ten predicates are applicable on a resume pair whose target is also an
+      // Eleven predicates are applicable on a resume pair whose target is also an
       // eligibility/authority target: every ELIGIBILITY_AUTHORITY_TARGETS +
-      // CALCULATION_ENTRY_TARGETS + resume-only branch is reached simultaneously.
-      expect(Object.values(byCode).filter((p) => p.applicable)).toHaveLength(10)
+      // CALCULATION_ENTRY_TARGETS + resume-only branch is reached simultaneously, plus Gate D's
+      // AUTHORITATIVE_ENTRYPOINTS_DELIVERED (owner completion gate, PR #4839, 20260810 — the
+      // eleventh, applicable whenever `targetState === 'authoritative'`, which this resume pair
+      // is).
+      expect(Object.values(byCode).filter((p) => p.applicable)).toHaveLength(11)
       expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.applicable).toBe(true)
       expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.count).toBe(0)
+      // This plan call runs under PRODUCTION-DEFAULT (undelivered) Gate D values — the override
+      // set for the drive-up above was reset in the `finally` block before this call — so the
+      // reporter must show the real shipped state: applicable, failing, both entrypoints
+      // undelivered.
+      expect(byCode.AUTHORITATIVE_ENTRYPOINTS_DELIVERED).toMatchObject({
+        applicable: true,
+        pass: false,
+        count: 2,
+      })
 
       for (const statement of statements) {
         expect(isWriteStatementV1(statement)).toBe(false)
@@ -819,7 +839,13 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       try {
         await directTransition(client, orgId, 'shadow', 'legacy', 1) // v2, prior='legacy'
         await directTransition(client, orgId, 'eligible', 'shadow', 2) // v3, prior='shadow'
+        // Gate D (owner completion gate, PR #4839, 20260810): this promotion step is SETUP for
+        // an A17-manifest-weakness reproduction, unrelated to Gate D — override on for just this
+        // one call, off immediately after, so it never leaks into the assertions below (which
+        // must observe production-default behaviour for everything else in this test).
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
         await directTransition(client, orgId, 'authoritative', 'eligible', 3) // v4, prior='eligible'
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
       } finally {
         client.release()
       }
@@ -995,6 +1021,78 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(applyResult.status).toBe(7)
       expect(applyResult.stderr).toContain('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
       expect(await rolloutRow(orgId)).toBeNull()
+    })
+
+    it('Gate D (owner completion gate, PR #4839, 20260810), driven through the actual CLI subprocess: a legal eligible -> authoritative promotion still refuses with AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED under production values — the test seam cannot cross the subprocess boundary, so this proves the CLI has no bypass and is display-only', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const driveClient = await pool.connect()
+      try {
+        // Setup only: drives the org to `eligible` (production-default undelivered Gate D
+        // values never block this — Gate D is keyed strictly on `targetState === 'authoritative'`
+        // and none of these three steps target it).
+        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+          orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c5-tool-test',
+          targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
+          evidenceManifestSha256: hex64(`${orgId}:gate-d-cli:shadow`),
+          evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+          reasonCode: 'rollout_transition',
+        })
+        await transitionAttendanceCalculationRolloutV1(transactionClient(driveClient), {
+          orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c5-tool-test',
+          targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
+          evidenceManifestSha256: hex64(`${orgId}:gate-d-cli:eligible`),
+          evidenceReferences: { imageSha: 'x', ownerAuthorizationRef: 'y', syntheticOrgRef: 'z' } as EvidenceReferencesV1,
+          reasonCode: 'rollout_transition',
+        })
+      } finally {
+        driveClient.release()
+      }
+      expect(await rolloutRow(orgId)).toEqual({ state: 'eligible', version: 3 })
+      const before = await rolloutRow(orgId)
+      const beforeEvents = await eventCount(orgId)
+
+      // eligible -> authoritative IS one of the seven ratified pairs, so plan reports
+      // legalPair:true and canBootstrap:false — this promotion is refused ONLY by Gate D, not by
+      // pair legality, org allowlist, or any other section-3 predicate (a clean org has none of
+      // those seeded).
+      const planResult = spawnCli(['plan', '--org', orgId, '--target', 'authoritative'])
+      const plan = JSON.parse(planResult.stdout) as AttendanceRolloutTransitionPlanV1 & { planDigest: string }
+      expect(plan.legalPair).toBe(true)
+      expect(plan.blocked).toBe(true)
+      const authoritativePredicate = plan.predicates.find((p) => p.code === 'AUTHORITATIVE_ENTRYPOINTS_DELIVERED')
+      expect(authoritativePredicate).toMatchObject({ applicable: true, pass: false, count: 2 })
+
+      const manifestPath = writeManifest(
+        'gate-d-cli-promotion',
+        baseManifest({
+          orgId,
+          targetState: 'authoritative',
+          sevenDistinctCalendarDaysObserved: [
+            '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07',
+          ],
+          criticalDiffCount: 0,
+          unresolvedReviewCount: 0,
+        }),
+      )
+      const applyResult = spawnCli([
+        'apply',
+        '--org', orgId,
+        '--target', 'authoritative',
+        '--expected-state', 'eligible',
+        '--expected-version', '3',
+        '--plan-digest', plan.planDigest,
+        '--confirm', ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
+        '--manifest', manifestPath,
+        '--actor-id', actorId,
+        '--correlation-id', crypto.randomUUID(),
+        '--engine-version', 'w4c5-tool-test',
+      ])
+
+      expect(applyResult.status).toBe(7)
+      expect(applyResult.stderr).toContain('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
+      await expect(rolloutRow(orgId)).resolves.toEqual(before)
+      await expect(eventCount(orgId)).resolves.toBe(beforeEvents)
     })
 
     it('missing confirmation refuses with W4C5_TOOL_CONFIRMATION_REQUIRED before any DB access', async () => {
