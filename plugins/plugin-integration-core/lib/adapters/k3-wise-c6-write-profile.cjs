@@ -303,6 +303,12 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
     return out
   }
 
+  function normalizeLookupKey(value) {
+    if (value === undefined || value === null) return null
+    const normalized = String(value).trim()
+    return normalized.length > 0 ? normalized : null
+  }
+
   function saveFailure() {
     const error = new Error('K3 WISE Save reported row failure')
     // Review #4761 P2: UNCONDITIONALLY the registered closed token. Passing through the
@@ -430,13 +436,25 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
 
     async lookupByKey(dataSourceId, object, key, policy) {
       const keyField = policy.keyFields[0]
+      const requestedKey = normalizeLookupKey(key[keyField])
       try {
         const read = await targetAdapter().read({
           object,
           filters: { [keyField]: key[keyField] },
         })
         const records = Array.isArray(read && read.records) ? read.records : []
-        return { data: records.map(unwrapReferenceShapes) }
+        // GetDetail is only evidence that a material exists when the returned material key
+        // identifies the material we asked for. Some K3 deployments return a successful
+        // default/template detail record for an unknown key; passing that unrelated record to
+        // classifyExisting turns a genuinely new material into `update`. Normalize only the
+        // outer string representation (trim, case-sensitive) and keep every exact match so the
+        // planner can still fail closed as `held` if an adapter ever reports duplicates.
+        const matching = records
+          .map(unwrapReferenceShapes)
+          .filter((record) => requestedKey !== null
+            && record && typeof record === 'object'
+            && normalizeLookupKey(record[keyField]) === requestedKey)
+        return { data: matching }
       } catch (error) {
         const code = error && error.details && error.details.code
         if (code === 'K3_WISE_READ_BUSINESS_ERROR') {
