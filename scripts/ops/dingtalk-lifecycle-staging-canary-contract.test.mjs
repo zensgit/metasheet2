@@ -272,6 +272,53 @@ test('P1 backend recreate reuses the exact running image pin instead of latest o
   assert.match(result.stdout, new RegExp(`^zensgit\\|${sha}\\|compose `))
 })
 
+test('P1 rollback recreate retains the proven image pin after the backend container disappears', () => {
+  const sha = 'b'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       STAGING_DIR=/tmp
+       STAGING_COMPOSE_FILE=/tmp/docker-compose.app.staging.yml
+       ATTENDANCE_OVERRIDE_FILE=/tmp/not-present-attendance
+       LIFECYCLE_OVERRIDE_FILE=/tmp/not-present-lifecycle
+       PINNED_IMAGE_OWNER=zensgit
+       PINNED_IMAGE_TAG=${sha}
+       docker() {
+         if [[ "$1" == "inspect" ]]; then
+           return 1
+         fi
+         printf '%s|%s|%s' "$IMAGE_OWNER" "$IMAGE_TAG" "$*"
+       }
+       compose_staging_cmd "" config`,
+      'bash',
+      REMOTE_SH,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'status',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, new RegExp(`^zensgit\\|${sha}\\|compose `))
+
+  const source = read(REMOTE_SH)
+  const actionBody = source.slice(source.indexOf('action_off()'), source.indexOf('\n# --- main'))
+  assert.ok(
+    actionBody.indexOf('pin_live_backend_image_for_transition') < actionBody.indexOf('backup_lifecycle_override'),
+    'image pin must be captured before the first write',
+  )
+})
+
 test('P1 deployed SHA provenance conflicts fail closed instead of selecting one source', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /image_commit.*health_commit/s)

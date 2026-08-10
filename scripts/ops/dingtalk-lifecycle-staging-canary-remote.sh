@@ -82,6 +82,8 @@ LIFECYCLE_OVERRIDE_FILE="${LIFECYCLE_PERSIST_DIR}/docker-compose.lifecycle-canar
 # Previous-override backup used only during action=off for restore-on-failure.
 LIFECYCLE_PREV_BACKUP=""
 LIFECYCLE_PREV_STATE="absent" # absent | present
+PINNED_IMAGE_OWNER=""
+PINNED_IMAGE_TAG=""
 
 is_truthy() {
   local v
@@ -147,12 +149,27 @@ compose_staging_cmd() {
   elif [[ -f "$LIFECYCLE_OVERRIDE_FILE" ]]; then
     files+=(-f "$LIFECYCLE_OVERRIDE_FILE")
   fi
-  if ! image_pin="$(resolve_live_backend_image_pin)"; then
-    echo "[lifecycle-canary][error] running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing compose" >&2
-    return 1
+  if [[ -n "$PINNED_IMAGE_OWNER" && -n "$PINNED_IMAGE_TAG" ]]; then
+    image_owner="$PINNED_IMAGE_OWNER"
+    image_tag="$PINNED_IMAGE_TAG"
+  else
+    if ! image_pin="$(resolve_live_backend_image_pin)"; then
+      echo "[lifecycle-canary][error] running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing compose" >&2
+      return 1
+    fi
+    read -r image_owner image_tag <<< "$image_pin"
   fi
-  read -r image_owner image_tag <<< "$image_pin"
   (cd "$STAGING_DIR" && IMAGE_OWNER="$image_owner" IMAGE_TAG="$image_tag" docker compose "${files[@]}" "$@")
+}
+
+pin_live_backend_image_for_transition() {
+  local image_pin
+  if ! image_pin="$(resolve_live_backend_image_pin)"; then
+    fail "running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing transition"
+  fi
+  read -r PINNED_IMAGE_OWNER PINNED_IMAGE_TAG <<< "$image_pin"
+  [[ "$PINNED_IMAGE_TAG" == "$DEPLOY_SHA" ]] \
+    || fail "running backend image tag '${PINNED_IMAGE_TAG}' does not match deploy_sha '${DEPLOY_SHA}'"
 }
 
 require_sha() {
@@ -760,6 +777,9 @@ action_off() {
 
   capture_live_snapshot
   assert_exact_sha
+  # A failed force-recreate may leave no backend container to inspect. Keep the
+  # already-proven pin for both the forward recreate and any rollback recreate.
+  pin_live_backend_image_for_transition
   require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=off"
 
   if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
