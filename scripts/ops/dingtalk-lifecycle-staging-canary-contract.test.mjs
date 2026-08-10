@@ -231,7 +231,10 @@ test('P1 backend recreate reuses the exact running image pin instead of latest o
   const source = read(REMOTE_SH)
   assert.match(source, /resolve_live_backend_image_pin\(\)/)
   assert.match(source, /metasheet2-backend:\(\[0-9a-f\]\{40\}\)/)
-  assert.match(source, /IMAGE_OWNER="\$image_owner" IMAGE_TAG="\$image_tag" docker compose/)
+  assert.match(
+    source,
+    /IMAGE_OWNER="\$image_owner" IMAGE_TAG="\$image_tag" \\\n\s+docker compose --project-directory "\$STAGING_DIR"/,
+  )
   assert.match(source, /refusing compose/)
 
   const sha = 'a'.repeat(40)
