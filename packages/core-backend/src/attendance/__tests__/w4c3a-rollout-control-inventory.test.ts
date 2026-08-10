@@ -290,8 +290,35 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
 // at all — a bare `continue`/drop on the "no enclosing function found" case would silently
 // reopen this exact hole (a module-level arrow function's refusal call would vanish rather than
 // count as unrepresented), so it is bucketed as `unattributedCount` and asserted `=== 0`
-// explicitly, with its own negative control proving the bucket isn't just always empty by
-// construction.
+// explicitly.
+//
+// P2 (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): the previous paragraph claimed this
+// bucket had "its own negative control proving the bucket isn't just always empty by
+// construction" — untrue at the time: the only assertion touching `unattributedCount` was the
+// conservation check below (attributed + unattributed === total occurrences), which passes
+// UNCHANGED even if `unattributedCount += 1` is replaced with a silent drop, because production
+// content never exercises that branch (all three real refusal calls sit inside a named
+// function), so `unattributedCount` is 0 either way and the conservation equation still balances
+// at 0 + 3 = 3. Fixed by adding a genuine negative control: a dedicated test drives
+// `attributeRefusalCallsV1` over a SYNTHETIC source string containing a refusal call inside a
+// top-level arrow function (no enclosing named `function` at all) and asserts it lands in
+// `unattributedCount`, not silently dropped. Proven load-bearing directly, not merely asserted:
+// deleting the `unattributedCount += 1` increment reds THAT test while the conservation check
+// stays green on the REAL file's content — the exact contrast that shows the conservation check
+// alone was never sufficient.
+//
+// P3 (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): the attribution pattern used to be
+// anchored on the WHOLE call form (`boundaryFail('...', 503)`, single-quoted, status 503
+// literal) — a 4th dispatch site spelled `boundaryFail("...", 503)` (double quotes),
+// `boundaryFail('...', 500)` (a different status), or with the code hoisted into a local `const`
+// (`const CODE = '...'; boundaryFail(CODE, 503)`) was invisible to that pattern and so
+// contributed to neither `counts` nor `unattributedCount` — the "unmapped/4th dispatch site
+// fails closed" test below stayed green over an undetected dispatch site, broader than what the
+// mechanism delivered (its own title claimed more than it covered). Fixed by attributing on the
+// quoted error-code NAME's occurrence (`REFUSAL_CALL_CODE_NAME_PATTERN`, matching either quote
+// character, in any surrounding call syntax) rather than the surrounding call form — see that
+// pattern's own comment for why it is scoped to this file's content only and never reused for
+// the repo-wide scan below.
 //
 // Disclosed scope — what this does NOT cover, stated rather than left for a reader to find:
 //   - Only THIS ONE file (`w4c2-live-scheduled-boundary.ts`) is scanned for attribution. A
@@ -302,6 +329,21 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
 //     plus brace-depth counting — not a real parser. It is verified safe for THIS file's actual
 //     content (no string/comment hides an unbalanced brace inside either target function's
 //     range), not proven safe in general.
+//   - Attribution counts LEXICAL occurrences of a matched refusal call, not RUNTIME
+//     REACHABILITY. Dead code still counts: wrapping a genuine call in an always-false guard
+//     (e.g. `if (false && posture.effectiveState === 'authoritative') { boundaryFail(...) }`)
+//     leaves every count and the whole suite unchanged, because nothing here evaluates control
+//     flow — it locates text inside brace-matched ranges. This guard proves DECLARATION-vs-
+//     CALL-SITE-TEXT correspondence, not that the call path is live (the real-DB behavioural
+//     suite in `attendance-w4c3a-rollout-control.db.test.ts` is what exercises actual reachability).
+//   - `REFUSAL_CALL_CODE_NAME_PATTERN` (the P2 fix above) still has a residual, disclosed gap
+//     rather than a chased one (repo doctrine: enumerating spellings does not converge —
+//     feedback_trap_enumeration_does_not_converge.md): a dispatch site spelling the code name
+//     BACKTICK-quoted (`` `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` ``, the same quoting this
+//     module's own header prose uses) or split/concatenated across multiple string literals
+//     still evades it. The backtick exclusion is deliberate — it is exactly what keeps this
+//     pattern from self-matching the header's own prose mention — but it is also a real hole in
+//     the other direction, named here rather than left for a reader to rediscover.
 //   - The map from declared key to function name (`KEY_TO_FUNCTION_NAME`) is still a reviewed,
 //     hand-maintained pair — a rename of `executeLivePunch`/`executeScheduledRunInternal`
 //     without updating that map fails closed (the old name vanishes from the discovered set, the
@@ -333,11 +375,43 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
   })
 
   // Exact literal call, not a loose substring: does not match the module header's own prose
-  // mention of the bare code string (backticked, never inside a `boundaryFail(...)` call).
+  // mention of the bare code string (backticked, never inside a `boundaryFail(...)` call). Used
+  // ONLY for (a) the repo-wide "exactly one file" scan below and (b) the whole-file total
+  // assertions, both of which want the narrow, literal thing their own titles say: "the EXACT
+  // refusal-call pattern" / "each function carries its exact expected count". Deliberately NOT
+  // the pattern `attributeRefusalCallsV1` uses for per-key/unmapped-site attribution — see
+  // `REFUSAL_CALL_CODE_NAME_PATTERN` below for why widening THIS pattern repo-wide would be
+  // unsafe: verified — scanning `packages/core-backend/src/` with a bare quote-name-quote
+  // pattern (no call-form anchor) hits THREE files, not one: this test file's own regex-literal
+  // definition just below (it spells the quoted code name verbatim to construct the regex), and
+  // `w4c2-authoritative-delivery.ts`'s docblock prose (which quotes the call form as a worked
+  // example) — the boundary file is only the third.
   const REFUSAL_CALL_PATTERN = /boundaryFail\(\s*'W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED'\s*,\s*503\s*\)/g
 
   function countRefusalCalls(content: string): number {
     return (content.match(REFUSAL_CALL_PATTERN) ?? []).length
+  }
+
+  // P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): anchors on the quoted
+  // error-code NAME's occurrence — either quote character, no requirement on the surrounding
+  // call syntax or trailing status code — so a 4th dispatch site written as
+  // `boundaryFail("...", 503)` (double quotes), `boundaryFail('...', 500)` (a different status),
+  // or `const CODE = '...'; boundaryFail(CODE, 503)` (code hoisted into a local const, attributed
+  // to whatever function lexically encloses the `const` declaration) all still attribute/count,
+  // where `REFUSAL_CALL_PATTERN` above would see none of them.
+  //
+  // Safe to apply ONLY to `w4c2-live-scheduled-boundary.ts`'s own content (never repo-wide — see
+  // `REFUSAL_CALL_PATTERN`'s comment for the two other files a repo-wide scan would then hit).
+  // Within THIS ONE file the code name appears in single/double quotes exclusively at the three
+  // genuine dispatch sites; its header-prose mention is backtick-quoted and this pattern only
+  // matches `'...'`/`"..."`, never `` `...` `` — verified: exactly 3 matches, none at the header
+  // line. Residual, disclosed (not chased) gap: a backtick-quoted or split/concatenated spelling
+  // of the code name still evades this pattern too — see the Gate D docblock's "Disclosed scope"
+  // list above.
+  const REFUSAL_CALL_CODE_NAME_PATTERN = /(['"])W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED\1/g
+
+  function countRefusalCallCodeNameOccurrences(content: string): number {
+    return (content.match(REFUSAL_CALL_CODE_NAME_PATTERN) ?? []).length
   }
 
   // ---- brace-matched function-range extraction: source of truth for per-key attribution ----
@@ -388,17 +462,18 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
   }
 
   /**
-   * Attributes every refusal-call occurrence in `content` to its INNERMOST enclosing named
-   * function (the smallest body range among every range that contains the call's index). A call
-   * inside NO named-function range at all (e.g. a module-level arrow function body) is counted in
-   * `unattributedCount`, never silently dropped — closing the exact fail-open hole a bare
-   * `continue` would reopen.
+   * Attributes every refusal-call occurrence (matched by `REFUSAL_CALL_CODE_NAME_PATTERN` — see
+   * its own comment for why the looser, spelling-tolerant pattern is used here rather than
+   * `REFUSAL_CALL_PATTERN`) in `content` to its INNERMOST enclosing named function (the smallest
+   * body range among every range that contains the call's index). A call inside NO named-function
+   * range at all (e.g. a module-level arrow function body) is counted in `unattributedCount`,
+   * never silently dropped — closing the exact fail-open hole a bare `continue` would reopen.
    */
   function attributeRefusalCallsV1(content: string): { counts: Record<string, number>; unattributedCount: number } {
     const ranges = findAllFunctionRanges(content)
     const counts: Record<string, number> = {}
     let unattributedCount = 0
-    const re = new RegExp(REFUSAL_CALL_PATTERN.source, 'g')
+    const re = new RegExp(REFUSAL_CALL_CODE_NAME_PATTERN.source, 'g')
     let m: RegExpExecArray | null
     while ((m = re.exec(content)) !== null) {
       const idx = m.index
@@ -451,7 +526,36 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts, unattributedCount } = attributeRefusalCallsV1(content)
     const attributedTotal = Object.values(counts).reduce((sum, n) => sum + n, 0)
-    expect(attributedTotal + unattributedCount).toBe(countRefusalCalls(content))
+    // Compared against REFUSAL_CALL_CODE_NAME_PATTERN's own total (the pattern the attribution
+    // loop actually iterates over), not REFUSAL_CALL_PATTERN's — the two patterns are no longer
+    // the same regex (gate-2 fix), and this conservation check needs to prove nothing the
+    // ATTRIBUTION LOOP saw was dropped, not compare against an unrelated stricter count.
+    expect(attributedTotal + unattributedCount).toBe(countRefusalCallCodeNameOccurrences(content))
+  })
+
+  it('P2 negative control (gate-2 round, CHANGES-REQUESTED): a refusal call inside a top-level arrow function — no enclosing named `function` at all — is bucketed as unattributed, not silently dropped', () => {
+    // Synthetic source, not the real boundary file: a named function (so `ranges` is non-empty,
+    // proving the "innermost enclosing range" search correctly finds nothing enclosing here
+    // rather than matching by accident), followed by a refusal call sitting inside a top-level
+    // `const ... = () => { ... }` — the one shape the Gate D docblock identifies as landing in
+    // `unattributedCount`, since `findAllFunctionRanges` only recognizes NAMED `function`
+    // declarations, never arrow functions.
+    //
+    // The code name is assembled from two separate string literals at runtime, never spelled as
+    // one contiguous quoted token in THIS file's own source text — the same self-match hazard
+    // `REFUSAL_CALL_PATTERN`'s own comment names: writing the full quoted name literally here
+    // would make this file itself turn up in the "exactly one file" scan below.
+    const codeName = ['W4C2', 'AUTHORITATIVE_MODE_NOT_DELIVERED'].join('_')
+    const synthetic = [
+      'function executeLivePunch(x) { return x }',
+      '',
+      'const topLevelArrowRefusal = () => {',
+      `  boundaryFail(${JSON.stringify(codeName)}, 503)`,
+      '}',
+    ].join('\n')
+    const { counts, unattributedCount } = attributeRefusalCallsV1(synthetic)
+    expect(counts).toEqual({})
+    expect(unattributedCount).toBe(1)
   })
 
   it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (an unmapped/4th dispatch site fails closed)', () => {
