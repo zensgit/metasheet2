@@ -52,35 +52,59 @@ import { execFileSync } from 'node:child_process'
 // Pattern definitions
 // ---------------------------------------------------------------------------
 
-// A NAMED LIST, not a closed one. This is the sweep's own load-bearing limitation and it is stated
-// here rather than left for a reader to discover: the `--self-test` battery proves each phrase
-// BELOW fires, which is evidence that the implemented patterns work — it is NOT evidence that the
-// vocabulary is complete, and a clean run therefore means "no listed phrase found", never "this
-// text makes no absolute claims". Measured, not asserted (PR #4839 gate, 20260810): the original
+// SINGLE SOURCE. A phrase and its two controls are ONE record: the production regex is derived
+// from this list, and each phrase's controls are checked with a regex built for THAT PHRASE ALONE.
+//
+// Both properties are here because their absence was executed, not imagined (owner review,
+// PR #4839, 20260810):
+//   - A phrase list and a parallel control list drifted the first time a phrase was added: seven
+//     phrases landed with zero controls while the banner still printed the old pattern count.
+//   - A "does every phrase have a control?" check on top of that did NOT fix it, because every
+//     control ran the FULL-vocabulary regex. Rewriting the `none` case's positive to a sentence
+//     containing only `every` left the battery green and still claiming all patterns verified.
+//     The criterion was the hole. One record per phrase, checked by its own regex, removes both.
+//
+// A NAMED LIST, not a closed one — the sweep's own load-bearing limitation, stated rather than
+// left for a reader to find. The battery proves each phrase BELOW fires; that is evidence the
+// implemented patterns work, NOT evidence the vocabulary is complete. A clean run means "no listed
+// phrase found", never "this text makes no absolute claims". Measured, not asserted: the original
 // ten-phrase list scored ZERO rows on the sentence "none of the reachable classes is impossible to
 // bucket, and this module is the sole arbiter; any subclass must inherit the exact same bucket
-// without exception" — five absolute claims, all invisible. The six phrases that sentence exposed
-// are now listed; the next such sentence will expose more. Add them when it does.
-const QUANTIFIER_PHRASES = [
-  'every',
-  'all',
-  'always',
-  'never',
-  'cannot',
-  'no other',
-  'by construction',
-  'exhaustively',
-  'only',
-  'guaranteed',
-  // Added after the miss described above.
-  'none',
-  'any',
-  'must',
-  'impossible',
-  'sole',
-  'solely',
-  'without exception',
+// without exception" — five absolute claims, all invisible. Six phrases that sentence exposed are
+// listed below (`none`, `any`, `must`, `impossible`, `sole`, `without exception`), plus `solely`
+// as a spelling variant of one of them. The next such sentence will expose more; add them then.
+//
+// Every negative is a NEAR MISS — a string that contains the phrase's letters but must not match
+// under word boundaries. A negative that merely omits the phrase would pass trivially.
+const QUANTIFIER_CASES = [
+  { phrase: 'every', positive: 'This works for every case.', negative: 'The everyday case is different.' },
+  { phrase: 'all', positive: 'It covers all paths.', negative: 'The overall design is fine.' },
+  { phrase: 'always', positive: 'The guard always releases the lock.', negative: 'The hallways were empty.' },
+  { phrase: 'never', positive: 'This never happens.', negative: 'The endeavor was cut short.' },
+  { phrase: 'cannot', positive: 'It cannot be instantiated.', negative: 'The cannonball rolled away.' },
+  { phrase: 'no other', positive: 'There is no other writer.', negative: 'There is another writer.' },
+  { phrase: 'by construction', positive: 'Shared by construction.', negative: 'By constructing it early we saved time.' },
+  { phrase: 'exhaustively', positive: 'Checked exhaustively.', negative: 'The exhaustive-sounding claim was vague.' },
+  { phrase: 'only', positive: 'It only matches boundary classes.', negative: 'This is a commonly used pattern.' },
+  // `guaranteed` previously carried `skipNegative: true` — an escape hatch that made the banner's
+  // "each proven ... not to fire on a negative" false for one row. Removed; this is its real
+  // near-miss (`guarantor` shares the stem, must not match under \b).
+  { phrase: 'guaranteed', positive: 'This is guaranteed to work.', negative: 'The guarantor signed the form.' },
+  { phrase: 'none', positive: 'None of the classes match.', negative: 'The nonexistent file was skipped.' },
+  { phrase: 'any', positive: 'Any subclass inherits the bucket.', negative: 'The build anyway completed.' },
+  { phrase: 'must', positive: 'It must fail closed.', negative: 'The mustard jar sat there.' },
+  { phrase: 'impossible', positive: 'That state is impossible.', negative: 'The impossibility argument was long.' },
+  { phrase: 'sole', positive: 'This module is the sole arbiter.', negative: 'The console logged it.' },
+  { phrase: 'solely', positive: 'It relies solely on the pin.', negative: 'The solenoid clicked.' },
+  { phrase: 'without exception', positive: 'It holds without exception.', negative: 'Without exceptions listed, review stalls.' },
 ]
+
+const QUANTIFIER_PHRASES = QUANTIFIER_CASES.map((quantifierCase) => quantifierCase.phrase)
+
+/** Regex for ONE phrase — what each phrase's own controls are checked against. */
+function buildSinglePhraseRegex(phrase) {
+  return new RegExp(`\\b(${phrase.replace(/ /g, '\\s+')})\\b`, 'gi')
+}
 
 function buildQuantifierRegex() {
   const alternation = QUANTIFIER_PHRASES.map((phrase) => phrase.replace(/ /g, '\\s+')).join('|')
@@ -109,24 +133,16 @@ const NM_OF_RE = /\b\d+\s+of\s+\d+\b/gi
 // wrong). A clean sweep below means "none found by a working mechanism", never "the mechanism
 // never worked".
 // ---------------------------------------------------------------------------
+// Derived from QUANTIFIER_CASES — never re-typed. Each quantifier row is checked against a regex
+// built for ITS OWN phrase, so a positive that exercises some OTHER listed phrase fails the row it
+// is written under instead of passing on the alternation's coattails.
 const SELF_TESTS = [
-  { name: 'quantifier: every', re: buildQuantifierRegex, positive: 'This works for every case.', negative: 'The everyday case is different.' },
-  { name: 'quantifier: all', re: buildQuantifierRegex, positive: 'It covers all paths.', negative: 'The overall design is fine.' },
-  { name: 'quantifier: always', re: buildQuantifierRegex, positive: 'The guard always releases the lock.', negative: 'It stayed alwaysish, which is not a word, but "hallways" should not fire.' },
-  { name: 'quantifier: never', re: buildQuantifierRegex, positive: 'This never happens.', negative: 'The endeavor was cut short.' },
-  { name: 'quantifier: cannot', re: buildQuantifierRegex, positive: 'It cannot be instantiated.', negative: 'The cannonball rolled away.' },
-  { name: 'quantifier: no other', re: buildQuantifierRegex, positive: 'There is no other writer.', negative: 'There is another writer.' },
-  { name: 'quantifier: by construction', re: buildQuantifierRegex, positive: 'Shared by construction.', negative: 'The construction site was busy.' },
-  { name: 'quantifier: exhaustively', re: buildQuantifierRegex, positive: 'Checked exhaustively.', negative: 'The search was thorough.' },
-  { name: 'quantifier: only', re: buildQuantifierRegex, positive: 'It only matches boundary classes.', negative: 'This is a commonly used pattern.' },
-  { name: 'quantifier: guaranteed', re: buildQuantifierRegex, positive: 'This is guaranteed to work.', negative: 'This is not guaranteed-sounding at all, wait — drop this line.', skipNegative: true },
-  { name: 'quantifier: none', re: buildQuantifierRegex, positive: 'None of the classes match.', negative: 'The nonexistent file was skipped.' },
-  { name: 'quantifier: any', re: buildQuantifierRegex, positive: 'Any subclass inherits the bucket.', negative: 'The build anyway completed.' },
-  { name: 'quantifier: must', re: buildQuantifierRegex, positive: 'It must fail closed.', negative: 'The mustard jar sat there.' },
-  { name: 'quantifier: impossible', re: buildQuantifierRegex, positive: 'That state is impossible.', negative: 'The task was difficult.' },
-  { name: 'quantifier: sole', re: buildQuantifierRegex, positive: 'This module is the sole arbiter.', negative: 'The console logged it.' },
-  { name: 'quantifier: solely', re: buildQuantifierRegex, positive: 'It relies solely on the pin.', negative: 'The solenoid clicked.' },
-  { name: 'quantifier: without exception', re: buildQuantifierRegex, positive: 'It holds without exception.', negative: 'Without exceptions listed, review stalls.' },
+  ...QUANTIFIER_CASES.map((quantifierCase) => ({
+    name: `quantifier: ${quantifierCase.phrase}`,
+    re: () => buildSinglePhraseRegex(quantifierCase.phrase),
+    positive: quantifierCase.positive,
+    negative: quantifierCase.negative,
+  })),
   {
     name: 'sha-like token',
     re: () => SHA_CANDIDATE_RE,
@@ -140,21 +156,23 @@ const SELF_TESTS = [
 
 function runSelfTests() {
   const failures = []
-  // Coverage control, and the reason it exists: SELF_TESTS is a hand-written list, and
-  // QUANTIFIER_PHRASES is a hand-written list, and nothing forced them to agree. They drifted the
-  // first time a phrase was added — seven new phrases landed with zero new controls and the banner
-  // still reported the OLD pattern count, which is the precise shape ("a hand-copied duplicate that
-  // drifts silently") this tool's own sibling docblock condemns. Derived from the vocabulary now,
-  // so adding a phrase without a control fails the sweep instead of quietly widening its blind spot.
-  const controlled = new Set(
-    SELF_TESTS.filter((t) => t.name.startsWith('quantifier: ')).map((t) => t.name.slice('quantifier: '.length)),
-  )
-  for (const phrase of QUANTIFIER_PHRASES) {
-    if (!controlled.has(phrase)) {
+  // Meta-assertion: EVERY row must carry both controls and both must actually run. The previous
+  // version allowed a per-row `skipNegative` escape hatch, which made the banner's "each proven to
+  // fire on a positive and not fire on a negative" false for the one row that used it. There is no
+  // longer such a field; this refuses to run if one is reintroduced, rather than trusting nobody
+  // will add it back.
+  for (const test of SELF_TESTS) {
+    if ('skipNegative' in test) {
       failures.push(
-        `quantifier vocabulary: ${JSON.stringify(phrase)} is in QUANTIFIER_PHRASES but has no self-test — ` +
-          'add one (a synthetic positive AND a near-miss negative) so a clean sweep still means "none found"',
+        `${test.name}: carries a skipNegative escape hatch — every row must run both controls, ` +
+          'or this tool\'s own PASSED banner becomes a false claim',
       )
+    }
+    if (typeof test.positive !== 'string' || test.positive.length === 0) {
+      failures.push(`${test.name}: missing a synthetic positive`)
+    }
+    if (typeof test.negative !== 'string' || test.negative.length === 0) {
+      failures.push(`${test.name}: missing a near-miss negative`)
     }
   }
   for (const test of SELF_TESTS) {
@@ -163,14 +181,13 @@ function runSelfTests() {
     if (positiveMatches.length === 0) {
       failures.push(`${test.name}: FAILED TO FIRE on its own synthetic positive sentence: ${JSON.stringify(test.positive)}`)
     }
-    if (!test.skipNegative) {
-      const negRe = test.re()
-      const negativeMatches = [...test.negative.matchAll(negRe)].map((m) => m[0]).filter((t) => (test.filter ? test.filter(t) : true))
-      if (negativeMatches.length > 0) {
-        failures.push(
-          `${test.name}: FALSELY FIRED on its own synthetic near-miss negative sentence: ${JSON.stringify(test.negative)} (matched ${JSON.stringify(negativeMatches)})`,
-        )
-      }
+    // Unconditional — there is no opt-out. See the meta-assertion above.
+    const negRe = test.re()
+    const negativeMatches = [...test.negative.matchAll(negRe)].map((m) => m[0]).filter((t) => (test.filter ? test.filter(t) : true))
+    if (negativeMatches.length > 0) {
+      failures.push(
+        `${test.name}: FALSELY FIRED on its own synthetic near-miss negative sentence: ${JSON.stringify(test.negative)} (matched ${JSON.stringify(negativeMatches)})`,
+      )
     }
   }
   return failures

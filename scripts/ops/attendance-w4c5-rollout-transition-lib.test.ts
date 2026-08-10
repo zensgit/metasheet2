@@ -873,15 +873,25 @@ test('exitCodeForAttendanceW4C5ErrorV1 does not fire on a raw driver-shaped erro
 })
 
 // ---------------------------------------------------------------------------
-// Mechanical sweep (P2-A, PR #4839 gate, 20260810): every `Attendance*Error` class declared in
-// the files this file's own call-graph trace found reachable from `plan` or `apply` must be
-// explicitly decided — either into ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 (the production
-// module's own exported list, not a hand-copied duplicate) or into
-// ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES below (exit 1, deliberately, each with its own
-// negative-control test above) — never left to a silent default. Reads SOURCE TEXT (never
-// imports these classes as values — same CJS/ESM-interop constraint the production module
-// documents), so a NEW class added to any of these files with neither name recognized here fails
-// this test closed, forcing a human decision instead of an unnoticed default.
+// Mechanical sweep (P2-A, PR #4839 gate, 20260810). Its DOMAIN, stated exactly — the production
+// module's comment on ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 was narrowed to this after an
+// earlier, broader phrasing here claimed more than the regex delivered and a subclass declaration
+// walked through it:
+//
+//   Covers: declarations spelled `export class Attendance<...>Error extends Error` or
+//   `export class Attendance<...>Error extends Attendance<...>Error`, in the FIVE files listed
+//   below (the depth-1 imports of `w4c3a-rollout-control.ts`).
+//   Does NOT cover: a class declared in a depth-2 file, a class named outside the
+//   `Attendance*Error` convention, or one extending some other base.
+//
+// Within that domain, each class found must be explicitly decided — either into
+// ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 (the production module's own exported list, not a
+// hand-copied duplicate) or into ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES below (exit 1,
+// deliberately, each with its own negative-control test above) — never left to a silent default,
+// and a class matching those spellings with neither name recognized fails this test closed.
+// Outside that domain the rot stays silent: this narrows the window, it does not close it.
+// Reads SOURCE TEXT (never imports these classes as values — same CJS/ESM-interop constraint the
+// production module documents).
 // ---------------------------------------------------------------------------
 const ATTENDANCE_W4C5_REACHABLE_ERROR_FILES = [
   '../../packages/core-backend/src/attendance/w4c3a-rollout-control.ts',
