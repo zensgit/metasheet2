@@ -227,6 +227,10 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
+      // OPS-01 superseded creation-effect compensation: full deprovision/OAuth chain,
+      // provenance drift, live-evidence veto, idempotency, and a two-connection user-mutex
+      // barrier. Wired beside the grant-table suite and pinned by the same wiring contract.
+      'tests/integration/directory-deprovision-compensation.db.test.ts',
       // T3 activation source read serialises against a concurrent integration deactivation
       // (post-merge review P1, FOR SHARE). Constructed pg_locks race — meaningless without a DB.
       // DATABASE_URL-gated; excluded so the no-DB job cannot skip-green; whole-file wired into

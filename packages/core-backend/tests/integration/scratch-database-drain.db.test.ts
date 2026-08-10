@@ -31,6 +31,18 @@
  *                                                        `forced === false` and its
  *                                                        "no unowned pg error" assertion
  *   - delete `assertSafeScratchDatabaseName`          -> "rejects unsafe identifiers" RED
+ *   - delete protected-name check / 57P01 absorb      -> #4820 gates RED
+ *   - remove poolManager.get().getInternalPool() wire -> wiring gate RED
+ *
+ * ## #4820 (narrow)
+ *
+ * Forced scratch drop can emit 57P01 on the MetaSheetServer singleton
+ * `poolManager.get().getInternalPool()`, not only the suite data Pool. Real-server suites
+ * attach a teardown-scoped handler to that internal Pool. Classification is SQLSTATE 57P01 or
+ * the exact administrator-command message — not generic "Connection terminated unexpectedly".
+ * `dropScratchDatabase` refuses protected shared names (`metasheet_test` is SAFE_SCRATCH_NAME-
+ * legal but not droppable). Issue #4820 stays observation-gated until Node 18 CI repetitions;
+ * these gates pin the mechanism, not full shared-DB isolation.
  *
  * ## Fail-closed and values-free (review #4799 P2-1 / P2-2)
  *
@@ -51,13 +63,22 @@
  * `application_name`, a marked comment inside its statement text).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Client, Pool } from 'pg'
 import {
+  assertDroppableScratchDatabaseName,
   assertSafeScratchDatabaseName,
+  attachOwnedPoolTerminationHandler,
   dropScratchDatabase,
   formatScratchDropFailure,
   formatScratchDropOutcome,
+  isAdministratorTerminationError,
+  isProtectedSharedDatabaseName,
   ScratchDropError,
   type ScratchAdminQueryable,
   type ScratchDropStep,
@@ -337,6 +358,120 @@ describeIfDatabase('#4791 scratch-database teardown drain', () => {
     // Positive control: the shape the real call sites generate must still be ACCEPTED, otherwise
     // this gate would pass simply by rejecting everything.
     expect(() => assertSafeScratchDatabaseName('ms2_w4c2sweepct_0f1e2d3c4b5a')).not.toThrow()
+  })
+
+  // ==============================================================================================
+  // #4820 — protected shared names, owned-pool 57P01, real-server wiring
+  // ==============================================================================================
+  describe('#4820 owned internal Pool + protected shared names', () => {
+    it('refuses protected shared base names (SAFE_SCRATCH_NAME alone allows metasheet_test)', async () => {
+      expect(assertSafeScratchDatabaseName('metasheet_test')).toBeUndefined()
+      expect(isProtectedSharedDatabaseName('metasheet_test')).toBe(true)
+      expect(() => assertDroppableScratchDatabaseName('metasheet_test')).toThrow(/SCRATCH_DATABASE_PROTECTED/)
+      expect(() => assertDroppableScratchDatabaseName('postgres')).toThrow(/SCRATCH_DATABASE_PROTECTED/)
+      expect(() => assertDroppableScratchDatabaseName('template0')).toThrow(/SCRATCH_DATABASE_PROTECTED/)
+
+      const probing: ScratchAdminQueryable = {
+        async query() {
+          throw new Error('PROTECTED_GUARD_BYPASSED_QUERY_REACHED_POOL')
+        },
+      }
+      for (const name of ['metasheet_test', 'postgres', 'template0', 'template1']) {
+        await expect(dropScratchDatabase(probing, name, { drainTimeoutMs: 200 })).rejects.toThrow(
+          /SCRATCH_DATABASE_PROTECTED/,
+        )
+      }
+    })
+
+    it('pre-fix hazard: idle Pool 57P01 uncaught without handler; owned with exact classifier', async () => {
+      const nameA = await createScratch('idleuncaught')
+      const nameB = await createScratch('idleowned')
+      const adminUrl = urlFor(dbUrl!, 'postgres')
+      const armScript = fileURLToPath(new URL('../helpers/scratch-database-idle-pool-arm.mjs', import.meta.url))
+      const coreBackendDir = fileURLToPath(new URL('../..', import.meta.url))
+
+      function runArm(arm: 'uncaught' | 'owned', datname: string) {
+        const result = spawnSync('pnpm', ['exec', 'tsx', armScript], {
+          cwd: coreBackendDir,
+          env: {
+            ...process.env,
+            ARM: arm,
+            SCRATCH_URL: urlFor(dbUrl!, datname),
+            ADMIN_URL: adminUrl,
+            DATNAME: datname,
+          },
+          encoding: 'utf8',
+          timeout: 30_000,
+        })
+        return { status: result.status, stderr: `${result.stderr || ''}${result.stdout || ''}` }
+      }
+
+      const armA = runArm('uncaught', nameA)
+      expect(armA.status, `arm A exit 17; got ${armA.status}\n${armA.stderr}`).toBe(17)
+      const armB = runArm('owned', nameB)
+      expect(armB.status, `arm B exit 0; got ${armB.status}\n${armB.stderr}`).toBe(0)
+
+      // Classifier: 57P01 / exact admin message only — not generic terminate.
+      expect(
+        isAdministratorTerminationError(
+          Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }),
+        ),
+      ).toBe(true)
+      expect(
+        isAdministratorTerminationError(new Error('terminating connection due to administrator command')),
+      ).toBe(true)
+      expect(
+        isAdministratorTerminationError(new Error('prefix terminating connection due to administrator command')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(new Error('terminating connection due to administrator command suffix')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(new Error(' terminating connection due to administrator command')),
+      ).toBe(false)
+      expect(
+        isAdministratorTerminationError(
+          Object.assign(new Error('terminating connection due to administrator command'), { code: 'ECONNRESET' }),
+        ),
+      ).toBe(false)
+      expect(isAdministratorTerminationError(new Error('Connection terminated unexpectedly'))).toBe(false)
+      expect(
+        isAdministratorTerminationError(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' })),
+      ).toBe(false)
+
+      const fake = new EventEmitter() as EventEmitter & {
+        on(event: 'error', listener: (err: Error) => void): EventEmitter
+        off(event: 'error', listener: (err: Error) => void): EventEmitter
+      }
+      const nonTerm = attachOwnedPoolTerminationHandler(fake)
+      expect(() =>
+        fake.emit('error', Object.assign(new Error('ECONNRESET synthetic'), { code: 'ECONNRESET' })),
+      ).toThrow(/ECONNRESET synthetic/)
+      expect(nonTerm.absorbed()).toBe(0)
+      // Generic terminate message must also stay loud (not absorbed).
+      expect(() => fake.emit('error', new Error('Connection terminated unexpectedly'))).toThrow(
+        /Connection terminated unexpectedly/,
+      )
+      expect(nonTerm.absorbed()).toBe(0)
+      nonTerm.detach()
+    })
+
+    it('source contract: both real-server suites require the post-start internal pool during teardown', () => {
+      const dir = dirname(fileURLToPath(import.meta.url))
+      for (const file of [
+        'bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
+        'attendance-w4c2-sweep-call-through.db.test.ts',
+      ]) {
+        const src = readFileSync(join(dir, file), 'utf8')
+        const startAt = src.indexOf('await server.start()')
+        const captureAt = src.indexOf('poolManager.get().getInternalPool()')
+        expect(startAt, file).toBeGreaterThan(-1)
+        expect(captureAt, file).toBeGreaterThan(startAt)
+        expect(src, file).toMatch(/attachOwnedPoolTerminationHandler/)
+        expect(src, file).toMatch(/new Error\('[A-Z0-9_]+SERVER_INTERNAL_POOL_NOT_CAPTURED'\)/)
+        expect(src, file).toMatch(/if \(poolCaptureError\) throw poolCaptureError/)
+      }
+    })
   })
 
   // ==============================================================================================

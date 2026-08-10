@@ -9,6 +9,8 @@ import { DirectorySyncInProgressError } from '../../src/directory/directory-sync
 // job. Importing it directly here pins its actual acceptance semantics, independent of any route-level mock.
 import { SimpleCronExpression } from '../../src/services/SchedulerService'
 
+const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
+
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
 }))
@@ -52,6 +54,7 @@ const workNotificationMocks = vi.hoisted(() => ({
 }))
 
 const deprovisionMocks = vi.hoisted(() => ({
+  compensateSupersededDenyGrant: vi.fn(),
   listDeprovisionEffects: vi.fn(),
   listDeprovisionEvents: vi.fn(),
   previewDeprovisionForUser: vi.fn(),
@@ -139,6 +142,7 @@ vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
 }))
 
 vi.mock('../../src/directory/deprovision-evidence-api', () => ({
+  compensateSupersededDenyGrant: deprovisionMocks.compensateSupersededDenyGrant,
   listDeprovisionEffects: deprovisionMocks.listDeprovisionEffects,
   listDeprovisionEvents: deprovisionMocks.listDeprovisionEvents,
   previewDeprovisionForUser: deprovisionMocks.previewDeprovisionForUser,
@@ -249,6 +253,7 @@ describe('adminDirectoryRouter', () => {
     approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
     approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
     approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
+    deprovisionMocks.compensateSupersededDenyGrant.mockReset()
     deprovisionMocks.listDeprovisionEffects.mockReset()
     deprovisionMocks.listDeprovisionEvents.mockReset()
     deprovisionMocks.previewDeprovisionForUser.mockReset()
@@ -354,6 +359,168 @@ describe('adminDirectoryRouter', () => {
       note: 'confirmed by owner',
     })
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+  })
+
+  it('maps orphan deny compensation drift to 409 without auditing success', async () => {
+    deprovisionMocks.compensateSupersededDenyGrant.mockRejectedValue(
+      Object.assign(new Error('grant provenance changed'), {
+        code: 'DRIFT_CONFLICT',
+      }),
+    )
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/compensate-orphan-deny',
+      {
+        params: { eventId: COMPENSATION_EVENT_ID },
+        body: { confirm: true, note: 'owner verified drift' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DRIFT_CONFLICT' },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('maps a busy directory source to a retryable 409 without database details', async () => {
+    deprovisionMocks.compensateSupersededDenyGrant.mockRejectedValue(
+      Object.assign(new Error('the evidenced DingTalk source is being updated; retry compensation'), {
+        code: 'COMPENSATION_SOURCE_BUSY',
+      }),
+    )
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/compensate-orphan-deny',
+      {
+        params: { eventId: COMPENSATION_EVENT_ID },
+        body: { confirm: true, note: 'owner verified busy source' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'COMPENSATION_SOURCE_BUSY',
+        message: 'the evidenced DingTalk source is being updated; retry compensation',
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(/55P03|lock_not_available/i)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('does not expose database details from an unexpected compensation failure', async () => {
+    deprovisionMocks.compensateSupersededDenyGrant.mockRejectedValue(
+      Object.assign(
+        new Error(
+          'duplicate key value violates unique constraint user_external_auth_grants_pkey DETAIL: connection localhost:5432',
+        ),
+        { code: '23505' },
+      ),
+    )
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/compensate-orphan-deny',
+      {
+        params: { eventId: COMPENSATION_EVENT_ID },
+        body: { confirm: true, note: 'owner verified failure' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DEPROVISION_COMPENSATION_FAILED',
+        message: 'Deny-row compensation failed',
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /23505|duplicate key|DETAIL|localhost|5432|user_external_auth_grants/i,
+    )
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed compensation event id before the service or audit', async () => {
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/compensate-orphan-deny',
+      {
+        params: { eventId: 'not-a-uuid' },
+        body: { confirm: true, note: 'owner verified cleanup' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'COMPENSATION_EVENT_ID_INVALID',
+        message: 'eventId must be a UUID',
+      },
+    })
+    expect(deprovisionMocks.compensateSupersededDenyGrant).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('runs confirmed orphan deny compensation and audits only values-free metadata', async () => {
+    deprovisionMocks.compensateSupersededDenyGrant.mockResolvedValue({
+      eventId: COMPENSATION_EVENT_ID,
+      effectId: 'effect-1',
+      localUserId: 'user-1',
+      compensationMode: 'orphan_deny_creation',
+      grantRow: 'deleted',
+      effectStatus: 'compensated',
+      accessGeneration: 8,
+      alreadyCompensated: false,
+      adminUserId: 'admin-1',
+      note: 'owner verified cleanup',
+    })
+
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/compensate-orphan-deny',
+      {
+        params: { eventId: COMPENSATION_EVENT_ID },
+        body: { confirm: true, note: 'owner verified cleanup' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(200)
+    expect(deprovisionMocks.compensateSupersededDenyGrant).toHaveBeenCalledWith({
+      eventId: COMPENSATION_EVENT_ID,
+      adminUserId: 'admin-1',
+      confirm: true,
+      note: 'owner verified cleanup',
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith({
+      actorId: 'admin-1',
+      actorType: 'user',
+      action: 'update',
+      resourceType: 'directory-deprovision-event',
+      resourceId: COMPENSATION_EVENT_ID,
+      meta: {
+        compensationMode: 'orphan_deny_creation',
+        effectId: 'effect-1',
+        localUserId: 'user-1',
+        grantRow: 'deleted',
+        alreadyCompensated: false,
+        noteLength: 22,
+      },
+    })
+    expect(JSON.stringify(auditMocks.auditLog.mock.calls[0])).not.toContain(
+      'owner verified cleanup',
+    )
   })
 
   it('lists integration-scoped events and rejects an unknown status before querying', async () => {
