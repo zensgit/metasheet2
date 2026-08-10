@@ -778,6 +778,9 @@ action_off() {
   if ! recreate_backend_only; then
     fail_transition_restore "backend_health_not_true_after_restart"
   fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail_transition_restore "post_restart_sha_mismatch"
+  fi
   if ! assert_exact_mode_off; then
     fail_transition_restore "post_restart_mode_not_off"
   fi

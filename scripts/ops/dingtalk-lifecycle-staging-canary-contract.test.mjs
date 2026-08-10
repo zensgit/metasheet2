@@ -433,6 +433,8 @@ test('P1 recreate_backend_only requires health true after restart (returns 1 oth
   // action=off must not claim success without recreate success
   assert.match(source, /if ! recreate_backend_only; then/)
   assert.match(source, /fail_transition_restore "backend_health_not_true_after_restart"/)
+  assert.match(source, /resolve_deployed_sha\)" != "\$DEPLOY_SHA"/)
+  assert.match(source, /fail_transition_restore "post_restart_sha_mismatch"/)
 })
 
 test('MUTATION: dropping health requirement after recreate turns contract red', () => {
