@@ -456,21 +456,45 @@ function isValidStateRecord(record: StateRecord): boolean {
   return false
 }
 
-async function readGrantEnabled(localUserId: string): Promise<boolean | null> {
+/**
+ * Grant read state — TRI-STATE ON PURPOSE.
+ *
+ * The prior `boolean | null` shape collapsed three genuinely different states — `enabled`,
+ * explicitly `disabled`, and `absent` (no row) — into two, and its catch returned `null`, the
+ * SAME value as "no row". So a transient query failure was indistinguishable from "this user
+ * has no grant", and the deny gate below (`state === 'disabled'`) fell through: a deprovisioned
+ * user's Rev 4.4 explicit disabled row could be bypassed by a single failed read while
+ * DINGTALK_AUTH_REQUIRE_GRANT is off (its default). Post-merge review 2026-08-10 P1.
+ *
+ * A read failure now FAILS CLOSED (throws a policy error → login denied), because "we could not
+ * verify the grant" must never be treated as "the grant permits login". `absent` stays a
+ * distinct, allowed state: brand-new / auto-linked users legitimately have no row and must
+ * still log in under the default non-strict mode.
+ */
+type GrantReadState = 'enabled' | 'disabled' | 'absent'
+
+async function readGrantState(localUserId: string): Promise<GrantReadState> {
+  let result: { rows: Array<{ enabled: boolean }> }
   try {
-    const result = await query<{ enabled: boolean }>(
+    result = await query<{ enabled: boolean }>(
       `SELECT enabled
        FROM user_external_auth_grants
        WHERE provider = $1 AND local_user_id = $2
        LIMIT 1`,
       [PROVIDER, localUserId],
     )
-    if (result.rows.length === 0) return null
-    return result.rows[0]?.enabled === true
   } catch (error) {
-    logger.warn('Failed to read DingTalk auth grant; treating as optional', error instanceof Error ? error : undefined)
-    return null
+    logger.warn(
+      'Failed to read DingTalk auth grant; failing closed',
+      error instanceof Error ? error : undefined,
+    )
+    throw createPolicyError(
+      'Unable to verify DingTalk login authorization; please retry',
+      { statusCode: 503, code: 'grant_state_unavailable' },
+    )
   }
+  if (result.rows.length === 0) return 'absent'
+  return result.rows[0]?.enabled === true ? 'enabled' : 'disabled'
 }
 
 /**
@@ -715,8 +739,18 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
     )
     return result.rows[0] ?? null
   } catch (error) {
-    logger.warn('Failed to resolve DingTalk external identity', error instanceof Error ? error : undefined)
-    return null
+    // Fail CLOSED (post-merge review P2-2): the same collapse readGrantState fixes lived here
+    // too — a swallowed read error returned null, indistinguishable from "no linked identity",
+    // so a failed identity read let the login fall through to the email-link / auto-provision
+    // path as if the DingTalk person were unknown (defeating the deny row their real identity
+    // carries; the identity unique constraint stopped a full bypass, but it is a latent
+    // fail-open and mints stray grants). "No identity" is still a legitimate null (new user);
+    // only a read FAILURE now throws.
+    logger.warn('Failed to resolve DingTalk external identity; failing closed', error instanceof Error ? error : undefined)
+    throw createPolicyError(
+      'Unable to verify DingTalk login authorization; please retry',
+      { statusCode: 503, code: 'grant_state_unavailable' },
+    )
   }
 }
 
@@ -859,15 +893,15 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
   const identityUser = await findIdentityUser(dtUser)
   if (identityUser) {
     assertLocalUserLoginAllowed(identityUser)
-    const grantEnabled = await readGrantEnabled(identityUser.id)
-    if (requireGrant && grantEnabled !== true) {
+    const grantState = await readGrantState(identityUser.id)
+    if (requireGrant && grantState !== 'enabled') {
       await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
       throw createPolicyError('DingTalk login is not enabled for this user', {
         statusCode: 403,
         code: 'grant_required',
       })
     }
-    if (grantEnabled === false) {
+    if (grantState === 'disabled') {
       await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
       throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
         statusCode: 403,
@@ -882,14 +916,14 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
     const emailUser = await findUserByEmail(dtUser.email)
     if (emailUser) {
       assertLocalUserLoginAllowed(emailUser)
-      const grantEnabled = await readGrantEnabled(emailUser.id)
-      if (requireGrant && grantEnabled !== true) {
+      const grantState = await readGrantState(emailUser.id)
+      if (requireGrant && grantState !== 'enabled') {
         throw createPolicyError('DingTalk login is not enabled for this user', {
           statusCode: 403,
           code: 'grant_required',
         })
       }
-      if (grantEnabled === false) {
+      if (grantState === 'disabled') {
         throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
           statusCode: 403,
           code: 'grant_disabled',
