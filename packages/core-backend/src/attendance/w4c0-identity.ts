@@ -1336,15 +1336,31 @@ export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
  * negative on precisely the case that matters.
  *
  * Instead this issues `SAVEPOINT` as the probe (verified empirically against real PostgreSQL
- * 15, both via `psql` and via this codebase's own `pg` driver): PostgreSQL raises SQLSTATE
- * `25P01` (`no_active_sql_transaction`, "SAVEPOINT can only be used in transaction blocks") IF
- * AND ONLY IF there is no open transaction block on the connection — independent of whether an
- * xid has ever been assigned. A `25P01` therefore proves idle (autocommit); the SAVEPOINT
- * succeeding proves the opposite (an open transaction already exists) and is the only case that
- * needs cleanup (`ROLLBACK TO SAVEPOINT`) before failing closed — the idle path never created
- * anything to clean up. Any OTHER error (neither `25P01` nor a successful SAVEPOINT) is
- * rethrown unchanged rather than silently treated as "idle": this function only ever certifies
- * idleness on affirmative proof (the `25P01`), never on the absence of a different error.
+ * 15, both via `psql` and via this codebase's own `pg` driver, across the full state space a
+ * caller can actually hand this function: fresh autocommit, idle-in-transaction, idle-in-
+ * transaction with a pre-existing nested savepoint, a READ ONLY transaction, a SERIALIZABLE
+ * transaction with no write yet (the dangerous xid-blind case this function exists to catch),
+ * and — the state this function used to get wrong — a transaction ABORTED by an earlier failed
+ * statement, both with and without a pre-existing savepoint). That state space collapses to
+ * exactly three outcomes for a bare `SAVEPOINT <name>`:
+ *
+ * 1. SQLSTATE `25P01` (`no_active_sql_transaction`): no open transaction block at all — the
+ *    ONLY affirmative proof of idle (autocommit). Nothing was created; proceed with no cleanup.
+ * 2. SQLSTATE `25P02` (`in_failed_sql_transaction`): an open transaction block EXISTS but a
+ *    prior statement in it already errored, so PostgreSQL ignores every command — including this
+ *    probe's own `SAVEPOINT` — until the block ends. This is emphatically NOT idle (there IS an
+ *    open transaction block); it is also NOT the "SAVEPOINT succeeded" case below, because the
+ *    savepoint was never actually created (verified empirically: a subsequent `ROLLBACK TO
+ *    SAVEPOINT w4c5_idle_probe` here fails with `3B001 undefined_savepoint`) — there is nothing
+ *    to clean up, only a refusal to raise, and it must be the product code, not this raw driver
+ *    SQLSTATE.
+ * 3. The `SAVEPOINT` succeeds: an open, non-aborted transaction block already existed. This is
+ *    the only case that leaves something to clean up.
+ *
+ * Any error OTHER than `25P01` or `25P02` is rethrown unchanged rather than silently treated as
+ * either idle or not-idle: this function only ever certifies idleness on affirmative proof (the
+ * `25P01`), and only ever certifies NOT-idle on affirmative proof of an open transaction block
+ * (`25P02`, or the SAVEPOINT succeeding) — never on the mere absence of some other error.
  *
  * The refusal code `W4C0_CONNECTION_NOT_IDLE` is likewise generic (P2-2 renamed it off its
  * original `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE`, which named a lock this function does not
@@ -1358,21 +1374,39 @@ export async function assertConnectionIsIdleV1(
     await connection.query('SAVEPOINT w4c5_idle_probe')
   } catch (error) {
     if (isNoActiveTransactionForSavepoint(error)) return // proven idle — proceed
-    throw error // some other failure; never mask it as "idle"
+    if (isFailedTransactionForSavepoint(error)) {
+      // Open transaction block, already aborted by an earlier statement — the probe's own
+      // SAVEPOINT never actually ran (nothing was created, nothing to roll back or release).
+      // Not idle; fail closed with the product code, never the raw 25P02.
+      fail('W4C0_CONNECTION_NOT_IDLE')
+    }
+    throw error // some other failure; never mask it as "idle" (or as "not idle")
   }
-  // The SAVEPOINT succeeded: `connection` already had an open transaction block on entry. Clean
-  // up the probe savepoint (nothing else was ever written under it) and fail closed — silently
-  // proceeding here is exactly the P1-2 regression this function exists to prevent.
+  // The SAVEPOINT succeeded: `connection` already had an open, non-aborted transaction block on
+  // entry. Clean up the probe savepoint FULLY before failing closed — silently proceeding here
+  // is exactly the P1-2 regression this function exists to prevent. `ROLLBACK TO SAVEPOINT`
+  // alone is not enough: it undoes any (nonexistent) work done under the savepoint but leaves
+  // the savepoint itself DEFINED in the caller's subtransaction stack (verified empirically: a
+  // subsequent `RELEASE SAVEPOINT w4c5_idle_probe` succeeds even after a bare `ROLLBACK TO
+  // SAVEPOINT w4c5_idle_probe`) — `RELEASE SAVEPOINT` afterward removes it, so the caller is
+  // left inside no subtransaction it never created.
   await connection.query('ROLLBACK TO SAVEPOINT w4c5_idle_probe').catch(() => undefined)
+  await connection.query('RELEASE SAVEPOINT w4c5_idle_probe').catch(() => undefined)
   fail('W4C0_CONNECTION_NOT_IDLE')
 }
 
+function savepointProbeSqlState(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null
+    ? ((error as { code?: unknown }).code as string | undefined)
+    : undefined
+}
+
 function isNoActiveTransactionForSavepoint(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { code?: unknown }).code === '25P01'
-  )
+  return savepointProbeSqlState(error) === '25P01'
+}
+
+function isFailedTransactionForSavepoint(error: unknown): boolean {
+  return savepointProbeSqlState(error) === '25P02'
 }
 
 /**

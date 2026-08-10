@@ -598,10 +598,11 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
 }
 
 // ---------------------------------------------------------------------------
-// Refusal -> exit code mapping. Tool-level codes (this module's own) and every boundary code
-// (AttendanceW4C3aRolloutControlError / AttendanceW4OperationError, surfaced verbatim via
-// `error.code` on `.message`/`.code`) are diagnosable by their EXACT code string on stderr; the
-// exit code buckets are for scripting only, never a substitute for reading the code.
+// Refusal -> exit code mapping. Tool-level codes (this module's own) and every boundary/identity
+// code (AttendanceW4C3aRolloutControlError / AttendanceW4OperationError /
+// AttendanceW4IdentityError, surfaced verbatim via `error.code` on `.message`/`.code`) are
+// diagnosable by their EXACT code string on stderr; the exit code buckets are for scripting only,
+// never a substitute for reading the code.
 // ---------------------------------------------------------------------------
 export const ATTENDANCE_W4C5_EXIT_SUCCESS_V1 = 0
 export const ATTENDANCE_W4C5_EXIT_ARGS_INVALID_V1 = 2
@@ -630,13 +631,29 @@ export function exitCodeForAttendanceW4C5ErrorV1(error: unknown): number {
         return ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1
     }
   }
+  // NIT-4 (PR #4839 P3 gate, 20260810): this used to discriminate by `error.name ===
+  // 'AttendanceW4C3aRolloutControlError' || 'AttendanceW4OperationError'` — an OR-list of exact
+  // class-name strings that silently omitted `AttendanceW4IdentityError` (thrown by
+  // `assertConnectionIsIdleV1`'s `W4C0_CONNECTION_NOT_IDLE` refusal), so that refusal fell all
+  // the way to the internal-error bucket. `.name` string-matching is itself the fragile shape:
+  // it requires every new error class in this family to be hand-added here, with no compiler or
+  // runtime signal when one is missed (exactly what just happened). None of these classes can be
+  // `instanceof`-checked here — this module deliberately takes no runtime import of core-backend
+  // (see the file-header comment on the CJS/ESM interop hazard) — so instead this discriminates
+  // on a STRUCTURAL marker every one of this repo's own values-free error classes shares BY
+  // CONSTRUCTION and documents as intentional (`AttendanceW4OperationError`'s own doc comment:
+  // "message IS the closed code"): `error instanceof Error`, a string `.code`, and
+  // `error.message === error.code` — true for `AttendanceW4C3aRolloutControlError`,
+  // `AttendanceW4OperationError`, and `AttendanceW4IdentityError` alike (each constructor calls
+  // `super(code)` and then sets `this.code = code`), and FALSE for a raw driver/system error
+  // (e.g. a PostgreSQL error has `.code` as a 5-character SQLSTATE but `.message` as a distinct
+  // human-readable sentence — verified against real PostgreSQL). A future class following this
+  // same "message is the code" convention is covered automatically, with no OR-list to extend.
   if (
-    typeof error === 'object' &&
-    error !== null &&
+    error instanceof Error &&
     'code' in error &&
     typeof (error as { code: unknown }).code === 'string' &&
-    ((error as { name?: unknown }).name === 'AttendanceW4C3aRolloutControlError' ||
-      (error as { name?: unknown }).name === 'AttendanceW4OperationError')
+    error.message === (error as { code: string }).code
   ) {
     return ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1
   }

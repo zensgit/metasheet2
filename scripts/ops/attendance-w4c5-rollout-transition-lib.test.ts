@@ -786,6 +786,29 @@ test('exitCodeForAttendanceW4C5ErrorV1 maps a boundary-shaped error to the bound
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1)
 })
 
+test('NIT-4 (PR #4839 P3 gate, 20260810): exitCodeForAttendanceW4C5ErrorV1 maps a W4C0_CONNECTION_NOT_IDLE (AttendanceW4IdentityError) refusal to the boundary-refused exit code, not internal-error', () => {
+  // Cannot `instanceof AttendanceW4IdentityError` here (no value-level core-backend import — see
+  // this module's own file-header comment), so this constructs the SAME shape the real class
+  // produces: `super(code)` then `this.code = code`, i.e. `message === code`. This is the exact
+  // omission the gate found: before this fix, this refusal fell through to
+  // ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 because only two OTHER class names were listed.
+  const error = new Error('W4C0_CONNECTION_NOT_IDLE')
+  ;(error as unknown as { name: string; code: string }).name = 'AttendanceW4IdentityError'
+  ;(error as unknown as { code: string }).code = 'W4C0_CONNECTION_NOT_IDLE'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1)
+})
+
+test('NIT-4: the structural marker does NOT fire on a raw driver-shaped error whose message differs from its code (negative control, attacking the new predicate)', () => {
+  // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE and `.message` as a
+  // distinct human-readable sentence (e.g. code='25P02', message='current transaction is
+  // aborted, commands ignored until end of transaction block' — verified against real
+  // PostgreSQL). If the structural marker degenerated into "any object with a string `.code`", a
+  // raw driver error like this would be misclassified as boundary-refused. It must not be.
+  const rawDriverError = new Error('current transaction is aborted, commands ignored until end of transaction block')
+  ;(rawDriverError as unknown as { code: string }).code = '25P02'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(rawDriverError), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
 test('exitCodeForAttendanceW4C5ErrorV1 maps an unrecognized error to the internal-error exit code', () => {
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(new Error('anything else')), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
   assert.equal(exitCodeForAttendanceW4C5ErrorV1('not an error at all'), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
