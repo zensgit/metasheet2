@@ -4,11 +4,12 @@
 //
 // Classifies operational-control-plane-census.cjs's site list against
 // operational-control-plane-registry.cjs's exact tuples and
-// plugin-attendance-table-domain.cjs's migrations-derived domain. Six buckets:
+// plugin-attendance-table-domain.cjs's migrations-derived domain. Seven buckets:
 //
 //   - claimed:           site's (relPath, symbol, table, verb) identity is registered, its
-//                         observed count is not over the registered multiplicity, and its
-//                         statement fingerprint matches.
+//                         observed count EQUALS the registered multiplicity exactly (not merely
+//                         "not over" — see underCount below), and its statement fingerprint
+//                         matches.
 //   - unclaimed:         table IS in the migrations-derived domain, but this
 //                         (relPath, symbol, table, verb) identity is not registered at all —
 //                         a new table/verb/symbol inside an otherwise-known file.
@@ -18,13 +19,26 @@
 //                         the census's scope gate is the prefix, not domain membership: a
 //                         constant re-pointed at an undomained table must still surface here,
 //                         not silently fall out of scope.
-//   - missing:           a registered identity's observed count is 0 (the constant was
+//   - missing:           a registered identity's observed count is exactly 0 (the constant was
 //                         re-pointed away, the symbol/verb changed, or the site was deleted).
+//   - underCount:        a registered identity's observed count is GREATER than 0 but LESS than
+//                         its registered multiplicity — some but not all of the approved
+//                         occurrences are present. Distinct from `missing` (0 observed) and from
+//                         `claimed` (exactly `multiplicity` observed, fingerprint-checked): an
+//                         identity approved for multiplicity 2 with only 1 observed occurrence
+//                         must not silently read as "claimed" just because that one occurrence's
+//                         fingerprint happens to match — the approval was for TWO occurrences,
+//                         and one of them is now unaccounted for. (No entry in the current
+//                         registry has multiplicity > 1, so this bucket is empty against the real
+//                         repo today — it exists to close a latent hole, not a live one; see the
+//                         classify test's synthetic multiplicity-2 probe, which is the only way
+//                         to exercise it before a real multiplicity > 1 entry exists.)
 //   - overCount:         a registered identity's observed count exceeds its multiplicity (a
 //                         second write added inside an already-approved symbol).
 //   - fingerprintDrift:  a registered identity matched on (relPath, symbol, table, verb) with
-//                         the right count, but the statement text hashed differently — the SQL
-//                         around the table target changed shape without changing its verb.
+//                         EXACTLY the registered multiplicity observed, but at least one matched
+//                         site's statement text hashed differently — the SQL around the table
+//                         target changed shape without changing its verb.
 //
 // Registry precision note: identity keys are built from a JSON array, not a `::`-joined string
 // (a joined key lets a symbol name containing the separator alias a different tuple — the very
@@ -55,6 +69,7 @@ function classifyOperationalControlPlaneSites(sites, registry, domainTables) {
 
   const claimed = []
   const missing = []
+  const underCount = []
   const overCount = []
   const fingerprintDrift = []
 
@@ -69,6 +84,14 @@ function classifyOperationalControlPlaneSites(sites, registry, domainTables) {
       overCount.push({ entry, observed: matched.length, sites: matched })
       continue
     }
+    if (matched.length < entry.multiplicity) {
+      // 0 < observed < multiplicity: some but not all of the approved occurrences are present.
+      // This must NOT fall through to the fingerprint-check loop below and be marked `claimed`
+      // just because the fingerprint of the occurrences that DO exist happens to match — the
+      // approval was for exactly `multiplicity` occurrences, not "at most".
+      underCount.push({ entry, observed: matched.length, sites: matched })
+      continue
+    }
     for (const site of matched) {
       if (site.fingerprint !== entry.fingerprint) {
         fingerprintDrift.push({ entry, site })
@@ -78,7 +101,7 @@ function classifyOperationalControlPlaneSites(sites, registry, domainTables) {
     }
   }
 
-  return { claimed, unclaimed, undomained, missing, overCount, fingerprintDrift }
+  return { claimed, unclaimed, undomained, missing, underCount, overCount, fingerprintDrift }
 }
 
 module.exports = { identityKey, classifyOperationalControlPlaneSites }

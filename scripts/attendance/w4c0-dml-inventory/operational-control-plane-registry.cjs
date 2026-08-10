@@ -22,18 +22,45 @@
 //   - the table's columns are job-lifecycle bookkeeping only: status/mode/cursor/totals/
 //     last_result/locked_at/started_at/finished_at/error/idempotency_key — no user/date/hours
 //     rows.
-//   - `sanitizeAttendanceReportSyncJobLastResult` (index.cjs) writes `last_result` through an
-//     explicit allowlist of counters and scope metadata (periodType/from/to/usersScanned/
-//     synced/created/patched/skipped/failed/duplicateRowKeys/fieldFingerprint/syncedAt/...) plus
-//     `failedUsers: {userId, failedRows}[]` — counts and identifiers, never a per-user attendance
-//     value (clock time, hours, status).
-//   - `mergeAttendanceReportSyncJobTotals` sums numeric counters only.
+//   - `last_result` itself, EXACTLY (corrected — this previously overstated allowlist coverage):
+//     `persistAttendanceReportSyncJobPageState` (index.cjs ~L3611/~L3615) writes
+//     `last_result = $6::jsonb` from `JSON.stringify(state.lastResult ?? {})` (index.cjs ~L3628)
+//     UNCONDITIONALLY — it does not itself sanitize; whatever `state.lastResult` its caller
+//     passes is what lands in the column. Of `runAttendanceReportSyncJobNextPage`'s FOUR call
+//     sites (index.cjs, same function, ~L3706/~L3717/~L3733/~L3744): TWO pass
+//     `sanitizeAttendanceReportSyncJobLastResult(pageResult)` (index.cjs ~L3475) — an explicit
+//     allowlist of counters/scope metadata plus `failedUsers` (see below) — but the OTHER TWO
+//     (the `page.ok === false` branch, ~L3706, and the outer `catch` block, ~L3744) pass a raw
+//     `{ error: <message> }` / `{ error: <message>, code: <code> }` object straight through,
+//     bypassing the sanitizer entirely. `<message>` there is `page.message` or
+//     `error instanceof Error ? error.message : String(error)` — an ARBITRARY upstream exception
+//     string from whatever failed inside `executeAttendanceReportSyncJobPage`'s call chain
+//     (which reaches the real per-user writer, `syncAttendanceReportRecords`, which itself reads
+//     real attendance-fact columns — work_minutes/late_minutes/first_in_at/etc. — before ever
+//     calling the multitable write API). This module did NOT audit every throw site in that call
+//     chain for whether an exception message could ever echo a fact value; the honest claim is
+//     "unbounded upstream error text, not allowlisted," not "covered by the allowlist."
+//   - `failedUsers`'s shape is NOT uniformly `{userId, failedRows}[]` either: that shape is only
+//     what the SUCCESS-path per-user loop pushes when `result.failed > 0`
+//     (`aggregate.failedUsers.push({ userId, failedRows: ... })`). The loop's OWN `catch` block —
+//     same function, both `syncAttendanceReportRecordsForUsers` (index.cjs ~L3163) and
+//     `syncAttendanceReportPeriodSummariesForUsers` (index.cjs ~L4451) — pushes
+//     `{ userId, error: error instanceof Error ? error.message : String(error) }` instead: same
+//     unbounded-upstream-message caveat as above, for HALF of what actually produces this array.
+//   - `mergeAttendanceReportSyncJobTotals` sums numeric counters only (this claim holds — it only
+//     ever adds `Number(...)`-coerced values from the fixed `ATTENDANCE_REPORT_SYNC_JOB_TOTAL_KEYS`
+//     set, plus the `failedUsers` array handled above).
 //   - `executeAttendanceReportSyncJobPage` (index.cjs, same section) delegates the ACTUAL report
 //     row writes to the existing canonical writers, `syncAttendanceReportRecordsForUsers` /
 //     `syncAttendanceReportPeriodSummariesForUsers` — the writer the ruling cites at
 //     plugins/plugin-attendance/index.cjs:3177's docblock. These four sites never touch a report
 //     row directly.
-// None of the four writes attendance facts or results; all four discharge the owner's condition.
+// CONCLUSION UNCHANGED, basis corrected: none of the four sites issues DML against a report row —
+// diagnostics (an error string, a per-user failure count) are not attendance facts or results
+// even when their CONTENT is not allowlist-bounded, and this registration was never contingent on
+// `last_result`'s contents being allowlist-pure — only on these four not writing report rows. That
+// narrower, correct claim is what discharges the owner's condition; the broader allowlist claim
+// above it was simply wrong and is corrected here, not retracted-and-reasoned-around.
 // (If a future site here were found to write facts/results, the ruling requires STOPPING and
 // reporting it, not registering it — see the ruling text above.)
 //

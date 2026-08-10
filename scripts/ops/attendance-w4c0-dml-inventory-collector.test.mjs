@@ -79,6 +79,9 @@ const {
 } = require(path.join(toolDir, 'constant-table-binding-resolver.cjs'))
 const {
   PLUGIN_ATTENDANCE_TABLE_PREFIX_PATTERN,
+  stripLeadingSchemaQualifiers,
+  fingerprintForStatement,
+  statementExpressionContaining,
   substituteResolvedDynamicTargets,
   buildOperationalControlPlaneCensus,
 } = require(path.join(toolDir, 'operational-control-plane-census.cjs'))
@@ -1196,6 +1199,28 @@ test('W4C-3c whole-file scanner catches multiline DML verb/table boundaries', ()
   }
 })
 
+test('schema-qualified DML target resolves to the real table (F6a hardening — measured neutral against the real repo, see collector.cjs docblock)', () => {
+  const shapes = [
+    // Single schema qualifier: must capture the table, not the schema.
+    ['async function q() { await db.query(`UPDATE public.attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    // Two-level qualifier (db.schema.table): the `*` group must not stop after one hop.
+    ['async function q() { await db.query(`INSERT INTO mydb.public.attendance_records (id) VALUES ($1)`) }', 'insert', 'attendance_records'],
+    // Quoted schema-qualified identifier.
+    ['async function q() { await db.query(`DELETE FROM "public"."attendance_records" WHERE id = $1`) }', 'delete', 'attendance_records'],
+  ]
+  for (const [content, verb, table] of shapes) {
+    const sites = scanFileForDmlSites('probe.cjs', content)
+    assert.equal(sites.length, 1, content)
+    assert.deepEqual([sites[0].verb, sites[0].table], [verb, table], content)
+  }
+  // Negative control: an UNqualified write must still resolve to exactly one site on the right
+  // table — the qualifier group must never swallow the table name itself.
+  const unqualified = 'async function q() { await db.query(`UPDATE attendance_records SET status = $1`) }'
+  const unqualifiedSites = scanFileForDmlSites('probe.cjs', unqualified)
+  assert.equal(unqualifiedSites.length, 1)
+  assert.deepEqual([unqualifiedSites[0].verb, unqualifiedSites[0].table], ['update', 'attendance_records'])
+})
+
 test('W4C-3c comment masker tracks nested braces inside template expressions', () => {
   const source = [
     'const sql = `SELECT ${render({ nested: { value: 1 } })}`',
@@ -1595,6 +1620,7 @@ test('operational-control-plane classify: real repo — the owners four are clai
   )
   assert.deepEqual(result.undomained, [])
   assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.underCount, [], 'F6c: all four registered entries have multiplicity 1 and 1 observed occurrence each — exact match, not under')
   assert.deepEqual(result.overCount, [])
   assert.deepEqual(result.fingerprintDrift, [])
 })
@@ -1637,6 +1663,22 @@ function fakeSourceForSingleFile(relPath, content) {
       return null
     },
     listAllFiles: (root) => (relPath === root || relPath.startsWith(`${root}/`) ? [relPath] : []),
+    listDir: () => [],
+  }
+}
+
+// Same shape as fakeSourceForSingleFile but backs multiple files at once — used for the F3
+// cross-file-import escape probe, which needs one file that DECLARES a plugin_attendance_*-valued
+// constant and a SEPARATE file that only IMPORTS it.
+function fakeSourceForFiles(filesByRelPath) {
+  const relPaths = Object.keys(filesByRelPath)
+  return {
+    readFile: (p) => {
+      if (Object.prototype.hasOwnProperty.call(filesByRelPath, p)) return filesByRelPath[p]
+      if (p === 'pnpm-workspace.yaml') return 'packages:\n'
+      return null
+    },
+    listAllFiles: (root) => relPaths.filter((p) => p === root || p.startsWith(`${root}/`)),
     listDir: () => [],
   }
 }
@@ -1690,6 +1732,7 @@ test('mutation probe baseline: the synthetic fixture is fully claimed before any
   assert.deepEqual(result.unclaimed, [])
   assert.deepEqual(result.undomained, [])
   assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.underCount, [])
   assert.deepEqual(result.overCount, [])
   assert.deepEqual(result.fingerprintDrift, [])
 })
@@ -1773,6 +1816,7 @@ test('mutation probe 4: a FIFTH write added inside an already-registered symbol 
   assert.equal(result.overCount[0].entry.symbol, 'cancelAttendanceReportSyncJob')
   assert.equal(result.overCount[0].observed, 2)
   assert.deepEqual(result.missing, [], 'overCount and missing are different failure modes — this leg must not also read as missing')
+  assert.deepEqual(result.underCount, [], 'F6c: overCount and underCount are opposite failure modes — this leg must not also read as underCount')
 })
 
 test('mutation probe 4b: the SQL around a registered site changing shape (same verb/table/symbol/count) REDs in isolation as fingerprintDrift', () => {
@@ -1795,8 +1839,104 @@ test('mutation probe 4b: the SQL around a registered site changing shape (same v
   assert.equal(result.fingerprintDrift[0].entry.symbol, 'lockAttendanceReportSyncJobForRun')
   assert.deepEqual(result.missing, [])
   assert.deepEqual(result.unclaimed, [])
+  assert.deepEqual(result.underCount, [])
   assert.deepEqual(result.overCount, [])
   assert.deepEqual(result.undomained, [])
+})
+
+test('mutation probe 4c (F1 recurrence fix): a chained .replace() appended right after a registered statement\'s closing backtick REDs as fingerprintDrift, byte-for-byte the counterexample that caused this re-hardening', () => {
+  const baseline = baselineReportSyncFixture()
+  const registry = fingerprintFixtureRegistry(baseline)
+  const anchor = "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'canceled'`, [])"
+  assert.equal(baseline.split(anchor).length - 1, 1, 'the statement anchor must match exactly once before mutating it')
+  const mutated = baseline.replace(
+    anchor,
+    "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'canceled'`.replace(' AND org_id = $2', ''), [])",
+  )
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', mutated)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  // Before the fix, backtickTemplateContaining hashed ONLY the backtick's inner text, so this
+  // exact mutation left the fingerprint byte-identical to the baseline's — the SQL that actually
+  // executes changed (a `.replace()` runs on it before the driver ever sees it) while the pin
+  // stayed green. statementExpressionContaining now extends the hashed span past any directly
+  // chained `.identifier(...)` segment, so this must now RED as fingerprintDrift.
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  assert.equal(result.claimed.length, 3, 'the three untouched sites stay claimed')
+  assert.equal(result.fingerprintDrift.length, 1)
+  assert.equal(result.fingerprintDrift[0].entry.symbol, 'cancelAttendanceReportSyncJob')
+  assert.deepEqual(result.missing, [])
+  assert.deepEqual(result.unclaimed, [])
+  assert.deepEqual(result.underCount, [])
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.undomained, [])
+})
+
+test('fingerprint span (F1): what statementExpressionContaining closes vs leaves open — executed proof, not prose', () => {
+  const baseSrc = [
+    'const ATTENDANCE_REPORT_SYNC_JOB_TABLE = \'plugin_attendance_report_sync_jobs\'',
+    'async function q(db) {',
+    '  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`, [a, b, c])',
+    '}',
+  ].join('\n')
+  const idx = baseSrc.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  const baseFp = fingerprintForStatement(statementExpressionContaining(baseSrc, idx))
+
+  const mutations = {
+    // CLOSED: a directly chained call after the backtick.
+    chainedReplace: baseSrc.replace(
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`, [a, b, c]',
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`.replace(\' AND org_id = $3\', \'\'), [a, b, c]',
+    ),
+    // CLOSED: two chained segments.
+    chainedReplaceThenTrim: baseSrc.replace(
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`, [a, b, c]',
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`.replace(\' AND org_id = $3\', \'\').trim(), [a, b, c]',
+    ),
+    // OPEN (disclosed, item 1 — same class as the recurrence: bind-array mutation).
+    bindArrayReorder: baseSrc.replace('[a, b, c]', '[c, b, a]'),
+    // OPEN (disclosed, item 2 — string concatenation is not a `.identifier` chain).
+    concatenation: baseSrc.replace(
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`, [a, b, c]',
+      '`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3` + \' OR 1=1\', [a, b, c]',
+    ),
+    // OPEN (disclosed, item 3 — a wrapping call is not a suffix chain).
+    wrappingCall: baseSrc.replace(
+      'db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`, [a, b, c])',
+      'db.query(stripOrgScope(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = $1 WHERE id = $2 AND org_id = $3`), [a, b, c])',
+    ),
+  }
+
+  const chainedIdx = mutations.chainedReplace.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  assert.notEqual(
+    fingerprintForStatement(statementExpressionContaining(mutations.chainedReplace, chainedIdx)),
+    baseFp,
+    'a single chained .replace() must change the fingerprint',
+  )
+  const chained2Idx = mutations.chainedReplaceThenTrim.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  assert.notEqual(
+    fingerprintForStatement(statementExpressionContaining(mutations.chainedReplaceThenTrim, chained2Idx)),
+    baseFp,
+    'a two-segment chain (.replace().trim()) must change the fingerprint',
+  )
+
+  const reorderIdx = mutations.bindArrayReorder.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  assert.equal(
+    fingerprintForStatement(statementExpressionContaining(mutations.bindArrayReorder, reorderIdx)),
+    baseFp,
+    'DISCLOSED OPEN: bind-array reordering is outside the one-argument span this fingerprint covers',
+  )
+  const concatIdx = mutations.concatenation.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  assert.equal(
+    fingerprintForStatement(statementExpressionContaining(mutations.concatenation, concatIdx)),
+    baseFp,
+    'DISCLOSED OPEN: string concatenation after the template is not a `.identifier` chain',
+  )
+  const wrapIdx = mutations.wrappingCall.indexOf('${ATTENDANCE_REPORT_SYNC_JOB_TABLE}')
+  assert.equal(
+    fingerprintForStatement(statementExpressionContaining(mutations.wrappingCall, wrapIdx)),
+    baseFp,
+    'DISCLOSED OPEN: a wrapping function call is not a suffix chain off the closing backtick',
+  )
 })
 
 test('mutation probe 5 (resolver "must FAIL not skip"): an unresolvable module-level binding used at a DML target throws rather than silently vanishing', () => {
@@ -1830,4 +1970,251 @@ test('operational-control-plane census: files without the plugin_attendance_ sub
   const source = fakeSourceForSingleFile('scripts/unrelated.cjs', content)
   const { sites } = buildOperationalControlPlaneCensus(source)
   assert.deepEqual(sites, [])
+})
+
+test('DISCLOSED (F2): kysely query-builder writes to a plugin_attendance_* table are NOT detected — pinned so the gap cannot silently drift', () => {
+  // Every detector this census delegates to (collector.cjs's raw-SQL-verb DML_LINE_PATTERN, and
+  // this module's own DML-verb + `${...}` scanner) is text matching against SQL keywords. A
+  // kysely builder call carries no such keyword text, so none of these forms are seen at all —
+  // not misclassified, not reported as an unresolved shape, simply never visited by any pattern.
+  // This pins that behavior for each builder verb collector.cjs's DML_LINE_PATTERN also
+  // recognizes as a raw-SQL verb (insert/update/delete), so a future change that starts detecting
+  // ANY of them must touch this test and the module docblock's disclosure, not silently pass.
+  const builderVerbCalls = [
+    "db.insertInto('plugin_attendance_report_sync_jobs').values({ org_id: orgId }).execute()",
+    "db.updateTable('plugin_attendance_report_sync_jobs').set({ status: 'canceled' }).where('id', '=', jobId).execute()",
+    "db.deleteFrom('plugin_attendance_report_sync_jobs').where('org_id', '=', orgId).execute()",
+  ]
+  for (const call of builderVerbCalls) {
+    const content = [
+      "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'", // keeps the substring pre-filter open
+      'async function builderWrite(db, orgId, jobId) {',
+      `  return ${call}`,
+      '}',
+      '',
+    ].join('\n')
+    const source = fakeSourceForSingleFile('scripts/builder-probe.cjs', content)
+    const { sites, unresolvedDynamicTargetShapes } = buildOperationalControlPlaneCensus(source)
+    assert.deepEqual(sites, [], `builder call must not surface as a site: ${call}`)
+    assert.deepEqual(
+      unresolvedDynamicTargetShapes,
+      [],
+      `builder call must not even surface as a reported-unresolved shape (no DML verb + \${...} token exists to report): ${call}`,
+    )
+  }
+})
+
+test('DISCLOSED (F3): a file that IMPORTS an already-declared plugin_attendance_*-valued constant from another file escapes both the pre-filter and the resolver', () => {
+  // The exporting file itself IS in scope (it declares the constant AND contains the literal
+  // substring), so its own DELETE is correctly seen — mirrors the real
+  // scripts/ops/staging-attendance-report-sync-a2-smoke.mjs:724 case.
+  const exportingFile = [
+    "export const REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'",
+    'async function cleanup(db) {',
+    '  return db.query(`DELETE FROM ${REPORT_SYNC_JOB_TABLE} WHERE org_id = ANY($1)`, [orgIds])',
+    '}',
+  ].join('\n')
+  // The IMPORTING probe file's own source text never contains the literal substring
+  // "plugin_attendance_" anywhere — the pre-filter skips it before binding resolution is even
+  // attempted, so this DELETE is invisible with no reported reason at all (unlike the
+  // non_module_level_root / unsupported_shape cases, which at least surface in
+  // unresolvedDynamicTargetShapes for files that DO pass the pre-filter).
+  const importingProbeFile = [
+    "import { REPORT_SYNC_JOB_TABLE } from './exporting-file.mjs'",
+    'async function evadingCleanup(db, orgIds) {',
+    '  return db.query(`DELETE FROM ${REPORT_SYNC_JOB_TABLE} WHERE org_id = ANY($1)`, [orgIds])',
+    '}',
+  ].join('\n')
+
+  const source = fakeSourceForFiles({
+    'scripts/exporting-file.mjs': exportingFile,
+    'scripts/importing-probe.mjs': importingProbeFile,
+  })
+  const { sites, unresolvedDynamicTargetShapes } = buildOperationalControlPlaneCensus(source)
+  assert.deepEqual(
+    sites.map((s) => s.relPath),
+    ['scripts/exporting-file.mjs'],
+    'only the exporting file (which itself declares the constant and contains the substring) is seen',
+  )
+  assert.deepEqual(
+    unresolvedDynamicTargetShapes,
+    [],
+    'the importing file never reaches the resolver at all — it is skipped by the pre-filter before ' +
+      'binding resolution runs, so there is no reported reason for its DELETE, only silent absence ' +
+      '(disclosed in the module docblock as an accepted trade-off, not a hidden gap)',
+  )
+})
+
+test('F4 (must-FAIL-not-skip exact scope): every shape OUTSIDE the recognized `${IDENT}` / `${IDENT.prop}`-of-a-module-level-const contract is REPORTED, not silently absent', () => {
+  const shapes = [
+    {
+      label: 'two-hop property access ${MAP.a.b}',
+      content: [
+        "const MAP = { a: 'plugin_attendance_x' }",
+        'async function q(db) {',
+        '  return db.query(`UPDATE ${MAP.a.b} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: 'MAP.a.b',
+    },
+    {
+      label: 'inline call ${tableName()}',
+      content: [
+        "// references plugin_attendance_report_sync_jobs conceptually, via a call this module cannot resolve",
+        'async function q(db) {',
+        '  return db.query(`UPDATE ${tableName()} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: 'tableName()',
+    },
+    {
+      label: 'ternary ${cond ? A : B}',
+      content: [
+        "const A = 'plugin_attendance_a'",
+        "const B = 'plugin_attendance_b'",
+        'async function q(db, cond) {',
+        '  return db.query(`UPDATE ${cond ? A : B} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: 'cond ? A : B',
+    },
+    {
+      label: 'binary concatenation ${PREFIX + SUFFIX}',
+      content: [
+        "const PREFIX = 'plugin_attendance_'",
+        'async function q(db) {',
+        "  return db.query(`UPDATE ${PREFIX + 'x'} SET x = 1`)",
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: "PREFIX + 'x'",
+    },
+    {
+      label: 'computed member access ${arr[0]}',
+      content: [
+        "const ARR = ['plugin_attendance_x']",
+        'async function q(db) {',
+        '  return db.query(`UPDATE ${ARR[0]} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: 'ARR[0]',
+    },
+    {
+      label: 'inline string-literal concatenation ${\'a\' + \'b\'}',
+      content: [
+        'async function q(db) {',
+        "  return db.query(`UPDATE ${'plugin_attendance_' + 'literal'} SET x = 1`)",
+        '}',
+      ].join('\n'),
+      reason: 'unsupported_shape',
+      raw: "'plugin_attendance_' + 'literal'",
+    },
+    {
+      label: 'function-scoped (non-module-level) const, narrow shape',
+      content: [
+        'async function q(db) {',
+        "  const localConst = 'plugin_attendance_x'",
+        '  return db.query(`UPDATE ${localConst} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'non_module_level_root',
+      raw: 'localConst',
+    },
+    {
+      label: 'function parameter, narrow shape',
+      content: [
+        '// references plugin_attendance_report_sync_jobs conceptually, via a function-scoped parameter',
+        'async function q(db, paramTable) {',
+        '  return db.query(`UPDATE ${paramTable} SET x = 1`)',
+        '}',
+      ].join('\n'),
+      reason: 'non_module_level_root',
+      raw: 'paramTable',
+    },
+  ]
+
+  for (const { label, content, reason, raw } of shapes) {
+    // Each fixture must still contain the "plugin_attendance_" substring somewhere so the
+    // pre-filter does not itself explain the absence — the point of this test is the SHAPE gap,
+    // isolated from the (separately disclosed, F3) substring pre-filter gap.
+    assert.ok(content.includes('plugin_attendance_'), `fixture must pass the pre-filter: ${label}`)
+    const { unresolvedDynamicTargetShapes } = substituteResolvedDynamicTargets(content)
+    assert.deepEqual(
+      unresolvedDynamicTargetShapes.map((s) => ({ reason: s.reason, raw: s.raw })),
+      [{ reason, raw }],
+      `${label} must be REPORTED (visible output), not silently absent`,
+    )
+  }
+})
+
+test('operational-control-plane census: real repo — zero unresolved dynamic-target shapes at the point this was measured (see F4 hardening)', () => {
+  const source = createWorktreeSource(rootDir)
+  const { unresolvedDynamicTargetShapes } = buildOperationalControlPlaneCensus(source)
+  assert.deepEqual(
+    unresolvedDynamicTargetShapes,
+    [],
+    'if this ever goes non-empty, a real DML-verb ${...} target this census cannot resolve exists ' +
+      'in a plugin_attendance_-flavoured file — investigate before assuming it is noise; the ' +
+      'synthetic shape test above proves the reporting mechanism itself works even when this stays empty',
+  )
+})
+
+test('F6a (schema-qualified names, form 2): a constant whose STRING VALUE bakes in a schema qualifier still resolves to the bare table, not silently out of scope', () => {
+  const content = [
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'public.plugin_attendance_report_sync_jobs'",
+    'async function createAttendanceReportSyncJob(db) {',
+    '  return db.query(`INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} (org_id) VALUES ($1)`, [1])',
+    '}',
+  ].join('\n')
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', content)
+  const { sites, unresolvedDynamicTargetShapes } = buildOperationalControlPlaneCensus(source)
+  assert.equal(sites.length, 1)
+  assert.equal(sites[0].table, 'plugin_attendance_report_sync_jobs', 'the schema qualifier baked into the constant value must be stripped, not left in scope-out')
+  assert.equal(sites[0].verb, 'insert')
+  assert.deepEqual(unresolvedDynamicTargetShapes, [])
+})
+
+test('F6a (schema-qualified names, form 2) unit: stripLeadingSchemaQualifiers', () => {
+  assert.equal(stripLeadingSchemaQualifiers('plugin_attendance_x'), 'plugin_attendance_x')
+  assert.equal(stripLeadingSchemaQualifiers('public.plugin_attendance_x'), 'plugin_attendance_x')
+  assert.equal(stripLeadingSchemaQualifiers('mydb.public.plugin_attendance_x'), 'plugin_attendance_x')
+  assert.equal(stripLeadingSchemaQualifiers(''), '')
+  assert.equal(stripLeadingSchemaQualifiers(null), '')
+})
+
+test('F6c isolation probe: a registered identity approved for multiplicity 2 with only 1 observed occurrence REDs as underCount ONLY — not claimed, not missing, not overCount', () => {
+  // No entry in the real OPERATIONAL_CONTROL_PLANE_REGISTRY has multiplicity > 1 today, so this
+  // is exercised against a synthetic registry entry, not the real repo — see the classify module
+  // docblock for why this bucket exists as a latent-hole closure rather than a live-today fix.
+  const content = [
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'",
+    'async function multiWriteSymbol(db) {',
+    "  return db.query(`UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} SET status = 'x'`, [])",
+    '}',
+  ].join('\n')
+  const source = fakeSourceForSingleFile('scripts/fixture.cjs', content)
+  const { sites } = buildOperationalControlPlaneCensus(source)
+  assert.equal(sites.length, 1, 'sanity: exactly one observed occurrence')
+  const registry = [{
+    relPath: 'scripts/fixture.cjs',
+    symbol: 'multiWriteSymbol',
+    table: REGISTRY_TABLE,
+    verb: 'update',
+    fingerprint: sites[0].fingerprint, // the one observed occurrence's own fingerprint — must not matter
+    multiplicity: 2, // approved for TWO occurrences; only one exists
+  }]
+  const result = classifyOperationalControlPlaneSites(sites, registry, [REGISTRY_TABLE])
+  assert.deepEqual(result.claimed, [], 'must NOT read as claimed just because the one occurrence present matches the fingerprint')
+  assert.deepEqual(result.missing, [], 'must NOT read as missing — one occurrence IS present')
+  assert.equal(result.underCount.length, 1)
+  assert.equal(result.underCount[0].entry.symbol, 'multiWriteSymbol')
+  assert.equal(result.underCount[0].observed, 1)
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.fingerprintDrift, [])
+  assert.deepEqual(result.unclaimed, [])
+  assert.deepEqual(result.undomained, [])
 })
