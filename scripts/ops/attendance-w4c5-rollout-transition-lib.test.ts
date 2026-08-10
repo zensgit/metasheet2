@@ -1110,9 +1110,10 @@ test('claim-sweep.mjs on a FULL (non-shallow) clone: a genuinely-not-an-ancestor
 // destination `stdout.write()` is asynchronous, and the race is on the CHILD process's own
 // internal write queue versus its own synchronous `process.exit()` call — independent of how
 // fast or slow the PARENT reads. Reproduced directly before fixing, through `runClaimSweep`
-// (the SAME `spawnSync`-based helper every other test in this file already uses — this bug does
-// NOT require a special reader shape to expose): file-redirected output for this exact fixture
-// was 1,000,896 bytes; piped via `runClaimSweep` it came back as exactly 65,536 bytes (one pipe
+// (the same helper the three shallow/full-clone tests above use, and the same `spawnSync`
+// primitive the self-test check above uses directly — this bug does NOT require a special
+// reader shape to expose): file-redirected output for this exact fixture was 1,000,896 bytes;
+// piped via `runClaimSweep` it came back as exactly 65,536 bytes (one pipe
 // bufferful) — the unfixed process exited mid-flush.
 const LARGE_SWEEP_LINE_COUNT = 3000
 function buildLargeQuantifierFile(dir: string): string {
