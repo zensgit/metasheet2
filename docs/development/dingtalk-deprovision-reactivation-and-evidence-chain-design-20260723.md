@@ -78,7 +78,8 @@ DELETE 逆转仅在其事件仍为 `applied` 时可用。任何后续 access-gra
 离岗 planner 见行已存在也不再补记 creation effect。该 supersede 语义为 main 既有合同（本勘误
 未触碰那两道门），故 Rev 4.4 的承诺应读作：「**在事件被 supersede 之前**，deny 行的存在性变化
 可被 restore 安全逆转」。残留行的补偿路径（人工清理 or 再证据化）列入 owner 会签清单（验证 MD
-§4 第 3 项）。另：多 active 源的 org 派生消歧为 follow-up hardening（#4833）。
+§4 第 3 项）。另：多 active 源的 org 派生消歧已落地（#4833）：请求 orgId 对照 active eligible 源的**集合**匹配，
+未指名且集合含多个不同 org 时拒绝（409 `ACTIVATE_ORG_AMBIGUOUS`），单一 org（含同 org 多源去重）照常派生。
 
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  

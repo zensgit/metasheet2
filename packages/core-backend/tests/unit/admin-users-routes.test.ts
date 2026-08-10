@@ -4051,6 +4051,66 @@ describe('admin-users routes', () => {
     expect(activateMocks.activatePendingUser).not.toHaveBeenCalled()
   })
 
+  // #4833 + verify-workflow findings: (a) the bulk envelope must carry ACTIVATE_ORG_AMBIGUOUS
+  // per-item; (b) no test asserted the routes actually THREAD the parsed orgId into
+  // activatePendingUser — a route that dropped it would leave every mapping test green.
+  it('POST bulk activate surfaces ACTIVATE_ORG_AMBIGUOUS per-item and threads each item orgId', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    activateMocks.activatePendingUser
+      .mockRejectedValueOnce(Object.assign(
+        new Error('dual active sources detail: da-1 da-2 DETAIL: secret'),
+        { code: 'ACTIVATE_ORG_AMBIGUOUS' },
+      ))
+      .mockResolvedValueOnce({
+        userId: 'pending-user-2',
+        activationStatus: 'activated',
+        isActive: true,
+        localPasswordSet: false,
+        membershipOrgId: 'org-b',
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/activate/bulk', {
+      body: {
+        items: [
+          { userId: 'pending-user-1', mode: 'admin_no_password' },
+          { userId: 'pending-user-2', mode: 'admin_no_password', orgId: 'org-b' },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        successCount: 1,
+        failureCount: 1,
+        items: [
+          {
+            userId: 'pending-user-1',
+            ok: false,
+            error: {
+              status: 409,
+              code: 'ACTIVATE_ORG_AMBIGUOUS',
+              message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+            },
+          },
+          { userId: 'pending-user-2', ok: true },
+        ],
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(/secret|da-1/i)
+    // Threading: the parsed orgId reached the activation service verbatim, item by item.
+    expect(activateMocks.activatePendingUser).toHaveBeenNthCalledWith(1,
+      expect.objectContaining({ userId: 'pending-user-1', orgId: undefined }))
+    expect(activateMocks.activatePendingUser).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ userId: 'pending-user-2', orgId: 'org-b' }))
+    // #4833 audit surface: the successful item's audit row records WHICH org was chosen.
+    const activateAudit = auditMocks.auditLog.mock.calls
+      .map((call) => call[0])
+      .find((entry) => entry?.resourceId === 'pending-user-2')
+    expect(activateAudit?.meta).toMatchObject({ membershipOrgId: 'org-b' })
+  })
+
   // Closeout review P1: the bulk route inherits the derived-org rule through the SAME
   // activatePendingUser + mapActivateError pair as the single route — a steered orgId fails
   // per-item as a safe 409 while the rest of the batch proceeds.

@@ -24,6 +24,7 @@ import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidenc
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const ORG = 'org-grant-fix-test'
+const ORG_B = 'org-grant-fix-test-b'
 const USER = 'u-grant-fix-test'
 const USER_A = 'u-grant-fix-owner'
 const USER_B = 'u-grant-fix-pending'
@@ -39,11 +40,13 @@ async function cleanup() {
     await query(`DELETE FROM user_orgs WHERE user_id = $1`, [uid])
     await query(`DELETE FROM users WHERE id = $1`, [uid])
   }
-  await query(`DELETE FROM directory_sync_runs WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
-  await query(`DELETE FROM directory_accounts WHERE integration_id IN
-                 (SELECT id FROM directory_integrations WHERE org_id = $1)`, [ORG])
-  await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [ORG])
+  for (const org of [ORG, ORG_B]) {
+    await query(`DELETE FROM directory_sync_runs WHERE integration_id IN
+                   (SELECT id FROM directory_integrations WHERE org_id = $1)`, [org])
+    await query(`DELETE FROM directory_accounts WHERE integration_id IN
+                   (SELECT id FROM directory_integrations WHERE org_id = $1)`, [org])
+    await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [org])
+  }
 }
 
 async function seedDirectory(opts: { sourceActive: boolean }) {
@@ -85,8 +88,13 @@ async function seedActivationSource(options: {
   integrationStatus?: string
   openId?: string
   unionId?: string
+  /** #4833: seed the source under a different org (dual-active-source disambiguation golden). */
+  orgId?: string
+  externalKey?: string
 }) {
-  const integrationCorpId = options.integrationCorpId ?? `corp-${ORG}`
+  const orgId = options.orgId ?? ORG
+  const integrationCorpId = options.integrationCorpId ?? `corp-${orgId}`
+  const externalKey = options.externalKey ?? `dingtalk:activation-source:ext-${orgId}`
   const integration = await query<{ id: string }>(
     `INSERT INTO directory_integrations
        (name, corp_id, org_id, provider, status, default_deprovision_policy)
@@ -94,7 +102,7 @@ async function seedActivationSource(options: {
      RETURNING id::text AS id`,
     [
       integrationCorpId,
-      ORG,
+      orgId,
       options.integrationProvider ?? 'dingtalk',
       options.integrationStatus ?? 'active',
     ],
@@ -104,7 +112,7 @@ async function seedActivationSource(options: {
        (integration_id, provider, corp_id, external_user_id, external_key, name,
         open_id, union_id, is_active)
      VALUES ($1::uuid, $2, $3, 'ext-activation-source',
-             'dingtalk:activation-source:ext', 'Activation Source', $4, $5, $6)
+             $7, 'Activation Source', $4, $5, $6)
      RETURNING id::text AS id`,
     [
       integration.rows[0].id,
@@ -113,6 +121,7 @@ async function seedActivationSource(options: {
       options.openId ?? null,
       options.unionId ?? null,
       options.accountActive ?? true,
+      externalKey,
     ],
   )
   if (options.linkedUserId !== undefined) {
@@ -956,6 +965,51 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       effect_status: 'reversed',
       reversed_by: 'admin-test',
     })
+  })
+
+  // #4833: with ACTIVE sources in TWO orgs, "derive" has no unique answer. Naming no org must
+  // refuse with zero residue; naming the second org must land the membership exactly there.
+  it('#4833 dual-ACTIVE orgs: no orgId refuses with zero residue; naming the second org activates there', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'dual-org@example.com', 'Dual Org', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    await seedActivationSource({ linkedUserId: USER })
+    await seedActivationSource({ linkedUserId: USER, orgId: ORG_B })
+
+    await expect(
+      activatePendingUser({ userId: USER, mode: 'admin_no_password', adminUserId: 'admin-test' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ORG_AMBIGUOUS' })
+    const afterRefusal = await query<{ activation_status: string; is_active: boolean }>(
+      `SELECT activation_status, is_active FROM users WHERE id = $1`, [USER])
+    expect(afterRefusal.rows[0]).toEqual({ activation_status: 'pending_activation', is_active: false })
+    const residue = await query(`SELECT 1 FROM user_orgs WHERE user_id = $1`, [USER])
+    expect(residue.rows).toHaveLength(0)
+
+    // Deterministic kill for the find-first/first-only mutation: da.id is a uuid, so which row
+    // sorts first is a coin flip — asking for a FIXED org would only catch the mutation half
+    // the time. Ask for whichever org is NOT first in the helper's own ORDER BY da.id order.
+    const firstByAccountId = await query<{ org_id: string }>(
+      `SELECT di.org_id
+         FROM directory_account_links l
+         JOIN directory_accounts da ON da.id = l.directory_account_id
+         JOIN directory_integrations di ON di.id = da.integration_id
+        WHERE l.local_user_id = $1 AND l.link_status = 'linked'
+        ORDER BY da.id
+        LIMIT 1`,
+      [USER],
+    )
+    const nonFirstOrg = firstByAccountId.rows[0].org_id === ORG ? ORG_B : ORG
+    await activatePendingUser({
+      userId: USER,
+      mode: 'admin_no_password',
+      adminUserId: 'admin-test',
+      orgId: nonFirstOrg,
+    })
+    const memberships = await query<{ org_id: string; is_active: boolean }>(
+      `SELECT org_id, is_active FROM user_orgs WHERE user_id = $1 ORDER BY org_id`, [USER])
+    expect(memberships.rows).toEqual([{ org_id: nonFirstOrg, is_active: true }])
   })
 
   it('alias conflict rolls back users/membership/grant (real Postgres transaction)', async () => {
