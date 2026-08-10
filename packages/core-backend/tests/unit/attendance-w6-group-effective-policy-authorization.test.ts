@@ -1,5 +1,5 @@
 /**
- * W6-1 (#4556) — the two load-bearing guarantees of
+ * W6-1 (#4556) — the three load-bearing guarantees of
  * `GET /api/attendance/groups/:groupId/effective-policy`:
  *
  *  1. `rbacGuard('attendance', 'admin')` is what stands between an
@@ -10,6 +10,12 @@
  *     read share exactly one database transaction, opened once per request.
  *     Proved by asserting the shared-transaction mock is invoked once and
  *     the pool-level mock is never invoked at all.
+ *  3. In the REAL application (`src/index.ts`, not this file's router-only
+ *     mount), the route sits behind the global authentication gate and the
+ *     attendance audit/security middleware. Mounting the router directly (as
+ *     guarantees 1-2 do, to stay DB-free) cannot prove that placement — this
+ *     is a separate, narrow source-text guard over `index.ts` itself. See the
+ *     describe block below for the full scope statement.
  *
  * DB-free: `../../src/db/pg` is replaced with a spy transaction whose
  * client answers a small, closed set of SQL shapes for a `free_time` group
@@ -18,10 +24,19 @@
  * real-DB integration suite covers the `fixed_shift` path, where the
  * injected FSER service also shares the same transaction handle.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import express from 'express'
 import request from 'supertest'
+import * as ts from 'typescript'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import {
+  enclosingFunctionLikeAt,
+  functionLikeLabel,
+  locateMarkers,
+  type AssemblyMarker,
+} from '../helpers/attendance-w6-index-assembly-order'
 
 const queryMock = vi.fn()
 const transactionMock = vi.fn()
@@ -184,5 +199,69 @@ describe('the membership check, the groupId validation, and the aggregate reads 
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Org membership required for effective-policy', details: undefined } })
     expect(transactionMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * Guarantee 3 (see file header): in the REAL application assembly, this
+ * route sits behind the global authentication gate and the attendance
+ * audit/security middleware. The suites above mount `attendanceAdminRouter()`
+ * directly on a bare Express app — necessary to stay DB-free, but it proves
+ * only `rbacGuard` and the shared transaction. It cannot see `src/index.ts`,
+ * where the real app registers the global gate, then the audit/security
+ * middleware, and only after that the attendance routers.
+ *
+ * Scope, stated narrowly: this is a source-text guard over `index.ts`, over
+ * four markers named as exact needles. It proves registration ORDER and
+ * MULTIPLICITY (each marker occurs exactly once, and the three upstream
+ * markers precede the route registration) and that all four calls are made
+ * from the SAME method (so a marker relocated into a different method that
+ * runs at a different time, or not at all on some path, cannot satisfy it by
+ * merely appearing earlier in the file's text). It is not a runtime proof —
+ * `MetaSheetServer` is too heavy to construct in a unit test (full plugin
+ * loader, DB pool, etc.); `multitable-w11-bridge-wiring.guard.test.ts` is the
+ * house's existing precedent for this exact shape.
+ */
+describe('the real app assembly (index.ts) registers this route behind the global gate and the attendance audit/security middleware', () => {
+  const indexPath = join(__dirname, '../../src/index.ts')
+  const indexText = readFileSync(indexPath, 'utf8')
+  const indexSource = ts.createSourceFile(indexPath, indexText, ts.ScriptTarget.ES2022, true)
+
+  const MARKERS: readonly AssemblyMarker[] = [
+    { label: 'global authentication gate', needle: 'if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)' },
+    { label: 'attendance audit middleware', needle: 'this.app.use(attendanceAuditMiddleware())' },
+    { label: 'attendance security middleware', needle: 'this.app.use(attendanceSecurityMiddleware())' },
+    { label: 'aggregate route registration', needle: 'this.app.use(attendanceAdminRouter())' },
+  ]
+
+  const locations = locateMarkers(indexText, MARKERS)
+  const [gate, audit, security, route] = locations
+
+  it('non-vacuity: every marker is present exactly once', () => {
+    expect(locations.map((loc) => ({ label: loc.label, occurrences: loc.occurrences }))).toEqual(
+      MARKERS.map((marker) => ({ label: marker.label, occurrences: 1 })),
+    )
+  })
+
+  it('the global gate precedes the route registration', () => {
+    expect(gate.index).toBeGreaterThanOrEqual(0)
+    expect(route.index).toBeGreaterThan(gate.index)
+  })
+
+  it('the attendance audit middleware precedes the route registration', () => {
+    expect(audit.index).toBeGreaterThanOrEqual(0)
+    expect(route.index).toBeGreaterThan(audit.index)
+  })
+
+  it('the attendance security middleware precedes the route registration', () => {
+    expect(security.index).toBeGreaterThanOrEqual(0)
+    expect(route.index).toBeGreaterThan(security.index)
+  })
+
+  it('all four markers are registered from the SAME method — the real assembly block, not merely the same file', () => {
+    const enclosing = locations.map((loc) => enclosingFunctionLikeAt(indexSource, loc.index))
+    expect(enclosing.every((node) => node !== null)).toBe(true)
+    expect(enclosing.every((node) => node === enclosing[0])).toBe(true)
+    expect(functionLikeLabel(enclosing[0] as ts.Node)).toBe('setupMiddleware')
   })
 })
