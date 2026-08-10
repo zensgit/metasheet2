@@ -182,105 +182,166 @@ enumerated or mapped, and W8 (whose scope under parent §9.9 makes this
 roll-up its job) built its own §3 matrix from scratch instead. This table is
 that mapping.
 
-**Count, derived independently rather than assumed**: §7.1 Database = 12
-bulleted checks; §7.2 Calculation = 15 bulleted checks; §7.3 Entry-point
-parity = **one prose rule, not a bulleted list** (no numbered items to map —
-noted below, not silently folded into the 42); §7.4 Mutation = 8 bulleted
-checks; §7.5 Frontend = 7 bulleted checks. **12 + 15 + 8 + 7 = 42.**
-(Derivation: `git grep -n '^## 7\.\|^### 7\.\|^## 8' origin/main --
-attendance-shift-group-advanced-capability-design-lock-20260723.md` locates
-`## 7.` at `:538` and `## 8.` at `:619` (`### 7.1` `:540`, `7.2` `:566`, `7.3`
-`:588`, `7.4` `:594`, `7.5` `:609`); `sed -n '538,618p' <file>` then counted
-by hand per subsection — 12 / 15 / prose / 8 / 7.)
+**Denominator is 43, fixed by owner ruling — not re-derived here, and not
+"corrected" back to 42.** Owner's ruling, verbatim: "DB-01..12 + CALC-01..15
++ EP-01 + MUT-01..08 + FE-01..07 = 43。EP-01 是复合项，五个入口和 fallback
+mutation 缺一即保持 OPEN。" This document's own independent bullet count
+agrees rather than conflicts with that ruling: §7.1 Database = 12 bulleted
+checks; §7.2 Calculation = 15 bulleted checks; §7.4 Mutation = 8 bulleted
+checks; §7.5 Frontend = 7 bulleted checks — 12+15+8+7 = **42** bulleted
+items, **plus** §7.3 Entry-point parity, which is **one prose clause, not a
+bulleted list**, assigned its own composite ID (**EP-01**) per the owner's
+ruling — 42 + 1 = **43**. There is no discrepancy left to report: an earlier
+round of this table stopped at 42 by treating EP-01's prose form as a reason
+to give it no row at all, rather than a reason to give it exactly one
+composite row. (Derivation: `git grep -n '^## 7\.\|^### 7\.\|^## 8'
+origin/main -- attendance-shift-group-advanced-capability-design-lock-20260723.md`
+locates `## 7.` at `:538` and `## 8.` at `:619` (`### 7.1` `:540`, `7.2`
+`:566`, `7.3` `:588`, `7.4` `:594`, `7.5` `:609`); `sed -n '538,618p' <file>`
+then counted by hand per subsection — 12 / 15 / 1 prose clause / 8 / 7.)
 
-Each row below carries one of three verdicts, per parent §10 item 1's own
-two-verdict shape (borrowed here because §7 has no shape of its own): **D**
-(discharged — named suite/slice cited, verified by test title at minimum, not
-by re-running); **R** (owner removal under parent §10 item 1 — none claimed
-in this round; this document proposes zero removals); or **EMPTY** (not
-substantiated this round — left empty and marked, not guessed). Every citation
-below is a **test title match** against `origin/main@d78b27d3`, not a
-full-body re-read of every assertion in the named test — a materially weaker
-form of evidence than the mutation-leg verification this document otherwise
-requires, and stated as such rather than presented as equivalent.
+**Exactly three permitted verdicts, per owner ruling** — not the two-verdict
+D/R shape an earlier round of this table borrowed from parent §10 item 1's
+own shape, and not the five-value D/PARTIAL/UNCERTAIN/EMPTY/R vocabulary a
+later-but-still-earlier round used instead:
 
-**§7.1 Database (12)**
+- **OPEN** — not substantiated this round to the SATISFIED bar below; left
+  open, not guessed. Partial or suggestive evidence found this round is kept
+  in the notes column so a later round does not re-search from zero, but it
+  does not change the verdict.
+- **SATISFIED** — requires both a `main` merge SHA (the commit that landed
+  the discharging test, not merely a verification-anchor SHA such as
+  `origin/main@d78b27d3`) **and** the specific test/evidence that discharges
+  it. A verification-anchor SHA proves the cited test exists at that head;
+  it does not by itself identify which commit landed it, so it is not
+  sufficient alone for this verdict. (This is a narrower use of the word
+  "SATISFIED" than `OD-W8-3`'s status elsewhere in this document — that OD
+  table tracks whether an *open decision* has been resolved; this table
+  tracks whether a parent-§7 *verification item* has a landed, named test.
+  The two tables' SATISFIED do not certify the same thing.)
+- **REMOVED** — requires an explicit owner decision **for that ID** plus a
+  statement of the product impact of removing it. **Zero rows carry this
+  verdict in this round** — no owner decision naming a specific ID exists
+  yet, and per the owner's own ruling ("不应现在批量裁掉 43 项。先机器映射，
+  只有无法满足且确实决定放弃的项目再逐项呈裁。"), none is asserted here.
 
-| # | Check | Verdict | Discharged by |
+**Map mechanically first, per the owner's ruling.** Every SATISFIED verdict
+below is backed by (a) a **test title match**, not a full-body re-read of
+every assertion in the named test — a materially weaker form of evidence
+than the mutation-leg verification this document otherwise requires
+elsewhere, stated as such rather than presented as equivalent — and (b) the
+merge commit that added the discharging file, located by `git log
+origin/main --diff-filter=A --format=%H -- <file> | tail -1` (the oldest
+commit adding that path, re-verified 2026-08-10 against
+`origin/main@d78b27d3`). A row whose only available evidence is a
+verification-anchor SHA, a partial/half match, an uncertain match, or a
+non-suite citation (e.g. a QA-handoff narrative rather than a titled test)
+is left **OPEN** under this bar, even where an earlier round of this table
+called it discharged.
+
+**§7.1 Database (DB-01..DB-12)**
+
+| ID | Check | Verdict | Evidence |
 | --- | --- | --- | --- |
-| 1 | fresh migration and upgrade from pre-segment schema | D | `attendance-shift-segments-migration.db.test.ts`: "FRESH: up() on an empty schema creates table, constraints, and the org-integrity FK" (`~L122`), "UPGRADE + BACKFILL: every legacy shift becomes segment 0..." (`~L150`) |
-| 2 | one segment backfill for every legacy shift | D | same file, "UPGRADE + BACKFILL..." (`~L150`) |
-| 3 | replay idempotency | D | same file, "REPLAY: a second up() is a no-op for already-covered shifts" (`~L166`) |
-| 4 | concurrent membership overlap rejection | D | `attendance-calculation-group-membership-w1.db.test.ts`: "lets the database reject one of two concurrent direct overlapping writes" (`~L456`) |
-| 5 | inclusive boundary transition (D-1 to D) without a gap or double winner | D | same w1 file, "closes the prior inclusive interval at D-1, starts the next at D, and records audit context" (`~L238`) |
-| 6 | cross-org FK and query isolation | D | `attendance-shift-segments-migration.db.test.ts` "CROSS-ORG INTEGRITY: the composite FK rejects a segment whose org differs from the parent shift" (`~L207`); `attendance-shift-segments-writer-matrix.db.test.ts` "cross-org: a shift is invisible and unreferenceable from another org" (`~L714`) |
-| 7 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | D | `attendance-shift-segments-writer-matrix.db.test.ts`, nine `matrix: ... typed 422 with zero writes` legs covering every named surface (`~L734, 789, 819, 913, 946, 966, 1498, 1541, 1578`) |
-| 8 | existing-reference delete 409 + zero writes per durable blocker; rejected/cancelled/history fixtures prove non-blocking evidence intact + redacted UUID | D | same file, "delete: typed 409 with zero writes for every durable blocker class" (`~L1642`), "delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID" (`~L1722`) |
-| 9 | concurrent shift delete + reference insertion cannot cascade-delete a newly created reference | D | same file, "concurrency: a reference insert racing a delete is serialized by the shared lock protocol" (`~L1892`) |
-| 10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | **PARTIAL / half EMPTY** | Second half only: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — **no matching test title found this round; EMPTY, not guessed.** |
-| 11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | **PARTIAL / half EMPTY** | Schema-rollback-forbidden half: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — **no matching test title found this round; EMPTY.** |
-| 12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | D | same file, `~L224` (same test as item 11's schema half — it discharges both) |
+| DB-01 | fresh migration and upgrade from pre-segment schema | SATISFIED | `attendance-shift-segments-migration.db.test.ts`: "FRESH: up() on an empty schema creates table, constraints, and the org-integrity FK" (`~L122`), "UPGRADE + BACKFILL: every legacy shift becomes segment 0..." (`~L150`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486` (#4569, 2026-07-24 — file first added at this commit). |
+| DB-02 | one segment backfill for every legacy shift | SATISFIED | same file, "UPGRADE + BACKFILL..." (`~L150`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-03 | replay idempotency | SATISFIED | same file, "REPLAY: a second up() is a no-op for already-covered shifts" (`~L166`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-04 | concurrent membership overlap rejection | SATISFIED | `attendance-calculation-group-membership-w1.db.test.ts`: "lets the database reject one of two concurrent direct overlapping writes" (`~L456`). Merge SHA `9055932e314265794b3baa8e80cff0828ba2902c` (#4563, 2026-07-23). |
+| DB-05 | inclusive boundary transition (D-1 to D) without a gap or double winner | SATISFIED | same w1 file, "closes the prior inclusive interval at D-1, starts the next at D, and records audit context" (`~L238`). Merge SHA `9055932e314265794b3baa8e80cff0828ba2902c`. |
+| DB-06 | cross-org FK and query isolation | SATISFIED | `attendance-shift-segments-migration.db.test.ts` "CROSS-ORG INTEGRITY: the composite FK rejects a segment whose org differs from the parent shift" (`~L207`); `attendance-shift-segments-writer-matrix.db.test.ts` "cross-org: a shift is invisible and unreferenceable from another org" (`~L714`). Both files first added at merge SHA `c5f08aecd5732d70b616561398d8456240f62486` (#4569). |
+| DB-07 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | SATISFIED | `attendance-shift-segments-writer-matrix.db.test.ts`, nine `matrix: ... typed 422 with zero writes` legs covering every named surface (`~L734, 789, 819, 913, 946, 966, 1498, 1541, 1578`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-08 | existing-reference delete 409 + zero writes per durable blocker; rejected/cancelled/history fixtures prove non-blocking evidence intact + redacted UUID | SATISFIED | same file, "delete: typed 409 with zero writes for every durable blocker class" (`~L1642`), "delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID" (`~L1722`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-09 | concurrent shift delete + reference insertion cannot cascade-delete a newly created reference | SATISFIED | same file, "concurrency: a reference insert racing a delete is serialized by the shared lock protocol" (`~L1892`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | OPEN | Second half only found: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — no matching test title found this round; not guessed. Below the SATISFIED bar (half the check is unevidenced). |
+| DB-11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | OPEN | Schema-rollback-forbidden half only found: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — no matching test title found this round. Below the SATISFIED bar. |
+| DB-12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | SATISFIED | same file, `~L224` (same test as DB-11's schema half, which fully discharges DB-12 but only half of DB-11 — DB-12 is a distinct parent bullet). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 
-**§7.2 Calculation (15)**
+**§7.2 Calculation (CALC-01..CALC-15)**
 
-| # | Check | Verdict | Discharged by |
+| ID | Check | Verdict | Evidence |
 | --- | --- | --- | --- |
-| 1 | `08:00-12:00` + `13:00-17:00` = 480, not 540 | D | `w4c1-segment-calculator.test.ts`: "two-segment day with a break: exact full result body (no envelope arithmetic, W4C-R1)" (`~L185`) |
-| 2 | missing afternoon in/out produces a segment anomaly | D | same file, "missing_check_in / missing_check_out statuses and daily partial" (`~L446`) |
-| 3 | duplicate punches resolve deterministically | D | same file, "two check-in candidates in one directional cell are duplicate_check_in" (`~L659`), "identical-instant duplicates..." (`~L675`), "two check-out candidates..." (`~L682`) |
-| 4 | a segment crossing midnight preserves the originating work date | D | same file, "overnight segment (endDayOffset=1) resolves across midnight" (`~L286`) |
-| 5 | same-day slots select by containing segment window, not first assignment row | D | same file, "a check-in exactly on the in-partition midpoint belongs to the LATER segment" (`~L635`) |
-| 6 | no-window and multiple-window matches return the ratified unresolved/ambiguous outcome | D | same file, "evidence outside the frozen attribution window is review" (`~L647`), "duplicates in BOTH directions escalate to ambiguous_segment_match" (`~L693`) |
-| 7 | approved overtime extends only the named window | D | same file, "bounded approved overtime WITH a punch extends payable time, clipped to the exact approved interval" (`~L926`) |
-| 8 | next-day shift overlap → ratified precedence/ambiguity | D | `attendance-work-date-resolver-w2.db.test.ts`: "open previous-night record wins over current-day containing shift at boundary" (`~L192`), "same date multiple published shifts with overlapping windows → ambiguous (no row-order)" (`~L219`) |
-| 9 | flex late-arrive/late-leave and early-arrive/early-leave | D | `w5-flex-segment-calculator.test.ts`: "resolves late-arrive / late-leave flex expectation and applies grace after" (`~L275`), "resolves early-arrive / early-leave flex expectation" (`~L355`) |
-| 10 | core-hours violation | **UNCERTAIN, not full D** | same flex file, "fail-closes corrupt frozen core policy as review_required/input_schema_invalid..." (`~L193, 212`), "runs authoring-valid core-hours flex without inventing a core reasonCode" (`~L410`) — plausible core-hours coverage, but no test title uses the word "violation"; flagged rather than counted clean. |
-| 11 | DST gap/fold and two non-UTC timezones | **PARTIAL** | DST half: `w4c1-segment-calculator.test.ts` describe block `~L752-845` — gap (`~L762`), fold-start (`~L779`), fold-end (`~L801`), shared-fold (`~L828`), invalid timezone (`~L845`). "Two non-UTC timezones" specifically — no test title distinguishes two vs. one non-UTC zone; **EMPTY for that half.** |
-| 12 | group switch at the effective boundary | **EMPTY** | Not found this round in the files checked (`w4c1-segment-calculator.test.ts`, `attendance-calculation-group-membership-w1.db.test.ts`). Not guessed. |
-| 13 | historical record snapshot unchanged after configuration edits | D | QA handoff G4 pattern, already cited at this document's §3.1 "Frozen evidence immutability" row (post-freeze policy edits do not move stored bytes; trigger rejection `W4C0_IMMUTABLE`) |
-| 14 | a backdated import/correction uses policy as-of the business work date, not the submission timestamp | **EMPTY** | Not found this round. Not guessed. |
-| 15 | a legacy daily result remains `envelope_legacy` and receives no fabricated segment rows | **PARTIAL** | `attendance-shift-segments-writer-matrix.db.test.ts` "creates a legacy-envelope shift with a persisted segment 0 (dual-write)" (`~L358`) — about shift creation, not a daily calculation *result* row; plausible but not a confirmed match. |
+| CALC-01 | `08:00-12:00` + `13:00-17:00` = 480, not 540 | SATISFIED | `w4c1-segment-calculator.test.ts`: "two-segment day with a break: exact full result body (no envelope arithmetic, W4C-R1)" (`~L185`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1` (#4607, 2026-07-25). |
+| CALC-02 | missing afternoon in/out produces a segment anomaly | SATISFIED | same file, "missing_check_in / missing_check_out statuses and daily partial" (`~L446`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-03 | duplicate punches resolve deterministically | SATISFIED | same file, "two check-in candidates in one directional cell are duplicate_check_in" (`~L659`), "identical-instant duplicates..." (`~L675`), "two check-out candidates..." (`~L682`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-04 | a segment crossing midnight preserves the originating work date | SATISFIED | same file, "overnight segment (endDayOffset=1) resolves across midnight" (`~L286`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-05 | same-day slots select by containing segment window, not first assignment row | SATISFIED | same file, "a check-in exactly on the in-partition midpoint belongs to the LATER segment" (`~L635`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-06 | no-window and multiple-window matches return the ratified unresolved/ambiguous outcome | SATISFIED | same file, "evidence outside the frozen attribution window is review" (`~L647`), "duplicates in BOTH directions escalate to ambiguous_segment_match" (`~L693`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-07 | approved overtime extends only the named window | SATISFIED | same file, "bounded approved overtime WITH a punch extends payable time, clipped to the exact approved interval" (`~L926`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
+| CALC-08 | next-day shift overlap → ratified precedence/ambiguity | SATISFIED | `attendance-work-date-resolver-w2.db.test.ts`: "open previous-night record wins over current-day containing shift at boundary" (`~L192`), "same date multiple published shifts with overlapping windows → ambiguous (no row-order)" (`~L219`). Merge SHA `f1e390977e57dc1239e312c7423f3cda2d1f055f` (#4567, 2026-07-24). |
+| CALC-09 | flex late-arrive/late-leave and early-arrive/early-leave | SATISFIED | `w5-flex-segment-calculator.test.ts`: "resolves late-arrive / late-leave flex expectation and applies grace after" (`~L275`), "resolves early-arrive / early-leave flex expectation" (`~L355`). Merge SHA `7da5d9e55b0f7c9b0a6ca471d38c3aa0115037ab` (#4748, 2026-08-04). |
+| CALC-10 | core-hours violation | OPEN | same flex file, "fail-closes corrupt frozen core policy as review_required/input_schema_invalid..." (`~L193, 212`), "runs authoring-valid core-hours flex without inventing a core reasonCode" (`~L410`) — plausible core-hours coverage, but no test title uses the word "violation"; below the SATISFIED bar. |
+| CALC-11 | DST gap/fold and two non-UTC timezones | OPEN | DST half found: `w4c1-segment-calculator.test.ts` describe block `~L752-845` — gap (`~L762`), fold-start (`~L779`), fold-end (`~L801`), shared-fold (`~L828`), invalid timezone (`~L845`). "Two non-UTC timezones" specifically — no test title distinguishes two vs. one non-UTC zone; half unevidenced. |
+| CALC-12 | group switch at the effective boundary | OPEN | Not found this round in the files checked (`w4c1-segment-calculator.test.ts`, `attendance-calculation-group-membership-w1.db.test.ts`). Not guessed. |
+| CALC-13 | historical record snapshot unchanged after configuration edits | OPEN | QA handoff G4 pattern, already cited at this document's §3.1 "Frozen evidence immutability" row (post-freeze policy edits do not move stored bytes; trigger rejection `W4C0_IMMUTABLE`) — a narrative process reference, not a titled suite; structurally cannot produce the merge-SHA-plus-test pair the SATISFIED bar requires. |
+| CALC-14 | a backdated import/correction uses policy as-of the business work date, not the submission timestamp | OPEN | Not found this round. Not guessed. |
+| CALC-15 | a legacy daily result remains `envelope_legacy` and receives no fabricated segment rows | OPEN | `attendance-shift-segments-writer-matrix.db.test.ts` "creates a legacy-envelope shift with a persisted segment 0 (dual-write)" (`~L358`) — about shift creation, not a daily calculation *result* row; plausible but not a confirmed match. Below the SATISFIED bar. |
 
-**§7.3 Entry-point parity** — prose rule, not a numbered check (confirmed
-above); no discharge row. No suite was found this round asserting the full
-cross-entrypoint parity property as stated ("replacing any caller with
-calendar-date fallback must make its parity test fail") as a single
-mechanism; left as an explicit gap rather than mapped to a partial proxy.
+**EP-01 — Entry-point parity (composite, §7.3)**
 
-**§7.4 Mutation (8) — ALL EMPTY this round.** "reintroduce first-to-last
-work-minute arithmetic"; "remove one segment from the sum"; "select the first
-overlapping group"; "use grace as attribution tail"; "choose the previous
-work date on ambiguity"; "remove org scope from every new query"; "recompute
-with current rather than frozen policy"; "accept multi-segment flex in v1" —
-none of these eight named mutation legs were found as titled tests in the
+§7.3 is a single prose clause, not a bulleted list: "The same work-date cases
+run through live punch, import, approved correction, approved overtime, and
+recomputation. Replacing any caller with calendar-date fallback must make
+its parity test fail." Per the owner's ruling this is one composite item,
+**EP-01**, covering **five entrypoints** — live punch, import, approved
+correction, approved overtime, recomputation — **plus** the fallback
+mutation ("replacing any caller with calendar-date fallback must make its
+parity test fail"). **缺一即保持 OPEN**: EP-01 is discharged only when all
+five entrypoints' parity legs AND the fallback-mutation leg are each
+individually evidenced; missing even one leaves the whole composite OPEN.
+
+| ID | Check | Verdict | Evidence |
+| --- | --- | --- | --- |
+| EP-01 | Composite: the same work-date cases pass through all five named entrypoints (live punch, import, approved correction, approved overtime, recomputation) with matching results, AND replacing any one caller with calendar-date fallback makes that caller's parity test fail. | OPEN | No suite was found this round asserting the full cross-entrypoint parity property as a single mechanism, nor per-entrypoint parity legs for all five callers, nor the fallback-mutation leg. §7.4's MUT-07 ("recompute with current rather than frozen policy") is a related but distinct mutation on a different property; it does not discharge EP-01's own fallback-mutation leg. Zero of the six required legs (5 entrypoints + 1 fallback mutation) confirmed this round — composite stays OPEN by the owner's own rule, not merely by this round's search budget. |
+
+**§7.4 Mutation (MUT-01..MUT-08) — all OPEN this round.**
+
+| ID | Named mutation | Verdict | Evidence |
+| --- | --- | --- | --- |
+| MUT-01 | reintroduce first-to-last work-minute arithmetic | OPEN | No titled test found this round. |
+| MUT-02 | remove one segment from the sum | OPEN | No titled test found this round. |
+| MUT-03 | select the first overlapping group | OPEN | No titled test found this round. |
+| MUT-04 | use grace as attribution tail | OPEN | No titled test found this round. |
+| MUT-05 | choose the previous work date on ambiguity | OPEN | No titled test found this round. |
+| MUT-06 | remove org scope from every new query | OPEN | No titled test found this round. |
+| MUT-07 | recompute with current rather than frozen policy | OPEN | No titled test found this round. |
+| MUT-08 | accept multi-segment flex in v1 | OPEN | No titled test found this round. |
+
+None of these eight named mutation legs were found as titled tests in the
 files checked this round. This is consistent with, though not proof of, Gate
 A (§5 ledger L10): the segment calculator's mutation-tested surface found
 above (`w4c1-segment-calculator.test.ts`) exercises the pure function, but
-§7.4's mutations are phrased against an *authoritative* calculation path that
-`SEGMENT_CALCULATION_IMPLEMENTED = false` keeps from ever running in
+§7.4's mutations are phrased against an *authoritative* calculation path
+that `SEGMENT_CALCULATION_IMPLEMENTED = false` keeps from ever running in
 production. Whether any of the eight already exist as untitled assertions
 inside a broader `it()` block is unverified — a title-level sweep cannot see
-that — so these stay EMPTY rather than credited from the absence of a
+that — so these stay OPEN rather than credited from the absence of a
 negative finding.
 
-**§7.5 Frontend (7) — ALL EMPTY this round**, exactly as this line's own
-review anticipated: "editor keyboard and screen-reader flow"; "segment order
-and overlap validation"; "responsive 375, 768, and 1440 pixel views";
-"source/effect labels in every group policy summary"; "no save request from
-preview-only controls"; "no raw ID fallback"; "route return preserves group
-and stage." No `apps/web` test file was searched for these this round (out of
-this round's budget) — an absence-of-search, not a confirmed absence of
-tests; recorded as EMPTY-and-unsearched rather than EMPTY-and-confirmed-absent
-so a later round does not read this as "checked, found nothing."
+**§7.5 Frontend (FE-01..FE-07) — all OPEN this round**, exactly as this
+line's own review anticipated.
 
-**Verdict tally over the 42** (counted directly from the two tables above,
-not estimated): **20 D** (§7.1: items 1-9, 12 = 10; §7.2: items 1-9, 13 = 10);
-**5 PARTIAL/UNCERTAIN** (§7.1 items 10, 11; §7.2 items 10, 11, 15 — each has
-at least one discharged half and at least one undischarged half or an
-unconfirmed match); **17 EMPTY** (§7.2 items 12, 14 = 2; §7.4 all 8; §7.5 all
-7). `20 + 5 + 17 = 42`. Zero **R** (owner-removal) verdicts proposed this
-round — this document asks the owner to rule on gaps, not to pre-clear any of
-them as removed.
+| ID | Named check | Verdict | Evidence |
+| --- | --- | --- | --- |
+| FE-01 | editor keyboard and screen-reader flow | OPEN | Not searched this round (see note below). |
+| FE-02 | segment order and overlap validation | OPEN | Not searched this round. |
+| FE-03 | responsive 375, 768, and 1440 pixel views | OPEN | Not searched this round. |
+| FE-04 | source/effect labels in every group policy summary | OPEN | Not searched this round. |
+| FE-05 | no save request from preview-only controls | OPEN | Not searched this round. |
+| FE-06 | no raw ID fallback | OPEN | Not searched this round. |
+| FE-07 | route return preserves group and stage | OPEN | Not searched this round. |
+
+No `apps/web` test file was searched for these this round (out of this
+round's budget) — an absence-of-search, not a confirmed absence of tests;
+recorded as OPEN-and-unsearched rather than OPEN-and-confirmed-absent so a
+later round does not read this as "checked, found nothing."
+
+**Verdict tally over the 43** (counted directly from the tables above, not
+estimated): **19 SATISFIED** (DB-01..09, DB-12 = 10; CALC-01..09 = 9); **24
+OPEN** (DB-10, DB-11 = 2; CALC-10..15 = 6; EP-01 = 1; MUT-01..08 = 8;
+FE-01..07 = 7); **0 REMOVED**. `19 + 24 + 0 = 43`. Zero REMOVED verdicts
+proposed this round, per the owner's own ruling that this table's job this
+round is to map mechanically, not to pre-clear any item as removed — that
+state requires an owner decision per ID which does not exist yet.
 
 ## 4. Soak entry and exit criteria
 
