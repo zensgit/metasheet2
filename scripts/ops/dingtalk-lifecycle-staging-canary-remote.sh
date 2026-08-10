@@ -227,7 +227,19 @@ resolve_deployed_sha() {
 
 read_flag_from_container() {
   local key="$1" val
-  val="$(docker exec "$BACKEND_CONTAINER" printenv "$key" 2>/dev/null || true)"
+  if ! val="$(docker exec "$BACKEND_CONTAINER" sh -c '
+key="$1"
+if printenv "$key" >/dev/null 2>&1; then
+  exec printenv "$key"
+fi
+printf "__MISSING__"
+' sh "$key" 2>/dev/null)"; then
+    return 1
+  fi
+  if [[ "$val" == "__MISSING__" ]]; then
+    printf 'false'
+    return 0
+  fi
   if is_truthy "$val"; then
     printf 'true'
   else
@@ -253,9 +265,9 @@ classify_mode_from_flags() {
 read_live_flags() {
   # stdout: "alias_on pending_on deprov_on mode" — mode may be multi-on
   local a p d m
-  a="$(read_flag_from_container "$FLAG_ALIAS")"
-  p="$(read_flag_from_container "$FLAG_PENDING")"
-  d="$(read_flag_from_container "$FLAG_DEPROVISION")"
+  a="$(read_flag_from_container "$FLAG_ALIAS")" || return 1
+  p="$(read_flag_from_container "$FLAG_PENDING")" || return 1
+  d="$(read_flag_from_container "$FLAG_DEPROVISION")" || return 1
   m="$(classify_mode_from_flags "$a" "$p" "$d")"
   printf '%s %s %s %s' "$a" "$p" "$d" "$m"
 }
@@ -413,10 +425,14 @@ write_status_artifact() {
 
 capture_live_snapshot() {
   # Sets globals: SNAP_*. Never fails solely because mode is multi-on.
+  local live_flags
   if ! docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     fail "staging backend container is not running: ${BACKEND_CONTAINER}"
   fi
-  read -r SNAP_ALIAS SNAP_PENDING SNAP_DEPROV SNAP_MODE <<< "$(read_live_flags)"
+  if ! live_flags="$(read_live_flags)"; then
+    fail "failed to read lifecycle flags from the running staging backend"
+  fi
+  read -r SNAP_ALIAS SNAP_PENDING SNAP_DEPROV SNAP_MODE <<< "$live_flags"
   SNAP_BUILD_SHA="$(resolve_deployed_sha)"
   SNAP_ALIAS_READY="$(probe_alias_readiness)"
   if [[ "$SNAP_ALIAS_READY" == "true" ]]; then

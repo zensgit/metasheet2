@@ -573,6 +573,50 @@ test('P2 classify_mode returns multi-on without dying; status/preflight fail clo
   assert.match(source, /write_lifecycle_override "false" "false" "false"/)
 })
 
+test('P1 lifecycle flag reads distinguish a missing key from docker exec failure', () => {
+  function runDocker(body) {
+    return spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         docker() { ${body}; }
+         if value="$(read_flag_from_container "$FLAG_ALIAS")"; then
+           printf 'accepted:%s' "$value"
+         else
+           printf 'rejected'
+         fi`,
+        'bash',
+        REMOTE_SH,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+  }
+
+  const missing = runDocker('printf "__MISSING__"; return 0')
+  assert.equal(missing.status, 0, missing.stderr)
+  assert.equal(missing.stdout, 'accepted:false')
+
+  const execFailure = runDocker('return 125')
+  assert.equal(execFailure.status, 0, execFailure.stderr)
+  assert.equal(execFailure.stdout, 'rejected')
+
+  const source = read(REMOTE_SH)
+  assert.doesNotMatch(source, /printenv "\$key"[^\n]*\|\| true/)
+  assert.match(source, /failed to read lifecycle flags from the running staging backend/)
+})
+
 test('production function: classify_mode_from_flags multi-on vs single modes', () => {
   function run(a, p, d) {
     return spawnSync(
