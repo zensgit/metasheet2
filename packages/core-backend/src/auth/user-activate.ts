@@ -322,16 +322,24 @@ async function assertDirectorySourceActiveForActivate(
   // so we can distinguish SOURCE_MISSING account-not-found from LINK_MISMATCH).
   // Implicit: start from links with exact link_status='linked' (no COALESCE default).
   //
-  // FOR SHARE (post-merge review P1, 2026-08-10): the activation transaction locks `users` but
-  // read this source unlocked, so under READ COMMITTED an admin could deactivate the
+  // FOR SHARE OF di (post-merge review P1, 2026-08-10): the activation transaction locks
+  // `users` but read this source unlocked, so under READ COMMITTED an admin could deactivate the
   // integration on another connection and COMMIT between this read and the activation's own
   // commit — activating a user against a now-inactive source ("admin 激活不得对 inactive 目录源
-  // 静默开通"). FOR SHARE on the integration (and account/link) rows serialises against that
-  // deactivation: it either blocks the admin's UPDATE until activation commits, or — if the
-  // deactivation already committed — the shared-lock EPQ recheck refetches the latest row so
-  // the status test below sees the fresh 'inactive'. In the explicit branch the link is on the
-  // nullable side of the LEFT JOIN and cannot be locked; the integration (the row this review
-  // named) is INNER-joined in both branches and is locked in both.
+  // 静默开通"). FOR SHARE on the integration row serialises against that deactivation: it either
+  // blocks the admin's UPDATE until activation commits, or — if the deactivation already
+  // committed — the shared-lock EPQ recheck refetches the latest row so the status test below
+  // sees the fresh 'inactive'.
+  //
+  // ONLY `di` is locked, deliberately. The account/link rows need no lock HERE: every writer
+  // that changes them first takes `lockUsersForAccessGraphWrite` on this same user (directory
+  // sync, deprovision, OAuth bind), and the activation already holds that users lock — so those
+  // races are already serialised. Integration `status` is the sole field with no per-user cover
+  // (an admin deactivating an integration takes no user lock), which is exactly what this fix
+  // closes. Locking da/l too would be untested, redundant scope and needless deadlock surface.
+  //
+  // LOCK ORDER: users FIRST (above), THEN this integration FOR SHARE. Every writer that touches
+  // both must keep that order; no production writer takes them in reverse (verified 2026-08-10).
   //
   // LOAD-BEARING INVARIANT: integration `status` is checked in TypeScript below, NOT in this
   // WHERE. That placement is what makes the FOR SHARE recheck useful — under READ COMMITTED,
@@ -350,7 +358,7 @@ async function assertDirectorySourceActiveForActivate(
          JOIN directory_integrations di ON di.id = da.integration_id
          LEFT JOIN directory_account_links l ON l.directory_account_id = da.id
         WHERE da.id = $1
-          FOR SHARE OF da, di`
+          FOR SHARE OF di`
     : `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
               l.local_user_id, l.link_status,
               da.provider AS account_provider, di.provider AS integration_provider,
@@ -363,7 +371,7 @@ async function assertDirectorySourceActiveForActivate(
         WHERE l.local_user_id = $1
           AND l.link_status = 'linked'
         ORDER BY da.id
-          FOR SHARE OF l, da, di`
+          FOR SHARE OF di`
 
   const params = options.directoryAccountId
     ? [options.directoryAccountId]

@@ -95,7 +95,11 @@ describeIfDatabase('T3 activation source read serialises against integration dea
   beforeEach(cleanup)
   afterAll(cleanup)
 
-  it('blocks on a concurrent integration deactivation and refuses once it commits (writing nothing)', async () => {
+  // Both branches of the source read must serialise. The IMPLICIT branch (no directoryAccountId,
+  // links-by-user) and the EXPLICIT branch (directoryAccountId, the path the production DingTalk
+  // OAuth SSO activation at routes/auth.ts takes — resolveDingTalkActivationSource passes an
+  // explicit account id) compile to different SQL, so a fix to one is not a fix to the other.
+  async function proveRaceRefuses(useExplicitAccount: boolean): Promise<void> {
     const seeded = await seed()
 
     const holder = new pg.Client({ connectionString: process.env.DATABASE_URL })
@@ -130,6 +134,7 @@ describeIfDatabase('T3 activation source read serialises against integration dea
         userId: seeded.userId,
         mode: 'admin_no_password',
         adminUserId: 'admin-test',
+        ...(useExplicitAccount ? { directoryAccountId: seeded.accountId } : {}),
       })
       const settledEarly = { done: false }
       activation.then(
@@ -186,5 +191,13 @@ describeIfDatabase('T3 activation source read serialises against integration dea
     expect(user.rows[0]).toEqual({ activation_status: 'pending_activation', is_active: false })
     const membership = await query(`SELECT 1 FROM user_orgs WHERE user_id = $1`, [seeded.userId])
     expect(membership.rows).toHaveLength(0)
+  }
+
+  it('IMPLICIT branch (no directoryAccountId): blocks on the deactivation and refuses once it commits', async () => {
+    await proveRaceRefuses(false)
+  }, 30_000)
+
+  it('EXPLICIT branch (directoryAccountId — the OAuth SSO activation path): blocks and refuses too', async () => {
+    await proveRaceRefuses(true)
   }, 30_000)
 })

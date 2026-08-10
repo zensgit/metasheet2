@@ -100,6 +100,7 @@ jobs:
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
           node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
+          node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs
           node --test scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
