@@ -64,6 +64,8 @@ export type ActivateUserResult = {
   isActive: true
   temporaryPassword?: string
   localPasswordSet: boolean
+  /** The org the membership was actually written to — derived from the directory source (#4833 audit surface). */
+  membershipOrgId: string | null
 }
 
 /**
@@ -90,10 +92,15 @@ export type ActivateErrorCode =
   | 'ACTIVATE_SOURCE_INACTIVE'
   | 'ACTIVATE_INTEGRATION_INACTIVE'
   | 'ACTIVATE_LINK_MISMATCH'
-  /** SSO-only: account/integration provider is not DingTalk, or corp_id is inconsistent. */
+  /**
+   * SSO: provider is not DingTalk or corp_id is inconsistent. Any mode: every active eligible
+   * source carries an empty integration org_id (nothing can anchor a membership write).
+   */
   | 'ACTIVATE_SOURCE_INELIGIBLE'
   /** Caller-supplied orgId disagrees with the org derived from the directory-source integration. */
   | 'ACTIVATE_ORG_MISMATCH'
+  /** Multiple ACTIVE directory sources in different orgs; the caller must name one (#4833). */
+  | 'ACTIVATE_ORG_AMBIGUOUS'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -112,7 +119,9 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   let passwordHash: string | null = null
   let localPasswordSet = false
   let mustChangePassword = false
-  let membershipOrgId = input.orgId ?? null
+  // Derived-only: seeded null so no refactor can ever revive the client-orgId-as-membership
+  // shape by skipping the source resolution — the ONLY assignment is from the helper's return.
+  let membershipOrgId: string | null = null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -152,18 +161,17 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     // The membership org DERIVES from the source integration in every mode; a client-supplied
     // orgId may only CONFIRM it. The gated form discarded the DB's org for non-SSO modes and
     // trusted the client's — "org A 的目录账号 + org B 的 orgId" wrote a cross-org membership.
+    // #4833: when the person has ACTIVE sources in more than one org, "derive" has no unique
+    // answer — the helper validates a caller-supplied orgId against the SET of active eligible
+    // sources (mismatch → ACTIVATE_ORG_MISMATCH) and refuses a caller who names none
+    // (ACTIVATE_ORG_AMBIGUOUS) instead of silently picking the lowest account id.
     const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
       userId,
       directoryAccountId: input.directoryAccountId ?? null,
       requireDingTalkSso: input.mode === 'sso',
       expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
+      requestedOrgId: input.orgId?.trim() || null,
     })
-    if (input.orgId && input.orgId !== sourceOrgId) {
-      throwCoded(
-        'orgId does not match the directory source integration for this user',
-        'ACTIVATE_ORG_MISMATCH',
-      )
-    }
     membershipOrgId = sourceOrgId
 
     const updated = await client.query(
@@ -281,6 +289,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     isActive: true,
     temporaryPassword,
     localPasswordSet,
+    membershipOrgId,
   }
 }
 
@@ -305,6 +314,7 @@ async function assertDirectorySourceActiveForActivate(
     directoryAccountId: string | null
     requireDingTalkSso: boolean
     expectedDingTalkIdentity: ActivateUserInput['expectedDingTalkIdentity']
+    requestedOrgId: string | null
   },
 ): Promise<string> {
   // Closed set: linked directory account must be active; integration active.
@@ -411,17 +421,44 @@ async function assertDirectorySourceActiveForActivate(
       'ACTIVATE_SOURCE_INELIGIBLE',
     )
   }
-  const activeEligible = eligibleRows.find(
+  const activeEligibleRows = eligibleRows.filter(
     (candidate) =>
       candidate.account_active === true
       && String(candidate.integration_status || '').toLowerCase() === 'active',
   )
-  if (activeEligible) {
-    const sourceOrgId = String(activeEligible.integration_org_id || '').trim()
-    if (sourceOrgId) return sourceOrgId
+  if (activeEligibleRows.length > 0) {
+    // #4833: derive against the SET of active eligible sources, not the first row. An active
+    // source whose integration carries no org is misconfigured — it cannot anchor a membership
+    // write, so it never joins the candidate set.
+    const candidateOrgIds = [...new Set(
+      activeEligibleRows
+        .map((candidate) => String(candidate.integration_org_id || '').trim())
+        .filter((orgId) => orgId.length > 0),
+    )]
+    if (candidateOrgIds.length === 0) {
+      throwCoded(
+        'Directory source is not a DingTalk account eligible for SSO activation',
+        'ACTIVATE_SOURCE_INELIGIBLE',
+      )
+    }
+    if (options.requestedOrgId) {
+      if (candidateOrgIds.includes(options.requestedOrgId)) {
+        return options.requestedOrgId
+      }
+      // The caller named an org none of the person's ACTIVE sources belongs to — steering.
+      throwCoded(
+        'orgId does not match the directory source integration for this user',
+        'ACTIVATE_ORG_MISMATCH',
+      )
+    }
+    if (candidateOrgIds.length === 1) {
+      return candidateOrgIds[0]
+    }
+    // No orgId and more than one legitimate answer: refusing beats silently picking one —
+    // activation would otherwise write an arbitrary org's membership (#4833).
     throwCoded(
-      'Directory source is not a DingTalk account eligible for SSO activation',
-      'ACTIVATE_SOURCE_INELIGIBLE',
+      'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+      'ACTIVATE_ORG_AMBIGUOUS',
     )
   }
   if (eligibleRows.some(

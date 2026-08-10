@@ -597,6 +597,11 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
     || code === 'ACTIVATE_SOURCE_INELIGIBLE'
     || code === 'ACTIVATE_ALIAS_CONFLICT'
     || code === 'ACTIVATE_ALIAS_REQUIRED'
+    // Unreachable today (the callback passes an explicit directoryAccountId and no orgId), but
+    // the closed set must track the enum: falling through to 500 for a caller-resolvable
+    // conflict is the exact drift the admin-route closure tests exist to prevent (#4833).
+    || code === 'ACTIVATE_ORG_MISMATCH'
+    || code === 'ACTIVATE_ORG_AMBIGUOUS'
   ) {
     return new DingTalkActivationIntentError(
       409,
