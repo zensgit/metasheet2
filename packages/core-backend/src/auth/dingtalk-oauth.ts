@@ -739,8 +739,18 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
     )
     return result.rows[0] ?? null
   } catch (error) {
-    logger.warn('Failed to resolve DingTalk external identity', error instanceof Error ? error : undefined)
-    return null
+    // Fail CLOSED (post-merge review P2-2): the same collapse readGrantState fixes lived here
+    // too — a swallowed read error returned null, indistinguishable from "no linked identity",
+    // so a failed identity read let the login fall through to the email-link / auto-provision
+    // path as if the DingTalk person were unknown (defeating the deny row their real identity
+    // carries; the identity unique constraint stopped a full bypass, but it is a latent
+    // fail-open and mints stray grants). "No identity" is still a legitimate null (new user);
+    // only a read FAILURE now throws.
+    logger.warn('Failed to resolve DingTalk external identity; failing closed', error instanceof Error ? error : undefined)
+    throw createPolicyError(
+      'Unable to verify DingTalk login authorization; please retry',
+      { statusCode: 503, code: 'grant_state_unavailable' },
+    )
   }
 }
 

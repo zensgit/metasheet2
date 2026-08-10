@@ -293,9 +293,11 @@ describe('dingtalk oauth login gates', () => {
       statusCode: 503,
       code: 'grant_state_unavailable',
     })
-    // Fail-closed means nothing downstream ran: no grant creation, no identity upsert.
-    expect(pgMocks.query.mock.calls.some((call) =>
-      /INSERT INTO user_external_auth_grants/i.test(String(call[0])))).toBe(false)
+    // Fail-closed means nothing downstream ran. Grant/identity writes run on the TRANSACTION
+    // client, so assert against its capture (a pgMocks.query check would be vacuous — those
+    // INSERTs never touch pgMocks.query).
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(false)
     expect(defaultTransactionStatements.some((sql) =>
       /UPDATE user_external_identities|INSERT INTO user_external_identities/i.test(sql))).toBe(false)
   })
@@ -344,8 +346,69 @@ describe('dingtalk oauth login gates', () => {
       statusCode: 403,
       code: 'grant_disabled',
     })
-    expect(pgMocks.query.mock.calls.some((call) =>
-      /INSERT INTO user_external_auth_grants/i.test(String(call[0])))).toBe(false)
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(false)
+  })
+
+  // Post-merge review P2-1: the three tests above take the EMAIL-linked branch (query #1 =
+  // findIdentityUser miss). The IDENTITY-direct path has its OWN readGrantState gates — and the
+  // deprovision SWEEP writes the deny row while touching no identity rows, so a swept user's
+  // next login hits exactly this path. Neutering the identity deny/read gates left all tests
+  // green until these. Also P2-2: findIdentityUser itself now fails closed on a read error.
+  const IDENTITY_USER = {
+    id: 'user-1',
+    email: 'alpha@example.com',
+    name: 'Alpha',
+    role: 'user',
+    is_active: true,
+    activation_status: 'activated',
+  }
+
+  it('identity-direct path: a DISABLED grant denies login (grant_disabled) even with requireGrant OFF', async () => {
+    // No-op transaction client so the rejected-login openId enrichment is harmless here.
+    pgMocks.transaction.mockImplementation(
+      async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
+        callback({ query: (async () => ({ rows: [] })) as unknown as typeof pgMocks.query }),
+    )
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT
+      .mockResolvedValueOnce({ rows: [{ enabled: false }] }) // readGrantState → disabled
+
+    await expect(exchangeCodeForUser('code-identity-disabled')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_disabled',
+    })
+  })
+
+  it('identity-direct path: a grant read failure fails CLOSED (grant_state_unavailable)', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT
+      .mockRejectedValueOnce(new Error('terminating connection due to administrator command'))
+
+    await expect(exchangeCodeForUser('code-identity-read-fails')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants|user_external_identities/i.test(sql))).toBe(false)
+  })
+
+  it('findIdentityUser fails CLOSED on a read error — no fall-through to email/provision (P2-2)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp')
+    pgMocks.query.mockRejectedValueOnce(new Error('terminating connection due to administrator command')) // findIdentityUser blows up
+
+    await expect(exchangeCodeForUser('code-identity-lookup-fails')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+    // Fail-closed: the login did NOT fall through to auto-provision a fresh account.
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO users\b/i.test(sql))).toBe(false)
   })
 
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
