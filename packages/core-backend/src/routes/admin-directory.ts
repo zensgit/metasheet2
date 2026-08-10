@@ -42,6 +42,7 @@ import {
 } from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
 import {
+  compensateSupersededDenyGrant,
   listDeprovisionEffects,
   listDeprovisionEvents,
   previewDeprovisionForUser,
@@ -58,6 +59,7 @@ import { isValidDirectoryScheduleTimezone, resolveDirectoryScheduleTimezone } fr
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutes')
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
   const normalized = typeof value === 'string' ? value.trim() : ''
@@ -1374,6 +1376,74 @@ export function adminDirectoryRouter(): Router {
     }
   }
 
+  async function compensateSupersededDenyGrantForRequest(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!UUID_SHAPE_RE.test(req.params.eventId)) {
+      jsonError(res, 400, 'COMPENSATION_EVENT_ID_INVALID', 'eventId must be a UUID')
+      return
+    }
+    try {
+      const result = await compensateSupersededDenyGrant({
+        eventId: req.params.eventId,
+        adminUserId,
+        confirm: req.body?.confirm === true,
+        note: typeof req.body?.note === 'string' ? req.body.note : undefined,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'directory-deprovision-event',
+        resourceId: req.params.eventId,
+        meta: {
+          compensationMode: result.compensationMode,
+          effectId: result.effectId,
+          localUserId: result.localUserId,
+          grantRow: result.grantRow,
+          alreadyCompensated: result.alreadyCompensated,
+          noteLength: result.note.length,
+        },
+      })
+      jsonOk(res, result)
+    } catch (error) {
+      const errorCode =
+        (error as { code?: string })?.code
+        || 'DEPROVISION_COMPENSATION_FAILED'
+      const status =
+        errorCode === 'EVENT_NOT_FOUND' || errorCode === 'USER_NOT_FOUND'
+          ? 404
+          : errorCode === 'COMPENSATION_CONFIRM_REQUIRED'
+              || errorCode === 'COMPENSATION_NOTE_REQUIRED'
+              || errorCode === 'COMPENSATION_ACTOR_REQUIRED'
+            ? 400
+            : errorCode === 'DRIFT_CONFLICT'
+                || errorCode === 'COMPENSATION_EVENT_NOT_SUPERSEDED'
+                || errorCode === 'COMPENSATION_NOT_APPLICABLE'
+                || errorCode === 'COMPENSATION_USER_INACTIVE'
+                || errorCode === 'COMPENSATION_SOURCE_INACTIVE'
+                || errorCode === 'COMPENSATION_SOURCE_BUSY'
+                || errorCode === 'COMPENSATION_MEMBERSHIP_INACTIVE'
+                || errorCode === 'COMPENSATION_LIVE_EVIDENCE'
+              ? 409
+              : 500
+      const responseCode = status === 500
+        ? 'DEPROVISION_COMPENSATION_FAILED'
+        : errorCode
+      jsonError(
+        res,
+        status,
+        responseCode,
+        status === 500
+          ? 'Deny-row compensation failed'
+          : (error as Error)?.message || 'Deny-row compensation failed',
+      )
+    }
+  }
+
   router.get('/deprovision/flags', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -1475,6 +1545,13 @@ export function adminDirectoryRouter(): Router {
     '/deprovision-events/:eventId/force-reactivate',
     async (req: Request, res: Response) => {
       await restoreDeprovisionEventForRequest(req, res, 'admin_force')
+    },
+  )
+
+  router.post(
+    '/deprovision-events/:eventId/compensate-orphan-deny',
+    async (req: Request, res: Response) => {
+      await compensateSupersededDenyGrantForRequest(req, res)
     },
   )
 
