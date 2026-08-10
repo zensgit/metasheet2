@@ -227,6 +227,15 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
+      // OPS-01 superseded creation-effect compensation: full deprovision/OAuth chain,
+      // provenance drift, live-evidence veto, idempotency, and a two-connection user-mutex
+      // barrier. Wired beside the grant-table suite and pinned by the same wiring contract.
+      'tests/integration/directory-deprovision-compensation.db.test.ts',
+      // T3 activation source read serialises against a concurrent integration deactivation
+      // (post-merge review P1, FOR SHARE). Constructed pg_locks race — meaningless without a DB.
+      // DATABASE_URL-gated; excluded so the no-DB job cannot skip-green; whole-file wired into
+      // the approval real-DB step (both points self-asserted inside the suite).
+      'tests/integration/directory-activation-source-lock.db.test.ts',
       // D3 Rev 4.3 evidence-ledger migration: isolated-schema upgrade, replay with evidence,
       // fail-before-DDL weak-data guard, FK/trigger invariants, and ownership-safe down.
       // DATABASE_URL-gated; excluded here and wired as a whole file into the approval real-DB
@@ -672,6 +681,16 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
       'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
+      // OBS-1 (2026-08-07): the two W4C-3b suites below landed in #4716 with NEITHER wiring
+      // point — absent from every real-DB run-list AND from this exclude, so the no-DB job
+      // collected + skip-greened them and no job ever executed them. request-snapshots is the
+      // real-DB proof of the 8-cell request-snapshot precondition (#4780, a soak entry gate);
+      // central-approval is the R0 central-approval action matrix over a fully migrated DB.
+      // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
+      // skip-green them; wired whole-file into the attendance real-DB step in plugin-tests.yml
+      // (two-point wiring).
+      'tests/integration/attendance-w4c3b-request-snapshots.db.test.ts',
+      'tests/integration/attendance-w4c3b-central-approval.db.test.ts',
       'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
       'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
       // #4556 W4C-4 §12.7: dual-host authorization, immutable calculation-detail/
@@ -696,6 +715,21 @@ export default defineConfig({
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
+      // OBS-1 completeness sweep (2026-08-07): the W3 shift-segments migration + writer-matrix
+      // real-DB suites were ALREADY whole-file wired into the attendance real-DB step in
+      // plugin-tests.yml, but these two exclude lines were missing (half-satisfied two-point
+      // wiring) — so the no-DB job collected and skip-greened them every PR in addition to the
+      // real run. Both points now present.
+      'tests/integration/attendance-shift-segments-migration.db.test.ts',
+      'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
+      // OBS-1 owner P1 (2026-08-08): the 加班银行 v1-5a settlement schema lock was the LAST file the
+      // derived corpus still could not see — it was named `attendance-settlement-table-v1-5a.test.ts`
+      // (outside the .db convention), carried by no run-list, and absent from this exclude, so the
+      // no-DB job was the only job that ever collected it and its `if (!dbUrl) return` self-skip
+      // green-passed there. Renamed to the .db convention, added to the attendance real-DB step's
+      // run-list, and excluded here (two-point wiring); the guard's exclusion entry for it is gone,
+      // so the completeness assertion now covers it like every other member.
+      'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
@@ -708,6 +742,17 @@ export default defineConfig({
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
+      // OBS-1 completeness sweep (2026-08-07): four more non-.db attendance suites in the same
+      // half-wired state — every describe in each is describeDb-gated (verified: no ungated
+      // describe blocks), each is ALREADY whole-file wired into a real-DB step in
+      // plugin-tests.yml (csv-export-bom in the approval step; the other three in the
+      // attendance step), but these exclude lines were missing, so the no-DB job collected and
+      // skip-greened them every PR. Both points now present; zero coverage moves — the same
+      // required `test` job still runs every one of them, with a database.
+      'tests/integration/attendance-csv-export-bom.test.ts',
+      'tests/integration/attendance-files-acl.test.ts',
+      'tests/integration/attendance-import-template-prefs.test.ts',
+      'tests/integration/attendance-makeup-punch-policy.test.ts',
       // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
       // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the
       // default unit run HERE but wired as a WHOLE FILE into the dedicated

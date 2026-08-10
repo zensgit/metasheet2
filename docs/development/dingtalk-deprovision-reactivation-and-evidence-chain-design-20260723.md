@@ -1,7 +1,7 @@
 # DingTalk Deprovision 恢复 + Preview/UI 证据链 — 实现级设计
 
 - Date: 2026-07-23
-- Status: **implementation design lock / Rev 4.4**（Rev 4.3 已终签；Rev 4.4 为 OPS-01 证据模型勘误，见 §0.7）
+- Status: **implementation design lock / Rev 4.5**（Rev 4.3 已终签；Rev 4.4 为 OPS-01 证据模型勘误；Rev 4.5 为 supersede 残留补偿裁决，见 §0.8）
 - Locked: 2026-07-23（owner 批准两篇一并升 lock）
 - Scope: 打开 `DIRECTORY_DEPROVISION_ENABLED` 之前，把「权威 effect 账本 + prospective planner + 全写者 per-user 锁 + event 恢复（含 drift）」设计正确
 - Baseline: **`origin/main @ 1bcfc86b8`**；相对 `ca625f14a` 本线相关代码 **scoped diff = 0**（membership + globally-clear 事实基线仍成立）
@@ -78,12 +78,28 @@ DELETE 逆转仅在其事件仍为 `applied` 时可用。任何后续 access-gra
 离岗 planner 见行已存在也不再补记 creation effect。该 supersede 语义为 main 既有合同（本勘误
 未触碰那两道门），故 Rev 4.4 的承诺应读作：「**在事件被 supersede 之前**，deny 行的存在性变化
 可被 restore 安全逆转」。残留行的补偿路径（人工清理 or 再证据化）列入 owner 会签清单（验证 MD
-§4 第 3 项）。另：多 active 源的 org 派生消歧为 follow-up hardening（#4833）。
+§4 第 3 项）。另：多 active 源的 org 派生消歧已落地（#4833）：请求 orgId 对照 active eligible 源的**集合**匹配，
+未指名且集合含多个不同 org 时拒绝（409 `ACTIVATE_ORG_AMBIGUOUS`），单一 org（含同 org 多源去重）照常派生。
 
 产品方向见 companion — **已赞成**。  
 **Implementation design lock 已于 2026-07-23 批准。**  
 序：lock → T1→T2→T3 → D1…D7 → canary。  
 **design lock ≠ T1 GO — 本次不授权启动 T1。**
+
+### 0.8 Rev 4.4 → Rev 4.5（OPS-01 supersede compensation）
+
+**Owner 裁决（2026-08-10）**：采用「显式、审计化补偿」，禁止在任意 supersede 时自动删除 deny 行。
+
+仅当下列条件在同一事务内全部成立，平台管理员才可执行专用补偿：
+
+1. 先持有 canonical per-user access-graph mutex，再锁 event/effects；
+2. event 与唯一 `grant_changed + grant_row_created=TRUE` effect 均为 `superseded`；
+3. 用户为 `activated + active`，原 event 的 directory account / integration / link 仍 `active + active + linked`；源行以 `FOR SHARE ... NOWAIT` 读取，若 sync 正持有源行则 409 busy，禁止持 user mutex 反向等待源行；
+4. 原 event 的组织 membership 仍 active；该用户不存在任何 `applied` deprovision event/effect；
+5. 当前 DingTalk grant 必须恰为 `enabled=FALSE` 且 `granted_by='system:directory-deprovision'`；任何缺失、启用或 provenance 漂移均 409；
+6. DELETE deny 行、effect → `compensated`、写入不可改的补偿 actor/time/note、generation CAS `+1` 在同一事务完成；event 保持 `superseded`，不得伪装成 full restore。
+
+补偿入口要求 `confirm=true` 与至少 8 字符备注。已完成补偿且 grant 仍不存在时可幂等重试；若补偿后又出现 grant 行，则按 drift 拒绝。迁移 down 在存在 `compensated` evidence 时 fail-closed。该代码落地不授权打开任何生命周期开关。
 
 ---
 
@@ -272,10 +288,20 @@ directory_deprovision_event_effects (
   access_generation_at_apply bigint NOT NULL,
   reversed_at timestamptz,
   reversed_by text,
+  compensation_note text,
   created_at timestamptz NOT NULL DEFAULT now(),
 
   CHECK (effect_type IN ('membership_changed','grant_changed','user_changed')),
-  CHECK (status IN ('applied','reversed','superseded')),
+  CHECK (status IN ('applied','reversed','superseded','compensated')),
+  CHECK (
+    (status = 'compensated'
+      AND effect_type = 'grant_changed'
+      AND grant_row_created = TRUE
+      AND reversed_at IS NOT NULL
+      AND COALESCE(length(btrim(reversed_by)), 0) > 0
+      AND COALESCE(length(btrim(compensation_note)), 0) >= 8)
+    OR (status <> 'compensated' AND compensation_note IS NULL)
+  ),
   CHECK (
     (effect_type = 'membership_changed' AND org_id IS NOT NULL)
     OR (effect_type IN ('grant_changed','user_changed') AND org_id IS NULL)
@@ -290,7 +316,7 @@ directory_deprovision_event_effects (
 |------|------|
 | **BEFORE INSERT ON events** | 在 **已持有对应 `users` 行锁的同一事务** 内校验：**当时** 存在 linked 行（`link_status='linked'` 且 account/user 匹配）；account ∈ integration；integration.org_id 匹配；sync 时 run 存在且同 integration。失败 → **拒绝 INSERT**。 |
 | **BEFORE INSERT ON effects** | `membership_changed` ⇒ `NEW.org_id = parent event.org_id`；grant/user effect 的 `org_id` 必须为 NULL；effect 的 user/generation 必须与 parent event 一致。 |
-| **Immutability** | events：INSERT 后禁止改身份字段（含 `directory_account_id`, `local_user_id`, `link_witness_*`, policy, globally_clear, generation, event_origin, run_id, org_id, integration_id, triggered_by）。仅允许 resolve 列。effects：INSERT 后禁止改 type/org/before_active/after_active/generation；仅 status/reversed_*。 |
+| **Immutability** | events：INSERT 后禁止改身份字段（含 `directory_account_id`, `local_user_id`, `link_witness_*`, policy, globally_clear, generation, event_origin, run_id, org_id, integration_id, triggered_by）。仅允许 resolve 列。effects：INSERT 后禁止改 type/org/before_active/after_active/generation；进入 `compensated` 后 `status/reversed_at/reversed_by/compensation_note` 整组不可再改。 |
 | **禁止** | event→**current** `directory_account_links` FK；partial unique 作 FK 目标；仅靠 witness=自身 CHECK 充当“当时已 linked”（CHECK 只防自相矛盾，**trigger 才验 live link**）。 |
 
 **Mutation / 集成必过：**

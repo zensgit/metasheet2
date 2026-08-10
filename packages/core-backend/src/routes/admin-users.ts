@@ -1848,6 +1848,12 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
     status: 409,
     message: 'orgId does not match the directory source integration for this user',
   },
+  // 409 (#4833): several ACTIVE sources in different orgs — "derive" has no unique answer, so
+  // the caller must name one; refusing beats silently picking the lowest account id.
+  ACTIVATE_ORG_AMBIGUOUS: {
+    status: 409,
+    message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>
@@ -2056,6 +2062,10 @@ async function auditActivateSuccess(
       localPasswordSet: result.localPasswordSet,
       // Boolean only: plaintext passwords and provider identity values are forbidden in audit.
       temporaryPasswordIssued: Boolean(result.temporaryPassword),
+      // #4833: with several ACTIVE sources the admin's orgId CHOOSES among orgs — the audit row
+      // must record which org the membership actually landed in, or the forensic question
+      // "who placed this user in org B" has no answer. An org id is placement, not identity.
+      membershipOrgId: result.membershipOrgId,
     },
   })
 }

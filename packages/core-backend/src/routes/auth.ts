@@ -597,6 +597,11 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
     || code === 'ACTIVATE_SOURCE_INELIGIBLE'
     || code === 'ACTIVATE_ALIAS_CONFLICT'
     || code === 'ACTIVATE_ALIAS_REQUIRED'
+    // Unreachable today (the callback passes an explicit directoryAccountId and no orgId), but
+    // the closed set must track the enum: falling through to 500 for a caller-resolvable
+    // conflict is the exact drift the admin-route closure tests exist to prevent (#4833).
+    || code === 'ACTIVATE_ORG_MISMATCH'
+    || code === 'ACTIVATE_ORG_AMBIGUOUS'
   ) {
     return new DingTalkActivationIntentError(
       409,
@@ -1675,13 +1680,15 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
  * issueAuthSessionToken (same claims/session). No state/nonce — that is a
  * web-redirect CSRF concept; the authCode is single-use, verified server-side.
  *
- * Path MUST stay under `/login/…`: authRouter mounts at `/api/auth`, so this
- * resolves to `/api/auth/login/dingtalk/container` — the path the in-container
- * frontend (LoginView) posts to AND the only form covered by the
- * `/api/auth/login` AUTH_WHITELIST prefix (jwt-middleware `isWhitelisted`,
- * startsWith). Container 免登 is pre-authentication and must bypass the global
- * JWT gate; registering it outside `/login` 404s the frontend and 401s the
- * real path — the E1 wire regression this fix closes.
+ * Path MUST stay `/login/dingtalk/container`: authRouter mounts at `/api/auth`,
+ * so this resolves to `/api/auth/login/dingtalk/container` — the path the
+ * in-container frontend (LoginView) posts to. Container 免登 is
+ * pre-authentication and must bypass the global JWT gate, so that exact path is
+ * declared in `GLOBAL_GATE_EXCEPTIONS` (auth/api-path-policy.ts) with kind
+ * `exact`. Moving or renaming this route means editing that declaration in the
+ * same commit: the exception covers this path only, NOT its siblings and NOT
+ * the rest of `/api/auth/login/**`. Registering it outside `/login` 404s the
+ * frontend and 401s the real path — the E1 wire regression this fix closes.
  */
 authRouter.post('/login/dingtalk/container', async (req: Request, res: Response) => {
   try {

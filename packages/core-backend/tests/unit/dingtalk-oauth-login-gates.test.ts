@@ -267,6 +267,151 @@ describe('dingtalk oauth login gates', () => {
     expect(txCalls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(false)
   })
 
+  // Post-merge review 2026-08-10 P1: readGrantEnabled caught any DB error and returned null,
+  // which is the SAME value as "no grant row"; the deny gate is `=== disabled`, so null slipped
+  // through and (with DINGTALK_AUTH_REQUIRE_GRANT off — its default) a deprovisioned user with
+  // an explicit disabled deny row would log in on a transient read failure. The read now fails
+  // CLOSED. These three lock the tri-state: error → deny; absent → allow; disabled → deny.
+  it('FAILS CLOSED when the grant read errors — a deprovision deny row cannot be bypassed by a query blip', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1') // requireGrant defaults OFF — the vulnerable config
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: none
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      }) // findUserByEmail
+      .mockRejectedValueOnce(new Error('terminating connection due to administrator command')) // grant read blows up
+
+    await expect(exchangeCodeForUser('code-grant-read-fails')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+    // Fail-closed means nothing downstream ran. Grant/identity writes run on the TRANSACTION
+    // client, so assert against its capture (a pgMocks.query check would be vacuous — those
+    // INSERTs never touch pgMocks.query).
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(false)
+    expect(defaultTransactionStatements.some((sql) =>
+      /UPDATE user_external_identities|INSERT INTO user_external_identities/i.test(sql))).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: an ABSENT grant (no row) still logs in under the default non-strict mode', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1') // requireGrant defaults OFF
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: none
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      }) // findUserByEmail
+      .mockResolvedValueOnce({ rows: [] }) // grant read → ABSENT (must NOT be treated as denial)
+
+    const result = await exchangeCodeForUser('code-grant-absent')
+    expect(result).toMatchObject({ localUserId: 'user-1', isNewUser: false })
+    // Absent under non-strict mode auto-grants (ensureGrant runs in the transaction).
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(true)
+  })
+
+  it('a DISABLED grant row still denies login with grant_disabled (Rev 4.4 deny gate intact)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1') // requireGrant defaults OFF — deny must fire anyway
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: none
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      }) // findUserByEmail
+      .mockResolvedValueOnce({ rows: [{ enabled: false }] }) // grant read → DISABLED deny row
+
+    await expect(exchangeCodeForUser('code-grant-disabled')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_disabled',
+    })
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants/i.test(sql))).toBe(false)
+  })
+
+  // Post-merge review P2-1: the three tests above take the EMAIL-linked branch (query #1 =
+  // findIdentityUser miss). The IDENTITY-direct path has its OWN readGrantState gates — and the
+  // deprovision SWEEP writes the deny row while touching no identity rows, so a swept user's
+  // next login hits exactly this path. Neutering the identity deny/read gates left all tests
+  // green until these. Also P2-2: findIdentityUser itself now fails closed on a read error.
+  const IDENTITY_USER = {
+    id: 'user-1',
+    email: 'alpha@example.com',
+    name: 'Alpha',
+    role: 'user',
+    is_active: true,
+    activation_status: 'activated',
+  }
+
+  it('identity-direct path: a DISABLED grant denies login (grant_disabled) even with requireGrant OFF', async () => {
+    // No-op transaction client so the rejected-login openId enrichment is harmless here.
+    pgMocks.transaction.mockImplementation(
+      async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
+        callback({ query: (async () => ({ rows: [] })) as unknown as typeof pgMocks.query }),
+    )
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT
+      .mockResolvedValueOnce({ rows: [{ enabled: false }] }) // readGrantState → disabled
+
+    await expect(exchangeCodeForUser('code-identity-disabled')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_disabled',
+    })
+  })
+
+  it('identity-direct path: a grant read failure fails CLOSED (grant_state_unavailable)', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT
+      .mockRejectedValueOnce(new Error('terminating connection due to administrator command'))
+
+    await expect(exchangeCodeForUser('code-identity-read-fails')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+    expect(defaultTransactionStatements.some((sql) =>
+      /INSERT INTO user_external_auth_grants|user_external_identities/i.test(sql))).toBe(false)
+  })
+
+  it('findIdentityUser fails CLOSED on a read error — no fall-through to email/provision (P2-2)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp')
+    pgMocks.query.mockRejectedValueOnce(new Error('terminating connection due to administrator command')) // findIdentityUser blows up
+
+    await expect(exchangeCodeForUser('code-identity-lookup-fails')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+    // Fail-closed and DISCRIMINATING (review NIT): exactly ONE query ran — findIdentityUser —
+    // and it threw. Under the fail-open mutation control reaches findUserByEmail (a 2nd query),
+    // so this call-count is what actually proves no fall-through to email-link/auto-provision.
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+  })
+
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
