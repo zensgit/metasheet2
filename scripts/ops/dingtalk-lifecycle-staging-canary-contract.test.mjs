@@ -192,6 +192,32 @@ test('remote pins staging compose/containers only', () => {
   assert.match(source, /assert_staging_only\(\)/)
 })
 
+test('production path resolver expands an explicit ~/ prefix instead of nesting a literal tilde', () => {
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      'source "$1"; HOME=/tmp/lifecycle-home; resolve_home_path "~/staging"',
+      'bash',
+      REMOTE_SH,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'status',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '/tmp/lifecycle-home/staging')
+})
+
 test('staging compose derives health build identity from the exact image tag, not stale env_file values', () => {
   const compose = read(STAGING_COMPOSE)
   assert.match(compose, /METASHEET_BUILD_COMMIT: \$\{IMAGE_TAG:-unknown\}/)

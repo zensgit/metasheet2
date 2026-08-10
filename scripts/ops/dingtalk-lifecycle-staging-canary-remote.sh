@@ -63,8 +63,8 @@ resolve_home_path() {
   local raw="$1"
   if [[ "$raw" == /* ]]; then
     printf '%s' "$raw"
-  elif [[ "$raw" == ~/* ]]; then
-    printf '%s' "${HOME}/${raw#~/}"
+  elif [[ "$raw" == "~/"* ]]; then
+    printf '%s' "${HOME}/${raw#"~/"}"
   else
     printf '%s' "${HOME}/${raw}"
   fi
