@@ -656,13 +656,18 @@ export const ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 = 1
 //    does not accidentally start routing it to boundary-refused.
 //  - TOO WIDE: the marker fires on ANY of this repo's other `export class Attendance*Error
 //    extends Error` classes that happen to follow the same `super(code); this.code = code`
-//    convention (most of the ~30-odd sibling classes across `packages/core-backend/src/attendance/`
-//    do, including `AttendanceW4RegistryError` in w4c0-operation-registry.ts — see its
-//    negative-control test) — the marker cannot distinguish "this call graph's own boundary
-//    code" from "a same-shaped class elsewhere in the package that happens to reach here on some
-//    future refactor."
-// This list is exactly the THREE classes this trace found reachable from `plan` or `apply` that
-// constitute the transition boundary and its identity/lock substrate:
+//    convention — MEASURED (a small script parsing every exported `*Error` class's constructor
+//    across `packages/core-backend/src/attendance/*.ts`, PR #4839 gate, 20260810), not estimated:
+//    30 of the 32 such classes follow it (the same two exceptions are `AttendanceRequestSnapshotError`
+//    above and `AttendanceCentralApprovalError`, both `super(message)` instead). The marker cannot
+//    distinguish "this call graph's own boundary code" from "a same-shaped class elsewhere in the
+//    package that happens to reach here on some future refactor" — see `AttendanceW4RegistryError`
+//    (w4c0-operation-registry.ts)'s own negative-control test, one concrete example of the 30.
+// This list is the three classes this trace found BOTH reachable from `plan` or `apply` AND
+// assigned to the boundary-refused bucket by decision — `AttendanceRequestSnapshotError` above is
+// a FOURTH class this same trace found reachable, deliberately assigned to internal-error instead
+// (see its own negative-control test), not an omission. The three assigned here constitute the
+// transition boundary and its identity/lock substrate:
 // `AttendanceW4C3aRolloutControlError` (this boundary's own `fail()` refusals, e.g.
 // `W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION`), `AttendanceW4IdentityError`
 // (w4c0-identity.ts's own `fail()`, reachable via `assertConnectionIsIdleV1`'s
