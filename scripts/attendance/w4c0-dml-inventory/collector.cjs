@@ -135,8 +135,24 @@ function discoverRuntimeRoots(source) {
 // census with non-SQL noise. A lowercase/mixed-case SQL keyword bypassing this scan is a stated
 // collector limitation (see the collector's own CI test and the Stage D handoff note), not a
 // silently-claimed guarantee.
+//
+// SCHEMA-QUALIFIED TARGETS (`UPDATE public.attendance_records`, `db.public.attendance_records`):
+// the leading `(?:...\.)*` group consumes zero or more `identifier.` qualifier segments before
+// the final captured identifier, so the capture always lands on the RIGHTMOST segment — the real
+// table name — not the schema/database prefix. Without this group the pattern took the FIRST
+// identifier after the verb, so a schema-qualified write resolved to a table literally named
+// `public`, which is not attendance-owned and fell out of every tracked bucket with no identity
+// to approve or refuse — a one-token bypass of the whole §8.4 gate (see the collector test's
+// `schema-qualified DML target resolves to the real table` case, which pins this). The group is
+// `*` (not `?`), so a two-level qualifier (`db.public.table`) resolves too. This can only ever
+// WIDEN what the scan captures — a previously mis-captured qualifier now resolves to its real
+// table — never narrow it, so the change direction is fail-closed. Measured neutral against the
+// real repository at the point this group was added: raw/tracked/unclassified site counts and
+// the pinned e0defbe26 baseline manifest hash were unchanged (see the collector test's own
+// byte-reproducibility assertion, which still passes) — no currently-scanned attendance DML in
+// this repo is schema-qualified today.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
 
 const P25_READ_TABLE_PATTERN = new RegExp(
   `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?(?![A-Za-z0-9_])`,
