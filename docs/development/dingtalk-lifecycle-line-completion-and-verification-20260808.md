@@ -1,6 +1,6 @@
 # 钉钉生命周期线 — 收尾开发与验证 MD（2026-08-08）
 
-- Status: **代码侧收尾完成（Rev 4.4 修复轮后恢复）** — closeout 复审（2026-08-08，对 main=45cf3a7c51）曾裁 **CHANGES REQUESTED**（2 P1 + 1 P2，见 §4bis），按其收尾顺序本状态一度改回 CHANGES_REQUIRED；修复 PR（T3 源权威 + OPS-01 可逆证据 Rev 4.4）与本状态行原子落地。启用/canary/U1-13/Transfer 仍 owner/ops-gated；三开关 OFF。
+- Status: **代码侧收尾进行中（第二轮 post-merge 复审吸收）** — 2026-08-08 复审（对 main=45cf3a7c51）裁 CHANGES REQUESTED（见 §4bis，已修复合入）；**2026-08-10 又一轮 post-merge 复审（对 main=d78b27d37c）再裁 CHANGES REQUIRED：2 个新 P1（OAuth grant 读 fail-open、T3 激活源 integration-status TOCTOU）+ 重申 owner-gated 的 supersede 补偿（§4 第 3 项），见 §4ter**。两 P1 分别由 #4845 与本 PR 修复。**撤回**：此前「可编码项正式清零」为过强声明——它只在这两张修复 PR 落地后成立，且始终**不含** owner 尚未裁决的 supersede 补偿（该裁决本身可能要求代码）。启用/canary/U1-13/Transfer 仍 owner/ops-gated；三开关 OFF。
 - 授权链：owner 2026-08-07/08 会话「钉钉同步业务功能开发-260721」指令 —— 「请排序并完成所有这条线剩余的开发，然后给出设计及验证 MD」，采纳含「显式批准 Rev 4.3」为第 1 步的收尾意见；模型分配按既有 model-split（Sonnet=机械/侦察、Fable=主循环+热文件语义、Opus=对抗门审）。
 - 权威锁：`dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md`（Rev 4.3，ratification 记录见其 §0.6，**终版随本 MD 提请 owner 会签**）+ companion admission 锁 Rev 4.2。
 - 前情：`dingtalk-lifecycle-postmerge-findings-20260724.md`（07-24 实测「离岗零证据」P1 的完整证据链）与 honest closeout（#4587 修正版）。
@@ -68,6 +68,18 @@ Mutation 六连杀（每条先证锚点命中、后证目标测试转红、cp �
 **独立对抗审 verdict（Opus，2026-08-09，绑 head 467ae34b57）**：**APPROVE-with-hardening，0 P1** —— 三条 refute-first 目标（T3 绕过 / writer 非 1:1 / restore drift）构造攻击后均未证伪；六条 mutation 独立复现全转红；immutability 函数与 20260728 版程序化逐行比对一列未丢；迁移在全新 DB 干净跑通且不在 9 处 MIGRATION_EXCLUDE。两条 P2 已落账：①**可逆性边界**——supersede（如管理员重新启用）后 restore 按既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成无证据残留：锁文 §0.7 已按此限定措辞（main 既有语义，非本 PR 引入），补偿路径列入 §4 owner 清单第 3 项；②**双 ACTIVE 源 org 派生歧义**（今日无 web 调用点可达）→ follow-up #4833。层级事实：mutation (d)（writer INSERT）只有真库 golden 能杀（6666 unit 全绿）；mutation (f)（源门控回退）只有 unit 层能杀（grant-table 真库 17/17 仍绿）——两层缺一不可。
 
 **#4833 落地记录（2026-08-10，PR #4843 — 本段不属于上面绑定 467ae34b57 的 verdict）**：org 派生改为对 active eligible 源**集合**匹配；无 orgId 且集合含多个不同 org → 409 `ACTIVATE_ORG_AMBIGUOUS`（错误闭集 14，HTTP leak 链全 14 驱动）；同 org 多源去重照常派生；空 org 源不参与投票（单独 fail-closed 测试）；审计 meta 记录实际落位 org（`membershipOrgId`）。双 org 真库金标故意选非 `da.id` 首行的 org，使 find-first 变异确定性转红（3/3），避免 uuid 排序掷硬币。
+
+## 4ter. 第二轮 post-merge 复审吸收（2026-08-10，对 main=d78b27d37c，CHANGES REQUIRED → 修复）
+
+独立复审（Grok 4.5 只读复核 + 源码判定）对 11 车 + #4831 + #4843 全落地态再审，确认 Rev 4.4 正常 writer/restore 链、T3 源权威、双 ACTIVE 消歧成立，但发现两个 P1 + 重申一个 P2：
+
+| 判项 | 内容 | 修复 |
+|---|---|---|
+| **P1-A（OAuth grant 读 fail-open）** | `readGrantEnabled` 捕获任意 DB 错误返回 `null`（与「无 grant 行」同值）；deny 门是 `=== false`，`null` 滑过；`DINGTALK_AUTH_REQUIRE_GRANT` 默认 false ⇒ 离岗者的 Rev 4.4 disabled deny 行可被一次读故障绕过登录 | **#4845**：改三态 `enabled`/`disabled`/`absent`，读失败 **fail-closed**（抛 `grant_state_unavailable`/503，与 `grant_disabled` 同 deny 通道）；`absent` 仍放行（新用户/自动关联）。测试：读故障 fail-closed、absent 正控放行、disabled 仍拒；变异复原 fail-open 转红 |
+| **P1-B（T3 激活源 integration-status TOCTOU）** | 激活事务只锁 `users`，源（account/link/integration）无锁读；READ COMMITTED 下管理员可在另一连接停用 integration 并提交于「读→提交」窗口间 ⇒ 对 inactive 源静默激活 | **本 PR**：源读加 `FOR SHARE OF ...`（两分支，integration 恒 INNER-join 故两分支皆锁）；载重不变量注释（status 在 TS 判非 WHERE，使 EPQ recheck 见新 inactive）；构造并发真库金标（pg_locks 屏障证激活阻塞于停用事务、提交后拒 `ACTIVATE_INTEGRATION_INACTIVE`、零写），mutation 去 `di` 锁确定性转红 |
+| **P2（supersede 残留补偿）** | 与 §4 第 3 项同——非新缺陷，owner-gated | 不改代码；待 owner 裁决（可能要求代码或运维合同）|
+
+两张修复均为窄 PR、独立对抗审 + exact-head CI；三开关继续 OFF；canary 逐项仍 NO-GO 待前述落地后再议。
 
 ## 5. 过程事故诚实档（含撤回）
 
