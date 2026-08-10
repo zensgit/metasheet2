@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1106,13 +1106,14 @@ test('claim-sweep.mjs on a FULL (non-shallow) clone: a genuinely-not-an-ancestor
 // P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): a large sweep piped to another
 // process (never redirected to a file) came back SILENTLY TRUNCATED — exit 0, no error, just
 // missing rows off the end, because `process.exit()` used to fire immediately after the last
-// `stdout.write()` without waiting for the write to actually reach the OS pipe. Reproduced
-// directly before fixing: file-redirected output for this exact fixture was 1,000,896 bytes;
-// piped and drained with an eager `spawn`-based reader it came back as exactly 65,536 bytes (one
-// pipe bufferful) — the unfixed process exited mid-flush. `spawnSync` (used by every OTHER test
-// in this file) does NOT reproduce this: it blocks until the child fully exits and then reads
-// whatever arrived, which on this platform is fast enough to race past the bug; a real `spawn`
-// with the reader attached BEFORE the child exits is what exposes it.
+// `stdout.write()` without waiting for the write to actually reach the OS pipe: for a PIPE
+// destination `stdout.write()` is asynchronous, and the race is on the CHILD process's own
+// internal write queue versus its own synchronous `process.exit()` call — independent of how
+// fast or slow the PARENT reads. Reproduced directly before fixing, through `runClaimSweep`
+// (the SAME `spawnSync`-based helper every other test in this file already uses — this bug does
+// NOT require a special reader shape to expose): file-redirected output for this exact fixture
+// was 1,000,896 bytes; piped via `runClaimSweep` it came back as exactly 65,536 bytes (one pipe
+// bufferful) — the unfixed process exited mid-flush.
 const LARGE_SWEEP_LINE_COUNT = 3000
 function buildLargeQuantifierFile(dir: string): string {
   const lines: string[] = []
@@ -1124,28 +1125,7 @@ function buildLargeQuantifierFile(dir: string): string {
   return filePath
 }
 
-/** Runs claim-sweep.mjs as a genuine child process, draining stdout via an eager `data`
- * listener that is attached BEFORE the child exits (unlike `spawnSync`, which only reads after
- * the child has already terminated) — the exact shape that exposes the pre-fix truncation bug. */
-function runClaimSweepViaRealPipe(args: string[], cwd: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLAIM_SWEEP_PATH, ...args], { cwd })
-    const stdoutChunks: Buffer[] = []
-    const stderrChunks: Buffer[] = []
-    child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(chunk))
-    child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk))
-    child.on('error', reject)
-    child.on('close', (status) => {
-      resolve({
-        status,
-        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8'),
-      })
-    })
-  })
-}
-
-test('claim-sweep.mjs piped output is NOT truncated by process.exit racing an unflushed write (large sweep, real child-process pipe)', async () => {
+test('claim-sweep.mjs piped output is NOT truncated by process.exit racing an unflushed write (large sweep, real child-process pipe)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'claim-sweep-pipe-trunc-'))
   try {
     const filePath = buildLargeQuantifierFile(dir)
@@ -1159,7 +1139,7 @@ test('claim-sweep.mjs piped output is NOT truncated by process.exit racing an un
     const fileRows = JSON.parse(readFileSync(outPath, 'utf8')) as Array<{ line: number; matched: string }>
     assert.equal(fileRows.length, LARGE_SWEEP_LINE_COUNT, 'fixture sanity: one "every" match per line')
 
-    const { status, stdout } = await runClaimSweepViaRealPipe(['--file', filePath, '--format', 'json'], dir)
+    const { status, stdout } = runClaimSweep(['--file', filePath, '--format', 'json'], dir)
     assert.equal(status, 0)
     // A truncated JSON payload fails to parse at all, or parses short — either way this is the
     // precise, mechanical assertion (not a byte-length threshold): every row must be present,
