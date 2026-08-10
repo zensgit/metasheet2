@@ -5,12 +5,25 @@
  * refusal class end to end) lives in
  * packages/core-backend/tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts.
  *
+ * SCOPED EXCEPTION (PR #4839 fresh-gate round, 20260810): the final section of this file breaks
+ * the "no filesystem, no network" rule above on purpose — it exercises `claim-sweep.mjs`'s
+ * shallow-clone ancestry-verdict downgrade against REAL git shallow-graft behaviour (constructed
+ * temp repos + a real child process), which cannot be proven any other way without mocking git
+ * itself. Added HERE, not a new file, specifically because this file is already wired into CI
+ * (`pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`,
+ * `.github/workflows/plugin-tests.yml`) and a new standalone test file would not run in CI
+ * without editing that workflow — out of scope for this round. See `claim-sweep.mjs`'s own
+ * header for the precise, disclosed statement of what is and is not CI-wired.
+ *
  * Run: pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -970,4 +983,122 @@ test('describeAttendanceW4C5ErrorV1 is values-free: reports only the code, never
   const description = describeAttendanceW4C5ErrorV1(error)
   assert.equal(description, 'W4C5_TOOL_MANIFEST_INVALID')
   assert.doesNotMatch(description, /do-not-print-me/)
+})
+
+// ---------------------------------------------------------------------------
+// claim-sweep.mjs coverage (PR #4839 fresh-gate round, 20260810). See the SCOPED EXCEPTION note
+// at the top of this file for why real git/filesystem/subprocess work happens in this section.
+// ---------------------------------------------------------------------------
+const CLAIM_SWEEP_PATH = fileURLToPath(new URL('./claim-sweep.mjs', import.meta.url))
+
+function runClaimSweep(args: string[], cwd: string): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(process.execPath, [CLAIM_SWEEP_PATH, ...args], { cwd, encoding: 'utf8' })
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+function gitQuiet(args: string[], cwd: string): void {
+  execFileSync('git', args, { cwd, stdio: ['ignore', 'ignore', 'ignore'] })
+}
+
+function gitOutput(args: string[], cwd: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+}
+
+/** A tiny full repo (c1 -> c2 -> c3, three real commits) in a fresh tmpdir, oldest SHA first. */
+function buildFullRepoV1(): { dir: string; c1: string; c2: string; c3: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'claim-sweep-full-'))
+  gitQuiet(['init', '-q'], dir)
+  gitQuiet(['config', 'user.email', 'test@example.com'], dir)
+  gitQuiet(['config', 'user.name', 'test'], dir)
+  writeFileSync(join(dir, 'a.txt'), 'one\n')
+  gitQuiet(['add', 'a.txt'], dir)
+  gitQuiet(['commit', '-q', '-m', 'c1'], dir)
+  const c1 = gitOutput(['rev-parse', 'HEAD'], dir)
+  writeFileSync(join(dir, 'a.txt'), 'two\n')
+  gitQuiet(['add', 'a.txt'], dir)
+  gitQuiet(['commit', '-q', '-m', 'c2'], dir)
+  const c2 = gitOutput(['rev-parse', 'HEAD'], dir)
+  writeFileSync(join(dir, 'a.txt'), 'three\n')
+  gitQuiet(['add', 'a.txt'], dir)
+  gitQuiet(['commit', '-q', '-m', 'c3'], dir)
+  const c3 = gitOutput(['rev-parse', 'HEAD'], dir)
+  return { dir, c1, c2, c3 }
+}
+
+test('claim-sweep.mjs self-tests pass (exercised as a real subprocess — this is the "own correctness IS CI-wired" half claim-sweep.mjs\'s header describes)', () => {
+  const result = spawnSync(process.execPath, [CLAIM_SWEEP_PATH, '--self-test'], { encoding: 'utf8' })
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /PASSED/)
+})
+
+test('claim-sweep.mjs shallow-clone downgrade — cat-file branch: a true ancestor outside the fetched depth is reported UNKNOWN, never a false disproof, and exit stays 0', () => {
+  const full = buildFullRepoV1()
+  const shallowDir = mkdtempSync(join(tmpdir(), 'claim-sweep-shallow1-'))
+  try {
+    execFileSync('git', ['clone', '-q', '--depth', '1', `file://${full.dir}`, shallowDir], { stdio: ['ignore', 'ignore', 'ignore'] })
+    assert.equal(gitOutput(['rev-parse', '--is-shallow-repository'], shallowDir), 'true')
+    // c1 (the oldest commit) sits entirely outside a depth-1 clone's fetched history — not even
+    // present as a git object locally. The exact "cat-file -e fails" branch.
+    writeFileSync(join(shallowDir, 'claim.txt'), `claim: ${full.c1} is old\n`)
+    const { status, stdout } = runClaimSweep(['--file', 'claim.txt', '--git-head', 'HEAD'], shallowDir)
+    assert.equal(status, 0, 'a shallow-downgraded UNKNOWN must never escalate the exit code')
+    assert.match(stdout, /UNKNOWN: shallow clone/)
+    assert.doesNotMatch(stdout, /AUTO: NOT an ancestor/)
+  } finally {
+    rmSync(full.dir, { recursive: true, force: true })
+    rmSync(shallowDir, { recursive: true, force: true })
+  }
+})
+
+test('claim-sweep.mjs shallow-clone downgrade — merge-base branch: an object present locally but truncated by the shallow graft boundary is reported UNKNOWN, never a false "NOT an ancestor" disproof', () => {
+  const full = buildFullRepoV1()
+  const shallowDir = mkdtempSync(join(tmpdir(), 'claim-sweep-shallow2-'))
+  try {
+    // depth=2 fetches c3 and c2 as objects; c2 becomes the shallow-graft boundary (git's
+    // `.git/shallow` records it as having no parents for traversal purposes, regardless of what
+    // c2's own commit object says).
+    execFileSync('git', ['clone', '-q', '--depth', '2', `file://${full.dir}`, shallowDir], { stdio: ['ignore', 'ignore', 'ignore'] })
+    assert.equal(gitOutput(['rev-parse', '--is-shallow-repository'], shallowDir), 'true')
+    // Explicitly fetch c1 as its own object WITHOUT connecting it through the graft boundary —
+    // present locally (cat-file succeeds below) but `merge-base --is-ancestor c1 c3` still
+    // returns exit 1, because traversal from c3 stops at the c2 graft and never reaches c1, even
+    // though c1 truly IS a history-ancestor of c3. This is the exact bug class: the tool must not
+    // trust that exit 1 as a real disproof.
+    execFileSync(
+      'git',
+      ['fetch', '-q', '--depth=1', `file://${full.dir}`, full.c1],
+      { cwd: shallowDir, stdio: ['ignore', 'ignore', 'ignore'] },
+    )
+    execFileSync('git', ['cat-file', '-e', `${full.c1}^{commit}`], { cwd: shallowDir, stdio: ['ignore', 'ignore', 'ignore'] }) // sanity: object IS present
+    const rawMergeBase = spawnSync('git', ['merge-base', '--is-ancestor', full.c1, full.c3], { cwd: shallowDir })
+    assert.equal(rawMergeBase.status, 1, 'fixture sanity: raw git must exhibit the misleading exit 1 for this test to mean anything')
+
+    writeFileSync(join(shallowDir, 'claim.txt'), `the head is at ${full.c1} .\n`)
+    const { status, stdout } = runClaimSweep(['--file', 'claim.txt', '--git-head', full.c3], shallowDir)
+    assert.equal(status, 0, 'a shallow-downgraded UNKNOWN must never escalate the exit code')
+    assert.match(stdout, /UNKNOWN: shallow clone/)
+    assert.doesNotMatch(stdout, /AUTO: NOT an ancestor/)
+  } finally {
+    rmSync(full.dir, { recursive: true, force: true })
+    rmSync(shallowDir, { recursive: true, force: true })
+  }
+})
+
+test('claim-sweep.mjs on a FULL (non-shallow) clone: a genuinely-not-an-ancestor SHA still gets "AUTO: NOT an ancestor" and escalates the exit code (regression control — the shallow fix must not blunt the real case)', () => {
+  const full = buildFullRepoV1()
+  try {
+    assert.equal(gitOutput(['rev-parse', '--is-shallow-repository'], full.dir), 'false')
+    gitQuiet(['checkout', '-q', '-b', 'unrelated', full.c1], full.dir)
+    writeFileSync(join(full.dir, 'b.txt'), 'x\n')
+    gitQuiet(['add', 'b.txt'], full.dir)
+    gitQuiet(['commit', '-q', '-m', 'unrelated commit'], full.dir)
+    const unrelated = gitOutput(['rev-parse', 'HEAD'], full.dir)
+    gitQuiet(['checkout', '-q', full.c3], full.dir)
+    writeFileSync(join(full.dir, 'claim.txt'), `claim: ${unrelated} merged already\n`)
+    const { status, stdout } = runClaimSweep(['--file', 'claim.txt', '--git-head', full.c3], full.dir)
+    assert.equal(status, 1)
+    assert.match(stdout, /AUTO: NOT an ancestor/)
+  } finally {
+    rmSync(full.dir, { recursive: true, force: true })
+  }
 })

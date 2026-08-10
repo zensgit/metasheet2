@@ -11,8 +11,20 @@
  * not converge under hand-fixing individual sentences (feedback_absolute_claim_sweep_must_be_
  * mechanical.md, feedback_trap_enumeration_does_not_converge.md): a single mechanical sweep run
  * repeatedly beats an enumeration of "just this one more fix." This script is a reusable TOOL,
- * not a one-shot fix — it is deliberately NOT wired into any CI workflow by this same PR (that
- * would require editing .github/workflows/*.yml, out of scope for the round that added it).
+ * not a one-shot fix.
+ *
+ * WIRING — stated precisely so no other text in this PR can be read as implying otherwise:
+ *   - This tool's OWN correctness (its pattern self-tests, `--self-test`, AND its shallow-clone
+ *     ancestry-verdict downgrade) IS exercised by CI: two subprocess-driven `node:test` cases in
+ *     `scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`, which is already wired into
+ *     `.github/workflows/plugin-tests.yml` (`pnpm exec tsx --test
+ *     scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`). No edit to any workflow file
+ *     was needed for this — the tests were added to a file CI already invokes.
+ *   - This tool's INTENDED normal-use invocation — sweeping an arbitrary set of changed files
+ *     and/or a PR body for absolute-claim language on demand — is run by NO CI gate. Nothing in
+ *     this PR runs `claim-sweep.mjs --file ... --text-file ...` automatically on every push; it
+ *     remains a manually-invoked audit tool a reviewer or author points at whatever needs
+ *     checking, same as before this PR's fresh-gate round.
  *
  * Usage:
  *   node scripts/ops/claim-sweep.mjs --self-test
@@ -35,6 +47,13 @@
  *     "0 findings" table — an empty table must mean "scanned N files/blobs, found nothing", never
  *     "scanned nothing".
  *   - An unreadable --file path is a hard error (exit 2), never a silent skip.
+ *   - Shallowness (`git rev-parse --is-shallow-repository`) is checked ONCE per run, before any
+ *     SHA-like token is verdicted. On a shallow clone, neither "not found as a commit object" nor
+ *     a `merge-base --is-ancestor` exit-1 is trusted as a disproof (repo doctrine: shallow-clone
+ *     ancestry answers are lies) — both downgrade to an explicit `UNKNOWN: shallow clone …` row,
+ *     which never starts with the `AUTO: NOT an ancestor` prefix the exit-1 escalation below
+ *     matches on, so an unreliable shallow-clone signal can never trigger a false mechanical
+ *     disproof.
  *
  * Exit codes:
  *   0 — self-tests passed and (for a sweep run) the scan completed with no MECHANICALLY-DISPROVEN
@@ -194,23 +213,56 @@ function runSelfTests() {
 }
 
 // ---------------------------------------------------------------------------
-// Git ancestry check (best-effort; degrades to UNKNOWN if not in a git repo or git is
-// unavailable — never silently treated as "verified").
+// Git ancestry check (best-effort; degrades to UNKNOWN if not in a git repo, git is
+// unavailable, or the repo is a SHALLOW CLONE — never silently treated as "verified").
+//
+// Standing house rule (this repo has been burned by this class before): on a shallow clone,
+// neither `git cat-file -e <sha>^{commit}` returning failure NOR `git merge-base --is-ancestor`
+// exiting 1 means what it means on a full clone. A commit outside the fetched depth is
+// genuinely absent from THIS clone's object store (not absent from history), and
+// `merge-base --is-ancestor` can run out of fetched history before finding a real common
+// ancestor and report "not an ancestor" for a commit that truly is one. Both cases are
+// downgraded to UNKNOWN rather than asserting a disproof.
 // ---------------------------------------------------------------------------
-function gitAncestryVerdict(token, headRef) {
+
+/**
+ * Computed ONCE per process (shallowness doesn't change mid-run) and threaded through every
+ * verdict call, never re-queried per token. If shallowness itself cannot be determined (git
+ * missing, not a repo), the safer assumption is SHALLOW — a repo this tool cannot even ask
+ * about ancestry depth is not one it should assert a mechanical disproof against.
+ */
+function isShallowRepo() {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    return out.toString('utf8').trim() === 'true'
+  } catch {
+    return true
+  }
+}
+
+function gitAncestryVerdict(token, headRef, shallow) {
   try {
     execFileSync('git', ['cat-file', '-e', `${token}^{commit}`], { stdio: ['ignore', 'ignore', 'ignore'] })
   } catch {
+    if (shallow) {
+      return `UNKNOWN: shallow clone — cannot confirm ${token} is not a commit object (it may sit outside the fetched depth); re-run on a full clone for a real verdict`
+    }
     return `AUTO: not found as a commit object in this repo`
   }
   try {
     execFileSync('git', ['merge-base', '--is-ancestor', token, headRef], { stdio: ['ignore', 'ignore', 'ignore'] })
     return `AUTO: ancestor of ${headRef}`
   } catch (error) {
-    // exit code 1 from `merge-base --is-ancestor` means "not an ancestor" (a real, mechanically
-    // verified negative); any OTHER failure (e.g. headRef itself unresolvable) is a tool error,
-    // not a verdict, and must not be conflated with "not an ancestor".
+    // exit code 1 from `merge-base --is-ancestor` means "not an ancestor" ONLY on a full clone (a
+    // real, mechanically verified negative); any OTHER failure (e.g. headRef itself unresolvable)
+    // is a tool error, not a verdict, and must not be conflated with "not an ancestor".
     if (error && typeof error.status === 'number' && error.status === 1) {
+      if (shallow) {
+        // Deliberately NOT prefixed with "AUTO: NOT an ancestor" — the exit(1)-escalation check
+        // in `main()` matches on that exact prefix, and a shallow-clone UNKNOWN must never re-arm
+        // a mechanical-disproof exit code it did not actually establish.
+        return `UNKNOWN: shallow clone — \`git merge-base --is-ancestor\` exit 1 is not a reliable disproof here (history may be truncated before a real common ancestor); re-run on a full clone (\`git fetch --unshallow\`) for a real verdict`
+      }
       return `AUTO: NOT an ancestor of ${headRef}`
     }
     return `AUTO: git unavailable/unresolvable (${headRef}) — UNVERIFIED`
@@ -220,7 +272,7 @@ function gitAncestryVerdict(token, headRef) {
 // ---------------------------------------------------------------------------
 // Scan
 // ---------------------------------------------------------------------------
-function scanLine(fileLabel, lineNumber, lineText, headRef) {
+function scanLine(fileLabel, lineNumber, lineText, headRef, shallow) {
   const rows = []
   const quantifierRe = buildQuantifierRegex()
   for (const m of lineText.matchAll(quantifierRe)) {
@@ -241,7 +293,7 @@ function scanLine(fileLabel, lineNumber, lineText, headRef) {
       patternType: 'sha-like-token',
       matched: m[0],
       sentence: lineText.trim().slice(0, 300),
-      backing: gitAncestryVerdict(m[0], headRef),
+      backing: gitAncestryVerdict(m[0], headRef, shallow),
     })
   }
   for (const m of lineText.matchAll(NM_SLASH_RE)) {
@@ -267,11 +319,11 @@ function scanLine(fileLabel, lineNumber, lineText, headRef) {
   return rows
 }
 
-function scanSource(fileLabel, text, headRef) {
+function scanSource(fileLabel, text, headRef, shallow) {
   const rows = []
   const lines = text.split('\n')
   for (let i = 0; i < lines.length; i += 1) {
-    rows.push(...scanLine(fileLabel, i + 1, lines[i], headRef))
+    rows.push(...scanLine(fileLabel, i + 1, lines[i], headRef, shallow))
   }
   return rows
 }
@@ -341,6 +393,16 @@ function main() {
     process.exit(2)
   }
 
+  // Computed ONCE for the whole run — see `isShallowRepo`'s own doc for why per-token
+  // re-computation would be wasteful (shallowness cannot change mid-process) and why "cannot
+  // determine" defaults to the conservative `true`.
+  const shallow = isShallowRepo()
+  if (shallow) {
+    process.stderr.write(
+      'claim-sweep: this is a SHALLOW git clone — SHA-like-token ancestry verdicts below are downgraded to UNKNOWN rather than a mechanical disproof (repo doctrine: shallow-clone ancestry answers are lies).\n',
+    )
+  }
+
   const allRows = []
   for (const filePath of args.files) {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
@@ -348,7 +410,7 @@ function main() {
       process.exit(2)
     }
     const text = readFileSync(filePath, 'utf8')
-    allRows.push(...scanSource(filePath, text, args.gitHead))
+    allRows.push(...scanSource(filePath, text, args.gitHead, shallow))
   }
   if (args.textFile) {
     if (!existsSync(args.textFile) || !statSync(args.textFile).isFile()) {
@@ -356,7 +418,7 @@ function main() {
       process.exit(2)
     }
     const text = readFileSync(args.textFile, 'utf8')
-    allRows.push(...scanSource(args.textLabel, text, args.gitHead))
+    allRows.push(...scanSource(args.textLabel, text, args.gitHead, shallow))
   }
 
   if (args.format === 'json') {
