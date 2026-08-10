@@ -29,6 +29,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..')
 const REMOTE_SH = join(HERE, 'dingtalk-lifecycle-staging-canary-remote.sh')
 const WORKFLOW = join(REPO_ROOT, '.github', 'workflows', 'dingtalk-lifecycle-staging-canary.yml')
+const CONTRACT_WORKFLOW = join(
+  REPO_ROOT,
+  '.github',
+  'workflows',
+  'dingtalk-lifecycle-staging-canary-contract.yml',
+)
 const ATTENDANCE_WORKFLOW = join(
   REPO_ROOT,
   '.github',
@@ -89,6 +95,7 @@ function workflowOn(doc) {
 test('remote script and workflow files exist', () => {
   assert.ok(existsSync(REMOTE_SH))
   assert.ok(existsSync(WORKFLOW))
+  assert.ok(existsSync(CONTRACT_WORKFLOW))
 })
 
 test('embedded remote script parses (bash -n)', () => {
@@ -101,6 +108,14 @@ test('workflow YAML parses with repository-available parser', () => {
   assert.equal(doc.name, 'DingTalk Lifecycle Staging Canary')
   assert.ok(workflowOn(doc)?.workflow_dispatch?.inputs?.action)
   assert.ok(doc.jobs?.run)
+})
+
+test('PR contract workflow executes this exact suite without changing the sealed plugin-tests pin', () => {
+  const workflow = read(CONTRACT_WORKFLOW)
+  assert.match(workflow, /pull_request:/)
+  assert.match(workflow, /node --test scripts\/ops\/dingtalk-lifecycle-staging-canary-contract\.test\.mjs/)
+  const pluginTests = read(join(REPO_ROOT, '.github', 'workflows', 'plugin-tests.yml'))
+  assert.doesNotMatch(pluginTests, /dingtalk-lifecycle-staging-canary-contract\.test\.mjs/)
 })
 
 // --- workflow shape -------------------------------------------------------------------
