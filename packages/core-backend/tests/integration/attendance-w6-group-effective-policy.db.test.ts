@@ -196,6 +196,14 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
   const groupBId = randomUUID()
   const shiftId = randomUUID()
   const ruleSetId = randomUUID()
+  // W3 compatibility (P3): a `fixed_shift` group whose shift has ZERO persisted
+  // `attendance_shift_segments` rows — `segmentCount <= 1` in the aggregate treats this
+  // identically to a single-segment shift (segment 0 synthesised from the legacy
+  // envelope). Deliberately a SEPARATE group/shift from groupA's (which seeds exactly
+  // one segment row) rather than deleting groupA's row, so the two fixtures stay
+  // independently discriminating.
+  const groupZeroSegId = randomUUID()
+  const shiftZeroSegId = randomUUID()
 
   function makeApp(user: { id: string; permissions: string[]; role?: string; orgId?: string }): express.Express {
     const app = express()
@@ -299,6 +307,27 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
         [randomUUID(), orgA, userId, shiftId, groupAId, producerKey, producerRunId],
       )
     }
+
+    // P3 fixture: a fixed_shift group whose shift carries ZERO
+    // attendance_shift_segments rows (groupA's shift, above, deliberately
+    // carries exactly one — the two fixtures are independently
+    // discriminating). No members/managers/assignments are seeded: FSER's
+    // `desired` is truthy from the fixed_schedule_configs row alone
+    // (`loadEffectivenessFacts` in the FSER service), which is all the
+    // aggregate's segmentCount branch needs to run.
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, timezone, flex_mode) VALUES ($1, $2, 'W6 Shift Zero Segments', 'Asia/Shanghai', 'strict')`,
+      [shiftZeroSegId, orgA],
+    )
+    await pool.query(`INSERT INTO attendance_groups (id, org_id, name, timezone, attendance_type) VALUES ($1, $2, 'W6 Group Zero Segments', 'Asia/Shanghai', 'fixed_shift')`, [
+      groupZeroSegId,
+      orgA,
+    ])
+    await pool.query(
+      `INSERT INTO attendance_group_fixed_schedule_configs (org_id, group_id, shift_id, start_date, end_date, revision, updated_by)
+       VALUES ($1, $2, $3, '2026-08-01', '2026-08-31', 1, $4)`,
+      [orgA, groupZeroSegId, shiftZeroSegId, adminUser],
+    )
   })
 
   afterAll(async () => {
@@ -406,6 +435,31 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
           expect.objectContaining({ code: 'SCHEDULE_STRATEGY_INCOMPLETE', domain: 'schedule' }),
         ]),
       )
+    })
+
+    it('P3: a fixed_shift group whose shift has ZERO persisted segment rows is still effective/effective (segment 0 synthesised, W3 compatibility)', async () => {
+      // The premise, asserted rather than assumed: without this, a future
+      // fixture edit that accidentally seeds a segment row here would leave
+      // the labels below unchanged (segmentCount 0 and 1 both satisfy
+      // `segmentCount <= 1`), and this leg would keep passing for the wrong
+      // reason.
+      const segmentRows = await pool.query(
+        'SELECT COUNT(*)::int AS cnt FROM attendance_shift_segments WHERE org_id = $1 AND shift_id = $2',
+        [orgA, shiftZeroSegId],
+      )
+      expect(segmentRows.rows[0].cnt).toBe(0)
+
+      const res = await request(adminApp()).get(`/api/attendance/groups/${groupZeroSegId}/effective-policy`)
+      expect(res.status).toBe(200)
+      const data = res.body.data
+      expect(data.groupType).toBe('fixed_shift')
+      expect(data.domains.segments.label).toBe('effective')
+      expect(data.domains.flex).toEqual({
+        label: 'effective',
+        mode: 'strict',
+        reasonCodes: [],
+        editorRef: { kind: 'group_context_route', step: 'schedule', surface: 'shifts' },
+      })
     })
   })
 
