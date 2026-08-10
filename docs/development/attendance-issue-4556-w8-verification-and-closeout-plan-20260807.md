@@ -237,7 +237,20 @@ commit adding that path, re-verified 2026-08-10 against
 verification-anchor SHA, a partial/half match, an uncertain match, or a
 non-suite citation (e.g. a QA-handoff narrative rather than a titled test)
 is left **OPEN** under this bar, even where an earlier round of this table
-called it discharged.
+called it discharged. A file-creation SHA is not automatically a
+title-landing SHA — several of these six files grew substantially after
+their creation commit (`attendance-shift-segments-writer-matrix.db.test.ts`
+1258→1997 lines; `w4c1-segment-calculator.test.ts` 1211→1317;
+`attendance-work-date-resolver-w2.db.test.ts` 531→545, all measured
+creation-SHA vs. `origin/main@d78b27d3`), so every cited title below was
+individually re-confirmed present **at the cited creation SHA itself**
+(`git show <sha>:<file> | grep -c "<title>"`, not merely present on current
+`main`) before this round assigned SATISFIED — the two unchanged files
+(`attendance-shift-segments-migration.db.test.ts`,
+`attendance-calculation-group-membership-w1.db.test.ts`) and
+`w5-flex-segment-calculator.test.ts` show identical line counts at creation
+and at `d78b27d3`, so no such drift was even possible there. One row (DB-07)
+needed a wording correction from this check — see its own cell.
 
 **§7.1 Database (DB-01..DB-12)**
 
@@ -249,12 +262,12 @@ called it discharged.
 | DB-04 | concurrent membership overlap rejection | SATISFIED | `attendance-calculation-group-membership-w1.db.test.ts`: "lets the database reject one of two concurrent direct overlapping writes" (`~L456`). Merge SHA `9055932e314265794b3baa8e80cff0828ba2902c` (#4563, 2026-07-23). |
 | DB-05 | inclusive boundary transition (D-1 to D) without a gap or double winner | SATISFIED | same w1 file, "closes the prior inclusive interval at D-1, starts the next at D, and records audit context" (`~L238`). Merge SHA `9055932e314265794b3baa8e80cff0828ba2902c`. |
 | DB-06 | cross-org FK and query isolation | SATISFIED | `attendance-shift-segments-migration.db.test.ts` "CROSS-ORG INTEGRITY: the composite FK rejects a segment whose org differs from the parent shift" (`~L207`); `attendance-shift-segments-writer-matrix.db.test.ts` "cross-org: a shift is invisible and unreferenceable from another org" (`~L714`). Both files first added at merge SHA `c5f08aecd5732d70b616561398d8456240f62486` (#4569). |
-| DB-07 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | SATISFIED | `attendance-shift-segments-writer-matrix.db.test.ts`, nine `matrix: ... typed 422 with zero writes` legs covering every named surface (`~L734, 789, 819, 913, 946, 966, 1498, 1541, 1578`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-07 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | SATISFIED | `attendance-shift-segments-writer-matrix.db.test.ts`, nine legs covering every named surface — not a uniform title (corrected this round: an earlier round's "nine `matrix: ... typed 422 with zero writes` legs" implied one shared title pattern for all nine, which overstates it): seven carry that literal title (`~L734, 789, 819, 913, 946, 966, 1578`) and two carry a distinct but substantively equivalent title, `matrix: shift-swap/schedule-dispatch final approval fails closed after the source/target shift became multi-segment` (`~L1498, 1541`), each asserting a 422 + typed guard code + a zero-incremental-write count in its body — same fail-closed/zero-write substance, different wording. Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 | DB-08 | existing-reference delete 409 + zero writes per durable blocker; rejected/cancelled/history fixtures prove non-blocking evidence intact + redacted UUID | SATISFIED | same file, "delete: typed 409 with zero writes for every durable blocker class" (`~L1642`), "delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID" (`~L1722`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 | DB-09 | concurrent shift delete + reference insertion cannot cascade-delete a newly created reference | SATISFIED | same file, "concurrency: a reference insert racing a delete is serialized by the shared lock protocol" (`~L1892`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 | DB-10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | OPEN | Second half only found: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — no matching test title found this round; not guessed. Below the SATISFIED bar (half the check is unevidenced). |
 | DB-11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | OPEN | Schema-rollback-forbidden half only found: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — no matching test title found this round. Below the SATISFIED bar. |
-| DB-12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | SATISFIED | same file, `~L224` (same test as DB-11's schema half, which fully discharges DB-12 but only half of DB-11 — DB-12 is a distinct parent bullet). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
+| DB-12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | SATISFIED | same file, `~L224` — checked against the **test body**, not just its title, since DB-12 has two clauses and DB-11's own OPEN verdict came from a half-covered bullet at this exact test: line ~229 asserts the abort-before-DDL half; line ~243 (`await segmentsDown(testDb)` on a schema that already has no table, asserted not to throw, with the preceding comment "down() on a schema that never had the table is a safe no-op") is the replay-safe-on-empty/fresh-database half — both clauses present in one test, so DB-12 (a distinct parent bullet from DB-11) is fully covered even though DB-11's own bullet (envelope/segment-unchanged on a *runtime*, non-schema rollback) is not touched by this test at all. Same test as DB-11's schema-rollback-forbidden half, discharging DB-12 in full and DB-11 only in part — the two rows are not exempted from the same rule, they cover disjoint clauses of the same test. Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 
 **§7.2 Calculation (CALC-01..CALC-15)**
 
