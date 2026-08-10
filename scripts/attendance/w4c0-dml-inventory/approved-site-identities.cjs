@@ -65,7 +65,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["764d7e80c2fefa8c"],
+    statementFingerprints: ["c9a9ef4053cf4c291b67edcffc284d8355c7358824b2db3be41a8fe8378fc3a4"],
     entryIds: [],
     genericSharedReason: "generic approval-product contract test tooling",
   },
@@ -75,7 +75,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["60d157f0e6833e27"],
+    statementFingerprints: ["ca8b9e6a92fcbd5edf4dfdcfece122a8615fcbaf0e95d92344fad1be08e1ec3d"],
     entryIds: [],
     genericSharedReason: "generic approval-product contract test tooling",
   },
@@ -85,7 +85,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c0b185a7adaa11c0"],
+    statementFingerprints: ["40f982a086313e888f8165deee9e0046595f269867a563a577956d5f6aedf96c"],
     entryIds: [],
     genericSharedReason: "generic approval-product contract test tooling",
   },
@@ -95,7 +95,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["04fbc7874c6148be"],
+    statementFingerprints: ["9d466a35838fec7b3736d4929d6efb1ca9def94bc94d1772e86b5ab81de25a24"],
     entryIds: [],
     genericSharedReason: "generic approval-product contract test tooling",
   },
@@ -105,7 +105,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["2504b12d9d03dc17"],
+    statementFingerprints: ["0350d83f9b2cc73c9a789c90a22ae4fc15678109bb44523085d5a11bd10e0eba"],
     entryIds: ["P06", "P07", "P08", "P09", "P10"],
   },
   {
@@ -114,7 +114,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["e4b0561656272073"],
+    statementFingerprints: ["f189c6b9e9572e0fdc11a1de2e283685cf8af4ad0ff073cb2eb310045b6f60a4"],
     entryIds: ["P06", "P07", "P08", "P09", "P10"],
   },
   {
@@ -123,7 +123,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["7fdd70efc44e522b"],
+    statementFingerprints: ["165d9f7d2516fcbef76c8c2fda9083ce8187fb5c7624a8da5e0ccb9ed57a2688"],
     entryIds: ["P11"],
   },
   {
@@ -132,7 +132,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["6b09f6d993901318"],
+    statementFingerprints: ["047030ffaecf8e9864f8aacd108dd688ed882710ce6c9e16982e08952f274720"],
     entryIds: ["P11"],
   },
   {
@@ -141,7 +141,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["7fdd70efc44e522b"],
+    statementFingerprints: ["165d9f7d2516fcbef76c8c2fda9083ce8187fb5c7624a8da5e0ccb9ed57a2688"],
     entryIds: ["P11"],
   },
   {
@@ -150,7 +150,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["0f7883d01dc52922"],
+    statementFingerprints: ["e11f446b83dba5d3446366fdd279ca57a0d17053876f20d369add2ae33d31dc7"],
     entryIds: ["P11"],
   },
   {
@@ -159,7 +159,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["885d34e2a15924ea"],
+    statementFingerprints: ["1b9405ed0b234eee8ac8c673aa86c96616f5650daefe14641b0fed8e53c8208a"],
     entryIds: ["P06", "P07", "P08", "P09"],
   },
   {
@@ -168,7 +168,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["5945f9ac30c70529"],
+    statementFingerprints: ["982b79225afd9ffe09d1aabfe2205125443828ab22d6bd6aab020f598466c4d4"],
     entryIds: ["P06", "P07", "P08", "P09"],
   },
   {
@@ -177,7 +177,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["350fe9ed287ebb65"],
+    statementFingerprints: ["2475e902b15f3d3f4112647c6063cb5098deb23bd1cd61dc9da7585d1df022bd"],
     entryIds: ["P06", "P07", "P08", "P09"],
   },
   {
@@ -186,7 +186,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["5e9ef83b630be0cf"],
+    statementFingerprints: ["8bde55d3d45595946a6583742f080bf4a8074e2760486485e6612165d7f0549d"],
     entryIds: ["P06", "P07", "P08", "P09"],
   },
   {
@@ -195,7 +195,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["b06eaa1eb0902619"],
+    statementFingerprints: ["1b7e2b35c5c2ae34dbbd22c9c5d2922e8cbd0e6f4edf14efd13e1238bf02fe84"],
     entryIds: ["P06"],
   },
   {
@@ -204,7 +204,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["885d34e2a15924ea"],
+    statementFingerprints: ["fd37a9e718101aa187c3320350829db18ae61e4d4481cf68db2922dc9860140d"],
     entryIds: ["P06"],
   },
   {
@@ -213,7 +213,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["15d3b158475a6f1c"],
+    statementFingerprints: ["69e837ab0275840c1716b0f15e86b1795721fbddb970fa671191e651280f2f2b"],
     entryIds: ["P14"],
   },
   {
@@ -222,7 +222,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["3ef93ff2b5cb8d9c"],
+    statementFingerprints: ["e49b7f599817eba0cabbaa44b10657ea8534ade3d0386abac01d0801671ac177"],
     entryIds: ["P05"],
   },
   {
@@ -231,7 +231,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["5a50b39203b59a39"],
+    statementFingerprints: ["53baa49fa02c98d702afb5cee76f36bddc34f5c90a3457f8d89136b01f9d751e"],
     entryIds: ["P15"],
   },
   {
@@ -240,7 +240,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["3ef93ff2b5cb8d9c"],
+    statementFingerprints: ["90b49fe43c76f4c858631ede9f47b384c7b099e73dc68bf6630b0cd2a12a951c"],
     entryIds: ["P05"],
   },
   {
@@ -249,7 +249,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["cae1917f8c599457"],
+    statementFingerprints: ["c1fc44463aa415d9c6aeedb32541208e8e5b62695de784c10debe9284f48ac05"],
     entryIds: [],
     genericSharedReason: "generic approval-bridge schema/backfill migration, not attendance-specific",
   },
@@ -259,7 +259,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["b5fe0337bb8e4f8d"],
+    statementFingerprints: ["12bc9d3551530aabd7155372d73e37b6c60bf23c10792a59f8e07759780e8105"],
     entryIds: ["P28"],
   },
   {
@@ -268,7 +268,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["66161a4a19350067"],
+    statementFingerprints: ["8da9171e5f5a9c8c4e75f5b8f08ee2b83115b46dfe4e3a9b128731a2feddc6fd"],
     entryIds: ["P17"],
   },
   {
@@ -277,7 +277,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c93b5c2b4373c991"],
+    statementFingerprints: ["0873308a357eb01975a3c82f0d7863033f8ab195cdce8bdfbd9107949b0d53e4"],
     entryIds: ["P17"],
   },
   {
@@ -286,7 +286,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["3f4092416ed656c9"],
+    statementFingerprints: ["8ca2d033cfa2a6af079e13416159ce2cc0fdc40231351791d7a6962625d36540"],
     entryIds: ["P17"],
   },
   {
@@ -295,7 +295,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["57415c236a2690cf"],
+    statementFingerprints: ["91c23c71c8e99d89fd4e00081455a0ade2ad160384eb3210299508a2ceac7795"],
     entryIds: ["P17"],
   },
   {
@@ -304,7 +304,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["3aaea392b2ec95e6"],
+    statementFingerprints: ["987c9d74358178766fa219ad9cc99b36b14670a296ed11cf93f6deb1290733e6"],
     entryIds: ["P17"],
   },
   {
@@ -313,7 +313,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["f95518a3b20051e8"],
+    statementFingerprints: ["b826539ad018c43ae596fb9af92c6043014e48f29ed1f77466ccc07d14c57c42"],
     entryIds: [],
     genericSharedReason: "generic approval-product seed script",
   },
@@ -323,7 +323,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["eee66f0e866281cd"],
+    statementFingerprints: ["4487eb46e7bc803be32d4a9f63af0747dbd20d735b58af15514564b770ceb0e2"],
     entryIds: [],
     genericSharedReason: "named generic bridge for a different product (after-sales), not attendance",
   },
@@ -333,7 +333,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["a6ca5f39807f3474"],
+    statementFingerprints: ["f8d7691d89131004704bfeafc323cdf186881e4615855383df5753d4954a2a44"],
     entryIds: [],
     genericSharedReason: "named generic bridge for a different product (after-sales), not attendance",
   },
@@ -343,7 +343,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["d7390fb7dab15fe6"],
+    statementFingerprints: ["3882bf3367c3197868dc371708a2bcd070175865cfc9ec55ef0f77243edbb588"],
     entryIds: [],
     genericSharedReason: "named generic bridge for a different product (after-sales), not attendance",
   },
@@ -353,7 +353,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["2f6034e0581f12cb"],
+    statementFingerprints: ["bb242580e2a24a2800b1d17dc832baa85333deedeee68603ed10ad6c12221b86"],
     entryIds: ["P17"],
   },
   {
@@ -362,7 +362,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["85634f248b2c180b", "93b675efb5565541"],
+    statementFingerprints: ["a946414a2dd345dfc976a3d1fbb6da041ec6800cfcdc252785f1d441ce0dccb5","b7249e6da18a4f69a2d56c18df800694fb064117dc2e6e052802713571a111ac"],
     entryIds: ["P17"],
   },
   {
@@ -371,7 +371,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c01613138b224618"],
+    statementFingerprints: ["8284885b0ecaaf623080cd33d9eb9fbad88f8f06ac13b8340ce998d22bee5d1b"],
     entryIds: ["P17"],
   },
   {
@@ -380,7 +380,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["496340a2d41fd719", "c5ab4e9e51ad4734"],
+    statementFingerprints: ["731b1cde8128b14f71c31ffadb67945b502e3f8f4bf2a95c79526e5cecbfda3f","b2df041e577b3c8a782c8baee209de00ffb2114f0f64b599ac1a87120f15d5f7"],
     entryIds: ["P17"],
   },
   {
@@ -389,7 +389,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["9eb159180a3cc0c5"],
+    statementFingerprints: ["2a938ffd777d693cc2d9ed786e985676c290cd9e653ba2ff97fa4aca27ea79a9"],
     entryIds: ["P17"],
   },
   {
@@ -398,7 +398,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["e79c98771d8350d2"],
+    statementFingerprints: ["1c6bf27c757273069b51ed6722698d1d5c891410b53fc0c87e04fd5d7b084c1c"],
     entryIds: ["P26"],
   },
   {
@@ -407,7 +407,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["89c84ee4be81ea20"],
+    statementFingerprints: ["5f31309d75714ea422d54befd74b1513a7c8fc2d0bf804c699cc77efb8a4a374"],
     entryIds: ["P26"],
   },
   {
@@ -416,7 +416,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["0db2d0910815d4cd"],
+    statementFingerprints: ["ca96e4e9e198c45d9266bf14d746aa4b31808854e5451deaaa7f67632f148a04"],
     entryIds: ["P26"],
   },
   {
@@ -425,7 +425,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["42d71cf14a5186dd"],
+    statementFingerprints: ["53ee342accada936127f49947c9f8bc3826ff45b0de7cce5baa391b20eff72a3"],
     entryIds: ["P26"],
   },
   {
@@ -434,7 +434,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["2a2b673bc0916a7b"],
+    statementFingerprints: ["0811ba47c957a2e7d4c91aba4d550787cfe15a7ead81edf7424186ea6dc956b0"],
     entryIds: ["P26"],
   },
   {
@@ -443,7 +443,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["28dc802dc1c6aed1", "85634f248b2c180b"],
+    statementFingerprints: ["770680945615b1d21fecb642a7db1d9bc508d3401aac473fceab83e20c1a61b8","ef1f465b14873e06d3af2d151927b80b425a2e5f17933c41a1a76c368a1f0235"],
     entryIds: ["P26"],
   },
   {
@@ -452,7 +452,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["fed41149c8249d6b"],
+    statementFingerprints: ["f8640f569bb2905a46aae226ea600aff1f86f308b80dfea0c4e759088fc8ad47"],
     entryIds: ["P26"],
   },
   {
@@ -461,7 +461,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["64089c1448c8ce7b"],
+    statementFingerprints: ["5eac319a68435ea4b5364037e7e340c33ddc0fe2167b3b0e66bb8e82985afddb"],
     entryIds: ["P26"],
   },
   {
@@ -470,7 +470,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["aa20488eb7636afb"],
+    statementFingerprints: ["4711a2583e292e32af36fa061778dbb1015a51ba056c1acaeefa3eb452e32078"],
     entryIds: ["P26"],
   },
   {
@@ -479,7 +479,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["6304bda0661d3605"],
+    statementFingerprints: ["35c139b15cfcbdf96f5ab7bb141bae2454cf75120844d4fca03faa1601a0ac83"],
     entryIds: ["P26"],
   },
   {
@@ -488,7 +488,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 5,
-    statementFingerprints: ["3bc8e17c6e26628d", "4dba39d89a14dded", "56c4961f6bd63e92", "85634f248b2c180b", "b8139487d164bfe9"],
+    statementFingerprints: ["1f3ccaff62c51e6a057dd63a1877427f1686e4b9b7244d29ffb8fc9ada709e3a","45f7f2225f761605f12cdbf894752bc19d01519a0c71546cea7ca54bef9e6024","5641fa4c7a0ac7a73ea2efc59f44d2675872f56c455e3fb3bb5ddc4d78a7278c","770680945615b1d21fecb642a7db1d9bc508d3401aac473fceab83e20c1a61b8","96aa87ba44727ae2cf8adbcba900d0179a5d457708e84d600a361a29e4a399c8"],
     entryIds: ["P26"],
   },
   {
@@ -497,7 +497,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 10,
-    statementFingerprints: ["0db2d0910815d4cd", "0db2d0910815d4cd", "3e43863cb43a9989", "4a638fdb3303f490", "4a638fdb3303f490", "4a638fdb3303f490", "4a638fdb3303f490", "55ce6fd3e82460fb", "c8f98d00bed274f8", "ff9138c31090b4c3"],
+    statementFingerprints: ["12854ebd00868655453f7bd28bc688eaafddab6c53a25c7f2c07f52cee07486e","12854ebd00868655453f7bd28bc688eaafddab6c53a25c7f2c07f52cee07486e","2d9228abacdc4e2ec7198221f8b724bb53c1896f07bf7f63c1604566466bd839","3101b1af0ffda9de49f2f8199b8b0096ff8ed38222f5716590e7c805930587c0","3ab48d2ade4f455f3e96c1723023457286ee2e02a962673b342351689d86f745","71b9f08f27007fe0d21b4031ed739acc9409b32d3cd7fd17ec5d34ea11da6ee0","bcc097394a6b9d58ece5ab875f236fe311e0864545152dde5f1124dffef07222","ca96e4e9e198c45d9266bf14d746aa4b31808854e5451deaaa7f67632f148a04","f2bf6518efc5b7515e84f4480d496fa426a366b5d138456df51e87c569a028f1","f2bf6518efc5b7515e84f4480d496fa426a366b5d138456df51e87c569a028f1"],
     entryIds: ["P26"],
   },
   {
@@ -506,7 +506,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["7508b078214a81c6"],
+    statementFingerprints: ["c9c3cabafae44f0461e7cb1d85ff7fb2caa546d96cca80cb30a0dea9116a0e26"],
     entryIds: ["X05"],
   },
   {
@@ -515,7 +515,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["7508b078214a81c6"],
+    statementFingerprints: ["c9c3cabafae44f0461e7cb1d85ff7fb2caa546d96cca80cb30a0dea9116a0e26"],
     entryIds: ["X05"],
   },
   {
@@ -524,7 +524,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["4bc60f7145974b0b", "502774765cbf87ad"],
+    statementFingerprints: ["1afb816e5c0070a3df88cb7da5a2f1dbcb8802e32ded1923275283d5cf066219","f63849e7370c458c6c27f737f41707f9f3fde7429e5008056b1b3591c861ba9b"],
     entryIds: ["P06"],
   },
   {
@@ -533,7 +533,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_manual_adjustments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["d218d95eeb6604ee"],
+    statementFingerprints: ["fd07ae75ff20e5dabb53bd87a83ee43e7b82172b138daa9773eda3697384bac9"],
     entryIds: ["X04"],
   },
   {
@@ -542,7 +542,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_record_result_edits",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["6ba705c6fcebe7cd"],
+    statementFingerprints: ["1f992c9d1792373311082f659fde3961dd877c94c08494c77258ca736fbb3660"],
     entryIds: ["P05"],
   },
   {
@@ -551,7 +551,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["0e04ad33ce851c87"],
+    statementFingerprints: ["438ce4ecbbefbbc3df8c2eea373404ba17bb60026aa691a59ca7288f1fda65a5"],
     entryIds: ["P01"],
   },
   {
@@ -560,7 +560,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["23a916d7bedb0fb1", "23a916d7bedb0fb1"],
+    statementFingerprints: ["58f0cc9a8db092c00b705d94108a8ba77147c4e36d2da82f1eaf74ed0bbb5d8d","58f0cc9a8db092c00b705d94108a8ba77147c4e36d2da82f1eaf74ed0bbb5d8d"],
     entryIds: ["P06", "P07", "P09"],
   },
   {
@@ -569,7 +569,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_schedule_dispatch_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["71447a834cef5ee5"],
+    statementFingerprints: ["46ab88412c46ccbbe0d9765e1aa04613b6954c7e8bb1e9bfa5915cf1b194fb05"],
     entryIds: ["P18"],
   },
   {
@@ -578,7 +578,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_swap_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["ab14bab23abe3c08"],
+    statementFingerprints: ["6bbe313c0fadb53207708b54c5e384e1cb0b14798a1a0e71e32076c970f30556"],
     entryIds: ["P18"],
   },
   {
@@ -587,7 +587,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["0825530e1827db81"],
+    statementFingerprints: ["07220c28205f9faf1caaabb1e34fab28e9b86449aeac2995b3d7416034d2e5bd"],
     entryIds: ["P13"],
   },
   {
@@ -596,7 +596,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["f0b9450d8af5c160"],
+    statementFingerprints: ["2f5a38c1264b6ca88b9814f08569f81a9a5a68ea932c2a65375e33a699b9d326"],
     entryIds: ["P13"],
   },
   {
@@ -605,7 +605,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["8f5a414f392359c5", "8f5a414f392359c5"],
+    statementFingerprints: ["6385094915f3108be3e8f94b7ea747a18b2fcfd3b2ad038d5cd7904919c54210","cfa612604c8a4031c248b1e27756dd8dd55d5c771c4ba928a4241699f967f479"],
     entryIds: ["P13"],
   },
   {
@@ -614,7 +614,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["434076d7198ce00f", "52c270e19b92ffb6"],
+    statementFingerprints: ["5fe4f60027302286ba20b5673ade0f8bba5dfb816b5922c4b4ba148ce98b5cf3","919da9116b1eae80fbadd21dabf61d26d67b8d2022f68ea89420e5ab4e1554b0"],
     entryIds: ["P13"],
   },
   {
@@ -623,7 +623,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["be2ec840eb77c53b", "c82e246af7705356"],
+    statementFingerprints: ["84d9afe8015d05bea1983285a1e400e3ed21ed62ab327a2c58922bfb22c6be44","b209b6af498bf4773551a1de10ee61a3f2bd9c057ba78dddffd6028a27abe7c4"],
     entryIds: ["P13"],
   },
   {
@@ -632,7 +632,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["9a4b6ea7061cf1e6"],
+    statementFingerprints: ["a00b756ccb3c648239d92546c1edf575f8afe039b5a7b5522c9e1db8741042ae"],
     entryIds: ["P06"],
   },
   {
@@ -641,7 +641,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["f1b0dca62a33c7e9"],
+    statementFingerprints: ["f0bb9dbeb9481848ee75d76d39549eb73a1c907eea3a024f9790855839f35269"],
     entryIds: ["P06"],
   },
   {
@@ -650,7 +650,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["525eeae7be7d07a8"],
+    statementFingerprints: ["61429c4c9b8c9741e4028bd4eda87a88988e7d4a1cfc306ee0653698ab7232d7"],
     entryIds: ["P06"],
   },
   {
@@ -659,7 +659,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["262aa27720368eea"],
+    statementFingerprints: ["4cad622f58d8ad5bb57f2ab43d0ebffe14ac4c15801113bcd38e9a6f73e9a246"],
     entryIds: ["P06"],
   },
   {
@@ -668,7 +668,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c4a58b09ea23f8b3"],
+    statementFingerprints: ["1dec577b239b5af4960c5b7315ea306ee0958df75882aca8b7659b7cb3c142e4"],
     entryIds: ["P06"],
   },
   {
@@ -677,7 +677,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["45f58014212d4c8e"],
+    statementFingerprints: ["9b7551786a1df4d9c771e6145e7068b17e2495bf2ea76728fd81a758690f73a3"],
     entryIds: ["P06"],
   },
   {
@@ -686,7 +686,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_rotation_assignments",
     verb: "delete",
     occurrences: 2,
-    statementFingerprints: ["363458812241f7d1", "c9af6a1c04d0d26b"],
+    statementFingerprints: ["70d89fae8400cbf6616e3b44baa5a3a150ccbf5450283327363c8b1fde97bdd1","e521fd0af0fc375b1dbc21503d0db58b9bf2ce78dfe9546614649d0fb34f9ea2"],
     entryIds: ["P14"],
   },
   {
@@ -695,7 +695,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_rotation_assignments",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["0e0194f3e1b081d4", "853bd32a337f0fb2"],
+    statementFingerprints: ["e282271dcfb811354adae599e818ad5b08dad5a3086e18e89e34436874c4dc68","fb0bdd0f291a586b5350ad94eff810e0561b6dcfc818ca558ff618152823b908"],
     entryIds: ["P14"],
   },
   {
@@ -704,7 +704,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_rotation_assignments",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["6bbfb6445fe1a6ec", "d30987cc90420786"],
+    statementFingerprints: ["02469b4500dae0208e8673a3f5b8ef8d81a9358b9daa64ad85c91cb1cee52853","54dfafe2527304c039516deefadf6ea0c9ec8792d6c0c98665762a73709a58cc"],
     entryIds: ["P14"],
   },
   {
@@ -713,7 +713,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_schedule_dispatch_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["08431afa3719f73a"],
+    statementFingerprints: ["49929cf885c504abe7b32f92ce407bad92857c0ea3b6bfdabca11e11d1dadde7"],
     entryIds: ["P18"],
   },
   {
@@ -722,7 +722,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["85634f248b2c180b"],
+    statementFingerprints: ["449db1650890935dbd4ace2173fbffa5c2344b459f65098fb8ba86dd0c03b615"],
     entryIds: ["P13"],
   },
   {
@@ -731,7 +731,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_rotation_assignments",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["a75557acc1e64d68", "a75557acc1e64d68"],
+    statementFingerprints: ["423a2972e8343783dd7932581178296c51795877d3a2b8b018cbdc7920fa32d2","cb08e2ad3970a63ef057c648e49beada4d0d968acb81c0bd0074a9cedf48152e"],
     entryIds: ["P27"],
   },
   {
@@ -740,7 +740,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "update",
     occurrences: 2,
-    statementFingerprints: ["a75557acc1e64d68", "a75557acc1e64d68"],
+    statementFingerprints: ["7cad5eadfa39320871ac851ff697905cf438e3b70710c948f5a1937f433766ef","d601c7f26abe13806bcf443832aa3296075144f38a630fe1fa120adaa0ec97e7"],
     entryIds: ["P27"],
   },
   {
@@ -749,7 +749,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["7ea344811026e5f7"],
+    statementFingerprints: ["a7b6ba0da34155f096fc2ac07dc17fae7587797849726b74547a401123d8841d"],
     entryIds: ["P12"],
   },
   {
@@ -758,7 +758,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["7ea344811026e5f7"],
+    statementFingerprints: ["a7b6ba0da34155f096fc2ac07dc17fae7587797849726b74547a401123d8841d"],
     entryIds: ["P12"],
   },
   {
@@ -767,7 +767,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["55564d17dc9161cb"],
+    statementFingerprints: ["795e58fa52bf753d8c98f2157f4bc6ee139fa84cc7400fe8df67c2c7ef40db35"],
     entryIds: ["P13"],
   },
   {
@@ -776,7 +776,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["723d7594bc3f7848"],
+    statementFingerprints: ["a7ac6fc4856bced9b9d42217205a1ca36d9f75e4200758e96790c0fb0d2d40b8"],
     entryIds: ["P13"],
   },
   {
@@ -785,7 +785,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["3e7e71cc17e28a33"],
+    statementFingerprints: ["c32dd05dd78ea3ac79e52dd4dd11aa3d594c1b7bc36ec8904967107db78f809f"],
     entryIds: ["P13"],
   },
   {
@@ -794,7 +794,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["cbc689ad28fed447"],
+    statementFingerprints: ["aae5323318c52995392c9c2975105fb41ed48aade76f32b7d728affcb8d71e77"],
     entryIds: ["P12"],
   },
   {
@@ -803,7 +803,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["d9dc4190c31f0d03"],
+    statementFingerprints: ["cf81e7b3db5e7e281c028e24c1d1fff9e0f613256386f8a1735ac908cc0a42b0"],
     entryIds: ["P12"],
   },
   {
@@ -812,7 +812,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_schedule_dispatch_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["b85ae6a73641ecee"],
+    statementFingerprints: ["a1038eaa6c0fb230c8e798171af496df7f04fc4a6b6726d5e20b01f7f138add2"],
     entryIds: ["P12"],
   },
   {
@@ -821,7 +821,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["07981ede9bbc74ec"],
+    statementFingerprints: ["85bf3c103bcc6b171d5fa20ca875a72662480b059538d87aa570dac880a29f6b"],
     entryIds: ["P13"],
   },
   {
@@ -830,7 +830,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["fa1e23e9804c2c73"],
+    statementFingerprints: ["3986b3da8923215fc971b64425ae55dcb43091c7f852f928a19764ee9d1ee297"],
     entryIds: ["P13"],
   },
   {
@@ -839,7 +839,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["36867dbc133d86d3"],
+    statementFingerprints: ["e1d6b006f9bfc1c12b75cdbfa3d67f3c10d02599d708cea3f684ed5bed57c2c5"],
     entryIds: ["P13"],
   },
   {
@@ -848,7 +848,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_swap_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["293ec5ac138edfe5"],
+    statementFingerprints: ["7c44d4d250e1f83c004e297297c8c019b58534951154ddb6d879f2700db7abab"],
     entryIds: ["P13"],
   },
   {
@@ -857,7 +857,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["6f89d8123eef34b6"],
+    statementFingerprints: ["6374882201eb2fa73bcb2b0122181be7e47f5023ab97f62ee990ce4fb4b01474"],
     entryIds: ["P12"],
   },
   {
@@ -866,7 +866,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_swap_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["b4cd8e9afabc0774"],
+    statementFingerprints: ["7f0a0620e7ce5f9b3bd5da960570d33bfd6d9963525f7ed6bab98d12a89766d7"],
     entryIds: ["P12"],
   },
   {
@@ -875,7 +875,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["e84ac1ef08c0938f"],
+    statementFingerprints: ["779cf1c2704f2147cf3387fd6aeb858a6afe998b7cdd62e2ce2209fb73f5d77b"],
     entryIds: ["X04"],
   },
   {
@@ -884,7 +884,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["419dbf15350c7849"],
+    statementFingerprints: ["8f92f0b4b48a26538b4d34505fb5a5ef23f4ff517b9961ce2dc0b11b65e610e8"],
     entryIds: ["X04"],
   },
   {
@@ -893,7 +893,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_auto_shift_auto_write_runs",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["a433e6d44909c833"],
+    statementFingerprints: ["d83c6e3815a98e728e449f3122bfbef8261518fbf9fa749cc70d46ef559796d1"],
     entryIds: ["X03"],
   },
   {
@@ -902,7 +902,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_schedule_dispatch_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["336326dd3c9ba6d2"],
+    statementFingerprints: ["fffe9919ae6c2b9c9026c766dabd7bb61e84e25c7b7f2f0bc1130c06177f0686"],
     entryIds: ["P18"],
   },
   {
@@ -911,7 +911,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["0ce161dab1c119c8"],
+    statementFingerprints: ["84fb52b67d486d05c9a2af553ad2e0597dca5240d0080e9146afaeb733672597"],
     entryIds: ["P18"],
   },
   {
@@ -920,7 +920,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["c2fc5810b681c6fa"],
+    statementFingerprints: ["2a88419074e70abbbea05045b29a7f5d943993c8fa505c27d8e9a724554a9baa"],
     entryIds: ["P18"],
   },
   {
@@ -929,7 +929,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_swap_requests",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["94949a299b3c770a"],
+    statementFingerprints: ["c0eeaac3cb8072e7265e21d3d49b2a4b5542bb15a6f89d56ba7bf4167d31e341"],
     entryIds: ["P18"],
   },
   {
@@ -938,7 +938,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["050236e263114850"],
+    statementFingerprints: ["bf58ccca89199f06d92759e66131f5fa251a6aa9173974be38112fc0ea00d722"],
     entryIds: ["P03", "P04"],
   },
   {
@@ -947,7 +947,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 2,
-    statementFingerprints: ["a75557acc1e64d68", "a75557acc1e64d68"],
+    statementFingerprints: ["c86636724f0f39163c8a424ea1723c0048bdef3056847a292f4ad61804d12301","eca7e11b583e38a016f6b3a2e48c1384504d5debf8595c530b83d93486cddbca"],
     entryIds: ["X02"],
   },
   {
@@ -956,7 +956,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["a75557acc1e64d68", "a75557acc1e64d68"],
+    statementFingerprints: ["1588bcbc040e1801ae5cd5ff936f934347e10a1cb4f4ede233ddc13aa11c49db","5144029e28e8c1ab49ba13056e0e3786e2d17ac8572c179e32c47edc2c625a11"],
     entryIds: ["X02"],
   },
   {
@@ -965,7 +965,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "update",
     occurrences: 3,
-    statementFingerprints: ["a75557acc1e64d68", "a75557acc1e64d68", "a75557acc1e64d68"],
+    statementFingerprints: ["4494b7a81fb8ca180a0d88cabe5c67dede0dc66911f15851bb443740298afb64","b3de904b8b81a024e411020a4e2872fd24030b97c5f55a65f7f9df818434c4be","f6b1d99fb67b9acdaa49ff6a1bfbc3879453bf3515a98e4fddd66ffbc9fcd509"],
     entryIds: ["X02"],
   },
   {
@@ -974,7 +974,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["f1dba4e0ec7f730a"],
+    statementFingerprints: ["abe4738386d50141e9f28c6582a631000dc32c653dceca084b5fb57c0603cded"],
     entryIds: ["X01"],
   },
   {
@@ -983,7 +983,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_auto_shift_auto_write_runs",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["0867228f8f2fb0dd"],
+    statementFingerprints: ["1b8853aca5aec797190693537a304edba5b5b3d14a42ce8ebd4d1078a3bfd2ae"],
     entryIds: ["X03"],
   },
   {
@@ -992,7 +992,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_auto_shift_auto_write_run_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["dfa79498070d8687"],
+    statementFingerprints: ["8d1798b64164bfa9a6e11354fe90745767251e72ba746e14bf2a13beee21888a"],
     entryIds: ["X03"],
   },
   {
@@ -1001,7 +1001,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["7d5caffca9afc93b"],
+    statementFingerprints: ["970300a0306a401413ff6b87ebf451954a74fdf824e5a43c493012a836fd2aaf"],
     entryIds: ["P18"],
   },
   {
@@ -1010,7 +1010,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_record_result_edits",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c708d6ce7a0361fa"],
+    statementFingerprints: ["ee779661fabf06b8f8d8d388422235a2002bf48370bfc3cc09436bd9f55c2f05"],
     entryIds: ["P05"],
   },
   {
@@ -1019,7 +1019,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["64c4e353ef295b86"],
+    statementFingerprints: ["4fdabee6c2d080d0d758d8d8a7272f8ee26f7b65ffc43eef33225ec445d5034e"],
     entryIds: ["X04"],
   },
   {
@@ -1028,7 +1028,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["0ce97a662cd2d415"],
+    statementFingerprints: ["234fc29ce254510f9ac1d84cd80961219f8334c0467cf792a7f3f34c563c5dd3"],
     entryIds: ["X04"],
   },
   {
@@ -1037,7 +1037,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_record_result_edits",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["4d30f91872417504"],
+    statementFingerprints: ["9e380f2699802c4687b83b8042752d95c42fdced1155f2c35201e636103f6107"],
     entryIds: ["P05"],
   },
   {
@@ -1046,7 +1046,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "insert",
     occurrences: 2,
-    statementFingerprints: ["372b0be514f8e144", "372b0be514f8e144"],
+    statementFingerprints: ["61613c0d1e8d0712f0af5141de5bfd665b27d6262442197070b364ebea4d8406","61613c0d1e8d0712f0af5141de5bfd665b27d6262442197070b364ebea4d8406"],
     entryIds: ["P01"],
   },
   {
@@ -1055,7 +1055,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["567b7ddc40e761de"],
+    statementFingerprints: ["83c7591dfb15f83e5de67acca2205bc40ef95138fa631610190a88ccfb403940"],
     entryIds: ["P13"],
   },
   {
@@ -1064,7 +1064,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["85634f248b2c180b"],
+    statementFingerprints: ["449db1650890935dbd4ace2173fbffa5c2344b459f65098fb8ba86dd0c03b615"],
     entryIds: ["P13"],
   },
   {
@@ -1073,7 +1073,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["50631fd7e67c25a7"],
+    statementFingerprints: ["e93df349865f44fcae9e8bb030bf88caed3c67f11acf86130437e4c3721c6860"],
     entryIds: ["P14"],
   },
   {
@@ -1082,7 +1082,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["adb5ac7fcca96186"],
+    statementFingerprints: ["faaf58eddbd3ac01c82aa87c3b053d60315ab27ff3b30c4965f0425b980c0f0e"],
     entryIds: ["P14"],
   },
   {
@@ -1091,7 +1091,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_accrual_run_items",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["0c869543615e1c3b"],
+    statementFingerprints: ["746e46470df0568f39df91547e4e5735cc8bedb7a116ee48d55088c7fb125ffc"],
     entryIds: ["X04"],
   },
   {
@@ -1100,7 +1100,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_accrual_runs",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["a4ae65923e3dbceb"],
+    statementFingerprints: ["cf6c4abb7ca9907d74c8c7b8100986defac67783a168bb66f59eca92dca43b73"],
     entryIds: ["X04"],
   },
   {
@@ -1109,7 +1109,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["184e2939ec5a310a"],
+    statementFingerprints: ["325bf9e0c4c1c453dcc4a757019dcce5b8b4efd90692de3a4e2dd24ed3415f1a"],
     entryIds: ["X04"],
   },
   {
@@ -1118,7 +1118,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["385339fa670d0712"],
+    statementFingerprints: ["c921c0ab78e62eda27dfa910c13203a8b29a42bf7cac5e12e15a895c5886d1e3"],
     entryIds: ["X04"],
   },
   {
@@ -1127,7 +1127,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["41948f7511a1abb1"],
+    statementFingerprints: ["22f67b22a9fb33088e6923007f230e7aa761bb855ab647f38702709318451aca"],
     entryIds: ["X04"],
   },
   {
@@ -1136,7 +1136,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["c2e3e3151c3c7c9d"],
+    statementFingerprints: ["29b0c3bdd9ffdbb6e2cd646be70697b7e0d5da00035ae198888ba0a6364dc5d3"],
     entryIds: ["X01"],
   },
   {
@@ -1145,7 +1145,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["eb49550824bfe124"],
+    statementFingerprints: ["6d86979ee73b1a25870eac6a1f2b7c18ab39a5cbe1c7f4aba149f7cf04c0f703"],
     entryIds: ["X01"],
   },
   {
@@ -1154,7 +1154,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["e1202791c4016f72"],
+    statementFingerprints: ["5139c6157a5bed2543b087df925633b667e3584e7a59e18ddce34add69b47c1b"],
     entryIds: ["P13"],
   },
   {
@@ -1163,7 +1163,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["39bdd577a6fcc9fc"],
+    statementFingerprints: ["5ffab9cecaf5b7b202b38e320ec874b318ea918590d7dbdd0afc69923e5e873e"],
     entryIds: ["P01", "P10"],
   },
   {
@@ -1172,7 +1172,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["20f941bc83f04715"],
+    statementFingerprints: ["b5891dd68dafef418e48bf9a7a18b0d5b5eb2cd9c0e6ca757f4a544cd0bfc7ed"],
     entryIds: ["P16"],
   },
   {
@@ -1181,7 +1181,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_batches",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["5f50049c8c3a74e3"],
+    statementFingerprints: ["53ce63f87153ec58c14f428b7ca862f0c588f90c972eee4013f5a3ab092f9fda"],
     entryIds: ["P16"],
   },
   {
@@ -1190,7 +1190,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_import_items",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["b31d3e9914f94f2d"],
+    statementFingerprints: ["a2bc2bf1626a2e4cba9a915c9faa56957be3eec99e30601a234633b1a9b97377"],
     entryIds: ["P16"],
   },
   {
@@ -1199,7 +1199,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_record_result_edits",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f4daf579dc937ced"],
+    statementFingerprints: ["005bb1680c283e8dad0b8937e59b45fb0781efb2fddefe5cd8900f2100a283f1"],
     entryIds: ["P16"],
   },
   {
@@ -1208,7 +1208,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["68643840bd707bf6"],
+    statementFingerprints: ["9de9e119dc82e806fcca067cdf5c9e8c9467f962f7130cb44e36adc7780dabda"],
     entryIds: ["P16"],
   },
   {
@@ -1217,7 +1217,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["35fcf8f534756939"],
+    statementFingerprints: ["4a67123bae0e030524028138dd0ad914a9b0fbc53d5a59f21cda0180cb662372"],
     entryIds: ["P16"],
   },
   {
@@ -1226,7 +1226,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_auto_shift_auto_write_runs",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["fdd936cff4147278"],
+    statementFingerprints: ["03331da78247c12999a7338216b695daf2fbc5740521e52ccdb18ad7eacc9fcd"],
     entryIds: ["P16"],
   },
   {
@@ -1235,7 +1235,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["b0084cec519fc788"],
+    statementFingerprints: ["c1b8e7a4ee45793be2d1f6ca0ea066c83a55ee3271440f88e3d714ded03e59e8"],
     entryIds: ["P16"],
   },
   {
@@ -1244,7 +1244,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["40c370a8a01b703f"],
+    statementFingerprints: ["2d026545bca364ea6aa3ddb0aa4137e428822868b3116d140ecd3de3d5ce3005"],
     entryIds: ["P16"],
   },
   {
@@ -1253,7 +1253,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["2d0f8b11cdebde4e"],
+    statementFingerprints: ["92012cd0d6c34e163946f3b7fbd45e3a7da360138b49bcdef20d728c52025304"],
     entryIds: ["P16"],
   },
   {
@@ -1262,7 +1262,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["92b49461f673f828"],
+    statementFingerprints: ["9360fb7dc95f8b955cb56236ec8a49e2082bf208c31cbc095a3d00e071f9b3f2"],
     entryIds: ["P16"],
   },
   {
@@ -1271,7 +1271,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["68fc1f9713ab5f0c"],
+    statementFingerprints: ["8ad6b482ea324fe1d00dcc1cc37b24a4206878861064fe7de6a5a08b0f86a0d3"],
     entryIds: ["P16"],
   },
   {
@@ -1280,7 +1280,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["5e915bb5125661ec"],
+    statementFingerprints: ["0a87d89edcb2f9aab750cc936978f1de0e6ed46c365b482b13d83633269620de"],
     entryIds: ["P16"],
   },
   {
@@ -1289,7 +1289,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f9ccb544bd67cd11"],
+    statementFingerprints: ["078cf1fa153f7582e68c9f5d85860faca4948b65972af1ae4e9433df660718c3"],
     entryIds: ["P16"],
   },
   {
@@ -1298,7 +1298,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["e663c4f72a564d56"],
+    statementFingerprints: ["14338d362e07b178fcb065169c5dcee5360330ac3af26cc7652973df06e53b4d"],
     entryIds: ["P16"],
   },
   {
@@ -1307,7 +1307,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["32f5e684d2556b7d"],
+    statementFingerprints: ["cb00ac79269432ac19920e0bbf78918446b91b7f3344ac90760935a87c9ff561"],
     entryIds: ["P16"],
   },
   {
@@ -1316,7 +1316,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["51ce9dceb11d22d3"],
+    statementFingerprints: ["4d2042649150595415d8dbc5335fa7c58d650771e57c072e9859b860ee7c9af4"],
     entryIds: ["P16"],
   },
   {
@@ -1325,7 +1325,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["7f24be52bde574b7"],
+    statementFingerprints: ["94281877ac34201ba3d12f5df98c310e28db6d7db4c08480e19b8de87a77fe25"],
     entryIds: ["P16"],
   },
   {
@@ -1334,7 +1334,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["48c3b26575286553"],
+    statementFingerprints: ["0359e38ab67893e3a21e71e342f6cfb5f55962550226d40cdd5301e2ed29aadc"],
     entryIds: ["P16"],
   },
   {
@@ -1343,7 +1343,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_schedule_dispatch_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["d7b15295bbcc2023"],
+    statementFingerprints: ["4c90a3eaa47e17485ec3aa4a48acb79c391427e57fdf725572978a0b0aeef301"],
     entryIds: ["P16"],
   },
   {
@@ -1352,7 +1352,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["11fecfd303e6b8ab"],
+    statementFingerprints: ["e0690003a439a418417e61fd659d9e22fe28260ba82d7f990d9832695031f5c1"],
     entryIds: ["P16"],
   },
   {
@@ -1361,7 +1361,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["5bcde41d7c7d12f8"],
+    statementFingerprints: ["cdb971de10fdffe29397046844b4b008b3be2b32372da77bd4e521abab71bbb1"],
     entryIds: ["P16"],
   },
   {
@@ -1370,7 +1370,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["5b98ccc3108e5600"],
+    statementFingerprints: ["1f696d40a83f982fa1d3898d35dcc3cbc76534bf89160a0b7fcfe1ef75a6ed07"],
     entryIds: ["P16"],
   },
   {
@@ -1379,7 +1379,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["8b7ed1e78075f530"],
+    statementFingerprints: ["c7ce86314895d97c439e4f29b79a702b5b7ae96a95075ee4f66d5a7f4a91ff8e"],
     entryIds: ["P16"],
   },
   {
@@ -1388,7 +1388,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["32f5e684d2556b7d"],
+    statementFingerprints: ["cae9d64086cb74eb29ee1247fa1a006413eb5813a513e6f8baa99e4281943d9f"],
     entryIds: ["P16"],
   },
   {
@@ -1397,7 +1397,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["47988fc38d801510"],
+    statementFingerprints: ["907b6ec7d8e8b70d134927027853022920daf130f2f795747797830d2a350263"],
     entryIds: ["P16"],
   },
   {
@@ -1406,7 +1406,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["7f24be52bde574b7"],
+    statementFingerprints: ["ae0c0d4e6b0728150406d4b61eae909d5acb8f18ca65a027155c197b307379c0"],
     entryIds: ["P16"],
   },
   {
@@ -1415,7 +1415,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["806ad0a0b3ca6826"],
+    statementFingerprints: ["cd9458aaf241fa933882169f8d82acb263b4e1bc78877953fa43a16d82ee60e0"],
     entryIds: ["P16"],
   },
   {
@@ -1424,7 +1424,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["2891113e82441157"],
+    statementFingerprints: ["3fc62a639f2ce8a0d92595e2c9753ce1c6c7bb69dc9ae1e1dad6b5636e4c23ff"],
     entryIds: ["P16"],
   },
   {
@@ -1433,7 +1433,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["5a3800cc7744d166"],
+    statementFingerprints: ["48d50a3d1f5574a27e0129b99c50f56caa15bb04d17df20be23324a336ac8f13"],
     entryIds: ["P16"],
   },
   {
@@ -1442,7 +1442,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "update",
     occurrences: 1,
-    statementFingerprints: ["f0c5b7dd0b9ca5a5"],
+    statementFingerprints: ["bd97265ff4092d8313fa445c8761cd9e4eefd9c0d9217ace511310e843a16fd9"],
     entryIds: ["P16"],
   },
   {
@@ -1451,7 +1451,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["70814dd8730694e8"],
+    statementFingerprints: ["c51e549e9f78a0c264a2b2e4791120c95858971a1b14f671f93349f1c459a86a"],
     entryIds: ["P16"],
   },
   {
@@ -1460,7 +1460,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["95e46468c9b139e6"],
+    statementFingerprints: ["47345e8e7f936b955a9400a07fb745f92ace423dda499c90bebbfe9e452dd5f0"],
     entryIds: ["P16"],
   },
   {
@@ -1469,7 +1469,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["628730103369ad5f"],
+    statementFingerprints: ["f77b939adf09b139f9b530291f6771be19d06089609c9c962313d88c95a918fb"],
     entryIds: ["P16"],
   },
   {
@@ -1478,7 +1478,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["dfad348c080c96b4"],
+    statementFingerprints: ["47933874c0821afc8d309e3ecbcfeeb71820236ea54f5fec48d4f5e9e9b6c6e2"],
     entryIds: ["P16"],
   },
   {
@@ -1487,7 +1487,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_rotation_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["4eb3e236ad8fb382"],
+    statementFingerprints: ["2a90f255958701fe8b37eab7de1a074d5aa0a0f6369487c9d88fa84aa64e8bea"],
     entryIds: ["P16"],
   },
   {
@@ -1496,7 +1496,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["45c0e05245f739de"],
+    statementFingerprints: ["21a582ccf1a563a906a6ccf96b6173f74e6ef1f946d030605a5158da5db5cdcf"],
     entryIds: ["P16"],
   },
   {
@@ -1505,7 +1505,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["76b61d87f53cf103"],
+    statementFingerprints: ["acc1ac4c8cf9575fedc3ad3101754bad680aaca4417c4e167e11d7c86da0bc6d"],
     entryIds: ["P16"],
   },
   {
@@ -1514,7 +1514,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["32f5e684d2556b7d"],
+    statementFingerprints: ["cae9d64086cb74eb29ee1247fa1a006413eb5813a513e6f8baa99e4281943d9f"],
     entryIds: ["P16"],
   },
   {
@@ -1523,7 +1523,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["47988fc38d801510"],
+    statementFingerprints: ["907b6ec7d8e8b70d134927027853022920daf130f2f795747797830d2a350263"],
     entryIds: ["P16"],
   },
   {
@@ -1532,7 +1532,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["7f24be52bde574b7"],
+    statementFingerprints: ["ae0c0d4e6b0728150406d4b61eae909d5acb8f18ca65a027155c197b307379c0"],
     entryIds: ["P16"],
   },
   {
@@ -1541,7 +1541,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["806ad0a0b3ca6826"],
+    statementFingerprints: ["cd9458aaf241fa933882169f8d82acb263b4e1bc78877953fa43a16d82ee60e0"],
     entryIds: ["P16"],
   },
   {
@@ -1550,7 +1550,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f8fec930d6e88b5b"],
+    statementFingerprints: ["21e0adab66d8317c91e2675db990b67b74c4269f1fefc4a39be4f043cf036185"],
     entryIds: ["P16"],
   },
   {
@@ -1559,7 +1559,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["2891113e82441157"],
+    statementFingerprints: ["3fc62a639f2ce8a0d92595e2c9753ce1c6c7bb69dc9ae1e1dad6b5636e4c23ff"],
     entryIds: ["P16"],
   },
   {
@@ -1568,7 +1568,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["2c5be08c2e12307b"],
+    statementFingerprints: ["e01dfdb18d3cc1f122a7967a171469caa35c148bb8e74c8a4e6fb9ed6427fae6"],
     entryIds: ["P16"],
   },
   {
@@ -1577,7 +1577,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["1a6d3ddb208fed92"],
+    statementFingerprints: ["d335a5c55bdf559f696197b3d3b8e8fc1867edd4023d2d98877066d5873474da"],
     entryIds: ["P16"],
   },
   {
@@ -1586,7 +1586,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_leave_balances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["74669ff4e806bda8"],
+    statementFingerprints: ["2e3a7900280f83d0645926a51640eb74e80e014c798f0fee0cb242457780d919"],
     entryIds: ["P16"],
   },
   {
@@ -1595,7 +1595,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["48c3b26575286553"],
+    statementFingerprints: ["99d21981c5e24495e16931bdc9b23802733ff36fb8f6cf55f6e8339c0f344f3a"],
     entryIds: ["P16"],
   },
   {
@@ -1604,7 +1604,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "insert",
     occurrences: 1,
-    statementFingerprints: ["35181f086364ec79"],
+    statementFingerprints: ["c659dcad79756ab8828258bf43b5a952ea30f4617447de0ec227dd0a2d37f424"],
     entryIds: ["P16"],
   },
   {
@@ -1613,7 +1613,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["dedf2fc2ff33e600"],
+    statementFingerprints: ["6aa45b58e8af971ef71028d9595d8ae0b005ba04d4319cceed70e6a5a126d1b8"],
     entryIds: ["P16"],
   },
   {
@@ -1622,7 +1622,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["32f5e684d2556b7d"],
+    statementFingerprints: ["cae9d64086cb74eb29ee1247fa1a006413eb5813a513e6f8baa99e4281943d9f"],
     entryIds: ["P16"],
   },
   {
@@ -1631,7 +1631,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_instances",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["51ce9dceb11d22d3"],
+    statementFingerprints: ["4d2042649150595415d8dbc5335fa7c58d650771e57c072e9859b860ee7c9af4"],
     entryIds: ["P16"],
   },
   {
@@ -1640,7 +1640,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "approval_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["7f24be52bde574b7"],
+    statementFingerprints: ["ae0c0d4e6b0728150406d4b61eae909d5acb8f18ca65a027155c197b307379c0"],
     entryIds: ["P16"],
   },
   {
@@ -1649,7 +1649,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["48c3b26575286553"],
+    statementFingerprints: ["0359e38ab67893e3a21e71e342f6cfb5f55962550226d40cdd5301e2ed29aadc"],
     entryIds: ["P16"],
   },
   {
@@ -1658,7 +1658,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f1b00c996213acc3"],
+    statementFingerprints: ["3b365ff58d5077c72bac5a0d9d84e4f7ebd26f0735980d50a9b2694bbe9d170c"],
     entryIds: ["P16"],
   },
   {
@@ -1667,7 +1667,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_events",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["b0084cec519fc788"],
+    statementFingerprints: ["c1b8e7a4ee45793be2d1f6ca0ea066c83a55ee3271440f88e3d714ded03e59e8"],
     entryIds: ["P16"],
   },
   {
@@ -1676,7 +1676,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_requests",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f3309c89a526e1f1"],
+    statementFingerprints: ["bb8f4d889628de4be088345588e8ab4a8c866d77b08fe81221f47fe95c64fb1e"],
     entryIds: ["P16"],
   },
   {
@@ -1685,7 +1685,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_shift_assignments",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["f076d8dabd87dc30"],
+    statementFingerprints: ["c7cc8cd5cdd520ac4e5379e9fc26f84162faace7989016d65fabd0c3f5890b1e"],
     entryIds: ["P16"],
   },
   {
@@ -1694,7 +1694,7 @@ const APPROVED_SITE_IDENTITIES = Object.freeze([
     table: "attendance_records",
     verb: "delete",
     occurrences: 1,
-    statementFingerprints: ["6895fac5525b69c1"],
+    statementFingerprints: ["45195ea078abd758630aafeb3997a5881d89491db34cca8f27eeb416b39c3028"],
     entryIds: ["P16"],
   },
 ])
@@ -1724,6 +1724,14 @@ for (const row of APPROVED_SITE_IDENTITIES) {
   }
   if (!Number.isInteger(row.occurrences) || row.occurrences < 1) {
     throw new Error(`ATTENDANCE_W4C0_APPROVED_SITE_IDENTITY_BAD_MULTIPLICITY: ${siteIdentityLabel(row)}`)
+  }
+  if (
+    !Array.isArray(row.statementFingerprints)
+    || row.statementFingerprints.length !== row.occurrences
+    || row.statementFingerprints.some((value) => !/^[0-9a-f]{64}$/.test(value))
+    || row.statementFingerprints.some((value, index, values) => index > 0 && values[index - 1] > value)
+  ) {
+    throw new Error(`ATTENDANCE_W4C0_APPROVED_SITE_IDENTITY_BAD_FINGERPRINT_MULTISET: ${siteIdentityLabel(row)}`)
   }
   const hasEntryIds = Array.isArray(row.entryIds) && row.entryIds.length > 0
   const hasGenericReason = typeof row.genericSharedReason === 'string' && row.genericSharedReason.length > 0

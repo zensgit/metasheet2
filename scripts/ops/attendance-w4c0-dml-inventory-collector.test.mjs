@@ -701,18 +701,16 @@ test('frozen must-red: deleting the WHERE from an approved tenant-scoped UPDATE 
   assert.notDeepEqual(drift.pinned, drift.observed, 'the pinned and observed fingerprints must actually differ')
 })
 
-test('statement fingerprint: normalisation is exactly whitespace + case, so formatting does not churn the gate', () => {
+test('statement fingerprint hashes exact masked text so value edits cannot hide behind normalisation', () => {
   const withWhere = "UPDATE attendance_records SET status = $1 WHERE org_id = $2 AND id = $3"
   const reformatted = "UPDATE attendance_records\n   SET status = $1\n WHERE org_id = $2\n   AND id = $3"
   const cased = "update attendance_records set status = $1 where org_id = $2 and id = $3"
 
-  // Must NOT churn: reformatting and case are not semantic changes, and a gate that reds on them
-  // gets re-pinned reflexively until nobody reads the diff.
-  assert.equal(statementFingerprintOf(reformatted), statementFingerprintOf(withWhere), 'reindentation must not move the fingerprint')
-  assert.equal(statementFingerprintOf(cased), statementFingerprintOf(withWhere), 'keyword case must not move the fingerprint')
-
-  // Must red: each of these is a different statement.
+  // Exact text is intentionally fail-closed. A parser-free normaliser cannot distinguish harmless
+  // keyword formatting from case/whitespace inside a quoted value, where both can change data.
   for (const [label, variant] of [
+    ['layout changed', reformatted],
+    ['keyword case changed', cased],
     ['WHERE deleted', 'UPDATE attendance_records SET status = $1'],
     ['WHERE weakened', 'UPDATE attendance_records SET status = $1 WHERE id = $3'],
     ['SET list extended', 'UPDATE attendance_records SET status = $1, approved = TRUE WHERE org_id = $2 AND id = $3'],
@@ -721,6 +719,17 @@ test('statement fingerprint: normalisation is exactly whitespace + case, so form
   ]) {
     assert.notEqual(statementFingerprintOf(variant), statementFingerprintOf(withWhere), `${label} must move the fingerprint`)
   }
+  assert.notEqual(
+    statementFingerprintOf("UPDATE attendance_records SET status = 'Active' WHERE org_id = $2"),
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active' WHERE org_id = $2"),
+    'case inside a quoted value is data, not keyword formatting',
+  )
+  assert.notEqual(
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active  user' WHERE org_id = $2"),
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active user' WHERE org_id = $2"),
+    'whitespace inside a quoted value is data and must not collapse',
+  )
+  assert.match(statementFingerprintOf(withWhere), /^[0-9a-f]{64}$/, 'the full SHA-256 must be retained')
 
   // The multiset property, asserted directly: 11 of the 19 repeated identities have occurrences
   // whose statements DIFFER, so comparing as a set would silently lose an occurrence.
@@ -737,6 +746,66 @@ test('statement fingerprint: normalisation is exactly whitespace + case, so form
   assert.ok(
     withDifferingStatements.length > 0,
     'at least one repeated identity must have occurrences with DIFFERENT statements, or the multiset-vs-set distinction would be untested',
+  )
+})
+
+test('statement fingerprint spans the complete outer SQL template across nested template expressions', () => {
+  const scoped = "const q = `UPDATE attendance_records SET payload = ${cond ? `a` : `b`} WHERE org_id = $1`"
+  const unscoped = "const q = `UPDATE attendance_records SET payload = ${cond ? `a` : `b`}`"
+  const scopedSite = scanFileForDmlSites('nested-template-probe.ts', scoped)[0]
+  const unscopedSite = scanFileForDmlSites('nested-template-probe.ts', unscoped)[0]
+
+  assert.match(
+    scopedSite.statementText,
+    /WHERE org_id = \$1/,
+    'the outer statement span must continue after a nested template expression',
+  )
+  assert.notEqual(
+    scopedSite.statementFingerprint,
+    unscopedSite.statementFingerprint,
+    'deleting tenant scope after a nested template expression must move the fingerprint',
+  )
+
+  const innerSql = "const q = `SELECT ${cond ? `UPDATE attendance_records SET status = $1 WHERE org_id = $2` : `SELECT 1`}`"
+  const innerSite = scanFileForDmlSites('nested-template-probe.ts', innerSql)[0]
+  assert.equal(
+    innerSite.statementText,
+    'UPDATE attendance_records SET status = $1 WHERE org_id = $2',
+    'SQL inside a nested template must use the innermost containing literal',
+  )
+
+  for (const [label, expression] of [
+    ['double-quoted string', '${"foo`bar"}'],
+    ['regular expression', '${/foo`bar/.test(value)}'],
+  ]) {
+    const withScope = `const q = \`${expression} UPDATE attendance_records SET status = $1 WHERE org_id = $2\``
+    const withoutScope = `const q = \`${expression} UPDATE attendance_records SET status = $1\``
+    const withScopeSite = scanFileForDmlSites('nested-template-probe.ts', withScope)[0]
+    const withoutScopeSite = scanFileForDmlSites('nested-template-probe.ts', withoutScope)[0]
+    assert.equal(
+      withScopeSite.statementText,
+      `${expression} UPDATE attendance_records SET status = $1 WHERE org_id = $2`,
+      `${label}: an unrelated backtick inside the expression must not become a literal boundary`,
+    )
+    assert.notEqual(
+      withScopeSite.statementFingerprint,
+      withoutScopeSite.statementFingerprint,
+      `${label}: deleting scope after the expression must move the outer statement fingerprint`,
+    )
+  }
+})
+
+test('statement fingerprint ignores regex backticks after a control-flow condition', () => {
+  const source = [
+    'if (ok) /foo`bar/.test(value)',
+    'const q = `UPDATE attendance_records SET status = $1 WHERE org_id = $2`',
+  ].join('\n')
+  const site = scanFileForDmlSites('control-regex-probe.ts', source)[0]
+
+  assert.equal(
+    site.statementText,
+    'UPDATE attendance_records SET status = $1 WHERE org_id = $2',
+    'a regex statement after an if condition must not become a template boundary',
   )
 })
 
@@ -801,7 +870,7 @@ test('every approved identity carries a well-formed statement fingerprint multis
       `${siteIdentityLabel(row)}: one fingerprint per pinned occurrence`,
     )
     for (const fp of row.statementFingerprints) {
-      assert.match(fp, /^[0-9a-f]{16}$/, `${siteIdentityLabel(row)}: fingerprint must be 16 lowercase hex chars`)
+      assert.match(fp, /^[0-9a-f]{64}$/, `${siteIdentityLabel(row)}: fingerprint must be a full lowercase SHA-256`)
     }
     assert.deepEqual(
       row.statementFingerprints,
@@ -1366,6 +1435,24 @@ function findWorkflowStepById(workflowText, stepId) {
   return { found: true, idCount: 1, job, keys: keys.sort(), text: block.join('\n'), start, end }
 }
 
+const COLLECTOR_EXPECTED_RUN_COMMANDS = Object.freeze([
+  'git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \\',
+  'git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+  COLLECTOR_STEP_COMMAND,
+])
+
+function collectorStepRunsExactCommand(step) {
+  const lines = step.text.split('\n')
+  const runIndex = lines.findIndex((line) => /^ {8}run:\s*\|\s*$/.test(line))
+  if (runIndex < 0) return false
+  const commands = lines
+    .slice(runIndex + 1)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+  return commands.length === COLLECTOR_EXPECTED_RUN_COMMANDS.length
+    && commands.every((line, index) => line === COLLECTOR_EXPECTED_RUN_COMMANDS[index])
+}
+
 test('this collector test file has an explicit, un-disableable CI execution step', () => {
   const workflow = readWorkflow()
 
@@ -1381,7 +1468,7 @@ test('this collector test file has an explicit, un-disableable CI execution step
   assert.equal(step.found, true, `exactly one workflow step must carry id: ${COLLECTOR_STEP_ID} (found ${step.idCount})`)
   assert.equal(step.job, 'test', 'the step must live in the `test` job — that is the one feeding the required `test (20.x)` context; the same step in another job would satisfy a whole-file substring check and gate nothing')
   assert.ok(
-    step.text.includes(COLLECTOR_STEP_COMMAND),
+    collectorStepRunsExactCommand(step),
     `the step must run the exact command \`${COLLECTOR_STEP_COMMAND}\`; a renamed or re-pointed command would leave the step name intact and run something else`,
   )
   assert.deepEqual(
@@ -1406,7 +1493,8 @@ test('CI wiring gate: the step analyzer reds on every way of disabling, moving, 
     `        id: ${COLLECTOR_STEP_ID}`,
     ...(extraKeys ? [extraKeys] : []),
     '        run: |',
-    '          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+    '          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \\',
+    '            git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
     `          ${COLLECTOR_STEP_COMMAND}`,
     '      - name: Run linting',
     '        run: pnpm lint',
@@ -1415,7 +1503,7 @@ test('CI wiring gate: the step analyzer reds on every way of disabling, moving, 
 
   const baseline = findWorkflowStepById(step(), COLLECTOR_STEP_ID)
   assert.deepEqual(
-    [baseline.found, baseline.job, baseline.keys, baseline.text.includes(COLLECTOR_STEP_COMMAND)],
+    [baseline.found, baseline.job, baseline.keys, collectorStepRunsExactCommand(baseline)],
     [true, 'test', ['id', 'name', 'run'], true],
     'positive control: the analyzer must accept a correctly wired step, or every red below proves nothing',
   )
@@ -1439,7 +1527,29 @@ test('CI wiring gate: the step analyzer reds on every way of disabling, moving, 
 
   // Command re-pointed while the step name and id stay intact.
   const repointed = step().replace(COLLECTOR_STEP_COMMAND, 'node --test scripts/ops/some-other.test.mjs')
-  assert.equal(findWorkflowStepById(repointed, COLLECTOR_STEP_ID).text.includes(COLLECTOR_STEP_COMMAND), false)
+  assert.equal(collectorStepRunsExactCommand(findWorkflowStepById(repointed, COLLECTOR_STEP_ID)), false)
+
+  for (const [label, replacement] of [
+    ['short-circuited', `true || ${COLLECTOR_STEP_COMMAND}`],
+    ['failure swallowed', `${COLLECTOR_STEP_COMMAND} || true`],
+    ['commented out', `# ${COLLECTOR_STEP_COMMAND}`],
+    ['duplicated', `${COLLECTOR_STEP_COMMAND}\n          ${COLLECTOR_STEP_COMMAND}`],
+    ['preceded by an early exit', `exit 0\n          ${COLLECTOR_STEP_COMMAND}`],
+    ['moved into the fetch fallback', `# ${COLLECTOR_STEP_COMMAND}`],
+  ]) {
+    const mutated = step().replace(COLLECTOR_STEP_COMMAND, replacement)
+    const attack = label === 'moved into the fetch fallback'
+      ? mutated.replace(
+          'git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+          COLLECTOR_STEP_COMMAND,
+        )
+      : mutated
+    assert.equal(
+      collectorStepRunsExactCommand(findWorkflowStepById(attack, COLLECTOR_STEP_ID)),
+      false,
+      `${label}: command presence must not be mistaken for execution`,
+    )
+  }
 
   // Id removed, and id duplicated — both must fail to resolve to exactly one step.
   assert.equal(findWorkflowStepById(step().replace(`        id: ${COLLECTOR_STEP_ID}\n`, ''), COLLECTOR_STEP_ID).found, false)
@@ -2210,6 +2320,8 @@ test('W4C-3c scanner: every target of a TRUNCATE / DROP TABLE list becomes its o
     ['async function q2() { await db.query(`TRUNCATE TABLE unrelated_rows, attendance_records, attendance_events`) }', 'truncate', ['unrelated_rows', 'attendance_records', 'attendance_events']],
     ['async function q3() { await db.query(`DROP TABLE IF EXISTS staging_a, attendance_records`) }', 'staging_drop', ['staging_a', 'attendance_records']],
     ['async function q4() { await db.query(`TRUNCATE ONLY public.attendance_records, public.attendance_events`) }', 'truncate', ['attendance_records', 'attendance_events']],
+    ['async function q5() { await db.query(`TRUNCATE "SET", attendance_records`) }', 'truncate', ['SET', 'attendance_records']],
+    ['async function q6() { await db.query(`TRUNCATE SET, attendance_records`) }', 'truncate', ['attendance_records']],
   ]
   for (const [source, verb, tables] of lists) {
     const sites = scanFileForDmlSites('probe.cjs', source)
@@ -2222,12 +2334,12 @@ test('W4C-3c scanner: every target of a TRUNCATE / DROP TABLE list becomes its o
   // verb's target is a column list, a SET list, or DDL — never another target.
   const notATargetList = scanFileForDmlSites(
     'probe.cjs',
-    'async function q5() { await db.query(`ALTER TABLE attendance_records ADD CONSTRAINT a_ck CHECK (x > 0), ADD CONSTRAINT b_ck CHECK (y > 0)`) }',
+    'async function q7() { await db.query(`ALTER TABLE attendance_records ADD CONSTRAINT a_ck CHECK (x > 0), ADD CONSTRAINT b_ck CHECK (y > 0)`) }',
   )
   assert.deepEqual(notATargetList.map((s) => s.table), ['attendance_records'], 'an ALTER TABLE constraint list must not mint extra table sites')
   const insertColumns = scanFileForDmlSites(
     'probe.cjs',
-    'async function q6() { await db.query(`INSERT INTO attendance_records (id, org_id) VALUES ($1, $2)`) }',
+    'async function q8() { await db.query(`INSERT INTO attendance_records (id, org_id) VALUES ($1, $2)`) }',
   )
   assert.deepEqual(insertColumns.map((s) => s.table), ['attendance_records'], 'an INSERT column list must not mint extra table sites')
 })

@@ -698,46 +698,133 @@ function hasLiveDmlOnTable(content, verb, table) {
 // (which is about two different call sites colliding on one symbol name): the file, symbol, table
 // and verb here are all the legitimate ones, and only the meaning of the SQL changed.
 //
-// The fingerprint closes that. It is deliberately a NORMALISED TEXT hash, not a parse:
-//   - whitespace runs collapse to one space, so reformatting/indentation does NOT churn the gate
-//     (measured: the same statement re-indented across six lines fingerprints identically);
-//   - comments are already blanked by the masker, so a comment edit does not churn it either;
-//   - case is folded, consistent with the identifier rule above;
-//   - everything else is significant — a changed WHERE, a changed SET list, a changed target
-//     column list, and a changed `${dynamicTable}` expression all move the hash (each measured).
-// A parser would be narrower and would need a dialect; this is the fail-closed direction: it can
-// only red MORE often than a semantic diff would, and every red is a real edit to a statement
-// somebody once approved.
-function normalizeStatementText(text) {
-  return String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
-}
-
+// The fingerprint closes that. It deliberately hashes the exact masked statement text rather than
+// attempting SQL normalisation: keyword case and layout can be non-semantic, but case or whitespace
+// inside a quoted value can be data. Folding the whole string made those two classes
+// indistinguishable and allowed a real value edit to keep the same fingerprint. Exact text is the
+// fail-closed direction: formatting changes require review, while statement changes cannot hide
+// behind a lossy normaliser. Comments are already blanked by the masker before this function runs.
 function statementFingerprintOf(text) {
-  return sha256Hex(normalizeStatementText(text)).slice(0, 16)
+  return sha256Hex(String(text ?? ''))
 }
 
-// One pass per file producing the [start, end) content ranges of every JS string/template literal,
-// so the per-site lookup is a scan of a small sorted array rather than a fresh O(file) walk each
-// time. Same tokenisation rule as sqlLiteralContainingIndex, which it replaces for bulk use.
+// One pass per file producing the [start, end) content ranges of every JS string/template literal.
+// The legacy quote-pairing ranges preserve the approved fingerprint domain. Complete template
+// ranges are added separately so `${...}` expressions containing nested templates cannot truncate
+// the outer SQL statement, while unrelated string/regex syntax keeps its existing interpretation.
+const CONTROL_STATEMENT_WITH_PAREN = new Set(['if', 'for', 'while', 'with'])
+
+function controlStatementParenStartsAt(src, index) {
+  let cursor = index - 1
+  while (cursor >= 0 && /\s/.test(src[cursor])) cursor -= 1
+  const end = cursor + 1
+  while (cursor >= 0 && /[A-Za-z0-9_$]/.test(src[cursor])) cursor -= 1
+  const start = cursor + 1
+  if (start === end || src[cursor] === '.' || src[cursor] === '?') return false
+  return CONTROL_STATEMENT_WITH_PAREN.has(src.slice(start, end))
+}
+
+function regexLiteralMayStartAt(src, index, controlParenEnds) {
+  let cursor = index - 1
+  while (cursor >= 0 && /\s/.test(src[cursor])) cursor -= 1
+  if (cursor < 0) return true
+  if ('([{:;,=!?&|+-*%^~<>'.includes(src[cursor])) return true
+  if (src[cursor] === ')' && controlParenEnds.has(cursor)) return true
+  const prefix = src.slice(0, cursor + 1)
+  const word = prefix.match(/([A-Za-z_$][A-Za-z0-9_$]*)$/)?.[1]
+  return new Set(['return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'yield', 'await']).has(word)
+}
+
 function sqlLiteralRanges(content) {
   const src = String(content ?? '')
   const ranges = []
-  let quote = null
-  let start = -1
-  let escaped = false
+  const stack = [{ mode: 'code' }]
+  const controlParenStack = []
+  const controlParenEnds = new Set()
   for (let i = 0; i < src.length; i += 1) {
     const ch = src[i]
-    if (quote !== null) {
-      if (escaped) { escaped = false; continue }
-      if (ch === '\\') { escaped = true; continue }
-      if (ch === quote) {
-        ranges.push([start + 1, i])
-        quote = null
-        start = -1
+    const next = src[i + 1]
+    const frame = stack[stack.length - 1]
+
+    if (frame.mode === 'code' || frame.mode === 'template_expr') {
+      if (ch === '(') {
+        controlParenStack.push(controlStatementParenStartsAt(src, i))
+        continue
+      }
+      if (ch === ')') {
+        if (controlParenStack.pop() === true) controlParenEnds.add(i)
+        continue
+      }
+      if (ch === '/' && next !== '/' && next !== '*' && regexLiteralMayStartAt(src, i, controlParenEnds)) {
+        stack.push({ mode: 'regex', inCharacterClass: false })
+        continue
+      }
+      if (ch === "'") {
+        stack.push({ mode: 'squote', start: i })
+        continue
+      }
+      if (ch === '"') {
+        stack.push({ mode: 'dquote', start: i })
+        continue
+      }
+      if (ch === '`') {
+        stack.push({ mode: 'template', start: i })
+        continue
+      }
+      if (frame.mode === 'template_expr' && ch === '{') {
+        frame.braceDepth += 1
+        continue
+      }
+      if (frame.mode === 'template_expr' && ch === '}') {
+        if (frame.braceDepth > 0) frame.braceDepth -= 1
+        else stack.pop()
       }
       continue
     }
-    if (ch === '`' || ch === "'" || ch === '"') { quote = ch; start = i }
+
+    if (frame.mode === 'template') {
+      if (ch === '\\' && i + 1 < src.length) {
+        i += 1
+        continue
+      }
+      if (ch === '`') {
+        ranges.push([frame.start + 1, i, 'template'])
+        stack.pop()
+        continue
+      }
+      if (ch === '$' && next === '{') {
+        stack.push({ mode: 'template_expr', braceDepth: 0 })
+        i += 1
+      }
+      continue
+    }
+
+    if (frame.mode === 'regex') {
+      if (ch === '\\' && i + 1 < src.length) {
+        i += 1
+        continue
+      }
+      if (ch === '[') {
+        frame.inCharacterClass = true
+        continue
+      }
+      if (ch === ']' && frame.inCharacterClass) {
+        frame.inCharacterClass = false
+        continue
+      }
+      if (ch === '/' && !frame.inCharacterClass) stack.pop()
+      continue
+    }
+
+    const closingQuote = frame.mode === 'squote' ? "'" : '"'
+    if (ch === '\\' && i + 1 < src.length) {
+      i += 1
+      continue
+    }
+    if (ch === closingQuote) {
+      ranges.push([frame.start + 1, i, 'literal'])
+      stack.pop()
+    }
   }
   return ranges
 }
@@ -749,9 +836,14 @@ function sqlLiteralRanges(content) {
 // one site's fingerprint cover the whole file.
 const STATEMENT_SLICE_LIMIT = 4000
 function statementTextAt(masked, index, ranges) {
+  let containingRange = null
   for (const [start, end] of ranges) {
-    if (start <= index && index < end) return masked.slice(start, end)
+    if (start > index || index >= end) continue
+    if (containingRange === null || end - start < containingRange[1] - containingRange[0]) {
+      containingRange = [start, end]
+    }
   }
+  if (containingRange !== null) return masked.slice(containingRange[0], containingRange[1])
   const semicolon = masked.indexOf(';', index)
   const end = semicolon === -1 ? Math.min(masked.length, index + STATEMENT_SLICE_LIMIT) : semicolon
   return masked.slice(index, Math.min(end, index + STATEMENT_SLICE_LIMIT))
@@ -771,8 +863,9 @@ function scanFileForDmlSites(relPath, content) {
     // unquoted identifier, verbatim for a double-quoted one. Everything downstream — ownership,
     // bucket classification, the debt key and the site identity — reads this resolved name, so
     // there is one spelling of a table per relation and no second code path to keep in step.
-    const { table } = resolveTableIdentifier(m[2])
-    if (SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())) continue
+    const { table, quoted } = resolveTableIdentifier(m[2])
+    const firstTargetIsUnquotedReserved = !quoted && SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())
+    if (firstTargetIsUnquotedReserved && !MULTI_TARGET_VERBS.has(verb)) continue
     // §8.4 scans "staging-table CREATE/DROP/ALTER" — i.e. runtime staging-table lifecycle
     // (e.g. a temp table created inside an import-commit code path), not ordinary schema
     // migration DDL. Migration files legitimately reshape tables on every release; treating
@@ -790,15 +883,17 @@ function scanFileForDmlSites(relPath, content) {
     // actually contains that site's own table and verb.
     const statementText = statementTextAt(masked, m.index, literalRanges)
     const statementFingerprint = statementFingerprintOf(statementText)
-    sites.push({
-      relPath,
-      line: lineIndex + 1,
-      verb,
-      table,
-      enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
-      statementFingerprint,
-      statementText,
-    })
+    if (!firstTargetIsUnquotedReserved) {
+      sites.push({
+        relPath,
+        line: lineIndex + 1,
+        verb,
+        table,
+        enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
+        statementFingerprint,
+        statementText,
+      })
+    }
 
     // Remaining targets of a `TRUNCATE a, b, c` / `DROP TABLE a, b` list. Each becomes its own
     // site at its own line, so a second target can neither hide behind the first nor collapse
@@ -808,8 +903,10 @@ function scanFileForDmlSites(relPath, content) {
       TABLE_LIST_CONTINUATION.lastIndex = m.index + m[0].length
       let continuation
       while ((continuation = TABLE_LIST_CONTINUATION.exec(masked)) !== null) {
-        const { table: nextTable } = resolveTableIdentifier(continuation[1])
-        if (SQL_RESERVED_NON_TABLE_WORDS.has(nextTable.toUpperCase())) break
+        const { table: nextTable, quoted: nextTableQuoted } = resolveTableIdentifier(continuation[1])
+        // A quoted reserved word is a valid identifier. An unquoted one is not a valid target, but
+        // it still must not hide a later target in the same list, so skip it and keep scanning.
+        if (!nextTableQuoted && SQL_RESERVED_NON_TABLE_WORDS.has(nextTable.toUpperCase())) continue
         const nextLineIndex = lineIndexAt(masked, continuation.index)
         sites.push({
           relPath,
@@ -1209,7 +1306,6 @@ module.exports = {
   maskCommentsForDmlScan,
   resolveTableIdentifier,
   statementFingerprintOf,
-  normalizeStatementText,
   statementTextAt,
   sqlLiteralRanges,
   hasLiveDmlOnTable,
