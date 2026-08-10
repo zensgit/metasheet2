@@ -123,9 +123,20 @@ require_compose_v2() {
   fail "docker compose v2 plugin is required"
 }
 
+resolve_live_backend_image_pin() {
+  local live_image
+  live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  if [[ "$live_image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend:([0-9a-f]{40})$ ]]; then
+    printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
 compose_staging_cmd() {
   # compose_staging_cmd [override_file_or_empty] <compose args...>
   local override_arg="${1:-}"
+  local image_pin image_owner image_tag
   shift || true
   local -a files=(-f "$STAGING_COMPOSE_FILE")
   if [[ -f "$ATTENDANCE_OVERRIDE_FILE" ]]; then
@@ -136,7 +147,12 @@ compose_staging_cmd() {
   elif [[ -f "$LIFECYCLE_OVERRIDE_FILE" ]]; then
     files+=(-f "$LIFECYCLE_OVERRIDE_FILE")
   fi
-  (cd "$STAGING_DIR" && docker compose "${files[@]}" "$@")
+  if ! image_pin="$(resolve_live_backend_image_pin)"; then
+    echo "[lifecycle-canary][error] running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing compose" >&2
+    return 1
+  fi
+  read -r image_owner image_tag <<< "$image_pin"
+  (cd "$STAGING_DIR" && IMAGE_OWNER="$image_owner" IMAGE_TAG="$image_tag" docker compose "${files[@]}" "$@")
 }
 
 require_sha() {
@@ -448,12 +464,7 @@ write_lifecycle_override() {
     echo "      ${FLAG_DEPROVISION}: \"${deprov_val}\""
   } > "$override_tmp"
 
-  local -a val_files=(-f "$STAGING_COMPOSE_FILE")
-  if [[ -f "$ATTENDANCE_OVERRIDE_FILE" ]]; then
-    val_files+=(-f "$ATTENDANCE_OVERRIDE_FILE")
-  fi
-  val_files+=(-f "$override_tmp")
-  if ! (cd "$STAGING_DIR" && docker compose "${val_files[@]}" config) >/dev/null 2>&1; then
+  if ! compose_staging_cmd "$override_tmp" config >/dev/null 2>&1; then
     rm -f "$override_tmp"
     fail "candidate lifecycle override failed 'docker compose config' validation; kept previous override at ${LIFECYCLE_OVERRIDE_FILE}"
   fi
