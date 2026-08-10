@@ -200,15 +200,18 @@ locates `## 7.` at `:538` and `## 8.` at `:619` (`### 7.1` `:540`, `7.2`
 `:566`, `7.3` `:588`, `7.4` `:594`, `7.5` `:609`); `sed -n '538,618p' <file>`
 then counted by hand per subsection — 12 / 15 / 1 prose clause / 8 / 7.)
 
-**Exactly three permitted verdicts, per owner ruling** — not the two-verdict
+**Exactly four permitted verdicts, per owner ruling** — not the two-verdict
 D/R shape an earlier round of this table borrowed from parent §10 item 1's
 own shape, and not the five-value D/PARTIAL/UNCERTAIN/EMPTY/R vocabulary a
 later-but-still-earlier round used instead:
 
-- **OPEN** — not substantiated this round to the SATISFIED bar below; left
-  open, not guessed. Partial or suggestive evidence found this round is kept
-  in the notes column so a later round does not re-search from zero, but it
-  does not change the verdict.
+- **OPEN** — the requirement is known to be unmet, or the owner's ruling
+  explicitly requires it to remain open until every named leg is evidenced.
+- **UNRESOLVED** — this round did not establish whether the requirement is
+  met: mapping was incomplete, evidence was partial, or the relevant surface
+  was not searched. Partial or suggestive evidence is kept in the notes so a
+  later round does not re-search from zero; it is not silently converted into
+  a claim that the implementation is absent.
 - **SATISFIED** — requires both a `main` merge SHA (the commit that landed
   the discharging test, not merely a verification-anchor SHA such as
   `origin/main@d78b27d3`) **and** the specific test/evidence that discharges
@@ -236,8 +239,9 @@ commit adding that path, re-verified 2026-08-10 against
 `origin/main@d78b27d3`). A row whose only available evidence is a
 verification-anchor SHA, a partial/half match, an uncertain match, or a
 non-suite citation (e.g. a QA-handoff narrative rather than a titled test)
-is left **OPEN** under this bar, even where an earlier round of this table
-called it discharged. A file-creation SHA is not automatically a
+is **UNRESOLVED** under this bar, even where an earlier round of this table
+called it discharged. A row is **OPEN** only when the unmet requirement is
+established or an owner rule explicitly keeps it open. A file-creation SHA is not automatically a
 title-landing SHA — several of these six files grew substantially after
 their creation commit (`attendance-shift-segments-writer-matrix.db.test.ts`
 1258→1997 lines; `w4c1-segment-calculator.test.ts` 1211→1317;
@@ -265,8 +269,8 @@ needed a wording correction from this check — see its own cell.
 | DB-07 | flag-OFF 422 + zero-write evidence for fixed-schedule apply/rebuild, automatic matching, draft/active assignment, rotation rule/generated assignment, shift-swap create/final approval, schedule-dispatch create/final approval | SATISFIED | `attendance-shift-segments-writer-matrix.db.test.ts`, nine legs covering every named surface — not a uniform title (corrected this round: an earlier round's "nine `matrix: ... typed 422 with zero writes` legs" implied one shared title pattern for all nine, which overstates it): seven carry that literal title (current-`main` lines `~734, 789, 819, 913, 946, 966, 1578`) and two carry a distinct but substantively equivalent title, `matrix: shift-swap/schedule-dispatch final approval fails closed after the source/target shift became multi-segment` (current-`main` lines `~1498, 1541`; both titles independently re-confirmed present at the cited creation SHA too, at their then-lower line numbers `765` and `804` — `git show c5f08aecd5732d70b616561398d8456240f62486:<file> \| grep -c "final approval fails closed"` → 2), each asserting a 422 + typed guard code + a zero-incremental-write count in its body — same fail-closed/zero-write substance, different wording. Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 | DB-08 | existing-reference delete 409 + zero writes per durable blocker; rejected/cancelled/history fixtures prove non-blocking evidence intact + redacted UUID | SATISFIED | same file, "delete: typed 409 with zero writes for every durable blocker class" (`~L1642`), "delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID" (`~L1722`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 | DB-09 | concurrent shift delete + reference insertion cannot cascade-delete a newly created reference | SATISFIED | same file, "concurrency: a reference insert racing a delete is serialized by the shared lock protocol" (`~L1892`). Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
-| DB-10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | OPEN | Second half only found: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — no matching test title found this round; not guessed. Below the SATISFIED bar (half the check is unevidenced). |
-| DB-11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | OPEN | Schema-rollback-forbidden half only found: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — no matching test title found this round. Below the SATISFIED bar. |
+| DB-10 | legacy-mode transition with active multi-segment refs rejected, prior mode unchanged; injected inconsistent state fails closed without legacy-envelope calc | UNRESOLVED | Second half only found: same file, "fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope" (`~L526`), "...before a punch can calculate..." (`~L575`). First half (rejecting a legacy-mode transition specifically while active multi-segment refs exist) — no matching test title found this round; not guessed. Below the SATISFIED bar (half the check is unevidenced), but not established absent. |
+| DB-11 | runtime rollback leaves legacy envelope + segments unchanged; destructive schema rollback forbidden once segment data exists | UNRESOLVED | Schema-rollback-forbidden half only found: `attendance-shift-segments-migration.db.test.ts` "down(): aborts BEFORE any DDL when segment rows exist; drops only an empty table" (`~L224`). Runtime (non-schema, org-posture) rollback leaving both envelope and segments unchanged — no matching test title found this round. Below the SATISFIED bar, but not established absent. |
 | DB-12 | migration `down()` aborts without DDL when rows exist and is replay-safe on an empty/fresh database | SATISFIED | same file, `~L224` — checked against the **test body**, not just its title, since DB-12 has two clauses and DB-11's own OPEN verdict came from a half-covered bullet at this exact test: line ~229 asserts the abort-before-DDL half; line ~243 (`await segmentsDown(testDb)` on a schema that already has no table, asserted not to throw, with the preceding comment "down() on a schema that never had the table is a safe no-op") is the replay-safe-on-empty/fresh-database half — both clauses present in one test, so DB-12 (a distinct parent bullet from DB-11) is fully covered even though DB-11's own bullet (envelope/segment-unchanged on a *runtime*, non-schema rollback) is not touched by this test at all. Same test as DB-11's schema-rollback-forbidden half, discharging DB-12 in full and DB-11 only in part — the two rows are not exempted from the same rule, they cover disjoint clauses of the same test. Merge SHA `c5f08aecd5732d70b616561398d8456240f62486`. |
 
 **§7.2 Calculation (CALC-01..CALC-15)**
@@ -282,12 +286,12 @@ needed a wording correction from this check — see its own cell.
 | CALC-07 | approved overtime extends only the named window | SATISFIED | same file, "bounded approved overtime WITH a punch extends payable time, clipped to the exact approved interval" (`~L926`). Merge SHA `aebac4f8bef344b3ff3443ee045439c789a569a1`. |
 | CALC-08 | next-day shift overlap → ratified precedence/ambiguity | SATISFIED | `attendance-work-date-resolver-w2.db.test.ts`: "open previous-night record wins over current-day containing shift at boundary" (`~L192`), "same date multiple published shifts with overlapping windows → ambiguous (no row-order)" (`~L219`). Merge SHA `f1e390977e57dc1239e312c7423f3cda2d1f055f` (#4567, 2026-07-24). |
 | CALC-09 | flex late-arrive/late-leave and early-arrive/early-leave | SATISFIED | `w5-flex-segment-calculator.test.ts`: "resolves late-arrive / late-leave flex expectation and applies grace after" (`~L275`), "resolves early-arrive / early-leave flex expectation" (`~L355`). Merge SHA `7da5d9e55b0f7c9b0a6ca471d38c3aa0115037ab` (#4748, 2026-08-04). |
-| CALC-10 | core-hours violation | OPEN | same flex file, "fail-closes corrupt frozen core policy as review_required/input_schema_invalid..." (`~L193, 212`), "runs authoring-valid core-hours flex without inventing a core reasonCode" (`~L410`) — plausible core-hours coverage, but no test title uses the word "violation"; below the SATISFIED bar. |
-| CALC-11 | DST gap/fold and two non-UTC timezones | OPEN | DST half found: `w4c1-segment-calculator.test.ts` describe block `~L752-845` — gap (`~L762`), fold-start (`~L779`), fold-end (`~L801`), shared-fold (`~L828`), invalid timezone (`~L845`). "Two non-UTC timezones" specifically — no test title distinguishes two vs. one non-UTC zone; half unevidenced. |
-| CALC-12 | group switch at the effective boundary | OPEN | Not found this round in the files checked (`w4c1-segment-calculator.test.ts`, `attendance-calculation-group-membership-w1.db.test.ts`). Not guessed. |
-| CALC-13 | historical record snapshot unchanged after configuration edits | OPEN | QA handoff G4 pattern, already cited at this document's §3.1 "Frozen evidence immutability" row (post-freeze policy edits do not move stored bytes; trigger rejection `W4C0_IMMUTABLE`) — a narrative process reference, not a titled suite; structurally cannot produce the merge-SHA-plus-test pair the SATISFIED bar requires. |
-| CALC-14 | a backdated import/correction uses policy as-of the business work date, not the submission timestamp | OPEN | Not found this round. Not guessed. |
-| CALC-15 | a legacy daily result remains `envelope_legacy` and receives no fabricated segment rows | OPEN | `attendance-shift-segments-writer-matrix.db.test.ts` "creates a legacy-envelope shift with a persisted segment 0 (dual-write)" (`~L358`) — about shift creation, not a daily calculation *result* row; plausible but not a confirmed match. Below the SATISFIED bar. |
+| CALC-10 | core-hours violation | UNRESOLVED | same flex file, "fail-closes corrupt frozen core policy as review_required/input_schema_invalid..." (`~L193, 212`), "runs authoring-valid core-hours flex without inventing a core reasonCode" (`~L410`) — plausible core-hours coverage, but no test title uses the word "violation"; below the SATISFIED bar and not established absent. |
+| CALC-11 | DST gap/fold and two non-UTC timezones | UNRESOLVED | DST half found: `w4c1-segment-calculator.test.ts` describe block `~L752-845` — gap (`~L762`), fold-start (`~L779`), fold-end (`~L801`), shared-fold (`~L828`), invalid timezone (`~L845`). "Two non-UTC timezones" specifically — no test title distinguishes two vs. one non-UTC zone; half unevidenced. |
+| CALC-12 | group switch at the effective boundary | UNRESOLVED | Not found this round in the files checked (`w4c1-segment-calculator.test.ts`, `attendance-calculation-group-membership-w1.db.test.ts`). Not guessed or established absent. |
+| CALC-13 | historical record snapshot unchanged after configuration edits | UNRESOLVED | QA handoff G4 pattern, already cited at this document's §3.1 "Frozen evidence immutability" row (post-freeze policy edits do not move stored bytes; trigger rejection `W4C0_IMMUTABLE`) — a narrative process reference, not a titled suite; structurally cannot produce the merge-SHA-plus-test pair the SATISFIED bar requires. |
+| CALC-14 | a backdated import/correction uses policy as-of the business work date, not the submission timestamp | UNRESOLVED | Not found this round. Not guessed or established absent. |
+| CALC-15 | a legacy daily result remains `envelope_legacy` and receives no fabricated segment rows | UNRESOLVED | `attendance-shift-segments-writer-matrix.db.test.ts` "creates a legacy-envelope shift with a persisted segment 0 (dual-write)" (`~L358`) — about shift creation, not a daily calculation *result* row; plausible but not a confirmed match. Below the SATISFIED bar. |
 
 **EP-01 — Entry-point parity (composite, §7.3)**
 
@@ -306,18 +310,18 @@ individually evidenced; missing even one leaves the whole composite OPEN.
 | --- | --- | --- | --- |
 | EP-01 | Composite: the same work-date cases pass through all five named entrypoints (live punch, import, approved correction, approved overtime, recomputation) with matching results, AND replacing any one caller with calendar-date fallback makes that caller's parity test fail. | OPEN | No suite was found this round asserting the full cross-entrypoint parity property as a single mechanism, nor per-entrypoint parity legs for all five callers, nor the fallback-mutation leg. §7.4's MUT-07 ("recompute with current rather than frozen policy") is a related but distinct mutation on a different property; it does not discharge EP-01's own fallback-mutation leg. Zero of the six required legs (5 entrypoints + 1 fallback mutation) confirmed this round — composite stays OPEN by the owner's own rule, not merely by this round's search budget. |
 
-**§7.4 Mutation (MUT-01..MUT-08) — all OPEN this round.**
+**§7.4 Mutation (MUT-01..MUT-08) — all UNRESOLVED this round.**
 
 | ID | Named mutation | Verdict | Evidence |
 | --- | --- | --- | --- |
-| MUT-01 | reintroduce first-to-last work-minute arithmetic | OPEN | No titled test found this round. |
-| MUT-02 | remove one segment from the sum | OPEN | No titled test found this round. |
-| MUT-03 | select the first overlapping group | OPEN | No titled test found this round. |
-| MUT-04 | use grace as attribution tail | OPEN | No titled test found this round. |
-| MUT-05 | choose the previous work date on ambiguity | OPEN | No titled test found this round. |
-| MUT-06 | remove org scope from every new query | OPEN | No titled test found this round. |
-| MUT-07 | recompute with current rather than frozen policy | OPEN | No titled test found this round. |
-| MUT-08 | accept multi-segment flex in v1 | OPEN | No titled test found this round. |
+| MUT-01 | reintroduce first-to-last work-minute arithmetic | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-02 | remove one segment from the sum | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-03 | select the first overlapping group | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-04 | use grace as attribution tail | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-05 | choose the previous work date on ambiguity | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-06 | remove org scope from every new query | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-07 | recompute with current rather than frozen policy | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
+| MUT-08 | accept multi-segment flex in v1 | UNRESOLVED | No titled test found this round; the search was not sufficient to establish absence. |
 
 None of these eight named mutation legs were found as titled tests in the
 files checked this round. This is consistent with, though not proof of, Gate
@@ -327,31 +331,32 @@ above (`w4c1-segment-calculator.test.ts`) exercises the pure function, but
 that `SEGMENT_CALCULATION_IMPLEMENTED = false` keeps from ever running in
 production. Whether any of the eight already exist as untitled assertions
 inside a broader `it()` block is unverified — a title-level sweep cannot see
-that — so these stay OPEN rather than credited from the absence of a
+that — so these stay UNRESOLVED rather than credited from the absence of a
 negative finding.
 
-**§7.5 Frontend (FE-01..FE-07) — all OPEN this round**, exactly as this
+**§7.5 Frontend (FE-01..FE-07) — all UNRESOLVED this round**, exactly as this
 line's own review anticipated.
 
 | ID | Named check | Verdict | Evidence |
 | --- | --- | --- | --- |
-| FE-01 | editor keyboard and screen-reader flow | OPEN | Not searched this round (see note below). |
-| FE-02 | segment order and overlap validation | OPEN | Not searched this round. |
-| FE-03 | responsive 375, 768, and 1440 pixel views | OPEN | Not searched this round. |
-| FE-04 | source/effect labels in every group policy summary | OPEN | Not searched this round. |
-| FE-05 | no save request from preview-only controls | OPEN | Not searched this round. |
-| FE-06 | no raw ID fallback | OPEN | Not searched this round. |
-| FE-07 | route return preserves group and stage | OPEN | Not searched this round. |
+| FE-01 | editor keyboard and screen-reader flow | UNRESOLVED | Not searched this round (see note below). |
+| FE-02 | segment order and overlap validation | UNRESOLVED | Not searched this round. |
+| FE-03 | responsive 375, 768, and 1440 pixel views | UNRESOLVED | Not searched this round. |
+| FE-04 | source/effect labels in every group policy summary | UNRESOLVED | Not searched this round. |
+| FE-05 | no save request from preview-only controls | UNRESOLVED | Not searched this round. |
+| FE-06 | no raw ID fallback | UNRESOLVED | Not searched this round. |
+| FE-07 | route return preserves group and stage | UNRESOLVED | Not searched this round. |
 
 No `apps/web` test file was searched for these this round (out of this
 round's budget) — an absence-of-search, not a confirmed absence of tests;
-recorded as OPEN-and-unsearched rather than OPEN-and-confirmed-absent so a
-later round does not read this as "checked, found nothing."
+recorded as UNRESOLVED-and-unsearched rather than OPEN-and-confirmed-unmet so
+a later round does not read this as "checked, found nothing."
 
 **Verdict tally over the 43** (counted directly from the tables above, not
-estimated): **19 SATISFIED** (DB-01..09, DB-12 = 10; CALC-01..09 = 9); **24
-OPEN** (DB-10, DB-11 = 2; CALC-10..15 = 6; EP-01 = 1; MUT-01..08 = 8;
-FE-01..07 = 7); **0 REMOVED**. `19 + 24 + 0 = 43`. Zero REMOVED verdicts
+estimated): **19 SATISFIED** (DB-01..09, DB-12 = 10; CALC-01..09 = 9); **1
+OPEN** (EP-01, kept OPEN by the owner's explicit all-six-legs rule); **23
+UNRESOLVED** (DB-10, DB-11 = 2; CALC-10..15 = 6; MUT-01..08 = 8;
+FE-01..07 = 7); **0 REMOVED**. `19 + 1 + 23 + 0 = 43`. Zero REMOVED verdicts
 proposed this round, per the owner's own ruling that this table's job this
 round is to map mechanically, not to pre-clear any item as removed — that
 state requires an owner decision per ID which does not exist yet.
