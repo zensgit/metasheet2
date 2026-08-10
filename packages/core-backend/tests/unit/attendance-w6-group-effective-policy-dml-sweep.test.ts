@@ -141,13 +141,11 @@ describe('W6-R1 static leg — the swept DOMAIN is derived and complete', () => 
 
 /**
  * `canReadAttendanceDirectoryReadiness` (declared in the route file itself,
- * on the seed path) short-circuits on `isRbacAdmin(userId)` —
- * `rbac/service.ts`'s `isAdmin`, imported under that alias — BEFORE it ever
- * reaches the injected `readOnlyQuery`. That call runs on the shared pool,
- * not on this route's own read-only transaction handle, so this closure —
- * reached through the relative-import expansion the walker already
- * performs — is the mechanism that keeps it inside W6-R1's "no write
- * anywhere on the call path" claim.
+ * on the seed path) calls `isRbacAdmin(userId, runQuery)` —
+ * `rbac/service.ts`'s `isAdmin`, imported under that alias — so the W6 route
+ * binds the role read to its injected `readOnlyQuery`. This closure, reached
+ * through the relative-import expansion the walker already performs, is the
+ * static complement to the real-DB same-handle proof.
  *
  * `rbac/service.ts` is NOT in `REQUIRED_IN_DOMAIN` above — that list has no
  * entry for it at any granularity. The assertions in this block are what pin

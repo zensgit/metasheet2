@@ -6,8 +6,9 @@
  *     unauthenticated or under-permissioned caller and the handler. This
  *     suite proves it behaviourally (the response the mocked DB layer could
  *     only produce if the handler ran), not by reading the route's source.
- *  2. The membership check, the groupId validation, and every aggregate
- *     read share exactly one database transaction, opened once per request.
+ *  2. The RBAC admin-role check, membership check, groupId validation, and
+ *     every aggregate read share exactly one database transaction, opened
+ *     once per request.
  *     Proved by asserting the shared-transaction mock is invoked once and
  *     the pool-level mock is never invoked at all.
  *  3. In the REAL application (`src/index.ts`, not this file's router-only
@@ -51,7 +52,8 @@ vi.mock('../../src/rbac/service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/rbac/service')>()
   return {
     ...actual,
-    isAdmin: vi.fn(async () => false),
+    isAdmin: vi.fn(async (userId: string, runQuery?: Parameters<typeof actual.isAdmin>[1]) =>
+      runQuery ? actual.isAdmin(userId, runQuery) : false),
     userHasPermission: vi.fn(async () => true),
   }
 })
@@ -82,6 +84,7 @@ type Client = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[
 function respond(sql: string, memberRow: Row | null): { rows: Row[]; rowCount: number } {
   const s = sql.toLowerCase()
   if (s.includes('set transaction read only')) return { rows: [], rowCount: 0 }
+  if (s.includes('from user_roles')) return { rows: [], rowCount: 0 }
   if (s.includes('from user_orgs uo')) {
     const rows = memberRow ? [memberRow] : []
     return { rows, rowCount: rows.length }
@@ -128,7 +131,14 @@ function makeApp(user: Record<string, unknown> | undefined) {
 beforeEach(() => {
   queryMock.mockReset()
   transactionMock.mockReset()
-  vi.mocked(isAdmin).mockReset().mockResolvedValue(false)
+  vi.mocked(isAdmin).mockReset().mockImplementation(async (userId, runQuery) => {
+    if (!runQuery) return false
+    const { rows } = await runQuery(
+      'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1',
+      [userId, 'admin'],
+    )
+    return rows.length > 0
+  })
   vi.mocked(userHasPermission).mockReset().mockResolvedValue(true)
 })
 
@@ -158,7 +168,7 @@ describe('rbacGuard is what refuses an unauthenticated caller', () => {
   })
 })
 
-describe('the membership check, the groupId validation, and the aggregate reads share ONE transaction', () => {
+describe('the RBAC admin-role check, membership check, groupId validation, and aggregate reads share ONE transaction', () => {
   it('a platform-admin caller short-circuits the membership statement, but the aggregate reads still run — one transaction, zero pool queries', async () => {
     const { calls } = installSharedTransaction(null)
     pinned.setApp(makeApp({ id: ADMIN_USER, role: 'admin', orgId: ORG }))
@@ -167,6 +177,7 @@ describe('the membership check, the groupId validation, and the aggregate reads 
     expect(res.body.data.groupId).toBe(GROUP)
     expect(transactionMock).toHaveBeenCalledTimes(1)
     expect(queryMock).not.toHaveBeenCalled()
+    expect(calls.some((sql) => sql.toLowerCase().includes('from user_roles'))).toBe(false)
     // No `user_orgs` statement: the admin claim short-circuits it.
     expect(calls.some((sql) => sql.toLowerCase().includes('from user_orgs'))).toBe(false)
     // But the aggregate's own reads did run, on the same handle.
@@ -181,6 +192,7 @@ describe('the membership check, the groupId validation, and the aggregate reads 
     expect(res.body.data.groupId).toBe(GROUP)
     expect(transactionMock).toHaveBeenCalledTimes(1)
     expect(queryMock).not.toHaveBeenCalled()
+    const adminRoleIndex = calls.findIndex((sql) => sql.toLowerCase().includes('from user_roles'))
     const membershipCalls = calls.filter((sql) => sql.toLowerCase().includes('from user_orgs'))
     expect(membershipCalls.length).toBe(1)
     expect(calls.some((sql) => sql.toLowerCase().includes('from attendance_groups'))).toBe(true)
@@ -188,6 +200,8 @@ describe('the membership check, the groupId validation, and the aggregate reads 
     // handle both share.
     const membershipIndex = calls.findIndex((sql) => sql.toLowerCase().includes('from user_orgs'))
     const groupIndex = calls.findIndex((sql) => sql.toLowerCase().includes('from attendance_groups'))
+    expect(adminRoleIndex).toBeGreaterThanOrEqual(0)
+    expect(membershipIndex).toBeGreaterThan(adminRoleIndex)
     expect(membershipIndex).toBeGreaterThanOrEqual(0)
     expect(groupIndex).toBeGreaterThan(membershipIndex)
   })

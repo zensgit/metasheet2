@@ -543,7 +543,7 @@ export async function canReadAttendanceDirectoryReadiness(
   orgId: string,
   runQuery: typeof query = query,
 ): Promise<boolean> {
-  if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId)) return true
+  if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId, runQuery)) return true
   // W4-PRE-1b item E (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21): dual
   // is_active filter — a user whose PLATFORM ACCOUNT is deactivated (`users.is_active=false`,
   // e.g. via PATCH /api/admin/users/:userId/status, which deliberately never touches
@@ -1750,11 +1750,11 @@ export function attendanceAdminRouter(): Router {
 
         // W6-R1: everything from here on that runs through `readOnlyQuery`
         // shares one `SET TRANSACTION READ ONLY` transaction — the
-        // membership check, the groupId validation, and the aggregate's and
-        // FSER's reads, all on the same handle. The membership gate is
-        // deliberately inside the transaction rather than before it, so its
-        // read shares the aggregate's and FSER's read-only client rather
-        // than running on the pool.
+        // RBAC admin-role check, membership check, groupId validation, and the
+        // aggregate's and FSER's reads, all on the same handle. The
+        // authorization reads deliberately stay inside the transaction so
+        // they share the aggregate's and FSER's read-only client instead of
+        // running on the pool.
         //
         // A delegated-non-member 403 and an invalid-groupId 400 still open a
         // transaction (read-only, rolled back with nothing in it); the

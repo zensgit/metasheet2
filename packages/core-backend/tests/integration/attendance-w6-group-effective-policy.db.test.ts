@@ -68,7 +68,8 @@ vi.mock('../../src/rbac/service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/rbac/service')>()
   return {
     ...actual,
-    isAdmin: vi.fn(async () => false),
+    isAdmin: vi.fn(async (userId: string, runQuery?: Parameters<typeof actual.isAdmin>[1]) =>
+      runQuery ? actual.isAdmin(userId, runQuery) : false),
     listUserPermissions: vi.fn(async () => []),
   }
 })
@@ -951,8 +952,9 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
      *  load-bearing: `canReadAttendanceDirectoryReadiness` short-circuits on
      *  `hasLegacyAdminClaim(req) || await isRbacAdmin(userId)`, so run as an
      *  admin the membership query never executes and every assertion about it
-     *  passes without the statement ever reaching Postgres. `isAdmin` is
-     *  mocked to false in this file, and this request carries no admin claim. */
+     *  passes without the statement ever reaching Postgres. The mock delegates
+     *  injected-query calls to the real `isAdmin`, and this request carries no
+     *  legacy admin claim. */
     function memberRequest(userId: string): express.Request {
       return { user: { id: userId, permissions: ['attendance:admin'] }, headers: {} } as unknown as express.Request
     }
@@ -995,8 +997,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
 
         observedTransactions.length = 0
         await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
-          // (1) THE MEMBERSHIP READ, on this handle, as a non-admin so the
-          //     SQL genuinely executes.
+          // (1) THE RBAC ADMIN-ROLE + MEMBERSHIP READS, on this handle, as a
+          //     non-admin so both SQL statements genuinely execute.
           const allowed = await canReadAttendanceDirectoryReadiness(
             memberRequest(memberUser),
             memberUser,
@@ -1004,6 +1006,10 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
             readOnlyQuery,
           )
           expect(allowed).toBe(true)
+          const adminRoleSoFar = observedTransactions[0].statements.filter(
+            (sql) => /FROM user_roles/.test(sql) && /role_id = \$2/.test(sql),
+          )
+          expect(adminRoleSoFar.length).toBe(1)
           // MEASURED, not reasoned: `allowed === true` is also what an admin
           // bypass returns, and on that path the membership statement never
           // reaches Postgres at all. Assert the statement itself landed on
@@ -1070,8 +1076,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       observedTransactions.length = 0
       observedSql.length = 0
       // adminApp()'s principal holds `attendance:admin` but is NOT an admin
-      // (no legacy claim, and `isAdmin` is mocked false), so the membership
-      // query really executes on this path.
+      // (no legacy claim, and the real `isAdmin` read returns false), so the
+      // membership query really executes on this path.
       //
       // The title says DELEGATED deliberately. A platform admin short-circuits
       // `canReadAttendanceDirectoryReadiness` before the membership statement
@@ -1087,7 +1093,9 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       const statements = observedTransactions[0].statements
       expect(statements[0]).toBe('SET TRANSACTION READ ONLY')
 
-      // The membership read is on THIS handle...
+      // The RBAC admin-role and membership reads are on THIS handle...
+      const adminRoleStatements = statements.filter((sql) => /FROM user_roles/.test(sql) && /role_id = \$2/.test(sql))
+      expect(adminRoleStatements.length).toBe(1)
       const membershipStatements = statements.filter((sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql))
       expect(membershipStatements.length).toBe(1)
 
@@ -1111,6 +1119,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
         (sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql),
       )
       expect(membershipOnAnyPath.length).toBe(membershipStatements.length)
+      const adminRoleOnAnyPath = observedSql.filter((sql) => /FROM user_roles/.test(sql) && /role_id = \$2/.test(sql))
+      expect(adminRoleOnAnyPath.length).toBe(adminRoleStatements.length)
     })
 
     /**
