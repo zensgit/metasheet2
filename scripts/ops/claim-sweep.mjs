@@ -14,10 +14,13 @@
  * not a one-shot fix.
  *
  * WIRING — stated precisely so no other text in this PR can be read as implying otherwise:
- *   - This tool's OWN correctness (its pattern self-tests, `--self-test`, AND its shallow-clone
- *     ancestry-verdict downgrade) IS exercised by CI: four subprocess-driven `node:test` cases in
- *     `scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`, which is already wired into
- *     `.github/workflows/plugin-tests.yml` (`pnpm exec tsx --test
+ *   - This tool's OWN correctness (its pattern self-tests, `--self-test`, its shallow-clone
+ *     ancestry-verdict downgrade, AND its pipe-flush behaviour on process exit) IS exercised by
+ *     CI: five subprocess-driven `node:test` cases in
+ *     `scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts` (self-tests-pass, the two
+ *     shallow-clone branches, the full-clone regression control, and the large-sweep pipe-
+ *     truncation regression), which is already wired into `.github/workflows/plugin-tests.yml`
+ *     (`pnpm exec tsx --test
  *     scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`). No edit to any workflow file
  *     was needed for this — the tests were added to a file CI already invokes.
  *   - This tool's INTENDED normal-use invocation — sweeping an arbitrary set of changed files

@@ -1154,3 +1154,29 @@ test('claim-sweep.mjs piped output is NOT truncated by process.exit racing an un
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): the self-test battery only
+// proves SHA256_DIGEST_RE fires on a synthetic sentence in isolation — it does NOT prove `scanLine`
+// actually wires that pattern into an emitted row. Deleting the `SHA256_DIGEST_RE` loop inside
+// `scanLine` (leaving the pattern definition and its self-tests untouched) would leave the
+// self-test battery green while the real CLI sweep below silently stopped reporting digest pins —
+// exactly the pattern-vs-wiring gap this test closes, end to end through the real CLI.
+test('claim-sweep.mjs CLI actually emits a sha256-digest-pin row for a real 64-char digest (pattern-to-row wiring, not just the self-test regex firing)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claim-sweep-digest-wiring-'))
+  try {
+    const digest = '88176e7e79f5f5a9017ff93675e05cbadf9589f9d1d3693f00503c05e0ea8fcf'
+    writeFileSync(join(dir, 'pin.txt'), `The pin is ${digest} exactly.\n`)
+    const { status, stdout } = runClaimSweep(['--file', 'pin.txt', '--format', 'json'], dir)
+    assert.equal(status, 0)
+    const rows = JSON.parse(stdout) as Array<{ patternType: string; matched: string; backing: string }>
+    const digestRows = rows
+      .filter((row) => row.patternType === 'sha256-digest-pin')
+      .map((row) => ({ patternType: row.patternType, matched: row.matched, backing: row.backing }))
+    assert.deepEqual(digestRows, [{ patternType: 'sha256-digest-pin', matched: digest, backing: 'NEEDS-MANUAL-BACKING' }])
+    // Never routed through git ancestry — a content digest is not a commit, and this asserts it
+    // directly rather than merely by absence of an AUTO:-prefixed backing string.
+    assert.doesNotMatch(digestRows[0].backing, /^AUTO:/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

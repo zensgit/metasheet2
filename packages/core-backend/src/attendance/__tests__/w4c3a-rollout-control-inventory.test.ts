@@ -322,9 +322,17 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
 //
 // Disclosed scope — what this does NOT cover, stated rather than left for a reader to find:
 //   - Only THIS ONE file (`w4c2-live-scheduled-boundary.ts`) is scanned for attribution. A
-//     refusal call added to a DIFFERENT file is caught by the sibling "exactly one git-tracked
-//     src file" test below (which reds if that pattern ever appears in a second file), not by
-//     the attribution logic here.
+//     refusal call added to a DIFFERENT file spelled in the CANONICAL form (single-quoted,
+//     status 503, literal `boundaryFail(...)` call) is caught by the sibling "exactly one
+//     git-tracked src file" test below (which reds if that exact pattern ever appears in a
+//     second file), not by the attribution logic here. Since the P2/P3 fix below (gate-2 round)
+//     split the attribution pattern from the repo-wide-scan pattern (necessarily — see
+//     REFUSAL_CALL_PATTERN's own comment for why widening the repo-wide one is unsafe), this
+//     sibling test no longer covers every spelling either: a second file spelling the call
+//     double-quoted, with a different status code, or with the code hoisted into a local const
+//     evades BOTH the repo-wide scan (strict pattern) AND the attribution logic (single-file
+//     scoped) — verified directly. Cross-file addition in a non-canonical spelling is an
+//     uncovered combination, named here rather than left for a reader to rediscover.
 //   - Attribution is by LEXICAL nesting inside a NAMED `function` declaration, located by regex
 //     plus brace-depth counting — not a real parser. It is verified safe for THIS file's actual
 //     content (no string/comment hides an unbalanced brace inside either target function's
@@ -558,7 +566,12 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     expect(unattributedCount).toBe(1)
   })
 
-  it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (an unmapped/4th dispatch site fails closed)', () => {
+  // Narrowed title (gate-2 round): "fails closed" holds for the spellings
+  // REFUSAL_CALL_CODE_NAME_PATTERN actually matches (single- or double-quoted code name, any
+  // status code, code hoisted into a const) — not every conceivable spelling. See the Gate D
+  // docblock's "Disclosed scope" list above for what still evades this (backtick-quoted or
+  // split/concatenated spellings, and any non-canonical spelling added to a DIFFERENT file).
+  it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (an unmapped/4th dispatch site in THIS file, single/double-quoted/any-status/const-hoisted, fails closed)', () => {
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts, unattributedCount } = attributeRefusalCallsV1(content)
     const knownFunctionNames = new Set(Object.values(KEY_TO_FUNCTION_NAME))
