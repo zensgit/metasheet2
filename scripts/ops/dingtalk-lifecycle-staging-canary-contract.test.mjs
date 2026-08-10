@@ -258,6 +258,45 @@ test('P1 deployed SHA provenance conflicts fail closed instead of selecting one 
   assert.doesNotMatch(source, /if \[\[ "\$health_commit" =~ \^\[0-9a-f\]\{40\}\$ \]\]; then printf/)
 })
 
+test('production preflight accepts only an exact resolved SHA; unknown and conflict fail closed', () => {
+  function run(buildSha) {
+    return spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         SNAP_MIGRATIONS_ZERO=true
+         SNAP_MODE=off
+         SNAP_BUILD_SHA="$2"
+         SNAP_HEALTH_OK=true
+         EXPECTED_CURRENT_MODE=''
+         DEPLOY_SHA=''
+         preflight_for_target off
+         printf '%s|%s' "$PREFLIGHT_OK" "$PREFLIGHT_NOTE"`,
+        'bash',
+        REMOTE_SH,
+        buildSha,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+  }
+  assert.equal(run('a'.repeat(40)).stdout, 'true|ok')
+  assert.equal(run('unknown').stdout, 'false|build_provenance_unknown')
+  assert.equal(run('conflict').stdout, 'false|build_provenance_conflict')
+  assert.equal(run('not-a-sha').stdout, 'false|build_provenance_unknown')
+})
+
 test('backend health proof never falls back to the web health endpoint', () => {
   const source = read(REMOTE_SH)
   const start = source.indexOf('capture_live_snapshot()')

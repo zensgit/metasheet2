@@ -616,7 +616,7 @@ preflight_for_target() {
     return 0
   fi
 
-  if [[ "$SNAP_BUILD_SHA" == "conflict" || -z "$SNAP_BUILD_SHA" ]]; then
+  if [[ "$SNAP_BUILD_SHA" == "conflict" || ! "$SNAP_BUILD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     PREFLIGHT_OK="false"
     if [[ "$SNAP_BUILD_SHA" == "conflict" ]]; then
       PREFLIGHT_NOTE="build_provenance_conflict"
