@@ -44,7 +44,7 @@ Shared concurrency with `attendance-staging-window-runner`. Status artifacts sta
 As of 2026-08-11 this lane remains **NOT EXECUTED** for lifecycle ON canaries. Staging preparation evidence:
 
 1. Attendance staging runner [run 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed backup + clone rehearsal + real apply: migration state `296 applied / 18 pending` -> `314 applied / 0 pending`; rehearsal isolation held and auth round-trip returned 200.
-2. **Build provenance conflict remains:** the running backend image tag is `b55c682748e3010cb70837770c298843a96e1019`, while `/api/health` still reports build commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. The operator lane refuses exact-SHA proof when image and health metadata disagree. Repair/rebuild and re-prove this before any write action.
+2. **Build provenance conflict remains live:** the running backend image tag is `b55c682748e3010cb70837770c298843a96e1019`, while `/api/health` still reports build commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. This PR fixes the source by making staging compose derive both build metadata variables from the exact `IMAGE_TAG`; after merge, redeploy/recreate and re-prove agreement before any write action.
 3. The existing `DEPLOY_KNOWN_HOSTS` secret is the independently verified deploy-host identity. The lane uses `StrictHostKeyChecking=yes`; missing host identity blocks dispatch rather than producing forgeable evidence.
 
 Until a **secret-backed real verifier** exists for:

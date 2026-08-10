@@ -48,6 +48,7 @@ const CANARY_GO_DOC = join(
   'dingtalk-lifecycle-canary-separate-go-20260724.md',
 )
 const STAGING_ENV_EXAMPLE = join(REPO_ROOT, 'docker', 'app.staging.env.example')
+const STAGING_COMPOSE = join(REPO_ROOT, 'docker-compose.app.staging.yml')
 
 function read(path) {
   return readFileSync(path, 'utf8')
@@ -174,6 +175,15 @@ test('remote pins staging compose/containers only', () => {
     /docker-compose\.app\.yml/,
   )
   assert.match(source, /assert_staging_only\(\)/)
+})
+
+test('staging compose derives health build identity from the exact image tag, not stale env_file values', () => {
+  const compose = read(STAGING_COMPOSE)
+  assert.match(compose, /METASHEET_BUILD_COMMIT: \$\{IMAGE_TAG:-unknown\}/)
+  assert.match(compose, /METASHEET_BUILD_IMAGE_TAG: \$\{IMAGE_TAG:-unknown\}/)
+  const envFileIndex = compose.indexOf('env_file:')
+  const environmentIndex = compose.indexOf('environment:', envFileIndex)
+  assert.ok(envFileIndex >= 0 && environmentIndex > envFileIndex)
 })
 
 test('P1 deployed SHA provenance conflicts fail closed instead of selecting one source', () => {

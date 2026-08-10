@@ -93,7 +93,7 @@ Merge is not an enablement instruction. **Lifecycle canary is NOT EXECUTED** and
 Lifecycle ON canaries remain **NOT EXECUTED**. Current staging preparation evidence and blocker:
 
 1. [Attendance staging runner 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed host backup, clone rehearsal, isolation check, real migration, and auth round-trip. Migration state is now `314 applied / 0 pending` (`migrations_pending_zero=true`).
-2. **Exact-build provenance is still blocked:** the running image tag is `b55c682748e3010cb70837770c298843a96e1019`, but `/api/health` reports old commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. Image/health disagreement is a hard `build_provenance_conflict`; the lane must not select either value as exact proof.
+2. **Exact-build provenance is still blocked live:** the running image tag is `b55c682748e3010cb70837770c298843a96e1019`, but `/api/health` reports old commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. Image/health disagreement is a hard `build_provenance_conflict`. This PR makes staging compose override stale env-file metadata from the exact `IMAGE_TAG`; merge + redeploy/recreate + agreement proof is still required.
 3. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
 
 Until those clear **and** a real verifier exists, do not claim lifecycle canary progress. Future ON sequence (alias → pending → deprovision) is documentation-only and **NOT EXECUTABLE** here.
