@@ -18,7 +18,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
+  ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1,
+  isAttendanceW4C2AuthoritativeEntrypointDeliveredV1,
+  type AttendanceW4C2AuthoritativeEntrypointV1,
+} from '../w4c2-authoritative-delivery'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../..')
 
@@ -247,5 +253,90 @@ describe('W4C-5 repository inventory gate 9: bypass-syntax decoys are caught (�
       const offenders = findRolloutDmlOffenders(dir, files)
       expect(offenders).toEqual([])
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Gate D (owner completion gate, PR #4839, 20260810): the declaration/code correspondence guard.
+//
+// `w4c2-authoritative-delivery.ts` is a pure, filesystem-free leaf that declares whether each
+// W4C-2 authoritative-mode entrypoint is delivered. That declaration is what
+// `transitionAttendanceCalculationRolloutV1` refuses promotion on — nothing here re-checks THAT
+// behaviourally (the real-DB test in `attendance-w4c3a-rollout-control.db.test.ts` does). This
+// suite's job is narrower and complementary: prove the declaration cannot silently disagree with
+// the actual refusal-call-site count in `w4c2-live-scheduled-boundary.ts` — the exact drift this
+// module's own docblock says is enforced "not here."
+// ---------------------------------------------------------------------------
+describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundary-source correspondence', () => {
+  const BOUNDARY_RELATIVE_FILE = 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts'
+
+  // Independently counted by reading the boundary source at PR #4839 head
+  // `2d35fdeb09a36d3b9ecbadfc4c645d12231e9be5`: `live_punch` (inside `executeLivePunch`) has
+  // exactly 1 refusal call site; `scheduled` (inside `executeScheduledRunInternal`, both its
+  // org-wide probe and its per-target loop — the SAME command kind per that module's own header)
+  // has exactly 2. This weighting, not per-function source-range slicing, is what the aggregate
+  // count below is checked against — see the comment on the second `it` for why an aggregate is
+  // still sufficient to catch a PARTIAL removal within a multi-site key.
+  const REFUSAL_SITE_WEIGHT: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, number>> = Object.freeze({
+    live_punch: 1,
+    scheduled: 2,
+  })
+
+  // Exact literal call, not a loose substring: does not match the module header's own prose
+  // mention of the bare code string (backticked, never inside a `boundaryFail(...)` call).
+  const REFUSAL_CALL_PATTERN = /boundaryFail\(\s*'W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED'\s*,\s*503\s*\)/g
+
+  function countRefusalCalls(content: string): number {
+    return (content.match(REFUSAL_CALL_PATTERN) ?? []).length
+  }
+
+  afterEach(() => {
+    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+  })
+
+  it('the exact refusal-call pattern occurs in exactly one git-tracked src file: the boundary itself', () => {
+    const files = listGitTrackedFiles(ROOT).filter((absolute) =>
+      path.relative(ROOT, absolute).split(path.sep).join('/').startsWith('packages/core-backend/src/'),
+    )
+    const matches = files
+      .filter((absolute) => countRefusalCalls(fs.readFileSync(absolute, 'utf8')) > 0)
+      .map((absolute) => path.relative(ROOT, absolute).split(path.sep).join('/'))
+    expect(matches).toEqual([BOUNDARY_RELATIVE_FILE])
+  })
+
+  it('declared-undelivered-weighted call count equals the ACTUAL call count in the boundary file (load-bearing: a declaration/code mismatch reds this)', () => {
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const actual = countRefusalCalls(content)
+    // Computed from the CURRENT declaration (production value unless a test overrides it), never
+    // hardcoded — so this assertion tracks whatever `w4c2-authoritative-delivery.ts` actually
+    // declares. A partial removal within the 2-site `scheduled` key (e.g. deleting only the
+    // per-target-loop call while leaving the org-wide-probe call and the declaration both
+    // unchanged) still reds this: actual would drop to 2 while expected stays 3.
+    const expected = ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.filter(
+      (key) => !isAttendanceW4C2AuthoritativeEntrypointDeliveredV1(key),
+    ).reduce((sum, key) => sum + REFUSAL_SITE_WEIGHT[key], 0)
+    expect(actual).toBe(expected)
+  })
+
+  it('positive control: production declaration is fully undelivered and the boundary carries all 3 refusal calls today', () => {
+    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false)
+    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    expect(countRefusalCalls(content)).toBe(3)
+  })
+
+  it('drift guard is load-bearing: declaring "live_punch" delivered (via the test seam) while the boundary source is unchanged mismatches and reds the correspondence assertion', () => {
+    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true })
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const actual = countRefusalCalls(content)
+    const expected = ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1.filter(
+      (key) => !isAttendanceW4C2AuthoritativeEntrypointDeliveredV1(key),
+    ).reduce((sum, key) => sum + REFUSAL_SITE_WEIGHT[key], 0)
+    // live_punch declared delivered => expected drops to 2 (scheduled's 2 sites only), but the
+    // boundary source still carries all 3 calls — this is the mismatch the correspondence
+    // assertion above exists to catch, demonstrated here directly rather than only asserted.
+    expect(expected).toBe(2)
+    expect(actual).toBe(3)
+    expect(actual).not.toBe(expected)
   })
 })

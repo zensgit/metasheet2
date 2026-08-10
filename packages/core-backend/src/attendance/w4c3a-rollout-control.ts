@@ -38,6 +38,7 @@ import {
 } from './w4c0-identity'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from './w4c0-operation-contract'
+import { attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1 } from './w4c2-authoritative-delivery'
 import {
   ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1,
   buildAttendanceRequestCalculationPayloadFromRequestRowV1,
@@ -1078,6 +1079,13 @@ export const ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1 = Object.freeze([
   'INCOMPLETE_OPERATION',
   'UNRESOLVED_INGRESS_REVIEW',
   'DEFECTIVE_REQUEST_SNAPSHOT',
+  // Gate D (owner completion gate, PR #4839, 20260810): applicable only when `targetState ===
+  // 'authoritative'` (covers BOTH legal rows that target it — promotion `:91` and resume `:94`
+  // — via that single condition, never via the pair or via `comparisonWritePosture`, which is
+  // also `'authoritative'` for the `authoritative -> suspended` de-escalation row `:93` and
+  // would wrongly block it). See `transitionAttendanceCalculationRolloutV1` for the enforced
+  // check; this reporter reads the identical `attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()`.
+  'AUTHORITATIVE_ENTRYPOINTS_DELIVERED',
 ] as const)
 
 export type AttendanceRolloutTransitionPredicateCodeV1 =
@@ -1273,6 +1281,21 @@ async function buildAttendanceRolloutTransitionPlanV1(
       predicates.push(passVerdict('UNRESOLVED_INGRESS_REVIEW', false, true, null))
       predicates.push(passVerdict('DEFECTIVE_REQUEST_SNAPSHOT', false, true, null))
     }
+
+    // Gate D: static (no DB read), so computed unconditionally here rather than gated behind
+    // the section-3 preconditions above — whether the W4C-2 authoritative writers are delivered
+    // is a fact about the deployed code, not about this org's row/batch/job state. Keyed
+    // strictly on `targetState`, matching the real boundary's own check below.
+    const authoritativeTargetApplicable = targetState === 'authoritative'
+    const undeliveredCount = attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()
+    predicates.push(
+      passVerdict(
+        'AUTHORITATIVE_ENTRYPOINTS_DELIVERED',
+        authoritativeTargetApplicable,
+        authoritativeTargetApplicable ? undeliveredCount === 0 : true,
+        authoritativeTargetApplicable ? undeliveredCount : null,
+      ),
+    )
   } else {
     for (const code of ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1) {
       if (code === 'ORG_ALLOWLISTED' || code === 'ROLLOUT_ROW_RESOLVABLE' || code === 'LEGAL_TRANSITION_PAIR') continue
@@ -1527,6 +1550,30 @@ export async function transitionAttendanceCalculationRolloutV1(
         defectiveRequestSnapshots = snapshotDefects.totalDefectiveRequests
         defectiveRequestSnapshotsByCell = snapshotDefects.byCell
         if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
+      }
+
+      // Gate D (owner completion gate, PR #4839, 20260810): a promotion INTO 'authoritative' —
+      // covers BOTH legal rows that target it, promotion (:91) and resume (:94), via this single
+      // `targetState` condition — is refused while either W4C-2 authoritative-mode entrypoint
+      // (`live_punch`, `scheduled`) remains undelivered
+      // (`packages/core-backend/src/attendance/w4c2-authoritative-delivery.ts`). Deliberately
+      // NOT keyed on `legal.comparisonWritePosture === 'authoritative'`: that posture is ALSO
+      // true for the `authoritative -> suspended` de-escalation row (:93), and keying on it
+      // would block the only escape hatch out of a stuck `authoritative` org. Placed as the LAST
+      // precondition, after every section-3 predicate above and strictly before the event INSERT
+      // below: existing pinned refusal codes for an authoritative target
+      // (RETRYABLE_JOB_HAS_OPERATION_ROWS, INCOMPLETE_OPERATION) fire first, unaffected by this
+      // addition. Values-free: the thrown code names no org, no entrypoint, no count. Zero
+      // writes: this throw happens inside the same transaction as every predicate above it and
+      // before the transaction's only two DML statements (the event INSERT immediately below,
+      // the state UPDATE after it) — a throw here is caught by `runControlTransaction` /
+      // `runAttendanceResultOperationTransactionV1`, which rolls the whole transaction back, the
+      // same mechanism every other precondition failure in this function already relies on.
+      if (
+        input.targetState === 'authoritative' &&
+        attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1() > 0
+      ) {
+        fail('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
       }
 
       // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
