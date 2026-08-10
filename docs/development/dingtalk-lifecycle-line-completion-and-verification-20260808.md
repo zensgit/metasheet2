@@ -53,7 +53,11 @@ Sonnet 侦察（restack 预案）全部命中：唯一真冲突 #4658、#4659 �
 
 1. **Rev 4.3 勘误已按 owner 指令落账**（#4646 锁文 §0.6 含 provenance）：每 event 仅一条源组织 `membership_changed`；`globally_clear` 只门控 grant/user。与 main 既有 W4-PRE-1d owner 裁决同轴，非新语义。**请 owner 终签。**
 2. **OPS-01 行形制裁定 — 已被 Rev 4.4 取代（closeout 复审会签指令）**：复审裁定「OPS-01 暂不签——ledger 必须记录『grant 行从不存在到 disabled』的存在性变化，restore 时才能安全删除；不能仅调整 upsert 位置」。原「无条件 disabled 行、ledger 外写入」形制即复审 P1-2 的根因（从未有 grant 的人 rehire 后被孤儿 deny 行永久挡死 OAuth）。Rev 4.4（锁文 §0.7）改为**纯 effect 驱动**：creation effect（`grant_row_created=TRUE`）→ writer INSERT deny 行 → restore DELETE 恢复无行态；deny 闸本身不变（ensureGrant 仍 creation-only，被显式 disabled 行挡住）。**该项不再等 owner 会签原语义——按会签指令已重做。**
-3. **OPS-01 supersede 残留的补偿路径（新增，对抗审 P2-1）**：deny 行的 DELETE 逆转仅在事件 `applied` 期间可用；被 supersede 后行成无证据残留（rehire/admin_force 均 `EVENT_NOT_APPLIED`，后续离岗不补证据）。此为 main 既有 supersede 合同的推论。**请 owner 裁定补偿路径**：残留 deny 行是否允许人工/运维清理，或引入「再证据化」机制。三开关 OFF 期间无生产暴露。
+3. **OPS-01 supersede 残留补偿 — owner 已裁（2026-08-10）**：采用 Rev 4.5 的显式、审计化专用补偿；不在 supersede 中自动删除。实现候选在本 PR，只有合入 main 且 exact-head required CI 通过后才可把代码缺口记为关闭。入口持 canonical per-user mutex，重验 active+linked 源、active membership、无 live evidence、generation 与 grant provenance；源行被 sync 占用时以 `NOWAIT` fail-fast 409，避免 user/source 反向锁序；只删除 `grant_row_created` 对应的 `system:directory-deprovision` disabled 行，漂移 409；effect 记 `compensated` 且 actor/time/note 不可再改，event 保持 `superseded`。三开关继续 OFF，合入不等于 canary GO。
+
+### 4quater. OPS-01 compensation implementation candidate（2026-08-10）
+
+本轮新增 migration、事务服务、平台管理员 API、D7 最小 UI 与真库/并发/迁移/CI 接线证据。当前文档在实现分支上，**merge SHA / exact-head CI 均待 PR 落地后回填**；不得据此提前宣告 main 已关闭 OPS-01。完整状态见 `dingtalk-lifecycle-six-step-closeout-execution-20260810.md`。
 
 ## 4bis. Closeout 复审吸收记录（2026-08-08，CHANGES REQUESTED → 修复）
 
