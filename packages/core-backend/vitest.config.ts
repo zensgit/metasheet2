@@ -227,6 +227,11 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
+      // T3 activation source read serialises against a concurrent integration deactivation
+      // (post-merge review P1, FOR SHARE). Constructed pg_locks race — meaningless without a DB.
+      // DATABASE_URL-gated; excluded so the no-DB job cannot skip-green; whole-file wired into
+      // the approval real-DB step (both points self-asserted inside the suite).
+      'tests/integration/directory-activation-source-lock.db.test.ts',
       // D3 Rev 4.3 evidence-ledger migration: isolated-schema upgrade, replay with evidence,
       // fail-before-DDL weak-data guard, FK/trigger invariants, and ownership-safe down.
       // DATABASE_URL-gated; excluded here and wired as a whole file into the approval real-DB
