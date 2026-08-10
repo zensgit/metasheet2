@@ -6,9 +6,9 @@
  *     unauthenticated or under-permissioned caller and the handler. This
  *     suite proves it behaviourally (the response the mocked DB layer could
  *     only produce if the handler ran), not by reading the route's source.
- *  2. The RBAC admin-role check, membership check, groupId validation, and
- *     every aggregate read share exactly one database transaction, opened
- *     once per request.
+ *  2. The post-guard platform-admin lookup, membership check, groupId
+ *     validation, and every aggregate read share exactly one database
+ *     transaction, opened once per request.
  *     Proved by asserting the shared-transaction mock is invoked once and
  *     the pool-level mock is never invoked at all.
  *  3. In the REAL application (`src/index.ts`, not this file's router-only
@@ -168,7 +168,7 @@ describe('rbacGuard is what refuses an unauthenticated caller', () => {
   })
 })
 
-describe('the RBAC admin-role check, membership check, groupId validation, and aggregate reads share ONE transaction', () => {
+describe('post-guard platform-admin, membership, validation, and aggregate reads share ONE transaction', () => {
   it('a platform-admin caller short-circuits the membership statement, but the aggregate reads still run — one transaction, zero pool queries', async () => {
     const { calls } = installSharedTransaction(null)
     pinned.setApp(makeApp({ id: ADMIN_USER, role: 'admin', orgId: ORG }))

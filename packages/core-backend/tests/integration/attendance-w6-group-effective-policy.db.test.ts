@@ -1093,23 +1093,40 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       const statements = observedTransactions[0].statements
       expect(statements[0]).toBe('SET TRANSACTION READ ONLY')
 
-      // The RBAC admin-role and membership reads are on THIS handle...
+      // The post-guard platform-admin lookup and membership reads are on THIS
+      // handle...
       const adminRoleStatements = statements.filter((sql) => /FROM user_roles/.test(sql) && /role_id = \$2/.test(sql))
       expect(adminRoleStatements.length).toBe(1)
       const membershipStatements = statements.filter((sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql))
       expect(membershipStatements.length).toBe(1)
 
-      // ...and so are the aggregate's own reads.
+      // ...and so are every aggregate- and FSER-authored read reached by this
+      // request. Compare each derived SQL literal across the all-path recorder
+      // and this transaction's recorder: equality means no matching execution
+      // escaped to the pool. Per-domain positive controls prevent an empty or
+      // inactive derived set from making the comparison vacuous.
       const repoRoot = findRepoRoot(__dirname)
       const closure = buildAggregateCallPathClosure(repoRoot)
+      const resolvedSql = collectQuerySqlArguments(closure, repoRoot).resolved
       const aggregateLiterals = new Set(
-        collectQuerySqlArguments(closure, repoRoot)
-          .resolved.filter((entry) => entry.file.endsWith('w6-group-effective-policy-aggregate.ts'))
+        resolvedSql
+          .filter((entry) => entry.file.endsWith('w6-group-effective-policy-aggregate.ts'))
+          .map((entry) => entry.sql),
+      )
+      const fserLiterals = new Set(
+        resolvedSql
+          .filter((entry) => entry.file.endsWith('attendance-group-fixed-schedule-effectiveness-service.cjs'))
           .map((entry) => entry.sql),
       )
       expect(aggregateLiterals.size).toBeGreaterThanOrEqual(5)
-      const aggregateStatements = statements.filter((sql) => aggregateLiterals.has(sql))
-      expect(aggregateStatements.length).toBeGreaterThan(0)
+      expect(fserLiterals.size).toBeGreaterThanOrEqual(1)
+      expect(statements.filter((sql) => aggregateLiterals.has(sql)).length).toBeGreaterThan(0)
+      expect(statements.filter((sql) => fserLiterals.has(sql)).length).toBeGreaterThan(0)
+      for (const sql of new Set([...aggregateLiterals, ...fserLiterals])) {
+        expect(observedSql.filter((candidate) => candidate === sql).length).toBe(
+          statements.filter((candidate) => candidate === sql).length,
+        )
+      }
 
       // NEGATIVE: the membership read must NOT also appear on the pool path.
       // `observedSql` carries pool statements and transaction statements alike,

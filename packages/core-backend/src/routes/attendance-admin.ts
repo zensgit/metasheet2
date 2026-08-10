@@ -1750,11 +1750,11 @@ export function attendanceAdminRouter(): Router {
 
         // W6-R1: everything from here on that runs through `readOnlyQuery`
         // shares one `SET TRANSACTION READ ONLY` transaction — the
-        // RBAC admin-role check, membership check, groupId validation, and the
-        // aggregate's and FSER's reads, all on the same handle. The
-        // authorization reads deliberately stay inside the transaction so
-        // they share the aggregate's and FSER's read-only client instead of
-        // running on the pool.
+        // post-guard platform-admin lookup, membership check, groupId
+        // validation, and the aggregate's and FSER's reads, all on the same
+        // handle. The handler-level authorization reads deliberately stay
+        // inside the transaction so they share the aggregate's and FSER's
+        // read-only client instead of running on the pool.
         //
         // A delegated-non-member 403 and an invalid-groupId 400 still open a
         // transaction (read-only, rolled back with nothing in it); the
