@@ -1,0 +1,31 @@
+name: DingTalk Lifecycle Staging Canary Contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dingtalk-lifecycle-staging-canary.yml'
+      - '.github/workflows/dingtalk-lifecycle-staging-canary-contract.yml'
+      - 'docker-compose.app.staging.yml'
+      - 'docker/app.staging.env.example'
+      - 'scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs'
+      - 'scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify runner YAML parser
+        run: python3 -c 'import yaml'
+      - name: Run lifecycle staging canary contract
+        run: node --test scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs

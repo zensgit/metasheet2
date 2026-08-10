@@ -4,6 +4,7 @@
 - Status: **CODE CANDIDATE / OPS AND EXTERNAL GATES NOT EXECUTED**
 - Baseline: `origin/main @ 775d537e616e325000c7578d7e2432d838da0801`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
+- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — **not executed** by this closeout
 
 ## 1. OPS-01 explicit compensation
 
@@ -58,7 +59,7 @@ Load-bearing mutations reproduced before restoration:
 - pass an unknown PostgreSQL SQLSTATE through as the response code → the HTTP error-surface test fails;
 - remove the `COALESCE` fail-closed terms from compensation evidence checks → raw NULL actor/note inserts succeed.
 
-## 3. Lifecycle flags and canary
+## 3. Lifecycle flags and canary (minimal safe lane)
 
 The repository defaults and closeout contract continue to require all three flags OFF:
 
@@ -68,15 +69,42 @@ DIRECTORY_PENDING_ACTIVATION_ENABLED=false
 DIRECTORY_DEPROVISION_ENABLED=false
 ```
 
-Merge is not an enablement instruction. Canary execution is **NOT EXECUTED** and remains a separate ops GO. When authorized, execute only one stage at a time:
+Merge is not an enablement instruction. **Lifecycle canary is NOT EXECUTED** and must not be implied complete by this PR or by the operator lane landing.
 
-| Stage | Enable | Required rollback proof before proceeding |
+### 3.1 Staging operator lane (what is actually executable)
+
+| Piece | Path |
+|---|---|
+| Workflow | `.github/workflows/dingtalk-lifecycle-staging-canary.yml` (manual only; default `status`) |
+| Remote | `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` |
+| Contract | `scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs` |
+
+| Action | Executable? | Notes |
 |---|---|---|
-| 1 | alias-only | turn alias read path off and prove the pre-cutover login path is restored |
-| 2 | pending admission | turn pending admission off and prove new admissions return to activated baseline behavior |
-| 3 | deprovision | turn writer off and prove a new sync cannot create an event/effect or mutate access state |
+| `status` | yes | values-free snapshot; multi-on reports then fail-closed |
+| `preflight` | yes | readiness only; `migrations_pending_zero` must be **exactly `true`** (`unknown` fails — never treated as success) |
+| `off` | yes | **sole env write**: emergency clear of the three gates; previous-override backup + restore on restart/health/mode failure; backend health must be true after restart; exact mode `off` proven |
+| `alias` / `pending` / `deprovision` | **NOT EXECUTABLE** | fail-closed preflight-only; `transition_applied=false` always. Env flip alone is not a canary — no secret-backed password-login / admit→activate / sync→deprovision verifier exists in this lane. Presence tokens are not ON enablers. |
 
-Deprovision is last. Do not overlap flag changes.
+`action=off` is an **emergency operational rollback of the env gate only**. Design lock Rev 4.2 §4.2 / §4.4 permanently forbids reintroducing OR-column fallback on `users.email` / `username` / `mobile` as a long-term design after T2b. OFF is not “canary stage 1 complete.”
+
+### 3.2 Current staging blockers (owner review 2026-08-11)
+
+Lifecycle ON canaries remain **NOT EXECUTED**. Current staging preparation evidence and blocker:
+
+1. [Attendance staging runner 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed host backup, clone rehearsal, isolation check, real migration, and auth round-trip. Migration state is now `314 applied / 0 pending` (`migrations_pending_zero=true`).
+2. **Exact-build provenance is still blocked live:** the running image tag is `b55c682748e3010cb70837770c298843a96e1019`, but `/api/health` reports old commit `59c24a1d21cfc70b76867da7d0ac15590d558c72`. Image/health disagreement is a hard `build_provenance_conflict`. This PR makes staging compose override stale env-file metadata from the exact `IMAGE_TAG`; merge + redeploy/recreate + agreement proof is still required.
+3. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
+
+Until those clear **and** a real verifier exists, do not claim lifecycle canary progress. Future ON sequence (alias → pending → deprovision) is documentation-only and **NOT EXECUTABLE** here.
+
+### 3.3 Future stages (NOT EXECUTABLE in this lane today)
+
+| Stage | Desired enable | Required real proof (missing today) |
+|---|---|---|
+| 1 | alias-only | password-login success against aliases + emergency `off` proof without OR-column fallback |
+| 2 | pending admission | admit→activate on an explicit canary subject (not a presence token) |
+| 3 | deprovision | sync→deprovision on an explicit canary integration; then `off` clears the writer |
 
 ## 4. Owner and ops acceptance
 
@@ -85,11 +113,12 @@ Real enterprise evidence is unavailable in this development lane. Therefore thes
 - U1-U13 interactive-card acceptance;
 - U11-a real callback corp-anchor;
 - named owners and final production switch decisions;
-- actual staged rollback exercises from section 3.
+- lifecycle canary ON stages (alias/pending/deprovision);
+- live staging status/preflight/off dispatches from this development lane (blockers in §3.2).
 
-The procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
+The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
-## 5. Transfer decision gate
+## 5. Transfer decision gate (T2-Gate)
 
 Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this lane:
 
@@ -99,7 +128,9 @@ Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this
 | DISPROVED | T3 may be considered after owner authorization |
 | INCONCLUSIVE / NOT EXECUTED | keep T3-T5 frozen |
 
-The runbook of record is `canonical-org-t2-gate-two-corp-staging-runbook-20260717.md`.
+**Procedure of record (post-fix):** `dingtalk-directory-corp-scope-staging-uat-20260725.md` (and closeout ledger `dingtalk-directory-corp-scope-closeout-verification-20260725.md`). Use that UAT after Phase A + Phase B deployment gates pass.
+
+**Historical provenance only (not the current executable procedure):** `canonical-org-t2-gate-two-corp-staging-runbook-20260717.md` is the pre-fix evidence runbook. It is self-superseded for acceptance after corp-scope Phase B. Steps that described legacy global-key collision preflight against the pre-Phase-B schema **cannot be re-run as executable current steps after Phase B** — they remain **provenance requirements** (what was proven / what SHA and gate outputs must already be on file), not a procedure to re-execute on a post-Phase-B database. Do not point operators at the 20260717 runbook as the live T2-Gate gate.
 
 ## 6. Test infrastructure lane
 
