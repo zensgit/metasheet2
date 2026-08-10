@@ -24,7 +24,18 @@ const {
   W4_CANONICAL_PATH_PREFIXES,
 } = require('./table-classification.cjs')
 
-const SCANNABLE_EXTENSIONS = new Set(['.ts', '.js', '.cjs', '.mjs', '.sql', '.sh'])
+// `.tsx`/`.jsx` are included even though the domain contains none today (measured: 0 files under
+// every discovered root, on the live tree and at the pinned baseline ref alike) — a React-shaped
+// module appearing later must be scanned, not silently invisible.
+// `.vue` is deliberately NOT scannable, and that is a stated residue rather than an oversight:
+// `maskCommentsForDmlScan` is a JS/SQL quote state machine, and an SFC's HTML `<template>` section
+// desynchronises it (an apostrophe in ordinary prose opens a phantom string literal), after which
+// `//` comments stop being masked. Measured over the 242 `.vue` files in `apps/web`, enabling the
+// extension produces exactly one DML-pattern match and it is a false positive of exactly that
+// shape — the words "on UPDATE so" inside a `//` comment in `UserManagementView.vue`. Scanning
+// SFCs needs an SFC-aware masker first; until then the extension would add prose noise, not
+// coverage. Zero attendance-owned matches exist in any `.vue` file today.
+const SCANNABLE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.cjs', '.mjs', '.sql', '.sh'])
 
 const EXCLUDED_PATH_SEGMENTS = [
   '/node_modules/',
@@ -98,9 +109,26 @@ function expandWorkspacePattern(pattern, { listDir }) {
   return [pattern]
 }
 
-// Discover workspace package root directories (each dir that both matches a pnpm-workspace.yaml
-// pattern AND has its own package.json) plus the extra named roots. `source` supplies
-// `readFile(relPath) -> string|null` and `listDir(relDir) -> string[]` (empty array if absent).
+// Discover the scan domain: EVERY directory named by a pnpm-workspace.yaml pattern, plus the
+// extra named roots. `source` supplies `readFile(relPath) -> string|null` and
+// `listDir(relDir) -> string[]` (empty array if absent).
+//
+// MEMBERSHIP IS THE MANIFEST, NOT A MARKER FILE. This function used to promote a
+// workspace-matched directory to a scan root only when `<dir>/package.json` existed. That made
+// census membership hinge on an incidental packaging artifact: `plugins/plugin-after-sales` — a
+// live product plugin with a `plugin.json` manifest (manifestVersion 2.0.0), an 850-line
+// `index.cjs`, a contributed route `/p/plugin-after-sales/after-sales` and 13 `lib/*.cjs`
+// modules, in the same after-sales approval domain this gate's own probes use — matches the
+// `plugins/*` workspace pattern but ships no `package.json`, so nothing in it was scanned at all.
+// The failure mode is worse than a missed classification: an unscanned directory does not move
+// the RAW census either, so a write there is invisible rather than unclaimed.
+//
+// Swapping one marker file for two (`package.json` OR `plugin.json`) would only move the same
+// fragility one file along. The rule is therefore derived from the manifest alone and FAILS
+// CLOSED: a directory the collector cannot classify is SCANNED, not skipped. Directories that
+// are absent, non-package, or source-free cost nothing — `listAllFiles` simply yields no
+// scannable file for them, which is why widening the root set from 13 to 20 directories added
+// zero census sites on the live tree and zero at the pinned baseline ref.
 function discoverRuntimeRoots(source) {
   const workspaceYaml = source.readFile('pnpm-workspace.yaml')
   if (workspaceYaml == null) {
@@ -113,14 +141,10 @@ function discoverRuntimeRoots(source) {
       candidateDirs.add(dir)
     }
   }
-  const packageRoots = []
-  for (const dir of candidateDirs) {
-    if (source.readFile(`${dir}/package.json`) != null) {
-      packageRoots.push(dir)
-    }
+  for (const named of EXTRA_NAMED_ROOTS) {
+    candidateDirs.add(named)
   }
-  const roots = [...packageRoots, ...EXTRA_NAMED_ROOTS].sort()
-  return roots
+  return [...candidateDirs].sort()
 }
 
 // --- DML statement scanning -------------------------------------------------------------------
@@ -129,14 +153,93 @@ function discoverRuntimeRoots(source) {
 // named in §8.4: INSERT/UPDATE/DELETE/TRUNCATE/MERGE, COPY FROM|TO, and staging CREATE/DROP/ALTER
 // TABLE. The pattern runs against the structurally masked whole file so whitespace between a
 // verb and table name may include newlines.
-// Case-sensitive by design: this codebase's real SQL is written in uppercase keywords
-// (verified against the runtime roots before this pattern was chosen); a case-insensitive
-// pattern instead matches ordinary English prose in comments ("update a record") and floods the
-// census with non-SQL noise. A lowercase/mixed-case SQL keyword bypassing this scan is a stated
-// collector limitation (see the collector's own CI test and the Stage D handoff note), not a
-// silently-claimed guarantee.
+// CASE — two independent axes, handled differently on purpose.
+//
+// (1) KEYWORDS are matched case-SENSITIVELY. This codebase's real SQL is written in uppercase
+//     keywords (verified against the runtime roots before this pattern was chosen); a
+//     case-insensitive pattern instead matches ordinary English prose in comments ("update a
+//     record") and floods the census with non-SQL noise. A lowercase/mixed-case SQL keyword
+//     bypassing this scan is a stated collector limitation (see the collector's own CI test and
+//     the Stage D handoff note), not a silently-claimed guarantee.
+//
+// (2) The TABLE IDENTIFIER is resolved per PostgreSQL folding rules — see
+//     `resolveTableIdentifier` below — and the attendance-ownership test is case-insensitive.
+//     This axis is NOT covered by (1) and must not be confused with it. Case-folding a captured
+//     identifier adds no prose noise whatsoever, because the verb still has to match uppercase to
+//     reach the capture at all; the trade that buys (1) buys nothing here. Before this was fixed,
+//     `INSERT INTO ATTENDANCE_RECORDS` DID mint a census site (the keywords are uppercase, so the
+//     pattern matched) and was then discarded by `isAttendanceOwnedCandidate`, silently and
+//     before `classifyTable` — not tracked, not unclaimed, not even unclassified — while naming
+//     the very same relation as the approved lowercase site. The three READ legs below
+//     (`P25_READ_TABLE_PATTERN`, `ATTENDANCE_RECORD_READ_PATTERN`,
+//     `ATTENDANCE_CALCULATION_READ_PATTERN`) have always matched tables case-insensitively; the
+//     write census was the only leg that did not.
+//
+// SCHEMA QUALIFIERS: `INSERT INTO public.attendance_records` must resolve to the table
+// `attendance_records`, not to `public`. Without the qualifier group below, the capture took the
+// FIRST identifier, so a schema prefix silently renamed the site to a non-attendance table and the
+// write left the tracked buckets entirely — a one-token bypass of the whole gate, and one this
+// repository's other DML scanner (multitable-revision-disposition) already handles. The group is
+// `*`, not `?`, so `db.schema.table` resolves to `table` too. This can only ever WIDEN what the
+// scan sees (a previously mis-captured qualifier now resolves to its real table), never narrow it,
+// so the change direction is fail-closed.
+// Group 2 captures the WHOLE final table token, quotes included, so that the quoted/unquoted
+// distinction survives the match instead of being thrown away by the regex. It is parsed in JS by
+// `resolveTableIdentifier`, which keeps the group indices stable (m[1] = verb, m[2] = table token)
+// and keeps the asymmetric-quote case an explicit decision rather than a backreference subtlety.
+// `ONLY` is a PostgreSQL inheritance modifier, not a table: `UPDATE ONLY t` and
+// `DELETE FROM ONLY t` both target `t`. Without the optional group below the capture took `ONLY`
+// as the table name, which is not attendance-owned, so the write left the tracked buckets
+// entirely — the same one-token bypass shape as the schema qualifier. It is consumed
+// STRUCTURALLY here and deliberately NOT added to `SQL_RESERVED_NON_TABLE_WORDS`: that set
+// `continue`s, i.e. discards the site, which would be fail-OPEN and would leave the real write
+// invisible rather than mis-named. Measured: zero `ONLY` DML targets exist in the domain today,
+// so this closes a latent hole at zero census cost.
 const DML_LINE_PATTERN =
-  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?/g
+  /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY|CREATE(?:\s+TEMP(?:ORARY)?)?\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE)\s+(?:ONLY\s+)?(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*("?[a-zA-Z_][a-zA-Z0-9_]*"?)/g
+
+// `TRUNCATE a, b` and `DROP TABLE a, b` take a LIST of targets; the pattern above matches the verb
+// once and so produced a site for `a` only, leaving every later target invisible. This sticky
+// continuation consumes the rest of the list from immediately after the first target.
+//
+// Restricted to the two verbs where a comma list is actually a target list. Applying it to every
+// verb was measured first and is wrong: it produces 12 false sites in this tree (`CONSTRAINT`
+// captured from `ALTER TABLE`-shaped DDL, and one prose fragment). Restricted, it produces ZERO
+// today — so, like `ONLY`, this closes a latent hole at zero census cost. Sticky (`y`) rather than
+// slicing so nothing depends on a fixed-width window that could cut an identifier in half.
+const MULTI_TARGET_VERBS = new Set(['truncate', 'staging_drop'])
+const TABLE_LIST_CONTINUATION =
+  /\s*,\s*(?:ONLY\s+)?(?:"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\.\s*)*("?[a-zA-Z_][a-zA-Z0-9_]*"?)/y
+
+// PostgreSQL identifier folding, applied to the captured table token.
+//
+//   INSERT INTO ATTENDANCE_RECORDS      -> unquoted: PostgreSQL folds it to `attendance_records`,
+//                                          so this is the SAME relation as the approved
+//                                          lowercase site and must resolve to the same name.
+//   INSERT INTO "Attendance_Records"    -> double-quoted: PostgreSQL preserves the spelling, so
+//                                          this is a DIFFERENT relation and must NOT be folded
+//                                          into the approved one. It resolves verbatim, is still
+//                                          admitted to attendance scope by the case-insensitive
+//                                          ownership test below, and then fails `classifyTable`
+//                                          (the registry holds only the real, lowercase tables) —
+//                                          landing in `unclassifiedTableSites`, a hard CI failure.
+//                                          That is the correct disposition twice over: it is not
+//                                          silently accepted as the approved table, and it is not
+//                                          silently dropped either.
+//   INSERT INTO "Attendance_Records     -> asymmetric quoting is not a quoted identifier in any
+//                                          dialect; treated as unquoted, i.e. folded, which is the
+//                                          wider (fail-closed) of the two readings.
+//
+// The attendance-owned tables are PostgreSQL relations, so PostgreSQL's folding rule is the right
+// one. `packages/mssql-readonly-utils` is inside the scan domain but is a read-only SQL Server
+// utility that owns none of them; under SQL Server's default collation identifiers are
+// case-insensitive whether quoted or not, so folding is at worst redundant there, never wrong.
+function resolveTableIdentifier(token) {
+  const raw = String(token)
+  const quoted = raw.length > 1 && raw.startsWith('"') && raw.endsWith('"')
+  const bare = raw.replace(/^"/, '').replace(/"$/, '')
+  return { table: quoted ? bare : bare.toLowerCase(), quoted }
+}
 
 const P25_READ_TABLE_PATTERN = new RegExp(
   `\\b(?:FROM|JOIN)\\s+"?(${Object.keys(P25_OPERATIONAL_TABLE_SPECS).join('|')})"?(?![A-Za-z0-9_])`,
@@ -355,6 +458,15 @@ function nearestEnclosingSymbol(lines, dmlLineIndex) {
  *  - handle `${ ... }` interpolations by re-entering JS code mode recursively
  *
  * Inside single/double-quoted JS strings: never treat `//`, `--`, or `/*` as comments.
+ *
+ * CONSEQUENCE, stated so it is not discovered later as a surprise: SQL-comment masking is a
+ * TEMPLATE-LITERAL behaviour. A comment deliberately wedged between the words of a DML verb —
+ * `INSERT/*c*\/INTO`, or `INSERT --c\n INTO` — is masked away, and so still seen, inside a
+ * template literal; inside a single- or double-quoted string the bytes are preserved verbatim, so
+ * the verb does not match and the site is NOT seen. This is narrow, not a general hole: ordinary
+ * quoted SQL with no interleaved comment IS seen in all three token kinds. It is an evasion that
+ * requires deliberately splitting a keyword inside a non-template string, and it belongs to the
+ * already-stated "lowercase/mixed-case keyword" class of scanner limitations.
  */
 function maskCommentsForDmlScan(content) {
   const src = String(content ?? '')
@@ -563,16 +675,183 @@ function hasLiveDmlOnTable(content, verb, table) {
   const masked = maskCommentsForDmlScan(String(content ?? ''))
   const sites = scanFileForDmlSites('__live_dml_probe__', masked)
   const verbNorm = String(verb).toLowerCase()
-  const tableNorm = String(table)
-  return sites.some((site) => site.verb === verbNorm && site.table === tableNorm)
+  // Case-folded on BOTH sides. Every caller of this helper asserts an ABSENCE
+  // (`!hasLiveDmlOnTable(...)` — the P15 operator-cleanup and P16 guards assert that a generator
+  // or module emits no live DELETE/UPDATE on a table), so matching more spellings can only make
+  // those guards red more often: the fail-closed direction. A guard that says "this path never
+  // deletes attendance_records" must not be satisfiable by a shift key.
+  const tableNorm = String(table).toLowerCase()
+  return sites.some((site) => site.verb === verbNorm && String(site.table).toLowerCase() === tableNorm)
 }
 
 // Scans one file's content for DML sites. Returns an array of raw sites (before bucket
 // classification) with 1-based line numbers retained ONLY as informational metadata — the debt
 // key never includes the line number (an unrelated edit elsewhere in the file must not red this
 // guard). Comments and documentation examples are masked first so they cannot mint sites.
+// --- statement fingerprint ---------------------------------------------------------------------
+//
+// The site identity (relPath, enclosingSymbol, table, verb) says WHERE a write is and WHAT it
+// touches. It says nothing about what the statement DOES. Deleting the entire
+// `WHERE org_id = $1 AND request_id = $2 AND …` from an approved tenant-scoped UPDATE — turning
+// it into an unbounded, cross-tenant, table-wide UPDATE — changes no component of the identity,
+// so the gate stayed green with byte-identical counters. That is not the substitution residue
+// (which is about two different call sites colliding on one symbol name): the file, symbol, table
+// and verb here are all the legitimate ones, and only the meaning of the SQL changed.
+//
+// The fingerprint closes that. It deliberately hashes the exact masked statement text rather than
+// attempting SQL normalisation: keyword case and layout can be non-semantic, but case or whitespace
+// inside a quoted value can be data. Folding the whole string made those two classes
+// indistinguishable and allowed a real value edit to keep the same fingerprint. Exact text is the
+// fail-closed direction: formatting changes require review, while statement changes cannot hide
+// behind a lossy normaliser. Comments are already blanked by the masker before this function runs.
+function statementFingerprintOf(text) {
+  return sha256Hex(String(text ?? ''))
+}
+
+// One pass per file producing the [start, end) content ranges of every JS string/template literal.
+// The legacy quote-pairing ranges preserve the approved fingerprint domain. Complete template
+// ranges are added separately so `${...}` expressions containing nested templates cannot truncate
+// the outer SQL statement, while unrelated string/regex syntax keeps its existing interpretation.
+const CONTROL_STATEMENT_WITH_PAREN = new Set(['if', 'for', 'while', 'with'])
+
+function controlStatementParenStartsAt(src, index) {
+  let cursor = index - 1
+  while (cursor >= 0 && /\s/.test(src[cursor])) cursor -= 1
+  const end = cursor + 1
+  while (cursor >= 0 && /[A-Za-z0-9_$]/.test(src[cursor])) cursor -= 1
+  const start = cursor + 1
+  if (start === end || src[cursor] === '.' || src[cursor] === '?') return false
+  return CONTROL_STATEMENT_WITH_PAREN.has(src.slice(start, end))
+}
+
+function regexLiteralMayStartAt(src, index, controlParenEnds) {
+  let cursor = index - 1
+  while (cursor >= 0 && /\s/.test(src[cursor])) cursor -= 1
+  if (cursor < 0) return true
+  if ('([{:;,=!?&|+-*%^~<>'.includes(src[cursor])) return true
+  if (src[cursor] === ')' && controlParenEnds.has(cursor)) return true
+  const prefix = src.slice(0, cursor + 1)
+  const word = prefix.match(/([A-Za-z_$][A-Za-z0-9_$]*)$/)?.[1]
+  return new Set(['return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'yield', 'await']).has(word)
+}
+
+function sqlLiteralRanges(content) {
+  const src = String(content ?? '')
+  const ranges = []
+  const stack = [{ mode: 'code' }]
+  const controlParenStack = []
+  const controlParenEnds = new Set()
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]
+    const next = src[i + 1]
+    const frame = stack[stack.length - 1]
+
+    if (frame.mode === 'code' || frame.mode === 'template_expr') {
+      if (ch === '(') {
+        controlParenStack.push(controlStatementParenStartsAt(src, i))
+        continue
+      }
+      if (ch === ')') {
+        if (controlParenStack.pop() === true) controlParenEnds.add(i)
+        continue
+      }
+      if (ch === '/' && next !== '/' && next !== '*' && regexLiteralMayStartAt(src, i, controlParenEnds)) {
+        stack.push({ mode: 'regex', inCharacterClass: false })
+        continue
+      }
+      if (ch === "'") {
+        stack.push({ mode: 'squote', start: i })
+        continue
+      }
+      if (ch === '"') {
+        stack.push({ mode: 'dquote', start: i })
+        continue
+      }
+      if (ch === '`') {
+        stack.push({ mode: 'template', start: i })
+        continue
+      }
+      if (frame.mode === 'template_expr' && ch === '{') {
+        frame.braceDepth += 1
+        continue
+      }
+      if (frame.mode === 'template_expr' && ch === '}') {
+        if (frame.braceDepth > 0) frame.braceDepth -= 1
+        else stack.pop()
+      }
+      continue
+    }
+
+    if (frame.mode === 'template') {
+      if (ch === '\\' && i + 1 < src.length) {
+        i += 1
+        continue
+      }
+      if (ch === '`') {
+        ranges.push([frame.start + 1, i, 'template'])
+        stack.pop()
+        continue
+      }
+      if (ch === '$' && next === '{') {
+        stack.push({ mode: 'template_expr', braceDepth: 0 })
+        i += 1
+      }
+      continue
+    }
+
+    if (frame.mode === 'regex') {
+      if (ch === '\\' && i + 1 < src.length) {
+        i += 1
+        continue
+      }
+      if (ch === '[') {
+        frame.inCharacterClass = true
+        continue
+      }
+      if (ch === ']' && frame.inCharacterClass) {
+        frame.inCharacterClass = false
+        continue
+      }
+      if (ch === '/' && !frame.inCharacterClass) stack.pop()
+      continue
+    }
+
+    const closingQuote = frame.mode === 'squote' ? "'" : '"'
+    if (ch === '\\' && i + 1 < src.length) {
+      i += 1
+      continue
+    }
+    if (ch === closingQuote) {
+      ranges.push([frame.start + 1, i, 'literal'])
+      stack.pop()
+    }
+  }
+  return ranges
+}
+
+// The statement text a site is fingerprinted over: the SQL literal containing it when there is
+// one (the normal case — SQL in this codebase lives in template literals), otherwise a bounded
+// slice from the verb to the end of the statement, for `.sql` and `.sh` files where the SQL is
+// not wrapped in a JS literal at all. The fallback is bounded so a file with no `;` cannot make
+// one site's fingerprint cover the whole file.
+const STATEMENT_SLICE_LIMIT = 4000
+function statementTextAt(masked, index, ranges) {
+  let containingRange = null
+  for (const [start, end] of ranges) {
+    if (start > index || index >= end) continue
+    if (containingRange === null || end - start < containingRange[1] - containingRange[0]) {
+      containingRange = [start, end]
+    }
+  }
+  if (containingRange !== null) return masked.slice(containingRange[0], containingRange[1])
+  const semicolon = masked.indexOf(';', index)
+  const end = semicolon === -1 ? Math.min(masked.length, index + STATEMENT_SLICE_LIMIT) : semicolon
+  return masked.slice(index, Math.min(end, index + STATEMENT_SLICE_LIMIT))
+}
+
 function scanFileForDmlSites(relPath, content) {
   const masked = maskCommentsForDmlScan(content)
+  const literalRanges = sqlLiteralRanges(masked)
   // Original lines for symbol attribution (function names live in non-comment code).
   const originalLines = String(content ?? '').split(/\r?\n/)
   const sites = []
@@ -580,8 +859,13 @@ function scanFileForDmlSites(relPath, content) {
   let m
   while ((m = DML_LINE_PATTERN.exec(masked))) {
     const verb = verbFromKeyword(m[1])
-    const table = m[2]
-    if (SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())) continue
+    // `site.table` is the RESOLVED relation name (see resolveTableIdentifier): folded for an
+    // unquoted identifier, verbatim for a double-quoted one. Everything downstream — ownership,
+    // bucket classification, the debt key and the site identity — reads this resolved name, so
+    // there is one spelling of a table per relation and no second code path to keep in step.
+    const { table, quoted } = resolveTableIdentifier(m[2])
+    const firstTargetIsUnquotedReserved = !quoted && SQL_RESERVED_NON_TABLE_WORDS.has(table.toUpperCase())
+    if (firstTargetIsUnquotedReserved && !MULTI_TARGET_VERBS.has(verb)) continue
     // §8.4 scans "staging-table CREATE/DROP/ALTER" — i.e. runtime staging-table lifecycle
     // (e.g. a temp table created inside an import-commit code path), not ordinary schema
     // migration DDL. Migration files legitimately reshape tables on every release; treating
@@ -591,13 +875,52 @@ function scanFileForDmlSites(relPath, content) {
     const isStagingDdlVerb = verb === 'staging_create' || verb === 'staging_drop' || verb === 'staging_alter'
     if (isStagingDdlVerb && isMigrationPath(relPath)) continue
     const lineIndex = lineIndexAt(masked, m.index)
-    sites.push({
-      relPath,
-      line: lineIndex + 1,
-      verb,
-      table,
-      enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
-    })
+    // `statementText` is carried alongside the fingerprint so that ALIGNMENT is checkable, not
+    // merely assumed. A hash is non-empty and perfectly stable even when it was taken over the
+    // WRONG span — `sqlLiteralRanges` is a quote-pairing scan, and one mispaired quote upstream
+    // could put a site inside a range belonging to a different literal. That would pin the wrong
+    // text and stay green forever. The suite asserts, for every tracked site, that this text
+    // actually contains that site's own table and verb.
+    const statementText = statementTextAt(masked, m.index, literalRanges)
+    const statementFingerprint = statementFingerprintOf(statementText)
+    if (!firstTargetIsUnquotedReserved) {
+      sites.push({
+        relPath,
+        line: lineIndex + 1,
+        verb,
+        table,
+        enclosingSymbol: nearestEnclosingSymbol(originalLines, lineIndex),
+        statementFingerprint,
+        statementText,
+      })
+    }
+
+    // Remaining targets of a `TRUNCATE a, b, c` / `DROP TABLE a, b` list. Each becomes its own
+    // site at its own line, so a second target can neither hide behind the first nor collapse
+    // into it. Placed AFTER the staging-DDL/migration `continue` above on purpose: if the first
+    // target of a statement is out of scope for a reason, every target of that statement is.
+    if (MULTI_TARGET_VERBS.has(verb)) {
+      TABLE_LIST_CONTINUATION.lastIndex = m.index + m[0].length
+      let continuation
+      while ((continuation = TABLE_LIST_CONTINUATION.exec(masked)) !== null) {
+        const { table: nextTable, quoted: nextTableQuoted } = resolveTableIdentifier(continuation[1])
+        // A quoted reserved word is a valid identifier. An unquoted one is not a valid target, but
+        // it still must not hide a later target in the same list, so skip it and keep scanning.
+        if (!nextTableQuoted && SQL_RESERVED_NON_TABLE_WORDS.has(nextTable.toUpperCase())) continue
+        const nextLineIndex = lineIndexAt(masked, continuation.index)
+        sites.push({
+          relPath,
+          line: nextLineIndex + 1,
+          verb,
+          table: nextTable,
+          enclosingSymbol: nearestEnclosingSymbol(originalLines, nextLineIndex),
+          // Every target of one statement shares that statement's fingerprint — they are the
+          // same statement, and a change to it must red all of them together.
+          statementFingerprint,
+          statementText,
+        })
+      }
+    }
   }
   return sites
 }
@@ -886,8 +1209,20 @@ function buildAttendanceCalculationReadCensus(source) {
 // to the whole monorepo's schema.
 const SHARED_TABLE_NAMES = new Set(['approval_instances', 'approval_records', 'approval_assignments'])
 
+function isAttendanceOwnedName(name) {
+  return name.startsWith('attendance_') || SHARED_TABLE_NAMES.has(name)
+}
+
+// Scope test on the RESOLVED identifier (already folded when unquoted), UNION its case-folded
+// form. The union is what makes the quoted axis fail closed: `"Attendance_Records"` resolves
+// verbatim and is not literally an attendance-owned name, but it is one shift key away from one,
+// so it is admitted to scope and then reds as an unclassified table rather than being dropped in
+// silence. Union-only, never intersection: this predicate can only ever put MORE sites in scope
+// than the exact-match form it replaced, so no site that was tracked before can stop being
+// tracked because of it.
 function isAttendanceOwnedCandidate(tableName) {
-  return tableName.startsWith('attendance_') || SHARED_TABLE_NAMES.has(tableName)
+  const name = String(tableName)
+  return isAttendanceOwnedName(name) || isAttendanceOwnedName(name.toLowerCase())
 }
 
 function isCanonicalBoundaryPath(relPath) {
@@ -969,6 +1304,10 @@ module.exports = {
   parseWorkspacePatterns,
   isScannablePath,
   maskCommentsForDmlScan,
+  resolveTableIdentifier,
+  statementFingerprintOf,
+  statementTextAt,
+  sqlLiteralRanges,
   hasLiveDmlOnTable,
   scanFileForDmlSites,
   scanFileForP25CallPathSites,

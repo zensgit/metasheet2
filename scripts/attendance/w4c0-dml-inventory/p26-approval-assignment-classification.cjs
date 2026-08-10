@@ -39,8 +39,21 @@ const P26_APPROVAL_ASSIGNMENT_CLASSIFICATIONS = Object.freeze([
   entry('scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs', 'cleanupStep', 'delete', 1, 'synthetic_cleanup'),
 ])
 
+/**
+ * Injective key for an approval_assignments writer site.
+ *
+ * JSON-array encoding, not a `' :: '`-joined string, for the same reason
+ * approved-site-identities.cjs uses it: the collector mints route symbols as
+ * `${METHOD} ${routePath}` from arbitrary path literals, so a joined key lets one
+ * (relPath, enclosingSymbol, verb) triple alias a DIFFERENT triple whose symbol happens to
+ * contain the separator. In a table whose whole job is to make every writer explicitly owned,
+ * a key that can collide is the vulnerability, not a formatting choice.
+ *
+ * `table` is not in the key because the only caller filters to `approval_assignments`
+ * first — the table coordinate is fixed, not omitted.
+ */
 function keyOf(site) {
-  return [site.relPath, site.enclosingSymbol, site.verb].join(' :: ')
+  return JSON.stringify([site.relPath, site.enclosingSymbol, site.verb])
 }
 
 function classifyP26ApprovalAssignmentSites(sites, classifications = P26_APPROVAL_ASSIGNMENT_CLASSIFICATIONS) {

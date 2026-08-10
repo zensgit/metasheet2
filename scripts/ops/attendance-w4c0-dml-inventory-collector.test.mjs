@@ -32,11 +32,22 @@ const {
   contentHashOfKeys,
   maskCommentsForDmlScan,
   hasLiveDmlOnTable,
+  discoverRuntimeRoots,
+  parseWorkspacePatterns,
+  isScannablePath,
+  isAttendanceOwnedCandidate,
+  resolveTableIdentifier,
+  statementFingerprintOf,
 } = require(
   path.join(toolDir, 'collector.cjs'),
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const {
+  APPROVED_SITE_IDENTITY_BY_KEY,
+  APPROVED_SITE_IDENTITIES,
+  siteIdentityLabel,
+} = require(path.join(toolDir, 'approved-site-identities.cjs'))
 const {
   PINNED_BASELINE_REF,
   PINNED_BASELINE_ARTIFACT_RELPATH,
@@ -55,6 +66,7 @@ const {
 const {
   assertP26ActionAndFixtureContract,
   classifyP26ApprovalAssignmentSites,
+  keyOf: p26KeyOf,
 } = require(path.join(toolDir, 'p26-approval-assignment-classification.cjs'))
 const {
   TABLE_BUCKETS,
@@ -75,21 +87,54 @@ function readWorkflow() {
 }
 
 // -------------------------------------------------------------------------------------------
-// 1. Exact-head HEAD scan: every business/schedule_fact/shared_hook site must resolve to a
-//    curated debt entry or the generic-shared allowlist; every attendance-owned table must be
-//    classified; every w4_canonical-table site must be inside the canonical boundary. This is
-//    the actual §8.4 CI gate against the real repository.
+// 1. Exact-head HEAD scan: every business/schedule_fact/shared_hook site must resolve to an
+//    APPROVED SITE IDENTITY — an exact (relPath, enclosingSymbol, table, verb) tuple occurring
+//    the exact pinned number of times — every attendance-owned table must be classified, and
+//    every w4_canonical-table site must be inside the canonical boundary. This is the actual
+//    §8.4 CI gate against the real repository.
+//
+//    The `missing` leg doubles as the NON-EMPTY-DOMAIN leg: it is computed by walking the frozen
+//    identity table, not the census, so a scanner that returns nothing (broken root discovery,
+//    an over-eager exclusion, a regex that stops matching) puts all 181 pinned identities into
+//    `missing` and reds — this gate cannot pass vacuously against an empty tree.
 // -------------------------------------------------------------------------------------------
 test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildRawCensus(source)
   const classified = classifyCensus(sites)
-  const { unclaimed } = classifyTrackedSites(classified.trackedSites)
+  const result = classifyTrackedSites(classified.trackedSites)
+  const { unclaimed, overCount, missing } = result
+
+  // Counts printed for the CI step log: a green tick is not evidence of what was measured.
+  console.log(
+    `[w4c0-dml-inventory] raw census sites=${sites.length} tracked=${result.trackedSiteCount}`
+    + ` observedIdentities=${result.observedIdentityCount} approvedIdentities=${result.approvedIdentityCount}`
+    + ` unclaimed=${unclaimed.length} overCount=${overCount.length} missing=${missing.length}`
+    + ` fingerprintDrift=${result.fingerprintDrift.length}`
+    + ` genericShared=${result.genericAllowlisted.length}`
+    + ` unclassifiedTables=${classified.unclassifiedTableSites.length}`
+    + ` outsideBoundary=${classified.outsideBoundarySites.length}`,
+  )
 
   assert.deepEqual(
     unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
     [],
-    'every business/schedule_fact/shared_hook DML site must resolve to a curated debt entry or the generic-shared allowlist',
+    'every business/schedule_fact/shared_hook DML site must be an approved site identity — a new table, verb, or symbol inside an already-approved file has no claim',
+  )
+  assert.deepEqual(
+    overCount.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [],
+    'an approved site identity may occur exactly its pinned number of times — a SECOND write at the same file/symbol/table/verb is new debt',
+  )
+  assert.deepEqual(
+    missing.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [],
+    'a pinned identity that no longer occurs is a stale approval (and an empty census reds here, so the gate has a non-empty domain)',
+  )
+  assert.deepEqual(
+    result.fingerprintDrift.map((d) => `${d.identity} pinned=${JSON.stringify(d.pinned)} observed=${JSON.stringify(d.observed)}`),
+    [],
+    'an approved identity must still carry the STATEMENT it was approved with — a changed WHERE, SET list, target column list or dynamic target at an approved coordinate is new debt, not a free edit',
   )
   assert.deepEqual(
     classified.unclassifiedTableSites.map((s) => `${s.relPath} :: ${s.table}`),
@@ -100,6 +145,809 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     classified.outsideBoundarySites.map((s) => `${s.relPath} :: ${s.table}`),
     [],
     'w4_canonical-bucket tables may only be written from the canonical adapter path prefix',
+  )
+})
+
+// -------------------------------------------------------------------------------------------
+// 1b. The owner's escape, as a permanent regression probe.
+//
+//     BASE BEHAVIOUR (origin/main before this conversion): adding `INSERT INTO
+//     attendance_records` to packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts
+//     — a file approved WHOLE by GENERIC_SHARED_ALLOWLIST — left the exact-head HEAD scan GREEN.
+//     Removing only that file's allowlist entry made it fail, proving the file name, not the
+//     write, was doing the work.
+//
+//     These probes do NOT hand-construct site objects. Each one reads the REAL approved file,
+//     splices SQL text into it in memory, RE-SCANS that file with the real scanner, and swaps the
+//     rescan into the real census. So the scanner, the nearest-preceding-symbol attribution, the
+//     bucket classifier and the identity lookup are all exercised exactly as they are in CI — a
+//     hand-built tuple could accidentally assert an identity the scanner would never produce.
+//     Each probe also asserts WHICH leg reds and that the others stay clean: a probe that reds
+//     for the wrong reason proves nothing.
+// -------------------------------------------------------------------------------------------
+function currentTrackedSites() {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  return classifyCensus(sites).trackedSites
+}
+
+/**
+ * Real-file mutation probe: rescan `relPath` with mutated content and splice the result into the
+ * live census. Asserts the mutation actually changed the file text and actually changed the
+ * scanned site set — an ineffective mutation and a useless test look identical otherwise.
+ */
+function censusWithMutatedFile(relPath, mutate) {
+  const tracked = currentTrackedSites()
+  const original = fs.readFileSync(path.join(rootDir, relPath), 'utf8')
+  const mutated = mutate(original)
+  assert.notEqual(mutated, original, 'probe mutation must actually change the file content')
+
+  const before = classifyCensus(scanFileForDmlSites(relPath, original)).trackedSites
+  const after = classifyCensus(scanFileForDmlSites(relPath, mutated)).trackedSites
+  assert.notEqual(
+    after.length,
+    before.length,
+    'probe mutation must actually change the scanned DML site set for this file',
+  )
+  assert.ok(before.length > 0, 'precondition: the probed file really is an approved DML writer')
+  return [...tracked.filter((site) => site.relPath !== relPath), ...after]
+}
+
+const AFTER_SALES_BRIDGE = 'packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts'
+const APPROVAL_PRODUCT_SERVICE = 'packages/core-backend/src/services/ApprovalProductService.ts'
+const AFTER_SALES_TXN_ANCHOR = `    await this.runInTransaction(async (trx) => {
+      await trx.query(
+        \`INSERT INTO approval_instances`
+
+function spliceAfterSalesTransaction(insertedStatements) {
+  return (original) => {
+    assert.equal(
+      original.split(AFTER_SALES_TXN_ANCHOR).length - 1,
+      1,
+      'probe anchor must match exactly once — if the bridge was refactored, re-derive the probe',
+    )
+    return original.replace(
+      AFTER_SALES_TXN_ANCHOR,
+      `    await this.runInTransaction(async (trx) => {\n${insertedStatements}      await trx.query(\n        \`INSERT INTO approval_instances`,
+    )
+  }
+}
+
+test("owner escape probe: a new table inside a whole-file-approved file is unclaimed, not admitted by the file's name", () => {
+  assert.deepEqual(
+    classifyTrackedSites(currentTrackedSites()).unclaimed,
+    [],
+    'precondition: the untouched tree is clean',
+  )
+
+  // Verbatim shape of the owner's escape: an attendance_records INSERT added to the generic
+  // after-sales approval bridge, which GENERIC_SHARED_ALLOWLIST used to approve by file path.
+  const census = censusWithMutatedFile(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(\n'
+      + '        `INSERT INTO attendance_records (id, org_id, user_id, work_date, status)\n'
+      + "         VALUES ($1, $2, $3, $4, 'normal')`,\n"
+      + '        [approvalId, command.sourceSystem, command.businessKey, command.title],\n'
+      + '      )\n',
+    ),
+  )
+  const result = classifyTrackedSites(census)
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+    'the owner escape must red by NAME in the unclaimed leg',
+  )
+  assert.deepEqual(result.overCount, [], 'the escape is a new identity, not a multiplicity drift')
+  assert.deepEqual(result.missing, [], 'the escape must not disturb any pinned identity')
+})
+
+test('owner escape probe: a new VERB on an already-approved file/symbol/table is unclaimed', () => {
+  // approval_instances IS approved at this file+symbol — but only for `insert`.
+  const census = censusWithMutatedFile(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(`DELETE FROM approval_instances WHERE business_key = $1`, [command.businessKey])\n',
+    ),
+  )
+  const result = classifyTrackedSites(census)
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_instances:delete`],
+    'approval is per (file, symbol, table, VERB) — an approved table does not carry a new verb',
+  )
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.missing, [])
+})
+
+test('owner escape probe: a new SYMBOL inside the whole-file-approved ApprovalProductService is unclaimed', () => {
+  // P26 used to claim this file by startsWith(), so every present and FUTURE symbol in it was
+  // approved — including one writing attendance_records from an approval service.
+  const census = censusWithMutatedFile(
+    APPROVAL_PRODUCT_SERVICE,
+    (original) => `${original}
+async function quietlyAddedAssignmentWriter(client, instanceId) {
+  await client.query(\`UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1\`, [instanceId])
+  await client.query(\`INSERT INTO attendance_records (id) VALUES ($1)\`, [instanceId])
+}
+`,
+  )
+  const result = classifyTrackedSites(census)
+  assert.deepEqual(
+    result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
+    [
+      `${APPROVAL_PRODUCT_SERVICE} :: quietlyAddedAssignmentWriter :: approval_assignments:update`,
+      `${APPROVAL_PRODUCT_SERVICE} :: quietlyAddedAssignmentWriter :: attendance_records:insert`,
+    ],
+    'a whole-file path-prefix claim would have admitted both of these; exact identity does not',
+  )
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.missing, [])
+})
+
+test('multiplicity probe: a SECOND occurrence of an already-approved identity reds in overCount, not unclaimed', () => {
+  // Duplicate an EXISTING approved write in place: same file, same enclosing symbol, same table,
+  // same verb. Nothing about the tuple changes — only how many times it occurs. This is the ONLY
+  // probe that exercises count pinning; if it reddened via `unclaimed` (because the scanner
+  // attributed the copy to a different symbol) it would prove nothing about multiplicity, which
+  // is why `unclaimed` is asserted empty FIRST.
+  const census = censusWithMutatedFile(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(\n'
+      + '        `INSERT INTO approval_instances (id, status, workflow_key)\n'
+      + "         VALUES ($1, 'pending', $2)`,\n"
+      + '        [approvalId, REFUND_WORKFLOW_KEY],\n'
+      + '      )\n',
+    ),
+  )
+  const result = classifyTrackedSites(census)
+
+  assert.deepEqual(
+    result.unclaimed,
+    [],
+    'the duplicate is the SAME identity — it must not red as unclaimed, or this probe never touched multiplicity',
+  )
+  assert.deepEqual(
+    result.overCount.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_instances:insert pinned=1 observed=2`],
+    'an extra write at an already-approved (file, symbol, table, verb) must red by name with pinned vs observed counts',
+  )
+  assert.deepEqual(result.missing, [])
+})
+
+test('multiplicity probe: a REMOVED occurrence of a pinned identity reds in missing (stale approval / empty-domain leg)', () => {
+  // Retarget the real approved write to a non-attendance table, so its pinned identity no longer
+  // occurs. A stale approval left standing would silently re-admit a future re-add at that exact
+  // coordinate, which is how a retired writer becomes a permanent hole.
+  const census = censusWithMutatedFile(AFTER_SALES_BRIDGE, (original) => {
+    assert.equal(
+      original.split('`INSERT INTO approval_instances').length - 1,
+      1,
+      'probe anchor must match exactly once',
+    )
+    return original.replace('`INSERT INTO approval_instances', '`INSERT INTO unrelated_product_rows')
+  })
+  const result = classifyTrackedSites(census)
+  assert.deepEqual(result.overCount, [])
+  assert.deepEqual(result.unclaimed, [], 'the retargeted table is out of attendance scope, so only the stale leg may red')
+  assert.deepEqual(
+    result.missing.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_instances:insert pinned=1 observed=0`],
+    'a pinned approval that no longer matches a real write must be retired explicitly, not left to re-admit a future re-add',
+  )
+
+  // Non-empty-domain leg, mechanically: an empty census puts EVERY pinned identity in `missing`,
+  // so a scanner that silently stops producing sites cannot make this gate pass against nothing.
+  const empty = classifyTrackedSites([])
+  assert.equal(empty.missing.length, empty.approvedIdentityCount)
+  assert.equal(empty.overCount.length, 0)
+  assert.ok(empty.approvedIdentityCount > 0, 'the approved-identity domain must be non-empty')
+})
+
+// -------------------------------------------------------------------------------------------
+// 1c. Two escapes that defeated this gate BEFORE the identity table was ever consulted.
+//
+//     Both were found by adversarial review of the identity conversion, and neither is a defect
+//     of the identity scheme — they are upstream of it, which is precisely why they mattered:
+//     the conversion's headline promise ("a new INSERT INTO attendance_records in an
+//     already-approved file can no longer land silently") held for exactly one spelling.
+//
+//       P1  TABLE-IDENTIFIER CASE. `INSERT INTO ATTENDANCE_RECORDS` DID mint a raw census site —
+//           the keywords are uppercase, so the case-sensitive pattern matched — and was then
+//           dropped by a case-SENSITIVE ownership test, before classifyTable. Not tracked, not
+//           unclaimed, not unclassified: silent. In PostgreSQL an unquoted identifier folds to
+//           lower case, so it named the same relation as the approved lowercase site.
+//           Signature: `raw` MOVES, `tracked` does not.
+//
+//       P2  CENSUS DOMAIN. `plugins/plugin-after-sales` matches the `plugins/*` workspace pattern
+//           but ships no package.json, and root promotion required one — so a live product plugin
+//           in this very after-sales approval domain was scanned by nothing.
+//           Signature: `raw` does NOT move, because the file is never opened.
+//
+//     The probes below are frozen must-red rows for both, and they assert the SIGNATURE, not just
+//     redness: each one requires the raw census to grow by exactly one site, which is what
+//     separates "the scanner saw it and the classifier judged it" from "the file was never read".
+// -------------------------------------------------------------------------------------------
+let cachedBaselineCensus = null
+function baselineCensus() {
+  if (cachedBaselineCensus === null) {
+    const source = createWorktreeSource(rootDir)
+    const { sites, roots } = buildRawCensus(source)
+    const classified = classifyCensus(sites)
+    cachedBaselineCensus = { sites, roots, classified, result: classifyTrackedSites(classified.trackedSites) }
+  }
+  return cachedBaselineCensus
+}
+
+/**
+ * Whole-pipeline probe. `censusWithMutatedFile` above rescans ONE file and splices the result into
+ * the live census, which is enough to exercise classification — but it assumes the file is in the
+ * scan domain, so it can never detect a domain hole. This helper instead runs the REAL
+ * `buildRawCensus` over a source whose `readFile` returns mutated content for exactly one path, so
+ * root discovery and the directory walk are exercised too. That is what makes the
+ * `plugins/plugin-after-sales` row below a domain proof rather than a classification proof.
+ */
+function fullCensusWithMutatedSource(relPath, mutate) {
+  const base = createWorktreeSource(rootDir)
+  const original = base.readFile(relPath)
+  assert.ok(original != null, `probe target must exist: ${relPath}`)
+  const mutated = mutate(original)
+  assert.notEqual(mutated, original, 'probe mutation must actually change the file content')
+  const source = {
+    readFile: (probePath) => (probePath === relPath ? mutated : base.readFile(probePath)),
+    listDir: (dir) => base.listDir(dir),
+    listAllFiles: (dir) => base.listAllFiles(dir),
+  }
+  const { sites, roots } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  return { sites, roots, classified, result: classifyTrackedSites(classified.trackedSites) }
+}
+
+function unclaimedLabels(result) {
+  return result.unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`)
+}
+
+function countLabels(rows) {
+  return rows.map((d) => `${d.identity} pinned=${d.pinned} observed=${d.observed}`)
+}
+
+test('PostgreSQL identifier folding: the resolver states which reading applies to each token shape', () => {
+  // The two axes are different SQL, not different strictness settings:
+  //   unquoted  -> PostgreSQL folds to lower case  -> the SAME relation
+  //   quoted    -> PostgreSQL preserves the spelling -> a DIFFERENT relation
+  assert.deepEqual(resolveTableIdentifier('attendance_records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('ATTENDANCE_RECORDS'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('Attendance_Records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('"attendance_records"'), { table: 'attendance_records', quoted: true })
+  assert.deepEqual(resolveTableIdentifier('"Attendance_Records"'), { table: 'Attendance_Records', quoted: true })
+  assert.deepEqual(resolveTableIdentifier('"ATTENDANCE_RECORDS"'), { table: 'ATTENDANCE_RECORDS', quoted: true })
+  // Asymmetric quoting is not a quoted identifier in any dialect. Fold it — the WIDER of the two
+  // readings, so an evasion cannot be built out of a stray quote.
+  assert.deepEqual(resolveTableIdentifier('"Attendance_Records'), { table: 'attendance_records', quoted: false })
+  assert.deepEqual(resolveTableIdentifier('Attendance_Records"'), { table: 'attendance_records', quoted: false })
+})
+
+test('attendance ownership is case-insensitive on the WRITE census, as it always was on the read legs', () => {
+  // Before the fix this predicate was exact-match, while P25_READ_TABLE_PATTERN,
+  // ATTENDANCE_RECORD_READ_PATTERN and ATTENDANCE_CALCULATION_READ_PATTERN all carried `gi`.
+  // The write census was the only leg in the file without case-insensitive table matching.
+  for (const name of [
+    'attendance_records', 'ATTENDANCE_RECORDS', 'Attendance_Records',
+    'approval_instances', 'APPROVAL_INSTANCES', 'Approval_Records', 'APPROVAL_ASSIGNMENTS',
+  ]) {
+    assert.equal(isAttendanceOwnedCandidate(name), true, `${name} must be in attendance scope`)
+  }
+  // Negative control: the predicate widened on CASE only. It must not have widened on name.
+  for (const name of [
+    'approval_workflows', 'APPROVAL_WORKFLOWS', 'users', 'plugin_after_sales_template_installs',
+    'attendance', 'attendancerecords',
+  ]) {
+    assert.equal(isAttendanceOwnedCandidate(name), false, `${name} must stay out of attendance scope`)
+  }
+})
+
+// Frozen must-red rows for P1. Every one of these was GREEN before the fix, with the raw census
+// moving 1220 -> 1221 while every counter stayed at zero.
+const IDENTIFIER_CASE_MUST_RED_ROWS = [
+  {
+    name: 'uppercase table identifier',
+    sql: '      await trx.query(`INSERT INTO ATTENDANCE_RECORDS (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'mixed-case table identifier',
+    sql: '      await trx.query(`INSERT INTO Attendance_Records (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'uppercase verb AND uppercase table together',
+    sql: "      await trx.query(`UPDATE ATTENDANCE_RECORDS SET status = 'void' WHERE id = $1`, [approvalId])\n",
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:update`],
+  },
+  {
+    name: 'schema-qualified uppercase table',
+    sql: '      await trx.query(`INSERT INTO public.ATTENDANCE_RECORDS (id) VALUES ($1)`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: attendance_records:insert`],
+  },
+  {
+    name: 'uppercase SHARED approval table (covers all of SHARED_TABLE_NAMES)',
+    sql: '      await trx.query(`DELETE FROM APPROVAL_ASSIGNMENTS WHERE instance_id = $1`, [approvalId])\n',
+    unclaimed: [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_assignments:delete`],
+  },
+]
+
+test('frozen must-red: an attendance table written in ANY unquoted case is the same relation and reds by name', () => {
+  for (const row of IDENTIFIER_CASE_MUST_RED_ROWS) {
+    const probe = fullCensusWithMutatedSource(AFTER_SALES_BRIDGE, spliceAfterSalesTransaction(row.sql))
+    // The P1 signature, asserted rather than assumed: the scanner DID see the write. If this
+    // equality ever fails the probe has stopped testing case and started testing something else.
+    assert.equal(
+      probe.sites.length,
+      baselineCensus().sites.length + 1,
+      `${row.name}: the raw census must grow by exactly one site — the scanner sees the write, the question is only what the ownership test then does with it`,
+    )
+    assert.deepEqual(unclaimedLabels(probe.result), row.unclaimed, `${row.name}: must red in unclaimed, folded onto its real lowercase relation`)
+    assert.deepEqual(probe.result.overCount, [], `${row.name}: no pinned identity may be disturbed`)
+    assert.deepEqual(probe.result.missing, [], `${row.name}: no pinned identity may be disturbed`)
+    assert.deepEqual(
+      probe.classified.unclassifiedTableSites,
+      [],
+      `${row.name}: an UNQUOTED identifier folds to a real registered table, so it must land in its bucket and red by identity — not fall out as unclassified`,
+    )
+  }
+})
+
+test('frozen must-red: an UPPERCASE spelling of an APPROVED write is the SAME identity — it reds on multiplicity, not as a new site', () => {
+  // This is the row that distinguishes the implemented reading from the crude alternative
+  // ("anything non-lowercase becomes an unclassified table"). Under the crude variant an
+  // uppercase spelling of an approved write would red in `unclassifiedTables`, and the collector
+  // would be asserting that ATTENDANCE_RECORDS is a table it has never heard of — which is false.
+  // Under PostgreSQL folding it must resolve onto the very identity that is already pinned, and
+  // therefore red as observed=2 against pinned=1, minting NO new identity.
+  const probe = fullCensusWithMutatedSource(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(\n'
+      + '        `INSERT INTO APPROVAL_INSTANCES (id, status, workflow_key)\n'
+      + "         VALUES ($1, 'pending', $2)`,\n"
+      + '        [approvalId, REFUND_WORKFLOW_KEY],\n'
+      + '      )\n',
+    ),
+  )
+  assert.equal(probe.sites.length, baselineCensus().sites.length + 1)
+  assert.deepEqual(
+    probe.result.unclaimed,
+    [],
+    'an uppercase spelling of an approved write must NOT mint a new identity — if it does, the fold is not mapping onto the same relation',
+  )
+  assert.equal(
+    probe.result.observedIdentityCount,
+    baselineCensus().result.observedIdentityCount,
+    'the identity COUNT must be unchanged: the uppercase write is the same tuple, occurring twice',
+  )
+  assert.deepEqual(
+    countLabels(probe.result.overCount),
+    [`${AFTER_SALES_BRIDGE} :: normalizeCommand :: approval_instances:insert pinned=1 observed=2`],
+    'the uppercase duplicate must red on multiplicity against the identity it actually names',
+  )
+  assert.deepEqual(probe.classified.unclassifiedTableSites, [])
+  assert.deepEqual(probe.result.missing, [])
+})
+
+test('frozen must-red: a QUOTED mixed-case identifier is a DIFFERENT relation — unclassified, and never silently dropped', () => {
+  // PostgreSQL does not fold a double-quoted identifier, so `"Attendance_Records"` is NOT
+  // `attendance_records` and must not be admitted as it. It is still one shift key away from an
+  // attendance table, so it must not be dropped in silence either — the union ownership test pulls
+  // it into scope and `classifyTable` (whose registry holds only the real, lowercase tables) then
+  // reds it as an unclassified attendance-owned table. Both halves of that are asserted here.
+  const probe = fullCensusWithMutatedSource(
+    AFTER_SALES_BRIDGE,
+    spliceAfterSalesTransaction(
+      '      await trx.query(`INSERT INTO "Attendance_Records" (id) VALUES ($1)`, [approvalId])\n',
+    ),
+  )
+  assert.equal(probe.sites.length, baselineCensus().sites.length + 1)
+  assert.deepEqual(
+    probe.classified.unclassifiedTableSites.map((s) => `${s.relPath} :: ${s.table}`),
+    [`${AFTER_SALES_BRIDGE} :: Attendance_Records`],
+    'a quoted mixed-case attendance lookalike must red as an unclassified attendance-owned table',
+  )
+  assert.deepEqual(
+    probe.result.unclaimed,
+    [],
+    'it must NOT be folded into attendance_records — that would be the wrong PostgreSQL reading, and would let a quoted identifier inherit a lowercase table approval',
+  )
+  assert.deepEqual(probe.result.overCount, [])
+  assert.deepEqual(probe.result.missing, [])
+
+  // Control: a quoted identifier that is ALREADY lowercase names the ordinary relation, so it must
+  // keep classifying normally. Quoting is not itself suspicious.
+  const quotedLower = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q() { await db.query(`INSERT INTO "attendance_records" (id) VALUES ($1)`) }',
+  )
+  assert.deepEqual([quotedLower.length, quotedLower[0]?.table], [1, 'attendance_records'])
+})
+
+// --- P2: the census domain -------------------------------------------------------------------
+
+const AFTER_SALES_PLUGIN_DIR = 'plugins/plugin-after-sales'
+const AFTER_SALES_PLUGIN_MODULE = `${AFTER_SALES_PLUGIN_DIR}/lib/refund-approval.cjs`
+
+test('census domain: every workspace-manifest directory is a scan root, with no marker-file escape', () => {
+  const source = createWorktreeSource(rootDir)
+  const roots = discoverRuntimeRoots(source)
+
+  // Expectation DERIVED from the manifest, not a copied list: expand pnpm-workspace.yaml here and
+  // require the root set to be exactly that, plus the named extra roots. Any marker-file rule
+  // (package.json, plugin.json, or the next one someone invents) fails this by construction —
+  // which is the point. Membership must come from the manifest, not from an incidental file.
+  const patterns = parseWorkspacePatterns(fs.readFileSync(path.join(rootDir, 'pnpm-workspace.yaml'), 'utf8'))
+  const expected = new Set(['scripts'])
+  for (const pattern of patterns) {
+    if (pattern.endsWith('/*')) {
+      const base = pattern.slice(0, -2)
+      for (const entry of fs.readdirSync(path.join(rootDir, base), { withFileTypes: true })) {
+        if (entry.isDirectory()) expected.add(`${base}/${entry.name}`)
+      }
+    } else {
+      expected.add(pattern)
+    }
+  }
+  assert.ok(expected.size > 1, 'precondition: the manifest expansion must be non-empty')
+  assert.deepEqual(roots, [...expected].sort(), 'the scan domain is exactly the workspace manifest plus the named extra roots')
+
+  // Frozen by name: the directory the marker-file rule lost. It is a live product plugin —
+  // plugin.json manifestVersion 2.0.0, an 850-line index.cjs, a contributed route, 13 lib modules.
+  assert.ok(roots.includes(AFTER_SALES_PLUGIN_DIR), `${AFTER_SALES_PLUGIN_DIR} must be a scan root`)
+  // Non-vacuity: if someone later adds a package.json to this plugin, the old rule would have
+  // covered it too and this row would silently stop exercising the escape. Say so out loud.
+  assert.equal(
+    fs.existsSync(path.join(rootDir, AFTER_SALES_PLUGIN_DIR, 'package.json')),
+    false,
+    'precondition: this plugin still has no package.json, so it still exercises the marker-file escape — if that changes, pick another manifest directory without one',
+  )
+  assert.equal(
+    fs.existsSync(path.join(rootDir, AFTER_SALES_PLUGIN_DIR, 'plugin.json')),
+    true,
+    'precondition: this plugin really is product code',
+  )
+})
+
+test('frozen must-red: attendance DML inside plugins/plugin-after-sales is inside the census domain and reds', () => {
+  const source = createWorktreeSource(rootDir)
+  // Walk the chain rather than assuming it: extension, exclusion rules, and the directory walk.
+  assert.equal(isScannablePath(AFTER_SALES_PLUGIN_MODULE), true, 'the module must be a scannable path')
+  assert.ok(
+    source.listAllFiles(AFTER_SALES_PLUGIN_DIR).includes(AFTER_SALES_PLUGIN_MODULE),
+    'the directory walk must actually reach the module',
+  )
+  assert.deepEqual(
+    scanFileForDmlSites(AFTER_SALES_PLUGIN_MODULE, source.readFile(AFTER_SALES_PLUGIN_MODULE)),
+    [],
+    'precondition: this module writes no DML today, so the probe below contributes the only site and the +1 assertion is exact',
+  )
+
+  const probe = fullCensusWithMutatedSource(AFTER_SALES_PLUGIN_MODULE, (original) => `${original}
+async function quietlyWriteAttendance(client, recordId) {
+  await client.query(\`INSERT INTO attendance_records (id) VALUES ($1)\`, [recordId])
+}
+`)
+  // The P2 signature, and the discriminator against P1: under the old rule the raw census did NOT
+  // move at all here, because the file was never opened. Redness alone would not have shown that.
+  assert.equal(
+    probe.sites.length,
+    baselineCensus().sites.length + 1,
+    'the raw census must grow — an unscanned directory contributes nothing, which is exactly how this escape hid',
+  )
+  assert.deepEqual(
+    unclaimedLabels(probe.result),
+    [`${AFTER_SALES_PLUGIN_MODULE} :: quietlyWriteAttendance :: attendance_records:insert`],
+    'an attendance write from the after-sales plugin must red by name',
+  )
+  assert.deepEqual(probe.result.overCount, [])
+  assert.deepEqual(probe.result.missing, [])
+})
+
+// --- P1-2: the statement, not just the coordinate ---------------------------------------------
+
+const ATTENDANCE_PLUGIN_INDEX = 'plugins/plugin-attendance/index.cjs'
+const ARCHIVE_WHERE_CLAUSE = `
+          WHERE org_id = $1
+            AND request_id = $2
+            AND source_key NOT LIKE '%:archived:%'`
+
+test('frozen must-red: deleting the WHERE from an approved tenant-scoped UPDATE reds in fingerprintDrift', () => {
+  // The owner's P1-2, verbatim. `archiveScheduleDispatchSourceKey` archives ONE request for ONE
+  // org. Delete its entire WHERE and it becomes an unbounded, cross-tenant, table-wide UPDATE
+  // that rewrites `source_key` for every row in `attendance_schedule_dispatch_requests`.
+  //
+  // Nothing about the site IDENTITY changes: same file, same symbol, same table, same verb, same
+  // occurrence count. Before the fingerprint the whole suite stayed green with byte-identical
+  // counter lines — the single most dangerous shape the inventory could not see, because it is a
+  // change to what an ALREADY-APPROVED write does rather than the appearance of a new one.
+  //
+  // Note this is NOT the substitution residue: that one is about two different call sites
+  // colliding on a shared symbol name. Here the file, symbol, table and verb are all the genuine,
+  // legitimately-approved ones. Only the SQL changed.
+  const probe = fullCensusWithMutatedSource(ATTENDANCE_PLUGIN_INDEX, (original) => {
+    assert.equal(
+      original.split(ARCHIVE_WHERE_CLAUSE).length - 1,
+      1,
+      'probe anchor must match exactly once — if the archive statement was reformatted, re-derive the probe rather than loosening it',
+    )
+    return original.replace(ARCHIVE_WHERE_CLAUSE, '')
+  })
+
+  // The identity legs must ALL stay clean — that is the whole point of the finding.
+  assert.deepEqual(probe.result.unclaimed, [], 'the coordinate is unchanged, so no new identity appears')
+  assert.deepEqual(probe.result.overCount, [], 'the occurrence count is unchanged')
+  assert.deepEqual(probe.result.missing, [], 'no pinned identity stops occurring')
+  assert.equal(
+    probe.sites.length,
+    baselineCensus().sites.length,
+    'the raw census does not move either — this attack adds no site, it edits one',
+  )
+
+  // ...and the statement leg must red, naming the identity.
+  assert.deepEqual(
+    probe.result.fingerprintDrift.map((d) => d.identity),
+    [`${ATTENDANCE_PLUGIN_INDEX} :: archiveScheduleDispatchSourceKey :: attendance_schedule_dispatch_requests:update`],
+    'removing the tenant scope from an approved UPDATE must red by name in the statement leg',
+  )
+  const drift = probe.result.fingerprintDrift[0]
+  assert.equal(drift.pinned.length, drift.observed.length, 'same number of occurrences — this is content drift, not a count change')
+  assert.notDeepEqual(drift.pinned, drift.observed, 'the pinned and observed fingerprints must actually differ')
+})
+
+test('statement fingerprint hashes exact masked text so value edits cannot hide behind normalisation', () => {
+  const withWhere = "UPDATE attendance_records SET status = $1 WHERE org_id = $2 AND id = $3"
+  const reformatted = "UPDATE attendance_records\n   SET status = $1\n WHERE org_id = $2\n   AND id = $3"
+  const cased = "update attendance_records set status = $1 where org_id = $2 and id = $3"
+
+  // Exact text is intentionally fail-closed. A parser-free normaliser cannot distinguish harmless
+  // keyword formatting from case/whitespace inside a quoted value, where both can change data.
+  for (const [label, variant] of [
+    ['layout changed', reformatted],
+    ['keyword case changed', cased],
+    ['WHERE deleted', 'UPDATE attendance_records SET status = $1'],
+    ['WHERE weakened', 'UPDATE attendance_records SET status = $1 WHERE id = $3'],
+    ['SET list extended', 'UPDATE attendance_records SET status = $1, approved = TRUE WHERE org_id = $2 AND id = $3'],
+    ['predicate negated', 'UPDATE attendance_records SET status = $1 WHERE org_id != $2 AND id = $3'],
+    ['dynamic target changed', 'UPDATE ${otherTable} SET status = $1 WHERE org_id = $2 AND id = $3'],
+  ]) {
+    assert.notEqual(statementFingerprintOf(variant), statementFingerprintOf(withWhere), `${label} must move the fingerprint`)
+  }
+  assert.notEqual(
+    statementFingerprintOf("UPDATE attendance_records SET status = 'Active' WHERE org_id = $2"),
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active' WHERE org_id = $2"),
+    'case inside a quoted value is data, not keyword formatting',
+  )
+  assert.notEqual(
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active  user' WHERE org_id = $2"),
+    statementFingerprintOf("UPDATE attendance_records SET status = 'active user' WHERE org_id = $2"),
+    'whitespace inside a quoted value is data and must not collapse',
+  )
+  assert.match(statementFingerprintOf(withWhere), /^[0-9a-f]{64}$/, 'the full SHA-256 must be retained')
+
+  // The multiset property, asserted directly: 11 of the 19 repeated identities have occurrences
+  // whose statements DIFFER, so comparing as a set would silently lose an occurrence.
+  const repeated = APPROVED_SITE_IDENTITIES.filter((row) => row.occurrences > 1)
+  assert.ok(repeated.length > 0, 'precondition: there are repeated identities to reason about')
+  for (const row of repeated) {
+    assert.equal(
+      row.statementFingerprints.length,
+      row.occurrences,
+      `${siteIdentityLabel(row)}: the pinned fingerprint list is a MULTISET of length occurrences, not a set`,
+    )
+  }
+  const withDifferingStatements = repeated.filter((row) => new Set(row.statementFingerprints).size > 1)
+  assert.ok(
+    withDifferingStatements.length > 0,
+    'at least one repeated identity must have occurrences with DIFFERENT statements, or the multiset-vs-set distinction would be untested',
+  )
+})
+
+test('statement fingerprint spans the complete outer SQL template across nested template expressions', () => {
+  const scoped = "const q = `UPDATE attendance_records SET payload = ${cond ? `a` : `b`} WHERE org_id = $1`"
+  const unscoped = "const q = `UPDATE attendance_records SET payload = ${cond ? `a` : `b`}`"
+  const scopedSite = scanFileForDmlSites('nested-template-probe.ts', scoped)[0]
+  const unscopedSite = scanFileForDmlSites('nested-template-probe.ts', unscoped)[0]
+
+  assert.match(
+    scopedSite.statementText,
+    /WHERE org_id = \$1/,
+    'the outer statement span must continue after a nested template expression',
+  )
+  assert.notEqual(
+    scopedSite.statementFingerprint,
+    unscopedSite.statementFingerprint,
+    'deleting tenant scope after a nested template expression must move the fingerprint',
+  )
+
+  const innerSql = "const q = `SELECT ${cond ? `UPDATE attendance_records SET status = $1 WHERE org_id = $2` : `SELECT 1`}`"
+  const innerSite = scanFileForDmlSites('nested-template-probe.ts', innerSql)[0]
+  assert.equal(
+    innerSite.statementText,
+    'UPDATE attendance_records SET status = $1 WHERE org_id = $2',
+    'SQL inside a nested template must use the innermost containing literal',
+  )
+
+  for (const [label, expression] of [
+    ['double-quoted string', '${"foo`bar"}'],
+    ['regular expression', '${/foo`bar/.test(value)}'],
+  ]) {
+    const withScope = `const q = \`${expression} UPDATE attendance_records SET status = $1 WHERE org_id = $2\``
+    const withoutScope = `const q = \`${expression} UPDATE attendance_records SET status = $1\``
+    const withScopeSite = scanFileForDmlSites('nested-template-probe.ts', withScope)[0]
+    const withoutScopeSite = scanFileForDmlSites('nested-template-probe.ts', withoutScope)[0]
+    assert.equal(
+      withScopeSite.statementText,
+      `${expression} UPDATE attendance_records SET status = $1 WHERE org_id = $2`,
+      `${label}: an unrelated backtick inside the expression must not become a literal boundary`,
+    )
+    assert.notEqual(
+      withScopeSite.statementFingerprint,
+      withoutScopeSite.statementFingerprint,
+      `${label}: deleting scope after the expression must move the outer statement fingerprint`,
+    )
+  }
+})
+
+test('statement fingerprint ignores regex backticks after a control-flow condition', () => {
+  const source = [
+    'if (ok) /foo`bar/.test(value)',
+    'const q = `UPDATE attendance_records SET status = $1 WHERE org_id = $2`',
+  ].join('\n')
+  const site = scanFileForDmlSites('control-regex-probe.ts', source)[0]
+
+  assert.equal(
+    site.statementText,
+    'UPDATE attendance_records SET status = $1 WHERE org_id = $2',
+    'a regex statement after an if condition must not become a template boundary',
+  )
+})
+
+test('statement fingerprint ALIGNMENT: every site is fingerprinted over its OWN statement', () => {
+  // A fingerprint is non-empty and perfectly stable even when taken over the WRONG span, and that
+  // failure is invisible: the gate would be green forever while pinning text belonging to some
+  // other literal. `sqlLiteralRanges` is a quote-pairing scan over the whole masked file, so a
+  // single mispaired quote upstream could shift every later range. "212/212 sites have a
+  // non-empty fingerprint" rules out extraction FAILURE; it says nothing about MISALIGNMENT, and
+  // the WHERE-deletion probe proves alignment for exactly one site out of 212.
+  //
+  // Mechanical check over the whole census: the text a site was fingerprinted over must contain
+  // that site's own table name AND its own verb keyword.
+  const VERB_KEYWORDS = {
+    insert: ['insert'],
+    update: ['update'],
+    delete: ['delete'],
+    truncate: ['truncate'],
+    merge: ['merge'],
+    copy: ['copy'],
+    staging_create: ['create'],
+    staging_drop: ['drop'],
+    staging_alter: ['alter'],
+  }
+  const tracked = currentTrackedSites()
+  assert.ok(tracked.length > 0, 'precondition: the census is non-empty')
+
+  const misaligned = []
+  for (const site of tracked) {
+    const text = String(site.statementText ?? '').replace(/\s+/g, ' ').toLowerCase()
+    const keywords = VERB_KEYWORDS[site.verb]
+    assert.ok(keywords, `unmapped verb ${site.verb} — extend VERB_KEYWORDS rather than skipping it, or this check silently stops covering that verb`)
+    const hasTable = text.includes(String(site.table).toLowerCase())
+    const hasVerb = keywords.some((kw) => text.includes(kw))
+    if (!hasTable || !hasVerb) {
+      misaligned.push(`${site.relPath}:${site.line} ${site.table}:${site.verb} hasTable=${hasTable} hasVerb=${hasVerb} text=${text.slice(0, 120)}`)
+    }
+  }
+  assert.deepEqual(
+    misaligned,
+    [],
+    'every tracked site must be fingerprinted over text that actually contains its own table and verb — a site failing this is pinning some other statement, and its fingerprint guards nothing',
+  )
+
+  // Negative control: the check must be capable of failing. A site whose text is replaced with an
+  // unrelated statement has to be caught, or the loop above is asserting nothing.
+  const decoy = { ...tracked[0], statementText: 'SELECT 1 FROM some_unrelated_place' }
+  const decoyText = decoy.statementText.replace(/\s+/g, ' ').toLowerCase()
+  assert.equal(
+    decoyText.includes(String(decoy.table).toLowerCase()) && VERB_KEYWORDS[decoy.verb].some((kw) => decoyText.includes(kw)),
+    false,
+    'positive control for the detector itself: mismatched statement text must be detectable',
+  )
+})
+
+test('every approved identity carries a well-formed statement fingerprint multiset', () => {
+  for (const row of APPROVED_SITE_IDENTITIES) {
+    assert.ok(Array.isArray(row.statementFingerprints), `${siteIdentityLabel(row)} must carry statementFingerprints`)
+    assert.equal(
+      row.statementFingerprints.length,
+      row.occurrences,
+      `${siteIdentityLabel(row)}: one fingerprint per pinned occurrence`,
+    )
+    for (const fp of row.statementFingerprints) {
+      assert.match(fp, /^[0-9a-f]{64}$/, `${siteIdentityLabel(row)}: fingerprint must be a full lowercase SHA-256`)
+    }
+    assert.deepEqual(
+      row.statementFingerprints,
+      [...row.statementFingerprints].sort(),
+      `${siteIdentityLabel(row)}: pinned fingerprints must be stored sorted, so comparison is order-independent`,
+    )
+  }
+})
+
+test('approval carries no file, prefix, or bare-symbol shape: every entry claim is exact-identity membership', () => {
+  // Attack the criterion itself. If any entry still approved by file or prefix, a synthetic site
+  // with that file but a nonsense symbol/table/verb would be claimed by it.
+  for (const entry of CURATED_DEBT_ENTRIES) {
+    for (const relPath of [
+      'packages/core-backend/src/routes/approvals.ts',
+      'packages/core-backend/src/services/ApprovalProductService.ts',
+      'packages/core-backend/src/services/ApprovalBridgeService.ts',
+      'packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts',
+      'packages/core-backend/src/services/AttendanceExpiryService.ts',
+      'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts',
+      'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts',
+      'packages/core-backend/src/attendance/w4c3a-sync-import-host.ts',
+      'packages/core-backend/src/attendance/w4c3b-approved-leave-cancellation.ts',
+      'plugins/plugin-attendance/index.cjs',
+    ]) {
+      assert.equal(
+        entry.claims({
+          relPath,
+          enclosingSymbol: '__synthetic_unapproved_symbol__',
+          table: 'attendance_records',
+          verb: 'insert',
+          line: 1,
+        }),
+        false,
+        `${entry.id} must not claim an unapproved symbol merely because it is in ${relPath}`,
+      )
+    }
+    // ...and the file's own approved symbols must not carry a different table or verb.
+    for (const row of APPROVED_SITE_IDENTITY_BY_KEY.values()) {
+      if (!(row.entryIds || []).includes(entry.id)) continue
+      assert.equal(
+        entry.claims({ ...row, table: '__synthetic_unapproved_table__' }),
+        false,
+        `${entry.id} must not claim a new table under its approved symbol ${row.enclosingSymbol}`,
+      )
+      assert.equal(
+        entry.claims({ ...row, verb: 'truncate' }),
+        false,
+        `${entry.id} must not claim a new verb under its approved symbol ${row.enclosingSymbol}`,
+      )
+      assert.equal(entry.claims(row), true, `${entry.id} must still claim its own approved identity`)
+    }
+  }
+})
+
+test('the identity table itself is well-formed: exact keys, no duplicates, one disposition, known owners', () => {
+  const rows = [...APPROVED_SITE_IDENTITY_BY_KEY.values()]
+  assert.ok(rows.length > 0)
+  const knownIds = new Set(CURATED_DEBT_ENTRIES.map((entry) => entry.id))
+  const seen = new Set()
+  for (const row of rows) {
+    const key = JSON.stringify([row.relPath, row.enclosingSymbol, row.table, row.verb])
+    assert.equal(seen.has(key), false, `duplicate approved identity: ${key}`)
+    seen.add(key)
+    assert.ok(Number.isInteger(row.occurrences) && row.occurrences >= 1, `bad multiplicity on ${key}`)
+    const owned = (row.entryIds || []).length > 0
+    const generic = typeof row.genericSharedReason === 'string' && row.genericSharedReason.length > 0
+    assert.notEqual(owned, generic, `exactly one disposition required on ${key}`)
+    for (const id of row.entryIds || []) {
+      assert.ok(knownIds.has(id), `approved identity ${key} names unknown debt id ${id}`)
+    }
+  }
+  console.log(
+    `[w4c0-dml-inventory] approved identities=${rows.length}`
+    + ` pinnedOccurrences=${rows.reduce((n, r) => n + r.occurrences, 0)}`
+    + ` repeated=${rows.filter((r) => r.occurrences > 1).length}`
+    + ` genericShared=${rows.filter((r) => r.genericSharedReason).length}`,
   )
 })
 
@@ -518,13 +1366,219 @@ test('W4C-3a fixed item-effect DML is classified under the completed P06-P09 cut
 // 5. CI wiring: this file must be named explicitly in the workflow (node:test files are neither
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).
 // -------------------------------------------------------------------------------------------
-test('this collector test file has an explicit CI execution step', () => {
+//
+//    The two `assert.match` calls this test used to be were whole-file substring checks: they
+//    proved the filename and the step name appear SOMEWHERE in the workflow text. `if: false` on
+//    the step left them both green — the gate could be switched off while its own wiring test
+//    still printed a tick. The check below is structural instead: it locates the step by a pinned
+//    `id`, derives the step's own block by indentation, and asserts the step's KEY SET exactly.
+//
+//    Asserting the key set exactly, rather than rejecting a list of known-bad keys, is deliberate:
+//    enumerating traps (`if`, `continue-on-error`, `shell`, …) never converges — the next disabling
+//    key is always the one not on the list. `['id', 'name', 'run']` and nothing else rejects every
+//    such key, including ones nobody has thought of yet.
+const COLLECTOR_STEP_ID = 'attendance-w4c0-dml-inventory'
+const COLLECTOR_STEP_COMMAND = `node --test scripts/ops/${THIS_TEST_FILENAME}`
+
+/**
+ * Locate one workflow step by its `id` and return its own block, derived structurally.
+ *
+ * Boundaries come from YAML indentation, never from a fixed line window: a step starts at the
+ * nearest preceding `      - ` line and ends at the next `      - ` line or at any key indented
+ * four spaces or less (which means the steps list itself has ended). Getting this wrong in the
+ * generous direction would silently attribute a NEIGHBOURING step's keys to this one, so the
+ * must-red matrix below includes a boundary control in both directions.
+ *
+ * Pure function of the workflow text so the same code path is exercised by the real workflow and
+ * by the synthetic negative rows — a analyzer that is only ever run against a passing input is not
+ * evidence about a failing one.
+ */
+function findWorkflowStepById(workflowText, stepId) {
+  const lines = workflowText.split(/\r?\n/)
+  const isStepStart = (line) => /^ {6}- /.test(line)
+  const leftStepsList = (line) => /^ {0,5}\S/.test(line)
+
+  const idLineIndexes = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^ {8}id:\s*(\S+)\s*$/.exec(lines[i])?.[1] === stepId) idLineIndexes.push(i)
+  }
+  if (idLineIndexes.length !== 1) return { found: false, idCount: idLineIndexes.length }
+  const idLine = idLineIndexes[0]
+
+  let start = -1
+  for (let i = idLine; i >= 0; i -= 1) {
+    if (isStepStart(lines[i])) { start = i; break }
+    if (leftStepsList(lines[i])) break
+  }
+  if (start < 0) return { found: false, idCount: 1 }
+
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (isStepStart(lines[i]) || leftStepsList(lines[i])) { end = i; break }
+  }
+
+  let job = null
+  for (let i = start; i >= 0; i -= 1) {
+    const m = lines[i].match(/^ {2}([A-Za-z0-9_-]+):\s*$/)
+    if (m) { job = m[1]; break }
+  }
+
+  const block = lines.slice(start, end)
+  // A step's own keys are the mapping keys at 8-space indentation, plus the `- name:` opener.
+  const keys = []
+  const opener = block[0].match(/^ {6}- ([A-Za-z0-9_-]+):/)
+  if (opener) keys.push(opener[1])
+  for (const line of block.slice(1)) {
+    const m = line.match(/^ {8}([A-Za-z0-9_-]+):/)
+    if (m) keys.push(m[1])
+  }
+  return { found: true, idCount: 1, job, keys: keys.sort(), text: block.join('\n'), start, end }
+}
+
+const COLLECTOR_EXPECTED_RUN_COMMANDS = Object.freeze([
+  'git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \\',
+  'git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+  COLLECTOR_STEP_COMMAND,
+])
+
+function collectorStepRunsExactCommand(step) {
+  const lines = step.text.split('\n')
+  const runIndex = lines.findIndex((line) => /^ {8}run:\s*\|\s*$/.test(line))
+  if (runIndex < 0) return false
+  const commands = lines
+    .slice(runIndex + 1)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+  return commands.length === COLLECTOR_EXPECTED_RUN_COMMANDS.length
+    && commands.every((line, index) => line === COLLECTOR_EXPECTED_RUN_COMMANDS[index])
+}
+
+test('this collector test file has an explicit, un-disableable CI execution step', () => {
   const workflow = readWorkflow()
+
+  // Retained verbatim from the previous version of this test — nothing is weakened, only added.
   assert.match(workflow, new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
   assert.match(
     workflow,
     /Run attendance W4C-0 Stage D §8\.4 and W4C-4 §12\.7 inventory collectors/,
     'the required CI step must name the W4C-4 current/history inventory, not only the older DML collector',
+  )
+
+  const step = findWorkflowStepById(workflow, COLLECTOR_STEP_ID)
+  assert.equal(step.found, true, `exactly one workflow step must carry id: ${COLLECTOR_STEP_ID} (found ${step.idCount})`)
+  assert.equal(step.job, 'test', 'the step must live in the `test` job — that is the one feeding the required `test (20.x)` context; the same step in another job would satisfy a whole-file substring check and gate nothing')
+  assert.ok(
+    collectorStepRunsExactCommand(step),
+    `the step must run the exact command \`${COLLECTOR_STEP_COMMAND}\`; a renamed or re-pointed command would leave the step name intact and run something else`,
+  )
+  assert.deepEqual(
+    step.keys,
+    ['id', 'name', 'run'],
+    'the step may carry ONLY name/id/run. Any other key — `if`, `continue-on-error`, `shell`, `env`, `working-directory`, or the next one invented — can neutralise or redirect the gate while every substring check stays green, so the key set is pinned exactly rather than blacklisted',
+  )
+})
+
+test('CI wiring gate: the step analyzer reds on every way of disabling, moving, or redirecting the step', () => {
+  // Synthetic workflows through the SAME analyzer the real assertion uses. Without these the
+  // analyzer would only ever have been run against an input that passes, which is no evidence
+  // about one that should not.
+  const step = (extraKeys = '') => [
+    'jobs:',
+    '  test:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: Checkout',
+    '        uses: actions/checkout@v4',
+    '      - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors',
+    `        id: ${COLLECTOR_STEP_ID}`,
+    ...(extraKeys ? [extraKeys] : []),
+    '        run: |',
+    '          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \\',
+    '            git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+    `          ${COLLECTOR_STEP_COMMAND}`,
+    '      - name: Run linting',
+    '        run: pnpm lint',
+    '',
+  ].join('\n')
+
+  const baseline = findWorkflowStepById(step(), COLLECTOR_STEP_ID)
+  assert.deepEqual(
+    [baseline.found, baseline.job, baseline.keys, collectorStepRunsExactCommand(baseline)],
+    [true, 'test', ['id', 'name', 'run'], true],
+    'positive control: the analyzer must accept a correctly wired step, or every red below proves nothing',
+  )
+
+  for (const [label, disablingKey] of [
+    ['if: false', '        if: false'],
+    ['if: on an expression', "        if: github.event_name == 'push'"],
+    ['continue-on-error', '        continue-on-error: true'],
+    ['an alternative shell', '        shell: pwsh'],
+    ['a redirected working-directory', '        working-directory: ./elsewhere'],
+    ['an env override', '        env:'],
+  ]) {
+    const analyzed = findWorkflowStepById(step(disablingKey), COLLECTOR_STEP_ID)
+    assert.equal(analyzed.found, true, `${label}: the step is still found`)
+    assert.notDeepEqual(analyzed.keys, ['id', 'name', 'run'], `${label} must be rejected by the pinned key set`)
+  }
+
+  // Moved to another job: a whole-file substring check cannot see this at all.
+  const movedJob = step().replace('  test:', '  unrelated-job:')
+  assert.equal(findWorkflowStepById(movedJob, COLLECTOR_STEP_ID).job, 'unrelated-job')
+
+  // Command re-pointed while the step name and id stay intact.
+  const repointed = step().replace(COLLECTOR_STEP_COMMAND, 'node --test scripts/ops/some-other.test.mjs')
+  assert.equal(collectorStepRunsExactCommand(findWorkflowStepById(repointed, COLLECTOR_STEP_ID)), false)
+
+  for (const [label, replacement] of [
+    ['short-circuited', `true || ${COLLECTOR_STEP_COMMAND}`],
+    ['failure swallowed', `${COLLECTOR_STEP_COMMAND} || true`],
+    ['commented out', `# ${COLLECTOR_STEP_COMMAND}`],
+    ['duplicated', `${COLLECTOR_STEP_COMMAND}\n          ${COLLECTOR_STEP_COMMAND}`],
+    ['preceded by an early exit', `exit 0\n          ${COLLECTOR_STEP_COMMAND}`],
+    ['moved into the fetch fallback', `# ${COLLECTOR_STEP_COMMAND}`],
+  ]) {
+    const mutated = step().replace(COLLECTOR_STEP_COMMAND, replacement)
+    const attack = label === 'moved into the fetch fallback'
+      ? mutated.replace(
+          'git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7',
+          COLLECTOR_STEP_COMMAND,
+        )
+      : mutated
+    assert.equal(
+      collectorStepRunsExactCommand(findWorkflowStepById(attack, COLLECTOR_STEP_ID)),
+      false,
+      `${label}: command presence must not be mistaken for execution`,
+    )
+  }
+
+  // Id removed, and id duplicated — both must fail to resolve to exactly one step.
+  assert.equal(findWorkflowStepById(step().replace(`        id: ${COLLECTOR_STEP_ID}\n`, ''), COLLECTOR_STEP_ID).found, false)
+  const duplicated = step().replace(
+    '      - name: Run linting\n        run: pnpm lint',
+    `      - name: Decoy\n        id: ${COLLECTOR_STEP_ID}\n        run: true`,
+  )
+  assert.deepEqual(
+    [findWorkflowStepById(duplicated, COLLECTOR_STEP_ID).found, findWorkflowStepById(duplicated, COLLECTOR_STEP_ID).idCount],
+    [false, 2],
+    'a duplicated id must not silently resolve to whichever step comes first',
+  )
+
+  // BLOCK-BOUNDARY control, both directions. A boundary bug and a passing test look identical, so
+  // assert that a NEIGHBOUR's disabling key is not attributed to this step, and that this step's
+  // own one still is.
+  const neighbourDisabled = step().replace(
+    '      - name: Run linting\n        run: pnpm lint',
+    '      - name: Run linting\n        if: false\n        continue-on-error: true\n        run: pnpm lint',
+  )
+  assert.deepEqual(
+    findWorkflowStepById(neighbourDisabled, COLLECTOR_STEP_ID).keys,
+    ['id', 'name', 'run'],
+    'the next step\'s keys must NOT bleed into this step\'s block — an over-generous end boundary would red spuriously and then be "fixed" by loosening the assertion',
+  )
+  assert.notDeepEqual(
+    findWorkflowStepById(step('        if: false'), COLLECTOR_STEP_ID).keys,
+    ['id', 'name', 'run'],
+    'and this step\'s OWN disabling key must still be caught — the pair proves the boundary is exact, not merely tight or merely loose',
   )
 })
 
@@ -989,6 +2043,42 @@ test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or
   assert.equal(classifyP26ApprovalAssignmentSites([...sites, ...added]).unclassified.length, 1)
 })
 
+test('W4C-3b P26 key is injective: a symbol containing the old separator cannot alias another site', () => {
+  // The collector mints route symbols as `${METHOD} ${routePath}` from arbitrary path literals,
+  // so an enclosingSymbol containing ' :: ' is constructible, not hypothetical. Under the old
+  // `[relPath, enclosingSymbol, verb].join(' :: ')` key these two DIFFERENT sites collapse onto
+  // the same string, which silently lends one site's classification to the other — the criterion
+  // itself becoming the bypass.
+  const classifications = [
+    { relPath: 'a.ts', enclosingSymbol: 'POST /x :: b.ts :: sym', verb: 'update', count: 1, owner: 'decoy' },
+  ]
+  const impostor = {
+    relPath: 'a.ts :: POST /x',
+    enclosingSymbol: 'b.ts :: sym',
+    verb: 'update',
+    table: 'approval_assignments',
+  }
+  assert.notEqual(
+    p26KeyOf(classifications[0]),
+    p26KeyOf(impostor),
+    'two distinct (relPath, enclosingSymbol, verb) triples must not share a key',
+  )
+  const result = classifyP26ApprovalAssignmentSites([impostor], classifications)
+  assert.equal(
+    result.unclassified.length,
+    1,
+    'the impostor site must remain unclassified — it must not inherit the decoy classification',
+  )
+  assert.equal(result.classifiedSites.length, 0)
+  assert.equal(result.stale.length, 1, 'and the decoy classification must itself report as stale')
+
+  // Positive control: the SAME triple really does classify, so the assertion above is about
+  // aliasing and not about `classifyP26ApprovalAssignmentSites` rejecting synthetic input.
+  const genuine = { ...impostor, relPath: 'a.ts', enclosingSymbol: 'POST /x :: b.ts :: sym' }
+  const ok = classifyP26ApprovalAssignmentSites([genuine], classifications)
+  assert.deepEqual([ok.unclassified.length, ok.classifiedSites.length, ok.stale.length], [0, 1, 0])
+})
+
 test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by W4C-3b', () => {
   const requiredDebtIds = ['P12', 'P13', 'P14', 'P17', 'P18', 'P19', 'P22', 'P26', 'P27', 'P28']
   const concreteDebtIds = requiredDebtIds.filter((id) => !['P19', 'P22'].includes(id))
@@ -1169,6 +2259,135 @@ test('W4C-3c whole-file scanner catches multiline DML verb/table boundaries', ()
     assert.equal(sites.length, 1, shapes[index])
     assert.deepEqual([sites[0].verb, sites[0].table], expected[index])
   }
+})
+
+test('W4C-3c scanner resolves schema-qualified write targets to the real table, not the qualifier', () => {
+  // Found by feeding the scanner an evasion battery while converting approval to exact site
+  // identity. Before the fix the capture group took the FIRST identifier after the verb, so
+  // `INSERT INTO public.attendance_records` produced a site on the table `public` — which is not
+  // attendance-owned, so the write fell out of the tracked buckets entirely and no identity, no
+  // count and no allowlist was ever consulted. A one-token bypass of the whole §8.4 gate.
+  //
+  // Exact-identity approval cannot help here: a write the scanner never turns into a site has no
+  // identity to be approved or refused. This leg therefore guards the SCANNER, and it is the
+  // reason the fix belongs with the identity conversion rather than after it.
+  const shapes = [
+    ['async function q1() { await db.query(`INSERT INTO public.attendance_records (id) VALUES ($1)`) }', 'insert', 'attendance_records'],
+    ['async function q2() { await db.query(`DELETE FROM public."attendance_events" WHERE id = $1`) }', 'delete', 'attendance_events'],
+    ['async function q3() { await db.query(`UPDATE "public".attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q4() { await db.query(`INSERT INTO db.public.attendance_records (id) VALUES ($1)`) }', 'insert', 'attendance_records'],
+  ]
+  for (const [source, verb, table] of shapes) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.deepEqual([sites[0].verb, sites[0].table], [verb, table], source)
+  }
+
+  // Negative control: the qualifier group must not swallow the table when there IS no qualifier,
+  // and must not invent a site out of a bare dotted expression that is not a DML target.
+  const bare = scanFileForDmlSites('probe.cjs', 'async function q5() { await db.query(`INSERT INTO attendance_records (id) VALUES ($1)`) }')
+  assert.deepEqual([bare.length, bare[0]?.table], [1, 'attendance_records'])
+})
+
+test('W4C-3c scanner: PostgreSQL ONLY is an inheritance modifier, not a table', () => {
+  // `UPDATE ONLY t` used to capture `ONLY` as the table. `ONLY` is not attendance-owned, so the
+  // write left the tracked buckets entirely — the same one-token bypass shape as the schema
+  // qualifier, and equally silent. Consumed structurally now; deliberately NOT added to
+  // SQL_RESERVED_NON_TABLE_WORDS, because that set `continue`s and would discard the site
+  // altogether, turning a mis-named write into an invisible one.
+  const shapes = [
+    ['async function q1() { await db.query(`UPDATE ONLY attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q2() { await db.query(`DELETE FROM ONLY attendance_events WHERE id = $1`) }', 'delete', 'attendance_events'],
+    ['async function q3() { await db.query(`UPDATE ONLY public.attendance_records SET status = $1`) }', 'update', 'attendance_records'],
+    ['async function q4() { await db.query(`TRUNCATE ONLY attendance_records`) }', 'truncate', 'attendance_records'],
+  ]
+  for (const [source, verb, table] of shapes) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.deepEqual([sites[0].verb, sites[0].table], [verb, table], source)
+  }
+  // Negative control: a table genuinely NAMED `only_...` must not be eaten by the modifier group.
+  const realTable = scanFileForDmlSites('probe.cjs', 'async function q5() { await db.query(`UPDATE attendance_only_flags SET x = $1`) }')
+  assert.deepEqual([realTable.length, realTable[0]?.table], [1, 'attendance_only_flags'])
+})
+
+test('W4C-3c scanner: every target of a TRUNCATE / DROP TABLE list becomes its own site', () => {
+  // A comma list is a TARGET list for exactly these two verbs. Only the first target used to
+  // become a site, so `TRUNCATE unrelated_table, attendance_records` hid an attendance truncation
+  // behind an innocuous first name.
+  const lists = [
+    ['async function q1() { await db.query(`TRUNCATE attendance_records, attendance_events`) }', 'truncate', ['attendance_records', 'attendance_events']],
+    ['async function q2() { await db.query(`TRUNCATE TABLE unrelated_rows, attendance_records, attendance_events`) }', 'truncate', ['unrelated_rows', 'attendance_records', 'attendance_events']],
+    ['async function q3() { await db.query(`DROP TABLE IF EXISTS staging_a, attendance_records`) }', 'staging_drop', ['staging_a', 'attendance_records']],
+    ['async function q4() { await db.query(`TRUNCATE ONLY public.attendance_records, public.attendance_events`) }', 'truncate', ['attendance_records', 'attendance_events']],
+    ['async function q5() { await db.query(`TRUNCATE "SET", attendance_records`) }', 'truncate', ['SET', 'attendance_records']],
+    ['async function q6() { await db.query(`TRUNCATE SET, attendance_records`) }', 'truncate', ['attendance_records']],
+  ]
+  for (const [source, verb, tables] of lists) {
+    const sites = scanFileForDmlSites('probe.cjs', source)
+    assert.deepEqual(sites.map((s) => s.table), tables, source)
+    assert.deepEqual([...new Set(sites.map((s) => s.verb))], [verb], source)
+  }
+
+  // Negative control, and the reason the continuation is restricted to these two verbs: applying
+  // it to every verb was measured and mints 12 false sites in this tree. A comma after any other
+  // verb's target is a column list, a SET list, or DDL — never another target.
+  const notATargetList = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q7() { await db.query(`ALTER TABLE attendance_records ADD CONSTRAINT a_ck CHECK (x > 0), ADD CONSTRAINT b_ck CHECK (y > 0)`) }',
+  )
+  assert.deepEqual(notATargetList.map((s) => s.table), ['attendance_records'], 'an ALTER TABLE constraint list must not mint extra table sites')
+  const insertColumns = scanFileForDmlSites(
+    'probe.cjs',
+    'async function q8() { await db.query(`INSERT INTO attendance_records (id, org_id) VALUES ($1, $2)`) }',
+  )
+  assert.deepEqual(insertColumns.map((s) => s.table), ['attendance_records'], 'an INSERT column list must not mint extra table sites')
+})
+
+test('DISCLOSURE (executable): the shapes this scanner still cannot see', () => {
+  // This test asserts a LIMITATION, on purpose. It is the residue list made executable: if any of
+  // these ever starts producing a site, this test reds and whoever changed it must update the
+  // stated residue in the PR body, `approved-site-identities.cjs`, and the collector header —
+  // rather than quietly widening the guarantee. A prose disclosure can drift from behaviour; this
+  // one cannot.
+  //
+  // Every row is paired with a positive control proving the row is about the ONE property named
+  // and not about a typo in the fixture.
+  const invisible = [
+    ['non-literal table name, resolvable const binding',
+      'const T = "attendance_records"\nasync function f() { await db.query(`INSERT INTO ${T} (id) VALUES ($1)`) }'],
+    ['non-literal table name, arbitrary expression',
+      'async function f() { await db.query(`INSERT INTO ${cfg.table} (id) VALUES ($1)`) }'],
+    ['lowercase SQL keywords',
+      'async function f() { await db.query(`insert into attendance_records (id) values ($1)`) }'],
+    ['mixed-case SQL keywords',
+      'async function f() { await db.query(`Insert Into attendance_records (id) VALUES ($1)`) }'],
+  ]
+  for (const [label, source] of invisible) {
+    assert.deepEqual(
+      scanFileForDmlSites('probe.cjs', source),
+      [],
+      `STILL INVISIBLE by design: ${label}. If this now produces a site, the scanner improved — update the stated residue everywhere it is written down, then change this row.`,
+    )
+  }
+
+  // Positive controls: the same writes in the literal, uppercase-keyword form ARE seen. Without
+  // these, a scanner that had stopped producing sites entirely would pass the block above.
+  for (const [label, source] of [
+    ['literal table, uppercase keywords', 'async function f() { await db.query(`INSERT INTO attendance_records (id) VALUES ($1)`) }'],
+    ['literal table, uppercase keywords, UPDATE', 'async function f() { await db.query(`UPDATE attendance_records SET status = $1`) }'],
+  ]) {
+    assert.equal(scanFileForDmlSites('probe.cjs', source).length, 1, `positive control must be seen: ${label}`)
+  }
+
+  // And the table-domain half of the same disclosure: the operational tables the plugin owns are
+  // outside the attendance-owned domain, so even a LITERAL write to them is out of scope today.
+  assert.equal(
+    isAttendanceOwnedCandidate('plugin_attendance_report_sync_jobs'),
+    false,
+    'STILL OUT OF DOMAIN by design: plugin_attendance_* operational tables. Four live writes exist at plugins/plugin-attendance/index.cjs and are invisible twice over (dynamic target AND out-of-domain table). Closing this needs a migrations-derived table domain plus constant-binding resolution, and it is scoped as follow-up work, not silently absent.',
+  )
+  assert.equal(isAttendanceOwnedCandidate('attendance_records'), true, 'positive control: the domain is not simply empty')
 })
 
 test('W4C-3c comment masker tracks nested braces inside template expressions', () => {

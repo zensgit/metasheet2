@@ -605,6 +605,7 @@ jobs:
       # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
       # re-proves the pinned baseline artifact is byte-reproducible from that ref.
       - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors
+        id: attendance-w4c0-dml-inventory
         run: |
           # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
           # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
