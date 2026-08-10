@@ -436,8 +436,20 @@ jobs:
       # 30 (23 + 7); the other 335 — multitable's 216 included — remain outside every guard's
       # (all 17) file list. This closes attendance's own gap, not "the last" gap.
       # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
-      # invocation, and that each of the seven files is (a) excluded from the no-DB job's default
-      # vitest.config.ts and (b) run as a whole-file arg of that step, and (c) exists on disk.
+      # invocation. OBS-1 (2026-08-07) converted the per-file assertions from a hardcoded FILES
+      # allowlist (33 entries at conversion time) to a DERIVED completeness check. An allowlist
+      # cannot notice a file it was never told about — the two W4C-3b suites that conversion wires
+      # (request-snapshots, central-approval) executed NOWHERE while the 33-entry guard was green.
+      # The corpus is every attendance-prefixed SUITE under tests/integration, found recursively,
+      # where "is a suite" is the union of "matches an include glob of a vitest config in the
+      # package" and "calls a vitest suite API" — no suffix or directory depth is hardcoded, after
+      # a .spec.ts probe and a subdirectory probe were both collected and skip-greened by the no-DB
+      # job while sitting in no corpus (2026-08-08). Every member must be excluded from the no-DB
+      # job's vitest.config.ts AND carried EXACTLY ONCE by a provably-executed real-DB invocation,
+      # and must exist on disk. NEITHER is REFUSED: the exit that let a suite submit a "positive
+      # proof" of DB-independence is DELETED (4828, 2026-08-09). Placed BEFORE the install: a break reds
+      # this required check in seconds. That is also why the corpus is derived statically rather
+      # than from vitest's own collection, which does not exist yet at this point in the job.
       - name: Attendance W4C-2 CI wiring contract
         run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 
@@ -1315,6 +1327,8 @@ jobs:
             tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+            tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
+            tests/integration/attendance-w4c3b-central-approval.db.test.ts \
             tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
             tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
             tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
@@ -1323,6 +1337,7 @@ jobs:
             tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts \
             tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts \
             tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
+            tests/integration/attendance-settlement-table-v1-5a.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \

@@ -1,31 +1,8 @@
 import type { Request, Response, NextFunction } from 'express'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { metrics } from '../metrics/metrics'
+import { apiPathEquals, isGateException } from './api-path-policy'
 import { authService } from './AuthService'
-
-const AUTH_WHITELIST = [
-  '/health',
-  '/api/health',
-  '/api/auth/login',
-  '/api/auth/register',
-  '/api/auth/invite/preview',
-  '/api/auth/invite/accept',
-  '/api/auth/refresh',
-  '/api/auth/refresh-token',
-  '/api/auth/dev-token',
-  '/api/auth/dingtalk/launch',
-  '/api/auth/dingtalk/callback',
-  '/api/plugins',
-  '/api/v2/hello',
-  '/api/v2/rpc-test',
-  '/internal/metrics',
-  '/api/cache-test',
-  '/api/permissions/health',
-  // PLM-COLLAB-P3-D2: embed routes are authenticated by the EdDSA embed token (embedTokenAuth),
-  // NOT the session JWT, so they must bypass the global session gate. embedTokenAuth is their
-  // sole auth; /api/plm-embed/config is intentionally public (it only serves the origin allowlist).
-  '/api/plm-embed/'
-]
 
 const PASSWORD_CHANGE_WHITELIST = [
   '/api/auth/me',
@@ -39,8 +16,15 @@ const PASSWORD_CHANGE_WHITELIST = [
 // Exported for use by other modules that need authenticated request typing
 export type AuthenticatedRequest = Request
 
+/**
+ * True when `path` is a declared exception to the global session gate.
+ *
+ * The exception list itself lives in `api-path-policy.ts` (`GLOBAL_GATE_EXCEPTIONS`), declared once
+ * with each entry's kind (`exact` vs `prefix`), so the gate and every other layer that asks about API
+ * paths consult the same table. This wrapper stays for the call sites that already import it.
+ */
 export function isWhitelisted(path: string): boolean {
-  return AUTH_WHITELIST.some(p => path.startsWith(p))
+  return isGateException(path)
 }
 
 const PUBLIC_FORM_CONTEXT_PATH = '/api/multitable/form-context'
@@ -65,8 +49,13 @@ export function isPublicFormAuthBypass(req: PublicFormBypassRequest): boolean {
   return false
 }
 
-function isPasswordChangeWhitelisted(path: string): boolean {
-  return PASSWORD_CHANGE_WHITELIST.some((prefix) => path.startsWith(prefix))
+function isPasswordChangeWhitelisted(pathOrUrl: string): boolean {
+  // The caller falls back to `req.originalUrl`, which — unlike `req.path` — still carries the query
+  // string. Compare the path portion only, so both callers' inputs mean the same thing here.
+  const path = (pathOrUrl || '').split('?')[0]
+  // Exact, via the shared policy: each entry names one route, so a longer path that merely starts with
+  // one of them is not covered by it.
+  return PASSWORD_CHANGE_WHITELIST.some((entry) => apiPathEquals(path, entry))
 }
 
 function resolveBearerToken(req: Request): string | undefined {

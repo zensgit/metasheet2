@@ -41,6 +41,7 @@ import type { AiUsageQueryFn } from './services/ai-usage-ledger'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
+import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
@@ -1354,7 +1355,10 @@ export class MetaSheetServer {
       // any non-allowlisted (method, path) falls through to jwtAuthMiddleware → 401, so a token can never
       // reach a write/side-effecting route outside the allowlist (kept in lockstep with the mounted guards).
       if (isOapiAllowlistRequest(req.method, req.path, req.headers.authorization)) return next()
-      if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
+      // API paths default INTO the session gate. `isApiPath` is the shared policy predicate
+      // (auth/api-path-policy.ts) that every layer asking this question uses, so the gate and the
+      // downstream audit/allowlist/limiter surfaces cannot disagree about what counts as API traffic.
+      if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
       return next()
     })
 
