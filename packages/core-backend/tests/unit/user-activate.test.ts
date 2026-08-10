@@ -631,6 +631,62 @@ describe('activatePendingUser (T3)', () => {
     expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
   })
 
+  // Empty-org sub-branch (verify-workflow finding: this fail-closed branch survived every
+  // mutation probe untested). An active source whose integration carries no org cannot anchor
+  // a membership write: alone it must refuse; alongside a real org it must simply not vote.
+  it('sole ACTIVE source with empty integration org: refuses ACTIVATE_SOURCE_INELIGIBLE, writing nothing', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ ...LINKED_ACTIVE_SOURCE, integration_org_id: '  ' }] })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-src' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('empty-org ACTIVE source next to a real one: does not vote — the real org derives without ambiguity', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { ...LINKED_ACTIVE_SOURCE, id: 'da-1', integration_org_id: '' },
+          { ...LINKED_ACTIVE_SOURCE, id: 'da-2', integration_org_id: 'org-2' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password' }),
+    ).resolves.toMatchObject({ activationStatus: 'activated', membershipOrgId: 'org-2' })
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-2'])
+  })
+
   // Dual-org: the person's ACTIVE source lives in org-2; a caller pointing at org-1 (their
   // other, inactive badge's org — or any org at all) must not be able to steer the membership.
   it('dual-org: derives the ACTIVE source org and refuses a caller steering to the other org', async () => {

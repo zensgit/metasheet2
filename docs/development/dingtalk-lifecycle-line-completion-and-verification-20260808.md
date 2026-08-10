@@ -65,7 +65,9 @@ Sonnet 侦察（restack 预案）全部命中：唯一真冲突 #4658、#4659 �
 
 Mutation 六连杀（每条先证锚点命中、后证目标测试转红、cp 还原）：restore DELETE 分支、planner creation 规划、no-op 豁免、writer creation INSERT、`ACTIVATE_ORG_MISMATCH` 校验、激活源门控回退（原 P1 复刻）。
 
-**独立对抗审 verdict（Opus，2026-08-09，绑 head 467ae34b57）**：**APPROVE-with-hardening，0 P1** —— 三条 refute-first 目标（T3 绕过 / writer 非 1:1 / restore drift）构造攻击后均未证伪；六条 mutation 独立复现全转红；immutability 函数与 20260728 版程序化逐行比对一列未丢；迁移在全新 DB 干净跑通且不在 9 处 MIGRATION_EXCLUDE。两条 P2 已落账：①**可逆性边界**——supersede（如管理员重新启用）后 restore 按既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成无证据残留：锁文 §0.7 已按此限定措辞（main 既有语义，非本 PR 引入），补偿路径列入 §4 owner 清单第 3 项；②**双 ACTIVE 源 org 派生歧义**（今日无 web 调用点可达）→ follow-up #4833，**已落地**：集合匹配 + `ACTIVATE_ORG_AMBIGUOUS`（409）+ 双 org 真库金标（对 find-first 变异确定性击杀——金标故意选非 `da.id` 首行的 org，避免 uuid 排序掷硬币）。层级事实：mutation (d)（writer INSERT）只有真库 golden 能杀（6666 unit 全绿）；mutation (f)（源门控回退）只有 unit 层能杀（grant-table 真库 17/17 仍绿）——两层缺一不可。
+**独立对抗审 verdict（Opus，2026-08-09，绑 head 467ae34b57）**：**APPROVE-with-hardening，0 P1** —— 三条 refute-first 目标（T3 绕过 / writer 非 1:1 / restore drift）构造攻击后均未证伪；六条 mutation 独立复现全转红；immutability 函数与 20260728 版程序化逐行比对一列未丢；迁移在全新 DB 干净跑通且不在 9 处 MIGRATION_EXCLUDE。两条 P2 已落账：①**可逆性边界**——supersede（如管理员重新启用）后 restore 按既有门拒绝（`EVENT_NOT_APPLIED`），deny 行成无证据残留：锁文 §0.7 已按此限定措辞（main 既有语义，非本 PR 引入），补偿路径列入 §4 owner 清单第 3 项；②**双 ACTIVE 源 org 派生歧义**（今日无 web 调用点可达）→ follow-up #4833。层级事实：mutation (d)（writer INSERT）只有真库 golden 能杀（6666 unit 全绿）；mutation (f)（源门控回退）只有 unit 层能杀（grant-table 真库 17/17 仍绿）——两层缺一不可。
+
+**#4833 落地记录（2026-08-10，PR #4843 — 本段不属于上面绑定 467ae34b57 的 verdict）**：org 派生改为对 active eligible 源**集合**匹配；无 orgId 且集合含多个不同 org → 409 `ACTIVATE_ORG_AMBIGUOUS`（错误闭集 14，HTTP leak 链全 14 驱动）；同 org 多源去重照常派生；空 org 源不参与投票（单独 fail-closed 测试）；审计 meta 记录实际落位 org（`membershipOrgId`）。双 org 真库金标故意选非 `da.id` 首行的 org，使 find-first 变异确定性转红（3/3），避免 uuid 排序掷硬币。
 
 ## 5. 过程事故诚实档（含撤回）
 

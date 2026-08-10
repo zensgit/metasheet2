@@ -64,6 +64,8 @@ export type ActivateUserResult = {
   isActive: true
   temporaryPassword?: string
   localPasswordSet: boolean
+  /** The org the membership was actually written to — derived from the directory source (#4833 audit surface). */
+  membershipOrgId: string | null
 }
 
 /**
@@ -90,7 +92,10 @@ export type ActivateErrorCode =
   | 'ACTIVATE_SOURCE_INACTIVE'
   | 'ACTIVATE_INTEGRATION_INACTIVE'
   | 'ACTIVATE_LINK_MISMATCH'
-  /** SSO-only: account/integration provider is not DingTalk, or corp_id is inconsistent. */
+  /**
+   * SSO: provider is not DingTalk or corp_id is inconsistent. Any mode: every active eligible
+   * source carries an empty integration org_id (nothing can anchor a membership write).
+   */
   | 'ACTIVATE_SOURCE_INELIGIBLE'
   /** Caller-supplied orgId disagrees with the org derived from the directory-source integration. */
   | 'ACTIVATE_ORG_MISMATCH'
@@ -114,7 +119,9 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   let passwordHash: string | null = null
   let localPasswordSet = false
   let mustChangePassword = false
-  let membershipOrgId = input.orgId ?? null
+  // Derived-only: seeded null so no refactor can ever revive the client-orgId-as-membership
+  // shape by skipping the source resolution — the ONLY assignment is from the helper's return.
+  let membershipOrgId: string | null = null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -163,7 +170,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       directoryAccountId: input.directoryAccountId ?? null,
       requireDingTalkSso: input.mode === 'sso',
       expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
-      requestedOrgId: input.orgId ?? null,
+      requestedOrgId: input.orgId?.trim() || null,
     })
     membershipOrgId = sourceOrgId
 
@@ -282,6 +289,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     isActive: true,
     temporaryPassword,
     localPasswordSet,
+    membershipOrgId,
   }
 }
 

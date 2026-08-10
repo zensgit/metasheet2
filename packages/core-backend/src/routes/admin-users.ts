@@ -2062,6 +2062,10 @@ async function auditActivateSuccess(
       localPasswordSet: result.localPasswordSet,
       // Boolean only: plaintext passwords and provider identity values are forbidden in audit.
       temporaryPasswordIssued: Boolean(result.temporaryPassword),
+      // #4833: with several ACTIVE sources the admin's orgId CHOOSES among orgs — the audit row
+      // must record which org the membership actually landed in, or the forensic question
+      // "who placed this user in org B" has no answer. An org id is placement, not identity.
+      membershipOrgId: result.membershipOrgId,
     },
   })
 }
