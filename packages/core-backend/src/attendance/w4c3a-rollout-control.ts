@@ -24,6 +24,7 @@ import {
   acquireAttendanceCalculationRolloutLockSessionExclusiveV1,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceResultOperationLocks,
+  assertConnectionIsIdleV1,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   isAttendanceCalculationOrgAllowlistedV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -1302,7 +1303,15 @@ async function buildAttendanceRolloutTransitionPlanV1(
  * body runs inside a transaction this function unconditionally rolls back in its `finally`
  * block — it NEVER issues `COMMIT`, on any path, including a thrown error. `connection` must be
  * idle (no already-open transaction) — the same discipline as every other multi-statement
- * boundary in this file.
+ * boundary in this file — ENFORCED (not merely documented; P2-2, PR #4839 gate, 20260809: this
+ * used to be a doc-comment-only precondition with no enforcement or test, exactly the defect
+ * class `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` was independently hardened
+ * against by W4C-5 NEW-B — see `assertConnectionIsIdleV1`'s own doc comment in w4c0-identity.ts.
+ * On a dirty connection, PostgreSQL only WARNs on this function's nested `BEGIN` (never errors),
+ * so this function's own unconditional `finally` ROLLBACK would then abort the CALLER's entire
+ * outer transaction, and the `SELECT set_config('statement_timeout', ...)` call below would
+ * override the caller's own statement timeout for the rest of it) as this function's own first
+ * statement, before `BEGIN`, fail-closed.
  */
 export async function planAttendanceCalculationRolloutTransitionV1(
   connection: AttendanceW4TransactionClientV1,
@@ -1311,6 +1320,7 @@ export async function planAttendanceCalculationRolloutTransitionV1(
   if (typeof rawInput !== 'object' || rawInput === null) fail('W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
   const orgId = String(parseCanonicalAttendanceRolloutOrgKeyV1(rawInput.orgId))
   const targetState = requireRolloutState(rawInput.targetState, 'W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
+  await assertConnectionIsIdleV1(connection)
   await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
   try {
     await connection.query("SELECT set_config('statement_timeout', $1, true)", [
@@ -1417,9 +1427,10 @@ export async function transitionAttendanceCalculationRolloutV1(
   // transaction — is what makes every section 3 predicate below actually re-evaluate a snapshot
   // that postdates the wait. W4C-5 NEW-B hardening (PR #4773 gate, 20260805): that idle
   // precondition is no longer a comment-only claim — `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`
-  // now proves it (a `SAVEPOINT` probe) as its own first statement and fails closed with
-  // `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE` rather than silently running inside the caller's
-  // pre-fixed snapshot.
+  // now proves it (a `SAVEPOINT` probe, `assertConnectionIsIdleV1` in w4c0-identity.ts — renamed
+  // P2-2, PR #4839 gate, 20260809, since it was generalized to a second caller) as its own first
+  // statement and fails closed with `W4C0_CONNECTION_NOT_IDLE` rather than silently running
+  // inside the caller's pre-fixed snapshot.
   await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
   try {
     // Inside the try (not before it): a throwing test hook must still release the lock via the

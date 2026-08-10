@@ -1290,9 +1290,11 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     // OUTER transaction's snapshot before the session-level rollout lock is ever requested —
     // silently reintroducing the exact P1-2 defect (PostgreSQL only WARNs on a nested `BEGIN`,
     // it does not error), `RESOLVED {state:'shadow'}`, no red test anywhere. Mutation-confirmed
-    // (see PR mutation ledger): neutering `assertConnectionIsIdleForSessionExclusiveRolloutLockV1`
-    // turns this leg from a `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE` rejection back into a silent
-    // `RESOLVED`, reproducing the gate's finding exactly.
+    // (see PR mutation ledger): neutering `assertConnectionIsIdleV1` (renamed off
+    // `assertConnectionIsIdleForSessionExclusiveRolloutLockV1` P2-2, PR #4839 gate, 20260809, when
+    // generalized to a second caller — see w4c0-identity.ts) turns this leg from a
+    // `W4C0_CONNECTION_NOT_IDLE` rejection back into a silent `RESOLVED`, reproducing the gate's
+    // finding exactly.
     it('rejects a transition called on a connection that already has an open transaction', async () => {
       const idleOrg = crypto.randomUUID()
       allow(idleOrg)
@@ -1307,7 +1309,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
             evidenceManifestSha256: hex64('new-b-not-idle'), evidenceReferences: baseRefs('new-b-not-idle'),
             reasonCode: 'rollout_transition',
           }),
-        ).rejects.toMatchObject({ code: 'W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE' })
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
         // No rollout row was ever created — the rejection happened before any rollout DML.
         await expect(pool.query(
           'SELECT count(*)::int AS n FROM attendance_calculation_rollout_state WHERE org_id = $1',

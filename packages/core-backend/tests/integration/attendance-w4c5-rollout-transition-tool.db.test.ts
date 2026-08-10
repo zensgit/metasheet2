@@ -25,6 +25,7 @@ import {
   planAttendanceCalculationRolloutTransitionV1,
   transitionAttendanceCalculationRolloutV1,
   type AttendanceRolloutTransitionPlanV1,
+  type AttendanceRolloutTransitionPredicateV1,
   type EvidenceReferencesV1,
 } from '../../src/attendance/w4c3a-rollout-control'
 import {
@@ -1076,6 +1077,159 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         expect(cliPlan.planDigest).toBe(digest)
       } finally {
         client.release()
+      }
+    })
+  })
+
+  describe('P2-2 (PR #4839 gate, 20260809): plan enforces its own idle-connection precondition — enforced, not just documented', () => {
+    // `planAttendanceCalculationRolloutTransitionV1`'s own doc comment used to say "`connection`
+    // must be idle" with no enforcement or test — the exact defect class W4C-5 NEW-B (PR #4773)
+    // already closed for the SIBLING session-exclusive-lock acquisition. On a dirty connection,
+    // PostgreSQL only WARNs on the nested `BEGIN` (never errors), so `plan`'s own unconditional
+    // `finally` ROLLBACK then aborted the CALLER's entire outer transaction, and `set_config(...,
+    // true)` overrode the caller's own `statement_timeout` for the rest of it. This reuses the
+    // EXISTING mechanism (`assertConnectionIsIdleV1`, generalized off
+    // `assertConnectionIsIdleForSessionExclusiveRolloutLockV1` in w4c0-identity.ts) rather than
+    // building a second one — see that function's own doc comment for the SAVEPOINT-probe proof.
+    it('rejects a plan called on a connection that already has an open transaction, before any DB read', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
+        await expect(
+          planAttendanceCalculationRolloutTransitionV1(transactionClient(client), { orgId, targetState: 'shadow' }),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+        // The caller's own pre-opened transaction is still open and usable afterward — the
+        // probe's `ROLLBACK TO SAVEPOINT` cleanup must not have touched it (same proof shape as
+        // the sibling test for the session-exclusive lock in
+        // attendance-w4c3a-rollout-control.db.test.ts).
+        await expect(client.query('SELECT 1 AS still_alive')).resolves.toMatchObject({
+          rows: [{ still_alive: 1 }],
+        })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+      // No rollout row was ever created — the refusal happened before plan's own BEGIN, let alone
+      // any predicate read inside it.
+      expect(await rolloutRow(orgId)).toBeNull()
+    })
+
+    it('positive control: an idle connection (the normal call shape) still plans successfully — proves the refusal above is specific to a dirty connection, not a general breakage', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        const plan = await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+          orgId,
+          targetState: 'shadow',
+        })
+        expect(plan.rowExists).toBe(false)
+        expect(plan.canBootstrap).toBe(true)
+        expect(plan.blocked).toBe(false)
+      } finally {
+        client.release()
+      }
+      expect(await rolloutRow(orgId)).toBeNull() // still zero-write, same as the zero-write proof above
+    })
+  })
+
+  describe('P2-1 auto-coverage (PR #4839 gate, 20260809): a REAL plan object exercises every field the digest must cover', () => {
+    // Complements the fixture-driven table in
+    // scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts. That unit test's fixture is
+    // typed against `AttendanceRolloutTransitionPlanV1`, but `scripts/ops` is outside every pnpm
+    // workspace and no CI step runs `tsc` over it (verified: pnpm-workspace.yaml lists only
+    // `packages/*`, `apps/*`, `tools/*`, `plugins/*`) — so that fixture's own completeness against
+    // the type is NOT mechanically enforced in CI; a human must remember to update it if the type
+    // gains a field. THIS test needs no human to remember anything: its field list comes from
+    // `Object.keys()` of an ACTUAL plan object `planAttendanceCalculationRolloutTransitionV1`
+    // (real production code) produced at runtime, so a field added to the type later is present in
+    // that list automatically. If no alternate-value case is registered for it yet, this test
+    // THROWS loudly rather than silently passing without covering it — forcing a human to add
+    // coverage is the honest failure mode here, not a false green.
+    it('mutating ANY field a real plan object carries changes the digest — a field with no registered alternate here fails loudly, never silently', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      let plan: AttendanceRolloutTransitionPlanV1
+      try {
+        plan = await planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+          orgId,
+          targetState: 'shadow',
+        })
+      } finally {
+        client.release()
+      }
+      // Sanity on the fixture this test relies on: a bootstrap-eligible legacy->shadow plan
+      // reaches the deep predicate branch, so `predicates` has more than one real, distinct entry
+      // to mutate below (never an empty/degenerate array).
+      expect(plan.predicates.length).toBeGreaterThan(1)
+
+      const baseline = computeAttendanceW4C5PlanDigestV1(plan)
+
+      const PLAN_FIELD_ALTERNATES: Record<string, (current: unknown) => unknown> = {
+        orgId: () => crypto.randomUUID(),
+        orgAllowlisted: (v) => !v,
+        rowExists: (v) => !v,
+        currentState: (v) => (v === 'shadow' ? 'eligible' : 'shadow'),
+        currentVersion: (v) => (typeof v === 'number' ? v + 1000 : 1),
+        priorState: (v) => (v === 'legacy' ? 'shadow' : 'legacy'),
+        targetState: (v) => (v === 'shadow' ? 'eligible' : 'shadow'),
+        legalPair: (v) => !v,
+        comparisonWritePosture: (v) => (v === 'shadow' ? 'authoritative' : 'shadow'),
+        canBootstrap: (v) => !v,
+        blocked: (v) => !v,
+        predicates: (v) => {
+          const arr = v as readonly AttendanceRolloutTransitionPredicateV1[]
+          return [...arr, { code: arr[0].code, applicable: arr[0].applicable, pass: !arr[0].pass, count: 999 }]
+        },
+      }
+
+      for (const key of Object.keys(plan)) {
+        const alt = PLAN_FIELD_ALTERNATES[key]
+        if (!alt) {
+          throw new Error(
+            `No alternate-value generator registered for plan field '${key}' in this test's ` +
+              `PLAN_FIELD_ALTERNATES — a field was added to AttendanceRolloutTransitionPlanV1 without ` +
+              `extending this P2-1 auto-coverage test. Add an entry before this can be proven covered ` +
+              `by computeAttendanceW4C5PlanDigestV1.`,
+          )
+        }
+        const mutated = { ...plan, [key]: alt((plan as Record<string, unknown>)[key]) } as AttendanceRolloutTransitionPlanV1
+        const digest = computeAttendanceW4C5PlanDigestV1(mutated)
+        expect(digest, `mutating '${key}' must change the digest`).not.toBe(baseline)
+      }
+
+      // Predicate sub-fields: mutate the FIRST predicate's own fields one at a time (structure
+      // otherwise unchanged) — the loop above only proves the `predicates` array AS A WHOLE
+      // participates; this proves each of `code`/`applicable`/`pass`/`count` individually does.
+      const PREDICATE_FIELD_ALTERNATES: Record<string, (current: unknown) => unknown> = {
+        code: () => plan.predicates[1].code, // a genuinely different REAL code, never a fabricated enum value
+        applicable: (v) => !v,
+        pass: (v) => !v,
+        count: (v) => (typeof v === 'number' ? v + 999 : 999),
+      }
+      const firstPredicate = plan.predicates[0]
+      for (const key of Object.keys(firstPredicate)) {
+        const alt = PREDICATE_FIELD_ALTERNATES[key]
+        if (!alt) {
+          throw new Error(
+            `No alternate-value generator registered for predicate field '${key}' — a field was added to ` +
+              `AttendanceRolloutTransitionPredicateV1 without extending this P2-1 auto-coverage test.`,
+          )
+        }
+        const mutatedPredicate = {
+          ...firstPredicate,
+          [key]: alt((firstPredicate as Record<string, unknown>)[key]),
+        } as AttendanceRolloutTransitionPredicateV1
+        const mutatedPlan: AttendanceRolloutTransitionPlanV1 = {
+          ...plan,
+          predicates: [mutatedPredicate, ...plan.predicates.slice(1)],
+        }
+        const digest = computeAttendanceW4C5PlanDigestV1(mutatedPlan)
+        expect(digest, `mutating predicate field '${key}' must change the digest`).not.toBe(baseline)
       }
     })
   })
