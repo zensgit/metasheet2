@@ -55,7 +55,12 @@
  * empty except for what THIS file itself seeds.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { dropScratchDatabase, formatScratchDropFailure, formatScratchDropOutcome } from '../helpers/scratch-database'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import http from 'node:http'
@@ -122,6 +127,8 @@ function installLoadedPlugin(server: MetaSheetServer, name: string, plugin: Reco
 describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real plugin, real PostgreSQL)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  /** MetaSheetServer singleton internal Pool — the #4820 57P01 emitter after forced scratch drop. */
+  let serverInternalPool: Pool | undefined
   let baseUrl = ''
   // Door 1: captured directly from a probe plugin's OWN `context.services` — never read off
   // plugin-attendance's internal state (which is not test-visible).
@@ -289,6 +296,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
     process.env.ATTENDANCE_SCHEDULER_INTERVAL_MS = '3600000'
 
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
+    // Import AFTER DATABASE_URL is rebound so poolManager binds to the scratch DB.
     const loaded = await import('../../src/index')
     server = new loaded.MetaSheetServer({
       port: 0,
@@ -296,6 +304,8 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
       pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')],
     })
     await server.start()
+    const { poolManager } = await import('../../src/integration/db/connection-pool')
+    serverInternalPool = poolManager.get().getInternalPool()
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('attendance server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
@@ -335,39 +345,52 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
   }, 120000)
 
   afterAll(async () => {
-    await pool?.end().catch(() => undefined)
-    if (server) await server.stop()
-    // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
-    // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
-    // which vitest counts as an unhandled error and the step exits 1 with every test passing.
-    // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
-    // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
-    // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
-    // but only after the admin pool is closed and the env is restored, because leaking either
-    // would itself show up as a new flake on the very check #4791 is about.
+    // #4820: teardown-scoped handlers on the server singleton internal Pool (primary) and the
+    // suite data Pool. Attach only here so body-time FATALs stay loud; keep through stop+drop.
+    const poolCaptureError = serverInternalPool
+      ? undefined
+      : new Error('W4C2_SWEEP_SERVER_INTERNAL_POOL_NOT_CAPTURED')
+    const teardownHandlers = [serverInternalPool, pool]
+      .filter((p): p is Pool => Boolean(p))
+      .map((p) => attachOwnedPoolTerminationHandler(p))
     let dropError: unknown
-    if (adminPool) {
-      try {
-        const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
-        console.log(formatScratchDropOutcome('w4c2-sweep-call-through', dropOutcome))
-      } catch (err) {
-        dropError = err
-        console.log(formatScratchDropFailure('w4c2-sweep-call-through', err))
+    try {
+      await pool?.end().catch(() => undefined)
+      if (server) await server.stop()
+      // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
+      // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
+      // which vitest counts as an unhandled error and the step exits 1 with every test passing.
+      // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
+      // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
+      // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
+      // but only after the admin pool is closed and the env is restored, because leaking either
+      // would itself show up as a new flake on the very check #4791 is about.
+      if (adminPool) {
+        try {
+          const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
+          console.log(formatScratchDropOutcome('w4c2-sweep-call-through', dropOutcome))
+        } catch (err) {
+          dropError = err
+          console.log(formatScratchDropFailure('w4c2-sweep-call-through', err))
+        }
+      }
+    } finally {
+      await adminPool?.end().catch(() => undefined)
+      for (const h of teardownHandlers) h.detach()
+      for (const [key, value] of Object.entries({
+        DATABASE_URL: priorEnv.databaseUrl,
+        RBAC_BYPASS: priorEnv.rbacBypass,
+        SKIP_PLUGINS: priorEnv.skipPlugins,
+        ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: priorEnv.rollout,
+        ATTENDANCE_SCHEDULER_ENABLED: priorEnv.schedulerEnabled,
+        ATTENDANCE_SCHEDULER_INTERVAL_MS: priorEnv.schedulerIntervalMs,
+      })) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
       }
     }
-    await adminPool?.end().catch(() => undefined)
-    for (const [key, value] of Object.entries({
-      DATABASE_URL: priorEnv.databaseUrl,
-      RBAC_BYPASS: priorEnv.rbacBypass,
-      SKIP_PLUGINS: priorEnv.skipPlugins,
-      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: priorEnv.rollout,
-      ATTENDANCE_SCHEDULER_ENABLED: priorEnv.schedulerEnabled,
-      ATTENDANCE_SCHEDULER_INTERVAL_MS: priorEnv.schedulerIntervalMs,
-    })) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
     if (dropError) throw dropError
+    if (poolCaptureError) throw poolCaptureError
   }, 60000)
 
   // ===============================================================================================

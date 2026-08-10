@@ -46,7 +46,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { dropScratchDatabase, formatScratchDropFailure, formatScratchDropOutcome } from '../helpers/scratch-database'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 import type { MetaSheetServer } from '../../src/index'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -137,6 +142,8 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   let pool: Pool
   let adminPool: Pool
   let scratchName: string
+  /** MetaSheetServer singleton internal Pool — the #4820 57P01 emitter after forced scratch drop. */
+  let serverInternalPool: Pool | undefined
   let baseUrl = ''
   let token = ''
 
@@ -236,9 +243,12 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
     // Default-off, unset — the exact shipped state this fix targets.
     delete process.env.ENABLE_BPMN_TIMER_POLLER
 
+    // Import AFTER DATABASE_URL is rebound so poolManager binds to the scratch DB.
     const loaded = await import('../../src/index')
     server = new loaded.MetaSheetServer({ port: 0, host: '127.0.0.1' })
     await server.start()
+    const { poolManager } = await import('../../src/integration/db/connection-pool')
+    serverInternalPool = poolManager.get().getInternalPool()
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
@@ -249,36 +259,49 @@ describeIfDatabase('BPMNWorkflowEngine startProcess poller-disabled zero-residue
   }, 120000)
 
   afterAll(async () => {
-    await pool?.end().catch(() => undefined)
-    if (server) await server.stop()
-    // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
-    // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
-    // which vitest counts as an unhandled error and the step exits 1 with every test passing.
-    // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
-    // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
-    // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
-    // but only after the admin pool is closed and the env is restored, because leaking either
-    // would itself show up as a new flake on the very check #4791 is about.
+    // #4820: teardown-scoped handlers on the server singleton internal Pool (primary) and the
+    // suite data Pool. Attach only here so body-time FATALs stay loud; keep through stop+drop.
+    const poolCaptureError = serverInternalPool
+      ? undefined
+      : new Error('BPMN_SERVER_INTERNAL_POOL_NOT_CAPTURED')
+    const teardownHandlers = [serverInternalPool, pool]
+      .filter((p): p is Pool => Boolean(p))
+      .map((p) => attachOwnedPoolTerminationHandler(p))
     let dropError: unknown
-    if (adminPool) {
-      try {
-        const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
-        console.log(formatScratchDropOutcome('bpmn-poller-disabled', dropOutcome))
-      } catch (err) {
-        dropError = err
-        console.log(formatScratchDropFailure('bpmn-poller-disabled', err))
+    try {
+      await pool?.end().catch(() => undefined)
+      if (server) await server.stop()
+      // #4791: drain the scratch DB's backends before dropping it. A forced drop terminates any
+      // still-attached backend, and `pg` reports that to its owner as an unowned 'error' EVENT —
+      // which vitest counts as an unhandled error and the step exits 1 with every test passing.
+      // The outcome line is emitted UNCONDITIONALLY: `CLEAN` is the claim, `FORCED` names the
+      // component still holding a connection and keeps #4791 open, `FAILED` means a teardown
+      // statement errored. The helper fails CLOSED, so the failure is logged and then RE-THROWN —
+      // but only after the admin pool is closed and the env is restored, because leaking either
+      // would itself show up as a new flake on the very check #4791 is about.
+      if (adminPool) {
+        try {
+          const dropOutcome = await dropScratchDatabase(adminPool, scratchName)
+          console.log(formatScratchDropOutcome('bpmn-poller-disabled', dropOutcome))
+        } catch (err) {
+          dropError = err
+          console.log(formatScratchDropFailure('bpmn-poller-disabled', err))
+        }
+      }
+    } finally {
+      await adminPool?.end().catch(() => undefined)
+      for (const h of teardownHandlers) h.detach()
+      for (const [key, value] of Object.entries({
+        DATABASE_URL: priorEnv.databaseUrl,
+        SKIP_PLUGINS: priorEnv.skipPlugins,
+        ENABLE_BPMN_TIMER_POLLER: priorEnv.enablePoller,
+      })) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
       }
     }
-    await adminPool?.end().catch(() => undefined)
-    for (const [key, value] of Object.entries({
-      DATABASE_URL: priorEnv.databaseUrl,
-      SKIP_PLUGINS: priorEnv.skipPlugins,
-      ENABLE_BPMN_TIMER_POLLER: priorEnv.enablePoller,
-    })) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
     if (dropError) throw dropError
+    if (poolCaptureError) throw poolCaptureError
   }, 60000)
 
   it('poller disabled + a timer-bearing process: /start rejects with BPMN_TIMER_POLLER_DISABLED and FOUR real zeros — process, activity, incident, timer rows all 0', async () => {

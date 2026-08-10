@@ -200,12 +200,90 @@ export interface ScratchDropOutcome {
  * POSITIVE character whitelist rather than a denylist of bad spellings: the complement of a
  * denylist is unbounded, the complement of this pattern is not. Matches what the call sites
  * actually generate (`ms2_<suite>_<hex>`), and nothing else.
+ *
+ * Note (#4820): this whitelist alone allows `metasheet_test` / `postgres` / `template*`. The
+ * protected-name guard below is what stops `dropScratchDatabase` from targeting those.
  */
 const SAFE_SCRATCH_NAME = /^[a-z][a-z0-9_]{0,62}$/
 
 export function assertSafeScratchDatabaseName(scratchName: string): void {
   if (typeof scratchName !== 'string' || !SAFE_SCRATCH_NAME.test(scratchName)) {
     throw new Error(`SCRATCH_DATABASE_NAME_UNSAFE: ${JSON.stringify(scratchName)}`)
+  }
+}
+
+/** Shared / system names that must never be drained or dropped via this helper. */
+const PROTECTED_SHARED_DATABASE_NAMES = new Set([
+  'postgres',
+  'template0',
+  'template1',
+  'metasheet_test',
+  'metasheet',
+])
+
+export function isProtectedSharedDatabaseName(name: string): boolean {
+  if (typeof name !== 'string' || name.length === 0) return false
+  return PROTECTED_SHARED_DATABASE_NAMES.has(name) || name.startsWith('template')
+}
+
+export function assertDroppableScratchDatabaseName(scratchName: string): void {
+  assertSafeScratchDatabaseName(scratchName)
+  if (isProtectedSharedDatabaseName(scratchName)) {
+    throw new Error(`SCRATCH_DATABASE_PROTECTED: ${JSON.stringify(scratchName)}`)
+  }
+}
+
+/**
+ * #4820 — absorb only administrator-command termination on owned pools.
+ * SQLSTATE `57P01`, or the exact PG message. Deliberately does NOT match generic
+ * "Connection terminated unexpectedly" (that is broader than admin terminate).
+ */
+export function isAdministratorTerminationError(err: unknown): boolean {
+  if (err != null && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code: unknown }).code
+    if (code != null) return code === '57P01'
+  }
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  return /^terminating connection due to administrator command$/i.test(message)
+}
+
+/** Structural surface for `pg.Pool` / EventEmitter-shaped doubles. */
+export interface ScratchOwnedPool {
+  on(event: 'error', listener: (err: Error) => void): unknown
+  off?(event: 'error', listener: (err: Error) => void): unknown
+  removeListener?(event: 'error', listener: (err: Error) => void): unknown
+}
+
+export interface OwnedPoolTerminationHandler {
+  detach(): void
+  absorbed(): number
+}
+
+/**
+ * Teardown-scoped handler for pools this suite owns (especially
+ * `poolManager.get().getInternalPool()` after a real MetaSheetServer boot). Attach at
+ * `afterAll` start; keep through `server.stop` + drop; then detach. Absorbs only
+ * `isAdministratorTerminationError`; rethrows everything else.
+ */
+export function attachOwnedPoolTerminationHandler(pool: ScratchOwnedPool): OwnedPoolTerminationHandler {
+  let absorbedCount = 0
+  let attached = true
+  const listener = (err: Error): void => {
+    if (isAdministratorTerminationError(err)) {
+      absorbedCount += 1
+      return
+    }
+    throw err
+  }
+  pool.on('error', listener)
+  return {
+    detach() {
+      if (!attached) return
+      attached = false
+      if (typeof pool.off === 'function') pool.off('error', listener)
+      else if (typeof pool.removeListener === 'function') pool.removeListener('error', listener)
+    },
+    absorbed: () => absorbedCount,
   }
 }
 
@@ -250,7 +328,8 @@ export async function dropScratchDatabase(
   scratchName: string,
   options: { drainTimeoutMs?: number; pollIntervalMs?: number } = {},
 ): Promise<ScratchDropOutcome> {
-  assertSafeScratchDatabaseName(scratchName)
+  // SAFE_SCRATCH_NAME allows metasheet_test; protected guard refuses shared/system DBs (#4820).
+  assertDroppableScratchDatabaseName(scratchName)
   const drainTimeoutMs = options.drainTimeoutMs ?? 10_000
   const pollIntervalMs = options.pollIntervalMs ?? 50
   const startedAt = Date.now()
