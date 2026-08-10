@@ -49,37 +49,56 @@ The remaining-slice plan
 
 The W6 design lock
 `attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md` is
-**PROPOSED / runtime HOLD** at this baseline (its preparation PR #4771 merged
-contract types, an out-of-build OpenAPI draft, fixtures, and an unmounted UI
-shell; no W6 runtime exists, and OD-W6-0..9 are OPEN). This document therefore
-does **not** treat any W6 semantic as decided. Section 6 lists every
-dependence on a W6 outcome explicitly.
+now **RATIFIED (W6-1 backend aggregate only)** on `origin/main` — its
+preparation PR #4771 merged contract types, an out-of-build OpenAPI draft,
+fixtures, and an unmounted UI shell; the RATIFY record (PR 4821, below)
+subsequently landed. This document therefore treats only the W6-1 scope named
+below as decided, and treats every W6 semantic beyond it (W6-2 contract
+wiring, W6-3 UI, W6-4 verification) as still undecided. Section 6 lists every
+remaining dependence on a W6 outcome explicitly.
 
-**Update disclosed 2026-08-08 — the decision state has moved, and this
-document deliberately does not move with it.** The sentence above says
-"OD-W6-0..9 are OPEN"; that was true at the pinned baseline and is no longer
-the whole story. Resolutions for OD-W6-0..9 — adopt the W6 lock, and option
-**(a)** for each decision, against PR #4771's merge commit
-`2967da018ceea41b91098e14d4c15a57236eb5f8` — are recorded in **PR 4821**
-(OPEN, non-draft, head `b5cc1a22`), which states that **its own merge** is
-their durable anchor. That PR is not merged, so there is no record of those
-resolutions on `main`, and nothing below is rewritten as decided. Three limits
-matter and are stated rather than glossed:
+**Re-verified 2026-08-10 against `origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`
+— the decision state has moved twice since this document's pinned baseline,
+and both moves are recorded here rather than silently carried forward or left
+at their earlier "OPEN/unmerged" wording.**
 
-1. **Scope.** The authorization those resolutions carry, by their own text, is
-   the **W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a
-   fresh exact-head gate (PR 4814, OPEN/Draft, unmerged). W6-2 contract
-   wiring, W6-3 UI, W6-4 verification, any merge, staging, soak, flag,
-   deployment, and closure of issue 4556 each remain withheld. A resolution of
-   OD-W6-*n* is not an adoption of W6 runtime.
-2. **Nothing has landed.** No W6 runtime exists at the rebase base
-   `origin/main@5c3146acbc81b655e62bee9249b68eaec4e6e4c6`: `git diff` between
-   the pinned baseline and that base over
+- **2026-08-08:** PR **4821** (the durable W6 RATIFY record) **MERGED** as
+  `ecf77d2433596bbdd8b67c312a37178dbc97f715` (verified an ancestor of
+  `origin/main`). It records: `OD-W6-0` adopt the W6 lock; `OD-W6-1..9`
+  option **(a)** for each, against PR #4771's merge commit
+  `2967da018ceea41b91098e14d4c15a57236eb5f8`; and it prospectively authorizes
+  **the W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a
+  fresh exact-head gate. The W6 lock's own header on `origin/main` now reads
+  "RATIFIED (W6-1 backend aggregate only) ... every W6 slice beyond W6-1
+  remains HOLD" (re-read at the current tip, not carried forward).
+- **2026-08-10:** PR **4805** (the W8 plan's L8 CI-wiring precondition — see
+  the W8 plan §5 row L8) **MERGED** as
+  `4c28467c54f376ad5a68718d3dbe6ad50c76a917`. It is unrelated to W6/W7
+  semantics — it wires two orphaned real-DB suites and converts a
+  hardcoded-allowlist CI guard to derived completeness — named here only
+  because every earlier round of this document cited it as OPEN/unmerged and
+  that wording is now stale everywhere it appears.
+
+Three limits matter and are stated rather than glossed, even though the
+RATIFY record itself is now on `main`:
+
+1. **Scope.** The authorization PR 4821 carries, by its own text, is the
+   **W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a fresh
+   exact-head gate. **PR 4814** (the W6-1 backend slice itself) is **OPEN,
+   Draft, unmerged** at `origin/main@d78b27d3` (head
+   `4cc0122883846900a1325cdacd5eda0355d77215`, re-verified 2026-08-10). W6-2
+   contract wiring, W6-3 UI, W6-4 verification, any merge, staging, soak,
+   flag, deployment, and closure of issue 4556 each remain withheld. Ratifying
+   the OD table is not an adoption of W6 runtime.
+2. **Nothing has landed.** No W6 runtime exists on `origin/main@d78b27d3`:
+   `git diff 4e6a35d9 origin/main` over
    `packages/core-backend/src/attendance`,
    `packages/core-backend/src/services`, `plugins/plugin-attendance`,
-   `packages/openapi`, and `apps/web/src/views/attendance` is empty, and the
-   W6 lock file itself is byte-identical on `main` from `2967da01` through the
-   rebase base.
+   `packages/openapi`, and `apps/web/src/views/attendance` is empty
+   (re-verified 2026-08-10). PR 4821 touched exactly one file, the W6 lock MD
+   itself (68 insertions / 28 deletions per its own diff stat), and PR 4805
+   touched only CI-workflow / vitest-config / test-tooling files outside every
+   one of those five paths.
 3. **W7 is unaffected either way.** §8 item 1 makes W6 sign-off *and W6
    runtime completion* a hard precondition; the second half is unmet
    regardless of how the first resolves. Every §6 row therefore stays
@@ -186,9 +205,9 @@ derivation.
   org's flip; it never recalculates existing results silently;
 - FSER-4 (`/effectiveness/me`) — its own gated line (#4709);
 - changes to the W6 read-aggregate contract — any needed change is an
-  owner-level W6 decision (made at W6 ratification while the W6 lock is still
-  PROPOSED, or as a W6 amendment if W6 is already ratified), not a W7 side
-  effect.
+  owner-level W6 decision, and the W6 lock is now RATIFIED (W6-1 backend
+  aggregate only), so that decision can only be made as a **W6 amendment**
+  going forward, not a W7 side effect.
 
 ## 3. Non-negotiable red lines
 
@@ -206,7 +225,7 @@ not prose.
 | W7-R7 | W7 makes no writes outside the canonical W4 write boundary and adds no DML side door: every new writer is claimed in the generated DML inventory. | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs` hard zero-bypass legs (`:1033`, `:1386`) stay green on the W7 head with the W7 writers claimed by exact `relPath::enclosingSymbol::table::verb` entries — no prefix claims. |
 | W7-R8 | Shadow is never presented as authoritative: group-derived shadow calculations are labeled as such in the ledger/trace; the legacy projection remains the served result until the org's flip. | Exact-key assertions on detail/trace responses for a group-shadow org: posture/label fields assert the shadow labeling; a mutation that serves the W7 shadow projection to the read path in a non-authoritative org turns the golden response leg red. |
 | W7-R9 | This document authorizes no runtime. The W7-0 preparation PR (if the owner later authorizes one) is byte-inert: deleting its contract/fixture files leaves every existing test green. | Deletion-green run recorded in that PR; `git diff <base> HEAD -- packages plugins apps scripts .github` for THIS docs PR is empty. |
-| W7-R10 | W6's own red line W6-R5 ("no calculation writer consumes the W6 aggregate") survives W7 unless the owner explicitly overrides it: W7's resolver reads persisted facts under locks, not the W6 HTTP aggregate. | **Derived domain, not a module allowlist.** *Leg 0 (completeness)*: the guard enumerates its own domain at run time — every source file under a pinned set of **roots** (`plugins/plugin-attendance/**`, `packages/core-backend/src/attendance/**`, and the W7 resolver's own directory; the root set, not a file set, is what the W7-0 contract fixes), collected by directory walk under a scannable-extension filter, then partitioned by a curated classification file into `calculation_path` / `not_calculation_path` (every non-calculation entry carrying its reason) — and asserts `unclaimed = 0`, so a file added under a root that nobody classified reds the guard by construction. **Non-empty-domain leg** (an empty read is not an absence): each pinned root must be asserted to exist and to contribute at least one file to the walked domain — **a pinned root resolving to zero files reds the guard**, because a mistyped, moved, or not-yet-created root would otherwise satisfy `unclaimed = 0` vacuously while every ban leg passes over nothing. Since the W7 resolver's directory does not exist at this baseline (§1.4), **the guard itself lands with W7-1** — the slice that creates the resolver, and therefore the first head at which every pinned root is real; W7-0 records only the root set and the reason each root is pinned ahead of the code it names, so nothing here makes W7-0 non-byte-inert (W7-R9) or leaves a red test inside it. That zero-file red is therefore a property of W7-1's gate, not a red test sitting inside W7-0. Pinning **roots** is the P16 shape; pinning **files** is the defect this replaces (an earlier draft of this row specified a hand-maintained `CALCULATION_PATH_MODULES` list, which a helper module outside the list walked straight through). *Leg (i) reference ban*, over the `calculation_path` partition: zero static `import`, zero `require`, and zero dynamic `import()` of the W6 aggregate service/route modules (a static import graph alone does not see `await import(…)`). *Leg (ii) transport ban*, over the same partition: zero `fetch`/`axios`/`request`/internal-HTTP-client call and zero occurrence of the aggregate's route string — matched against the route literal exactly as the repo writes it (`/api/attendance/groups/{groupId}/effective-policy`, `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:25`, plus the `:groupId` express spelling), never via a home-grown path normalizer — because a resolver that does `await fetch('/api/attendance/groups/:groupId/effective-policy')` imports nothing yet violates the rule. **Positive control = the bypass this criterion exists to catch**, not a probe that merely confirms the criterion: create a **new, unclassified** helper file under a pinned root containing `await fetch('/api/attendance/groups/:groupId/effective-policy')` and import it from a `calculation_path` module; Leg 0 must red (`unclaimed ≠ 0`) with the helper unclassified, and Leg (ii) must red once the same helper is classified `calculation_path` — one probe reddening both legs is what proves the domain gap is closed. Verify the probe's anchor was actually hit (the probe file really entered the scanned domain; an unhit probe and a dead gate look identical), and restore from a file backup (`cp`), never `git checkout -- <file>`. **Correct statement of the P16 analogy** — an earlier draft of this row called it "the same exact-allowlist shape as the P16 inventory", which is inverted: P16's scan domain is **derived** (`buildRawCensus` walks `discoverRuntimeRoots` → `listAllFiles` → `isScannablePath` → `scanFileForDmlSites`, `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823`) and its completeness leg is `assert.deepEqual(unclaimed, [], 'hard zero-bypass requires unclaimed=0')` (`scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1045, 1074`); the exact allowlist (`scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74`) is P16's **claim** side and is never its scan domain. That correction also makes this row consistent with its sibling: the W8 plan §3.3 names the hardcoded-allowlist form as "the mechanism that let L8 stay invisible" and prescribes glob-derived completeness for the same reason. **What this criterion does not catch** (stated, not papered over): (1) a file classified `not_calculation_path` — deliberately or by mistake — leaves the ban legs inapplicable to it while Leg 0 stays green, because the classification file is the **claim** side and a `not_calculation_path` entry is a reviewable assertion, not a proof (P16 has the identical property; the mitigation is the same one P16 relies on — the classification diff is reviewed, and each `not_calculation_path` entry is spot-checked for non-reachability from the frozen-context build path — not a mechanical guarantee); (2) a call originating in a module outside the pinned roots — Leg 0 narrows this to "someone added a directory nobody pinned as a root", itself a reviewable event; (3) a route string assembled from fragments at run time; (4) any consumption path that is neither a module reference nor an HTTP call to that route. (Conditional on OD-W7-1; if the owner chooses (b) there, this row is replaced by an owner-signed W6 decision — at W6 ratification, or an amendment if W6 is already ratified.) |
+| W7-R10 | W6's own red line W6-R5 ("no calculation writer consumes the W6 aggregate") survives W7 unless the owner explicitly overrides it: W7's resolver reads persisted facts under locks, not the W6 HTTP aggregate. | **Derived domain, not a module allowlist.** *Leg 0 (completeness)*: the guard enumerates its own domain at run time — every source file under a pinned set of **roots** (`plugins/plugin-attendance/**`, `packages/core-backend/src/attendance/**`, and the W7 resolver's own directory; the root set, not a file set, is what the W7-0 contract fixes), collected by directory walk under a scannable-extension filter, then partitioned by a curated classification file into `calculation_path` / `not_calculation_path` (every non-calculation entry carrying its reason) — and asserts `unclaimed = 0`, so a file added under a root that nobody classified reds the guard by construction. **Non-empty-domain leg** (an empty read is not an absence): each pinned root must be asserted to exist and to contribute at least one file to the walked domain — **a pinned root resolving to zero files reds the guard**, because a mistyped, moved, or not-yet-created root would otherwise satisfy `unclaimed = 0` vacuously while every ban leg passes over nothing. Since the W7 resolver's directory does not exist at this baseline (§1.4), **the guard itself lands with W7-1** — the slice that creates the resolver, and therefore the first head at which every pinned root is real; W7-0 records only the root set and the reason each root is pinned ahead of the code it names, so nothing here makes W7-0 non-byte-inert (W7-R9) or leaves a red test inside it. That zero-file red is therefore a property of W7-1's gate, not a red test sitting inside W7-0. Pinning **roots** is the P16 shape; pinning **files** is the defect this replaces (an earlier draft of this row specified a hand-maintained `CALCULATION_PATH_MODULES` list, which a helper module outside the list walked straight through). *Leg (i) reference ban*, over the `calculation_path` partition: zero static `import`, zero `require`, and zero dynamic `import()` of the W6 aggregate service/route modules (a static import graph alone does not see `await import(…)`). *Leg (ii) transport ban*, over the same partition: zero `fetch`/`axios`/`request`/internal-HTTP-client call and zero occurrence of the aggregate's route string — matched against the route literal exactly as the repo writes it (`/api/attendance/groups/{groupId}/effective-policy`, `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:25`, plus the `:groupId` express spelling), never via a home-grown path normalizer — because a resolver that does `await fetch('/api/attendance/groups/:groupId/effective-policy')` imports nothing yet violates the rule. **Positive control = the bypass this criterion exists to catch**, not a probe that merely confirms the criterion: create a **new, unclassified** helper file under a pinned root containing `await fetch('/api/attendance/groups/:groupId/effective-policy')` and import it from a `calculation_path` module; Leg 0 must red (`unclaimed ≠ 0`) with the helper unclassified, and Leg (ii) must red once the same helper is classified `calculation_path` — one probe reddening both legs is what proves the domain gap is closed. Verify the probe's anchor was actually hit (the probe file really entered the scanned domain; an unhit probe and a dead gate look identical), and restore from a file backup (`cp`), never `git checkout -- <file>`. **Correct statement of the P16 analogy** — an earlier draft of this row called it "the same exact-allowlist shape as the P16 inventory", which is inverted: P16's scan domain is **derived** (`buildRawCensus` walks `discoverRuntimeRoots` → `listAllFiles` → `isScannablePath` → `scanFileForDmlSites`, `scripts/attendance/w4c0-dml-inventory/collector.cjs:53, 104, 574, 807-823`) and its completeness leg is `assert.deepEqual(unclaimed, [], 'hard zero-bypass requires unclaimed=0')` (`scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1045, 1074`); the exact allowlist (`scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74`) is P16's **claim** side and is never its scan domain. That correction also makes this row consistent with its sibling: the W8 plan §3.3 names the hardcoded-allowlist form as "the mechanism that let L8 stay invisible" and prescribes glob-derived completeness for the same reason. **What this criterion does not catch** (stated, not papered over): (1) a file classified `not_calculation_path` — deliberately or by mistake — leaves the ban legs inapplicable to it while Leg 0 stays green, because the classification file is the **claim** side and a `not_calculation_path` entry is a reviewable assertion, not a proof (P16 has the identical property; the mitigation is the same one P16 relies on — the classification diff is reviewed, and each `not_calculation_path` entry is spot-checked for non-reachability from the frozen-context build path — not a mechanical guarantee); (2) a call originating in a module outside the pinned roots — Leg 0 narrows this to "someone added a directory nobody pinned as a root", itself a reviewable event; (3) a route string assembled from fragments at run time; (4) any consumption path that is neither a module reference nor an HTTP call to that route. (Conditional on OD-W7-1; if the owner chooses (b) there, this row is replaced by an owner-signed W6 decision — the W6 lock is already RATIFIED (W6-1 backend aggregate only), so that decision can only be made as a W6 amendment.) |
 
 ## 4. Cutover mechanics (draft, all OPEN)
 
@@ -228,7 +247,27 @@ A new in-transaction resolver — the OD-W7-1 decision — determines, for
 
 ### 4.2 Staging ladder (per-org, shadow → compare → cutover)
 
-Conditional on OD-W7-3 for the exact state carrier; semantics are fixed here:
+Conditional on OD-W7-3 for the exact state carrier; semantics are fixed here.
+
+**The rollout-control boundary alone does not resolve posture — this is a
+two-part condition, not a single source of truth.** The W4 precedent
+(`resolveSegmentCalculationPosture`,
+`packages/core-backend/src/attendance/w4c0-identity.ts:454`) reads a
+*persisted row* from `attendance_calculation_rollout_state` and ONLY advances
+past `legacy` when that row exists, is not `suspended`, AND the org passes an
+exact-match allowlist/scope check (`isOrgExactlyAllowlisted`, same file,
+`:471-482`) — an org with a `shadow`/`eligible`/`authoritative` row but no
+allowlist entry, or an allowlist entry but no row, still resolves to
+`legacy`. The rollout-control **transition boundary** (single writer, closed
+matrix — W7-R4) governs how that row gets written; it says nothing about how
+posture is *read*. Whatever carrier OD-W7-3 selects for W7's own posture
+must clone **both** halves — the write-side transition boundary AND a
+`resolveSegmentCalculationPosture`-shaped read-side function requiring row ∧
+allowlist/scope — not the write-side discipline alone. A W7 implementation
+that treats "a legal transition landed" as sufficient to advertise a new
+posture, without an analogous read-side allowlist/scope gate, reproduces the
+exact class of bug the W4C-0 persisted-row-plus-allowlist design exists to
+prevent.
 
 - **group_shadow**: the legacy path remains the authoritative producer byte
   for byte (W7-R3). Alongside it, the W7 resolver produces a group-derived
@@ -310,12 +349,12 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | W7 element | Depends on | Conditionality |
 | --- | --- | --- |
 | Group-policy domain grouping used in resolution completeness checks | OD-W6-4 (domain/conflict closed inventory) | W7 adopts whatever closed inventory the owner fixes for W6; if W6 narrows it, W7's "policy incomplete" predicate narrows identically. |
-| `preview_only` labeling vs. calculability of segments/flex | OD-W6-6 (preview_only derivation) | W7's eligibility predicate must be consistent with the W6 derivation the owner picks; conflicting definitions require an owner-level W6 decision first (made at W6 ratification while the W6 lock is still PROPOSED, or a W6 amendment if W6 is already ratified). |
+| `preview_only` labeling vs. calculability of segments/flex | OD-W6-6 (preview_only derivation) | **RATIFIED as option (a)** — W6 lock §9: single-segment `strict` is `effective` under any posture; multi-segment and `flex_required_duration` are `preview_only` unless posture is `authoritative` **and** `SEGMENT_CALCULATION_IMPLEMENTED` is true. W7's eligibility predicate must be consistent with this ratified derivation; a conflict now requires a **W6 amendment** to resolve (the ratify-time branch is no longer open — ratification already happened). |
 | Conflict surfacing of membership overlap in the workspace | OD-W6-4 / W6 §4.4 | W7 only *emits* the fail-closed runtime conflict (W7-R2); the display inventory is W6's. |
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
-| The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision (at W6 ratification, or a W6 amendment if W6 is already ratified), not a W7 choice. |
+| The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision, and the W6 lock is now RATIFIED (W6-1 backend aggregate only), so overriding W6-R5 can only be made as a **W6 amendment**, not a W7 choice. |
 | Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If the owner does not adopt/complete W6, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. Declining OD-W6-0 also has a consequence beyond W7: parent lock §10 item 8 (the effective/inherited/preview-only/conflicting group workflow) has no landed implementation at this baseline and W6 is its only planned vehicle, so issue #4556 could not close under §10 as ratified without an owner amendment to parent §10 — see the W8 plan §5-§6. **Status as of 2026-08-08** (§0 update, with its limits): OD-W6-0 is *recorded* as adopt, in an unmerged PR whose merge it names as the durable anchor — so the "declines" branch is not the recorded direction, but this row does not become satisfied by that. The **second** conjunct, W6 completion, is untouched: no W6 runtime is on `main`, and only the W6-1 backend slice is prospectively authorized (Draft/HOLD, unmerged), which does not reach the four-label workflow item 8 names. This row stays conditional. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-10** (§0 update): OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, and the W6 lock's own header on `origin/main` reads RATIFIED (W6-1 backend aggregate only) — so the "declines" branch is now foreclosed for the W6-1 scope specifically, not merely recorded pending a merge. That still does not satisfy this row: the row requires W6 **completion gates**, and the **second** conjunct is untouched — no W6 runtime is on `main` (`git diff` over the five W6-relevant paths between the pinned baseline and current main is empty), and only the W6-1 backend slice is prospectively authorized (PR 4814, Draft/HOLD, unmerged), which does not reach the four-label workflow item 8 names. This row stays conditional. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
@@ -323,7 +362,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | --- | --- | --- |
 | OD-W7-1 | Source of group policy for calculation | **(a)** A dedicated in-transaction resolver reading persisted facts (W1 membership, group row, FSER-composed schedule facts) under the existing lock order; W6-R5 stays intact; the W6 aggregate remains display-only. (b) Consume the W6 aggregate service in-process — rejected by default: violates W6-R5, couples display labeling to accounting, and makes the aggregate's values-free posture a calculation constraint. |
 | OD-W7-2 | Frozen-context evolution | **(a)** `schemaVersion: 2` with a discriminated selector (`'legacy' \| 'group_effective'`); `calculationGroupId` non-null iff `group_effective`; v1 stays valid/immutable with untouched golden bytes; the calculator accepts exactly {v1-legacy, v2-either} and fail-closes on all else. (b) Widen v1 in place — rejected, for the value-domain reason: W7 must widen the value domain of two existing **mandatory** keys (`selector` beyond `'legacy'`, `calculationGroupId` beyond `null`), which destroys `schemaVersion` as a discriminator and silently invalidates every existing v1 consumer's `selector === 'legacy'` assumption. Honesty note: the fingerprint argument does **not** carry — this repo's W5 precedent already widened v1 in place with an *optional* key (`flexPolicy?`, `w4c0-write-boundary-types.ts:147-151`; validator accepts the legacy exact key set or the same set plus optional `flexPolicy`, `w4c1-segment-calculator.ts:331-345`) and the v1 golden literals did not move (`w4c1-fingerprint-golden.test.ts` still pins the no-`flexPolicy` context to the unchanged `GOLDEN_STORAGE_FINGERPRINT`). An optional-key widening leaves old bytes alone; a mandatory-value-domain widening is a different operation, and that — not fingerprint movement — is why (b) is rejected. |
-| OD-W7-3 | Cutover state carrier | **(a)** A second org-keyed state machine for context-source (`off <-> group_shadow <-> group_eligible -> group_authoritative <-> suspended`) in its own table, cloning the hardened-boundary pattern (single writer, closed matrix, trigger backstop, evidence manifest); keeps the W4 machine's meaning ("is segment calculation authoritative") untouched. (b) Extend the existing five-state machine with combined states — rejected: breaks the ratified closed matrix, its DB trigger, and every landed test that pins the 7 legal pairs. Consequence of (a): an org has two postures; the legal combinations table is part of the W7-0 contract. |
+| OD-W7-3 | Cutover state carrier | **(a)** A second org-keyed state machine for context-source (`off <-> group_shadow <-> group_eligible -> group_authoritative <-> suspended`) in its own table, cloning the hardened-boundary pattern (single writer, closed matrix, trigger backstop, evidence manifest) **and** a `resolveSegmentCalculationPosture`-shaped read-side resolver (persisted row ∧ allowlist/scope check — §4.2's two-part-condition note; the transition-writer discipline alone does not resolve posture); keeps the W4 machine's meaning ("is segment calculation authoritative") untouched. (b) Extend the existing five-state machine with combined states — rejected: breaks the ratified closed matrix, its DB trigger, and every landed test that pins the 7 legal pairs. Consequence of (a): an org has two postures, each independently gated by its own row-plus-allowlist read; the legal combinations table is part of the W7-0 contract. |
 | OD-W7-4 | Suspended-from-group fallback direction | **(a)** No legacy fallback from `group_authoritative`; suspend/resume only, mirroring W4's `authoritative <-> suspended` asymmetry — history stays explainable with one producer per work date. (b) Allow an explicit owner-driven fall-back-to-legacy transition with its own evidence manifest — larger matrix, more drills, only justified if soak shows group-authoritative is not operationally recoverable. |
 | OD-W7-5 | Read-side provenance spellings | **(a)** Extend the existing closed enums by amendment (detail `projectionOwner`/trace source-kind gain group-provenance values; exact strings fixed at W7-0). (b) A parallel provenance field — rejected: second spelling of the same fact. |
 | OD-W7-6 | Group-policy snapshot form | **(a)** Freeze group policy INTO the frozen context (plus its fingerprint), no second snapshot table; the context is already the immutable policy carrier (`w4c0-write-boundary-types.ts:124`). (b) A separate group-policy snapshot table keyed by group/date — needed only if per-group dedup matters for storage; adds a join to every immutability proof. |
@@ -334,12 +373,14 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 
 1. **Precondition (hard)**: owner signs off the W6 lock at its exact merged
    SHA and answers OD-W6-1..9; W6 runtime slices complete their own gates.
-   (Half of this has moved as of 2026-08-08 — see the §0 update: the sign-off
-   and the OD-W6-1..9 answers are *recorded* against merged SHA
-   `2967da018ceea41b91098e14d4c15a57236eb5f8`, in a PR that is not merged, and
-   the authorization they carry reaches only the W6-1 backend slice. The
-   second clause — W6 runtime slices completing their own gates — is unmet,
-   so this precondition as a whole is unmet and step 2 below is not reached.)
+   (**Status as of 2026-08-10** — see the §0 update: the first clause is now
+   MET — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, ratifying
+   merged SHA `2967da018ceea41b91098e14d4c15a57236eb5f8` and answering
+   OD-W6-1..9 option (a); the authorization it carries reaches only the W6-1
+   backend slice. The second clause — W6 runtime slices completing their own
+   gates — remains unmet: PR 4814 (the W6-1 slice) is OPEN/Draft/unmerged, and
+   no W6 runtime exists on `main`. So this precondition as a whole is still
+   unmet and step 2 below is not reached.)
 2. Owner reviews this draft, answers OD-W7-1..8, and signs off the exact
    merged SHA of this document (docs may be amended until then).
 3. W7-0 preparation PR (contract/fixtures only, byte-inert, Draft/HOLD;
@@ -410,24 +451,37 @@ Documents:
 - W6 lock `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md` (whole; §2.3 `:89-97`, W6-R4/R5 `:106-107`, OD-W6-1..9 `:234-246`)
 - `docs/development/attendance-4709-fser4-member-projection-contract-amendment-20260804.md:136-183` (§3-§4)
 
-GitHub state, **re-queried 2026-08-08 against the rebase base
-`origin/main@5c3146acbc81b655e62bee9249b68eaec4e6e4c6`**. The 2026-08-07 line
-this replaces listed issue #4791 as OPEN; it is not, so the line is superseded
-rather than re-dated:
+GitHub state, **re-queried 2026-08-10 against current
+`origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`** (this branch's own
+base is the older `5c3146acbc81b655e62bee9249b68eaec4e6e4c6`; main has moved
+ahead of it and every fact below is checked against the newer tip, not the
+branch's stale base — see the standing house rule against verifying against a
+stale base). The 2026-08-08 round's line this replaces listed PRs 4805/4821 as
+OPEN/unmerged; both have since merged, so the line is superseded rather than
+re-dated:
 
 - PRs MERGED: #4771 (W6 prep, merge commit
   `2967da018ceea41b91098e14d4c15a57236eb5f8`); #4772 (FSER-4 §2 member-safe
   `/me` projection); #4773 (OD-W4C-61=(a) hardening); #4774/#4779 (#4770 arc);
-  #4780 (#4775 8-cell); **4799** (`51c3d8720789476efa15f6b99b6dc5f51df4743b`,
-  the issue-4791 scratch-DB teardown fix — verified an ancestor of the rebase
-  base).
-- Issues OPEN: #4556, #4629, #4709, #4770, #4775, #4792.
+  #4780 (#4775 8-cell); #4799 (`51c3d8720789476efa15f6b99b6dc5f51df4743b`, the
+  issue-4791 scratch-DB teardown fix); **4821** (durable W6 RATIFY record,
+  merge commit `ecf77d2433596bbdd8b67c312a37178dbc97f715`, merged
+  2026-08-08T10:41:37Z — see the §0 update); **4805** (the W8 plan's former
+  L8 CI-wiring precondition, merge commit
+  `4c28467c54f376ad5a68718d3dbe6ad50c76a917`, merged 2026-08-10T06:59:23Z —
+  see the W8 plan §5 row L8, now landed).
+- Issues OPEN (re-checked 2026-08-10): #4556, #4629, #4709, #4770, #4775,
+  #4792.
 - Issues CLOSED: **4791** (57P01 teardown flake), CLOSED COMPLETED
   2026-08-07T15:44:55Z, and its rollup **4796**, closed 2026-08-07T15:45:30Z
   on the same evidence. The W8 plan's OD-W8-3 carries the full record; the
   criterion was the `scratchDrain=` line reporting `CLEAN` on main's required
   gate, not a green run.
 - PRs OPEN / unmerged, named for provenance only and authorized by nothing
-  here: 4805 (the W8 plan's L8 CI-wiring precondition, head `2985e03c`); 4814
-  (W6-1 backend slice, Draft, head `4cc01228`); 4821 (durable W6 RATIFY
-  record, non-draft, head `b5cc1a22` — the §0 update above).
+  here: **4814** (the W6-1 backend slice itself, Draft, head
+  `4cc0122883846900a1325cdacd5eda0355d77215`, re-verified 2026-08-10 —
+  this is the one PR whose merge would actually put W6 runtime on `main`);
+  **4839** (Draft operator CLI for the rollout-transition writer named at
+  `w4c3a-rollout-control.ts:1125` — the W8 plan §5 ledger row L11 records that
+  landing this PR removes the "no production caller" gap it documents) —
+  naming either authorizes neither.
