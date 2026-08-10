@@ -331,12 +331,20 @@ async function assertDirectorySourceActiveForActivate(
   // committed — the shared-lock EPQ recheck refetches the latest row so the status test below
   // sees the fresh 'inactive'.
   //
-  // ONLY `di` is locked, deliberately. The account/link rows need no lock HERE: every writer
-  // that changes them first takes `lockUsersForAccessGraphWrite` on this same user (directory
-  // sync, deprovision, OAuth bind), and the activation already holds that users lock — so those
-  // races are already serialised. Integration `status` is the sole field with no per-user cover
-  // (an admin deactivating an integration takes no user lock), which is exactly what this fix
-  // closes. Locking da/l too would be untested, redundant scope and needless deadlock surface.
+  // ONLY `di` is locked, deliberately. The account/link rows (`da.is_active`, `l.link_status`)
+  // need no lock HERE: every production writer of those columns on a linked row first takes
+  // `lockUsersForAccessGraphWrite` on this same user, which the activation already holds across
+  // read→commit — so those races are already serialised. The writers, audited 2026-08-10:
+  //   - directory sync sweep — backstopped by the link-table-driven recheck-throw at
+  //     directory-sync.ts:3341-3358 (aborts if the link changed under it);
+  //   - manual (un)bind — directory-sync.ts:6688 locks both the target and the prior holder;
+  //   - local provider create/archive — local-directory-org.ts:477 / :635.
+  // (Deprovision and OAuth bind do NOT write these columns — they were named in error in an
+  // earlier draft of this comment.) Integration `status` is the sole field with no per-user
+  // cover — an admin deactivating an integration takes no user lock — which is exactly what this
+  // FOR SHARE closes. A positive control pins the account-path mitigation:
+  // directory-activation-source-lock.db.test.ts asserts a users-lock-holding account
+  // deactivation makes this activation block on the users lock and refuse.
   //
   // LOCK ORDER: users FIRST (above), THEN this integration FOR SHARE. Every writer that touches
   // both must keep that order; no production writer takes them in reverse (verified 2026-08-10).

@@ -244,6 +244,13 @@ jobs:
       - name: Directory deprovision ledger CI-wiring contract (required lane)
         run: node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
 
+      # Same promotion (post-merge review of #4846, P2): the activation-source-lock wiring
+      # contract's original home is the k3wise-offline-poc job, whose check cannot block a merge,
+      # so de-listing the suite + repinning would pass all 9 required checks while the real-DB
+      # golden silently stops running. Invoked here in the required test lane so it actually gates.
+      - name: Directory activation source-lock CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
+
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
       # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes

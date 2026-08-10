@@ -200,4 +200,79 @@ describeIfDatabase('T3 activation source read serialises against integration dea
   it('EXPLICIT branch (directoryAccountId — the OAuth SSO activation path): blocks and refuses too', async () => {
     await proveRaceRefuses(true)
   }, 30_000)
+
+  // SAFE-path positive control (delta review P3-2): the fix locks ONLY the integration row,
+  // relying on the pre-existing users lock to serialise ACCOUNT/LINK races. This pins that
+  // premise: a writer holding this user's users lock while deactivating the account makes the
+  // activation block ON THE USERS LOCK and then refuse — so account deactivation cannot slip
+  // through unserialised despite the source read not locking `da`. If a future change dropped
+  // the users lock, the activation would read the stale-active account and this test reds.
+  it('an account deactivation under the users lock serialises the activation, which then refuses', async () => {
+    const seeded = await seed()
+    const holder = new pg.Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    let activation: Promise<unknown> | null = null
+    try {
+      await holder.query('BEGIN')
+      // Hold this user's access-graph lock, exactly as every real account/link writer does...
+      await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [seeded.userId])
+      // ...then deactivate the account within that same locked transaction.
+      await holder.query(
+        `UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid`,
+        [seeded.accountId],
+      )
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const holderXid = String(
+        (
+          await holder.query(
+            `SELECT transactionid::text AS xid
+               FROM pg_locks
+              WHERE pid = $1 AND locktype = 'transactionid' AND granted
+              LIMIT 1`,
+            [holderPid],
+          )
+        ).rows[0]?.xid,
+      )
+
+      activation = activatePendingUser({
+        userId: seeded.userId,
+        mode: 'admin_no_password',
+        adminUserId: 'admin-test',
+      })
+      const settledEarly = { done: false }
+      activation.then(() => { settledEarly.done = true }, () => { settledEarly.done = true })
+
+      // The activation blocks on the USERS lock (its very first statement), waiting on the
+      // holder's transaction — proving the account race is serialised there, not at `da`.
+      let blockedPid = 0
+      for (let attempt = 0; attempt < 100 && blockedPid === 0; attempt += 1) {
+        const waiting = await holder.query(
+          `SELECT blocked.pid AS pid
+             FROM pg_locks blocked
+            WHERE NOT blocked.granted
+              AND blocked.locktype = 'transactionid'
+              AND blocked.transactionid::text = $1
+              AND blocked.pid <> $2
+            LIMIT 1`,
+          [holderXid, holderPid],
+        )
+        blockedPid = Number(waiting.rows[0]?.pid ?? 0)
+        if (blockedPid === 0) await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(blockedPid).toBeGreaterThan(0)
+      expect(settledEarly.done).toBe(false)
+
+      await holder.query('COMMIT') // account now inactive; users lock released
+      // The activation proceeds, reads the committed-inactive account, and refuses.
+      await expect(activation).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INACTIVE' })
+      activation = null
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* already committed */ }
+      await holder.end()
+      if (activation) { await activation.catch(() => undefined) }
+    }
+    const user = await query<{ activation_status: string }>(
+      `SELECT activation_status FROM users WHERE id = $1`, [seeded.userId])
+    expect(user.rows[0]?.activation_status).toBe('pending_activation')
+  }, 30_000)
 })
