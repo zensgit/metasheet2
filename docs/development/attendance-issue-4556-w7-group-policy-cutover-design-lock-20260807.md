@@ -126,11 +126,12 @@ provenance is in §10.
 **Cutover therefore means**: for an org that has completed the W7 staging
 ladder, (i) the frozen-context builder's policy inputs (shift/segments/flex/
 rules/timezone) are resolved from the **group-effective policy** of the user's
-effective calculation group for that work date instead of (or layered onto)
-the legacy per-user resolution, and (ii) the frozen context records that
-provenance (`calculationGroupId` non-null, a non-`legacy` selector). Readers
-(§1.3) then see group-derived provenance in the same immutable evidence chain.
-Nothing else in the write boundary moves.
+effective calculation group for that work date — **whether this REPLACES the
+legacy per-user resolution or LAYERS ONTO it is `OD-W7-9`, a new decision
+below, not settled by this sentence** — and (ii) the frozen context records
+that provenance (`calculationGroupId` non-null, a non-`legacy` selector).
+Readers (§1.3) then see group-derived provenance in the same immutable
+evidence chain. Nothing else in the write boundary moves.
 
 ### 1.2 The group-side inputs that already exist
 
@@ -335,9 +336,37 @@ OD-W7-5, fixed at W7-0.
    direction the W4 matrix does not have) is OD-W7-4 — it is a policy
    question with historical-explainability consequences, not a mechanical
    one.
-4. **No restatement on rollback** (parent R3): rolling an org back changes the
-   producer for **future** work dates only; already-frozen calculations and
-   their evidence stay immutable (W7-R6 mechanical check applies).
+4. **No restatement on rollback** (parent R3) — **corrected this round; the
+   previous wording was contradicted by landed code, not merely stale.**
+   Already-frozen calculations and their evidence stay immutable
+   (calculations are append-only; W7-R6 mechanical check applies) — that
+   half is TRUE and unchanged. The other half — "rolling an org back changes
+   the producer for **future** work dates only" — is **false as stated**:
+   `w4c3c-recompute.ts:1-8` (header) and `:165-176` (the `current_policy`
+   input contract) show `policy=current_policy` builds a **fresh** frozen
+   context, via `buildW4ShadowFrozenContextV1`, at recompute time for an
+   **arbitrary (including past) work date** — recompute is not restricted to
+   future dates. Reachability is proven, not assumed: a live route accepts
+   it at `plugins/plugin-attendance/index.cjs:30685`
+   (`policy: z.enum(['frozen_prior', 'current_policy']).default('frozen_prior')`)
+   with the adapter building that fresh context at `~L35284`
+   (`buildW4ShadowFrozenContextV1` call inside the `current_policy` branch).
+   **Failure scenario**: org X is group-authoritative; work date D3 is frozen
+   from the group-effective source; X is rolled back (to `group_shadow` or
+   `legacy`, per whichever OD-W7-3/OD-W7-4 shape lands); an operator later
+   runs `current_policy` recompute on D3 → a **second** calculation for D3,
+   built by whatever producer is current at recompute time (potentially the
+   legacy producer) — i.e. **two producers for one org+work-date**, exactly
+   the ambiguity `OD-W7-7(b)` was rejected to avoid. This is also
+   **self-inconsistent with `OD-W7-7(a)` as already written** (§7 below),
+   which itself lists recompute `current_policy` as an entrypoint that "flips
+   atomically with the org's posture" — meaning OD-W7-7(a)'s own text
+   anticipates `current_policy` tracking posture, which is precisely the
+   behavior this item's old wording denied existed. The disposition — refuse
+   post-rollback `current_policy` recompute for work dates frozen under a
+   superseded source, vs. record the producer on the calculation and make
+   recompute honor the frozen source — is **`OD-W7-10`** (new, §7 below); this
+   item states the corrected fact and defers the choice.
 5. **Evidence**: every W7 transition inserts an event with the evidence
    manifest hash and closed reference keys, exactly the
    `requireEvidenceReferences` discipline (`w4c3a-rollout-control.ts:114-163`).
@@ -368,6 +397,8 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | OD-W7-6 | Group-policy snapshot form | **(a)** Freeze group policy INTO the frozen context (plus its fingerprint), no second snapshot table; the context is already the immutable policy carrier (`w4c0-write-boundary-types.ts:124`). (b) A separate group-policy snapshot table keyed by group/date — needed only if per-group dedup matters for storage; adds a join to every immutability proof. |
 | OD-W7-7 | Which entrypoints cut over together | **(a)** All source entrypoints (live punch, scheduled, import, approval-driven, recompute `current_policy`) flip atomically with the org's posture — one producer per org per work date. (b) Phased per-entrypoint cutover — rejected by default: two producers in one org/date makes evidence and parity claims ambiguous (the W4C-3a lesson: same canonical row, separately snapshotted projections, was already the maximum tolerable split). |
 | OD-W7-8 | First-org scope | **(a)** The named synthetic staging org only, reusing the W4C-5 allowlist discipline (exact org, `scope='synthetic_staging'`, no wildcard); real named-org opt-in is a separate later owner decision per parent §9.8. (b) Two synthetic staging orgs — the named one plus a second synthetic org with a deliberately different group topology (multi-group, overlapping effective dates at the boundary), both under the same exact-allowlist discipline, zero customer data — buys cross-org isolation evidence before any real named-org decision, at the cost of a second full evidence chain and soak window. Real named-org opt-in remains a separate later owner decision per parent §9.8 under either option. |
+| OD-W7-9 | **New this round (§1.1 update).** Replace vs. layer — the single most load-bearing choice of the cutover, previously buried in a §1.1 parenthetical ("instead of (or layered onto) the legacy per-user resolution") and absent from this menu entirely, even though it is one of the two facts §1.1's own next sentence depends on. **No option is recommended-first: these are two different systems with different W7-R1/W7-R3 exposure, and the choice is the owner's, not a default this document offers.** The code exposes the chokepoint: `buildW4ShadowFrozenContextV1` (`plugins/plugin-attendance/index.cjs:22625` def, `~L22746` reads `shift.timezone`, `~L22751` reads `shift.rounding_minutes`) takes `shiftId` and reads policy fields off the **shift row itself** — there is no second, group-aware builder and no branch inside this one. **(REPLACE)** A new group-effective resolver supplies the shift/segment/timezone/rounding inputs to the *existing* `buildW4ShadowFrozenContextV1` in place of the legacy per-user resolvers (`resolveW4LiveCandidateInTransactionV1` / `resolveW4ScheduledCandidateInTransactionV1`, §1.1); the legacy resolvers and the single production builder are both untouched in shape, only their upstream caller for group-authoritative orgs changes. Under REPLACE, W7-R3's parity legs mean exactly what W7-R3 says: for a non-group-authoritative org, the legacy resolvers still run and the builder still receives their output unchanged, so "every response/projection byte and every v1 frozen-context byte is unchanged" is a claim about an **untouched code path**. The exposed slice boundary is upstream of the builder — a new resolver module, no change to `buildW4ShadowFrozenContextV1` itself. **(LAYER-ONTO)** The single production builder (`buildW4ShadowFrozenContextV1`) itself gains group-aware inputs — its own `shift`/`timezone`/`rounding_minutes` reads (`~L22746`, `~L22751`) become conditional on posture, sourced from the group's effective policy instead of the shift row when an org is group-authoritative. Under LAYER-ONTO, W7-R3's parity legs assert something **different and possibly unsatisfiable as currently worded**: the builder is no longer an untouched code path for *any* org once the change lands — its own body now branches on posture — so "every v1 frozen-context byte is unchanged" for a non-group-authoritative org depends on that branch's `legacy` arm reproducing the pre-change code exactly, a runtime property to be proven per release rather than a structural guarantee from an unmodified function. The exposed slice boundary is *inside* the single production builder — the one module W7-R1 pins as singular. Consequence for OD-W7-1 (§7, resolution-input source): both branches are compatible with OD-W7-1(a) (a dedicated in-transaction resolver reading persisted facts); REPLACE makes that resolver a **new caller** of the existing builder, LAYER-ONTO makes it an **input provider consulted from inside** the existing builder — different files touched, different W7-1 slice boundary, same OD-W7-1(a) posture-source discipline either way. |
+| OD-W7-10 | **New this round (§5 item 4).** Disposition of post-rollback `current_policy` recompute for a work date frozen under a superseded (now-rolled-back) group-effective source — see the §5 item 4 correction above; this decision is what that correction's second sentence defers to, not resolved by the correction itself. **No option is recommended-first.** **(a)** Refuse `current_policy` recompute, at the route/adapter layer, for any work date whose existing frozen calculation's producer/source differs from the org's *current* rollout state — requires recording which producer built each calculation (a new field or a derivable equivalent) and a new fail-closed check in the recompute path (`plugins/plugin-attendance/index.cjs:30685` route, `~L35284` adapter) before `buildW4ShadowFrozenContextV1` is called; preserves "one producer per org+work-date" (the invariant OD-W7-7(a) already committed to) at the cost of a new refusal surface and its own negative-path test. **(b)** Record the producer/source on the calculation at freeze time (extending the frozen-context or evidence-manifest shape) and make `current_policy` recompute **honor the frozen source** rather than always resolving current policy — i.e., `current_policy` for a work date frozen under a superseded group source recomputes against *that superseded source*, not today's policy; keeps the recompute route unconditionally available (no new 4xx surface) at the cost of redefining what "current_policy" means for such a record, which needs its own naming/labeling so it is not confused with true current-policy recompute for a never-group-authoritative work date. Either option requires `w4c3c-recompute.ts` and the route/adapter to change; neither is free, and OD-W7-7(a)'s "one producer per work date" claim is **false today** for this path regardless of which option the owner later picks (§5 item 4). |
 
 ## 8. Landing sequence (conditional skeleton)
 
@@ -381,7 +412,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
    gates — remains unmet: PR 4814 (the W6-1 slice) is OPEN/Draft/unmerged, and
    no W6 runtime exists on `main`. So this precondition as a whole is still
    unmet and step 2 below is not reached.)
-2. Owner reviews this draft, answers OD-W7-1..8, and signs off the exact
+2. Owner reviews this draft, answers OD-W7-1..10, and signs off the exact
    merged SHA of this document (docs may be amended until then).
 3. W7-0 preparation PR (contract/fixtures only, byte-inert, Draft/HOLD;
    separate owner authorization — this document does not grant it).
@@ -395,9 +426,13 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 
 ## 9. Owner decision
 
-`OD-W7-0` (adopt this lock) and `OD-W7-1..8` are **OPEN**. This document
-carries no default: absent owner sign-off — and absent the W6 preconditions
-in §8 item 1 — W7 remains a paper plan and no W7 runtime work is authorized.
+`OD-W7-0` (adopt this lock) and `OD-W7-1..10` are **OPEN** (`OD-W7-9` and
+`OD-W7-10` added this round — see §7 — and are no less load-bearing than
+`OD-W7-1..8`: `OD-W7-9` gates which code path W7-1 even touches, and
+`OD-W7-10` gates whether the rollback invariant in §5 item 4 is enforceable
+as written). This document carries no default: absent owner sign-off — and
+absent the W6 preconditions in §8 item 1 — W7 remains a paper plan and no W7
+runtime work is authorized.
 
 ## 10. Provenance
 
