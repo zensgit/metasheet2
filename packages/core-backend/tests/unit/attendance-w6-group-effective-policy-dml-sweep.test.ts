@@ -139,6 +139,63 @@ describe('W6-R1 static leg — the swept DOMAIN is derived and complete', () => 
   })
 })
 
+/**
+ * `canReadAttendanceDirectoryReadiness` (declared in the route file itself,
+ * on the seed path) short-circuits on `isRbacAdmin(userId)` —
+ * `rbac/service.ts`'s `isAdmin`, imported under that alias — BEFORE it ever
+ * reaches the injected `readOnlyQuery`. That call runs on the shared pool,
+ * not on this route's own read-only transaction handle, so this closure —
+ * reached through the relative-import expansion the walker already
+ * performs — is the mechanism that keeps it inside W6-R1's "no write
+ * anywhere on the call path" claim.
+ *
+ * `REQUIRED_IN_DOMAIN` above pins `rbac/service.ts` at FILE granularity;
+ * that alone is not enough, because a different declaration in the same
+ * file (`userHasPermission`) could keep the FILE in-domain even if THIS
+ * declaration's own reachability broke. This block pins the declaration
+ * itself — narrower than a file floor, not a whole-file scan: everything
+ * here operates on `isAdmin`'s own extracted unit text, never on
+ * `rbac/service.ts`'s full source.
+ */
+describe('W6-R1 static leg — the platform-admin short-circuit (rbac/service.ts::isAdmin) is pinned by DECLARATION', () => {
+  const ISADMIN_FILE = 'packages/core-backend/src/rbac/service.ts'
+  const isAdminUnit = closure.units.find((unit) => unit.file === ISADMIN_FILE && unit.name === 'isAdmin')
+
+  it('the declaration is reachable in the closure — a future refactor that drops it fails here, not by the domain silently shrinking', () => {
+    expect(isAdminUnit).toBeDefined()
+  })
+
+  it('its DB seam is a SELECT', () => {
+    const resolved = sqlArguments.resolved.find((entry) => entry.file === ISADMIN_FILE && entry.unit === 'isAdmin')
+    expect(resolved).toBeDefined()
+    expect(resolved?.sql.trim().toUpperCase().startsWith('SELECT')).toBe(true)
+  })
+
+  it('EXECUTED positive control: a single-write mutation at that exact seam is caught by both the DML-verb leg and the SELECT-only leg', () => {
+    const original = (isAdminUnit as { text: string }).text
+    const needle = 'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1'
+    expect(original).toContain(needle)
+    const mutated = original.replace(needle, 'UPDATE user_roles SET role_id = $2 WHERE user_id = $1')
+    expect(mutated).not.toEqual(original)
+
+    // Non-vacuity: the write really is there — this is what the "no raw-SQL
+    // DML verb" leg below sweeps for.
+    expect(RAW_SQL_DML.some((pattern) => pattern.test(mutated))).toBe(true)
+
+    // A synthetic ONE-UNIT closure carrying only the mutated declaration —
+    // not a whole-file re-scan — run through the SAME classifier the real
+    // legs use.
+    const mutatedClosure = syntheticClosure(ISADMIN_FILE, 'isAdmin', mutated)
+    const mutatedArgs = collectQuerySqlArguments(mutatedClosure, repoRoot)
+    expect(mutatedArgs.findings).toEqual([])
+    expect(mutatedArgs.resolved.length).toBe(1)
+    // The exact predicate the "every resolved SQL literal is a SELECT" leg
+    // checks over the whole closure: on the REAL (unmutated) closure this
+    // seam passes it; mutated, it does not.
+    expect(mutatedArgs.resolved[0].sql.trim().toUpperCase().startsWith('SELECT')).toBe(false)
+  })
+})
+
 describe('W6-R1 static leg — zero DML anywhere in the derived closure', () => {
   it('no reachable declaration contains a raw-SQL DML verb', () => {
     const offenders = closure.units
