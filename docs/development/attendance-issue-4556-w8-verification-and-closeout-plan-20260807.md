@@ -384,11 +384,17 @@ unexecutable, not as a step awaiting scheduling.
 | Exit 5 (PASS marker + residue zero) | **Blocked** — nothing to mark PASS | Gate C |
 | Exit 6 (off-roster diffs dispositioned) | **Blocked** — no diffs are generated without a real run | Gate C |
 
-**Net**: of 11 entry items, 8 are executable today and 3 are blocked (4, 5's
-live half, 10's live half — plus entry 9's live half); of 6 exit items,
-**all 6** are blocked. Landing PR #4839 (Gate C's named remedy) does not by
-itself clear entries 4/exit-3 — Gate A and Gate D remain independent
-blockers even after a transition command exists.
+**Net**: of 11 entry items, 8 are executable today and 3 are blocked, by the
+verdict word each row above actually carries — **blocked** rows are 4, 5, 10;
+**executable** rows are 1, 2, 3, 6, 7, 8, 9, 11. That count of 8 folds in
+entry 9's own caveat, stated once here so the "8" is not read as clean: entry
+9 carries the same live-observation gap as entries 5 and 10 (Gate C), but its
+row is bucketed executable because the underlying test-suite property (a
+harness already calls the transition writer) is real *today*, independent of
+any live deployment — unlike entries 4, 5, and 10, which have no executable
+form today at all. Of 6 exit items, **all 6** are blocked. Landing PR #4839 (Gate C's named
+remedy) does not by itself clear entries 4/exit-3 — Gate A and Gate D remain
+independent blockers even after a transition command exists.
 
 Conditional: if the owner adopts W7, the same contract runs a second time for
 the W7 cutover posture (the W7 lock's OD-W7-8/soak markers); OD-W8-2 decides
