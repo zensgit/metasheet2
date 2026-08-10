@@ -149,8 +149,19 @@ const PLUGIN_ATTENDANCE_TABLE_PREFIX_PATTERN = /^plugin_attendance_[a-z0-9_]+$/
 // interpolation. Deliberately does not try to match the interpolation's closing `}` or inner
 // content inline (a fixed-width character class cannot tell a recognized shape from an
 // unrecognized one without also silently discarding the unrecognized ones) — the closing brace is
-// found by balanced-depth scanning below, and the inner text's shape is classified explicitly, so
-// every occurrence produces a resolved edit OR a reported unresolved-shape entry, never neither.
+// found by balanced-depth scanning below, and the inner text's shape is classified explicitly.
+// EXACT claim (narrower than "every occurrence produces an edit or a report" — that broader
+// phrasing was checked against the code and is false, see below): every occurrence whose
+// resolution is NOT EVEN ATTEMPTED — a malformed/unclosed `${`, an unrecognized shape, or a
+// recognized-shape root that is not a module-level constant — produces a reported
+// unresolvedDynamicTargetShapes entry, never silent absence (this is the "must FAIL, not skip"
+// property this section documents). A THIRD, separate, INTENTIONAL outcome exists once resolution
+// IS attempted and succeeds: the resolved table may simply not match this census's
+// `plugin_attendance_` scope (e.g. `${OTHER_TABLE}` resolving to `'some_other_table'`) — that
+// occurrence produces neither an edit nor a report entry, by design (see the `continue // resolved
+// fine, just out of this census's scope` line below) — it is a correctly-resolved, deliberately
+// out-of-scope result, not an unresolved one, and reporting it would misrepresent this census's
+// prefix-only scope gate as a resolution failure.
 // Case-sensitive by design, same rationale as collector.cjs's DML_LINE_PATTERN (see that pattern's
 // docblock): this codebase's real SQL is written in uppercase keywords; a case-insensitive pattern
 // would match English prose in comments and flood this census with non-SQL noise. A lowercase or

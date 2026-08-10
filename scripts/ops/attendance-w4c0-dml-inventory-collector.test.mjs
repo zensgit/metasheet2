@@ -2218,3 +2218,25 @@ test('F6c isolation probe: a registered identity approved for multiplicity 2 wit
   assert.deepEqual(result.unclaimed, [])
   assert.deepEqual(result.undomained, [])
 })
+
+test('claim-sweep adjudication finding: a dynamic target that RESOLVES but is out of plugin_attendance_ scope produces NEITHER an edit NOR a reported shape — a third, intentional outcome, correcting an earlier docblock overclaim', () => {
+  const content = [
+    "const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'", // keeps the pre-filter open
+    "const OTHER_TABLE = 'some_other_table'", // resolves fine (narrow shape, module-level const) but is not plugin_attendance_*
+    'async function inScope(db) {',
+    '  return db.query(`INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE} (org_id) VALUES ($1)`, [1])',
+    '}',
+    'async function outOfScope(db) {',
+    '  return db.query(`UPDATE ${OTHER_TABLE} SET x = 1`)',
+    '}',
+  ].join('\n')
+  const result = substituteResolvedDynamicTargets(content)
+  // The out-of-scope target must not appear as a reported shape (it was NOT unresolved — it
+  // resolved correctly, just to a table outside this census's prefix scope).
+  assert.deepEqual(result.unresolvedDynamicTargetShapes, [])
+  // The in-scope target must still produce its edit (content actually substituted).
+  assert.notEqual(result.content, content)
+  assert.ok(result.content.includes('plugin_attendance_report_sync_jobs'))
+  // The out-of-scope target's OWN text must be left untouched in the output (never substituted).
+  assert.ok(result.content.includes('${OTHER_TABLE}'), 'the out-of-scope target must be left as-is, not substituted')
+})
