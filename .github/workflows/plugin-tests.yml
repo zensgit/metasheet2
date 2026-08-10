@@ -99,6 +99,7 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs
           node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
           node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
