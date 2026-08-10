@@ -15,7 +15,7 @@
  *
  * WIRING — stated precisely so no other text in this PR can be read as implying otherwise:
  *   - This tool's OWN correctness (its pattern self-tests, `--self-test`, AND its shallow-clone
- *     ancestry-verdict downgrade) IS exercised by CI: two subprocess-driven `node:test` cases in
+ *     ancestry-verdict downgrade) IS exercised by CI: four subprocess-driven `node:test` cases in
  *     `scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`, which is already wired into
  *     `.github/workflows/plugin-tests.yml` (`pnpm exec tsx --test
  *     scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`). No edit to any workflow file
@@ -93,6 +93,16 @@ import { execFileSync } from 'node:child_process'
 // listed below (`none`, `any`, `must`, `impossible`, `sole`, `without exception`), plus `solely`
 // as a spelling variant of one of them. The next such sentence will expose more; add them then.
 //
+// SECOND BATCH, closed this round (gate-2, CHANGES-REQUESTED, PR #4839, 20260810) — named here so
+// the next reader can tell what was learned rather than re-deriving it: `unconditionally`,
+// `each`, `100%`, `invariably`, `completely`. A REAL this-round instance of one of these
+// (`each`) existed in this very PR's body ("five findings … each fixed and mutation-proven") —
+// not a hypothetical, the exact class this sweep exists to catch. `100%` needed a boundary-
+// fragment special case (see `phraseFragment` below): a bare trailing `\b` never matches after a
+// non-word character like `%`, so the OLD single alternation-wide `\b(...)\b` wrapper would have
+// silently never fired for it even once it was added to the list — verified via this file's own
+// self-test battery, which is exactly the control that catches this class of authoring mistake.
+//
 // Every negative is a NEAR MISS — a string that contains the phrase's letters but must not match
 // under word boundaries. A negative that merely omits the phrase would pass trivially.
 const QUANTIFIER_CASES = [
@@ -116,18 +126,44 @@ const QUANTIFIER_CASES = [
   { phrase: 'sole', positive: 'This module is the sole arbiter.', negative: 'The console logged it.' },
   { phrase: 'solely', positive: 'It relies solely on the pin.', negative: 'The solenoid clicked.' },
   { phrase: 'without exception', positive: 'It holds without exception.', negative: 'Without exceptions listed, review stalls.' },
+  { phrase: 'unconditionally', positive: 'This rule holds unconditionally.', negative: 'The unconditional guarantee still needed sign-off.' },
+  { phrase: 'each', positive: 'It applies to each row.', negative: 'The beach was crowded.' },
+  { phrase: '100%', positive: 'It is 100% covered.', negative: 'It costs 1000 dollars.' },
+  { phrase: 'invariably', positive: 'It invariably fails under load.', negative: 'The invariant held throughout.' },
+  { phrase: 'completely', positive: 'It completely resolves the issue.', negative: 'The complete set was archived.' },
 ]
 
 const QUANTIFIER_PHRASES = QUANTIFIER_CASES.map((quantifierCase) => quantifierCase.phrase)
 
+/**
+ * Boundary-aware regex fragment for ONE phrase. A bare `\b` requires a transition between a word
+ * character (`\w`) and a non-word character; it can never match immediately after a phrase that
+ * itself ENDS in a non-word character (e.g. `100%` followed by a space or end-of-string — `%`
+ * and the following non-word character are never a `\b` transition). Phrases that start/end with
+ * a word character (every phrase here except `100%`) get the original plain `\b` treatment,
+ * unchanged; `100%`'s trailing edge uses a negative lookahead (`(?!\w)` — "not immediately
+ * followed by a word character") instead, which correctly requires nothing further for a
+ * non-word-ending phrase rather than a boundary transition that structurally cannot exist.
+ */
+function phraseFragment(phrase) {
+  const escaped = phrase.replace(/ /g, '\\s+')
+  const leftBoundary = /^\w/.test(phrase) ? '\\b' : ''
+  const rightBoundary = /\w$/.test(phrase) ? '\\b' : '(?!\\w)'
+  return `${leftBoundary}(${escaped})${rightBoundary}`
+}
+
 /** Regex for ONE phrase — what each phrase's own controls are checked against. */
 function buildSinglePhraseRegex(phrase) {
-  return new RegExp(`\\b(${phrase.replace(/ /g, '\\s+')})\\b`, 'gi')
+  return new RegExp(phraseFragment(phrase), 'gi')
 }
 
 function buildQuantifierRegex() {
-  const alternation = QUANTIFIER_PHRASES.map((phrase) => phrase.replace(/ /g, '\\s+')).join('|')
-  return new RegExp(`\\b(${alternation})\\b`, 'gi')
+  // Each alternative carries its OWN boundary fragment (see `phraseFragment`) rather than one
+  // outer `\b(...)\b` wrapped around the whole alternation — the old wrapper form would apply the
+  // same (wrong, for `100%`) trailing-`\b` requirement to every alternative regardless of what it
+  // ends with.
+  const alternation = QUANTIFIER_PHRASES.map((phrase) => phraseFragment(phrase)).join('|')
+  return new RegExp(alternation, 'gi')
 }
 
 // SHA-like: 7-40 lowercase hex characters. A candidate is first matched as a bare run of
@@ -137,10 +173,31 @@ function buildQuantifierRegex() {
 // heuristic that eliminates the single largest false-positive source (every doc comment in this
 // repo embeds dates like ", 20260810)") at the cost of missing the astronomically rare real git
 // SHA that happens to be all-digit.
+//
+// P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): this pattern's {7,40} quantifier
+// structurally CANNOT match a run of 41+ hex characters — a full-length sha256 digest (64 hex
+// chars, exactly what this repo's own content-addressed pins use, e.g.
+// `s6a-package-provenance-pins.json`) has no valid match position: any 40-or-fewer-char window
+// selected from inside a 64-char run still borders more hex characters on at least one side, so
+// the required `\b` boundary never lands. Verified directly: a file containing both a 64-char
+// digest and an 8-char SHA-like token flagged only the 8-char one before this fix. The pin
+// digests — the values that actually gate the required `integration-guard` check — were the one
+// thing this sweep could not see. Fixed with a SEPARATE, exact-length pattern below rather than
+// widening {7,40} (widening would blur the two different claim classes together: a git commit
+// SHA is verifiable ancestry, a content digest is not, and must never be run through
+// `gitAncestryVerdict`'s `cat-file`/`merge-base` calls — see its own use-site comment in
+// `scanLine`).
 const SHA_CANDIDATE_RE = /\b[0-9a-f]{7,40}\b/g
 function isShaLike(token) {
   return /[a-f]/.test(token)
 }
+
+// Exact-length sha256 hex digest (64 chars) — a SEPARATE class from SHA_CANDIDATE_RE above, not
+// an extension of it (see that pattern's comment for why). A run of 65 hex characters correctly
+// produces ZERO matches here (proven by this pattern's own self-test negative below): whichever
+// 64-char window is tried, at least one boundary still borders another hex character from the
+// same run, exactly the same boundary-exhaustion reasoning as SHA_CANDIDATE_RE's {7,40} case.
+const SHA256_DIGEST_RE = /\b[0-9a-f]{64}\b/g
 
 // N/M (e.g. "28/28") and "N of M" (e.g. "5 of 7") figures.
 const NM_SLASH_RE = /\b\d+\s*\/\s*\d+\b/g
@@ -167,6 +224,22 @@ const SELF_TESTS = [
     re: () => SHA_CANDIDATE_RE,
     positive: 'The head is at a21615573cdeadbeef1234567890abcdef123456.',
     negative: 'Filed on 20260810 as PR #4839, item 3 of 3.',
+    filter: isShaLike,
+  },
+  {
+    name: 'sha256 digest pin (exact 64-char run) vs a 65-char run (one longer — must NOT match)',
+    re: () => SHA256_DIGEST_RE,
+    positive: 'The pin is 88176e7e79f5f5a9017ff93675e05cbadf9589f9d1d3693f00503c05e0ea8fcf exactly.',
+    // 65 hex chars (the positive's 64 plus one more) — proves the exact-length anchor rejects a
+    // run one character too long, not just runs that are obviously too short.
+    negative: 'The pin is 88176e7e79f5f5a9017ff93675e05cbadf9589f9d1d3693f00503c05e0ea8fcfa exactly.',
+    filter: isShaLike,
+  },
+  {
+    name: 'sha256 digest pin does not fire on a short hex run (6 chars)',
+    re: () => SHA256_DIGEST_RE,
+    positive: 'The pin is 88176e7e79f5f5a9017ff93675e05cbadf9589f9d1d3693f00503c05e0ea8fcf exactly.',
+    negative: 'The short id abc123 is unrelated.',
     filter: isShaLike,
   },
   { name: 'N/M figure (slash)', re: () => NM_SLASH_RE, positive: 'All 28/28 tests passed.', negative: 'See packages/core-backend for the source.' },
@@ -296,6 +369,22 @@ function scanLine(fileLabel, lineNumber, lineText, headRef, shallow) {
       backing: gitAncestryVerdict(m[0], headRef, shallow),
     })
   }
+  // Exact-length sha256 digest pins — a SEPARATE row type, deliberately NEVER routed through
+  // `gitAncestryVerdict`: a content-addressed digest is not a git commit and `cat-file -e
+  // <digest>^{commit}` would just report "not found", a misleading verdict dressed up as a real
+  // one. Always NEEDS-MANUAL-BACKING — this sweep has no mechanical way to confirm a digest pin
+  // matches what it claims to pin.
+  for (const m of lineText.matchAll(SHA256_DIGEST_RE)) {
+    if (!isShaLike(m[0])) continue
+    rows.push({
+      file: fileLabel,
+      line: lineNumber,
+      patternType: 'sha256-digest-pin',
+      matched: m[0],
+      sentence: lineText.trim().slice(0, 300),
+      backing: 'NEEDS-MANUAL-BACKING',
+    })
+  }
   for (const m of lineText.matchAll(NM_SLASH_RE)) {
     rows.push({
       file: fileLabel,
@@ -331,6 +420,15 @@ function scanSource(fileLabel, text, headRef, shallow) {
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+
+// P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): a misuse-exit signal, never a
+// direct `process.exit()` call from inside argument parsing — see `main()`'s own comment for why
+// calling `process.exit()` anywhere after a `process.stdout.write()` in this file is the exact
+// bug class being fixed (truncated piped output). `parseArgs` writes its own stderr diagnostic
+// (that write is safe here — it happens before any stdout output exists to race) and throws this
+// sentinel; `main()` is the ONLY place that decides the process's final exit code.
+class ClaimSweepMisuseError extends Error {}
+
 function parseArgs(argv) {
   const args = { files: [], textFile: null, textLabel: 'TEXT_BLOB', format: 'md', gitHead: 'HEAD', selfTest: false }
   for (let i = 0; i < argv.length; i += 1) {
@@ -343,7 +441,7 @@ function parseArgs(argv) {
     else if (arg === '--git-head') args.gitHead = argv[++i]
     else {
       process.stderr.write(`claim-sweep: unrecognized argument ${JSON.stringify(arg)}\n`)
-      process.exit(2)
+      throw new ClaimSweepMisuseError()
     }
   }
   return args
@@ -364,9 +462,37 @@ function printTableMd(rows) {
   }
 }
 
+/**
+ * P3 fix (gate-2 round, CHANGES-REQUESTED, PR #4839, 20260810): a large sweep piped to another
+ * process (rather than redirected to a file) was SILENTLY TRUNCATED — exit code 0, no error,
+ * just missing rows off the end. Root cause: for a PIPE destination (unlike a TTY or a regular
+ * file), `process.stdout.write()` is asynchronous — Node queues the write and returns before the
+ * data has necessarily reached the kernel. The old code called `process.exit(N)` immediately
+ * after the LAST `stdout.write()`/`printTableMd()` call in every exit path, which forcibly
+ * terminates the process without waiting for any still-in-flight writes to flush. Reproduced
+ * directly (not simulated): a synthetic sweep whose file-redirected output is 1,000,896 bytes
+ * came back as exactly 65,536 bytes (one pipe bufferful) when piped and drained with an eager
+ * reader — the process exited before the remaining ~935KB of queued writes ever reached the
+ * pipe.
+ *
+ * Fix: this function NEVER calls `process.exit()`. Every exit path sets `process.exitCode`
+ * instead and returns; Node's default behaviour is to keep the event loop alive until all
+ * pending I/O (including queued stdout/stderr writes) has actually drained, THEN exit with
+ * whatever `process.exitCode` was last set to. `parseArgs`'s `ClaimSweepMisuseError` is caught
+ * here for the same reason — it should never itself call `process.exit()`.
+ */
 function main() {
   const argv = process.argv.slice(2)
-  const args = parseArgs(argv)
+  let args
+  try {
+    args = parseArgs(argv)
+  } catch (error) {
+    if (error instanceof ClaimSweepMisuseError) {
+      process.exitCode = 2
+      return
+    }
+    throw error
+  }
 
   // Standing control: self-tests run on EVERY invocation, not only `--self-test`.
   const selfTestFailures = runSelfTests()
@@ -374,15 +500,18 @@ function main() {
     if (selfTestFailures.length > 0) {
       process.stderr.write('claim-sweep self-test: FAILED\n')
       for (const failure of selfTestFailures) process.stderr.write(`  - ${failure}\n`)
-      process.exit(1)
+      process.exitCode = 1
+      return
     }
     process.stdout.write(`claim-sweep self-test: PASSED (${SELF_TESTS.length} patterns, each proven to fire on a positive and not fire on a negative)\n`)
-    process.exit(0)
+    process.exitCode = 0
+    return
   }
   if (selfTestFailures.length > 0) {
     process.stderr.write('claim-sweep: refusing to run — the sweep\'s own pattern self-tests failed, so a clean scan below would mean nothing:\n')
     for (const failure of selfTestFailures) process.stderr.write(`  - ${failure}\n`)
-    process.exit(1)
+    process.exitCode = 1
+    return
   }
 
   // Standing control: zero input is a hard error, never a silently-clean empty table.
@@ -390,7 +519,8 @@ function main() {
     process.stderr.write(
       'claim-sweep: no input given (need at least one --file and/or --text-file) — refusing to report an empty sweep over nothing.\n',
     )
-    process.exit(2)
+    process.exitCode = 2
+    return
   }
 
   // Computed ONCE for the whole run — see `isShallowRepo`'s own doc for why per-token
@@ -407,7 +537,8 @@ function main() {
   for (const filePath of args.files) {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
       process.stderr.write(`claim-sweep: --file ${JSON.stringify(filePath)} does not exist or is not a regular file — refusing to silently skip it.\n`)
-      process.exit(2)
+      process.exitCode = 2
+      return
     }
     const text = readFileSync(filePath, 'utf8')
     allRows.push(...scanSource(filePath, text, args.gitHead, shallow))
@@ -415,7 +546,8 @@ function main() {
   if (args.textFile) {
     if (!existsSync(args.textFile) || !statSync(args.textFile).isFile()) {
       process.stderr.write(`claim-sweep: --text-file ${JSON.stringify(args.textFile)} does not exist or is not a regular file.\n`)
-      process.exit(2)
+      process.exitCode = 2
+      return
     }
     const text = readFileSync(args.textFile, 'utf8')
     allRows.push(...scanSource(args.textLabel, text, args.gitHead, shallow))
@@ -438,9 +570,10 @@ function main() {
   const disprovenShas = allRows.filter((row) => row.patternType === 'sha-like-token' && row.backing.startsWith('AUTO: NOT an ancestor'))
   if (disprovenShas.length > 0) {
     process.stderr.write(`claim-sweep: ${disprovenShas.length} SHA-like token(s) MECHANICALLY CONFIRMED NOT an ancestor of ${args.gitHead} — see rows above.\n`)
-    process.exit(1)
+    process.exitCode = 1
+    return
   }
-  process.exit(0)
+  process.exitCode = 0
 }
 
 main()
