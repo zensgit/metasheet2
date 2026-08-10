@@ -1848,6 +1848,12 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
     status: 409,
     message: 'orgId does not match the directory source integration for this user',
   },
+  // 409 (#4833): several ACTIVE sources in different orgs — "derive" has no unique answer, so
+  // the caller must name one; refusing beats silently picking the lowest account id.
+  ACTIVATE_ORG_AMBIGUOUS: {
+    status: 409,
+    message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>

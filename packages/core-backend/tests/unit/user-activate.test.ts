@@ -516,6 +516,121 @@ describe('activatePendingUser (T3)', () => {
     expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
   })
 
+  // #4833 quartet: with several ACTIVE sources, "derive" has no unique answer — the caller's
+  // orgId is validated against the SET; naming none is a refusal, not a silent pick.
+  it('dual-ACTIVE different orgs + no orgId: refuses with ACTIVATE_ORG_AMBIGUOUS, writing nothing', async () => {
+    const dualActive = [
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-1', integration_org_id: 'org-1' },
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-2', integration_org_id: 'org-2' },
+    ]
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: dualActive })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ORG_AMBIGUOUS' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('dual-ACTIVE different orgs + orgId naming the SECOND org: activates into exactly that org', async () => {
+    const dualActive = [
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-1', integration_org_id: 'org-1' },
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-2', integration_org_id: 'org-2' },
+    ]
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: dualActive })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+
+    // Under the pre-#4833 find-first shape this legitimate request answered 409.
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-2' }),
+    ).resolves.toMatchObject({ activationStatus: 'activated' })
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-2'])
+  })
+
+  it('dual-ACTIVE different orgs + orgId outside the set: ACTIVATE_ORG_MISMATCH', async () => {
+    const dualActive = [
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-1', integration_org_id: 'org-1' },
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-2', integration_org_id: 'org-2' },
+    ]
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: dualActive })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password', orgId: 'org-3' }),
+    ).rejects.toMatchObject({ code: 'ACTIVATE_ORG_MISMATCH' })
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('dual-ACTIVE SAME org: no ambiguity — the set dedupes and the org derives', async () => {
+    const dualSameOrg = [
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-1' },
+      { ...LINKED_ACTIVE_SOURCE, id: 'da-2' },
+    ]
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: dualSameOrg })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+
+    await expect(
+      activatePendingUser({ userId: 'u1', mode: 'admin_no_password' }),
+    ).resolves.toMatchObject({ activationStatus: 'activated' })
+    const membershipWrite = pgMocks.query.mock.calls.find((call) =>
+      String(call[0]).includes('INSERT INTO user_orgs'))
+    expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
+  })
+
   // Dual-org: the person's ACTIVE source lives in org-2; a caller pointing at org-1 (their
   // other, inactive badge's org — or any org at all) must not be able to steer the membership.
   it('dual-org: derives the ACTIVE source org and refuses a caller steering to the other org', async () => {

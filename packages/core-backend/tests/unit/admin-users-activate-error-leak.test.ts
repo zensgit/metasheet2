@@ -261,6 +261,8 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
       ['ACTIVATE_SOURCE_MISSING', 409, 'No linked active directory account for activation'],
       // Closeout review P1: derived-org confirmation failure surfaces as 409 with OUR message.
       ['ACTIVATE_ORG_MISMATCH', 409, 'orgId does not match the directory source integration for this user'],
+      // #4833: dual-ACTIVE-source ambiguity surfaces as 409 with OUR message.
+      ['ACTIVATE_ORG_AMBIGUOUS', 409, 'Multiple active directory sources in different orgs; orgId is required to disambiguate'],
     ]
     return cases.reduce(
       (chain, [code, status, message]) => chain.then(async () => {
