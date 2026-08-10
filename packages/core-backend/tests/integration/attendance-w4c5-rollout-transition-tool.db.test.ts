@@ -907,8 +907,11 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     // call site. Test (A) deliberately sets the Gate D test seam and does NOT clear it itself
     // (simulating a throw between set and clear, the exact class of bug fixed above). Test (B),
     // which vitest always runs after (A)'s `afterEach` fires regardless of (A)'s outcome, asserts
-    // production-default (undelivered) values are observed. If the file-level backstop is ever
-    // removed AND the A17 fix above is ever reverted to its unguarded inline form, (B) reds.
+    // production-default (undelivered) values are observed. If the describe-scoped `afterEach`
+    // above is ever removed, (B) reds — on its own, independent of whether the A17 fix's
+    // `finally` block above is intact, because (A) never clears the seam itself; verified
+    // directly (gate-2 round): removing only the `afterEach`, with the A17 `finally` block left
+    // untouched, reds (B).
     describe('Gate D test-seam hygiene: the describe-level afterEach backstop is load-bearing', () => {
       it('(A) sets the Gate D override and relies ENTIRELY on the surrounding afterEach to clear it (no explicit clear in this test)', () => {
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false) // sanity: starts clean
