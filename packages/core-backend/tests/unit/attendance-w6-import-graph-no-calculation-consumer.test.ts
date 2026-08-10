@@ -21,6 +21,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -121,6 +122,28 @@ function findOffenders(rootDir: string, absoluteFiles: readonly string[]): Array
   return offenders
 }
 
+/**
+ * Plants a decoy file for a positive control WITHOUT writing into the real
+ * `packages/core-backend/src/` tree: another suite in this workspace walks
+ * that tree recursively (a full-`src` structural guard), and a real file
+ * momentarily created and then deleted there races that walk under full-suite
+ * parallelism. `findOffenders` only does relative-path arithmetic plus a
+ * `readFileSync` on the paths it is given, so an isolated temp directory that
+ * mirrors the real relative path is exactly as discriminating and touches no
+ * tree any other suite scans.
+ */
+function withDecoyFile<T>(relativePath: string, content: string, run: (fakeRoot: string, absolute: string) => T): T {
+  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'w6r5-decoy-'))
+  try {
+    const absolute = path.join(fakeRoot, relativePath)
+    fs.mkdirSync(path.dirname(absolute), { recursive: true })
+    fs.writeFileSync(absolute, content)
+    return run(fakeRoot, absolute)
+  } finally {
+    fs.rmSync(fakeRoot, { recursive: true, force: true })
+  }
+}
+
 describe('W6-R5 repository inventory: no calculation-path file imports the W6 aggregate', () => {
   it('zero calculation-write-path files reference either W6-1 module', () => {
     const relativeFiles = listGitTrackedFiles(ROOT)
@@ -176,62 +199,68 @@ describe('W6-R5 repository inventory: no calculation-path file imports the W6 ag
   })
 
   it('positive control: a decoy importing the contract module is caught', () => {
-    const scratchPath = path.join(ROOT, 'packages/core-backend/src/services/zz-w6r5-decoy-contract-scratch.ts')
-    fs.writeFileSync(
-      scratchPath,
+    const relative = 'packages/core-backend/src/services/zz-w6r5-decoy-contract-scratch.ts'
+    withDecoyFile(
+      relative,
       "import { ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAINS_V1 } from '../attendance/w6-group-effective-policy-contract'\n",
+      (fakeRoot, absolute) => {
+        const offenders = findOffenders(fakeRoot, [absolute])
+        expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-contract' }])
+      },
     )
-    try {
-      const relative = 'packages/core-backend/src/services/zz-w6r5-decoy-contract-scratch.ts'
-      expect(listGitTrackedFiles(ROOT).includes(relative)).toBe(false)
-      const offenders = findOffenders(ROOT, [scratchPath])
-      expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-contract' }])
-    } finally {
-      fs.unlinkSync(scratchPath)
-    }
   })
 
   it('positive control for the widened lib/ prefix: a decoy CJS file under lib/ that requires W6 is caught', () => {
-    const scratchPath = path.join(ROOT, 'plugins/plugin-attendance/lib/zz-w6r5-decoy-w7-winner.cjs')
-    fs.writeFileSync(
-      scratchPath,
+    const relative = 'plugins/plugin-attendance/lib/zz-w6r5-decoy-w7-winner.cjs'
+    withDecoyFile(
+      relative,
       "const { createAttendanceGroupEffectivePolicyAggregateService } = require('../../../packages/core-backend/src/attendance/w6-group-effective-policy-aggregate')\nmodule.exports = { createAttendanceGroupEffectivePolicyAggregateService }\n",
+      (fakeRoot, absolute) => {
+        const offenders = findOffenders(fakeRoot, [absolute])
+        expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
+      },
     )
-    try {
-      const relative = 'plugins/plugin-attendance/lib/zz-w6r5-decoy-w7-winner.cjs'
-      expect(listGitTrackedFiles(ROOT).includes(relative)).toBe(false)
-      const offenders = findOffenders(ROOT, [scratchPath])
-      expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
-    } finally {
-      fs.unlinkSync(scratchPath)
-    }
   })
 
   it('positive control: a decoy under the NEW src/services/ prefix that imports W6 is caught', () => {
-    const scratchPath = path.join(ROOT, 'packages/core-backend/src/services/zz-w6r5-decoy-services-scratch.ts')
-    fs.writeFileSync(scratchPath, "import { createAttendanceGroupEffectivePolicyAggregateService } from '../attendance/w6-group-effective-policy-aggregate'\n")
-    try {
-      const relative = 'packages/core-backend/src/services/zz-w6r5-decoy-services-scratch.ts'
-      const files = listGitTrackedFiles(ROOT) // untracked scratch file — proves the git-tracked-only scope too
-      expect(files.includes(relative)).toBe(false)
-      // Directly exercise findOffenders (the REAL detector, not a re-typed
-      // predicate copy) against the untracked file.
-      const offenders = findOffenders(ROOT, [scratchPath])
-      expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
-    } finally {
-      fs.unlinkSync(scratchPath)
-    }
+    const relative = 'packages/core-backend/src/services/zz-w6r5-decoy-services-scratch.ts'
+    withDecoyFile(
+      relative,
+      "import { createAttendanceGroupEffectivePolicyAggregateService } from '../attendance/w6-group-effective-policy-aggregate'\n",
+      (fakeRoot, absolute) => {
+        // Directly exercise findOffenders (the REAL detector, not a re-typed
+        // predicate copy) against the isolated file.
+        const offenders = findOffenders(fakeRoot, [absolute])
+        expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
+      },
+    )
   })
 
   it('positive control: a decoy under the (pre-existing) src/attendance/ prefix that imports W6 is caught', () => {
-    const scratchPath = path.join(ROOT, 'packages/core-backend/src/attendance/zz-w6r5-decoy-scratch.ts')
-    fs.writeFileSync(scratchPath, "import { createAttendanceGroupEffectivePolicyAggregateService } from './w6-group-effective-policy-aggregate'\n")
+    const relative = 'packages/core-backend/src/attendance/zz-w6r5-decoy-scratch.ts'
+    withDecoyFile(
+      relative,
+      "import { createAttendanceGroupEffectivePolicyAggregateService } from './w6-group-effective-policy-aggregate'\n",
+      (fakeRoot, absolute) => {
+        const offenders = findOffenders(fakeRoot, [absolute])
+        expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
+      },
+    )
+  })
+
+  it('the untracked-scope claim is real: a git-tracked-files scan on this repo really does exclude a decoy planted directly in the real tree', () => {
+    // The four positive controls above intentionally never touch the real
+    // `packages/core-backend/src/` tree (another suite walks it recursively
+    // and races a transient file there). This test proves the property that
+    // trade-off gives up — `listGitTrackedFiles` excludes an untracked file —
+    // once, against a location no known suite scans: this test file's own
+    // directory.
+    const scratchPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'zz-w6r5-decoy-untracked-scope.ts')
+    fs.writeFileSync(scratchPath, '// untracked scope probe\n')
     try {
-      const relative = 'packages/core-backend/src/attendance/zz-w6r5-decoy-scratch.ts'
-      const files = listGitTrackedFiles(ROOT)
-      expect(files.includes(relative)).toBe(false)
-      const offenders = findOffenders(ROOT, [scratchPath])
-      expect(offenders).toEqual([{ file: relative, marker: 'w6-group-effective-policy-aggregate' }])
+      const relative = path.relative(ROOT, scratchPath).split(path.sep).join('/')
+      expect(fs.existsSync(scratchPath)).toBe(true)
+      expect(listGitTrackedFiles(ROOT).includes(relative)).toBe(false)
     } finally {
       fs.unlinkSync(scratchPath)
     }
