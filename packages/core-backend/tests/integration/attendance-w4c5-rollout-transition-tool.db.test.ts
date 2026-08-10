@@ -1184,6 +1184,59 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(await rolloutRow(orgId)).toBeNull()
     })
 
+    // P2-C (PR #4839 gate, 20260810): `assertConnectionIsIdleV1`'s cleanup, on the "SAVEPOINT
+    // succeeded" branch (an open, non-aborted transaction already existed), issues BOTH
+    // `ROLLBACK TO SAVEPOINT w4c5_idle_probe` (w4c0-identity.ts:1393) AND, immediately after,
+    // `RELEASE SAVEPOINT w4c5_idle_probe` (:1394) — the function's own doc comment explains why
+    // the first alone is not enough: `ROLLBACK TO SAVEPOINT` undoes work done under the
+    // savepoint but leaves the savepoint itself DEFINED in the connection's subtransaction stack;
+    // only `RELEASE SAVEPOINT` afterward actually removes it. A prior gate round claimed this
+    // `RELEASE` line was "covered by the same F1 mutation proof" above — refuted: F1's assertions
+    // (`queryLog[0]`, the temp-table row surviving) are both satisfied identically whether or not
+    // :1394 ever runs, because F1 never issues a SECOND `RELEASE SAVEPOINT` itself. This test
+    // does, from OUTSIDE the guard, playing the role of a caller checking the guard actually
+    // cleaned up: it must fail, because the guard already released the name. Deleting :1394 alone
+    // leaves every other suite green (verified by the gate round that added this test: mutate,
+    // record red, restore via `cp`) but flips this test's outcome, because a SECOND `RELEASE
+    // SAVEPOINT w4c5_idle_probe` on a savepoint the guard never released SUCCEEDS instead of
+    // failing (verified against real PostgreSQL 15 directly, both shapes, before writing this
+    // assertion).
+    it('P2-C: after a not-idle refusal, the guard has already RELEASEd its own probe savepoint — a caller-issued RELEASE SAVEPOINT afterward must fail with 3B001, proving cleanup rather than merely documenting it', async () => {
+      const orgId = crypto.randomUUID()
+      allow(orgId)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
+        await expect(
+          planAttendanceCalculationRolloutTransitionV1(transactionClient(client), {
+            orgId,
+            targetState: 'shadow',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+        // The guard's own SAVEPOINT probe ran and hit the "already open, non-aborted transaction"
+        // branch (never the 25P01/25P02 branches — this connection's transaction is neither
+        // absent nor aborted), so `w4c5_idle_probe` was ROLLBACK-TO'd and then RELEASEd. If
+        // `RELEASE SAVEPOINT w4c5_idle_probe` (w4c0-identity.ts:1394) had NOT run, this exact
+        // statement would SUCCEED instead (the savepoint would still be defined) — that is the
+        // load-bearing distinction this assertion is built to catch.
+        await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe')).rejects.toMatchObject({
+          code: '3B001', // invalid_savepoint_specification: "savepoint ... does not exist"
+        })
+        // That failed RELEASE is itself a normal SQL error inside the (still-open) transaction
+        // block, so — same PostgreSQL rule F2 above already exercises — it now poisons the REST
+        // of this transaction until a ROLLBACK: every further statement on this connection fails
+        // with 25P02, not a dropped connection. Asserting that (rather than a bare "some query
+        // still resolves") confirms this was a genuine SQL-level 3B001, not e.g. the connection
+        // having been silently reset out from under this test.
+        await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+      expect(await rolloutRow(orgId)).toBeNull()
+    })
+
     it('positive control: an idle connection (the normal call shape) still plans successfully — proves the refusal above is specific to a dirty connection, not a general breakage', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
