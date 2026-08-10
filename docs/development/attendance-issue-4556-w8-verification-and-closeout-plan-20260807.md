@@ -182,31 +182,29 @@ enumerated or mapped, and W8 (whose scope under parent §9.9 makes this
 roll-up its job) built its own §3 matrix from scratch instead. This table is
 that mapping.
 
-**Denominator is 43, fixed by owner ruling — not re-derived here, and not
-"corrected" back to 42.** Owner's ruling, verbatim: "DB-01..12 + CALC-01..15
-+ EP-01 + MUT-01..08 + FE-01..07 = 43。EP-01 是复合项，五个入口和 fallback
-mutation 缺一即保持 OPEN。" This document's own independent bullet count
-agrees rather than conflicts with that ruling: §7.1 Database = 12 bulleted
+**Denominator is 43 for this ledger, derived directly from parent-lock §7 —
+not an owner authorization or closure ruling.** §7.1 Database = 12 bulleted
 checks; §7.2 Calculation = 15 bulleted checks; §7.4 Mutation = 8 bulleted
 checks; §7.5 Frontend = 7 bulleted checks — 12+15+8+7 = **42** bulleted
 items, **plus** §7.3 Entry-point parity, which is **one prose clause, not a
-bulleted list**, assigned its own composite ID (**EP-01**) per the owner's
-ruling — 42 + 1 = **43**. There is no discrepancy left to report: an earlier
+bulleted list**, assigned one composite ID (**EP-01**) by this mapping — 42 +
+1 = **43**. There is no discrepancy left to report: an earlier
 round of this table stopped at 42 by treating EP-01's prose form as a reason
 to give it no row at all, rather than a reason to give it exactly one
 composite row. (Derivation: `git grep -n '^## 7\.\|^### 7\.\|^## 8'
-origin/main -- attendance-shift-group-advanced-capability-design-lock-20260723.md`
+origin/main -- docs/development/attendance-shift-group-advanced-capability-design-lock-20260723.md`
 locates `## 7.` at `:538` and `## 8.` at `:619` (`### 7.1` `:540`, `7.2`
 `:566`, `7.3` `:588`, `7.4` `:594`, `7.5` `:609`); `sed -n '538,618p' <file>`
 then counted by hand per subsection — 12 / 15 / 1 prose clause / 8 / 7.)
 
-**Exactly four permitted verdicts, per owner ruling** — not the two-verdict
+**Exactly four bookkeeping verdicts are used by this draft** — not the two-verdict
 D/R shape an earlier round of this table borrowed from parent §10 item 1's
 own shape, and not the five-value D/PARTIAL/UNCERTAIN/EMPTY/R vocabulary a
-later-but-still-earlier round used instead:
+later-but-still-earlier round used instead. These labels classify evidence;
+they do not record owner authorization:
 
-- **OPEN** — the requirement is known to be unmet, or the owner's ruling
-  explicitly requires it to remain open until every named leg is evidenced.
+- **OPEN** — the requirement is known to be unmet, including a compound
+  requirement for which one or more named legs remains unevidenced.
 - **UNRESOLVED** — this round did not establish whether the requirement is
   met: mapping was incomplete, evidence was partial, or the relevant surface
   was not searched. Partial or suggestive evidence is kept in the notes so a
@@ -224,11 +222,10 @@ later-but-still-earlier round used instead:
   The two tables' SATISFIED do not certify the same thing.)
 - **REMOVED** — requires an explicit owner decision **for that ID** plus a
   statement of the product impact of removing it. **Zero rows carry this
-  verdict in this round** — no owner decision naming a specific ID exists
-  yet, and per the owner's own ruling ("不应现在批量裁掉 43 项。先机器映射，
-  只有无法满足且确实决定放弃的项目再逐项呈裁。"), none is asserted here.
+  verdict in this round** — no owner decision naming a specific ID is cited,
+  so none is asserted here.
 
-**Map mechanically first, per the owner's ruling.** Every SATISFIED verdict
+**Map mechanically first.** Every SATISFIED verdict
 below is backed by (a) a **test title match**, not a full-body re-read of
 every assertion in the named test — a materially weaker form of evidence
 than the mutation-leg verification this document otherwise requires
@@ -241,7 +238,7 @@ verification-anchor SHA, a partial/half match, an uncertain match, or a
 non-suite citation (e.g. a QA-handoff narrative rather than a titled test)
 is **UNRESOLVED** under this bar, even where an earlier round of this table
 called it discharged. A row is **OPEN** only when the unmet requirement is
-established or an owner rule explicitly keeps it open. A file-creation SHA is not automatically a
+established. A file-creation SHA is not automatically a
 title-landing SHA — several of these six files grew substantially after
 their creation commit (`attendance-shift-segments-writer-matrix.db.test.ts`
 1258→1997 lines; `w4c1-segment-calculator.test.ts` 1211→1317;
@@ -298,7 +295,7 @@ needed a wording correction from this check — see its own cell.
 §7.3 is a single prose clause, not a bulleted list: "The same work-date cases
 run through live punch, import, approved correction, approved overtime, and
 recomputation. Replacing any caller with calendar-date fallback must make
-its parity test fail." Per the owner's ruling this is one composite item,
+its parity test fail." This mapping represents that single prose clause as one composite item,
 **EP-01**, covering **five entrypoints** — live punch, import, approved
 correction, approved overtime, recomputation — **plus** the fallback
 mutation ("replacing any caller with calendar-date fallback must make its
@@ -308,7 +305,7 @@ individually evidenced; missing even one leaves the whole composite OPEN.
 
 | ID | Check | Verdict | Evidence |
 | --- | --- | --- | --- |
-| EP-01 | Composite: the same work-date cases pass through all five named entrypoints (live punch, import, approved correction, approved overtime, recomputation) with matching results, AND replacing any one caller with calendar-date fallback makes that caller's parity test fail. | OPEN | No suite was found this round asserting the full cross-entrypoint parity property as a single mechanism, nor per-entrypoint parity legs for all five callers, nor the fallback-mutation leg. §7.4's MUT-07 ("recompute with current rather than frozen policy") is a related but distinct mutation on a different property; it does not discharge EP-01's own fallback-mutation leg. Zero of the six required legs (5 entrypoints + 1 fallback mutation) confirmed this round — composite stays OPEN by the owner's own rule, not merely by this round's search budget. |
+| EP-01 | Composite: the same work-date cases pass through all five named entrypoints (live punch, import, approved correction, approved overtime, recomputation) with matching results, AND replacing any one caller with calendar-date fallback makes that caller's parity test fail. | OPEN | No suite was found this round asserting the full cross-entrypoint parity property as a single mechanism, nor per-entrypoint parity legs for all five callers, nor the fallback-mutation leg. §7.4's MUT-07 ("recompute with current rather than frozen policy") is a related but distinct mutation on a different property; it does not discharge EP-01's own fallback-mutation leg. Zero of the six required legs (5 entrypoints + 1 fallback mutation) confirmed this round, so the composite stays OPEN. |
 
 **§7.4 Mutation (MUT-01..MUT-08) — all UNRESOLVED this round.**
 
@@ -354,12 +351,11 @@ a later round does not read this as "checked, found nothing."
 
 **Verdict tally over the 43** (counted directly from the tables above, not
 estimated): **19 SATISFIED** (DB-01..09, DB-12 = 10; CALC-01..09 = 9); **1
-OPEN** (EP-01, kept OPEN by the owner's explicit all-six-legs rule); **23
+OPEN** (EP-01, with none of its six component legs confirmed); **23
 UNRESOLVED** (DB-10, DB-11 = 2; CALC-10..15 = 6; MUT-01..08 = 8;
 FE-01..07 = 7); **0 REMOVED**. `19 + 1 + 23 + 0 = 43`. Zero REMOVED verdicts
-proposed this round, per the owner's own ruling that this table's job this
-round is to map mechanically, not to pre-clear any item as removed — that
-state requires an owner decision per ID which does not exist yet.
+proposed this round: that state requires an owner decision per ID, and none is
+cited here.
 
 ## 4. Soak entry and exit criteria
 
