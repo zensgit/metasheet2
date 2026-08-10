@@ -10,8 +10,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import {
+  ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1,
   ATTENDANCE_W4C5_CONFIRMATION_TOKEN_V1,
   ATTENDANCE_W4C5_EXIT_ARGS_INVALID_V1,
   ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1,
@@ -790,34 +793,143 @@ test('ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1 is reserved for the read-only `plan` 
   assert.equal(typeof ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1, 'number')
 })
 
-test('exitCodeForAttendanceW4C5ErrorV1 maps a boundary-shaped error to the boundary-refused exit code', () => {
+// ---------------------------------------------------------------------------
+// P2-A (PR #4839 gate, 20260810): one positive test per bucket in
+// ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 (the closed `.name` allowlist this reverted BACK to,
+// off a one-round-lived structural-marker discriminator — see that const's own doc comment for
+// the full call-graph trace), plus negative controls for classes that share the marker's
+// "message IS the code" shape but must NOT get exit 7.
+// ---------------------------------------------------------------------------
+test('exitCodeForAttendanceW4C5ErrorV1 maps an AttendanceW4C3aRolloutControlError-shaped refusal to the boundary-refused exit code', () => {
   const error = new Error('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
   ;(error as unknown as { name: string; code: string }).name = 'AttendanceW4C3aRolloutControlError'
   ;(error as unknown as { code: string }).code = 'W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION'
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1)
 })
 
-test('NIT-4 (PR #4839 P3 gate, 20260810): exitCodeForAttendanceW4C5ErrorV1 maps a W4C0_CONNECTION_NOT_IDLE (AttendanceW4IdentityError) refusal to the boundary-refused exit code, not internal-error', () => {
+test('exitCodeForAttendanceW4C5ErrorV1 maps a W4C0_CONNECTION_NOT_IDLE (AttendanceW4IdentityError) refusal to the boundary-refused exit code, not internal-error', () => {
   // Cannot `instanceof AttendanceW4IdentityError` here (no value-level core-backend import — see
   // this module's own file-header comment), so this constructs the SAME shape the real class
-  // produces: `super(code)` then `this.code = code`, i.e. `message === code`. This is the exact
-  // omission the gate found: before this fix, this refusal fell through to
-  // ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 because only two OTHER class names were listed.
+  // produces: `super(code)` then `this.code = code`. NIT-4 (PR #4839 P3 gate, 20260810) found
+  // this exact refusal falling through to ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 because a prior
+  // two-item `.name` OR-list omitted this class — the omission this list now includes.
   const error = new Error('W4C0_CONNECTION_NOT_IDLE')
   ;(error as unknown as { name: string; code: string }).name = 'AttendanceW4IdentityError'
   ;(error as unknown as { code: string }).code = 'W4C0_CONNECTION_NOT_IDLE'
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1)
 })
 
-test('NIT-4: the structural marker does NOT fire on a raw driver-shaped error whose message differs from its code (negative control, attacking the new predicate)', () => {
-  // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE and `.message` as a
-  // distinct human-readable sentence (e.g. code='25P02', message='current transaction is
-  // aborted, commands ignored until end of transaction block' — verified against real
-  // PostgreSQL). If the structural marker degenerated into "any object with a string `.code`", a
-  // raw driver error like this would be misclassified as boundary-refused. It must not be.
+test('P2-A: exitCodeForAttendanceW4C5ErrorV1 maps an ATTENDANCE_CALCULATION_ROLLOUT_BUSY (AttendanceW4OperationError) refusal to the boundary-refused exit code', () => {
+  // Reachable ONLY from `apply` (`acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s
+  // `busyError('rollout')` in w4c0-identity.ts) — `plan` never acquires an advisory lock — but the
+  // discriminator itself does not distinguish plan-reachable from apply-reachable, so one shaped
+  // case here is the direct test for the third (previously untested-by-name) bucket member.
+  const error = new Error('ATTENDANCE_CALCULATION_ROLLOUT_BUSY')
+  ;(error as unknown as { name: string; code: string }).name = 'AttendanceW4OperationError'
+  ;(error as unknown as { code: string }).code = 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1)
+})
+
+test('P2-A negative control: an AttendanceRequestSnapshotError-shaped refusal (message !== code) must NOT get the boundary-refused exit code', () => {
+  // `AttendanceRequestSnapshotError` (w4c3b-request-snapshots.ts) IS reachable from both `plan`
+  // and `apply` (`classifyAttendanceRequestSnapshotDefectsV1`'s unwrapped live-side
+  // `computeAttendanceRequestPayloadFingerprintV1` call — no try/catch, unlike its stored-side
+  // sibling) but its constructor takes `(code, statusCode, message)` and calls `super(message)` —
+  // a FIXED human sentence, never equal to `code`, on every real call site. This is exactly the
+  // class the one-round-lived structural marker (`message === code`) mis-measured as "too
+  // narrow" — it never matched the marker either, so this refusal was ALREADY exit-1 before this
+  // revert; this test locks that in as the deliberately-correct bucket (a live row that cannot be
+  // normalized into a calculation payload is a data-integrity defect, not one of this boundary's
+  // own documented section-3 refusals), not an omission to fix.
+  const error = new Error('Invalid request snapshot input')
+  ;(error as unknown as { name: string; code: string }).name = 'AttendanceRequestSnapshotError'
+  ;(error as unknown as { code: string }).code = 'W4C3B_REQUEST_SNAPSHOT_INPUT_INVALID'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
+test('P2-A negative control: an AttendanceW4RegistryError-shaped refusal (same "message IS the code" shape as the boundary classes) must NOT get the boundary-refused exit code', () => {
+  // `AttendanceW4RegistryError` (w4c0-operation-registry.ts) follows the IDENTICAL
+  // `super(code); this.code = code` convention as all three boundary classes — this is the
+  // concrete case the one-round-lived structural marker mis-measured as "too wide": the marker
+  // could not distinguish this internal-invariant registry class from the three that actually
+  // constitute the transition boundary. A `.name` closed list does not have this failure mode by
+  // construction (an unlisted name never matches), and this test attacks that directly: it is
+  // NOT in ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1, so even a perfectly marker-shaped instance
+  // must still fall to internal-error.
+  const error = new Error('W4C0_BATCH_ITEM_ORDINAL_MISMATCH')
+  ;(error as unknown as { name: string; code: string }).name = 'AttendanceW4RegistryError'
+  ;(error as unknown as { code: string }).code = 'W4C0_BATCH_ITEM_ORDINAL_MISMATCH'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
+test('exitCodeForAttendanceW4C5ErrorV1 does not fire on a raw driver-shaped error (negative control: `.name` is never one of the three boundary class names)', () => {
+  // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE, `.message` as a
+  // distinct human-readable sentence, and a driver-assigned `.name` (never one of this repo's own
+  // class names) — verified against real PostgreSQL. This must fall to internal-error regardless
+  // of whatever shape `.message`/`.code` happen to have.
   const rawDriverError = new Error('current transaction is aborted, commands ignored until end of transaction block')
   ;(rawDriverError as unknown as { code: string }).code = '25P02'
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(rawDriverError), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
+// ---------------------------------------------------------------------------
+// Mechanical sweep (P2-A, PR #4839 gate, 20260810): every `Attendance*Error` class declared in
+// the files this file's own call-graph trace found reachable from `plan` or `apply` must be
+// explicitly decided — either into ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 (the production
+// module's own exported list, not a hand-copied duplicate) or into
+// ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES below (exit 1, deliberately, each with its own
+// negative-control test above) — never left to a silent default. Reads SOURCE TEXT (never
+// imports these classes as values — same CJS/ESM-interop constraint the production module
+// documents), so a NEW class added to any of these files with neither name recognized here fails
+// this test closed, forcing a human decision instead of an unnoticed default.
+// ---------------------------------------------------------------------------
+const ATTENDANCE_W4C5_REACHABLE_ERROR_FILES = [
+  '../../packages/core-backend/src/attendance/w4c3a-rollout-control.ts',
+  '../../packages/core-backend/src/attendance/w4c0-identity.ts',
+  '../../packages/core-backend/src/attendance/w4c0-operation-contract.ts',
+  '../../packages/core-backend/src/attendance/w4c3b-request-snapshots.ts',
+  '../../packages/core-backend/src/attendance/w4c0-operation-registry.ts',
+]
+const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
+  'AttendanceRequestSnapshotError',
+  'AttendanceW4RegistryError',
+]
+const ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE = /export class (Attendance\w*Error) extends Error/g
+
+test('mechanical sweep control: the error-class-declaration regex actually fires on a synthetic sentence (a clean sweep below means "every class decided", not "the regex matched nothing")', () => {
+  const synthetic = 'export class AttendanceSyntheticProbeError extends Error {\n  readonly code: string\n}'
+  const matches = [...synthetic.matchAll(ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE)].map((m) => m[1])
+  assert.deepEqual(matches, ['AttendanceSyntheticProbeError'])
+})
+
+test('mechanical sweep: every Attendance*Error class declared in the reachable call-graph files is explicitly decided (boundary-refused or not) — no silent default for a new class', () => {
+  const found = new Set<string>()
+  const undecided: string[] = []
+  for (const relativePath of ATTENDANCE_W4C5_REACHABLE_ERROR_FILES) {
+    const absolutePath = fileURLToPath(new URL(relativePath, import.meta.url))
+    const text = readFileSync(absolutePath, 'utf8')
+    for (const match of text.matchAll(ATTENDANCE_W4C5_ERROR_CLASS_DECLARATION_RE)) {
+      found.add(match[1])
+      const decided =
+        (ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 as readonly string[]).includes(match[1]) ||
+        ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES.includes(match[1])
+      if (!decided) undecided.push(`${match[1]} (${relativePath})`)
+    }
+  }
+  assert.deepEqual(
+    undecided,
+    [],
+    'undecided Attendance*Error class(es) — add each to ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 ' +
+      '(and update exitCodeForAttendanceW4C5ErrorV1s doc comment) or to ' +
+      'ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES in this test, with a reason either way',
+  )
+  // Every DECIDED name must still exist as a real class declaration in one of the files above —
+  // otherwise a rename or deletion would silently satisfy this sweep without ever re-checking
+  // whatever the class became.
+  const stale = [...ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1, ...ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES].filter(
+    (name) => !found.has(name),
+  )
+  assert.deepEqual(stale, [], 'decided name(s) no longer declared in any reachable file')
 })
 
 test('exitCodeForAttendanceW4C5ErrorV1 maps an unrecognized error to the internal-error exit code', () => {

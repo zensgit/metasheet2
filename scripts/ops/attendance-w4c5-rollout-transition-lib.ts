@@ -619,10 +619,9 @@ export async function runAttendanceW4C5ApplyOrchestrationV1(
 
 // ---------------------------------------------------------------------------
 // Refusal -> exit code mapping. Tool-level codes (this module's own) and every boundary/identity
-// code (AttendanceW4C3aRolloutControlError / AttendanceW4OperationError /
-// AttendanceW4IdentityError, surfaced verbatim via `error.code` on `.message`/`.code`) are
-// diagnosable by their EXACT code string on stderr; the exit code buckets are for scripting only,
-// never a substitute for reading the code.
+// code (`ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1` below, surfaced verbatim via `error.code` on
+// `.message`/`.code`) are diagnosable by their EXACT code string on stderr; the exit code buckets
+// are for scripting only, never a substitute for reading the code.
 // ---------------------------------------------------------------------------
 export const ATTENDANCE_W4C5_EXIT_SUCCESS_V1 = 0
 export const ATTENDANCE_W4C5_EXIT_ARGS_INVALID_V1 = 2
@@ -632,6 +631,63 @@ export const ATTENDANCE_W4C5_EXIT_PLAN_STALE_V1 = 5
 export const ATTENDANCE_W4C5_EXIT_PLAN_BLOCKED_V1 = 6
 export const ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1 = 7
 export const ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1 = 1
+
+// P2-A (PR #4839 gate, 20260810): REVERTED off a one-round-lived structural-marker
+// discriminator (`error instanceof Error && typeof error.code === 'string' && error.message ===
+// error.code`) back to this closed `.name` allowlist. The marker's own docblock claimed the
+// shape was shared "BY CONSTRUCTION" by "every one of this repo's own values-free error
+// classes" — measured false in BOTH directions against the actual `plan`/`apply` call graph
+// traced from this file (not assumed: every function `planAttendanceCalculationRolloutTransitionV1`
+// and `transitionAttendanceCalculationRolloutV1` call, transitively, was read):
+//  - TOO NARROW: `AttendanceRequestSnapshotError` (w4c3b-request-snapshots.ts) IS reachable —
+//    `w4c3a-rollout-control.ts`'s `classifyAttendanceRequestSnapshotDefectsV1` (called from both
+//    `plan`'s `buildAttendanceRolloutTransitionPlanV1` and `apply`'s
+//    `transitionAttendanceCalculationRolloutV1`, whenever the target is an
+//    ELIGIBILITY_AUTHORITY_TARGETS state) calls the live-side
+//    `computeAttendanceRequestPayloadFingerprintV1` UNWRAPPED (no try/catch — unlike its
+//    stored-side sibling call two lines above, which deliberately swallows the same throw into
+//    `null`). That class's constructor takes `(code, statusCode, message)` and calls
+//    `super(message)` — a fixed human sentence, never equal to `code` — so it never matched the
+//    marker and fell to the internal-error bucket anyway. It is DELIBERATELY not in this list
+//    either (see the negative-control test): a live request row that cannot even be normalized
+//    into a calculation payload is a data-integrity defect, not one of this boundary's own
+//    documented, expected section-3 refusals — internal-error is the correct bucket, and this
+//    class is kept only as a regression guard that a future change to the marker or this list
+//    does not accidentally start routing it to boundary-refused.
+//  - TOO WIDE: the marker fires on ANY of this repo's other `export class Attendance*Error
+//    extends Error` classes that happen to follow the same `super(code); this.code = code`
+//    convention (most of the ~30-odd sibling classes across `packages/core-backend/src/attendance/`
+//    do, including `AttendanceW4RegistryError` in w4c0-operation-registry.ts — see its
+//    negative-control test) — the marker cannot distinguish "this call graph's own boundary
+//    code" from "a same-shaped class elsewhere in the package that happens to reach here on some
+//    future refactor."
+// This list is exactly the THREE classes this trace found reachable from `plan` or `apply` that
+// constitute the transition boundary and its identity/lock substrate:
+// `AttendanceW4C3aRolloutControlError` (this boundary's own `fail()` refusals, e.g.
+// `W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION`), `AttendanceW4IdentityError`
+// (w4c0-identity.ts's own `fail()`, reachable via `assertConnectionIsIdleV1`'s
+// `W4C0_CONNECTION_NOT_IDLE` — called directly by `plan`, and indirectly by `apply` through
+// `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` — plus every other identity/lock
+// helper `apply` calls), and `AttendanceW4OperationError` (w4c0-operation-contract.ts;
+// constructed by w4c0-identity.ts's `busyError()` for an advisory-lock-busy 503 — reachable ONLY
+// from `apply`, via `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`,
+// `acquireAttendanceResultOperationLocks` inside `lockControlDomain`, and
+// `acquireAttendanceCalculationTargetLocks` inside `lockTargetsAndParents`; `plan` never
+// acquires an advisory lock, so it can never throw this one). `.name` string matching, not
+// `instanceof`, because this module deliberately takes no runtime (value-level) import of
+// core-backend (file-header comment, CJS/ESM interop hazard) — none of these three classes can
+// be `instanceof`-checked here. This IS the fragile shape the marker round tried to fix (a new
+// class in this family needs a human decision to be added here) — the companion "mechanical
+// sweep" test in this file's `.test.ts` fails closed if a new `Attendance*Error` class shows up
+// in any of the files that trace covered, without an explicit decision recorded there, so the
+// rot is caught rather than silent. Exported (not module-private) so that same test asserts THIS
+// production list — never a hand-copied duplicate, which would drift silently exactly like the
+// defect this whole exercise is closing.
+export const ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 = Object.freeze([
+  'AttendanceW4C3aRolloutControlError',
+  'AttendanceW4IdentityError',
+  'AttendanceW4OperationError',
+] as const)
 
 export function exitCodeForAttendanceW4C5ErrorV1(error: unknown): number {
   if (error instanceof AttendanceW4C5ToolError) {
@@ -651,30 +707,7 @@ export function exitCodeForAttendanceW4C5ErrorV1(error: unknown): number {
         return ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1
     }
   }
-  // NIT-4 (PR #4839 P3 gate, 20260810): this used to discriminate by `error.name ===
-  // 'AttendanceW4C3aRolloutControlError' || 'AttendanceW4OperationError'` — an OR-list of exact
-  // class-name strings that silently omitted `AttendanceW4IdentityError` (thrown by
-  // `assertConnectionIsIdleV1`'s `W4C0_CONNECTION_NOT_IDLE` refusal), so that refusal fell all
-  // the way to the internal-error bucket. `.name` string-matching is itself the fragile shape:
-  // it requires every new error class in this family to be hand-added here, with no compiler or
-  // runtime signal when one is missed (exactly what just happened). None of these classes can be
-  // `instanceof`-checked here — this module deliberately takes no runtime import of core-backend
-  // (see the file-header comment on the CJS/ESM interop hazard) — so instead this discriminates
-  // on a STRUCTURAL marker every one of this repo's own values-free error classes shares BY
-  // CONSTRUCTION and documents as intentional (`AttendanceW4OperationError`'s own doc comment:
-  // "message IS the closed code"): `error instanceof Error`, a string `.code`, and
-  // `error.message === error.code` — true for `AttendanceW4C3aRolloutControlError`,
-  // `AttendanceW4OperationError`, and `AttendanceW4IdentityError` alike (each constructor calls
-  // `super(code)` and then sets `this.code = code`), and FALSE for a raw driver/system error
-  // (e.g. a PostgreSQL error has `.code` as a 5-character SQLSTATE but `.message` as a distinct
-  // human-readable sentence — verified against real PostgreSQL). A future class following this
-  // same "message is the code" convention is covered automatically, with no OR-list to extend.
-  if (
-    error instanceof Error &&
-    'code' in error &&
-    typeof (error as { code: unknown }).code === 'string' &&
-    error.message === (error as { code: string }).code
-  ) {
+  if (error instanceof Error && (ATTENDANCE_W4C5_BOUNDARY_ERROR_NAMES_V1 as readonly string[]).includes(error.name)) {
     return ATTENDANCE_W4C5_EXIT_BOUNDARY_REFUSED_V1
   }
   return ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1
