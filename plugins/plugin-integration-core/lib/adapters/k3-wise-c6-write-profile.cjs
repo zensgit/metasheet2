@@ -23,7 +23,10 @@
 
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
-const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
+const {
+  isMeaningfulK3Identifier,
+  resolveEffectiveK3WiseObjects,
+} = require('./k3-wise-webapi-adapter.cjs')
 const {
   K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
   K3WISE_MATERIAL_LIST_B4_TEMPLATE,
@@ -309,17 +312,10 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
     return normalized.length > 0 ? normalized : null
   }
 
-  function meaningfulMaterialIdentifier(record) {
+  function hasMeaningfulMaterialIdentifier(record) {
     if (!record || typeof record !== 'object') return false
-    for (const field of ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']) {
-      const value = record[field]
-      if (typeof value === 'number' && Number.isFinite(value) && value > 0) return true
-      if (typeof value === 'string') {
-        const normalized = value.trim()
-        if (normalized && normalized !== '0') return true
-      }
-    }
-    return false
+    return ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']
+      .some((field) => isMeaningfulK3Identifier(record[field]))
   }
 
   // Some live K3 GetDetail endpoints return HTTP/business success for an unknown material while
@@ -342,9 +338,15 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
         : wrapper
     }
     if (!candidate || typeof candidate !== 'object') return false
-    if (normalizeLookupKey(candidate[keyField]) !== requestedKey) return false
-    return meaningfulMaterialIdentifier(candidate)
-      || meaningfulMaterialIdentifier(wrapper)
+    // Mirror extractMaterialDetailRecord's supported response shapes without its final
+    // request-key correlation fallback: an independently returned inner key wins; otherwise
+    // use an independently returned outer-wrapper key. Never use record[keyField] here because
+    // the adapter may have synthesized it from the request.
+    const rawKey = normalizeLookupKey(candidate[keyField])
+      ?? normalizeLookupKey(wrapper && wrapper[keyField])
+    if (rawKey !== requestedKey) return false
+    return hasMeaningfulMaterialIdentifier(candidate)
+      || hasMeaningfulMaterialIdentifier(wrapper)
       || normalizeLookupKey(candidate.FName) !== null
   }
 
