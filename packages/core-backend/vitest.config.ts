@@ -679,6 +679,7 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
       'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
+      'tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts',
       'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
       'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
       // OBS-1 (2026-08-07): the two W4C-3b suites below landed in #4716 with NEITHER wiring

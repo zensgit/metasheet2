@@ -4,9 +4,22 @@ Status: OWNER-GATED / NOT EXECUTED
 
 Date: 2026-07-25
 
+**T2-Gate procedure of record (post-fix).** Supersedes
+`canonical-org-t2-gate-two-corp-staging-runbook-20260717.md` for acceptance. The 20260717
+runbook remains historical provenance only.
+
+**After Phase B migration has already been applied:** §1 steps 5–6 and all of §2 (Phase B
+values-free preflight that requires the legacy global index and “no Phase B replacement
+index/CHECK already present”) **cannot be re-run as executable current steps**. Their
+PASS reports, SHAs, and exit codes become **provenance requirements** that must already be
+on file for the cutover window. Re-running §2 against a post-Phase-B schema is expected to
+BLOCKED/ERROR and must not be treated as a live gate. Continue from §3 only when those
+provenance artifacts exist; do not invent a re-preflight path on the migrated database.
+
 ## 1. Pre-UAT cutover gate
 
-Run this owner/ops gate before UAT:
+Run this owner/ops gate before UAT (pre-Phase-B window only for steps 5–6; after Phase B see
+the provenance note above):
 
 1. Phase A matcher/callback hardening is merged and deployed to staging.
 2. Build the exact Phase A SHA through the trusted operator path. Keep the provenance file owned

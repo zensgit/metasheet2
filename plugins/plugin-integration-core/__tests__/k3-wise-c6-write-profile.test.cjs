@@ -123,7 +123,7 @@ function jsonResponse(status, body) {
 
 // Mock K3: login, GetDetail (existing row for MAT-C6-EXIST, business-fail for everything
 // else — K3's real "not found" shape), Save success. Counts every path.
-function mockK3({ existing = {}, fallbackDetail = null } = {}) {
+function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false, innerIdOnly = false, outerIdentity = false, placeholderId = null } = {}) {
   const calls = []
   const impl = async (url, init) => {
     const parsed = new URL(url)
@@ -141,6 +141,34 @@ function mockK3({ existing = {}, fallbackDetail = null } = {}) {
           StatusCode: 200,
           Message: 'Successful',
           Data: [{ FStatus: true, FItemID: row.FItemID, Data: row }],
+        })
+      }
+      if (echoOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number } }],
+        })
+      }
+      if (innerIdOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number, FItemID: 7006 } }],
+        })
+      }
+      if (outerIdentity) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, FNumber: number, FItemID: 7003, Data: {} }],
+        })
+      }
+      if (placeholderId !== null) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number, FItemID: placeholderId } }],
         })
       }
       if (fallbackDetail) {
@@ -385,6 +413,145 @@ test('lookup ignores a successful GetDetail record whose normalized key does not
     tokenStore: memoryStore(),
   }))
 
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an echo-only successful GetDetail envelope with no independent material identity', async () => {
+  const fetchPair = mockK3({
+    // Live-shape regression: the endpoint accepts the request and echoes FNumber, but neither
+    // a stable material id nor FName was independently returned.
+    echoOnly: true,
+  })
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'ECHO-ONLY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an empty successful GetDetail detail even when the adapter correlates its request key', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'SYNTHETIC-KEY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ fallbackDetail: {} }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup accepts the supported outer-key and outer-id GetDetail shape as existing', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'OUTER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ outerIdentity: true }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup accepts an inner-key and inner-id GetDetail shape without a name as existing', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'INNER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ innerIdOnly: true }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+for (const placeholderId of ['null', 'UNDEFINED', 'None']) {
+  test(`lookup rejects placeholder material identifier ${placeholderId} as independent identity`, async () => {
+    const dryRun = await dryRunExternalWrite(c6Inputs({
+      rows: [{ code: 'PLACEHOLDER-ID-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+      fetchPair: mockK3({ placeholderId }),
+      tokenStore: memoryStore(),
+    }))
+
+    assert.equal(dryRun.counts.add, 1)
+    assert.equal(dryRun.counts.update, 0)
+    assert.equal(dryRun.counts.held, 0)
+  })
+}
+
+for (const { label, value } of [
+  { label: 'boolean', value: true },
+  { label: 'object', value: {} },
+  { label: 'array', value: [] },
+]) {
+  test(`lookup rejects a non-scalar ${label} material identifier as independent identity`, async () => {
+    const dryRun = await dryRunExternalWrite(c6Inputs({
+      rows: [{ code: 'NON-SCALAR-ID-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+      fetchPair: mockK3({ placeholderId: value }),
+      tokenStore: memoryStore(),
+    }))
+
+    assert.equal(dryRun.counts.add, 1)
+    assert.equal(dryRun.counts.update, 0)
+    assert.equal(dryRun.counts.held, 0)
+  })
+}
+
+test('lookup never treats the request-key correlation fallback as raw material identity', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'REQUEST-KEY-ONLY', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          // The normalized read record is correlated with the request, but neither raw
+          // response layer independently returned the key. A raw ID alone is insufficient.
+          records: [{ FNumber: 'REQUEST-KEY-ONLY', FItemID: 7005 }],
+          raw: { Data: [{ FStatus: true, FItemID: 7005, Data: {} }] },
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup rejects a malformed raw Data container even when a normalized record is present', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'MALFORMED-RAW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          records: [{ FNumber: 'MALFORMED-RAW-MATERIAL', FItemID: 7004, FName: 'Old name' }],
+          raw: { Data: 'malformed' },
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
   assert.equal(dryRun.counts.add, 1)
   assert.equal(dryRun.counts.update, 0)
   assert.equal(dryRun.counts.held, 0)

@@ -61,6 +61,7 @@
       <StockPreparationDashboardView
         v-if="activeKey === 'dashboard'"
         :project-id="selectedProjectId"
+        :scope="scope"
         @select-project="handleDashboardProjectSelect"
         @navigate-stage="handleNavigateStage"
       />
@@ -69,27 +70,33 @@
            (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
         v-else-if="activeKey === 'project-workspace'"
+        :scope="scope"
         @select-project="handleProjectSelect"
       />
       <StockPreparationSnapshotDiffView
         v-else-if="activeKey === 'bom-snapshot-diff'"
         :project-id="selectedProjectId"
+        :scope="scope"
       />
       <StockPreparationMappingConfirmView
         v-else-if="activeKey === 'material-mapping'"
         :project-id="selectedProjectId"
+        :scope="scope"
       />
       <StockPreparationUnitConfirmView
         v-else-if="activeKey === 'unit-conversion'"
         :project-id="selectedProjectId"
+        :scope="scope"
       />
       <StockPreparationPrepLineView
         v-else-if="activeKey === 'prep-line'"
         :project-id="selectedProjectId"
+        :scope="scope"
       />
       <StockPreparationExceptionQueueView
         v-else-if="activeKey === 'exception-queue'"
         :project-id="selectedProjectId"
+        :scope="scope"
       />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
@@ -111,6 +118,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
+import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationDashboardView from './StockPreparationDashboardView.vue'
@@ -122,6 +130,7 @@ import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 
 const { locale } = useLocale()
+const scope = getDefaultIntegrationScope()
 
 // Same synchronous locale pattern as the rest of the integration surface (IntegrationHelpView /
 // errorCodeLabels): read `locale.value` directly in the template.

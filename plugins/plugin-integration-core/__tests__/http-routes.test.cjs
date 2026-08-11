@@ -622,6 +622,44 @@ async function testUnauthenticatedWriteRequestIsRejected() {
   assert.equal(calls.length, 0, 'unauthenticated write did not reach services')
 }
 
+async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
+  const { services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  const routePath = '/api/integration/internal/k3-wise/call-audit'
+  assert.ok(registered.includes(`GET ${routePath}`), 'K3 values-free call-audit route registered')
+
+  for (const user of [undefined, READ_USER, WRITE_USER]) {
+    const denied = await invoke(routes, 'GET', routePath, { user })
+    assertErrorResponse(denied, user ? [403] : [401])
+  }
+
+  const allowed = await invoke(routes, 'GET', routePath, { user: ADMIN_USER })
+  assertOkResponse(allowed, 200)
+  assert.equal(allowed.body.data.version, '2026.08.v2')
+  assert.equal(allowed.body.data.scope, 'process')
+  assert.match(allowed.body.data.processEpoch, /^[0-9a-f]{32}$/)
+  assert.deepEqual(Object.keys(allowed.body.data.counts), [
+    'materialGetDetail',
+    'materialGetList',
+    'materialSave',
+    'materialSubmit',
+    'materialAudit',
+    'otherRead',
+    'otherLifecycleWrite',
+  ])
+  assert.ok(Object.values(allowed.body.data.counts).every(Number.isSafeInteger))
+  const serialized = JSON.stringify(allowed.body.data)
+  for (const forbidden of ['url', 'path', 'query', 'credential', 'request', 'response', 'tenant']) {
+    assert.equal(serialized.toLowerCase().includes(forbidden), false, `audit response excludes ${forbidden}`)
+  }
+
+  const crossTenant = await invoke(routes, 'GET', routePath, {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenant, [403])
+}
+
 async function testExternalSystemRoutes() {
   const { calls, services } = createMockServices()
   const { routes, registered } = mountRoutes(services)
@@ -1890,7 +1928,24 @@ async function testPipelineExternalWriteApplyRoute() {
     'external-write apply route registered',
   )
 
-  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = ' true '
+  try {
+    const disabled = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+      user: WRITE_USER,
+      params: { id: pipeline.id },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: 'must-not-be-consumed' } },
+    })
+    assert.equal(disabled.statusCode, 403)
+    assert.equal(disabled.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'deployment read-only gate refuses before loading pipeline/systems/adapters')
+    assert.equal(storage.map.size, 0, 'deployment read-only gate cannot consume a token')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  try {
+    let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
     user: WRITE_USER,
     params: { id: pipeline.id },
     body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: {} },
@@ -1991,7 +2046,11 @@ async function testPipelineExternalWriteApplyRoute() {
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
-  assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+    assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
@@ -8518,9 +8577,13 @@ async function testC6AdapterBackedTargetLoadsWithCredentials() {
 }
 
 async function main() {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  try {
   await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
+  await testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testStockPreparationErpMaterialSyncRoute()
@@ -8596,6 +8659,10 @@ async function main() {
   await testStagingInstallSteeringHasNoEffect()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 // W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write

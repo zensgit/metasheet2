@@ -10,6 +10,7 @@
 
 const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
+  ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
@@ -154,6 +155,7 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+const { getK3WiseCallAuditSnapshot } = require('./adapters/k3-wise-call-audit.cjs')
 // DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
 // SAME decision both the preview and the record materializer use, so they cannot diverge).
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
@@ -617,6 +619,14 @@ function assertStockPreparationErpAutoPersistNoSteering(req) {
 // source-run read-only byte-for-byte.
 function stockPreparationPlmAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// Entity-level delivery containment. This negative gate is intentionally
+// independent from the dry-run route: an internal evaluation environment can
+// keep previews usable while refusing every C6 Apply before request parsing,
+// token consumption, pipeline loading, or adapter/network activity.
+function c6WriteApplyDisabled() {
+  return String(process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED ?? '').trim().toLowerCase() === 'true'
 }
 
 // T3b OD-2 (layered semantics — deliberately NOT a copy of the ERP guard): with auto-persist ON the
@@ -2726,6 +2736,15 @@ function createHandlers(services, options = {}) {
       })
     },
 
+    async k3WiseCallAudit(req, res) {
+      // Internal operational evidence only. The snapshot is process-local and
+      // values-free, but still reveals connector activity, so keep it admin-only
+      // and reuse the existing tenant boundary before selecting its partition.
+      requireAccess(req, 'admin')
+      const tenantId = resolveTenantId(req, requestQuery(req))
+      return sendOk(res, getK3WiseCallAuditSnapshot({ tenantId }))
+    },
+
     async adaptersList(req, res) {
       requireAccess(req, 'read')
       const describe = typeof adapterRegistry.getAdapterMetadata === 'function'
@@ -3503,6 +3522,9 @@ function createHandlers(services, options = {}) {
 
     async pipelinesExternalWriteApply(req, res) {
       requireAccess(req, 'write')
+      if (c6WriteApplyDisabled()) {
+        throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
+      }
       const body = normalizeC6WriteApplyBody(requestBody(req))
       const scope = scopedInput(req, {
         id: requestParams(req).id,

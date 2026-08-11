@@ -18,6 +18,62 @@
 
 ---
 
+## 0. 2026-08-11 当前只读交付目标收口（现行）
+
+本节是当前交付目标的最新状态，优先于本文后续仍以 Save-only 为目标的历史规划。
+当前目标已收窄并冻结为：**单客户、真实 SQL Server/K3 读取、备料清洗与一次 dry-run，零外部写**。
+原 Save-only Apply、K3 回写及 PLM/ERP/CRM/SRM 全面通用化均未被本次验收授权或证明，后续如要启动，
+必须使用新 issue、新 operation id 和独立 owner 授权。
+
+### 0.1 完成证据
+
+| 要求 | 当前证据 | 判定 |
+|---|---|---|
+| S4 GetList/intake 收口 | #4757 已合，merge `889a39bc77c7c8e40aef2325a7351d58bc3a392a` | PASS |
+| 代码与必需门 | #4860 已合，merge `d9a3feba2615a9c3660907451f27c3a3bff1d6c6`；全部检查成功，含 `integration-guard`、`test (20.x)` | PASS |
+| 实体机部署与读腿 | #4628 `_07`：健康、插件、配置回读、SQL Server 只读源、D2 身份与 K3 read-smoke 均 PASS；只读视图 2 行，K3 读 10 行 | PASS |
+| 业务 dry-run | #4628 `_10`：`sourceRows=2`、`planned=2`、`add=2`、`held=0`、`failed=0`、完整且未截断 | PASS |
+| 零外部写 | 同一 process epoch、同一 tenant 分区的 before/after 审计：`GetDetail=2`，Save/Submit/Audit/其它生命周期写均 0；Apply/普通 run/replay 均 0 | PASS |
+| 操作收口 | `_10` 单次执行后删除恰一条未使用内部 token，operation `CLOSED_PASS`；#4628 以 `COMPLETED` 关闭 | PASS |
+
+权威 values-free 回执：
+
+- [最终实体机证据](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249278343)
+- [只读阶段关闭记录](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249316596)
+- [#4860](https://github.com/zensgit/metasheet2/pull/4860)
+
+### 0.2 受测运行时身份
+
+```text
+baseRuntimeCommit=bb0574fcde4ad4dc1d059065c6c2348b96b54ed1
+baseArtifactId=9087053934
+baseArtifactDigest=sha256:5239f80322b020091dea88282974f2d9082b444afd8676070c6ea2031eb9c721
+basePackageTgzSha256=3b66b3ac674dc6507faa6c14bdea64af1311682928a9bb6334cc2e1dd03de50c
+basePackageZipSha256=12971927ba4d34c0b4aad0a0b5fd5a28f6d9f50a71e0c87a70dd6c7785e5dc4c
+reviewedOverlayMergeCommit=d9a3feba2615a9c3660907451f27c3a3bff1d6c6
+reviewedOverlayRuntimeFileCount=5
+reviewedOverlayPrFileCount=7
+auditVersion=2026.08.v2
+```
+
+这是一个经批准的 **base package + exact reviewed overlay** 组合身份，不得把它改写成“完整包已经在
+`d9a3feba…` 重新构建并原字节验证”。五个文件是实体机实际部署的非测试运行时/配置子集;
+#4860 另含两个测试文件,PR 总 diff 为七个文件。历史实体证据只绑定上述组合。
+
+### 0.3 可复跑判据
+
+可复跑指**判据与步骤可重新执行**，不表示已关闭的 `_10` 可以复用。后续复跑必须：
+
+1. 从届时批准的 main 构建并冻结新包，或重新批准一个逐文件可验证的 base+overlay 组合；
+2. 使用新的、不可复用的 operation id，并重新获得 owner 对只读窗口的明确授权；
+3. 绑定同一客户 tenant、approved SQL Server source、K3-read/K3-write D2 身份和受控两行视图；
+4. 审计 before/after 必须是同一 `processEpoch` 和同一 tenant 分区，且 `GetDetail` 正控增量大于 0；
+5. 仅运行一次 dry-run；要求计划断言与 §0.1 相同，Apply/普通 run/replay 及所有 K3 生命周期写增量均为 0；
+6. 任一计数不可用、epoch 改变、源读取不完整或出现非零写调用，都必须 fail-closed，不得以代码路径推理代替证据。
+
+本次结论是 `CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN`。它**不是**生产认证、外部写验收、客户生产行读取、
+规模认证或通用集成平台完成声明。
+
 ## 1. 目标与边界
 
 本轮交付 `stock_preparation.v1` + 数据库读 + K3 WISE API 读/清洗/**仅 Save**:单客户、手动触发、K3 物料
@@ -981,7 +1037,7 @@ B.5 称「Submit/Audit 关闭是运行期不变量」——**过强**。真相:
 **执行顺序**:验证 workflow 与 K3 profile/C6 并行 → 认证 K3 read profile 并产出 B4 → 冻结 provenance
 → 构建最终包 → PG 15/16/17 验证 → 实体机先读/清洗,再 1–3 行 Save 与 GetDetail 回读。
 
-**执行切片状态表**:
+**执行切片状态表(2026-08-05 时点记录;最终现行状态见 §0)**:
 
 | 切片 | 状态 |
 |---|---|

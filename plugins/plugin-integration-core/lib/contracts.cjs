@@ -70,6 +70,7 @@ function normalizeExternalSystemForAdapter(system) {
   }
   return {
     id: optionalString(system.id, 'system.id'),
+    tenantId: optionalString(system.tenantId, 'system.tenantId'),
     name: optionalString(system.name, 'system.name') || requiredString(system.kind, 'system.kind'),
     kind: requiredString(system.kind, 'system.kind'),
     role: optionalString(system.role, 'system.role') || 'bidirectional',
