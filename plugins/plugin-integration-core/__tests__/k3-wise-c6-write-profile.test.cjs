@@ -484,6 +484,34 @@ for (const { label, value } of [
   })
 }
 
+test('lookup never treats the request-key correlation fallback as raw material identity', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'REQUEST-KEY-ONLY', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          // The normalized read record is correlated with the request, but neither raw
+          // response layer independently returned the key. A raw ID alone is insufficient.
+          records: [{ FNumber: 'REQUEST-KEY-ONLY', FItemID: 7005 }],
+          raw: { Data: [{ FStatus: true, FItemID: 7005, Data: {} }] },
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
 test('lookup rejects a malformed raw Data container even when a normalized record is present', async () => {
   const input = c6Inputs({
     rows: [{ code: 'MALFORMED-RAW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
