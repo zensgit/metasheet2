@@ -35,9 +35,10 @@
 > claims are re-verified at each review round. Items that later changed state
 > are corrected in place with their
 > provenance rather than silently dropped — see OD-W8-3 (SATISFIED), ledger
-> rows L1, L2, L6, **L8 (now landed — PR 4805 MERGED)**, L9, L10, L11, L12,
-> and §10. Re-verified 2026-08-11 against
-> `origin/main@2bf952d0f510815edc13a613df56df720bc95739`.
+> rows L1, L2, L6, **L8 (now landed — PR 4805 MERGED)**, L9, L10,
+> **L11 (Gate C implementation landed — PR 4839 MERGED)**, L12, and §10.
+> Re-verified 2026-08-11 against
+> `origin/main@60afbffe07bfddc7f32ff08549e36e995662b228`.
 
 ## 0. Purpose and authority
 
@@ -72,15 +73,17 @@ must be amended. This clause binds every section below, §4 in particular.
 | Zero-bypass hard gate | Current-tree open-debt set asserted exactly empty with a live side-door mutation leg; exact P16 allowlist. | `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs:1033, 1074, 1386`; `scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs:74` |
 | QA handoff tooling | The W4C-2 QA handoff manual (gate matrix G1-G24 mapped to suites and CI steps) plus isolated-DB scripts (reset / run-suites / residue check) exist and are values-safe (localhost-forced). | `docs/development/attendance-w4c2-qa-handoff-20260726.md` (§1.2, §2.3); `scripts/attendance/w4c2-qa/qa-db-reset.sh`, `qa-run-suites.sh`, `qa-residue-check.sql` |
 | Manual preview QA matrix | Issue #4629 carries the ten-case manual feedback matrix `PQA-01..PQA-10` (multi-segment authoring, overnight attribution, timezone, legacy compatibility, shadow posture, ambiguous evidence, authorization isolation, fingerprint freeze, outbox retry, scheduled identity) against a frozen candidate SHA; all ten checkboxes are unchecked and PQA-10 is marked BLOCKED there. This is the only place "PQA" exists as a case-ID concept (the raw three-letter token also occurs as base64/binary noise in unrelated assets) — it is an issue-side case-ID prefix, **not** a repo artifact. | issue #4629 (OPEN), body read 2026-08-07 |
-| Soak preconditions landed | The W4C-5 transition-safety arc is on main: hardened single transition boundary with the closed 7-pair matrix and evidence-manifest discipline (PR #4773, OD-W4C-61=(a) per module header); recovery-sweep fairness + values-free observability counters (#4770 arc, PRs #4774/#4779, incl. `last_attempt_at` durable rotation and the `neverAttemptedRunning`/`oldestRunningAttemptAgeSeconds` counters); the complete 8-cell request-snapshot precondition (#4775 arc, PR #4780, with stored-payload re-hash). | `packages/core-backend/src/attendance/w4c3a-rollout-control.ts:1-21, 85-93, 802-823, 863, 1044, 1125`; `w4c2-scheduled-run-ops-worker.ts:44, 176-182`; `zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts:1-28` |
+| Soak preconditions landed | The W4C-5 transition-safety arc is on main: hardened transition boundary and evidence-manifest discipline (PR #4773); recovery-sweep fairness and values-free counters (PRs #4774/#4779); the complete 8-cell request-snapshot precondition (PR #4780); and the operator `plan`/`apply` CLI plus preparation runbook (PR #4839, merge `60afbffe…`). The merge authorizes no execution, org selection, staging, flag, deployment, soak, or production/customer data. | `packages/core-backend/src/attendance/w4c3a-rollout-control.ts`; `scripts/ops/attendance-w4c5-rollout-transition.ts`; `docs/development/attendance-issue-4556-w4c5-operator-runbook-20260809.md`; `w4c2-scheduled-run-ops-worker.ts`; `zzzz20260805120000_w4c2_scheduled_run_sweep_fairness.ts` |
 | Expected-differences roster | A closed, fail-closed-probed roster of anticipated legacy-vs-W4 divergences exists with exactly one ratified entry (`correction_applied_daily_adjusted`); the remaining-slice plan requires this roster to enter soak so known divergence is not misread as regression. | `packages/core-backend/src/attendance/w4c2-shadow-expected-differences.ts:39-53, 75-83, 135`; `attendance-issue-4556-w4-remaining-slice-plan-20260726.md:117-119` |
 | Dual-host read matrices | Calculation-detail is dual-hosted (admin + self; self rejects `userId` input with a typed 400); decision-trace is dual-hosted the same way. | `packages/core-backend/src/routes/attendance-admin.ts:1479, 1512-1515, 1376, 1416` |
 | Closeout master plan | The attendance line's master plan already models final closure as a locked owner item (B14, "issue #4556 关闭终裁 — 锁 §14-10"). | `docs/development/attendance-line-closeout-master-plan-20260726.md:107, 134` |
 
 Expected-but-absent, verified honestly:
 
-- No W8 verification MD, no operator migration/rollback runbook, and no
-  acceptance ledger exist yet — they are W8's deliverables, not inputs.
+- No W8 verification MD or final acceptance ledger exists yet. PR 4839 has
+  landed the W4C-5 transition CLI and its preparation runbook; that artifact
+  is an input to W8, not a substitute for W8's final migration/rollback and
+  closeout evidence.
 - No "PQA" tooling exists in the repo (see spine row above); a W8 "PQA-style
   matrix" therefore means *a manual matrix authored in the #4629 style*, and
   §3.2 defines it rather than citing a nonexistent artifact.
@@ -433,14 +436,14 @@ from this summary binds exactly as if it were listed.
 6. off-roster diffs each dispositioned (defect filed or roster amended by its
    own reviewed change) — an undispositioned diff fails exit.
 
-**Executability at the W8 head, per rung — NEW this round.** As written,
-this contract can neither start nor exit: day 1, a two-segment shift gets 422
-from `assertSegmentCalculationAllowed` (§5 ledger L10, Gate A); there is no
-shipped command to leave `legacy` (§5 ledger L11, Gate C); once
+**Executability at the W8 head, per rung — refreshed after PR 4839.** As
+written, this contract still cannot complete: day 1, a two-segment shift gets
+422 from `assertSegmentCalculationAllowed` (§5 ledger L10, Gate A), and once
 `authoritative`, the first live or scheduled punch 503s
-(`W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED`, §5 ledger L12, Gate D). This is not
-softened into "pending" language below — an unexecutable step is stated as
-unexecutable, not as a step awaiting scheduling.
+(`W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED`, §5 ledger L12, Gate D). The former
+missing-command blocker is closed: PR 4839 landed a shipped `plan`/`apply`
+caller and runbook (§5 ledger L11). No command execution is evidenced or
+authorized merely because that code is on `main`.
 
 | Rung | Executable at the W8 head? | Blocked on |
 | --- | --- | --- |
@@ -448,31 +451,28 @@ unexecutable, not as a step awaiting scheduling.
 | Entry 2 (deployed SHA / migrations / health) | Executable — infra check | — |
 | Entry 3 (named synthetic org only, no wildcard/customer data) | Executable — scoping decision | — |
 | Entry 4 (every entrypoint represented) | **Blocked** — live punch and scheduled entrypoints 503 the instant posture is `authoritative`; any multi-segment shift 422s regardless of posture | Gate A (multi-segment 422) + Gate D (live/scheduled 503) |
-| Entry 5 (W4C-5 §3 predicate set, all-clear inside the transition transaction) | **Blocked as a live-soak action** — "inside the transition transaction" presupposes a transition is being attempted against a real deployment; the predicate function itself is unit/integration-testable today, but nothing in production calls it | Gate C (no production caller) |
+| Entry 5 (W4C-5 §3 predicate set, all-clear inside the transition transaction) | Executable in code through PR 4839's `plan`/`apply` path; no live action is authorized or recorded | — (runtime authorization remains an external governance gate) |
 | Entry 6 (expected-differences roster finalized) | Executable — doc/config work | — |
 | Entry 7 (sweep observability counters healthy) | Executable — counters read regardless of posture | — |
 | Entry 8 (P16 inventory) | Executable — static review | — |
-| Entry 9 (negative transition test exists for the zero-unresolved-review gate) | Executable **as a test-suite property** (the rollout-control test suite already calls the transition writer via a test harness); not executable as a *live* soak observation for the same reason as entry 5 | Gate C, for the live-observation half only |
-| Entry 10 (evidence manifest carries authorization ref + target state + entrypoint inventory + dates) | **Blocked as a live-soak artifact** — the manifest is populated at transition time; its field *shape* is testable, a real populated manifest is not, absent a caller | Gate C |
+| Entry 9 (negative transition test exists for the zero-unresolved-review gate) | Executable as a test-suite property and through the landed operator path; no live observation is claimed before a separately authorized run | — |
+| Entry 10 (evidence manifest carries authorization ref + target state + entrypoint inventory + dates) | Executable through the landed CLI's validated manifest contract; no real manifest has been populated or accepted | — |
 | Entry 11 (standing: no production deploy/flag action) | Executable — a prohibition requires no action to satisfy | — |
-| Exit 1 (≥ 7 days in target posture) | **Blocked** — cannot occupy a posture nothing can transition into | Gate C |
-| Exit 2 (zero critical diffs / zero unresolved reviews over the window) | **Blocked** — no window exists without exit 1 | Gate C |
-| Exit 3 (reversal + suspend/resume drills) | **Blocked** — drills exercise the transition boundary and, once authoritative, the entrypoints | Gate C + Gate D |
-| Exit 4 (valid pointers, unchanged historical hashes across the window) | **Blocked** — no window | Gate C |
-| Exit 5 (PASS marker + residue zero) | **Blocked** — nothing to mark PASS | Gate C |
-| Exit 6 (off-roster diffs dispositioned) | **Blocked** — no diffs are generated without a real run | Gate C |
+| Exit 1 (≥ 7 days in target posture) | **Blocked** — the authoritative target is still unusable for live/scheduled entrypoints, and multi-segment scope remains disabled | Gate A + Gate D |
+| Exit 2 (zero critical diffs / zero unresolved reviews over the window) | **Blocked** — no valid window exists without exit 1 | Gate A + Gate D |
+| Exit 3 (reversal + suspend/resume drills) | **Blocked** — drills eventually exercise the still-undelivered authoritative entrypoints | Gate D |
+| Exit 4 (valid pointers, unchanged historical hashes across the window) | **Blocked** — no valid window exists | Gate A + Gate D |
+| Exit 5 (PASS marker + residue zero) | **Blocked** — there is no valid completed run to mark PASS | Gate A + Gate D |
+| Exit 6 (off-roster diffs dispositioned) | **Blocked** — no valid run produces the required diff set | Gate A + Gate D |
 
-**Net**: of 11 entry items, 8 are executable today and 3 are blocked, by the
-verdict word each row above actually carries — **blocked** rows are 4, 5, 10;
-**executable** rows are 1, 2, 3, 6, 7, 8, 9, 11. That count of 8 folds in
-entry 9's own caveat, stated once here so the "8" is not read as clean: entry
-9 carries the same live-observation gap as entries 5 and 10 (Gate C), but its
-row is bucketed executable because the underlying test-suite property (a
-harness already calls the transition writer) is real *today*, independent of
-any live deployment — unlike entries 4, 5, and 10, which have no executable
-form today at all. Of 6 exit items, **all 6** are blocked. Landing PR #4839 (Gate C's named
-remedy) does not by itself clear entries 4/exit-3 — Gate A and Gate D remain
-independent blockers even after a transition command exists.
+**Net**: of 11 entry items, 10 have no remaining product-code blocker in the
+category their rows describe, and 1 is blocked — row 4, on Gate A + Gate D.
+This is not an authorization and records no live evidence: entries 5, 9, and
+10 still require a separately owner-authorized operator run before W8 may cite
+them as live observations. Of 6 exit items, **all 6** remain blocked by the
+Gate A/Gate D dependency chain. PR 4839 closed Gate C's missing-caller
+implementation gap only; it did not clear either remaining product blocker or
+start a soak clock.
 
 Conditional: if the owner adopts W7, the same contract runs a second time for
 the W7 cutover posture (the W7 lock's OD-W7-8/soak markers); OD-W8-2 decides
@@ -502,13 +502,13 @@ pre-accept anything.
 | L3 | Workflow residue: malformed `bpmn:timeCycle` in `startProcess` leaves ACTIVE process + OPEN incident residue (pre-existing, poller-flag-independent). | issue #4792 (OPEN) | Not addressed in tree | Not attendance-owned; W8 must verify it cannot pollute the soak org's residue-zero sweep (exclusion documented), else fix-first |
 | L4 | Windows-side / manual preview QA: #4629 matrix PQA-01..10 all unchecked; PQA-10 marked BLOCKED there; the QA handoff targets a superseded head SHA by its own "re-fetch latest head" rule. | issue #4629; `attendance-w4c2-qa-handoff-20260726.md` | Confirmed unchecked 2026-08-07 | OD-W8-4: complete against current head, or formally retire in favor of the §3.2 `PQA-W8-*` matrix; silence is not a disposition |
 | L5 | Soak itself: zero rollout transitions executed outside tests; no soak evidence exists. | W4 lock §12.8; §4 above | Confirmed absent | §4 executed in full, evidence in the verification MD |
-| L6 | W6/W7 conditional debts: whatever OD-W6-*/OD-W7-* choices leave deliberately out (e.g. employee self-projection of the aggregate, OD-W6-5; per-group punch enforcement, OD-4556-9). | respective locks | OPEN by construction at the pinned baseline. **Movement, re-verified 2026-08-11 against `origin/main@0e1e1778baffa00d600d5a980ff3ed87993e79f7`**: the OD-W6-0..9 resolutions — adopt the W6 lock, option (a) for each — are **MERGED**, PR 4821 `ecf77d2433596bbdd8b67c312a37178dbc97f715` (2026-08-08T10:41:37Z). The W6 lock's own header on `origin/main` now reads RATIFIED (W6-1 backend aggregate only). The authorization those resolutions carry remains narrow by their own text: the **W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a fresh exact-head gate. The current clean-rebuild candidate is PR 4849, OPEN/Draft/unmerged at head `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; PR 4814 remains OPEN/Draft/unmerged at its older head `4cc0122883846900a1325cdacd5eda0355d77215` but is not the current delivery candidate — no W6-2 contract wiring, no W6-3 UI, no W6-4 verification, no merge. Consistent with that, no W6 runtime exists on main: `git diff 4e6a35d9 origin/main` over `packages/core-backend/src/attendance`, `packages/core-backend/src/services`, `plugins/plugin-attendance`, `packages/openapi`, and `apps/web/src/views/attendance` is empty (re-verified 2026-08-11; PR 4821 touched only the one lock MD). OD-W7-0..10 carry no ruling of any kind. | Listed in the ledger with their owning lock — not silently absorbed into issue 4556. The decision-record half of this row is now settled by a merged PR; the implementation half (W6 runtime, W7 anything) is not, and W8-R7 continues to re-derive this row on the W8 head |
+| L6 | W6/W7 conditional debts: whatever OD-W6-*/OD-W7-* choices leave deliberately out (e.g. employee self-projection of the aggregate, OD-W6-5; per-group punch enforcement, OD-4556-9). | respective locks | Re-verified 2026-08-11 at `origin/main@60afbffe`: PR 4821 has landed the RATIFIED OD-W6-0..9 record, prospectively authorizing W6-1 only. PR 4849 remains Draft/HOLD and unmerged at `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; W6-2/3/4 and every W7 decision remain unlanded. The route literal is still confined to the design lock and out-of-build draft, and the backend contains only the types-only W6 contract, so no W6 runtime is on main. The earlier whole-attendance-subtree empty-diff proof is retired because PR 4839 legitimately changed unrelated W4C files in that subtree. | Listed with the owning lock, not silently absorbed into issue 4556. The W6 decision record is settled; W6/W7 implementation remains open, and W8-R7 re-derives it on the W8 head. |
 | L7 | Wave-5 explanation-surface posture-ceiling revision once W4 evidence is authoritative anywhere (named cross-lane follow-up; must not be done unilaterally by this lane). | W4 lock §10.3 (`:2386-2403`) | Not started | Ledger row naming the owning lane; not a #4556 closure blocker unless the owner rules otherwise |
 | L8 | CI wiring gap: two of the 40 `attendance-w4c*.db.test.ts` suites (`attendance-w4c3b-request-snapshots.db.test.ts`, `attendance-w4c3b-central-approval.db.test.ts`) were in neither the plugin-tests real-DB run-list nor the vitest no-DB exclude — their DB-gated blocks skip-greened and executed nowhere in CI. The request-snapshots suite is the real-DB proof of the 8-cell soak-entry precondition (#4775 arc, PR #4780). The wiring guard (`attendance-w4c2-ci-wiring.test.mjs`) could not catch this: its `FILES` constant was a hardcoded allowlist, not a completeness assertion. | This document (§1 spine row; found by the #4804 adversarial gate); fix **PR 4805 MERGED** `4c28467c54f376ad5a68718d3dbe6ad50c76a917` (2026-08-10T06:59:23Z) | **Fixed and landed** (an earlier round of this cell read "PR 4805 OPEN, unmerged" — accurate at that round's rebase base, superseded here). Re-verified 2026-08-10 against `origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`: both named files now appear in the real-DB run-list (step `id: attendance-real-db-integration`) **and** in `vitest.config.ts` `test.exclude` — two-point wired; 40 files on disk match `attendance-w4c*.db.test.ts`, all 40 carried; the run-list carries 101 total whole-file args (widened past the `attendance-w4c*` family — see W8-R4); `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`'s own header records the conversion from the hardcoded `FILES` allowlist to a derived-completeness assertion (OBS-1, re-read at the current tip). | **Row stays live; its requirement changed from fix to re-verify-and-execute.** The wiring gap that blocked *starting* §3 is closed. What remains, per this section's preamble (which this plan cannot pre-stamp): the two previously-orphaned suites must actually run green on the W8 head with non-zero per-file counts (W8-R3/R4) before their evidence counts — a merged wiring fix is not the same claim as an executed green run, and W8-R7 re-derives this row's landed-state against the then-current main rather than trusting this round's re-count. |
-| L9 | Parent §10 item 8 has **no landed implementation** at this baseline: the four-label group workflow (effective / inherited / preview-only / conflicting) is W6's scope, and `conflict_action_required` exists only in the types-only contract module, the W6 JSON fixtures, and the out-of-build OpenAPI draft — no runtime, no route, and the panel shell is imported nowhere. W6 is item 8's only planned vehicle. | Parent lock §10 (`:764-777`, item 8 `:776-777`); W6 lock (`Status: RATIFIED (W6-1 backend aggregate only)` on `origin/main`, ratified via PR 4821 `ecf77d2433596bbdd8b67c312a37178dbc97f715`, merged 2026-08-08) | Verified at this baseline and re-verified against `origin/main@0e1e1778baffa00d600d5a980ff3ed87993e79f7` (grep: label in types/fixtures/draft only; panel referenced nowhere; zero source drift over the attendance/W6 paths between the pinned baseline and current main) | **The decision half of this row is now settled; the implementation half has not moved.** OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED, not merely recorded pending a merge. On that ratified direction the declining branch below is foreclosed for the W6-1 scope, but the coupling itself is unchanged: item 8 still has **no landed implementation**, W6 remains its only planned vehicle, and only the W6-1 *backend* slice is prospectively authorized (current candidate PR 4849, Draft/HOLD, unmerged, head `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; PR 4814 remains open at an older head but is not the current candidate) — the four-label workflow is W6-3 UI scope, which is explicitly still withheld and has no authorization at all yet, ratified or otherwise. The original warning now applies to a narrower future: **were the W6 runtime beyond W6-1 (specifically W6-3 UI) not to land, item 8 could not be satisfied and issue 4556 could not close under §10 as ratified** — closure would then require an owner amendment to parent §10, routed through OD-W8-1(b); see §6 item 8. W8-R7 re-derives this row on the W8 head |
+| L9 | Parent §10 item 8 has **no landed implementation**: the four-label group workflow (effective / inherited / preview-only / conflicting) belongs to W6, while `conflict_action_required` remains confined to the types-only contract, fixtures, and out-of-build OpenAPI draft; the panel shell is still unmounted. | Parent lock §10 item 8; W6 lock RATIFIED via PR 4821 | Re-verified at `origin/main@60afbffe` by direct route/label/panel-reference searches. PR 4849 is only the unmerged W6-1 backend candidate; W6-3 UI remains unauthorized. | The decision direction is settled, but implementation is open. Without W6-3 UI, parent item 8 cannot be satisfied and issue 4556 cannot close under the ratified §10; changing that outcome requires owner amendment OD-W8-1(b). W8-R7 re-derives this row on the W8 head. |
 
 | L10 | **Gate A — multi-segment calculation is OFF, and no org-level value can turn it on.** `plugins/plugin-attendance/lib/attendance-shift-service.cjs:60` — `const SEGMENT_CALCULATION_IMPLEMENTED = false`, short-circuited at `:495` (`if (!SEGMENT_CALCULATION_IMPLEMENTED) return false`) **before** the org env-allowlist is even read (the allowlist read is unreachable code for this purpose). Its call site, `assertSegmentCalculationAllowed` (`:1075`, invoked via `assertWorkContextSegmentCalculationAllowed`, `index.cjs:8351`), throws `HttpError(422, SHIFT_SERVICE_ERROR.MULTI_SEGMENT_CALCULATION_DISABLED)` for any shift with more than one persisted segment. The comment at `:57-59` names the discipline: an env value alone must never make reference writers accept multi-segment shifts, and W4 "must flip this only in the same reviewed change that adds the calculator." W4C-1 landed the calculator; the constant was never flipped in the same or any later change. | `attendance-shift-service.cjs:57-60, 495, 1075`; `index.cjs:8351` | Verified 2026-08-10 against `origin/main@d78b27d3`: constant is `false`, short-circuit precedes the allowlist read, `assertSegmentCalculationAllowed` throws 422 unconditionally for `segmentCount > 1`. W7 §1.1 records this fact and stops there (no ledger row, no soak-blocking consequence drawn); this document was silent on it entirely before this round. | **New, OPEN.** This is a hard blocker to §4 soak entry item 4 ("every entrypoint represented") for any multi-segment shift and to §4 exit generally, until the owner either (i) authorizes flipping the constant in the same reviewed change W4's own comment requires, or (ii) explicitly re-scopes the soak to single-segment shifts only via OD-W8-1(b). Silence is not a disposition. |
-| L11 | **Gate C — the rollout-transition writer has no production caller; only tests call it.** `transitionAttendanceCalculationRolloutV1` is exported at `w4c3a-rollout-control.ts:1125`, and `eligible → authoritative` is a legal pair in its closed matrix, but `git grep -ln transitionAttendanceCalculationRolloutV1 origin/main` filtered to exclude every `*.test.ts`/`*.db.test.ts` path and the defining module itself returns **zero** files — verified 2026-08-11: exactly 3 files in the entire tree reference the symbol (the defining module + 2 integration test files), none of them a route, CLI, or scheduled job. The operator CLI that would call it in production is **not on `main`** — it lives only in Draft PR **#4839** (`[HOLD] feat(attendance-w4c5): operator transition tooling + executable runbook`, OPEN, current head `f6f35bc828d9e5dbe1912bfdb692c1d848f62dc1`). | `w4c3a-rollout-control.ts:1125`; PR #4839 | Verified 2026-08-11 against `origin/main@2bf952d0f510815edc13a613df56df720bc95739` (grep above). The prior #4839 head `a95472ac7b99a9c8de52376a922ec6bda7f025cb` completed 9/9 required checks and an independent exact-head review; that evidence is historical and does not transfer to the refreshed head, which requires its own fresh checks and review before landing. W7 §1.3 describes the transition boundary's write discipline in full but never states that it has zero production callers; W8 §4 (pre-this-round) named the soak's operational steps without noting there is no shipped command to execute any of them. | **New, OPEN. Flagged explicitly for the owner, as this line's own review demanded**: landing PR #4839 removes this gate — it is the one row on this ledger with a named, already-open remedy. Until #4839 (or an equivalent) merges, no rollout transition beyond a test harness can execute against a real deployment, which makes §4 exit item 1 ("≥ 7 calendar days in the target posture") structurally unreachable — there is no way to enter a target posture outside a test process. This also means the claim-sweep tool this line borrows for step E (below) lives on that same unmerged branch, a fact recorded rather than hidden. |
+| L11 | **Gate C implementation gap — CLOSED by PR 4839; execution remains owner-gated.** The operator CLI now imports and calls `transitionAttendanceCalculationRolloutV1` through its tested `plan`/`apply` orchestration, so the former "tests only" statement is no longer true. | `scripts/ops/attendance-w4c5-rollout-transition.ts`; `docs/development/attendance-issue-4556-w4c5-operator-runbook-20260809.md`; PR #4839 merge `60afbffe07bfddc7f32ff08549e36e995662b228` | Re-verified 2026-08-11 against `origin/main@60afbffe`: the CLI and runbook are present; the merge commit is an ancestor of main; the runbook's non-authorization notice forbids staging, flag, deployment, soak, production/customer data, and issue closure. No tool execution or rollout transition is claimed. | **SATISFIED as a code-delivery debt, not as runtime evidence.** W8 may now use the shipped command after a separate owner authorization. Gate A and Gate D remain independent product blockers, and the soak clock has not started. The claim-sweep helper borrowed by step E is now on main too. |
 | L12 | **Gate D — authoritative write execution is undelivered at exactly the two entrypoints §4 names first, deliberately and by design.** `w4c2-live-scheduled-boundary.ts:1272` (live punch), `:1878` (scheduled absence), `:2072` (scheduled run) each call `boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', 503)` when posture/write-posture is `authoritative`; module header `:69-72` states this in prose ("effective `authoritative` write execution itself is NOT delivered by this slice ... the state is unreachable in production"). This is a deliberate, **tested** fail-closed state, not a bug: `attendance-w4c2-gate-matrix-e5.db.test.ts:1079-1091` asserts 503 + the exact code + zero rows written for both the live and the scheduled path. Scope stays honest in both directions: authoritative mode **IS** delivered by four other modules verified to branch on `mode === 'authoritative'` without this short-circuit — `w4c3b-approved-leave-cancellation.ts`, `w4c3c-manual-edit-apply.ts`, `w4c3c-recompute.ts`, `w4c3a-legacy-plan-processor.ts`. It is precisely the two entrypoints W8 §4 entry item 4 names first (live punch, scheduled) that are not. | `w4c2-live-scheduled-boundary.ts:69-72, 1272, 1878, 2072`; `attendance-w4c2-gate-matrix-e5.db.test.ts:1079-1091` | Verified 2026-08-10 against `origin/main@d78b27d3`: all three call sites confirmed byte-for-byte; test assertions confirmed at the cited lines; the four delivering modules confirmed to branch on `mode === 'authoritative'` without the boundary short-circuit. W8 §4 (pre-this-round) named live punch and scheduled as the first two soak-entry entrypoints without disclosing this. | **New, OPEN.** This is a hard blocker to §4 exit generally (an org cannot spend 7 days "in the target posture" if the two highest-volume entrypoints 503 the instant posture reaches `authoritative`) and specifically undermines entry item 4's "every entrypoint represented." Disposition is the owner's: (i) authorize delivering the live/scheduled authoritative write path (its own gated PR, its own real-DB + mutation gate, same class as W4C-3a/b/c), or (ii) explicitly re-scope soak entry to the four already-delivering entrypoints only, via OD-W8-1(b), with live punch and scheduled named as a residual not yet in scope. |
 
 Any debt discovered between this baseline and W8 execution joins the ledger;
@@ -701,10 +701,10 @@ Documents:
 - W6 lock `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md` (status + §5)
 - W7 draft lock `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md` (companion document in this PR)
 
-GitHub state, **re-queried 2026-08-10 against current
-`origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`** (this branch's own
-base remains the older `5c3146ac…`; main has moved ahead of it, so this round
-verifies against the newer tip rather than the branch's stale base — the
+GitHub state, **re-queried 2026-08-11 against current
+`origin/main@60afbffe07bfddc7f32ff08549e36e995662b228`** (this branch has
+been caught up to this exact main tip; the older `5c3146ac…` base remains
+historical provenance only — the
 2026-08-08 round's line recorded PRs 4805/4821 as OPEN/unmerged; both have
 since merged, so that line is superseded, not merely re-dated):
 
@@ -722,15 +722,16 @@ since merged, so that line is superseded, not merely re-dated):
   `ecf77d2433596bbdd8b67c312a37178dbc97f715`, merged 2026-08-08T10:41:37Z —
   see ledger L6/L9); **4805** (L8 CI-wiring fix, merge commit
   `4c28467c54f376ad5a68718d3dbe6ad50c76a917`, merged 2026-08-10T06:59:23Z —
-  see ledger L8, now landed).
+  see ledger L8, now landed); **4839** (W4C-5 operator transition CLI and
+  runbook, merge commit `60afbffe07bfddc7f32ff08549e36e995662b228`, merged
+  2026-08-11T03:46:49Z — Gate C implementation landed; execution remains
+  separately owner-gated).
 - PRs OPEN / unmerged: **4849** (current clean-rebuild W6-1 backend candidate,
   Draft, head `c2ac8284ab38756133c74ce54fde50d07d5bf13a` — the current PR whose
   merge would put W6-1 runtime on `main`); **4814** (older W6-1 candidate,
   still Draft/open/unmerged at head
   `4cc0122883846900a1325cdacd5eda0355d77215`, not the current delivery
-  candidate); **4839** (Draft operator CLI for the
-  rollout-transition writer — see ledger row L11, Gate C). Naming either
-  authorizes neither.
+  candidate). Naming either authorizes neither.
 
 Closure evidence for issue 4791, verified this round rather than quoted:
 workflow run 31191954460 (`Plugin System Tests`, `event=push`,
@@ -755,14 +756,14 @@ artifact. Its landing is what discharges ledger row L8 above and the §1/§3.3/
 §4-item-5 corrections in this round. It authorizes no W8 runtime by itself —
 it is a CI-tooling fix, not a rollout-transition or soak action.
 
-New Gate C companion, named for provenance only: **PR 4839**
+Former Gate C companion, now landed: **PR 4839**
 (`[HOLD] feat(attendance-w4c5): operator transition tooling + executable
-runbook`), OPEN, Draft, current head
-`f6f35bc828d9e5dbe1912bfdb692c1d848f62dc1` — see ledger row L11. The prior
-head `a95472ac7b99a9c8de52376a922ec6bda7f025cb` completed 9/9 required checks
-and its exact-head review; that evidence is historical and does not transfer. The
-current head requires fresh checks and independent review before landing. Naming it
-authorizes nothing; it is not merged.
+runbook`), MERGED as `60afbffe07bfddc7f32ff08549e36e995662b228` from exact
+head `f9127df5ae9a63d4b2dfcd50fcf7fd54949940b3` after 9/9 required checks and
+an independent exact-head 0 P1/P2 gate. See ledger row L11. The landing closes
+the missing-caller implementation gap only; its own body and runbook explicitly
+withhold tool execution, staging, flags, deployment, soak, production/customer
+data, and issue closure.
 
 Commands behind this block (re-run 2026-08-11; recorded so W8-R7's
 regeneration can be reproduced rather than trusted): `gh issue view <n> --json
@@ -773,6 +774,7 @@ number,state,isDraft,mergedAt,mergeCommit,headRefOid,statusCheckRollup`;
 repos/zensgit/metasheet2/branches/main/protection --jq
 '.required_status_checks.contexts'`; `git merge-base --is-ancestor <sha>
 origin/main`; `git grep -ln <symbol> origin/main -- .` filtered by `grep -v`
-against test-file and defining-module paths (Gate C); and, for the L8/W8-R4
+against test-file and defining-module paths (Gate C, now expected to find the
+landed CLI); and, for the L8/W8-R4
 re-count, a walk of the `id: attendance-real-db-integration` step's own arg
 list rather than a fixed-width slice of the workflow file.

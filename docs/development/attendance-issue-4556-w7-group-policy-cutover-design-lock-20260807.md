@@ -57,8 +57,8 @@ below as decided, and treats every W6 semantic beyond it (W6-2 contract
 wiring, W6-3 UI, W6-4 verification) as still undecided. Section 6 lists every
 remaining dependence on a W6 outcome explicitly.
 
-**Re-verified 2026-08-10 against `origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`
-— the decision state has moved twice since this document's pinned baseline,
+**Re-verified 2026-08-11 against `origin/main@60afbffe07bfddc7f32ff08549e36e995662b228`
+— the decision state has moved three times since this document's pinned baseline,
 and both moves are recorded here rather than silently carried forward or left
 at their earlier "OPEN/unmerged" wording.**
 
@@ -78,6 +78,13 @@ at their earlier "OPEN/unmerged" wording.**
   hardcoded-allowlist CI guard to derived completeness — named here only
   because every earlier round of this document cited it as OPEN/unmerged and
   that wording is now stale everywhere it appears.
+- **2026-08-11:** PR **4839** (the W4C-5 rollout-transition operator CLI and
+  executable preparation runbook) **MERGED** as
+  `60afbffe07bfddc7f32ff08549e36e995662b228`. This closes W8 ledger Gate C's
+  missing-caller implementation gap. It does not authorize executing the
+  tool, selecting an org, staging, flags, deployment, soak, production or
+  customer data, or issue closure; the merged runbook states those boundaries
+  explicitly.
 
 Three limits matter and are stated rather than glossed, even though the
 RATIFY record itself is now on `main`:
@@ -93,15 +100,14 @@ RATIFY record itself is now on `main`:
    contract wiring, W6-3 UI, W6-4 verification, any merge, staging, soak,
    flag, deployment, and closure of issue 4556 each remain withheld. Ratifying
    the OD table is not an adoption of W6 runtime.
-2. **Nothing has landed.** No W6 runtime exists on `origin/main@d78b27d3`:
-   `git diff 4e6a35d9 origin/main` over
-   `packages/core-backend/src/attendance`,
-   `packages/core-backend/src/services`, `plugins/plugin-attendance`,
-   `packages/openapi`, and `apps/web/src/views/attendance` is empty
-   (re-verified 2026-08-10). PR 4821 touched exactly one file, the W6 lock MD
-   itself (68 insertions / 28 deletions per its own diff stat), and PR 4805
-   touched only CI-workflow / vitest-config / test-tooling files outside every
-   one of those five paths.
+2. **No W6 runtime has landed.** Re-verified at `origin/main@60afbffe`: the
+   production route literal appears only in the W6 design lock and the
+   out-of-build OpenAPI draft; the backend tree contains the types-only
+   `w6-group-effective-policy-contract.ts`, but not PR 4849's aggregate,
+   response-contract, route assembly, or real-DB delivery files. The older
+   broad-path-diff proof is deliberately retired: PR 4839 legitimately changed
+   other W4C attendance files under those same directories, so an empty diff
+   over the whole attendance subtree is no longer a valid W6-specific test.
 3. **W7 is unaffected either way.** §8 item 1 makes W6 sign-off *and W6
    runtime completion* a hard precondition; the second half is unmet
    regardless of how the first resolves. Every §6 row therefore stays
@@ -386,7 +392,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
 | The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision, and the W6 lock is now RATIFIED (W6-1 backend aggregate only), so overriding W6-R5 can only be made as a **W6 amendment**, not a W7 choice. |
 | Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-11** (§0 update): OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, and the W6 lock's own header on `origin/main` reads RATIFIED (W6-1 backend aggregate only) — so the "declines" branch is now foreclosed for the W6-1 scope specifically, not merely recorded pending a merge. That still does not satisfy this row: the row requires W6 **completion gates**, and the **second** conjunct is untouched — no W6 runtime is on `origin/main@0e1e1778baffa00d600d5a980ff3ed87993e79f7` (`git diff` over the five W6-relevant paths between the pinned baseline and current main is empty), and only the W6-1 backend slice is prospectively authorized (current candidate PR 4849, Draft/HOLD, unmerged, head `c2ac8284ab38756133c74ce54fde50d07d5bf13a`), which does not reach the four-label workflow item 8 names. PR 4814 remains open at an older head but is not the current delivery candidate. This row stays conditional. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-11** (§0 update): OD-W6-0 is **RATIFIED as adopt** via PR 4821, but the runtime conjunct is unmet. At `origin/main@60afbffe`, the route literal remains confined to the design lock and out-of-build OpenAPI draft, and the backend has only the types-only contract. Current W6-1 candidate PR 4849 is Draft/HOLD and unmerged at `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; it also does not reach W6-2 contract wiring, W6-3's four-label UI, or W6-4 verification. PR 4814 remains an older non-delivery candidate. This row stays conditional. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
@@ -491,12 +497,11 @@ Documents:
 - W6 lock `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md` (whole; §2.3 `:89-97`, W6-R4/R5 `:106-107`, OD-W6-1..9 `:234-246`)
 - `docs/development/attendance-4709-fser4-member-projection-contract-amendment-20260804.md:136-183` (§3-§4)
 
-GitHub state, **re-queried 2026-08-10 against current
-`origin/main@d78b27d37c96b66cd8d898dc6b8b17e2a5f294a5`** (this branch's own
-base is the older `5c3146acbc81b655e62bee9249b68eaec4e6e4c6`; main has moved
-ahead of it and every fact below is checked against the newer tip, not the
-branch's stale base — see the standing house rule against verifying against a
-stale base). The 2026-08-08 round's line this replaces listed PRs 4805/4821 as
+GitHub state, **re-queried 2026-08-11 against current
+`origin/main@60afbffe07bfddc7f32ff08549e36e995662b228`** (this branch has
+been caught up to that exact tip; the older `5c3146ac…` base remains
+historical provenance only). The 2026-08-08 round's line this replaces listed
+PRs 4805/4821 as
 OPEN/unmerged; both have since merged, so the line is superseded rather than
 re-dated:
 
@@ -509,7 +514,10 @@ re-dated:
   2026-08-08T10:41:37Z — see the §0 update); **4805** (the W8 plan's former
   L8 CI-wiring precondition, merge commit
   `4c28467c54f376ad5a68718d3dbe6ad50c76a917`, merged 2026-08-10T06:59:23Z —
-  see the W8 plan §5 row L8, now landed).
+  see the W8 plan §5 row L8, now landed); **4839** (W4C-5 operator CLI and
+  runbook, merge commit `60afbffe07bfddc7f32ff08549e36e995662b228`, merged
+  2026-08-11T03:46:49Z — W8 Gate C's implementation gap is landed, while
+  execution and soak remain separately owner-gated).
 - Issues OPEN (re-checked 2026-08-10): #4556, #4629, #4709, #4770, #4775,
   #4792.
 - Issues CLOSED: **4791** (57P01 teardown flake), CLOSED COMPLETED
@@ -523,7 +531,4 @@ re-dated:
   this is the current PR whose merge would put W6-1 runtime on `main`);
   **4814** (an older W6-1 candidate that remains Draft/open/unmerged at head
   `4cc0122883846900a1325cdacd5eda0355d77215`, not the current delivery
-  candidate); **4839** (Draft operator CLI for the rollout-transition writer named at
-  `w4c3a-rollout-control.ts:1125` — the W8 plan §5 ledger row L11 records that
-  landing this PR removes the "no production caller" gap it documents) —
-  naming either authorizes neither.
+  candidate). Naming either authorizes neither.
