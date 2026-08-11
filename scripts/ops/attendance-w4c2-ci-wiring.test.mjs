@@ -2242,6 +2242,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
   'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
   'tests/integration/attendance-w4c4-calculation-detail.db.test.ts',
+  'tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts',
   'tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts',
   'tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts',
   'tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts',
