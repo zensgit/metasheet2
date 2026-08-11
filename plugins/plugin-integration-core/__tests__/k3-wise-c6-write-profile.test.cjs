@@ -123,7 +123,7 @@ function jsonResponse(status, body) {
 
 // Mock K3: login, GetDetail (existing row for MAT-C6-EXIST, business-fail for everything
 // else — K3's real "not found" shape), Save success. Counts every path.
-function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false, outerIdentity = false, placeholderId = null } = {}) {
+function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false, innerIdOnly = false, outerIdentity = false, placeholderId = null } = {}) {
   const calls = []
   const impl = async (url, init) => {
     const parsed = new URL(url)
@@ -150,11 +150,18 @@ function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false, outerI
           Data: [{ FStatus: true, Data: { FNumber: number } }],
         })
       }
+      if (innerIdOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number, FItemID: 7006 } }],
+        })
+      }
       if (outerIdentity) {
         return jsonResponse(200, {
           StatusCode: 200,
           Message: 'Successful',
-          Data: [{ FStatus: true, FNumber: number, FItemID: 7003, Data: { FName: 'Old name' } }],
+          Data: [{ FStatus: true, FNumber: number, FItemID: 7003, Data: {} }],
         })
       }
       if (placeholderId !== null) {
@@ -444,6 +451,18 @@ test('lookup accepts the supported outer-key and outer-id GetDetail shape as exi
   const dryRun = await dryRunExternalWrite(c6Inputs({
     rows: [{ code: 'OUTER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
     fetchPair: mockK3({ outerIdentity: true }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup accepts an inner-key and inner-id GetDetail shape without a name as existing', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'INNER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ innerIdOnly: true }),
     tokenStore: memoryStore(),
   }))
 
