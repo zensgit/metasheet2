@@ -18,6 +18,21 @@
 #                BOTH markers fails closed. Proves real password login.
 #                NEVER writes lifecycle env flags; never touches arbitrary admins.
 #                Requires login identifier/password secret files only (chmod 600).
+#   human-bootstrap — staging-only create/repair of a SEPARATE fixed human
+#                platform administrator (username staging-owner-admin, name
+#                Staging Owner Admin, no email/mobile). Authenticates admin API
+#                with the existing fixed canary admin JWT (minted from canary
+#                password login). Human password arrives only as chmod-600
+#                STAGING_OWNER_ADMIN_PASSWORD_FILE (path only; never logged).
+#                Lookup exact-matches username; fail closed on multiple rows or
+#                identity/name/admin mismatch. Create via POST /api/admin/users
+#                (no email/mobile) or idempotent reset of the owned match only;
+#                then required POST reset-password (must_change_password), GET
+#                access (admin role/isAdmin), real POST login
+#                (passwordChangeRequired + exact username), then required
+#                revoke-sessions with canary JWT. Never writes lifecycle env;
+#                never restarts. Post-check: exact SHA, health, migrations-zero,
+#                all flags OFF. Artifacts are values-free booleans/enums only.
 #   alias      — TRANSIENT secret-backed alias cutover canary.
 #                Success requires/proves OFF (post-rollback mode+login).
 #                Failure restores the OFF override before failing (post-write).
@@ -42,12 +57,12 @@
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
 #   * migrations_pending_zero must be exactly "true" for preflight_ok and for
-#     action=off / action=alias / action=bootstrap (unknown is a fail, never
-#     treated as success).
+#     action=off / action=alias / action=bootstrap / action=human-bootstrap
+#     (unknown is a fail, never treated as success).
 #   * action=off|alias: recreate backend only; prove postgres/redis IDs unchanged;
 #     require backend health true after restart; prove exact mode; restore
 #     previous override and re-recreate on any failure after the write.
-#   * action=bootstrap: no lifecycle env write; no backend recreate.
+#   * action=bootstrap|human-bootstrap: no lifecycle env write; no backend recreate.
 #   * multi-on: status/preflight report and fail closed; action=off still clears
 #     the exact three flags (does not die in derive_mode before clear).
 #   * Artifacts never contain env values, credentials, subject ids, or PII —
@@ -60,10 +75,11 @@ set -euo pipefail
 log() { echo "[lifecycle-canary] $*"; }
 fail() { echo "[lifecycle-canary][error] $*" >&2; exit 1; }
 
-ACTION="${ACTION:?ACTION is required (status|preflight|off|bootstrap|alias|pending|deprovision)}"
+ACTION="${ACTION:?ACTION is required (status|preflight|off|bootstrap|human-bootstrap|alias|pending|deprovision)}"
 TARGET_MODE="${TARGET_MODE:-}"
 EXPECTED_CURRENT_MODE="${EXPECTED_CURRENT_MODE:-}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
+BOOTSTRAP_CONFIRMATION="${BOOTSTRAP_CONFIRMATION:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
@@ -73,15 +89,24 @@ RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
 # Workflow materializes chmod-600 identifier/password into the per-run remote dir.
 # Alias mints CANARY_ADMIN_JWT_FILE after successful pre-login (never from
 # secrets.ATTENDANCE_ADMIN_JWT). Bootstrap does not consume a JWT file.
+# human-bootstrap mints JWT from canary login for admin API, and consumes a
+# separate STAGING_OWNER_ADMIN_PASSWORD_FILE for the human admin password only.
 CANARY_ADMIN_JWT_FILE="${CANARY_ADMIN_JWT_FILE:-}"
 CANARY_LOGIN_IDENTIFIER_FILE="${CANARY_LOGIN_IDENTIFIER_FILE:-}"
 CANARY_LOGIN_PASSWORD_FILE="${CANARY_LOGIN_PASSWORD_FILE:-}"
+STAGING_OWNER_ADMIN_PASSWORD_FILE="${STAGING_OWNER_ADMIN_PASSWORD_FILE:-}"
 
 # Fixed dedicated lifecycle canary admin ownership markers (values-free constants).
 # Create/repair ONLY this (email, id) pair. Any email/id collision that does not
 # match BOTH markers fails closed — never mutates an arbitrary existing admin.
 CANARY_OWNER_EMAIL="lifecycle-canary@staging.invalid"
 CANARY_OWNER_USER_ID="6c1fe000-ca0a-4000-8000-1ec0c1e00001"
+
+# Fixed SEPARATE human platform administrator identity (values-free constants).
+# Username ownership only (no email/mobile). Collision / identity mismatch fails
+# closed — never mutates an arbitrary existing admin.
+HUMAN_OWNER_USERNAME="staging-owner-admin"
+HUMAN_OWNER_NAME="Staging Owner Admin"
 
 # Intentionally ignored: not a real verifier path. Kept empty so accidental
 # exports cannot be mistaken for canary completion evidence.
@@ -387,7 +412,8 @@ probe_migration_pending_zero() {
 }
 
 require_migrations_pending_zero_true() {
-  # Load-bearing for every transition (action=off|alias) and for preflight_ok.
+  # Load-bearing for every transition (action=off|alias) and for
+  # action=bootstrap|human-bootstrap and for preflight_ok.
   local v="$1" context="$2"
   if [[ "$v" == "true" ]]; then
     return 0
@@ -412,6 +438,16 @@ require_canary_secret_files() {
     [[ -s "$path" ]] || fail "action=${context} secret file empty for ${f}"
   done
   log "${context} canary login secret files present (paths only; values never logged)"
+}
+
+require_staging_owner_admin_password_file() {
+  # Human admin password path only — never export or log the value.
+  local path="${STAGING_OWNER_ADMIN_PASSWORD_FILE:-}"
+  local context="${1:-human-bootstrap}"
+  [[ -n "$path" ]] || fail "action=${context} requires STAGING_OWNER_ADMIN_PASSWORD_FILE (chmod-600 secret file path); no auto-selection"
+  [[ -f "$path" ]] || fail "action=${context} secret file missing for STAGING_OWNER_ADMIN_PASSWORD_FILE"
+  [[ -s "$path" ]] || fail "action=${context} secret file empty for STAGING_OWNER_ADMIN_PASSWORD_FILE"
+  log "${context} staging owner admin password file present (path only; values never logged)"
 }
 
 # Identifier secret file (app trim) must equal the fixed ownership email marker.
@@ -932,6 +968,303 @@ except Exception as e:
     raise SystemExit(2)
 sys.stdout.write(f"{code}\n{body}")
 PY
+}
+
+# Staging-only create/repair of the FIXED separate human platform admin via admin API.
+# Auth: short-lived canary admin JWT file (minted from canary password login).
+# Human password: STAGING_OWNER_ADMIN_PASSWORD_FILE only (exact bytes into API; never logged).
+# Sequence (values-free reason enums only on stdout):
+#   list → exact username match → create OR safe repair gate → required reset-password
+#   → GET access (admin role/isAdmin) → real login (passwordChangeRequired + username)
+#   → required revoke-sessions (canary JWT).
+# Fail closed: multiple exact matches, identity/name/admin mismatch, missing proofs.
+# Sets HUMAN_BOOTSTRAP_OUTCOME to created|repaired|reason enum.
+bootstrap_human_platform_admin() {
+  local result ok note python_tmp
+  HUMAN_BOOTSTRAP_OUTCOME="unset"
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -f "${CANARY_ADMIN_JWT_FILE}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || fail "action=human-bootstrap requires canary admin JWT file (minted from password login)"
+  [[ -n "${STAGING_OWNER_ADMIN_PASSWORD_FILE:-}" && -f "${STAGING_OWNER_ADMIN_PASSWORD_FILE}" && -s "${STAGING_OWNER_ADMIN_PASSWORD_FILE}" ]] \
+    || fail "action=human-bootstrap requires STAGING_OWNER_ADMIN_PASSWORD_FILE path"
+
+  # Keep the heredoc outside command substitution. Older deploy-host Bash versions
+  # parse Python parentheses inside a nested heredoc as shell syntax. The temporary
+  # source contains no credentials; only chmod-600 secret file paths are argv.
+  python_tmp="$(mktemp "${TMPDIR:-/tmp}/lifecycle-human-bootstrap.XXXXXX.py")"
+  chmod 600 "$python_tmp"
+  cat >"$python_tmp" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+jwt_path, pass_path, base, owner_username, owner_name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+
+
+def emit(ok, note):
+    sys.stdout.write(("true" if ok else "false") + "|" + note)
+    raise SystemExit(0)
+
+
+def read_token():
+    try:
+        token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    except Exception:
+        emit(False, "admin_jwt_read_failed")
+    if not token:
+        emit(False, "admin_jwt_empty")
+    return token
+
+
+def read_password_bytes():
+    try:
+        # Exact bytes for transport; no transform/log.
+        return pathlib.Path(pass_path).read_bytes()
+    except Exception:
+        emit(False, "secret_file_read_failed")
+
+
+def password_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        emit(False, "password_not_utf8")
+
+
+def request(method, path, token, body_obj=None):
+    url = base.rstrip("/") + path
+    data = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if body_obj is not None:
+        data = json.dumps(body_obj).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif method.upper() == "POST":
+        data = b"{}"
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            code = int(resp.getcode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        code = int(e.code)
+    except Exception:
+        return None, None
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except Exception:
+        parsed = None
+    return code, parsed
+
+
+def empty_contact(value):
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
+
+
+def require_admin_access(user_id, token, phase):
+    quoted_id = urllib.parse.quote(user_id, safe="")
+    code, payload = request("GET", f"/api/admin/users/{quoted_id}/access", token)
+    if code is None:
+        emit(False, f"{phase}_access_transport_failed")
+    if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+        emit(False, f"{phase}_access_http_{code if code is not None else 'na'}")
+    access = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    access_user = access.get("user") if isinstance(access.get("user"), dict) else {}
+    roles = access.get("roles") if isinstance(access.get("roles"), list) else []
+    if access.get("isAdmin") is not True or not any(str(role) == "admin" for role in roles):
+        emit(False, f"{phase}_access_not_admin")
+    username = access_user.get("username")
+    if not isinstance(username, str) or username.strip().lower() != owner_username.lower():
+        emit(False, f"{phase}_access_username_mismatch")
+    name = access_user.get("name")
+    if not isinstance(name, str) or name != owner_name:
+        emit(False, f"{phase}_access_name_mismatch")
+    if not empty_contact(access_user.get("email")) or not empty_contact(access_user.get("mobile")):
+        emit(False, f"{phase}_access_contact_not_empty")
+    if access_user.get("is_active") is not True:
+        emit(False, f"{phase}_access_inactive")
+    if access_user.get("activationStatus") != "activated":
+        emit(False, f"{phase}_access_not_activated")
+
+
+token = read_token()
+password_raw = read_password_bytes()
+password = password_text(password_raw)
+if password == "":
+    emit(False, "empty_password")
+if password != password.strip():
+    emit(False, "password_outer_whitespace")
+if len(password) < 8:
+    emit(False, "password_too_short")
+if len(password) > 128:
+    emit(False, "password_too_long")
+if not any(char.islower() for char in password):
+    emit(False, "password_missing_lowercase")
+if not any(char.isupper() for char in password):
+    emit(False, "password_missing_uppercase")
+if not any(char.isdigit() for char in password):
+    emit(False, "password_missing_digit")
+if any(pattern in password.lower() for pattern in ("password", "123456", "qwerty", "abc123", "letmein", "admin")):
+    emit(False, "password_weak_pattern")
+
+# 1) Lookup by username query; exact-match only (values never logged).
+q = urllib.parse.urlencode({"q": owner_username, "page": "1", "pageSize": "100"})
+code, payload = request("GET", f"/api/admin/users?{q}", token)
+if code is None:
+    emit(False, "list_transport_failed")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit(False, f"list_http_{code if code is not None else 'na'}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+items = data.get("items") if isinstance(data.get("items"), list) else []
+exact = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    uname = item.get("username")
+    if isinstance(uname, str) and uname.strip().lower() == owner_username.lower():
+        exact.append(item)
+if len(exact) > 1:
+    emit(False, "collision_multiple_rows")
+
+outcome = "unset"
+user_id = ""
+if len(exact) == 1:
+    row = exact[0]
+    user_id = str(row.get("id") or "").strip()
+    name = row.get("name")
+    if not user_id:
+        emit(False, "identity_missing_id")
+    if not isinstance(name, str) or name != owner_name:
+        emit(False, "identity_name_mismatch")
+    if not empty_contact(row.get("email")) or not empty_contact(row.get("mobile")):
+        emit(False, "identity_contact_not_empty")
+    # Ownership guard before any password mutation. Profile flags are not enough;
+    # verify the production RBAC surface used by ensurePlatformAdmin.
+    require_admin_access(user_id, token, "pre_reset")
+    outcome = "repaired"
+else:
+    # 2) Create with username/name/admin only; no email/mobile and without the
+    # operator password. The server-generated temporary
+    # password keeps must_change_password=true even if this process is interrupted
+    # before the required reset below. The generated value is never emitted.
+    create_body = {
+        "username": owner_username,
+        "name": owner_name,
+        "role": "admin",
+        "roleId": "admin",
+        "isActive": True,
+    }
+    code, payload = request("POST", "/api/admin/users", token, create_body)
+    if code is None:
+        emit(False, "create_transport_failed")
+    if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+        emit(False, f"create_http_{code if code is not None else 'na'}")
+    created = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    created_user = created.get("user") if isinstance(created.get("user"), dict) else {}
+    user_id = str(created_user.get("id") or created.get("userId") or "").strip()
+    if not user_id:
+        emit(False, "create_missing_user_id")
+    created_username = created_user.get("username")
+    if not isinstance(created_username, str) or created_username.strip().lower() != owner_username.lower():
+        emit(False, "create_username_mismatch")
+    if not empty_contact(created_user.get("email")) or not empty_contact(created_user.get("mobile")):
+        emit(False, "create_contact_not_empty")
+    outcome = "created"
+
+# 3) Required reset-password forces must_change_password (create and repair).
+code, payload = request(
+    "POST",
+    f"/api/admin/users/{urllib.parse.quote(user_id, safe='')}/reset-password",
+    token,
+    {"password": password},
+)
+if code is None:
+    emit(False, "reset_transport_failed")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit(False, f"reset_http_{code if code is not None else 'na'}")
+
+# 4) Post-write access proof catches create/role drift and protects the claimed result.
+require_admin_access(user_id, token, "post_reset")
+
+# 5) Real password login: passwordChangeRequired true + exact username.
+login_body = json.dumps({"identifier": owner_username, "password": password}).encode("utf-8")
+login_req = urllib.request.Request(
+    base.rstrip("/") + "/api/auth/login",
+    data=login_body,
+    headers={"Content-Type": "application/json", "Accept": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(login_req, timeout=20) as resp:
+        login_raw = resp.read().decode("utf-8", errors="replace")
+        login_code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit(False, f"login_http_{int(e.code)}")
+except Exception:
+    emit(False, "login_request_failed")
+try:
+    login_data = json.loads(login_raw)
+except Exception:
+    emit(False, f"login_http_{login_code}_bad_json")
+if login_code != 200 or not isinstance(login_data, dict) or login_data.get("success") is not True:
+    emit(False, f"login_http_{login_code}_rejected")
+login_payload = login_data.get("data") if isinstance(login_data.get("data"), dict) else {}
+if login_payload.get("passwordChangeRequired") is not True:
+    emit(False, "login_password_change_required_missing")
+login_user = login_payload.get("user") if isinstance(login_payload.get("user"), dict) else {}
+login_username = login_user.get("username")
+if not isinstance(login_username, str) or login_username.strip().lower() != owner_username.lower():
+    emit(False, "login_username_mismatch")
+
+# 6) Required revoke-sessions using canary JWT (clean up human login session).
+code, payload = request(
+    "POST",
+    f"/api/admin/users/{urllib.parse.quote(user_id, safe='')}/revoke-sessions",
+    token,
+    {"reason": "lifecycle_canary_human_bootstrap"},
+)
+if code is None:
+    emit(False, "revoke_transport_failed")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit(False, f"revoke_http_{code if code is not None else 'na'}")
+revoke_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+revoked_after = revoke_data.get("revokedAfter")
+if not isinstance(revoked_after, str) or not revoked_after.strip():
+    emit(False, "revoke_proof_missing")
+
+emit(True, outcome)
+PY
+  if ! result="$(python3 "$python_tmp" \
+    "$CANARY_ADMIN_JWT_FILE" \
+    "$STAGING_OWNER_ADMIN_PASSWORD_FILE" \
+    "$STAGING_API_BASE_URL" \
+    "$HUMAN_OWNER_USERNAME" \
+    "$HUMAN_OWNER_NAME")"; then
+    rm -f "$python_tmp"
+    HUMAN_BOOTSTRAP_OUTCOME="python_failed"
+    log "human-bootstrap refused: note=python_failed"
+    return 1
+  fi
+  rm -f "$python_tmp"
+  ok="${result%%|*}"
+  note="${result#*|}"
+  HUMAN_BOOTSTRAP_OUTCOME="$note"
+  if [[ "$ok" != "true" ]]; then
+    log "human-bootstrap refused: note=${note}"
+    return 1
+  fi
+  log "human-bootstrap OK outcome=${note} (fixed human admin only; values never logged)"
+  return 0
 }
 
 # POST /api/admin/login-aliases/backfill — success required; record counts only.
@@ -1605,7 +1938,7 @@ action_not_executable_on() {
     echo "transition_applied=false"
     echo "executable=false"
   } > "${OUTPUT_DIR}/summary.txt"
-  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|bootstrap|alias only. transition_applied=false"
+  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|bootstrap|human-bootstrap|alias only. transition_applied=false"
 }
 
 # Staging-only create/repair of the fixed dedicated lifecycle canary admin.
@@ -1886,6 +2219,96 @@ action_alias() {
   log "action=alias OK (transient ON proven; success proved OFF; backfill may persist)"
 }
 
+# Staging-only create/repair of the FIXED separate human platform administrator.
+# Authenticates admin API with the fixed lifecycle canary admin (password login → JWT).
+# Human password is STAGING_OWNER_ADMIN_PASSWORD_FILE only. Never writes lifecycle env;
+# never restarts. Collision / identity mismatch fail closed.
+action_human_bootstrap() {
+  local note="human_bootstrap_admin"
+  local human_ok="false"
+  HUMAN_BOOTSTRAP_OUTCOME="unset"
+
+  require_sha
+  require_canary_secret_files "human-bootstrap"
+  assert_canary_identifier_matches_owner "human-bootstrap"
+  require_staging_owner_admin_password_file "human-bootstrap"
+  [[ "$BOOTSTRAP_CONFIRMATION" == "CREATE_STAGING_HUMAN_ADMIN" ]] \
+    || fail "action=human-bootstrap requires BOOTSTRAP_CONFIRMATION=CREATE_STAGING_HUMAN_ADMIN"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=human-bootstrap"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=human-bootstrap requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=human-bootstrap refused: backend_health_ok must be true before account mutation"
+  fi
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=human-bootstrap refused: live mode must be off (live='${SNAP_MODE}')"
+  fi
+  if [[ "$SNAP_MODE" != "$EXPECTED_CURRENT_MODE" ]]; then
+    fail "strict expected-current-mode transition failed: live='${SNAP_MODE}' expected_current_mode='${EXPECTED_CURRENT_MODE}'"
+  fi
+
+  # Mint short-lived canary admin JWT for admin API (never ATTENDANCE_ADMIN_JWT).
+  if ! mint_canary_admin_jwt_from_password_login "human-bootstrap"; then
+    fail "action=human-bootstrap refused: canary password login / JWT mint failed (no human mutation performed)"
+  fi
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || fail "action=human-bootstrap refused: admin JWT file missing after mint (no human mutation performed)"
+
+  # No lifecycle env write path exists below — create/repair only the fixed human identity.
+  if ! bootstrap_human_platform_admin; then
+    fail "action=human-bootstrap refused: fixed human create/repair failed (note=${HUMAN_BOOTSTRAP_OUTCOME:-unset}); no env write performed"
+  fi
+  human_ok="true"
+
+  # Re-prove stack posture after account mutation: mode still off, health true, SHA unchanged,
+  # migrations zero, all three lifecycle flags OFF. No restart expected.
+  capture_live_snapshot
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=human-bootstrap refused: post-human-bootstrap live mode must remain off (live='${SNAP_MODE}'); no lifecycle env write expected"
+  fi
+  if [[ "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=human-bootstrap refused: post-human-bootstrap all lifecycle flags must remain OFF"
+  fi
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=human-bootstrap refused: post-human-bootstrap backend_health_ok must remain true"
+  fi
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap post-check"
+  if [[ "${SNAP_BUILD_SHA:-}" != "$DEPLOY_SHA" ]]; then
+    fail "action=human-bootstrap refused: post-human-bootstrap SHA '${SNAP_BUILD_SHA:-}' must match deploy_sha '${DEPLOY_SHA}'"
+  fi
+  assert_exact_sha
+
+  note="human_bootstrap_admin_${HUMAN_BOOTSTRAP_OUTCOME}"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "" "" "false" "$note"
+  {
+    echo "action=human-bootstrap"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=false"
+    echo "human_bootstrap_outcome=${HUMAN_BOOTSTRAP_OUTCOME}"
+    echo "human_bootstrap_ok=${human_ok}"
+    echo "lifecycle_env_write=false"
+    echo "backend_recreate=false"
+    echo "post_human_bootstrap_mode_off=true"
+    echo "post_human_bootstrap_flags_off=true"
+    echo "post_human_bootstrap_health_ok=true"
+    echo "post_human_bootstrap_migrations_zero=true"
+    echo "post_human_bootstrap_sha_match=true"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=human-bootstrap OK outcome=${HUMAN_BOOTSTRAP_OUTCOME} (no lifecycle env write; mode/health/SHA/migrations reasserted)"
+}
+
 # --- main ------------------------------------------------------------------------------
 
 main() {
@@ -1897,10 +2320,11 @@ main() {
     preflight) action_preflight ;;
     off) action_off ;;
     bootstrap) action_bootstrap ;;
+    human-bootstrap) action_human_bootstrap ;;
     alias) action_alias ;;
     pending) action_not_executable_on pending ;;
     deprovision) action_not_executable_on deprovision ;;
-    *) fail "invalid ACTION='${ACTION}' (status|preflight|off|bootstrap|alias|pending|deprovision)" ;;
+    *) fail "invalid ACTION='${ACTION}' (status|preflight|off|bootstrap|human-bootstrap|alias|pending|deprovision)" ;;
   esac
 }
 
