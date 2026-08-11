@@ -274,6 +274,7 @@ const events = ref<DeprovisionEvent[]>([])
 
 const selectedEvent = ref<DeprovisionEvent | null>(null)
 const effects = ref<DeprovisionEffect[]>([])
+const effectsEventId = ref<string | null>(null)
 const restoring = ref(false)
 const forceConfirm = ref(false)
 const forceNote = ref('')
@@ -284,11 +285,14 @@ const restoreConflict = ref('')
 const canRestore = computed(
   () =>
     selectedEvent.value?.status === 'applied'
-    && effects.value.some((effect) => effect.status === 'applied'),
+    && effectsEventId.value === selectedEvent.value.id
+    && effects.value.length > 0
+    && effects.value.every((effect) => effect.status === 'applied'),
 )
 const canCompensate = computed(
   () =>
     selectedEvent.value?.status === 'superseded'
+    && effectsEventId.value === selectedEvent.value.id
     && effects.value.some(
       (effect) =>
         effect.effect_type === 'grant_changed'
@@ -296,6 +300,20 @@ const canCompensate = computed(
         && effect.status === 'superseded',
     ),
 )
+
+let eventsRequestId = 0
+let effectsRequestId = 0
+
+function clearEffects() {
+  effects.value = []
+  effectsEventId.value = null
+}
+
+function clearEventSelection() {
+  effectsRequestId += 1
+  selectedEvent.value = null
+  clearEffects()
+}
 
 function shortId(id: string): string {
   if (!id) return ''
@@ -355,42 +373,55 @@ async function runPreview() {
 }
 
 async function loadEvents() {
+  const requestId = ++eventsRequestId
+  const integrationId = props.integrationId
   loadingEvents.value = true
   try {
-    if (!props.integrationId) {
+    if (!integrationId) {
       events.value = []
-      selectedEvent.value = null
-      effects.value = []
+      clearEventSelection()
       return
     }
-    const selectedEventId = selectedEvent.value?.id
+    if (selectedEvent.value) {
+      effectsRequestId += 1
+      clearEffects()
+    }
     const params = new URLSearchParams()
     if (eventsUserFilter.value.trim()) params.set('userId', eventsUserFilter.value.trim())
     params.set('limit', '50')
     const response = await apiFetch(
-      `/api/admin/directory/integrations/${encodeURIComponent(props.integrationId)}/deprovision-events?${params.toString()}`,
+      `/api/admin/directory/integrations/${encodeURIComponent(integrationId)}/deprovision-events?${params.toString()}`,
     )
     const body = await response.json().catch(() => ({}))
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     if (!response.ok) {
       setError(body?.error?.message || '加载事件失败')
       return
     }
     events.value = (body?.data?.items || []) as DeprovisionEvent[]
+    const selectedEventId = selectedEvent.value?.id
     if (selectedEventId) {
-      selectedEvent.value =
-        events.value.find((event) => event.id === selectedEventId) ?? null
-      if (!selectedEvent.value) effects.value = []
+      const refreshedSelection = events.value.find((event) => event.id === selectedEventId)
+      if (refreshedSelection) {
+        await selectEvent(refreshedSelection)
+      } else {
+        clearEventSelection()
+      }
     }
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     if (body?.data?.flags) flags.value = body.data.flags as DeprovisionFlags
   } catch (error) {
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     setError(error instanceof Error ? error.message : '加载事件失败')
   } finally {
-    loadingEvents.value = false
+    if (requestId === eventsRequestId) loadingEvents.value = false
   }
 }
 
 async function selectEvent(ev: DeprovisionEvent) {
+  const requestId = ++effectsRequestId
   selectedEvent.value = ev
+  clearEffects()
   restoreConflict.value = ''
   forceConfirm.value = false
   forceNote.value = ''
@@ -401,24 +432,27 @@ async function selectEvent(ev: DeprovisionEvent) {
       `/api/admin/directory/deprovision-events/${encodeURIComponent(ev.id)}/effects`,
     )
     const body = await response.json().catch(() => ({}))
+    if (requestId !== effectsRequestId || selectedEvent.value?.id !== ev.id) return
     if (!response.ok) {
       setError(body?.error?.message || '加载 effects 失败')
-      effects.value = []
       return
     }
     effects.value = (body?.data?.items || []) as DeprovisionEffect[]
+    effectsEventId.value = ev.id
   } catch (error) {
+    if (requestId !== effectsRequestId || selectedEvent.value?.id !== ev.id) return
     setError(error instanceof Error ? error.message : '加载 effects 失败')
   }
 }
 
 async function compensateOrphanDeny() {
   if (!selectedEvent.value || !canCompensate.value) return
+  const eventId = selectedEvent.value.id
   compensating.value = true
   restoreConflict.value = ''
   try {
     const response = await apiFetch(
-      `/api/admin/directory/deprovision-events/${encodeURIComponent(selectedEvent.value.id)}/compensate-orphan-deny`,
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(eventId)}/compensate-orphan-deny`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -453,7 +487,6 @@ async function compensateOrphanDeny() {
         : `残留 deny 行补偿成功 · gen=${body?.data?.accessGeneration}`,
     )
     await loadEvents()
-    if (selectedEvent.value) await selectEvent(selectedEvent.value)
   } catch (error) {
     setError(error instanceof Error ? error.message : '补偿失败')
   } finally {
@@ -463,11 +496,12 @@ async function compensateOrphanDeny() {
 
 async function restore(mode: 'rehire' | 'admin_force') {
   if (!selectedEvent.value || !canRestore.value) return
+  const eventId = selectedEvent.value.id
   restoring.value = true
   restoreConflict.value = ''
   try {
     const response = await apiFetch(
-      `/api/admin/directory/deprovision-events/${encodeURIComponent(selectedEvent.value.id)}/${
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(eventId)}/${
         mode === 'rehire' ? 'reactivate' : 'force-reactivate'
       }`,
       {
@@ -501,7 +535,6 @@ async function restore(mode: 'rehire' | 'admin_force') {
       }`,
     )
     await loadEvents()
-    if (selectedEvent.value) await selectEvent(selectedEvent.value)
   } catch (error) {
     setError(error instanceof Error ? error.message : '恢复失败')
   } finally {
@@ -517,6 +550,9 @@ async function refreshAll() {
 watch(
   () => props.integrationId,
   () => {
+    eventsRequestId += 1
+    events.value = []
+    clearEventSelection()
     if (expanded.value) void loadEvents()
   },
 )

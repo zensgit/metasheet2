@@ -13,6 +13,9 @@ import {
 import { SimpleCronExpression } from '../../src/services/SchedulerService'
 
 const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
+const DEPROVISION_EVENT_ID = '22222222-2222-4222-8222-222222222222'
+const SECOND_DEPROVISION_EVENT_ID = '33333333-3333-4333-8333-333333333333'
+const DEPROVISION_INTEGRATION_ID = '44444444-4444-4444-8444-444444444444'
 
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
@@ -280,7 +283,7 @@ describe('adminDirectoryRouter', () => {
       'post',
       '/deprovision/events/:eventId/restore',
       {
-        params: { eventId: 'event-1' },
+        params: { eventId: DEPROVISION_EVENT_ID },
         body: { mode: 'rehire' },
         user: { id: 'admin-1', role: 'admin' },
       },
@@ -302,8 +305,27 @@ describe('adminDirectoryRouter', () => {
       'post',
       '/deprovision/events/:eventId/restore',
       {
-        params: { eventId: 'event-1' },
+        params: { eventId: DEPROVISION_EVENT_ID },
         body: { mode: 'force' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'RESTORE_MODE_INVALID' },
+    })
+    expect(deprovisionMocks.restoreDeprovisionEvent).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-string compatibility restore mode before restore', async () => {
+    const response = await invokeRoute(
+      'post',
+      '/deprovision/events/:eventId/restore',
+      {
+        params: { eventId: DEPROVISION_EVENT_ID },
+        body: { mode: ['admin_force'] },
         user: { id: 'admin-1', role: 'admin' },
       },
     )
@@ -318,7 +340,7 @@ describe('adminDirectoryRouter', () => {
 
   it('exposes the locked rehire and force-reactivate routes with fixed modes', async () => {
     deprovisionMocks.restoreDeprovisionEvent.mockResolvedValue({
-      eventId: 'event-1',
+      eventId: DEPROVISION_EVENT_ID,
       restoreMode: 'rehire',
       restoredEffectCount: 1,
       localUserId: 'user-1',
@@ -329,13 +351,13 @@ describe('adminDirectoryRouter', () => {
       'post',
       '/deprovision-events/:eventId/reactivate',
       {
-        params: { eventId: 'event-1' },
+        params: { eventId: DEPROVISION_EVENT_ID },
         user: { id: 'admin-1', role: 'admin' },
       },
     )
     expect(rehire.statusCode).toBe(200)
     expect(deprovisionMocks.restoreDeprovisionEvent).toHaveBeenLastCalledWith({
-      eventId: 'event-1',
+      eventId: DEPROVISION_EVENT_ID,
       mode: 'rehire',
       adminUserId: 'admin-1',
       confirm: false,
@@ -343,7 +365,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     deprovisionMocks.restoreDeprovisionEvent.mockResolvedValue({
-      eventId: 'event-2',
+      eventId: SECOND_DEPROVISION_EVENT_ID,
       restoreMode: 'admin_force',
       restoredEffectCount: 1,
       localUserId: 'user-2',
@@ -353,14 +375,14 @@ describe('adminDirectoryRouter', () => {
       'post',
       '/deprovision-events/:eventId/force-reactivate',
       {
-        params: { eventId: 'event-2' },
+        params: { eventId: SECOND_DEPROVISION_EVENT_ID },
         body: { confirm: true, note: 'confirmed by owner' },
         user: { id: 'admin-1', role: 'admin' },
       },
     )
     expect(forced.statusCode).toBe(200)
     expect(deprovisionMocks.restoreDeprovisionEvent).toHaveBeenLastCalledWith({
-      eventId: 'event-2',
+      eventId: SECOND_DEPROVISION_EVENT_ID,
       mode: 'admin_force',
       adminUserId: 'admin-1',
       confirm: true,
@@ -544,14 +566,14 @@ describe('adminDirectoryRouter', () => {
       'get',
       '/integrations/:integrationId/deprovision-events',
       {
-        params: { integrationId: 'integration-1' },
+        params: { integrationId: DEPROVISION_INTEGRATION_ID },
         query: { status: 'applied', userId: 'user-1', limit: '10' },
         user: { id: 'admin-1', role: 'admin' },
       },
     )
     expect(listed.statusCode).toBe(200)
     expect(deprovisionMocks.listDeprovisionEvents).toHaveBeenCalledWith({
-      integrationId: 'integration-1',
+      integrationId: DEPROVISION_INTEGRATION_ID,
       localUserId: 'user-1',
       limit: 10,
       status: 'applied',
@@ -562,7 +584,7 @@ describe('adminDirectoryRouter', () => {
       'get',
       '/integrations/:integrationId/deprovision-events',
       {
-        params: { integrationId: 'integration-1' },
+        params: { integrationId: DEPROVISION_INTEGRATION_ID },
         query: { status: 'open' },
         user: { id: 'admin-1', role: 'admin' },
       },
@@ -573,6 +595,144 @@ describe('adminDirectoryRouter', () => {
       error: { code: 'DEPROVISION_EVENT_STATUS_INVALID' },
     })
     expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed integration and event ids before calling deprovision services', async () => {
+    const invalidIntegration = await invokeRoute(
+      'get',
+      '/integrations/:integrationId/deprovision-events',
+      {
+        params: { integrationId: 'not-a-uuid' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(invalidIntegration.statusCode).toBe(400)
+    expect(invalidIntegration.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_INTEGRATION_ID_INVALID' },
+    })
+    expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
+
+    const invalidIntegrationQuery = await invokeRoute(
+      'get',
+      '/deprovision/events',
+      {
+        query: { integrationId: 'not-a-uuid' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(invalidIntegrationQuery.statusCode).toBe(400)
+    expect(invalidIntegrationQuery.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_INTEGRATION_ID_INVALID' },
+    })
+    expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
+
+    for (const path of [
+      '/deprovision-events/:eventId/effects',
+      '/deprovision/events/:eventId/effects',
+    ]) {
+      const invalidEffects = await invokeRoute('get', path, {
+        params: { eventId: 'not-a-uuid' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(invalidEffects.statusCode).toBe(400)
+      expect(invalidEffects.body).toMatchObject({
+        ok: false,
+        error: { code: 'DEPROVISION_EVENT_ID_INVALID' },
+      })
+    }
+    expect(deprovisionMocks.listDeprovisionEffects).not.toHaveBeenCalled()
+
+    const invalidRestore = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/reactivate',
+      {
+        params: { eventId: 'not-a-uuid' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(invalidRestore.statusCode).toBe(400)
+    expect(invalidRestore.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_EVENT_ID_INVALID' },
+    })
+    expect(deprovisionMocks.restoreDeprovisionEvent).not.toHaveBeenCalled()
+  })
+
+  it.each(['', 'abc', '10.5', '0', '201'])(
+    'rejects invalid deprovision event limit %j before querying',
+    async (limit) => {
+      const response = await invokeRoute(
+        'get',
+        '/integrations/:integrationId/deprovision-events',
+        {
+          params: { integrationId: DEPROVISION_INTEGRATION_ID },
+          query: { limit },
+          user: { id: 'admin-1', role: 'admin' },
+        },
+      )
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DEPROVISION_EVENT_LIMIT_INVALID' },
+      })
+      expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not expose database details from unexpected event, effect, or restore failures', async () => {
+    const databaseError = Object.assign(
+      new Error('duplicate key at localhost:5432 for private_table'),
+      { code: '23505' },
+    )
+    deprovisionMocks.listDeprovisionEvents.mockRejectedValueOnce(databaseError)
+    const eventsResponse = await invokeRoute(
+      'get',
+      '/integrations/:integrationId/deprovision-events',
+      {
+        params: { integrationId: DEPROVISION_INTEGRATION_ID },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(eventsResponse.statusCode).toBe(500)
+    expect(eventsResponse.body).toMatchObject({
+      error: { code: 'DEPROVISION_EVENTS_FAILED', message: 'List events failed' },
+    })
+
+    deprovisionMocks.listDeprovisionEffects.mockRejectedValueOnce(databaseError)
+    const effectsResponse = await invokeRoute(
+      'get',
+      '/deprovision-events/:eventId/effects',
+      {
+        params: { eventId: DEPROVISION_EVENT_ID },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(effectsResponse.statusCode).toBe(500)
+    expect(effectsResponse.body).toMatchObject({
+      error: { code: 'DEPROVISION_EFFECTS_FAILED', message: 'List effects failed' },
+    })
+
+    deprovisionMocks.restoreDeprovisionEvent.mockRejectedValueOnce(databaseError)
+    const restoreResponse = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/reactivate',
+      {
+        params: { eventId: DEPROVISION_EVENT_ID },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+    expect(restoreResponse.statusCode).toBe(500)
+    expect(restoreResponse.body).toMatchObject({
+      error: { code: 'DEPROVISION_RESTORE_FAILED', message: 'Restore failed' },
+    })
+    expect(JSON.stringify([
+      eventsResponse.body,
+      effectsResponse.body,
+      restoreResponse.body,
+    ])).not.toMatch(/23505|duplicate key|localhost|5432|private_table/i)
   })
 
   describe('approval-card config (CFG-2)', () => {
