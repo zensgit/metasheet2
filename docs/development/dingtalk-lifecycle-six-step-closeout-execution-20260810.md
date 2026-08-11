@@ -1,7 +1,7 @@
 # DingTalk lifecycle six-step closeout execution
 
 - Date: 2026-08-10
-- Updated: 2026-08-11
+- Updated: 2026-08-12
 - Status: **CODE + STAGING ALIAS CANARY COMPLETE / PENDING + DEPROVISION + EXTERNAL GATES NOT EXECUTED**
 - Baseline: `origin/main @ ddec28b12ebff97fae33af45553d77c149d816e1`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
@@ -88,7 +88,8 @@ Merge is not an enablement instruction. The staging alias canary was later execu
 | `preflight` | yes | readiness only; `migrations_pending_zero` must be **exactly `true`** (`unknown` fails — never treated as success) |
 | `off` | yes | **sole env write**: emergency clear of the three gates; previous-override backup + restore on restart/health/mode failure; backend health must be true after restart; exact mode `off` proven |
 | `alias` | yes (transient) | secret-backed password login before ON, during alias-only, and after required OFF rollback |
-| `pending` / `deprovision` | **NOT EXECUTABLE** | fail-closed preflight-only; no admit→activate / sync→deprovision verifier exists in this lane. Presence tokens are not ON enablers. |
+| `pending` | yes (transient, **NOT EXECUTED**) | explicit owned directory-account subject; admit-only or optional SSO activation; success requires OFF rollback; unobserved browser OAuth stays `NOT_EXECUTED` |
+| `deprovision` | yes (two-phase, **NOT EXECUTED**) | explicit owned subject in a dedicated one-account manual integration; exact preview/planner radius; pre-request reserved run UUID; exact ledger/restore; success requires OFF rollback |
 
 `action=off` is an **emergency operational rollback of the env gate only**. Design lock Rev 4.2 §4.2 / §4.4 permanently forbids reintroducing OR-column fallback on `users.email` / `username` / `mobile` as a long-term design after T2b. OFF is not “canary stage 1 complete.”
 
@@ -105,15 +106,15 @@ The safe OFF baseline and transient alias canary are proven:
 7. [Lifecycle status 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038) re-proved the exact staging SHA, healthy backend, zero pending migrations, mode `off`, and all three flags `false`.
 8. [Lifecycle alias 31504979575](https://github.com/zensgit/metasheet2/actions/runs/31504979575) proved real password login before ON, while alias-only was live, and after rollback. It reported zero collisions and finished in exact mode `off` with all three flags `false`.
 
-The former image-tag/health-commit conflict is resolved. Alias production enablement remains a separate owner GO. Pending and deprovision remain blocked by the absence of explicit real test subjects and secret-backed real verifiers.
+The former image-tag/health-commit conflict is resolved. Alias production enablement remains a separate owner GO. Pending and deprovision operators are implemented but remain blocked by the absence of an explicitly owned real test subject and, for deprovision, a dedicated one-account integration. The existing shared employee integration is not eligible.
 
 ### 3.3 Canary stages
 
 | Stage | Result | Required real proof |
 |---|---|---|
 | 1 | alias-only **PASS, rolled back** | password-login success against aliases + required `off` proof without OR-column fallback |
-| 2 | pending admission **NOT EXECUTED** | admit→activate on an explicit canary subject (not a presence token) |
-| 3 | deprovision **NOT EXECUTED** | sync→deprovision on the same explicit canary subject; then `off` clears the writer |
+| 2 | pending admission **NOT EXECUTED** | transient admit→activate on an explicit canary subject (not a presence token), then prove OFF |
+| 3 | deprovision **NOT EXECUTED** | dedicated one-account integration; reserved exact run UUID; sync→ledger→restore on the same subject, then prove OFF |
 
 ## 4. Owner and ops acceptance
 

@@ -1,6 +1,6 @@
 # DingTalk staging lifecycle canary and UAT execution record (2026-08-11)
 
-- Status: **PARTIAL EXECUTION / ALIAS + DESIGNATED ADMIN OAUTH LOGIN PASS / PENDING + DEPROVISION + U1-U13 NOT EXECUTED**
+- Status: **PARTIAL EXECUTION / ALIAS + DESIGNATED ADMIN OAUTH LOGIN PASS / PENDING + DEPROVISION OPERATORS READY BUT NOT EXECUTED / U1-U13 NOT EXECUTED**
 - Repository evidence head: `0287b250b33fe4c7ea98b880360af74fc08a5ebf`
 - Lifecycle staging deploy SHA: `ddec28b12ebff97fae33af45553d77c149d816e1`
 - Production-readiness inventory deploy SHA: `e27c8dbabb798cd1d3c407f1601430fd151df5bc`
@@ -119,8 +119,8 @@ remains the pre-change baseline.
 | Order | Stage | Result | Durable evidence / reason |
 |---|---|---|---|
 | 1 | alias-only | **PASS, rolled back** | Run `31504979575`; transient ON was proven by real password login and success required a return to exact OFF |
-| 2 | pending admission | **NOT EXECUTED** | No explicitly owned DingTalk source employee exists for a destructive admit -> activate test; no existing employee may be auto-selected |
-| 3 | deprovision | **NOT EXECUTED** | Requires a real source-side disable/removal of the same dedicated canary employee after pending activation succeeds |
+| 2 | pending admission | **NOT EXECUTED** | Operator exists, but no explicitly owned DingTalk source employee has been proven in the target integration; no existing employee may be auto-selected |
+| 3 | deprovision | **NOT EXECUTED** | Operator exists, but requires the same owned employee in a dedicated one-account integration plus a real source-side disable/removal |
 
 ### 4.1 Alias result
 
@@ -160,14 +160,34 @@ Required external input before execution:
 4. prove pending cannot log in, then activate it and prove the intended login path;
 5. restore `DIRECTORY_PENDING_ACTIVATION_ENABLED=false` and re-prove mode OFF.
 
+The operator accepts only the explicit directory-account secret. Its default phase proves pending
+admission and OFF rollback. Optional `PENDING_SSO_ACTIVATE` uses the real SSO activation path, but
+browser OAuth remains `NOT_EXECUTED` unless a human completes and observes that callback; the
+script does not promote an unobserved browser step to PASS.
+
 ### 4.3 Deprovision gate
 
-The read-only directory preview saw no removal candidate and reported zero would-deactivate
-accounts. Deprovision cannot be proven by editing the local database or by selecting a real
-employee. After Section 4.2 succeeds, an authorized operator must disable/remove that same
-dedicated employee at the DingTalk source, run sync with deprovision transiently enabled,
-verify the event/effect ledger and access denial, exercise restore as specified, and then
-return the flag to OFF.
+The earlier read-only directory preview saw no removal candidate and reported zero
+would-deactivate accounts. A later browser inspection showed that the active integration is a
+shared employee integration, so it is explicitly disqualified from destructive canary use.
+Deprovision cannot be proven by editing the local database or by selecting a real employee.
+
+After Section 4.2 succeeds, an authorized operator must create/use a separate active DingTalk
+integration that contains exactly the selected account (all active and inactive account rows
+count), has scheduler, admission automation, and member-group projection disabled, and uses
+`mark_inactive`. Apply requires
+`DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`, which attests that the source is disabled
+and no other operator will sync or edit this dedicated integration until the lifecycle flags are
+proven OFF. The preview and one-account checks are not an atomic scope lock, so this exclusive
+window is mandatory. The apply sequence then requires an exact one-subject preview and planner result,
+persists a random sync run UUID before env/HTTP, transiently enables only deprovision, and starts
+the async sync with that UUID. A lost 202 or runner crash retains the exact recovery journal;
+retries cannot start a second provider pull with the same UUID. Recovery binds only that run's
+single event and exact membership/grant/user effect triple. Restore probes the exact event tuple,
+reverses it, verifies the exact effect set and access graph, and leaves all three flags OFF.
+An exact run that terminates without a matching ledger event leaves a fail-closed journal. It must
+be resolved through an owner-reviewed abandonment procedure; deleting the journal to force a new
+apply is prohibited.
 
 ## 5. DingTalk directory readiness
 
@@ -243,12 +263,15 @@ DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false
 
 ## 8. Next executable actions
 
-1. Provision one dedicated staging DingTalk employee and authorize its use for pending and
-   deprovision canaries.
-2. Execute pending, prove rollback to OFF, then execute deprovision and prove rollback to OFF.
-3. Configure the staging Stream/template inputs and `LOG_LEVEL=info`; execute U1-U13 and the
+1. Complete the target-enterprise selection for the operator-controlled DingTalk account and
+   verify it appears in a read-only directory preview; otherwise provision it in the target corp.
+2. Provision a dedicated staging DingTalk employee and a separate one-account manual integration;
+   authorize that subject for pending and deprovision canaries.
+3. Execute pending and prove rollback to OFF, then execute two-phase deprovision and prove restore
+   plus rollback to OFF.
+4. Configure the staging Stream/template inputs and `LOG_LEVEL=info`; execute U1-U13 and the
    real callback corp-anchor procedure.
-4. Record named owners and explicit production switch decisions. Any absent evidence remains
+5. Record named owners and explicit production switch decisions. Any absent evidence remains
    `NOT EXECUTED`.
 
 Until those external actions occur, the lifecycle code line and alias staging canary are

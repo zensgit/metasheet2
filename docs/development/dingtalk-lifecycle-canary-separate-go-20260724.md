@@ -1,19 +1,19 @@
 # DingTalk lifecycle canary — separate ops GO (not auto-enabled)
 
 **Date:** 2026-07-24
-**Updated:** 2026-08-11 (bootstrap fixed canary admin + alias JWT mint from password login; bootstrap stdin secret transport / no container secret files / permissions-column omit / session revoke on repair / post-bootstrap OFF+health+SHA reassert; alias is a **transient** secret-backed cutover and run 31504979575 completed with required OFF rollback; pending/deprovision remain **NOT EXECUTABLE**)
+**Updated:** 2026-08-12 (alias run 31504979575 completed with required OFF rollback; pending/deprovision now have fail-closed transient operators but remain **NOT EXECUTED**; deprovision requires a dedicated one-account integration and pre-reserves its exact sync run UUID before env/HTTP)
 **Related locks:**
 - `dingtalk-directory-admission-activation-lifecycle-design-20260723.md` Rev 4.2
-- `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.2
+- `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.5
 - Closeout execution: `dingtalk-lifecycle-six-step-closeout-execution-20260810.md`
 
 ## What is NOT enabled by merge
 
 | Flag / action | Default after code land | Executable in this lane? |
 |---------------|-------------------------|--------------------------|
-| `DIRECTORY_PENDING_ACTIVATION_ENABLED` ON | **OFF** | **NOT EXECUTABLE** — no admit→activate verifier |
+| `DIRECTORY_PENDING_ACTIVATION_ENABLED` ON | **OFF** | **Executable only as a transient canary** on an explicit owned account. Default phase admits to pending and proves OFF rollback; optional SSO activation still records browser OAuth as `NOT_EXECUTED` until a human observes it. |
 | `AUTH_LOGIN_USE_ALIASES` ON (T2b cutover) | **OFF** | **Executable only as a transient canary** (`action=alias`). Success requires/proves OFF in the same run; failure restores the OFF override before failing. Runtime OFF cannot be proven if rollback recreate itself fails (override restored on disk). Requires secret-backed password login; short-lived admin JWT is minted from that login (never `secrets.ATTENDANCE_ADMIN_JWT`). |
-| `DIRECTORY_DEPROVISION_ENABLED` ON | **OFF** | **NOT EXECUTABLE** — no sync→deprovision verifier |
+| `DIRECTORY_DEPROVISION_ENABLED` ON | **OFF** | **Executable only as a two-phase transient canary** on an explicit owned account in a dedicated one-account integration. Apply and restore are separate confirmed operations; every exit restores/proves the flags OFF or reports that runtime OFF is unproven. |
 | Env-gate clear (`action=off`) | n/a | Executable emergency only (after migrations true + exact SHA) |
 | Dedicated canary admin (`action=bootstrap`) | n/a | Executable staging-only create/repair of the **fixed** owned row only (no lifecycle env write) |
 
@@ -34,7 +34,8 @@ Presence of canary subject/integration/owner tokens is **not** a real canary and
 | `off` | yes | emergency clear of the three env gates; previous-override restore on failure; health true after restart required |
 | `bootstrap` | yes (manual) | staging-only create/repair of fixed canary admin; see below; **no lifecycle env write** |
 | `alias` | yes (transient) | secret-backed cutover canary; see sequence below; success requires/proves OFF |
-| `pending` / `deprovision` | **NOT EXECUTABLE** | fail-closed preflight-only; `transition_applied=false` always |
+| `pending` | yes (transient, **NOT EXECUTED**) | explicit owned directory account only; pending admit or optional SSO activation; required OFF rollback; browser OAuth remains a human checkpoint |
+| `deprovision` | yes (two-phase, **NOT EXECUTED**) | dedicated one-account manual integration only; exact preview/planner radius; reserved run UUID + recovery journal; exact event/effects restore; required OFF rollback |
 
 Shared concurrency with `attendance-staging-window-runner`. Status artifacts stay values-free (booleans / counts / reason enums / SHA only).
 
@@ -120,12 +121,29 @@ As of 2026-08-11 the alias cutover canary is complete and rolled back. Pending a
 
 The former image-tag/health-commit provenance conflict is resolved. This establishes the safe OFF baseline and the transient alias staging canary; it does not authorize production alias traffic.
 
-Until a **secret-backed real verifier** exists for:
+The secret-backed operators now exist, but neither action has been run in staging. Execution still
+requires one explicitly owned source employee. Deprovision additionally refuses any integration
+that is scheduled, auto-admitting, member-group projecting, or contains anything other than the
+single selected directory account (inactive rows count too). The current shared employee
+integration is therefore ineligible by construction.
 
-- pending: real admit→activate on an explicit canary subject,
-- deprovision: real sync→deprovision on an explicit canary integration,
+Apply also requires the literal confirmation
+`DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`: the source is disabled, the integration
+is dedicated to the one canary account, and no other operator may sync or edit that integration
+until the apply window has returned all lifecycle flags to OFF. Preview plus the one-account
+precondition are strong fail-closed gates, but they are not an atomic scope lock; this explicit
+exclusive window is therefore a required operational hold, not an optional note.
 
-those ON actions stay **NOT EXECUTABLE**. The full values-free execution record is `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
+For deprovision apply, journal schema v4 persists the subject tuple and a random run UUID **before**
+the env write and HTTP request. The async API must claim that UUID; a repeated request returns the
+same run without a second provider pull. A lost 202 or runner crash is recovered only from that
+exact UUID, then the exact event/effect triple. Restore status is read by exact event/user/integration
+tuple rather than a recent-events page. No latest/sole-event inference is permitted.
+If the reserved run terminates without a matching ledger event, the journal intentionally blocks
+both overwrite and a guessed restore. That state requires an owner-reviewed abandonment procedure;
+operators must not delete the journal merely to retry.
+
+The full values-free execution record is `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
 
 ## Canary sequence
 
@@ -133,8 +151,8 @@ those ON actions stay **NOT EXECUTABLE**. The full values-free execution record 
 2. **Complete:** configure the fixed alias-canary login secrets without exposing their values.
 3. **Complete:** create/repair the dedicated canary administrators and prove password login with all flags OFF.
 4. **Complete:** dispatch `action=alias`; prove transient ON login and required OFF rollback login.
-5. **NOT EXECUTED:** real admit→activate on an explicitly owned DingTalk employee, then pending rollback.
-6. **NOT EXECUTED:** real source departure and deprovision/restore proof on that same employee, then rollback.
+5. **NOT EXECUTED (operator ready):** real admit→activate on an explicitly owned DingTalk employee, then pending rollback.
+6. **NOT EXECUTED (operator ready, dedicated integration required):** real source departure and deprovision/restore proof on that same employee, then rollback.
 7. Production remains a separate GO.
 
 ## Owner note

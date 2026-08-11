@@ -5,6 +5,7 @@ import { Logger } from '../core/logger'
 import {
   DirectorySyncFrozenByTransferError,
   DirectorySyncInProgressError,
+  DirectorySyncRunReplayError,
   DirectoryTenantChangeBlockedError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
@@ -14,6 +15,7 @@ import {
   bindDirectoryAccount,
   createDirectoryIntegration,
   getDirectorySyncScheduleSnapshot,
+  getDirectorySyncRun,
   getDirectoryAccountSummary,
   getDirectoryReviewItem,
   listDirectoryIntegrationAccounts,
@@ -533,9 +535,17 @@ export function adminDirectoryRouter(): Router {
     // where the pull outlives any sane request timeout) ask for 202 + runId and poll the
     // runs endpoint.
     if (req.body?.async === true) {
+      const requestedRunId = typeof req.body?.runId === 'string' ? req.body.runId.trim() : ''
+      if (requestedRunId && !UUID_SHAPE_RE.test(requestedRunId)) {
+        jsonError(res, 400, 'DIRECTORY_SYNC_RUN_ID_INVALID', 'runId must be a UUID')
+        return
+      }
       try {
         const runId = await new Promise<string>((resolve, reject) => {
-          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', { onRunStarted: resolve })
+          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', {
+            onRunStarted: resolve,
+            requestedRunId: requestedRunId || undefined,
+          })
             .then((result) => {
               logger.info(`Async directory sync finished for ${req.params.integrationId} (run ${result.run.id})`)
             })
@@ -551,6 +561,16 @@ export function adminDirectoryRouter(): Router {
         jsonOk(res, { accepted: true, runId, integrationId: req.params.integrationId })
         return
       } catch (error) {
+        if (error instanceof DirectorySyncRunReplayError) {
+          res.status(202)
+          jsonOk(res, {
+            accepted: true,
+            runId: error.runId,
+            integrationId: req.params.integrationId,
+            replayed: true,
+          })
+          return
+        }
         // DT-HARDEN-05: the lease conflict is thrown by the claim, BEFORE onRunStarted
         // ever fires, so it always lands in this catch — and it is the same benign
         // "already running" state as in the non-async branch below. Map it identically:
@@ -632,6 +652,26 @@ export function adminDirectoryRouter(): Router {
       })
     } catch (error) {
       jsonError(res, 500, 'DIRECTORY_RUNS_FAILED', readErrorMessage(error, 'Failed to load sync runs'))
+    }
+  })
+
+  router.get('/integrations/:integrationId/runs/:runId', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!UUID_SHAPE_RE.test(req.params.runId)) {
+      jsonError(res, 400, 'DIRECTORY_SYNC_RUN_ID_INVALID', 'runId must be a UUID')
+      return
+    }
+
+    try {
+      const run = await getDirectorySyncRun(req.params.integrationId, req.params.runId)
+      if (!run) {
+        jsonError(res, 404, 'DIRECTORY_RUN_NOT_FOUND', 'Directory sync run not found')
+        return
+      }
+      jsonOk(res, { run })
+    } catch (error) {
+      jsonError(res, 500, 'DIRECTORY_RUN_FAILED', readErrorMessage(error, 'Failed to load sync run'))
     }
   })
 
