@@ -2,7 +2,11 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import type { QueryFn } from './permission-service'
 import { assertInTransaction } from './pg-transaction-guard'
-import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
+import {
+  acquireCanonicalSheetFencesInOrder,
+  assertNoActiveWriterBlock,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 import { selectCheckpointByAnchorSeq } from './history-trust-checkpoint'
 import { reconstructRecordsAtSeq, type RecordStateAtT } from './record-reconstructor'
 import { mintOperation, sealOperation } from './operation-ledger'
@@ -505,6 +509,52 @@ export interface ExactAnchorLockedAuthorityScope {
 const recoveryRecordKey = (sheetId: string, recordId: string): string => `${sheetId}\u0000${recordId}`
 
 /**
+ * P22 foreign-fence availability — discover the COMPLETE set of sheet ids this recovery will lock
+ * (source + every declared link-field foreign sheet + every sheet on a current inbound/outbound edge
+ * touching the source). PURE READ: no lock, no `composed`, safe to run BEFORE the canonical fences so
+ * they can be acquired in ONE deterministic sheet-id order.
+ *
+ * This is the sheet-id half of {@link lockExactAnchorRecoveryAuthorityScope} (its `authoritySheetIds`
+ * set — the `requestedRecordKeys`/`foreignSheetByField` record-level detail is deliberately NOT
+ * reproduced) and MUST stay in sync with it: the fences taken from this list are exactly the sheets
+ * whose `meta_sheets` row + `meta_records` rows that function later NOWAIT-locks. Any drift (a link
+ * added/removed between this read and that function's re-read) is SAFE — an extra fence is harmless, and
+ * a newly-appeared foreign sheet simply keeps the pre-existing NOWAIT behaviour for that one edge; no
+ * deadlock can result because every post-fence lock is NOWAIT.
+ */
+export async function discoverRecoveryAuthoritySheetIds(
+  query: QueryFn,
+  sourceSheetId: string,
+): Promise<string[]> {
+  const ids = new Set<string>([sourceSheetId])
+  const linkFields = await query(
+    `SELECT id, property FROM meta_fields WHERE sheet_id = $1 AND type = 'link'`,
+    [sourceSheetId],
+  )
+  for (const row of linkFields.rows as Array<{ property?: unknown }>) {
+    const property =
+      row.property !== null && typeof row.property === 'object' && !Array.isArray(row.property)
+        ? (row.property as Record<string, unknown>)
+        : undefined
+    const foreignSheetId = resolveForeignSheetIdFromProperty(property)
+    if (foreignSheetId) ids.add(foreignSheetId)
+  }
+  const currentEdges = await query(
+    `SELECT source.sheet_id AS source_sheet_id, target.sheet_id AS target_sheet_id
+       FROM meta_links link
+       LEFT JOIN meta_records source ON source.id = link.record_id
+       LEFT JOIN meta_records target ON target.id = link.foreign_record_id
+      WHERE source.sheet_id = $1 OR target.sheet_id = $1`,
+    [sourceSheetId],
+  )
+  for (const row of currentEdges.rows as Array<{ source_sheet_id?: unknown; target_sheet_id?: unknown }>) {
+    if (typeof row.source_sheet_id === 'string' && row.source_sheet_id) ids.add(row.source_sheet_id)
+    if (typeof row.target_sheet_id === 'string' && row.target_sheet_id) ids.add(row.target_sheet_id)
+  }
+  return [...ids].sort()
+}
+
+/**
  * Establish one global sheet-then-record lock order for the complete recovery relation surface.
  *
  * The scope is deliberately conservative: every declared link sheet, every current inbound/outbound
@@ -744,8 +794,24 @@ export async function applyExactAnchorRecovery(
         throw new ApplyRefusalError('recovery-trust-required')
       }
 
-      // 1. Fence-first (L4).
-      await fenceWriterEntry(query, input.sheetId)
+      // 1. Fence-first (L4) — P22 foreign-fence availability. Acquire the canonical per-sheet write fence
+      //    for EVERY sheet this recovery will lock (source + all linked foreign sheets) in ONE
+      //    deterministic sheet-id order, BEFORE any row lock. This MUST be a single ordered acquisition:
+      //    the source fence can NOT be taken first with the foreign fences added later, or two mirror
+      //    recoveries (source=A/foreign=B vs source=B/foreign=A) invert the fence order and ABBA-deadlock.
+      //    Foreign sheets now serialise on the SAME blocking canonical fence their own fenced writers take
+      //    instead of failing a NOWAIT row lock under a foreign writer that merely holds a linked record —
+      //    the availability defect this slice fixes. Deadlock-free: every writer holds at most ONE
+      //    canonical fence, and recovery holds ALL of its canonical fences before ANY (NOWAIT) row lock, so
+      //    a recovery blocked on a fence holds no row lock another writer could wait on (single global
+      //    ordered acquisition). Flag-gated ⇒ byte-identical to the prior single-sheet `fenceWriterEntry`
+      //    when the flag is OFF (recovery refuses at the ENV-trust gate below regardless). The durable
+      //    writer-block check is kept SOURCE-only (fence-before-check), exactly as `fenceWriterEntry` did.
+      if (isWriterFenceEnabled()) {
+        const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, input.sheetId)
+        await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
+        await assertNoActiveWriterBlock(query, input.sheetId)
+      }
 
       // 2. ENV-ONLY TRUST FLAGS — before any sheet-state adjudication, burn, or write. Fence alone is
       //    a flag-off no-op; refuse unless the trusted recovery substrate is actually armed.
