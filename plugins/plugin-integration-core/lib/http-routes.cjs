@@ -2730,9 +2730,11 @@ function createHandlers(services, options = {}) {
 
     async k3WiseCallAudit(req, res) {
       // Internal operational evidence only. The snapshot is process-local and
-      // values-free, but still reveals connector activity, so keep it admin-only.
+      // values-free, but still reveals connector activity, so keep it admin-only
+      // and reuse the existing tenant boundary before selecting its partition.
       requireAccess(req, 'admin')
-      return sendOk(res, getK3WiseCallAuditSnapshot())
+      const tenantId = resolveTenantId(req, requestQuery(req))
+      return sendOk(res, getK3WiseCallAuditSnapshot({ tenantId }))
     },
 
     async adaptersList(req, res) {

@@ -1830,7 +1830,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     try {
       // The counter receives the canonical wire pathname only long enough to map it
       // into a closed operation vocabulary. It retains no URL or request value.
-      recordK3WiseCall(wirePathname, intent)
+      recordK3WiseCall(wirePathname, intent, normalizedSystem.tenantId)
       const response = await fetchImpl(url, {
         method,
         headers: requestHeaders,

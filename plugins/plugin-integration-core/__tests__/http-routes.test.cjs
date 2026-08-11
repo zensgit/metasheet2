@@ -635,8 +635,9 @@ async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
 
   const allowed = await invoke(routes, 'GET', routePath, { user: ADMIN_USER })
   assertOkResponse(allowed, 200)
-  assert.equal(allowed.body.data.version, '2026.08.v1')
+  assert.equal(allowed.body.data.version, '2026.08.v2')
   assert.equal(allowed.body.data.scope, 'process')
+  assert.match(allowed.body.data.processEpoch, /^[0-9a-f]{32}$/)
   assert.deepEqual(Object.keys(allowed.body.data.counts), [
     'materialGetDetail',
     'materialGetList',
@@ -651,6 +652,12 @@ async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
   for (const forbidden of ['url', 'path', 'query', 'credential', 'request', 'response', 'tenant']) {
     assert.equal(serialized.toLowerCase().includes(forbidden), false, `audit response excludes ${forbidden}`)
   }
+
+  const crossTenant = await invoke(routes, 'GET', routePath, {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenant, [403])
 }
 
 async function testExternalSystemRoutes() {
