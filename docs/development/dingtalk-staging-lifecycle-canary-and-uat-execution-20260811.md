@@ -1,6 +1,6 @@
 # DingTalk staging lifecycle canary and UAT execution record (2026-08-11)
 
-- Status: **PARTIAL EXECUTION / ALIAS CANARY PASS / PENDING + DEPROVISION + U1-U13 NOT EXECUTED**
+- Status: **PARTIAL EXECUTION / ALIAS + OAUTH LOGIN PASS / PENDING + DEPROVISION + U1-U13 NOT EXECUTED**
 - Repository evidence head: `325917c0a484522ef9ce87b286d5d986d4e205b3`
 - Lifecycle staging deploy SHA: `ddec28b12ebff97fae33af45553d77c149d816e1`
 - Production-readiness inventory deploy SHA: `e27c8dbabb798cd1d3c407f1601430fd151df5bc`
@@ -39,6 +39,28 @@ password-login legs using the configured canary credential:
 - after rollback to OFF: `post_rollback_login_ok=true`.
 
 Password rotation and secret assignment do not authorize any lifecycle flag.
+
+### 2.1 Real DingTalk account binding and login
+
+The operator completed the DingTalk consent in an authenticated
+`staging-owner-admin` browser session. The callback returned to the settings page with the
+bound result, and a fresh status read showed all of the following simultaneously:
+
+```text
+dingtalk_available=true
+dingtalk_enabled=true
+dingtalk_identity_bound=true
+directory_managed=false
+```
+
+The browser then logged out of the password-authenticated session, returned to `/login`, and
+selected `Use DingTalk login`. Without entering the local password again, the real DingTalk
+OAuth callback completed and redirected to the authenticated `/attendance` page. The earlier
+fail-closed `unlinked_enabled_local_user` result therefore changed to a successful login only
+after the explicit binding operation.
+
+This is evidence for account binding and DingTalk OAuth login only. It is not evidence for the
+interactive-card Stream callback gate in Section 6.
 
 ## 3. Exact OFF baseline
 
@@ -186,14 +208,12 @@ DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false
 
 ## 8. Next executable actions
 
-1. The owner completes the open DingTalk OAuth browser handoff; record success or the
-   values-free rejection reason. This is login evidence only, not U11-a.
-2. Provision one dedicated staging DingTalk employee and authorize its use for pending and
+1. Provision one dedicated staging DingTalk employee and authorize its use for pending and
    deprovision canaries.
-3. Execute pending, prove rollback to OFF, then execute deprovision and prove rollback to OFF.
-4. Configure the staging Stream/template inputs and `LOG_LEVEL=info`; execute U1-U13 and the
+2. Execute pending, prove rollback to OFF, then execute deprovision and prove rollback to OFF.
+3. Configure the staging Stream/template inputs and `LOG_LEVEL=info`; execute U1-U13 and the
    real callback corp-anchor procedure.
-5. Record named owners and explicit production switch decisions. Any absent evidence remains
+4. Record named owners and explicit production switch decisions. Any absent evidence remains
    `NOT EXECUTED`.
 
 Until those external actions occur, the lifecycle code line and alias staging canary are
