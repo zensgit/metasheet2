@@ -9,7 +9,7 @@
 > Fresh base: `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `ea2043552060383f46984781c063d71efeb88f0d`
+> `54c23a4dcd8539d126c3654bed92b487af7247da`
 
 ## 0. Evidence rules
 
@@ -31,7 +31,7 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `0287b250b33fe4c7ea98b880360af74fc08a5ebf` |
-| Evidence head | `ea2043552060383f46984781c063d71efeb88f0d` |
+| Evidence head | `54c23a4dcd8539d126c3654bed92b487af7247da` |
 | Database | Local PostgreSQL 15.17 |
 | Scratch database | `metasheet_w6_4849_codex_20260812_a` on a local role; credentials were not recorded |
 | Data | Synthetic only |

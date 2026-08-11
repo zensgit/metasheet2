@@ -13,7 +13,7 @@
 > (the merge of PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `ea2043552060383f46984781c063d71efeb88f0d`
+> `54c23a4dcd8539d126c3654bed92b487af7247da`
 
 ## 0. Scope delivered
 
