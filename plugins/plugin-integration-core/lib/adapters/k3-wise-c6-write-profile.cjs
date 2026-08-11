@@ -315,7 +315,13 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   function hasMeaningfulMaterialIdentifier(record) {
     if (!record || typeof record !== 'object') return false
     return ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']
-      .some((field) => isMeaningfulK3Identifier(record[field]))
+      .some((field) => {
+        const value = record[field]
+        // The adapter predicate also supports structured identifiers in generic response
+        // extraction. Material existence proof is narrower: a stable ID must be scalar.
+        if (typeof value !== 'number' && typeof value !== 'string') return false
+        return isMeaningfulK3Identifier(value)
+      })
   }
 
   // Some live K3 GetDetail endpoints return HTTP/business success for an unknown material while

@@ -466,6 +466,24 @@ for (const placeholderId of ['null', 'UNDEFINED', 'None']) {
   })
 }
 
+for (const { label, value } of [
+  { label: 'boolean', value: true },
+  { label: 'object', value: {} },
+  { label: 'array', value: [] },
+]) {
+  test(`lookup rejects a non-scalar ${label} material identifier as independent identity`, async () => {
+    const dryRun = await dryRunExternalWrite(c6Inputs({
+      rows: [{ code: 'NON-SCALAR-ID-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+      fetchPair: mockK3({ placeholderId: value }),
+      tokenStore: memoryStore(),
+    }))
+
+    assert.equal(dryRun.counts.add, 1)
+    assert.equal(dryRun.counts.update, 0)
+    assert.equal(dryRun.counts.held, 0)
+  })
+}
+
 test('lookup rejects a malformed raw Data container even when a normalized record is present', async () => {
   const input = c6Inputs({
     rows: [{ code: 'MALFORMED-RAW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
