@@ -28,7 +28,9 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LIB = join(HERE, 'attendance-window-runner-pipeline.lib.sh')
 const REMOTE_SH = join(HERE, 'attendance-staging-window-runner-remote.sh')
+const LIFECYCLE_REMOTE_SH = join(HERE, 'dingtalk-lifecycle-staging-canary-remote.sh')
 const WORKFLOW = join(HERE, '..', '..', '.github', 'workflows', 'attendance-staging-window-runner.yml')
+const STAGING_COMPOSE = join(HERE, '..', '..', 'docker-compose.app.staging.yml')
 
 function runPipefailBash(script) {
   // Same shape as the workflow's remote invocation: bash -o pipefail -c '<script>'.
@@ -106,6 +108,117 @@ test('workflow shape contract: remote commands run under explicit `bash -o pipef
     `expected every remote (ssh) command to be wrapped in \`bash -o pipefail -c\` (sync + action), found ${pipefailInvocations.length}`,
   )
   assert.doesNotMatch(yaml, /bash\s+-s\b/, 'the workflow must not fall back to `ssh ... bash -s` (login-shell pipefail is not guaranteed)')
+})
+
+test('workflow pins deploy-host identity for every SSH and SCP operation', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(workflow, /DEPLOY_KNOWN_HOSTS: \$\{\{ secrets\.DEPLOY_KNOWN_HOSTS \}\}/)
+  assert.match(workflow, /DEPLOY_KNOWN_HOSTS is required/)
+  assert.match(workflow, /decoded_known_hosts=.*base64 -d/)
+  assert.match(workflow, /ssh-ed25519\|ssh-rsa\|ecdsa-sha2\|ssh-dss/)
+  assert.match(workflow, /did not resolve to a recognizable key/)
+  assert.doesNotMatch(workflow, /StrictHostKeyChecking=no/)
+  const strictUses = workflow.match(/StrictHostKeyChecking=yes/g) || []
+  assert.ok(strictUses.length >= 3, `expected strict host checks on sync SSH, compose SCP, and remote action; found ${strictUses.length}`)
+  assert.match(workflow, /UserKnownHostsFile=~\/\.ssh\/known_hosts/)
+  assert.match(workflow, /UserKnownHostsFile=\$HOME\/\.ssh\/known_hosts/)
+})
+
+function assertPersistentComposeContract({ workflow, remote, lifecycleRemote, stagingCompose }) {
+  assert.match(
+    workflow,
+    /scp[^\n]*\\\n\s+docker-compose\.app\.staging\.yml \\\n\s+"\$DEPLOY_USER@\$DEPLOY_HOST:\$\{runner_dir\}\/docker-compose\.app\.staging\.yml"/,
+    'the remote action must receive the compose file from the exact workflow checkout',
+  )
+  assert.match(remote, /PERSISTENT_STAGING_COMPOSE_FILE="\$\{RUNNER_PERSIST_DIR\}\/docker-compose\.app\.staging\.yml"/)
+  assert.match(remote, /prepare_staging_compose_for_deploy\(\)/)
+  assert.match(remote, /candidate="\$\{HERE\}\/docker-compose\.app\.staging\.yml"/)
+  assert.match(remote, /mv -f "\$STAGING_COMPOSE_CANDIDATE_TMP" "\$PERSISTENT_STAGING_COMPOSE_FILE"/)
+
+  const deployStart = remote.indexOf('action_deploy() {')
+  const deployEnd = remote.indexOf('\naction_smoke() {', deployStart)
+  const deploy = remote.slice(deployStart, deployEnd)
+  const prepareIndex = deploy.indexOf('prepare_staging_compose_for_deploy')
+  const pairValidationIndex = deploy.indexOf('-f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config')
+  const baseMoveIndex = deploy.indexOf('mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"')
+  assert.ok(prepareIndex >= 0 && prepareIndex < pairValidationIndex, 'deploy must prepare the checked-out base before pair validation')
+  assert.ok(pairValidationIndex < baseMoveIndex, 'the base/override pair must validate before either persistent file changes')
+  assert.equal(
+    (remote.match(/prepare_staging_compose_for_deploy/g) || []).length,
+    2,
+    'only the function definition and action=deploy call may prepare the persistent compose',
+  )
+
+  assert.match(stagingCompose, /METASHEET_BUILD_COMMIT: \$\{IMAGE_TAG:-unknown\}/)
+  assert.match(stagingCompose, /METASHEET_BUILD_IMAGE_TAG: \$\{IMAGE_TAG:-unknown\}/)
+  assert.match(
+    remote,
+    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s+docker compose --project-directory "\$STAGING_DIR" -f "\$STAGING_COMPOSE_FILE" -f "\$OVERRIDE_FILE"/,
+    'live pull/up must render health identity from the exact deploy SHA',
+  )
+  assert.match(
+    deploy,
+    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s+docker compose --project-directory "\$STAGING_DIR" -f "\$STAGING_COMPOSE_CANDIDATE_TMP" -f "\$override_tmp" config/,
+    'base/override validation must use the same exact-SHA interpolation as live pull/up',
+  )
+  assert.equal(
+    (remote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
+    3,
+    'every non-version-check attendance compose invocation must pin the staging project directory',
+  )
+  assert.equal(
+    (lifecycleRemote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
+    1,
+    'the lifecycle compose entry point must pin the staging project directory',
+  )
+  for (const source of [remote, lifecycleRemote]) {
+    assert.match(source, /PERSISTENT_STAGING_COMPOSE_FILE=/)
+  }
+}
+
+test('deploy ships and atomically installs the checked-out staging compose at a persistent path', () => {
+  assertPersistentComposeContract({
+    workflow: readFileSync(WORKFLOW, 'utf8'),
+    remote: readFileSync(REMOTE_SH, 'utf8'),
+    lifecycleRemote: readFileSync(LIFECYCLE_REMOTE_SH, 'utf8'),
+    stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+  })
+})
+
+test('MUTATION: removing the deploy compose preparation call turns the full contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const deployStart = original.indexOf('action_deploy() {')
+  const deployEnd = original.indexOf('\naction_smoke() {', deployStart)
+  const mutated = `${original.slice(0, deployStart)}${original.slice(deployStart, deployEnd).replace(
+    '  prepare_staging_compose_for_deploy\n',
+    '',
+  )}${original.slice(deployEnd)}`
+  assert.throws(
+    () => assertPersistentComposeContract({
+      workflow: readFileSync(WORKFLOW, 'utf8'),
+      remote: mutated,
+      lifecycleRemote: readFileSync(LIFECYCLE_REMOTE_SH, 'utf8'),
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /deploy must prepare the checked-out base/,
+  )
+})
+
+test('MUTATION: dropping exact-SHA interpolation from live compose turns the health contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    'IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \\\n    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
+    'docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
+  )
+  assert.throws(
+    () => assertPersistentComposeContract({
+      workflow: readFileSync(WORKFLOW, 'utf8'),
+      remote: mutated,
+      lifecycleRemote: readFileSync(LIFECYCLE_REMOTE_SH, 'utf8'),
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /live pull\/up must render health identity/,
+  )
 })
 
 test('dsn_database_name: extracts the db-name path segment, stripping the query string', () => {
@@ -306,15 +419,15 @@ test('persistent override: lives under $HOME/.metasheet2/window-runner, NOT the 
 test('persistent override: written atomically — mktemp candidate + docker compose config validation + rename, never a truncating write straight onto the live file', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
   assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX"\)"/, 'expected a mktemp candidate override in the persist dir (X placeholder at the END — no trailing suffix)')
-  const validateIdx = remote.indexOf('docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config')
+  const validateIdx = remote.indexOf('docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config')
   const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
   assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
   // the validation MUST run in the same cwd as compose_staging() (cd "$STAGING_DIR"), or it
   // resolves relative env_file/.env differently than the config `up -d` actually executes
   assert.match(
-    remote.slice(Math.max(0, validateIdx - 40), validateIdx),
-    /\(cd "\$STAGING_DIR" &&\s*$/,
-    'candidate override validation must run inside (cd "$STAGING_DIR" && docker compose …), matching compose_staging()',
+    remote.slice(Math.max(0, validateIdx - 120), validateIdx),
+    /\(cd "\$STAGING_DIR" && IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s*$/,
+    'candidate pair validation must use the staging cwd and exact-SHA interpolation, matching compose_staging()',
   )
   assert.notEqual(mvIdx, -1, 'candidate override must be atomically renamed into place')
   assert.ok(validateIdx < mvIdx, 'validation must come BEFORE the atomic rename')
