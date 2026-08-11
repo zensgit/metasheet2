@@ -99,6 +99,7 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
           node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
           node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
           node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
@@ -176,6 +177,13 @@ jobs:
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
+
+      # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
+      # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
+      - name: Production maintenance SSH host-identity contract (required lane)
+        id: production-maintenance-ssh-host-identity-contract
+        if: matrix.node-version == '20.x'
+        run: node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
 
       # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
       # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
