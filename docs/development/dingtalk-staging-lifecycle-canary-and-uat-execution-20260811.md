@@ -1,7 +1,7 @@
 # DingTalk staging lifecycle canary and UAT execution record (2026-08-11)
 
-- Status: **PARTIAL EXECUTION / ALIAS + OAUTH LOGIN PASS / PENDING + DEPROVISION + U1-U13 NOT EXECUTED**
-- Repository evidence head: `325917c0a484522ef9ce87b286d5d986d4e205b3`
+- Status: **PARTIAL EXECUTION / ALIAS + DESIGNATED ADMIN OAUTH LOGIN PASS / PENDING + DEPROVISION + U1-U13 NOT EXECUTED**
+- Repository evidence head: `0287b250b33fe4c7ea98b880360af74fc08a5ebf`
 - Lifecycle staging deploy SHA: `ddec28b12ebff97fae33af45553d77c149d816e1`
 - Production-readiness inventory deploy SHA: `e27c8dbabb798cd1d3c407f1601430fd151df5bc`
 - Owner instruction: keep all lifecycle flags OFF after every canary; do not convert missing real-enterprise evidence into PASS.
@@ -62,6 +62,33 @@ after the explicit binding operation.
 This is evidence for account binding and DingTalk OAuth login only. It is not evidence for the
 interactive-card Stream callback gate in Section 6.
 
+### 2.2 Designated DingTalk administrator login
+
+The operator selected the existing active directory account designated for this staging
+administrator check. A read-only inventory first proved that it was linked to one local user and
+had a complete DingTalk identity, but had no DingTalk login grant and did not have the platform
+administrator role. With explicit owner approval, the administrative API then performed exactly
+two auditable access-graph changes for that existing local user:
+
+```text
+platform_admin=true
+dingtalk_login_grant_enabled=true
+directory_linked=true
+identity_union_id_present=true
+identity_open_id_present=true
+```
+
+The OAuth chooser initially presented a different cached DingTalk account. That account was not
+authorized; the operator returned to the account chooser and completed consent with the designated
+administrator account. The backend recorded a fresh DingTalk login at
+`2026-08-11T16:40:37.205Z`, the callback redirected to the authenticated `/attendance` page, and
+the same browser session subsequently loaded `/admin/users` successfully. This proves both the
+real DingTalk login and effective platform-administrator authorization. It does not identify or
+authorize a destructive pending/deprovision canary subject.
+
+These access-graph changes did not write any lifecycle environment switch. The fresh OFF proof in
+Section 3 was taken after the changes.
+
 ## 3. Exact OFF baseline
 
 [Lifecycle status run 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038)
@@ -78,6 +105,14 @@ completed successfully at repository head
 | `DIRECTORY_PENDING_ACTIVATION_ENABLED` | `false` |
 | `DIRECTORY_DEPROVISION_ENABLED` | `false` |
 | transition applied | `false` (read-only status action) |
+
+A second read-only status run
+[31513394261](https://github.com/zensgit/metasheet2/actions/runs/31513394261) completed after the
+designated administrator role/grant change at repository head
+`0287b250b33fe4c7ea98b880360af74fc08a5ebf`. Its downloaded artifact again reports the same
+staging build SHA, healthy backend, zero pending migrations, `mode=off`, all three lifecycle flags
+`false`, and `transition_applied=false`. This is the current terminal-state proof; the earlier run
+remains the pre-change baseline.
 
 ## 4. Canary sequence
 
