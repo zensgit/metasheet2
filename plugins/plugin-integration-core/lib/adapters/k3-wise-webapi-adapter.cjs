@@ -2590,6 +2590,7 @@ function resolveEffectiveK3WiseObjects(config) {
 
 module.exports = {
   K3_WISE_WEBAPI_ADAPTER_METADATA,
+  isMeaningfulK3Identifier: isMeaningfulIdentifier,
   resolveEffectiveK3WiseObjects,
   K3_PROFILE_PINNED_REQUEST_KEYS,
   K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,

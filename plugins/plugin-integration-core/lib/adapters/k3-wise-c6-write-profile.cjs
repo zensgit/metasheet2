@@ -23,7 +23,10 @@
 
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
-const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
+const {
+  isMeaningfulK3Identifier,
+  resolveEffectiveK3WiseObjects,
+} = require('./k3-wise-webapi-adapter.cjs')
 const {
   K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
   K3WISE_MATERIAL_LIST_B4_TEMPLATE,
@@ -309,6 +312,50 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
     return normalized.length > 0 ? normalized : null
   }
 
+  function hasMeaningfulMaterialIdentifier(record) {
+    if (!record || typeof record !== 'object') return false
+    return ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']
+      .some((field) => {
+        const value = record[field]
+        // The adapter predicate also supports structured identifiers in generic response
+        // extraction. Material existence proof is narrower: a stable ID must be scalar.
+        if (typeof value !== 'number' && typeof value !== 'string') return false
+        return isMeaningfulK3Identifier(value)
+      })
+  }
+
+  // Some live K3 GetDetail endpoints return HTTP/business success for an unknown material while
+  // echoing only the requested FNumber. The WebAPI adapter deliberately fills a missing FNumber
+  // from that request so ordinary read callers retain correlation, but that synthesized field is
+  // not existence evidence for C6. When the raw envelope is available, require the raw key plus
+  // one independently returned material fact. Test doubles without raw envelopes follow the same
+  // identity rule on their record instead of receiving a production-only bypass.
+  function hasIndependentMaterialIdentity(read, record, keyField, requestedKey) {
+    let candidate = record
+    let wrapper = null
+    if (read && read.raw && typeof read.raw === 'object') {
+      const data = read.raw.Data
+      wrapper = Array.isArray(data)
+        ? data.find((item) => item && typeof item === 'object' && !Array.isArray(item))
+        : (data && typeof data === 'object' && !Array.isArray(data) ? data : null)
+      if (!wrapper) return false
+      candidate = wrapper.Data && typeof wrapper.Data === 'object' && !Array.isArray(wrapper.Data)
+        ? wrapper.Data
+        : wrapper
+    }
+    if (!candidate || typeof candidate !== 'object') return false
+    // Mirror extractMaterialDetailRecord's supported response shapes without its final
+    // request-key correlation fallback: an independently returned inner key wins; otherwise
+    // use an independently returned outer-wrapper key. Never use record[keyField] here because
+    // the adapter may have synthesized it from the request.
+    const rawKey = normalizeLookupKey(candidate[keyField])
+      ?? normalizeLookupKey(wrapper && wrapper[keyField])
+    if (rawKey !== requestedKey) return false
+    return hasMeaningfulMaterialIdentifier(candidate)
+      || hasMeaningfulMaterialIdentifier(wrapper)
+      || normalizeLookupKey(candidate.FName) !== null
+  }
+
   function saveFailure() {
     const error = new Error('K3 WISE Save reported row failure')
     // Review #4761 P2: UNCONDITIONALLY the registered closed token. Passing through the
@@ -453,7 +500,8 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
           .map(unwrapReferenceShapes)
           .filter((record) => requestedKey !== null
             && record && typeof record === 'object'
-            && normalizeLookupKey(record[keyField]) === requestedKey)
+            && normalizeLookupKey(record[keyField]) === requestedKey
+            && hasIndependentMaterialIdentity(read, record, keyField, requestedKey))
         return { data: matching }
       } catch (error) {
         const code = error && error.details && error.details.code
