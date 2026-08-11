@@ -29,6 +29,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   rmSync,
 } from 'node:fs'
@@ -1972,8 +1973,8 @@ ON
 
 /** Extract the embedded non-secret bootstrap Node program (NODE heredoc). */
 function bootstrapNodeSource(source = read(REMOTE_SH)) {
-  const start = source.indexOf("cat >\"$node_tmp\" <<'NODE'")
-  assert.notEqual(start, -1, 'bootstrap node_tmp NODE heredoc must exist')
+  const start = source.indexOf("cat >\"$BOOTSTRAP_NODE_TMP\" <<'NODE'")
+  assert.notEqual(start, -1, 'bootstrap BOOTSTRAP_NODE_TMP NODE heredoc must exist')
   const bodyStart = source.indexOf('\n', start) + 1
   const end = source.indexOf('\nNODE\n', bodyStart)
   assert.notEqual(end, -1, 'NODE terminator missing')
@@ -2132,7 +2133,7 @@ test('bootstrap create and repair upsert user_session_revocations like session-r
   assert.equal(createFailed, true)
 })
 
-test('bootstrap streams secrets over docker exec stdin; never docker cp container secret files', () => {
+test('bootstrap frames secrets before docker exec; never nests heredoc pipeline or copies container files', () => {
   const source = read(REMOTE_SH)
   const start = source.indexOf('bootstrap_lifecycle_canary_admin()')
   const end = source.indexOf('\n# Admin API via JWT file', start)
@@ -2141,10 +2142,26 @@ test('bootstrap streams secrets over docker exec stdin; never docker cp containe
   assert.match(body, /readFrame|readUInt32BE/)
   assert.match(body, /docker exec -i/)
   assert.match(body, /no container secret files/i)
+  assert.match(body, /bootstrap\.frames\.XXXXXX/)
+  assert.match(body, /chmod 600 "\$BOOTSTRAP_FRAMED_TMP"/)
+  assert.match(body, />"\$BOOTSTRAP_FRAMED_TMP" <<'PY'/)
+  assert.match(body, /<"\$BOOTSTRAP_FRAMED_TMP"\)"/)
+  assert.match(body, /cleanup_bootstrap_tmps/)
+  assert.match(body, /arm_bootstrap_tmp_cleanup_guard/)
+  assert.match(source, /trap cleanup_bootstrap_tmps EXIT/)
+  assert.match(source, /trap 'exit 143' TERM/)
+  assert.match(body, /cleanup_bootstrap_tmps\s+disarm_bootstrap_tmp_cleanup_guard/)
+  assert.ok(
+    body.indexOf('>"$BOOTSTRAP_FRAMED_TMP" <<\'PY\'') < body.indexOf('docker exec -i'),
+    'secret framing must complete before docker exec command substitution',
+  )
+  assert.doesNotMatch(body, /<<'PY'\s*\|\s*docker exec/)
   assert.doesNotMatch(body, /docker cp/)
   // Host may mktemp a non-secret node source; must never docker-cp login secret files.
   assert.doesNotMatch(body, /docker cp[^\n]*login\.(identifier|password)/)
   assert.doesNotMatch(body, /BACKEND_CONTAINER:[^\n]*login\.(identifier|password)/)
+  assert.match(body, /secret framing input read failed/)
+  assert.doesNotMatch(body, /struct\.pack\(">I", 0\) \+ struct\.pack\(">I", 0\)/)
   assert.match(body, /CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=12|password_too_short/)
   assert.match(body, /password\.length < minLen|password_too_short/)
   // JWT revocation watermark is authoritative; user_sessions is an additional belt.
@@ -2154,6 +2171,83 @@ test('bootstrap streams secrets over docker exec stdin; never docker cp containe
   assert.match(body, /user_sessions/)
   assert.match(body, /revoked_at/)
   assert.match(body, /lifecycle_canary_bootstrap_password_repair/)
+})
+
+test('FUNCTIONAL: bootstrap producer completes before docker and preserves exact framed password bytes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-bootstrap-frames-'))
+  const ident = join(dir, 'login.identifier')
+  const password = join(dir, 'login.password')
+  writeFileSync(ident, 'lifecycle-canary@staging.invalid\n', { mode: 0o600 })
+  writeFileSync(password, Buffer.from('Exact\r\nPassword-12345', 'utf8'), { mode: 0o600 })
+  const harness = `
+set -euo pipefail
+export LIFECYCLE_CANARY_SOURCE_ONLY=true
+source "$1"
+CANARY_LOGIN_IDENTIFIER_FILE="$2"
+CANARY_LOGIN_PASSWORD_FILE="$3"
+docker() {
+  [[ "$1" == "exec" && "$2" == "-i" ]] || return 91
+  python3 -c 'import pathlib,sys; data=sys.stdin.buffer.read(); n1=int.from_bytes(data[:4],"big"); v1=data[4:4+n1]; p=4+n1; n2=int.from_bytes(data[p:p+4],"big"); v2=data[p+4:p+4+n2]; assert p+4+n2 == len(data); assert v1 == pathlib.Path(sys.argv[1]).read_bytes().strip(); assert v2 == pathlib.Path(sys.argv[2]).read_bytes(); print("true|created", end="")' "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE"
+}
+bootstrap_lifecycle_canary_admin
+`
+  try {
+    const result = spawnSync('bash', ['-c', harness, 'bash', REMOTE_SH, ident, password], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'bootstrap',
+        OUTPUT_DIR: dir,
+        RUN_STAMP: 'contract-bootstrap-frames',
+      },
+    })
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /bootstrap transaction OK outcome=created/)
+    assert.deepEqual(readdirSync(dir).sort(), ['login.identifier', 'login.password'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: bootstrap removes framed secrets on docker failure and SIGTERM', () => {
+  for (const [mode, dockerBody, expectedStatus] of [
+    ['failure', 'return 92', 1],
+    ['sigterm', 'kill -TERM $$; sleep 1', 143],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), `lifecycle-bootstrap-${mode}-`))
+    const ident = join(dir, 'login.identifier')
+    const password = join(dir, 'login.password')
+    writeFileSync(ident, 'lifecycle-canary@staging.invalid', { mode: 0o600 })
+    writeFileSync(password, Buffer.from('ExactFailurePassword-12345', 'utf8'), { mode: 0o600 })
+    const harness = `
+set -euo pipefail
+export LIFECYCLE_CANARY_SOURCE_ONLY=true
+source "$1"
+CANARY_LOGIN_IDENTIFIER_FILE="$2"
+CANARY_LOGIN_PASSWORD_FILE="$3"
+docker() { ${dockerBody}; }
+bootstrap_lifecycle_canary_admin
+`
+    try {
+      const result = spawnSync('bash', ['-c', harness, 'bash', REMOTE_SH, ident, password], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'bootstrap',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: `contract-bootstrap-${mode}`,
+        },
+      })
+      assert.equal(result.status, expectedStatus, `${mode}: ${result.stderr}${result.stdout}`)
+      assert.deepEqual(
+        readdirSync(dir).sort(),
+        ['login.identifier', 'login.password'],
+        `${mode}: framed temp must be removed`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
 })
 
 test('bootstrap requires exact SHA, OFF, health, migrations zero; never writes lifecycle env', () => {

@@ -560,6 +560,31 @@ mint_canary_admin_jwt_from_password_login() {
 
 # Strong minimum password length for the fixed canary admin (matches on-prem bootstrap floor).
 CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=12
+BOOTSTRAP_NODE_TMP=""
+BOOTSTRAP_FRAMED_TMP=""
+
+cleanup_bootstrap_tmps() {
+  if [[ -n "${BOOTSTRAP_NODE_TMP:-}" && -f "${BOOTSTRAP_NODE_TMP}" ]]; then
+    rm -f "${BOOTSTRAP_NODE_TMP}"
+  fi
+  if [[ -n "${BOOTSTRAP_FRAMED_TMP:-}" && -f "${BOOTSTRAP_FRAMED_TMP}" ]]; then
+    rm -f "${BOOTSTRAP_FRAMED_TMP}"
+  fi
+  BOOTSTRAP_NODE_TMP=""
+  BOOTSTRAP_FRAMED_TMP=""
+}
+
+arm_bootstrap_tmp_cleanup_guard() {
+  trap cleanup_bootstrap_tmps EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 141' PIPE
+}
+
+disarm_bootstrap_tmp_cleanup_guard() {
+  trap - EXIT HUP INT TERM PIPE
+}
 
 # Transactional create/repair of the FIXED owned lifecycle canary admin only.
 # Collision fail-closed: any users row matching email OR id that does not match
@@ -572,22 +597,18 @@ CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=12
 # Node program is non-secret host temp source base64'd into env (not secret files).
 # stdout reason enums only via result lines.
 bootstrap_lifecycle_canary_admin() {
-  local result note node_tmp node_b64
+  local result note node_b64
   BOOTSTRAP_OUTCOME="unset"
-  node_tmp=""
+  BOOTSTRAP_NODE_TMP=""
+  BOOTSTRAP_FRAMED_TMP=""
 
-  cleanup_bootstrap_node_tmp() {
-    if [[ -n "${node_tmp:-}" && -f "${node_tmp}" ]]; then
-      rm -f "${node_tmp}"
-    fi
-    node_tmp=""
-  }
+  arm_bootstrap_tmp_cleanup_guard
 
   # Non-secret node program on host only (never contains credentials).
   # permissions column omitted (054 TEXT[] default / later jsonb default both work).
   # Repair revokes sessions when schema supports it (user_session_revocations and/or user_sessions).
-  node_tmp="$(mktemp "${TMPDIR:-/tmp}/lifecycle-canary-bootstrap-node.XXXXXX")"
-  cat >"$node_tmp" <<'NODE'
+  BOOTSTRAP_NODE_TMP="$(mktemp "${TMPDIR:-/tmp}/lifecycle-canary-bootstrap-node.XXXXXX")"
+  cat >"$BOOTSTRAP_NODE_TMP" <<'NODE'
 const { Client } = require("pg");
 
 function fail(code) {
@@ -798,21 +819,17 @@ function readFrame() {
 NODE
 
   # shellcheck disable=SC2064
-  trap cleanup_bootstrap_node_tmp RETURN
+  node_b64="$(base64 <"$BOOTSTRAP_NODE_TMP" | tr -d '\n')"
+  cleanup_bootstrap_tmps
 
-  node_b64="$(base64 <"$node_tmp" | tr -d '\n')"
-  cleanup_bootstrap_node_tmp
-
-  # Host: exact-byte secret files → framed stdin only. No secret values in argv/export.
-  # Also enforce password minimum length on host (values-free) before streaming.
-  if ! result="$(
-    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$CANARY_BOOTSTRAP_MIN_PASSWORD_LEN" <<'PY' | docker exec -i \
-      -e "CANARY_BOOTSTRAP_OWNER_ID=${CANARY_OWNER_USER_ID}" \
-      -e "CANARY_BOOTSTRAP_OWNER_EMAIL=${CANARY_OWNER_EMAIL}" \
-      -e "CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=${CANARY_BOOTSTRAP_MIN_PASSWORD_LEN}" \
-      -e "CANARY_BOOTSTRAP_NODE_B64=${node_b64}" \
-      "$BACKEND_CONTAINER" \
-      node -e 'eval(Buffer.from(process.env.CANARY_BOOTSTRAP_NODE_B64||"","base64").toString("utf8"))'
+  # Build framed stdin before entering command substitution. Some staging-host bash
+  # versions misparse a heredoc feeding a pipeline nested inside $(...), even though
+  # bash -n accepts it. The framed file stays in the per-run chmod-700 secret dir,
+  # is chmod-600, and is removed by this function's exit/signal guard plus the
+  # workflow's independent remote-directory EXIT cleanup.
+  BOOTSTRAP_FRAMED_TMP="$(mktemp "$(dirname "$CANARY_LOGIN_PASSWORD_FILE")/bootstrap.frames.XXXXXX")"
+  chmod 600 "$BOOTSTRAP_FRAMED_TMP"
+  if ! python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$CANARY_BOOTSTRAP_MIN_PASSWORD_LEN" >"$BOOTSTRAP_FRAMED_TMP" <<'PY'
 import pathlib
 import struct
 import sys
@@ -827,9 +844,8 @@ try:
     # Exact password bytes — no transform.
     password = pathlib.Path(pass_path).read_bytes()
 except Exception:
-    # Empty frames → container reports secret_stdin / empty_credentials path.
-    sys.stdout.buffer.write(struct.pack(">I", 0) + struct.pack(">I", 0))
-    raise SystemExit(0)
+    sys.stderr.write("secret framing input read failed\n")
+    raise SystemExit(2)
 # Host-side strong minimum: decode for length check only (UTF-8), still stream exact bytes.
 try:
     password_text = password.decode("utf-8")
@@ -842,9 +858,22 @@ sys.stdout.buffer.write(struct.pack(">I", len(identifier)) + identifier)
 sys.stdout.buffer.write(struct.pack(">I", len(password)) + password)
 sys.stdout.buffer.flush()
 PY
-  )"; then
+  then
+    fail "action=bootstrap: secret framing failed"
+  fi
+
+  if ! result="$(docker exec -i \
+    -e "CANARY_BOOTSTRAP_OWNER_ID=${CANARY_OWNER_USER_ID}" \
+    -e "CANARY_BOOTSTRAP_OWNER_EMAIL=${CANARY_OWNER_EMAIL}" \
+    -e "CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=${CANARY_BOOTSTRAP_MIN_PASSWORD_LEN}" \
+    -e "CANARY_BOOTSTRAP_NODE_B64=${node_b64}" \
+    "$BACKEND_CONTAINER" \
+    node -e 'eval(Buffer.from(process.env.CANARY_BOOTSTRAP_NODE_B64||"","base64").toString("utf8"))' \
+    <"$BOOTSTRAP_FRAMED_TMP")"; then
     fail "action=bootstrap: container bootstrap transaction runner failed"
   fi
+  cleanup_bootstrap_tmps
+  disarm_bootstrap_tmp_cleanup_guard
 
   # Collapse multi-line docker/node noise to the last values-free status line.
   result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
