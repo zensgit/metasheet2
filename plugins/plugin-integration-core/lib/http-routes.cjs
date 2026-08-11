@@ -621,6 +621,14 @@ function stockPreparationPlmAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
+// Entity-level delivery containment. This negative gate is intentionally
+// independent from the dry-run route: an internal evaluation environment can
+// keep previews usable while refusing every C6 Apply before request parsing,
+// token consumption, pipeline loading, or adapter/network activity.
+function c6WriteApplyDisabled() {
+  return String(process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED ?? '').trim().toLowerCase() === 'true'
+}
+
 // T3b OD-2 (layered semantics — deliberately NOT a copy of the ERP guard): with auto-persist ON the
 // PLM source-run gains a write side-effect, so an explicit tenantId on ANY carrier is a steering
 // vector and is rejected fail-closed BEFORE body normalization and any I/O. projectId differs from
@@ -3514,6 +3522,9 @@ function createHandlers(services, options = {}) {
 
     async pipelinesExternalWriteApply(req, res) {
       requireAccess(req, 'write')
+      if (c6WriteApplyDisabled()) {
+        throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
+      }
       const body = normalizeC6WriteApplyBody(requestBody(req))
       const scope = scopedInput(req, {
         id: requestParams(req).id,
