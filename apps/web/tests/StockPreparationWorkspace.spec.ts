@@ -879,6 +879,53 @@ describe('StockPreparationWorkspace shell', () => {
     expect(root.textContent || '').not.toContain('proj-alpha')
   })
 
+  it('passes the default integration scope through every mounted stock-preparation child request', async () => {
+    localStorage.setItem('tenantId', 'tenant-from-integration-scope')
+    localStorage.setItem('workspaceId', 'workspace-from-integration-scope')
+    mockStockPrepReads()
+
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+
+    const views = [
+      ['material-mapping', '[data-testid="stock-prep-mapping-overview"]'],
+      ['unit-conversion', '[data-testid="stock-prep-unit-overview"]'],
+      ['prep-line', '[data-testid="stock-prep-line-overview"]'],
+      ['exception-queue', '[data-testid="stock-prep-exception-overview"]'],
+    ] as const
+    for (const [view, settledSelector] of views) {
+      ;(root.querySelector(`[data-testid="stock-prep-tab-${view}"]`) as HTMLButtonElement).click()
+      await waitForSelector(root, settledSelector)
+    }
+
+    const urls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/api/integration/stock-preparation/'))
+    const requiredPaths = [
+      '/stock-preparation/projects',
+      '/stock-preparation/snapshot-batches',
+      '/stock-preparation/material-mappings/summary',
+      '/stock-preparation/unit-conversions/summary',
+      '/stock-preparation/prep-lines',
+      '/stock-preparation/exceptions',
+    ]
+    for (const path of requiredPaths) {
+      expect(urls.some((url) => url.includes(path)), `missing exercised child request: ${path}`).toBe(true)
+    }
+    expect(urls.filter((url) => url.includes('/stock-preparation/projects')).length).toBeGreaterThanOrEqual(2)
+    for (const url of urls) {
+      const parsed = new URL(url, 'https://stock-preparation.invalid')
+      expect(parsed.searchParams.get('tenantId'), `tenant scope missing from ${parsed.pathname}`).toBe('tenant-from-integration-scope')
+      expect(parsed.searchParams.get('workspaceId'), `workspace scope missing from ${parsed.pathname}`).toBe('workspace-from-integration-scope')
+    }
+  })
+
   it('seeds the shared project context from the ?projectId= route query (deep link / reload)', async () => {
     mockStockPrepReads()
     h.route = {

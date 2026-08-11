@@ -6,8 +6,9 @@
 > `k3wise-material-list-b4-binding-draft-20260805.md`。本文不另立记录点,冲突时以上述为准。
 > 全文 values-free:只含计数、闭集 token、run/PR 引用与 PASS/FAIL。
 >
-> **2026-08-11 现行状态**:当前交付目标已收窄为单客户、只读、零外部写，并已按 §8 完成
-> 实体机功能 dry-run 验收。本文后续 Save-only 内容保留为历史规划/未来独立写操作，不得据此扩大本次结论；
+> **2026-08-11 现行状态**:当前交付目标已收窄为单客户、只读、零外部写；§8 记录的 dry-run
+> 后经主机归属更正确认发生在 223 考勤机，**不能证明 222 备料/数据库对接目标机已验收**。222 当前状态见 §8.0。
+> 本文后续 Save-only 内容保留为历史规划/未来独立写操作，不得据此扩大本次结论；
 > 权威优先级见计划文档 §0。
 
 ## 1. 范围(owner 四项裁决,20260805,基点 `d368700536`)
@@ -371,7 +372,8 @@ R2/R3 的该前置已解除。
 
 ### 7.3 窗口 PASS 后
 
-在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。**已于 2026-08-11 履行。**
+在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。该动作曾于 2026-08-11
+对 223 履行；§8.0 的后续主机归属更正使其**不再满足 222 目标机验收**。
 
 ## 7.5 实体机窗口(已授权排期,2026-08-06)
 
@@ -396,7 +398,8 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 
 ## 7.6 历史配置修复阻塞:两道门与正确的修复前提(2026-08-07,已解除)
 
-> **历史状态,已解除(2026-08-11)**:本节记录 2026-08-07 的配置阻塞;最终配置、读取和实体机结果见 §8。
+> **历史状态,在 223 运行中曾解除(2026-08-11)**:本节记录 2026-08-07 的配置阻塞；该运行结果见 §8，
+> 但 222 目标机仍须按 §8.0 重验。
 
 窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
 
@@ -527,15 +530,40 @@ owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒
 
 ---
 
-## 8. 实体机只读验收记录（2026-08-11）
+## 8. 历史实体机只读运行记录（2026-08-11，非当前目标机）
 
-### 8.1 范围与运行身份
+### 8.0 P1 主机归属更正与当前状态
+
+本文此前把本节判为当前目标机验收完成；**该结论撤回**。#4628 的 owner 授权原文绑定
+`targetHost=192.168.1.223`，而后续
+[#4861 主机归属更正](https://github.com/zensgit/metasheet2/issues/4861#issuecomment-5250153754)
+明确 222 才是备料/数据库对接机，223 是考勤测试机。所以下文 PASS 仍是 223 上真实发生的历史功能证据，
+但不得再作为 222 的实体机验收证据。
+
+222 当前已部署 #4862 Apply 禁用门并报告服务健康、unit-level `403 C6_WRITE_APPLY_DISABLED` 与零 K3 网络活动；
+真实 API Apply 未执行。222 的 stock-preparation UI 在 #4865 部署前因七个子视图缺失 default integration scope，
+`/projects` 返回 HTTP 400；#4865 已合入 main，但仍待目标机部署和实测。
+
+```text
+historicalEvidenceHost=192.168.1.223
+currentTargetHost=192.168.1.222
+historicalOperationDisposition=CLOSED_PASS
+currentTargetDisposition=REVALIDATION_REQUIRED
+target222ApplyContainment=DEPLOYED
+target222RealApiApplyProbe=NOT_RUN
+target222ScopedUiRead=FAILED_HTTP_400_BEFORE_4865
+target222BusinessDryRun=NOT_RUN
+externalWriteAuthorization=NONE
+```
+
+### 8.1 历史范围与运行身份
 
 本次验收只覆盖：真实 SQL Server approved source、真实 K3 只读探针、备料清洗与一次 C6 dry-run。
 不执行 Apply、普通 pipeline run、dead-letter replay、K3 Save/Submit/Audit，也不读取客户生产业务行。
 
 ```text
 issue=4628
+targetHost=192.168.1.223
 baseRuntimeCommit=bb0574fcde4ad4dc1d059065c6c2348b96b54ed1
 baseArtifactId=9087053934
 reviewedOverlayPr=4860
@@ -564,10 +592,10 @@ finalOperationId=stockprep_d9a3feba_readonly_entity_20260811_10_VALUES_FREE_TENA
 阶段关闭：[comment 5249316596](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249316596)。
 #4628 已以 `COMPLETED` 关闭。
 
-### 8.3 验收判定
+### 8.3 历史运行判定与当前目标判定
 
 ```text
-stageDisposition=COMPLETED
+historicalOperationDisposition=COMPLETED
 acceptedEvidenceClass=CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN
 singleFinalDryRun=PASS
 externalWrites=0
@@ -577,14 +605,17 @@ k3SubmitCalls=0
 k3AuditCalls=0
 flagsRestoredOff=YES
 customerProductionCertification=NOT_CLAIMED
+currentTargetHost=192.168.1.222
+currentTargetDisposition=REVALIDATION_REQUIRED
 ```
 
-因此，当前**单客户、只读、零外部写**交付目标的实体机业务功能验收完成。S4 已由 #4757 合入，
-数据库读取、K3 读取、备料清洗、dry-run 计划和零写证据形成闭环。
+因此，S4 与代码侧能力仍已完成；223 上也确有数据库读取、K3 读取、备料清洗、dry-run 计划和零写历史证据。
+但当前**单客户、只读、零外部写**目标在 222 上的实体机业务验收**尚未完成**。
 
 ### 8.4 复跑与结论边界
 
-`_10` 已关闭且禁止重试。复跑必须使用新 operation id、新 owner 授权和新冻结运行时身份；before/after
+`_10` 已关闭且禁止重试。222 重验必须使用新 operation id、新 owner 授权和新冻结运行时身份，并明确
+`targetHost=192.168.1.222`；before/after
 审计必须绑定同一 tenant 与同一 `processEpoch`，以 `GetDetail` 非零增量为正控，并再次证明所有写计数为 0。
 任一计数不可用或 epoch 改变都不得判 PASS。完整复跑规则以权威计划 §0.3 为准。
 
@@ -593,8 +624,8 @@ PLM/ERP/CRM/SRM 全面通用化。上述能力进入后续独立路线。
 
 ## 8'. staging 彩排实测(最终跑,2026-08-06)
 
-> **编号说明（已履行）**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**，
-> 该记录现已在上节产生。本节仍是 staging 彩排(第二层)，与实体机验收(第三层)是不同的东西，
+> **编号说明**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**；上节保留 223 历史记录并
+> 明确 222 重验仍待完成。本节仍是 staging 彩排(第二层)，与目标机验收(第三层)是不同的东西，
 > **不得互相顶替**，故继续编号为 §8'。
 
 ### 8'.1 运行标识

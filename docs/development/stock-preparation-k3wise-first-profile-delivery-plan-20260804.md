@@ -18,23 +18,51 @@
 
 ---
 
-## 0. 2026-08-11 当前只读交付目标收口（现行）
+## 0. 2026-08-11 当前只读交付目标状态（现行，目标机重验中）
 
 本节是当前交付目标的最新状态，优先于本文后续仍以 Save-only 为目标的历史规划。
 当前目标已收窄并冻结为：**单客户、真实 SQL Server/K3 读取、备料清洗与一次 dry-run，零外部写**。
 原 Save-only Apply、K3 回写及 PLM/ERP/CRM/SRM 全面通用化均未被本次验收授权或证明，后续如要启动，
 必须使用新 issue、新 operation id 和独立 owner 授权。
 
-### 0.1 完成证据
+### 0.0 P1 主机归属更正（2026-08-11）
+
+本文此前把 #4628 的 `_07` / `_10` 记录为当前目标机验收完成；**该结论撤回**。#4628 的 owner
+授权原文明确写的是 `targetHost=192.168.1.223`，而后续
+[#4861 主机归属更正](https://github.com/zensgit/metasheet2/issues/4861#issuecomment-5250153754)
+明确：`192.168.1.222` 才是备料/数据库对接机，223 是考勤测试机。因此 223 上的运行仍可证明该
+base+overlay 组合曾完成一次受控功能 dry-run，但**不能证明 222 目标机已验收**。
+
+```text
+historicalEvidenceHost=192.168.1.223
+currentTargetHost=192.168.1.222
+historicalOperationDisposition=CLOSED_PASS
+currentTargetDisposition=REVALIDATION_REQUIRED
+target222ApplyContainment=DEPLOYED
+target222RealApiApplyProbe=NOT_RUN
+target222ScopedUiRead=FAILED_HTTP_400_BEFORE_4865
+target222BusinessDryRun=NOT_RUN
+externalWriteAuthorization=NONE
+```
+
+#4862 的 Apply 禁用门已适配并部署到 222；#4865 已在 main 修复七个子视图缺失 default integration
+scope 的源码问题。两者都不替代目标机业务验收：#4865 仍需部署到 222，随后必须用新 operation id 和新 owner
+授权完成 scoped GET、真实 HTTP `403 C6_WRITE_APPLY_DISABLED` 与一次零写 dry-run。223 的冗余 overlay
+须另行按可验证备份处理，不得把它算作 222 证据。
+
+### 0.1 证据分类
 
 | 要求 | 当前证据 | 判定 |
 |---|---|---|
 | S4 GetList/intake 收口 | #4757 已合，merge `889a39bc77c7c8e40aef2325a7351d58bc3a392a` | PASS |
 | 代码与必需门 | #4860 已合，merge `d9a3feba2615a9c3660907451f27c3a3bff1d6c6`；全部检查成功，含 `integration-guard`、`test (20.x)` | PASS |
-| 实体机部署与读腿 | #4628 `_07`：健康、插件、配置回读、SQL Server 只读源、D2 身份与 K3 read-smoke 均 PASS；只读视图 2 行，K3 读 10 行 | PASS |
-| 业务 dry-run | #4628 `_10`：`sourceRows=2`、`planned=2`、`add=2`、`held=0`、`failed=0`、完整且未截断 | PASS |
-| 零外部写 | 同一 process epoch、同一 tenant 分区的 before/after 审计：`GetDetail=2`，Save/Submit/Audit/其它生命周期写均 0；Apply/普通 run/replay 均 0 | PASS |
-| 操作收口 | `_10` 单次执行后删除恰一条未使用内部 token，operation `CLOSED_PASS`；#4628 以 `COMPLETED` 关闭 | PASS |
+| 223 历史部署与读腿 | #4628 `_07`：健康、插件、配置回读、SQL Server 只读源、D2 身份与 K3 read-smoke 均 PASS；只读视图 2 行，K3 读 10 行 | HISTORICAL_NON_TARGET |
+| 223 历史业务 dry-run | #4628 `_10`：`sourceRows=2`、`planned=2`、`add=2`、`held=0`、`failed=0`、完整且未截断 | HISTORICAL_NON_TARGET |
+| 223 历史零外部写 | 同一 process epoch、同一 tenant 分区的 before/after 审计：`GetDetail=2`，Save/Submit/Audit/其它生命周期写均 0；Apply/普通 run/replay 均 0 | HISTORICAL_NON_TARGET |
+| 历史操作收口 | `_10` 单次执行后删除恰一条未使用内部 token，operation `CLOSED_PASS`；#4628 以 `COMPLETED` 关闭 | PASS_FOR_CLOSED_OPERATION_ONLY |
+| 222 Apply containment | #4862 gate 部署、服务健康、unit-level `403 C6_WRITE_APPLY_DISABLED`、零 K3 网络活动 | PARTIAL_PASS_REAL_HTTP_PENDING |
+| 222 UI scope | #4865 已合；部署前 `/projects` 为 HTTP 400 | MERGED_NOT_ENTITY_VERIFIED |
+| 222 业务验收 | 新 operation 尚未授权或执行 | PENDING |
 
 权威 values-free 回执：
 
@@ -42,7 +70,7 @@
 - [只读阶段关闭记录](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249316596)
 - [#4860](https://github.com/zensgit/metasheet2/pull/4860)
 
-### 0.2 受测运行时身份
+### 0.2 223 历史受测运行时身份
 
 ```text
 baseRuntimeCommit=bb0574fcde4ad4dc1d059065c6c2348b96b54ed1
@@ -56,9 +84,9 @@ reviewedOverlayPrFileCount=7
 auditVersion=2026.08.v2
 ```
 
-这是一个经批准的 **base package + exact reviewed overlay** 组合身份，不得把它改写成“完整包已经在
+这是一个经批准的 **base package + exact reviewed overlay** 历史组合身份，不得把它改写成“完整包已经在
 `d9a3feba…` 重新构建并原字节验证”。五个文件是实体机实际部署的非测试运行时/配置子集;
-#4860 另含两个测试文件,PR 总 diff 为七个文件。历史实体证据只绑定上述组合。
+#4860 另含两个测试文件,PR 总 diff 为七个文件。该证据只绑定 223 上的历史运行，不绑定 222。
 
 ### 0.3 可复跑判据
 
@@ -66,12 +94,13 @@ auditVersion=2026.08.v2
 
 1. 从届时批准的 main 构建并冻结新包，或重新批准一个逐文件可验证的 base+overlay 组合；
 2. 使用新的、不可复用的 operation id，并重新获得 owner 对只读窗口的明确授权；
-3. 绑定同一客户 tenant、approved SQL Server source、K3-read/K3-write D2 身份和受控两行视图；
+3. 明确绑定 `targetHost=192.168.1.222`、同一客户 tenant、approved SQL Server source、K3-read/K3-write D2 身份和受控两行视图；
 4. 审计 before/after 必须是同一 `processEpoch` 和同一 tenant 分区，且 `GetDetail` 正控增量大于 0；
 5. 仅运行一次 dry-run；要求计划断言与 §0.1 相同，Apply/普通 run/replay 及所有 K3 生命周期写增量均为 0；
 6. 任一计数不可用、epoch 改变、源读取不完整或出现非零写调用，都必须 fail-closed，不得以代码路径推理代替证据。
 
-本次结论是 `CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN`。它**不是**生产认证、外部写验收、客户生产行读取、
+当前 222 目标机结论是 `REVALIDATION_REQUIRED`。223 的历史结论仍是
+`CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN`，但它**不是** 222 验收、生产认证、外部写验收、客户生产行读取、
 规模认证或通用集成平台完成声明。
 
 ## 1. 目标与边界
