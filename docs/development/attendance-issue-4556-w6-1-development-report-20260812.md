@@ -12,8 +12,8 @@
 > Fresh base: `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
 > (the merge of PR #4804)
 >
-> Implementation evidence head before this record-only report delta:
-> `5832177ccfdb9cddedee4a2e1249fadaf4d77fa9`
+> Implementation and test evidence head before this record-only report delta:
+> `ea2043552060383f46984781c063d71efeb88f0d`
 
 ## 0. Scope delivered
 

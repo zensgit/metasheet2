@@ -8,8 +8,8 @@
 >
 > Fresh base: `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
 >
-> Implementation evidence head before this record-only report delta:
-> `5832177ccfdb9cddedee4a2e1249fadaf4d77fa9`
+> Implementation and test evidence head before this record-only report delta:
+> `ea2043552060383f46984781c063d71efeb88f0d`
 
 ## 0. Evidence rules
 
@@ -31,7 +31,7 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `0287b250b33fe4c7ea98b880360af74fc08a5ebf` |
-| Evidence head | `5832177ccfdb9cddedee4a2e1249fadaf4d77fa9` |
+| Evidence head | `ea2043552060383f46984781c063d71efeb88f0d` |
 | Database | Local PostgreSQL 15.17 |
 | Scratch database | `metasheet_w6_4849_codex_20260812_a` on a local role; credentials were not recorded |
 | Data | Synthetic only |
@@ -58,12 +58,16 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   --watch=false
 ```
 
-Result: **12 files / 296 tests passed**.
+Result: **12 files / 297 tests passed**.
 
 This matrix covers pure aggregate behavior, exact recursive response shape,
 authorization and app-assembly guards, static DML call-path closure, API path
 policy, invalid enum/state negatives, resolver behavior reached by the route,
-and zero-segment compatibility fixtures.
+and zero-segment compatibility fixtures. The authorization matrix includes a
+DB-backed platform-admin positive leg whose principal has no legacy admin role:
+the real `isAdmin(userId, runQuery)` query returns true on the shared
+transaction handle, the membership query is skipped, and aggregate reads still
+run on that handle.
 
 ### 2.2 Migration and real-DB execution
 
