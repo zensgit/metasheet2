@@ -309,6 +309,45 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
     return normalized.length > 0 ? normalized : null
   }
 
+  function meaningfulMaterialIdentifier(record) {
+    if (!record || typeof record !== 'object') return false
+    for (const field of ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']) {
+      const value = record[field]
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) return true
+      if (typeof value === 'string') {
+        const normalized = value.trim()
+        if (normalized && normalized !== '0') return true
+      }
+    }
+    return false
+  }
+
+  // Some live K3 GetDetail endpoints return HTTP/business success for an unknown material while
+  // echoing only the requested FNumber. The WebAPI adapter deliberately fills a missing FNumber
+  // from that request so ordinary read callers retain correlation, but that synthesized field is
+  // not existence evidence for C6. When the raw envelope is available, require the raw key plus
+  // one independently returned material fact. Test doubles without raw envelopes follow the same
+  // identity rule on their record instead of receiving a production-only bypass.
+  function hasIndependentMaterialIdentity(read, record, keyField, requestedKey) {
+    let candidate = record
+    let wrapper = null
+    if (read && read.raw && typeof read.raw === 'object') {
+      const data = read.raw.Data
+      wrapper = Array.isArray(data)
+        ? data.find((item) => item && typeof item === 'object' && !Array.isArray(item))
+        : (data && typeof data === 'object' && !Array.isArray(data) ? data : null)
+      if (!wrapper) return false
+      candidate = wrapper.Data && typeof wrapper.Data === 'object' && !Array.isArray(wrapper.Data)
+        ? wrapper.Data
+        : wrapper
+    }
+    if (!candidate || typeof candidate !== 'object') return false
+    if (normalizeLookupKey(candidate[keyField]) !== requestedKey) return false
+    return meaningfulMaterialIdentifier(candidate)
+      || meaningfulMaterialIdentifier(wrapper)
+      || normalizeLookupKey(candidate.FName) !== null
+  }
+
   function saveFailure() {
     const error = new Error('K3 WISE Save reported row failure')
     // Review #4761 P2: UNCONDITIONALLY the registered closed token. Passing through the
@@ -453,7 +492,8 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
           .map(unwrapReferenceShapes)
           .filter((record) => requestedKey !== null
             && record && typeof record === 'object'
-            && normalizeLookupKey(record[keyField]) === requestedKey)
+            && normalizeLookupKey(record[keyField]) === requestedKey
+            && hasIndependentMaterialIdentity(read, record, keyField, requestedKey))
         return { data: matching }
       } catch (error) {
         const code = error && error.details && error.details.code

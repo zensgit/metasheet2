@@ -123,7 +123,7 @@ function jsonResponse(status, body) {
 
 // Mock K3: login, GetDetail (existing row for MAT-C6-EXIST, business-fail for everything
 // else — K3's real "not found" shape), Save success. Counts every path.
-function mockK3({ existing = {}, fallbackDetail = null } = {}) {
+function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false } = {}) {
   const calls = []
   const impl = async (url, init) => {
     const parsed = new URL(url)
@@ -141,6 +141,13 @@ function mockK3({ existing = {}, fallbackDetail = null } = {}) {
           StatusCode: 200,
           Message: 'Successful',
           Data: [{ FStatus: true, FItemID: row.FItemID, Data: row }],
+        })
+      }
+      if (echoOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number } }],
         })
       }
       if (fallbackDetail) {
@@ -382,6 +389,35 @@ test('lookup ignores a successful GetDetail record whose normalized key does not
   const dryRun = await dryRunExternalWrite(c6Inputs({
     rows: [{ code: 'NEW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
     fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an echo-only successful GetDetail envelope with no independent material identity', async () => {
+  const fetchPair = mockK3({
+    // Live-shape regression: the endpoint accepts the request and echoes FNumber, but neither
+    // a stable material id nor FName was independently returned.
+    echoOnly: true,
+  })
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'ECHO-ONLY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an empty successful GetDetail detail even when the adapter correlates its request key', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'SYNTHETIC-KEY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ fallbackDetail: {} }),
     tokenStore: memoryStore(),
   }))
 
