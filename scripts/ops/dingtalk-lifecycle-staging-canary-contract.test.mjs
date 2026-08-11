@@ -2,7 +2,7 @@
 // dingtalk-lifecycle-staging-canary-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL SAFE staging lifecycle lane:
-//   EXECUTABLE: status | preflight | off | bootstrap | alias
+//   EXECUTABLE: status | preflight | off | bootstrap | human-bootstrap | alias
 //   NOT EXECUTABLE: pending | deprovision (fail-closed preflight-only)
 //
 // Alias is a TRANSIENT secret-backed cutover canary: success requires/proves OFF;
@@ -11,8 +11,11 @@
 // login (never secrets.ATTENDANCE_ADMIN_JWT).
 // Bootstrap creates/repairs the fixed owned canary admin only (collision
 // fail-closed; no lifecycle env write).
+// Human-bootstrap creates/repairs a SEPARATE fixed human platform admin
+// (username staging-owner-admin) via canary-authenticated admin API + password
+// file; required reset-password/access/login/revoke; no lifecycle env write.
 // Load-bearing mutations for owner P1/P2 gaps:
-//   * migrations_pending_zero unknown must fail preflight/off/alias/bootstrap
+//   * migrations_pending_zero unknown must fail preflight/off/alias/bootstrap/human-bootstrap
 //   * pending/deprovision never apply (transition_applied=false; NOT EXECUTABLE)
 //   * alias requires pre-login(+JWT mint), backfill, readiness, post-ON login,
 //     rollback, post-rollback login, exact SHA, migrations, secret-file transport
@@ -106,8 +109,8 @@ function workflowOn(doc) {
 function actionAliasBody(source) {
   const start = source.indexOf('action_alias()')
   assert.notEqual(start, -1, 'action_alias() must exist')
-  const end = source.indexOf('\n# --- main', start)
-  assert.notEqual(end, -1, 'main marker after action_alias')
+  const end = source.indexOf('\naction_human_bootstrap()', start)
+  assert.notEqual(end, -1, 'action_human_bootstrap after action_alias')
   return source.slice(start, end)
 }
 
@@ -124,6 +127,22 @@ function actionBootstrapBody(source) {
   assert.notEqual(start, -1, 'action_bootstrap() must exist')
   const end = source.indexOf('\naction_off()', start)
   assert.notEqual(end, -1, 'action_off after action_bootstrap')
+  return source.slice(start, end)
+}
+
+function actionHumanBootstrapBody(source) {
+  const start = source.indexOf('action_human_bootstrap()')
+  assert.notEqual(start, -1, 'action_human_bootstrap() must exist')
+  const end = source.indexOf('\n# --- main', start)
+  assert.notEqual(end, -1, 'main marker after action_human_bootstrap')
+  return source.slice(start, end)
+}
+
+function bootstrapHumanPlatformAdminBody(source) {
+  const start = source.indexOf('bootstrap_human_platform_admin()')
+  assert.notEqual(start, -1, 'bootstrap_human_platform_admin() must exist')
+  const end = source.indexOf('\n# POST /api/admin/login-aliases/backfill', start)
+  assert.notEqual(end, -1, 'backfill marker after bootstrap_human_platform_admin')
   return source.slice(start, end)
 }
 
@@ -157,13 +176,14 @@ test('PR contract workflow executes this exact suite without changing the sealed
 
 // --- workflow shape -------------------------------------------------------------------
 
-test('workflow action choices include status/preflight/off/bootstrap/alias and non-executable ON names', () => {
+test('workflow action choices include status/preflight/off/bootstrap/human-bootstrap/alias and non-executable ON names', () => {
   const options = workflowOn(loadYaml(read(WORKFLOW))).workflow_dispatch.inputs.action.options
   assert.deepEqual(options, [
     'status',
     'preflight',
     'off',
     'bootstrap',
+    'human-bootstrap',
     'alias',
     'pending',
     'deprovision',
@@ -201,12 +221,15 @@ test('SSH transport requires a pinned known_hosts secret', () => {
   assert.doesNotMatch(yaml, /StrictHostKeyChecking=no/)
 })
 
-test('workflow requires deploy_sha + expected_current for off/bootstrap/alias; pending/deprovision NOT EXECUTABLE', () => {
+test('workflow requires deploy_sha + expected_current for off/bootstrap/human-bootstrap/alias; pending/deprovision NOT EXECUTABLE', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /expected_current_mode is required for action=off/)
   assert.match(yaml, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
   assert.match(yaml, /deploy_sha must be the FULL 40-char lowercase commit SHA for action=\$\{ACTION\}/)
-  assert.match(yaml, /ACTION" == "bootstrap" \|\| "\$ACTION" == "alias"/)
+  assert.match(
+    yaml,
+    /ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap" \|\| "\$ACTION" == "alias"/,
+  )
   // Secret presence is checked only in Run remote action (not Validate inputs).
   assert.match(
     yaml,
@@ -217,14 +240,14 @@ test('workflow requires deploy_sha + expected_current for off/bootstrap/alias; p
   assert.doesNotMatch(yaml, /canary_subject_id:/)
   assert.doesNotMatch(yaml, /canary_integration_id:/)
   assert.doesNotMatch(yaml, /owner_confirm:/)
-  // No password-reset API / admin reset path (prose saying "no password reset" is fine).
+  // Workflow must not embed admin password-reset HTTP paths (remote script may).
   assert.doesNotMatch(yaml, /resetPassword|reset_password|\/api\/.*password-reset/i)
   assert.doesNotMatch(yaml, /POST\s+\/api\/admin\/.*password/i)
   // No unconditional always-OFF claim in structural validation comments.
   assert.doesNotMatch(yaml, /always OFF after/i)
 })
 
-test('workflow requires an explicit privileged bootstrap confirmation phrase', () => {
+test('workflow requires explicit privileged confirmation phrases for bootstrap and human-bootstrap', () => {
   const yaml = read(WORKFLOW)
   const doc = loadYaml(yaml)
   assert.ok(workflowOn(doc).workflow_dispatch.inputs.bootstrap_confirmation)
@@ -232,20 +255,26 @@ test('workflow requires an explicit privileged bootstrap confirmation phrase', (
   assert.equal(validate.env.BOOTSTRAP_CONFIRMATION, '${{ inputs.bootstrap_confirmation }}')
   assert.match(validate.run, /ACTION" == "bootstrap"/)
   assert.match(validate.run, /BOOTSTRAP_CONFIRMATION" != "CREATE_STAGING_CANARY_ADMIN"/)
+  assert.match(validate.run, /ACTION" == "human-bootstrap"/)
+  assert.match(validate.run, /BOOTSTRAP_CONFIRMATION" != "CREATE_STAGING_HUMAN_ADMIN"/)
 })
 
-test('workflow bootstrap/alias secret transport uses chmod-600 files + scp; never ATTENDANCE_ADMIN_JWT', () => {
+test('workflow bootstrap/human-bootstrap/alias secret transport uses chmod-600 files + scp; never ATTENDANCE_ADMIN_JWT', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /chmod 600/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
+  assert.match(yaml, /STAGING_OWNER_ADMIN_PASSWORD/)
   assert.match(yaml, /CANARY_LOGIN_IDENTIFIER_FILE=/)
   assert.match(yaml, /CANARY_LOGIN_PASSWORD_FILE=/)
+  assert.match(yaml, /STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
   assert.match(yaml, /\.canary-secrets/)
   assert.match(yaml, /scp \$ssh_opts/)
   // printf uses non-exported shell vars after env demote (not raw env names).
   assert.match(yaml, /printf '%s' "\$\{_CANARY_PASS\}"/)
   assert.match(yaml, /printf '%s' "\$\{_CANARY_IDENT\}"/)
+  assert.match(yaml, /printf '%s' "\$\{_STAGING_OWNER_PASS\}"/)
+  assert.match(yaml, /staging-owner-admin\.password/)
   // Must not materialize or demote ATTENDANCE_ADMIN_JWT (alias mints JWT from login).
   // Prose may mention the forbidden secret; forbid GHA secret injection only.
   assert.doesNotMatch(yaml, /_CANARY_JWT=/)
@@ -256,9 +285,13 @@ test('workflow bootstrap/alias secret transport uses chmod-600 files + scp; neve
   assert.doesNotMatch(yaml, /export ATTENDANCE_ADMIN_JWT=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_IDENTIFIER=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
+  assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export CANARY_LOGIN_PASSWORD='/)
-  // bootstrap shares the same secret transport gate as alias.
-  assert.match(yaml, /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap"/)
+  // bootstrap/human-bootstrap share the canary secret transport gate as alias.
+  assert.match(
+    yaml,
+    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap"/,
+  )
 })
 
 test('workflow Validate inputs does not receive canary login secrets (no child inheritance gap)', () => {
@@ -269,14 +302,16 @@ test('workflow Validate inputs does not receive canary login secrets (no child i
   assert.equal(validate.env.ATTENDANCE_ADMIN_JWT, undefined)
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, undefined)
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, undefined)
+  assert.equal(validate.env.STAGING_OWNER_ADMIN_PASSWORD, undefined)
   // No secret presence checks in this step (they launch after bash -n otherwise).
   assert.doesNotMatch(validate.run, /ATTENDANCE_ADMIN_JWT/)
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
+  assert.doesNotMatch(validate.run, /STAGING_OWNER_ADMIN_PASSWORD/)
   assert.match(validate.run, /bash -n scripts\/ops\/dingtalk-lifecycle-staging-canary-remote\.sh/)
-  // Structural bootstrap/alias checks remain; secret presence does not.
+  // Structural bootstrap/human-bootstrap/alias checks remain; secret presence does not.
   assert.match(validate.run, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
-  assert.match(validate.run, /bootstrap\|alias/)
+  assert.match(validate.run, /bootstrap\|human-bootstrap\|alias|bootstrap" \|\| "\$ACTION" == "human-bootstrap"/)
 })
 
 test('workflow materializes secrets inside Run remote action under EXIT trap (no separate secrets step)', () => {
@@ -313,7 +348,11 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
       if (t === 'set -euo pipefail') sawSet = true
       continue
     }
-    if (t.startsWith('unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD')) {
+    if (
+      t.startsWith(
+        'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD',
+      )
+    ) {
       sawEnvUnset = true
       break
     }
@@ -327,6 +366,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
     [
       '_CANARY_IDENT="${LIFECYCLE_CANARY_LOGIN_IDENTIFIER-}"',
       '_CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"',
+      '_STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"',
     ],
     'only demote assignments (builtins) before secret env unset — no external commands; no JWT',
   )
@@ -334,10 +374,11 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   // Order after demote: trap → mktemp → printf from shell vars → unset shell vars → remote scp.
   const trapIdx = runBody.indexOf('trap cleanup_canary_ephemeral_paths EXIT INT TERM')
   const envUnsetIdx = runBody.indexOf(
-    'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD',
+    'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD',
   )
   const mktempIdx = runBody.indexOf('mktemp -d')
   const printfPassIdx = runBody.indexOf("printf '%s' \"${_CANARY_PASS}\"")
+  const printfOwnerIdx = runBody.indexOf("printf '%s' \"${_STAGING_OWNER_PASS}\"")
   // Post-write shell-var wipe (must follow password printf; fail-path unset is earlier).
   const unsetShellIdx = runBody.indexOf(
     'unset _CANARY_IDENT _CANARY_PASS',
@@ -351,6 +392,8 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.ok(localCleanAssignIdx > trapIdx && localCleanAssignIdx < remoteMkdirIdx, 'register local dir for trap before remote copy')
   assert.ok(printfPassIdx > trapIdx, 'password materialize after trap')
   assert.ok(printfPassIdx < remoteMkdirIdx, 'local password write before remote mkdir')
+  assert.ok(printfOwnerIdx > printfPassIdx, 'human password materialize after canary password')
+  assert.ok(printfOwnerIdx < remoteMkdirIdx, 'human password local write before remote mkdir')
   assert.ok(unsetShellIdx > printfPassIdx, 'unset shell secret vars immediately after printf writes')
   assert.ok(unsetShellIdx < remoteMkdirIdx, 'shell secret vars cleared before remote copy')
   assert.ok(remoteMkdirIdx > mktempIdx, 'remote secrets mkdir after local materialize')
@@ -359,11 +402,16 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(remoteStep.run, /trap cleanup_canary_ephemeral_paths EXIT INT TERM/)
   assert.match(remoteStep.run, /mktemp -d/)
   assert.match(remoteStep.run, /printf '%s' "\$\{_CANARY_PASS\}"/)
-  assert.match(remoteStep.run, /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD/)
+  assert.match(remoteStep.run, /printf '%s' "\$\{_STAGING_OWNER_PASS\}"/)
+  assert.match(
+    remoteStep.run,
+    /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD/,
+  )
   assert.ok(remoteStep.env, 'Run remote action must declare env')
   assert.equal(remoteStep.env.ATTENDANCE_ADMIN_JWT, undefined, 'never inject ATTENDANCE_ADMIN_JWT')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, 'identifier secret on Run remote action only')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, 'password secret on Run remote action only')
+  assert.ok(remoteStep.env.STAGING_OWNER_ADMIN_PASSWORD, 'human password secret on Run remote action only')
   assert.equal(remoteStep.env.SECRETS_DIR, undefined, 'no secrets_dir cross-step handoff')
 
   assert.match(runBody, /CLEAN_REMOTE_SECRETS_DIR/)
@@ -373,9 +421,17 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(runBody, /OUTPUT_COLLECTED=1/)
   // Explicit: secrets_dir must not be a step output handoff.
   assert.doesNotMatch(runBody, /secrets_dir=.*GITHUB_OUTPUT/)
-  // bootstrap|alias share materialize gate; no admin.jwt from GHA secrets.
-  assert.match(runBody, /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap"/)
+  // bootstrap|human-bootstrap|alias share materialize gate; no admin.jwt from GHA secrets.
+  assert.match(
+    runBody,
+    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap"/,
+  )
   assert.doesNotMatch(runBody, /admin\.jwt/)
+  // Local+remote secret cleanup; never echo secret values.
+  assert.match(runBody, /rm -rf "\$\{CLEAN_LOCAL_SECRETS_DIR\}"/)
+  assert.match(runBody, /rm -rf '\$\{remote_secrets_dir\}'|rm -rf \$\{remote_rm\}/)
+  assert.doesNotMatch(runBody, /echo\s+[\"']?\$\{?(_CANARY_PASS|_STAGING_OWNER_PASS|STAGING_OWNER_ADMIN_PASSWORD)/)
+  assert.doesNotMatch(runBody, /cat\s+[\"']?\$\{?secrets_dir\}.*password/)
 })
 
 test('workflow cleanup never deletes persistent .metasheet2 overrides', () => {
@@ -660,9 +716,10 @@ test('production function: require_migrations_pending_zero_true accepts only tru
 
 // --- P1: pending/deprovision NOT EXECUTABLE; alias is executable ----------------------
 
-test('P1 pending/deprovision route to action_not_executable_on; alias routes to action_alias; bootstrap routes to action_bootstrap', () => {
+test('P1 pending/deprovision route to action_not_executable_on; alias routes to action_alias; bootstrap/human-bootstrap route', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /bootstrap\) action_bootstrap/)
+  assert.match(source, /human-bootstrap\) action_human_bootstrap/)
   assert.match(source, /alias\) action_alias/)
   assert.match(source, /pending\) action_not_executable_on pending/)
   assert.match(source, /deprovision\) action_not_executable_on deprovision/)
@@ -689,19 +746,24 @@ test('P1 pending/deprovision route to action_not_executable_on; alias routes to 
   )
 })
 
-test('P1 action=off and action=alias write lifecycle override; bootstrap/pending/deprovision do not', () => {
+test('P1 action=off and action=alias write lifecycle override; bootstrap/human-bootstrap/pending/deprovision do not', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /off\) action_off/)
   assert.match(source, /bootstrap\) action_bootstrap/)
+  assert.match(source, /human-bootstrap\) action_human_bootstrap/)
   assert.match(source, /alias\) action_alias/)
   assert.match(source, /action_off\(\)/)
   assert.match(source, /action_bootstrap\(\)/)
+  assert.match(source, /action_human_bootstrap\(\)/)
   assert.match(source, /action_alias\(\)/)
   assert.match(source, /write_lifecycle_override "false" "false" "false"/)
   assert.match(source, /write_lifecycle_override "true" "false" "false"/)
   const bootstrapBody = actionBootstrapBody(source)
   assert.doesNotMatch(bootstrapBody, /write_lifecycle_override/)
   assert.doesNotMatch(bootstrapBody, /recreate_backend_only/)
+  const humanBody = actionHumanBootstrapBody(source)
+  assert.doesNotMatch(humanBody, /write_lifecycle_override/)
+  assert.doesNotMatch(humanBody, /recreate_backend_only/)
   const notExec = source.slice(
     source.indexOf('action_not_executable_on()'),
     source.indexOf('\naction_bootstrap()'),
@@ -2555,6 +2617,7 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
     'TARGET_MODE',
     'EXPECTED_CURRENT_MODE',
     'DEPLOY_SHA',
+    'BOOTSTRAP_CONFIRMATION',
     'STAGING_DEPLOY_PATH',
     'DEPLOY_PATH',
     'OUTPUT_DIR',
@@ -2566,5 +2629,762 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
   assert.doesNotMatch(yaml, /export OWNER_CONFIRM=/)
   assert.doesNotMatch(yaml, /export ATTENDANCE_ADMIN_JWT=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
+  assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export CANARY_ADMIN_JWT_FILE=/)
+  // Path-only exports for secret files are allowed.
+  assert.match(yaml, /export CANARY_LOGIN_IDENTIFIER_FILE=/)
+  assert.match(yaml, /export CANARY_LOGIN_PASSWORD_FILE=/)
+  assert.match(yaml, /export STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
+})
+
+// --- human-bootstrap: fixed separate human platform admin -----------------------------
+
+test('human-bootstrap fixed identity markers and confirmation CREATE_STAGING_HUMAN_ADMIN', () => {
+  const source = read(REMOTE_SH)
+  const yaml = read(WORKFLOW)
+  assert.match(source, /HUMAN_OWNER_USERNAME="staging-owner-admin"/)
+  assert.match(source, /HUMAN_OWNER_NAME="Staging Owner Admin"/)
+  assert.match(source, /action_human_bootstrap\(\)/)
+  assert.match(source, /bootstrap_human_platform_admin\(\)/)
+  assert.match(source, /STAGING_OWNER_ADMIN_PASSWORD_FILE/)
+  assert.match(source, /BOOTSTRAP_CONFIRMATION=CREATE_STAGING_HUMAN_ADMIN/)
+  assert.match(yaml, /CREATE_STAGING_HUMAN_ADMIN/)
+  assert.match(yaml, /human-bootstrap/)
+  assert.match(yaml, /staging-owner-admin/)
+})
+
+test('human-bootstrap requires exact SHA, OFF, health, migrations zero; never writes lifecycle env or restarts', () => {
+  const body = actionHumanBootstrapBody(read(REMOTE_SH))
+  assert.match(body, /require_sha/)
+  assert.match(body, /assert_exact_sha/)
+  assert.match(body, /require_migrations_pending_zero_true "\$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap"/)
+  assert.match(body, /require_canary_secret_files "human-bootstrap"/)
+  assert.match(body, /assert_canary_identifier_matches_owner "human-bootstrap"/)
+  assert.match(body, /require_staging_owner_admin_password_file "human-bootstrap"/)
+  assert.match(body, /BOOTSTRAP_CONFIRMATION=CREATE_STAGING_HUMAN_ADMIN/)
+  assert.match(body, /expected_current_mode=off/)
+  assert.match(body, /backend_health_ok must be true before account mutation/)
+  assert.match(body, /live mode must be off/)
+  assert.match(body, /mint_canary_admin_jwt_from_password_login "human-bootstrap"/)
+  assert.match(body, /bootstrap_human_platform_admin/)
+  assert.match(body, /post-human-bootstrap live mode must remain off/)
+  assert.match(body, /all lifecycle flags must remain OFF/)
+  assert.match(body, /post-human-bootstrap backend_health_ok must remain true/)
+  assert.match(body, /require_migrations_pending_zero_true "\$SNAP_MIGRATIONS_ZERO" "action=human-bootstrap post-check"/)
+  assert.match(body, /post-human-bootstrap SHA/)
+  assert.match(body, /post_human_bootstrap_mode_off=true/)
+  assert.match(body, /post_human_bootstrap_flags_off=true/)
+  assert.match(body, /post_human_bootstrap_migrations_zero=true/)
+  assert.match(body, /transition_applied=false/)
+  assert.match(body, /lifecycle_env_write=false/)
+  assert.match(body, /backend_recreate=false/)
+  assert.doesNotMatch(body, /write_lifecycle_override/)
+  assert.doesNotMatch(body, /recreate_backend_only/)
+  assert.doesNotMatch(body, /pin_live_backend_image_for_transition/)
+  // Values-free summary only (no password/token/PII fields).
+  assert.doesNotMatch(body, /password=/)
+  assert.doesNotMatch(body, /identifier=/)
+  assert.doesNotMatch(body, /Authorization/)
+  assert.doesNotMatch(body, /Bearer /)
+})
+
+test('human-bootstrap sequence: mint JWT then create/repair with required reset/access/login/revoke', () => {
+  const body = actionHumanBootstrapBody(read(REMOTE_SH))
+  const mint = body.indexOf('mint_canary_admin_jwt_from_password_login "human-bootstrap"')
+  const txn = body.indexOf('bootstrap_human_platform_admin')
+  const postCapture = body.indexOf('post-human-bootstrap live mode must remain off')
+  assert.ok(mint > 0, 'canary JWT mint required')
+  assert.ok(txn > mint, 'human mutation after canary JWT mint')
+  assert.ok(postCapture > txn, 'post-check after mutation')
+
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  // Create path via POST /api/admin/users without email/mobile.
+  assert.match(helper, /\/api\/admin\/users/)
+  assert.match(helper, /"username": owner_username/)
+  assert.match(helper, /"name": owner_name/)
+  assert.match(helper, /"role": "admin"/)
+  assert.match(helper, /"roleId": "admin"/)
+  const createBody = helper.match(/create_body = \{[\s\S]*?\n    \}/)?.[0] || ''
+  assert.ok(createBody, 'create_body must exist')
+  assert.doesNotMatch(createBody, /"password":/)
+  assert.match(helper, /no email\/mobile|Create path: username\+name\+admin only; no email\/mobile/i)
+  assert.doesNotMatch(helper, /"email":/)
+  assert.doesNotMatch(helper, /"mobile":/)
+  // Safe repair / collision fail-closed.
+  assert.match(helper, /collision_multiple_rows/)
+  assert.match(helper, /identity_name_mismatch/)
+  assert.match(helper, /require_admin_access\(user_id, token, "pre_reset"\)/)
+  assert.match(helper, /f"\{phase\}_access_not_admin"/)
+  assert.match(helper, /identity_contact_not_empty/)
+  assert.match(helper, /outcome = "repaired"/)
+  assert.match(helper, /outcome = "created"/)
+  // Required reset-password forces must_change_password.
+  assert.match(helper, /\/reset-password/)
+  assert.match(helper, /must_change_password|Required reset-password forces must_change_password/)
+  // GET access verifies admin role/isAdmin.
+  assert.match(helper, /\/access/)
+  assert.match(helper, /isAdmin/)
+  assert.match(helper, /access_not_admin/)
+  assert.match(helper, /access_inactive/)
+  assert.match(helper, /access_not_activated/)
+  // Real login verifies passwordChangeRequired + exact username.
+  assert.match(helper, /\/api\/auth\/login/)
+  assert.match(helper, /passwordChangeRequired/)
+  assert.match(helper, /login_password_change_required_missing/)
+  assert.match(helper, /login_username_mismatch/)
+  // Required revoke-sessions with canary JWT (not human token).
+  assert.match(helper, /\/revoke-sessions/)
+  assert.match(helper, /lifecycle_canary_human_bootstrap/)
+  assert.match(helper, /revoke_proof_missing/)
+  // Existing-account repair proves RBAC ownership before reset. Both paths prove it
+  // again after reset, then login and revoke the proof session.
+  const preAccessIdx = helper.indexOf('require_admin_access(user_id, token, "pre_reset")')
+  const resetIdx = helper.indexOf('f"/api/admin/users/{urllib.parse.quote(user_id, safe=\'\')}/reset-password"')
+  const postAccessIdx = helper.indexOf('require_admin_access(user_id, token, "post_reset")')
+  const loginIdx = helper.indexOf('base.rstrip("/") + "/api/auth/login"')
+  const revokeIdx = helper.indexOf('f"/api/admin/users/{urllib.parse.quote(user_id, safe=\'\')}/revoke-sessions"')
+  assert.ok(preAccessIdx > 0 && preAccessIdx < resetIdx, 'existing-account access proof before reset-password')
+  assert.ok(postAccessIdx > resetIdx, 'post-write access proof after reset-password')
+  assert.ok(loginIdx > postAccessIdx, 'login after post-write access proof')
+  assert.ok(revokeIdx > loginIdx, 'revoke-sessions after login proof')
+  // Secrets: password from file path only; never logged.
+  assert.match(helper, /STAGING_OWNER_ADMIN_PASSWORD_FILE|pass_path/)
+  assert.match(helper, /values never logged|never logged/i)
+  assert.doesNotMatch(helper, /print\(password\)|log\(password\)|echo .*password/i)
+  assert.doesNotMatch(helper, /sys\.stdout\.write\(password\)/)
+})
+
+test('human-bootstrap workflow wiring demotes STAGING_OWNER_ADMIN_PASSWORD and cleans local+remote files', () => {
+  const yaml = read(WORKFLOW)
+  const doc = loadYaml(yaml)
+  const remoteStep = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
+  assert.ok(remoteStep?.env?.STAGING_OWNER_ADMIN_PASSWORD)
+  assert.match(
+    String(remoteStep.env.STAGING_OWNER_ADMIN_PASSWORD),
+    /inputs\.action == 'human-bootstrap'.*secrets\.STAGING_OWNER_ADMIN_PASSWORD/,
+  )
+  assert.match(remoteStep.run, /_STAGING_OWNER_PASS="\$\{STAGING_OWNER_ADMIN_PASSWORD-\}"/)
+  assert.match(
+    remoteStep.run,
+    /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD/,
+  )
+  assert.match(remoteStep.run, /printf '%s' "\$\{_STAGING_OWNER_PASS\}"/)
+  assert.match(remoteStep.run, /staging-owner-admin\.password/)
+  assert.match(remoteStep.run, /chmod 600 .*staging-owner-admin\.password|chmod 600 "\$\{secrets_dir\}\/staging-owner-admin\.password"/)
+  assert.match(remoteStep.run, /export STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
+  assert.match(remoteStep.run, /human-bootstrap requires STAGING_OWNER_ADMIN_PASSWORD/)
+  // Cleanup both local and remote secret dirs.
+  assert.match(remoteStep.run, /CLEAN_LOCAL_SECRETS_DIR/)
+  assert.match(remoteStep.run, /CLEAN_REMOTE_SECRETS_DIR/)
+  assert.match(remoteStep.run, /rm -rf "\$\{CLEAN_LOCAL_SECRETS_DIR\}"/)
+  assert.match(remoteStep.run, /rm -rf '\$\{remote_secrets_dir\}'|if \[\[ -n '\$\{remote_secrets_dir\}' \]\]; then rm -rf/)
+  // Never log secret.
+  assert.doesNotMatch(remoteStep.run, /echo .*_STAGING_OWNER_PASS/)
+  assert.doesNotMatch(remoteStep.run, /(?:echo|printf)[^\n]*\$\{?STAGING_OWNER_ADMIN_PASSWORD\}?/)
+  assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
+})
+
+test('human-bootstrap enforces the backend password policy before any account mutation', () => {
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  const policyEnd = helper.indexOf('# 1) Lookup by username query')
+  assert.ok(policyEnd > 0, 'password policy must precede the first API lookup')
+  const policy = helper.slice(0, policyEnd)
+  assert.match(policy, /password != password\.strip\(\)/)
+  assert.match(policy, /len\(password\) < 8/)
+  assert.match(policy, /len\(password\) > 128/)
+  assert.match(policy, /char\.islower\(\)/)
+  assert.match(policy, /char\.isupper\(\)/)
+  assert.match(policy, /char\.isdigit\(\)/)
+  for (const weak of ['password', '123456', 'qwerty', 'abc123', 'letmein', 'admin']) {
+    assert.match(policy, new RegExp(`"${weak}"`))
+  }
+})
+
+test('FUNCTIONAL harness: action_human_bootstrap order gates then mint then mutation then reassert; no env write', () => {
+  const sha = 'c'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       CALL_LOG=()
+       record() { CALL_LOG+=("\$1"); }
+       require_sha() { record require_sha; }
+       require_canary_secret_files() { record require_secrets; }
+       assert_canary_identifier_matches_owner() { record assert_owner; }
+       require_staging_owner_admin_password_file() { record require_owner_pass; }
+       capture_live_snapshot() {
+         record capture
+         SNAP_ALIAS=false; SNAP_PENDING=false; SNAP_DEPROV=false; SNAP_MODE=off
+         SNAP_BUILD_SHA="$DEPLOY_SHA"; SNAP_ALIAS_READY=true; SNAP_CAN_ENABLE_ALIAS=true
+         SNAP_MIGRATIONS_ZERO=true; SNAP_HEALTH_OK=true
+       }
+       assert_exact_sha() { record assert_sha; }
+       require_migrations_pending_zero_true() { record require_mig; }
+       mint_canary_admin_jwt_from_password_login() {
+         record "mint:\$1"
+         CANARY_ADMIN_JWT_FILE=/tmp/lifecycle-human-bootstrap-jwt
+         printf 'jwt' > "\$CANARY_ADMIN_JWT_FILE"
+         return 0
+       }
+       bootstrap_human_platform_admin() { record human_txn; HUMAN_BOOTSTRAP_OUTCOME=created; return 0; }
+       write_lifecycle_override() { record "write:\$1:\$2:\$3"; }
+       recreate_backend_only() { record recreate; return 0; }
+       write_status_artifact() { record write_status; }
+       OUTPUT_DIR="$2"
+       mkdir -p "$OUTPUT_DIR"
+       DEPLOY_SHA="$3"
+       EXPECTED_CURRENT_MODE=off
+       BOOTSTRAP_CONFIRMATION=CREATE_STAGING_HUMAN_ADMIN
+       ACTION=human-bootstrap
+       action_human_bootstrap
+       printf '%s\\n' "\${CALL_LOG[@]}"`,
+      'bash',
+      REMOTE_SH,
+      '/tmp/lifecycle-canary-human-bootstrap-success',
+      sha,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'human-bootstrap',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-human-bootstrap-success',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        DEPLOY_SHA: sha,
+        EXPECTED_CURRENT_MODE: 'off',
+        BOOTSTRAP_CONFIRMATION: 'CREATE_STAGING_HUMAN_ADMIN',
+      },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const lines = result.stdout.trim().split('\n')
+  const idx = (name) => {
+    const i = lines.indexOf(name)
+    assert.ok(i >= 0, `missing call ${name} in ${lines.join(',')}`)
+    return i
+  }
+  assert.ok(idx('require_sha') < idx('require_secrets'))
+  assert.ok(idx('require_secrets') < idx('assert_owner'))
+  assert.ok(idx('assert_owner') < idx('require_owner_pass'))
+  assert.ok(idx('require_mig') < idx('mint:human-bootstrap'))
+  assert.ok(idx('mint:human-bootstrap') < idx('human_txn'))
+  const humanI = idx('human_txn')
+  const secondCapture = lines.indexOf('capture', humanI + 1)
+  assert.ok(secondCapture > humanI, 'post-human-bootstrap recapture required')
+  const secondSha = lines.indexOf('assert_sha', humanI + 1)
+  assert.ok(secondSha > secondCapture, 'post-human-bootstrap SHA reassert after recapture')
+  assert.ok(!lines.some((l) => l.startsWith('write:')), 'human-bootstrap must not write lifecycle override')
+  assert.ok(!lines.includes('recreate'), 'human-bootstrap must not recreate backend')
+})
+
+test('FUNCTIONAL: bootstrap_human_platform_admin create path orders reset/access/login/revoke', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-human-bootstrap-create-'))
+  const jwtFile = join(dir, 'admin.jwt')
+  const passFile = join(dir, 'staging-owner-admin.password')
+  const callsFile = join(dir, 'calls.txt')
+  writeFileSync(jwtFile, 'canary-jwt-token', { mode: 0o600 })
+  writeFileSync(passFile, 'HumanPass9Xyz', { mode: 0o600 })
+  writeFileSync(callsFile, '', { mode: 0o600 })
+  const serverPy = `
+import json, http.server, socketserver, pathlib
+calls = pathlib.Path(${JSON.stringify(callsFile)})
+class H(http.server.BaseHTTPRequestHandler):
+    def _read(self):
+        n = int(self.headers.get('Content-Length', '0'))
+        return self.rfile.read(n) if n else b''
+    def _write(self, code, obj):
+        body = json.dumps(obj).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        calls.write_text(calls.read_text() + f'GET {self.path}\\n', encoding='utf-8')
+        auth = self.headers.get('Authorization', '')
+        assert auth == 'Bearer canary-jwt-token'
+        if self.path.startswith('/api/admin/users?') and 'staging-owner-admin' in self.path:
+            return self._write(200, {'ok': True, 'data': {'items': [], 'total': 0}})
+        if self.path.endswith('/access'):
+            return self._write(200, {
+                'ok': True,
+                'data': {
+                    'user': {
+                        'id': 'user-new',
+                        'username': 'staging-owner-admin',
+                        'name': 'Staging Owner Admin',
+                        'email': None,
+                        'mobile': None,
+                        'role': 'admin',
+                        'is_admin': True,
+                        'is_active': True,
+                        'activationStatus': 'activated',
+                    },
+                    'roles': ['admin'],
+                    'isAdmin': True,
+                },
+            })
+        self._write(404, {'ok': False})
+    def do_POST(self):
+        raw = self._read()
+        calls.write_text(calls.read_text() + f'POST {self.path}\\n', encoding='utf-8')
+        auth = self.headers.get('Authorization', '')
+        if self.path == '/api/auth/login':
+            body = json.loads(raw.decode('utf-8'))
+            assert body['identifier'] == 'staging-owner-admin'
+            assert body['password'] == 'HumanPass9Xyz'
+            return self._write(200, {
+                'success': True,
+                'data': {
+                    'token': 'human-session-jwt',
+                    'passwordChangeRequired': True,
+                    'user': {'username': 'staging-owner-admin', 'name': 'Staging Owner Admin'},
+                },
+            })
+        assert auth == 'Bearer canary-jwt-token'
+        if self.path == '/api/admin/users':
+            body = json.loads(raw.decode('utf-8'))
+            assert body.get('username') == 'staging-owner-admin'
+            assert body.get('name') == 'Staging Owner Admin'
+            assert body.get('role') == 'admin'
+            assert body.get('roleId') == 'admin'
+            assert 'password' not in body
+            assert 'email' not in body
+            assert 'mobile' not in body
+            return self._write(200, {
+                'ok': True,
+                'data': {
+                    'user': {
+                        'id': 'user-new',
+                        'username': 'staging-owner-admin',
+                        'name': 'Staging Owner Admin',
+                        'email': None,
+                        'mobile': None,
+                        'role': 'admin',
+                        'is_admin': True,
+                    },
+                },
+            })
+        if self.path.endswith('/reset-password'):
+            body = json.loads(raw.decode('utf-8'))
+            assert body.get('password') == 'HumanPass9Xyz'
+            return self._write(200, {'ok': True, 'data': {'userId': 'user-new'}})
+        if self.path.endswith('/revoke-sessions'):
+            return self._write(200, {
+                'ok': True,
+                'data': {'userId': 'user-new', 'revokedAfter': '2026-08-11T00:00:00.000Z'},
+            })
+        self._write(404, {'ok': False})
+    def log_message(self, *args):
+        return
+with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
+    print(httpd.server_address[1], flush=True)
+    for _ in range(6):
+        httpd.handle_request()
+`
+  const serverProc = spawn('python3', ['-c', serverPy], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+  })
+  const serverDone = collectChild(serverProc, 10000)
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let buf = ''
+      const timer = setTimeout(() => reject(new Error('port timeout')), 3000)
+      const onData = (chunk) => {
+        buf += chunk.toString('utf8')
+        const line = buf.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+        if (/^\d+$/.test(line)) {
+          clearTimeout(timer)
+          serverProc.stdout.off('data', onData)
+          resolve(line)
+        }
+      }
+      serverProc.stdout.on('data', onData)
+    })
+    const result = spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         CANARY_ADMIN_JWT_FILE="$2"
+         STAGING_OWNER_ADMIN_PASSWORD_FILE="$3"
+         STAGING_API_BASE_URL="http://127.0.0.1:$4"
+         bootstrap_human_platform_admin
+         printf 'OUTCOME=%s\\n' "$HUMAN_BOOTSTRAP_OUTCOME"`,
+        'bash',
+        REMOTE_SH,
+        jwtFile,
+        passFile,
+        port,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'human-bootstrap',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: 'contract-human-create',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+        timeout: 10000,
+      },
+    )
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    assert.match(result.stdout, /OUTCOME=created/)
+    assert.match(result.stdout, /human-bootstrap OK outcome=created/)
+    const calls = readFileSync(callsFile, 'utf8')
+    assert.match(calls, /GET \/api\/admin\/users\?/)
+    assert.match(calls, /POST \/api\/admin\/users\n/)
+    assert.match(calls, /POST \/api\/admin\/users\/user-new\/reset-password/)
+    assert.match(calls, /GET \/api\/admin\/users\/user-new\/access/)
+    assert.match(calls, /POST \/api\/auth\/login/)
+    assert.match(calls, /POST \/api\/admin\/users\/user-new\/revoke-sessions/)
+    const order = [
+      calls.indexOf('GET /api/admin/users?'),
+      calls.indexOf('POST /api/admin/users\n'),
+      calls.indexOf('POST /api/admin/users/user-new/reset-password'),
+      calls.indexOf('GET /api/admin/users/user-new/access'),
+      calls.indexOf('POST /api/auth/login'),
+      calls.indexOf('POST /api/admin/users/user-new/revoke-sessions'),
+    ]
+    for (let i = 1; i < order.length; i += 1) {
+      assert.ok(order[i] > order[i - 1], `call order broken at ${i}: ${calls}`)
+    }
+    await Promise.race([serverDone, new Promise((r) => setTimeout(r, 500))])
+  } finally {
+    if (!serverProc.killed && serverProc.exitCode === null) {
+      try {
+        serverProc.kill('SIGKILL')
+      } catch {
+        // ignore
+      }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: bootstrap_human_platform_admin safe repair and collision rejection', async () => {
+  async function runScenario(items, expectOk, expectNote, options = {}) {
+    const {
+      accessAdmin = true,
+      accessActive = true,
+      accessActivationStatus = 'activated',
+      passwordChangeRequired = true,
+      resetCode = 200,
+      revokeCode = 200,
+      revokeProof = true,
+    } = options
+    const dir = mkdtempSync(join(tmpdir(), 'lifecycle-human-bootstrap-repair-'))
+    const jwtFile = join(dir, 'admin.jwt')
+    const passFile = join(dir, 'staging-owner-admin.password')
+    writeFileSync(jwtFile, 'canary-jwt-token', { mode: 0o600 })
+    writeFileSync(passFile, 'HumanPass9Xyz', { mode: 0o600 })
+    const serverPy = `
+import json, http.server, socketserver
+items = json.loads(${JSON.stringify(JSON.stringify(items))})
+access_admin = ${accessAdmin ? 'True' : 'False'}
+access_active = ${accessActive ? 'True' : 'False'}
+access_activation_status = ${JSON.stringify(accessActivationStatus)}
+password_change_required = ${passwordChangeRequired ? 'True' : 'False'}
+reset_code = ${Number(resetCode)}
+revoke_code = ${Number(revokeCode)}
+revoke_proof = ${revokeProof ? 'True' : 'False'}
+class H(http.server.BaseHTTPRequestHandler):
+    def _read(self):
+        n = int(self.headers.get('Content-Length', '0'))
+        return self.rfile.read(n) if n else b''
+    def _write(self, code, obj):
+        body = json.dumps(obj).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path.startswith('/api/admin/users?'):
+            return self._write(200, {'ok': True, 'data': {'items': items, 'total': len(items)}})
+        if '/access' in self.path:
+            u = items[0]
+            access_user = dict(u)
+            access_user['is_active'] = access_active
+            access_user['activationStatus'] = access_activation_status
+            return self._write(200, {
+                'ok': True,
+                'data': {
+                    'user': access_user,
+                    'roles': ['admin'] if access_admin else [],
+                    'isAdmin': access_admin,
+                },
+            })
+        self._write(404, {'ok': False})
+    def do_POST(self):
+        if self.path == '/api/auth/login':
+            return self._write(200, {
+                'success': True,
+                'data': {
+                    'token': 't',
+                    'passwordChangeRequired': password_change_required,
+                    'user': {'username': 'staging-owner-admin'},
+                },
+            })
+        if self.path.endswith('/reset-password'):
+            return self._write(reset_code, {'ok': reset_code == 200, 'data': {}})
+        if self.path.endswith('/revoke-sessions'):
+            data = {
+                'revokedAfter': '2026-08-11T00:00:00.000Z' if revoke_proof else None,
+            }
+            return self._write(revoke_code, {'ok': revoke_code == 200, 'data': data})
+        if self.path == '/api/admin/users':
+            return self._write(500, {'ok': False})
+        self._write(404, {'ok': False})
+    def log_message(self, *args):
+        return
+with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
+    print(httpd.server_address[1], flush=True)
+    for _ in range(8):
+        httpd.handle_request()
+`
+    const serverProc = spawn('python3', ['-c', serverPy], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    })
+    const serverDone = collectChild(serverProc, 10000)
+    try {
+      const port = await new Promise((resolve, reject) => {
+        let buf = ''
+        const timer = setTimeout(() => reject(new Error('port timeout')), 3000)
+        const onData = (chunk) => {
+          buf += chunk.toString('utf8')
+          const line = buf.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+          if (/^\d+$/.test(line)) {
+            clearTimeout(timer)
+            serverProc.stdout.off('data', onData)
+            resolve(line)
+          }
+        }
+        serverProc.stdout.on('data', onData)
+      })
+      const result = spawnSync(
+        'bash',
+        [
+          '-o',
+          'pipefail',
+          '-c',
+          `source "$1"
+           CANARY_ADMIN_JWT_FILE="$2"
+           STAGING_OWNER_ADMIN_PASSWORD_FILE="$3"
+           STAGING_API_BASE_URL="http://127.0.0.1:$4"
+           if bootstrap_human_platform_admin; then
+             printf 'ok|%s' "$HUMAN_BOOTSTRAP_OUTCOME"
+           else
+             printf 'fail|%s' "$HUMAN_BOOTSTRAP_OUTCOME"
+           fi`,
+          'bash',
+          REMOTE_SH,
+          jwtFile,
+          passFile,
+          port,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ACTION: 'human-bootstrap',
+            OUTPUT_DIR: dir,
+            RUN_STAMP: 'contract-human-repair',
+            LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+          },
+          timeout: 10000,
+        },
+      )
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      if (expectOk) {
+        assert.match(result.stdout, new RegExp(`(?:^|\\n)ok\\|${expectNote}`))
+      } else {
+        assert.match(result.stdout, new RegExp(`(?:^|\\n)fail\\|${expectNote}`))
+      }
+      await Promise.race([serverDone, new Promise((r) => setTimeout(r, 500))])
+    } finally {
+      if (!serverProc.killed && serverProc.exitCode === null) {
+        try {
+          serverProc.kill('SIGKILL')
+        } catch {
+          // ignore
+        }
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  await runScenario(
+    [
+      {
+        id: 'owned-1',
+        username: 'staging-owner-admin',
+        name: 'Staging Owner Admin',
+        email: null,
+        mobile: null,
+        role: 'admin',
+        is_admin: true,
+      },
+    ],
+    true,
+    'repaired',
+  )
+  await runScenario(
+    [
+      {
+        id: 'a',
+        username: 'staging-owner-admin',
+        name: 'Staging Owner Admin',
+        email: null,
+        mobile: null,
+        role: 'admin',
+        is_admin: true,
+      },
+      {
+        id: 'b',
+        username: 'staging-owner-admin',
+        name: 'Staging Owner Admin',
+        email: null,
+        mobile: null,
+        role: 'admin',
+        is_admin: true,
+      },
+    ],
+    false,
+    'collision_multiple_rows',
+  )
+  await runScenario(
+    [
+      {
+        id: 'x',
+        username: 'staging-owner-admin',
+        name: 'Wrong Name',
+        email: null,
+        mobile: null,
+        role: 'admin',
+        is_admin: true,
+      },
+    ],
+    false,
+    'identity_name_mismatch',
+  )
+  await runScenario(
+    [
+      {
+        id: 'y',
+        username: 'staging-owner-admin',
+        name: 'Staging Owner Admin',
+        email: null,
+        mobile: null,
+        role: 'user',
+        is_admin: false,
+      },
+    ],
+    false,
+    'pre_reset_access_not_admin',
+    { accessAdmin: false },
+  )
+  const ownedAdmin = [{
+    id: 'owned-proof',
+    username: 'staging-owner-admin',
+    name: 'Staging Owner Admin',
+    email: null,
+    mobile: null,
+    role: 'admin',
+    is_admin: true,
+  }]
+  await runScenario(ownedAdmin, false, 'reset_http_503', { resetCode: 503 })
+  await runScenario(ownedAdmin, false, 'pre_reset_access_inactive', {
+    accessActive: false,
+  })
+  await runScenario(ownedAdmin, false, 'pre_reset_access_not_activated', {
+    accessActivationStatus: 'pending_activation',
+  })
+  await runScenario(ownedAdmin, false, 'login_password_change_required_missing', {
+    passwordChangeRequired: false,
+  })
+  await runScenario(ownedAdmin, false, 'revoke_http_503', { revokeCode: 503 })
+  await runScenario(ownedAdmin, false, 'revoke_proof_missing', { revokeProof: false })
+})
+
+test('MUTATION: human-bootstrap create request carrying operator password turns contract red', () => {
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  const mutated = helper.replace(
+    '"roleId": "admin",',
+    '"roleId": "admin",\n        "password": password,',
+  )
+  const createBody = mutated.match(/create_body = \{[\s\S]*?\n    \}/)?.[0] || ''
+  assert.throws(() => assert.doesNotMatch(createBody, /"password":/))
+})
+
+test('MUTATION: human-bootstrap dropping reset-password turns contract red', () => {
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  const mutated = helper.replaceAll('/reset-password', '/no-reset')
+  let failed = false
+  try {
+    assert.match(mutated, /\/reset-password/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: human-bootstrap dropping login passwordChangeRequired check turns contract red', () => {
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  const mutated = helper.replaceAll('passwordChangeRequired', 'passwordChangeIgnored')
+  let failed = false
+  try {
+    assert.match(mutated, /passwordChangeRequired/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: human-bootstrap dropping revoke-sessions turns contract red', () => {
+  const helper = bootstrapHumanPlatformAdminBody(read(REMOTE_SH))
+  const mutated = helper.replaceAll('/revoke-sessions', '/no-revoke')
+  let failed = false
+  try {
+    assert.match(mutated, /\/revoke-sessions/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: human-bootstrap writing lifecycle override turns no-env-write contract red', () => {
+  const original = actionHumanBootstrapBody(read(REMOTE_SH))
+  const mutated = `${original}\n  write_lifecycle_override "true" "false" "false"\n`
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /write_lifecycle_override/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: human-bootstrap skipping canary JWT mint turns contract red', () => {
+  const body = actionHumanBootstrapBody(read(REMOTE_SH))
+  const mutated = body.replace(
+    'mint_canary_admin_jwt_from_password_login "human-bootstrap"',
+    'true # mint removed',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /mint_canary_admin_jwt_from_password_login "human-bootstrap"/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
 })
