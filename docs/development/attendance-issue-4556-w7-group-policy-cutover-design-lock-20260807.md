@@ -100,7 +100,7 @@ RATIFY record itself is now on `main`:
    contract wiring, W6-3 UI, W6-4 verification, any merge, staging, soak,
    flag, deployment, and closure of issue 4556 each remain withheld. Ratifying
    the OD table is not an adoption of W6 runtime.
-2. **No W6 runtime has landed.** Re-verified at `origin/main@3767d87c`: the
+2. **No W6 runtime has landed.** Re-verified at `origin/main@b4ec9514`: the
    production route literal appears only in the W6 design lock and the
    out-of-build OpenAPI draft; the backend tree contains the types-only
    `w6-group-effective-policy-contract.ts`, but not PR 4849's aggregate,
@@ -392,7 +392,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
 | The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision, and the W6 lock is now RATIFIED (W6-1 backend aggregate only), so overriding W6-R5 can only be made as a **W6 amendment**, not a W7 choice. |
 | Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-11** (§0 update): OD-W6-0 is **RATIFIED as adopt** via PR 4821, but the runtime conjunct is unmet. At `origin/main@3767d87c`, the route literal remains confined to the design lock and out-of-build OpenAPI draft, and the backend has only the types-only contract. Current W6-1 candidate PR 4849 is Draft/HOLD and unmerged at `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; it also does not reach W6-2 contract wiring, W6-3's four-label UI, or W6-4 verification. PR 4814 remains an older non-delivery candidate. This row stays conditional. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-11** (§0 update): OD-W6-0 is **RATIFIED as adopt** via PR 4821, but the runtime conjunct is unmet. At `origin/main@b4ec9514`, the route literal remains confined to the design lock and out-of-build OpenAPI draft, and the backend has only the types-only contract. Current W6-1 candidate PR 4849 is Draft/HOLD and unmerged at `c2ac8284ab38756133c74ce54fde50d07d5bf13a`; it also does not reach W6-2 contract wiring, W6-3's four-label UI, or W6-4 verification. PR 4814 remains an older non-delivery candidate. This row stays conditional. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
