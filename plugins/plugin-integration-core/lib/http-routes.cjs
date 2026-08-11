@@ -10,6 +10,7 @@
 
 const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
+  ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
@@ -154,6 +155,7 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+const { getK3WiseCallAuditSnapshot } = require('./adapters/k3-wise-call-audit.cjs')
 // DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
 // SAME decision both the preview and the record materializer use, so they cannot diverge).
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
@@ -2724,6 +2726,15 @@ function createHandlers(services, options = {}) {
         adapters: adapterRegistry.listAdapterKinds(),
         routes: ROUTES.map(([method, path]) => ({ method, path })),
       })
+    },
+
+    async k3WiseCallAudit(req, res) {
+      // Internal operational evidence only. The snapshot is process-local and
+      // values-free, but still reveals connector activity, so keep it admin-only
+      // and reuse the existing tenant boundary before selecting its partition.
+      requireAccess(req, 'admin')
+      const tenantId = resolveTenantId(req, requestQuery(req))
+      return sendOk(res, getK3WiseCallAuditSnapshot({ tenantId }))
     },
 
     async adaptersList(req, res) {
