@@ -64,7 +64,10 @@ const applyArgs = (token: string) => ({
   token,
   sheetId: SHEET,
   actorId: ACTOR,
-  evaluateFullReadAccess: ALLOW_FULL_READ,
+  // P25 two-interface split: applyExactAnchorRecovery now requires the two named full-read interfaces
+  // instead of the single evaluateFullReadAccess field.
+  preliminaryFullRead: ALLOW_FULL_READ,
+  finalLockedFullRead: ALLOW_FULL_READ,
   stabilizeAuthorization: REAL_STABILIZE,
   evaluatePlanAuthorization: ALLOW_PLAN,
 })
