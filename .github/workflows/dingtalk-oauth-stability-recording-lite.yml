@@ -4,6 +4,9 @@ name: DingTalk OAuth Stability Recording (Lite)
 # Alertmanager + webhook alert-DELIVERY topology is NOT deployable from current main and is
 # DEFERRED (the check soft-reports it, the verdict does not depend on it). This workflow does
 # NOT claim alert-delivery observability is restored — only OAuth-stability metrics observability.
+#
+# Host identity is pinned via DEPLOY_KNOWN_HOSTS (raw or base64 known_hosts). SSH in the
+# called scripts enforces StrictHostKeyChecking=yes + UserKnownHostsFile + GlobalKnownHostsFile=/dev/null.
 
 on:
   schedule:
@@ -27,11 +30,21 @@ jobs:
       - name: Prepare SSH key
         env:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
 
       - name: Reapply Alertmanager webhook config
         id: webhook_self_heal
@@ -50,6 +63,7 @@ jobs:
 
           SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
           SSH_KEY="${HOME}/.ssh/deploy_key" \
+          SSH_KNOWN_HOSTS_FILE="${HOME}/.ssh/known_hosts" \
           bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh set
 
       - name: Run remote stability check
@@ -68,6 +82,7 @@ jobs:
           JSON_OUTPUT=true \
           SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
           SSH_KEY="${HOME}/.ssh/deploy_key" \
+          SSH_KNOWN_HOSTS_FILE="${HOME}/.ssh/known_hosts" \
           bash scripts/ops/dingtalk-oauth-stability-check.sh >"${JSON_PATH}" 2>"${LOG_PATH}"
           rc=$?
           set -e

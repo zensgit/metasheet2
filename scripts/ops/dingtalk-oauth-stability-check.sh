@@ -32,8 +32,18 @@ cleanup_payload_dir() {
 }
 trap cleanup_payload_dir EXIT
 
+# Host identity is pinned by the caller (workflow prepares ~/.ssh/known_hosts from
+# DEPLOY_KNOWN_HOSTS). Refuse TOFU / global known_hosts so only the pinned file is trusted.
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-${HOME}/.ssh/known_hosts}"
+
 ssh_cmd() {
-  ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
+  ssh -i "${SSH_KEY}" \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+    -o GlobalKnownHostsFile=/dev/null \
+    "${SSH_USER_HOST}" "$@"
 }
 
 # Scrape a token-gated endpoint on the deploy host. The token is read from the backend container's
