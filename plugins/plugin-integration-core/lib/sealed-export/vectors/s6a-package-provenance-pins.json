@@ -85,7 +85,7 @@
     "s6aRuntimeAuthorityRealDbTest": "609da9054db15ced3567417b31ae743f2c3be1656f5e3d0874a77c3a4cbd0375",
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "de978adafa8b89772cefa921c2051f434bf346bf5c2978bef3424ee70f51ba3f",
-    "multitableOnpremPackageBuild": "463c7d73c6c7f2d1b6cdf0820d7a06974a9c463dd5e98bbbaf1c996e1dc4ed99",
+    "multitableOnpremPackageBuild": "ae477a24375a7269e5710a3481905c9b74255c03fd802841a16849aca48ee33a",
     "pluginTestsWorkflow": "6e6653d6cdb102330da32cacd10f12fb842111a3e23675857474068421ea5faa"
   }
 }

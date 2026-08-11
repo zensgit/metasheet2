@@ -355,16 +355,20 @@ function write_windows_first_hop_bootstrap_assets() {
 @echo off
 setlocal
 if "%~1"=="" (
-  echo Usage: ${PACKAGE_NAME}-deploy-bootstrap.bat ^<package.zip^|package.tgz^> [installed-root]
+  echo Usage: ${PACKAGE_NAME}-deploy-bootstrap.bat ^<package.zip^|package.tgz^> [installed-root] [install-deps:0^|1] [run-migrations:0^|1]
   exit /b 64
 )
 set "INSTALL_ROOT=%~2"
 if "%INSTALL_ROOT%"=="" set "INSTALL_ROOT=%cd%"
+set "INSTALL_DEPS=%~3"
+if "%INSTALL_DEPS%"=="" set "INSTALL_DEPS=1"
+set "RUN_MIGRATIONS=%~4"
+if "%RUN_MIGRATIONS%"=="" set "RUN_MIGRATIONS=1"
 REM First-hop bootstrap sidecar. Use this from a release download when the
 REM already-installed deploy.bat/launcher is too old to stage the new package
 REM under C:\ms-tmp. It intentionally bypasses the installed launcher and runs
 REM the fresh launcher sidecar next to this .bat file.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${PACKAGE_NAME}-deploy-bootstrap.ps1" -RootDir "%INSTALL_ROOT%" -PackageArchive "%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${PACKAGE_NAME}-deploy-bootstrap.ps1" -RootDir "%INSTALL_ROOT%" -PackageArchive "%~1" -InstallDeps "%INSTALL_DEPS%" -RunMigrations "%RUN_MIGRATIONS%"
 set "APPLY_EXIT=%ERRORLEVEL%"
 echo [multitable-onprem-deploy-bootstrap] apply exit=%APPLY_EXIT%
 exit /b %APPLY_EXIT%
@@ -634,6 +638,11 @@ First-hop bootstrap sidecar:
   ${PACKAGE_NAME}-deploy-bootstrap.ps1 (or the .bat wrapper) next to the package
   archive and run it from the existing install root:
     powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip
+  A no-dependency repair must explicitly disable migrations as the same atomic
+  mode; either of these forms preserves existing node_modules and uses the
+  rollback-protected package overlay:
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip -InstallDeps 0 -RunMigrations 0
+    .\${PACKAGE_NAME}-deploy-bootstrap.bat .\${PACKAGE_NAME}.zip . 0 0
   The sidecar uses the current launcher logic immediately, defaults staging to
   C:\ms-tmp on Windows, and invokes the staged package's fresh apply helper.
 
