@@ -1928,7 +1928,24 @@ async function testPipelineExternalWriteApplyRoute() {
     'external-write apply route registered',
   )
 
-  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = ' true '
+  try {
+    const disabled = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+      user: WRITE_USER,
+      params: { id: pipeline.id },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: 'must-not-be-consumed' } },
+    })
+    assert.equal(disabled.statusCode, 403)
+    assert.equal(disabled.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'deployment read-only gate refuses before loading pipeline/systems/adapters')
+    assert.equal(storage.map.size, 0, 'deployment read-only gate cannot consume a token')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  try {
+    let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
     user: WRITE_USER,
     params: { id: pipeline.id },
     body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: {} },
@@ -2029,7 +2046,11 @@ async function testPipelineExternalWriteApplyRoute() {
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
-  assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+    assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
@@ -8556,6 +8577,9 @@ async function testC6AdapterBackedTargetLoadsWithCredentials() {
 }
 
 async function main() {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  try {
   await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -8635,6 +8659,10 @@ async function main() {
   await testStagingInstallSteeringHasNoEffect()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 // W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write
