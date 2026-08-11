@@ -801,6 +801,10 @@ export default defineConfig({
       // Time Machine closeout guard: per-subject authority leases. It is DATABASE_URL-gated and
       // pinned by the shared exact-anchor CI wiring contract.
       'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
+      // TM-closeout slice goldens (DATABASE_URL-gated; two-point wired via the exact-anchor CI wiring contract).
+      'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
+      'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
+      'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

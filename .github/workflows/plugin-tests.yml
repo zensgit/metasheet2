@@ -995,6 +995,9 @@ jobs:
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
+            tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts \
+            tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
+            tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \
