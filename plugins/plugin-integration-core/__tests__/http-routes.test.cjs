@@ -1928,6 +1928,23 @@ async function testPipelineExternalWriteApplyRoute() {
     'external-write apply route registered',
   )
 
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = ' true '
+  try {
+    const disabled = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+      user: WRITE_USER,
+      params: { id: pipeline.id },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: 'must-not-be-consumed' } },
+    })
+    assert.equal(disabled.statusCode, 403)
+    assert.equal(disabled.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'deployment read-only gate refuses before loading pipeline/systems/adapters')
+    assert.equal(storage.map.size, 0, 'deployment read-only gate cannot consume a token')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
+
   let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
     user: WRITE_USER,
     params: { id: pipeline.id },
