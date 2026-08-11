@@ -26,7 +26,7 @@ W6-3 UI, W6-4 whole-W6 closeout, W7 calculation cutover, or W8 closure.
 | Route | `GET /api/attendance/groups/:groupId/effective-policy` under `attendance:admin` |
 | Principal scope | Organization comes from the authenticated principal; client selectors cannot replace it |
 | Delegated admin | Active target-org membership is required after the route RBAC guard |
-| Transaction | RBAC lookup, membership check, aggregate reads, and FSER reads share one PostgreSQL `READ ONLY` transaction-bound query handle |
+| Transaction | The handler's post-guard platform-admin lookup, delegated membership check, aggregate reads, and FSER reads share one PostgreSQL `READ ONLY` transaction-bound query handle; `rbacGuard` performs its permitted middleware reads before that transaction |
 | Response | Exact-key, values-free aggregate with closed labels, domains, conflict codes, reason codes, and editor references |
 | FSER | Existing fixed-schedule effectiveness service is composed; W6 does not rederive or persist a second status |
 | Conflict handling | Membership overlap is reported as a count and `conflict_action_required`; no winner is selected |
@@ -56,7 +56,7 @@ W6-2 and is intentionally absent from this slice.
 | --- | --- |
 | W6-R1 | The route is GET-only. The service is constructed per request with the transaction query handle. PostgreSQL `SET TRANSACTION READ ONLY` is the mechanism of record; a derived static call-path sweep is a secondary guard. |
 | W6-R2 | The response validator enforces exact recursive key sets and values-free fields. Membership overlap leaves the service as a count, never a member list. |
-| W6-R3 | `rbacGuard` is attached at route registration. Principal org resolution and selector mismatch checks precede aggregate SQL. Platform-admin lookup and delegated membership checks use the same read-only query handle as the aggregate. |
+| W6-R3 | `rbacGuard` is attached at route registration and may perform its permitted RBAC reads before the handler transaction. Principal org resolution and selector mismatch checks precede aggregate SQL. The handler's post-guard platform-admin lookup and delegated membership checks use the same read-only query handle as the aggregate. |
 | W6-R4 | The aggregate receives the existing FSER service. Caller and producer-key inventories reject a second derivation or producer-key spelling. |
 | W6-R5 | Import-graph and call-path guards reject calculation-writer consumption. Overlap fixtures require conflict reporting instead of choose-first/choose-latest behavior. |
 | W6-R6 | Runtime validators reject unknown labels, domains, conflict codes, reason codes, group types, rollout states, and editor-reference members. |
@@ -89,7 +89,8 @@ file, no-DB exclusion, and attendance run list merged without semantic conflict.
 The sealed-export provenance JSON was regenerated from the resulting workflow
 bytes rather than copying an earlier branch value.
 
-The resulting implementation delta is 31 files. No migration, feature flag,
+The runtime implementation delta before the two report files is 31 files; the
+exact base-to-report-head delta is 33 files. No migration, feature flag,
 rollout-state mutation, staging action, deployment action, or customer data is
 part of that delta.
 
@@ -107,6 +108,10 @@ These are not represented as W6-1 guarantees:
    plugin attendance library requires an explicit closed-set edit and tests.
 4. W6-2 contract publication, W6-3 UI, and W6-4 whole-W6 verification remain
    separate gated slices.
+5. Date-only response fields are checked for the closed `YYYY-MM-DD` lexical
+   shape. Calendar-valid production values remain a producer/database
+   invariant; W6-1 does not claim that its response validator rejects every
+   lexically valid but impossible calendar date.
 
 ## 6. Stop condition
 
@@ -117,4 +122,3 @@ The authorized end state for this work is:
 - no merge is performed;
 - no runtime, flag, deployment, staging, soak, production/customer data, or
   issue #4556 close action is performed.
-
