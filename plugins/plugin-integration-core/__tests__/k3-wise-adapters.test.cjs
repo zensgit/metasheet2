@@ -12,6 +12,11 @@ const {
   createK3WiseWebApiAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
 const {
+  __internals: auditInternals,
+  K3_WISE_CALL_AUDIT_OPERATIONS,
+  getK3WiseCallAuditSnapshot,
+} = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-call-audit.cjs'))
+const {
   createK3WiseSqlServerChannel,
   createK3WiseSqlServerChannelFactory,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-channel.cjs'))
@@ -868,7 +873,15 @@ async function testK3WebApiAdapter() {
 }
 
 async function testK3WebApiMaterialDetailReadSmoke() {
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/GetDetail', 'read'), 'materialGetDetail')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/GetList', 'read'), 'materialGetList')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Save.ashx', 'lifecycle-write'), 'materialSave')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Submit', 'lifecycle-write'), 'materialSubmit')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Audit', 'lifecycle-write'), 'materialAudit')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/BOM/Save', 'lifecycle-write'), 'otherLifecycleWrite')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Token/Create', 'read'), 'otherRead')
   const { calls, fetchImpl } = createK3FetchMock()
+  const auditBefore = getK3WiseCallAuditSnapshot()
   const adapter = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
       config: {
@@ -929,6 +942,21 @@ async function testK3WebApiMaterialDetailReadSmoke() {
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'read smoke must not Save')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'read smoke must not Submit')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'read smoke must not Audit')
+
+  const auditAfter = getK3WiseCallAuditSnapshot()
+  assert.deepEqual(
+    Object.keys(auditAfter.counts),
+    [...K3_WISE_CALL_AUDIT_OPERATIONS],
+    'the operational evidence uses a closed values-free key set',
+  )
+  assert.equal(auditAfter.counts.materialGetDetail - auditBefore.counts.materialGetDetail, 1)
+  assert.equal(auditAfter.counts.materialSave - auditBefore.counts.materialSave, 0)
+  assert.equal(auditAfter.counts.materialSubmit - auditBefore.counts.materialSubmit, 0)
+  assert.equal(auditAfter.counts.materialAudit - auditBefore.counts.materialAudit, 0)
+  const auditText = JSON.stringify(auditAfter)
+  for (const forbidden of ['MAT-GATE-001', 'k3.example.test', 'k3-session-1', 'k3-token-1']) {
+    assert.equal(auditText.includes(forbidden), false, `call-audit snapshot must not expose ${forbidden}`)
+  }
 
   const missingKey = await adapter.read({ object: 'material' }).catch((error) => error)
   assert.ok(missingKey instanceof AdapterValidationError, 'Material read requires a concrete FNumber/template key')

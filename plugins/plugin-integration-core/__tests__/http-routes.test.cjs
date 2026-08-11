@@ -622,6 +622,37 @@ async function testUnauthenticatedWriteRequestIsRejected() {
   assert.equal(calls.length, 0, 'unauthenticated write did not reach services')
 }
 
+async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
+  const { services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  const routePath = '/api/integration/internal/k3-wise/call-audit'
+  assert.ok(registered.includes(`GET ${routePath}`), 'K3 values-free call-audit route registered')
+
+  for (const user of [undefined, READ_USER, WRITE_USER]) {
+    const denied = await invoke(routes, 'GET', routePath, { user })
+    assertErrorResponse(denied, user ? [403] : [401])
+  }
+
+  const allowed = await invoke(routes, 'GET', routePath, { user: ADMIN_USER })
+  assertOkResponse(allowed, 200)
+  assert.equal(allowed.body.data.version, '2026.08.v1')
+  assert.equal(allowed.body.data.scope, 'process')
+  assert.deepEqual(Object.keys(allowed.body.data.counts), [
+    'materialGetDetail',
+    'materialGetList',
+    'materialSave',
+    'materialSubmit',
+    'materialAudit',
+    'otherRead',
+    'otherLifecycleWrite',
+  ])
+  assert.ok(Object.values(allowed.body.data.counts).every(Number.isSafeInteger))
+  const serialized = JSON.stringify(allowed.body.data)
+  for (const forbidden of ['url', 'path', 'query', 'credential', 'request', 'response', 'tenant']) {
+    assert.equal(serialized.toLowerCase().includes(forbidden), false, `audit response excludes ${forbidden}`)
+  }
+}
+
 async function testExternalSystemRoutes() {
   const { calls, services } = createMockServices()
   const { routes, registered } = mountRoutes(services)
@@ -8521,6 +8552,7 @@ async function main() {
   await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
+  await testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testStockPreparationErpMaterialSyncRoute()

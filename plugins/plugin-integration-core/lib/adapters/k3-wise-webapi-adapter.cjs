@@ -39,6 +39,7 @@ const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
 // Save path below owns the throw disposition, the preview owns the valid:false disposition.
 const { composeSchemaBody, findUnfilledPlaceholders, projectRecordForBody } = require('./k3-save-body-composer.cjs')
+const { recordK3WiseCall } = require('./k3-wise-call-audit.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -1810,7 +1811,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     // Build ONCE, then gate the pathname that was actually produced. Re-deriving it here would
     // reintroduce exactly the check-vs-use gap that axes 4, 5 and 6 all exploited.
     const endpointUrl = buildEndpointUrl(baseUrl, path)
-    assertWireEndpointIntent(toWireEndpointPathname(endpointUrl.pathname), intent)
+    const wirePathname = toWireEndpointPathname(endpointUrl.pathname)
+    assertWireEndpointIntent(wirePathname, intent)
     for (const [key, value] of Object.entries(query || {})) {
       if (value === undefined || value === null || value === '') continue
       endpointUrl.searchParams.set(key, String(value))
@@ -1826,6 +1828,9 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     )
 
     try {
+      // The counter receives the canonical wire pathname only long enough to map it
+      // into a closed operation vocabulary. It retains no URL or request value.
+      recordK3WiseCall(wirePathname, intent)
       const response = await fetchImpl(url, {
         method,
         headers: requestHeaders,
