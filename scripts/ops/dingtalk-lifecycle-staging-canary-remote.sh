@@ -8,26 +8,39 @@
 #   status     — read-only snapshot (values-free closed booleans / SHA / health)
 #   preflight  — read-only readiness for a target mode; never applies env flips
 #   off        — emergency operational rollback of the THREE lifecycle env gates
-#                to OFF (only permitted env write). Atomic previous-override
-#                backup + restore on restart/health/mode failure.
+#                to OFF. Atomic previous-override backup + restore on
+#                restart/health/mode failure.
+#   alias      — TRANSIENT secret-backed alias cutover canary.
+#                Success requires/proves OFF (post-rollback mode+login).
+#                Failure restores the OFF override before failing (post-write).
+#                Runtime OFF cannot be proven if rollback recreate itself fails
+#                (override restored on disk; operator must inspect).
+#                Requires full deploy SHA, expected_current_mode=off, admin JWT
+#                file + login identifier/password files (chmod 600).
+#                Sequence: pre-login → backfill (collisions==0) → cutover-status
+#                ready → write alias ON → recreate backend only → post-ON login
+#                → restore OFF → recreate → post-rollback login.
+#                Backfill rows may persist.
 #
 # NOT EXECUTABLE (fail-closed preflight-only; transition_applied always false):
-#   alias / pending / deprovision
+#   pending / deprovision
 #     Env flips alone are NOT a canary. There is no secret-backed real verifier
-#     for password-login success/rollback, admit→activate, or sync→deprovision.
-#     Presence tokens must not pretend to drive those paths. These actions only
-#     emit a preflight assessment and refuse apply.
+#     for admit→activate or sync→deprovision. Presence tokens must not pretend
+#     to drive those paths.
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
 #   * migrations_pending_zero must be exactly "true" for preflight_ok and for
-#     action=off (unknown is a fail, never treated as success).
-#   * action=off: recreate backend only; prove postgres/redis IDs unchanged;
-#     require backend health true after restart; prove exact mode=off; restore
+#     action=off / action=alias (unknown is a fail, never treated as success).
+#   * action=off|alias: recreate backend only; prove postgres/redis IDs unchanged;
+#     require backend health true after restart; prove exact mode; restore
 #     previous override and re-recreate on any failure after the write.
 #   * multi-on: status/preflight report and fail closed; action=off still clears
 #     the exact three flags (does not die in derive_mode before clear).
-#   * Artifacts never contain env values, credentials, subject ids, or PII.
+#   * Artifacts never contain env values, credentials, subject ids, or PII —
+#     only booleans / counts / reason enums / SHA.
+#   * Secrets never appear in shell argv, process listings via export of values,
+#     or logs; only chmod-600 file paths are passed.
 #   * Invoked as `bash -o pipefail -c '<script>'`.
 set -euo pipefail
 
@@ -43,6 +56,12 @@ DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
 
+# Secret-backed alias canary inputs: FILE PATHS only (values never exported).
+# Workflow materializes chmod-600 files into the per-run remote directory.
+CANARY_ADMIN_JWT_FILE="${CANARY_ADMIN_JWT_FILE:-}"
+CANARY_LOGIN_IDENTIFIER_FILE="${CANARY_LOGIN_IDENTIFIER_FILE:-}"
+CANARY_LOGIN_PASSWORD_FILE="${CANARY_LOGIN_PASSWORD_FILE:-}"
+
 # Intentionally ignored: not a real verifier path. Kept empty so accidental
 # exports cannot be mistaken for canary completion evidence.
 # CANARY_SUBJECT_ID / CANARY_INTEGRATION_ID / OWNER_CONFIRM are NOT used.
@@ -53,6 +72,7 @@ POSTGRES_CONTAINER="metasheet-staging-postgres"
 REDIS_CONTAINER="metasheet-staging-redis"
 STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
+STAGING_API_BASE_URL="http://127.0.0.1:8082"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
 
 FLAG_ALIAS="AUTH_LOGIN_USE_ALIASES"
@@ -84,11 +104,13 @@ fi
 
 LIFECYCLE_PERSIST_DIR="${HOME}/.metasheet2/lifecycle-canary"
 LIFECYCLE_OVERRIDE_FILE="${LIFECYCLE_PERSIST_DIR}/docker-compose.lifecycle-canary.override.yml"
-# Previous-override backup used only during action=off for restore-on-failure.
+# Previous-override backup used during action=off|alias for restore-on-failure
+# (alias success path also restores OFF to prove rollback; failure restores first).
 LIFECYCLE_PREV_BACKUP=""
 LIFECYCLE_PREV_STATE="absent" # absent | present
 PINNED_IMAGE_OWNER=""
 PINNED_IMAGE_TAG=""
+ALIAS_ROLLBACK_ARMED="false"
 
 is_truthy() {
   local v
@@ -344,7 +366,7 @@ probe_migration_pending_zero() {
 }
 
 require_migrations_pending_zero_true() {
-  # Load-bearing for every transition (currently only action=off) and for preflight_ok.
+  # Load-bearing for every transition (action=off|alias) and for preflight_ok.
   local v="$1" context="$2"
   if [[ "$v" == "true" ]]; then
     return 0
@@ -353,6 +375,276 @@ require_migrations_pending_zero_true() {
     fail "${context}: migrations_pending_zero must be exactly true (got false — pending migrations; run attendance staging migrate backup/clone-rehearsal first)"
   fi
   fail "${context}: migrations_pending_zero must be exactly true (got '${v}' — probe unknown/failed; refuse, do not treat unknown as success)"
+}
+
+require_canary_secret_files() {
+  # Paths only — never read values into shell variables that get logged.
+  local f
+  for f in \
+    CANARY_ADMIN_JWT_FILE \
+    CANARY_LOGIN_IDENTIFIER_FILE \
+    CANARY_LOGIN_PASSWORD_FILE
+  do
+    local path="${!f:-}"
+    [[ -n "$path" ]] || fail "action=alias requires ${f} (chmod-600 secret file path); no auto-selection"
+    [[ -f "$path" ]] || fail "action=alias secret file missing for ${f}"
+    [[ -s "$path" ]] || fail "action=alias secret file empty for ${f}"
+  done
+  log "alias canary secret files present (paths only; values never logged)"
+}
+
+# Real password login via secret files. Values stay inside python; never argv/export/log.
+# Identifier may follow app trim semantics (strip ends). Password is read EXACTLY as
+# stored (no CR/LF strip, no transform). stdout: true|ok or false|<reason_enum>.
+prove_canary_password_login() {
+  local context="$1"
+  local result ok note
+  result="$(
+    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$STAGING_API_BASE_URL" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.error
+import urllib.request
+
+ident_path, pass_path, base = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    # read_bytes+decode avoids text-mode universal-newline translation.
+    # App sanitizeLoginIdentifier trims ends; password must not be transformed.
+    identifier = pathlib.Path(ident_path).read_bytes().decode("utf-8").strip()
+    password = pathlib.Path(pass_path).read_bytes().decode("utf-8")
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if not identifier or password == "":
+    print("false|empty_credentials")
+    raise SystemExit(0)
+body = json.dumps({"identifier": identifier, "password": password}).encode("utf-8")
+req = urllib.request.Request(
+    base.rstrip("/") + "/api/auth/login",
+    data=body,
+    headers={"Content-Type": "application/json", "Accept": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    print(f"false|http_{int(e.code)}")
+    raise SystemExit(0)
+except Exception:
+    print("false|request_failed")
+    raise SystemExit(0)
+try:
+    data = json.loads(raw)
+except Exception:
+    print(f"false|http_{code}_bad_json")
+    raise SystemExit(0)
+token = ""
+if isinstance(data, dict) and isinstance(data.get("data"), dict):
+    token = data["data"].get("token") or ""
+ok = (
+    code == 200
+    and data.get("success") is True
+    and isinstance(token, str)
+    and len(token) > 0
+)
+print("true|ok" if ok else f"false|http_{code}_login_rejected")
+PY
+  )"
+  ok="${result%%|*}"
+  note="${result#*|}"
+  if [[ "$ok" == "true" ]]; then
+    log "password login OK (${context})"
+    return 0
+  fi
+  log "password login FAILED (${context}): ${note}"
+  return 1
+}
+
+# Admin API via JWT file. Prints values-free result lines; never logs token.
+# Usage: admin_api_request METHOD PATH
+# stdout on transport success: HTTP_CODE\nBODY
+admin_api_request() {
+  local method="$1" path="$2"
+  python3 - "$CANARY_ADMIN_JWT_FILE" "$STAGING_API_BASE_URL" "$method" "$path" <<'PY'
+import pathlib
+import sys
+import urllib.error
+import urllib.request
+
+jwt_path, base, method, path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+except Exception:
+    sys.stderr.write("admin jwt file read failed\n")
+    raise SystemExit(2)
+if not token:
+    sys.stderr.write("admin jwt file empty\n")
+    raise SystemExit(2)
+url = base.rstrip("/") + path
+data = b"{}" if method.upper() == "POST" else None
+req = urllib.request.Request(
+    url,
+    data=data,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method=method.upper(),
+)
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    body = e.read().decode("utf-8", errors="replace")
+    code = int(e.code)
+except Exception as e:
+    sys.stderr.write(f"admin api request failed: {type(e).__name__}\n")
+    raise SystemExit(2)
+sys.stdout.write(f"{code}\n{body}")
+PY
+}
+
+# POST /api/admin/login-aliases/backfill — success required; record counts only.
+# Requires Python int counts only (reject bool/float/string/missing/negative) and
+# collisions==0 before any env write (collisions would lock collided users out
+# under alias-only login). Production API returns JS numbers → JSON ints.
+# Sets: BACKFILL_OK BACKFILL_INSERTED BACKFILL_COLLISIONS BACKFILL_SKIPPED BACKFILL_NOTE
+run_alias_backfill() {
+  local raw code body parsed
+  BACKFILL_OK="false"
+  BACKFILL_INSERTED="0"
+  BACKFILL_COLLISIONS="0"
+  BACKFILL_SKIPPED="0"
+  BACKFILL_NOTE="unset"
+  if ! raw="$(admin_api_request POST /api/admin/login-aliases/backfill)"; then
+    BACKFILL_NOTE="transport_failed"
+    log "alias backfill request failed (transport)"
+    return 1
+  fi
+  code="$(printf '%s\n' "$raw" | head -n1)"
+  body="$(printf '%s\n' "$raw" | tail -n +2)"
+  if [[ "$code" != "200" ]]; then
+    BACKFILL_NOTE="http_${code}"
+    log "alias backfill HTTP ${code} (body redacted)"
+    return 1
+  fi
+  # Parse only counts / ok flag — never echo body (may contain unexpected fields).
+  # Fail closed: counts must be Python int only (not bool/float/str); collisions==0.
+  if ! parsed="$(printf '%s' "$body" | python3 -c 'import json,sys
+
+def nonneg_int(v, name):
+    # API emits JSON numbers as Python int. Reject bool (int subclass), float
+    # (including 1.0), string (including "1"), missing/None, and negatives.
+    if type(v) is not int:
+        raise ValueError(name)
+    if v < 0:
+        raise ValueError(name)
+    return v
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("false|malformed|0|0|0")
+    raise SystemExit(0)
+if d.get("ok") is not True:
+    print("false|not_ok|0|0|0")
+    raise SystemExit(0)
+data = d.get("data") if isinstance(d.get("data"), dict) else None
+if not isinstance(data, dict):
+    print("false|malformed|0|0|0")
+    raise SystemExit(0)
+try:
+    # Missing keys → .get None → type is not int → malformed.
+    ins = nonneg_int(data.get("inserted"), "inserted")
+    col = nonneg_int(data.get("collisions"), "collisions")
+    sk = nonneg_int(
+        data["skippedEmpty"] if "skippedEmpty" in data else data.get("skipped_empty"),
+        "skippedEmpty",
+    )
+except Exception:
+    print("false|malformed|0|0|0")
+    raise SystemExit(0)
+if col != 0:
+    print(f"false|collisions_nonzero|{ins}|{col}|{sk}")
+    raise SystemExit(0)
+print(f"true|ok|{ins}|{col}|{sk}")
+')"; then
+    BACKFILL_NOTE="parse_failed"
+    log "alias backfill response parse failed"
+    return 1
+  fi
+  BACKFILL_OK="${parsed%%|*}"
+  local rest="${parsed#*|}"
+  BACKFILL_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  BACKFILL_INSERTED="${rest%%|*}"
+  rest="${rest#*|}"
+  BACKFILL_COLLISIONS="${rest%%|*}"
+  BACKFILL_SKIPPED="${rest#*|}"
+  if [[ "$BACKFILL_OK" != "true" ]]; then
+    log "alias backfill refused: note=${BACKFILL_NOTE} inserted=${BACKFILL_INSERTED} collisions=${BACKFILL_COLLISIONS} skipped_empty=${BACKFILL_SKIPPED}"
+    return 1
+  fi
+  # Defense in depth: bash-side exact collisions==0 and nonnegative digit counts.
+  if [[ ! "$BACKFILL_INSERTED" =~ ^(0|[1-9][0-9]*)$ ]] \
+    || [[ ! "$BACKFILL_COLLISIONS" =~ ^(0|[1-9][0-9]*)$ ]] \
+    || [[ ! "$BACKFILL_SKIPPED" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    BACKFILL_OK="false"
+    BACKFILL_NOTE="malformed_counts"
+    log "alias backfill refused: non-integer counts"
+    return 1
+  fi
+  if [[ "$BACKFILL_COLLISIONS" != "0" ]]; then
+    BACKFILL_OK="false"
+    BACKFILL_NOTE="collisions_nonzero"
+    log "alias backfill refused: collisions must be 0 (got ${BACKFILL_COLLISIONS}); refuse env write"
+    return 1
+  fi
+  log "alias backfill OK inserted=${BACKFILL_INSERTED} collisions=0 skipped_empty=${BACKFILL_SKIPPED}"
+  return 0
+}
+
+# GET /api/admin/login-aliases/cutover-status — require ready + canEnableCutover true.
+# Sets: CUTOVER_READY CUTOVER_CAN_ENABLE
+run_alias_cutover_status() {
+  local raw code body parsed
+  CUTOVER_READY="false"
+  CUTOVER_CAN_ENABLE="false"
+  if ! raw="$(admin_api_request GET /api/admin/login-aliases/cutover-status)"; then
+    log "alias cutover-status request failed (transport)"
+    return 1
+  fi
+  code="$(printf '%s\n' "$raw" | head -n1)"
+  body="$(printf '%s\n' "$raw" | tail -n +2)"
+  if [[ "$code" != "200" ]]; then
+    log "alias cutover-status HTTP ${code} (body redacted)"
+    return 1
+  fi
+  parsed="$(printf '%s' "$body" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("false|false")
+    raise SystemExit(0)
+data = d.get("data") if isinstance(d.get("data"), dict) else {}
+# Prefer nested data; also accept top-level for resilience.
+ready = data.get("ready", d.get("ready"))
+can = data.get("canEnableCutover", d.get("canEnableCutover"))
+print(("true" if ready is True else "false") + "|" + ("true" if can is True else "false"))
+')"
+  CUTOVER_READY="${parsed%%|*}"
+  CUTOVER_CAN_ENABLE="${parsed#*|}"
+  if [[ "$CUTOVER_READY" != "true" || "$CUTOVER_CAN_ENABLE" != "true" ]]; then
+    log "alias cutover-status not ready (ready=${CUTOVER_READY} canEnableCutover=${CUTOVER_CAN_ENABLE})"
+    return 1
+  fi
+  log "alias cutover-status ready=true canEnableCutover=true"
+  return 0
 }
 
 validate_mode_name() {
@@ -451,6 +743,7 @@ capture_live_snapshot() {
 }
 
 backup_lifecycle_override() {
+  # action=off only: restore-on-failure returns to whatever was on disk before the write.
   mkdir -p "$LIFECYCLE_PERSIST_DIR"
   LIFECYCLE_PREV_BACKUP="$(mktemp "${LIFECYCLE_PERSIST_DIR}/.prev.XXXXXX")"
   if [[ -f "$LIFECYCLE_OVERRIDE_FILE" ]]; then
@@ -464,15 +757,42 @@ backup_lifecycle_override() {
   fi
 }
 
-restore_lifecycle_override() {
-  # Restore previous override state after a failed transition.
-  if [[ "$LIFECYCLE_PREV_STATE" == "present" && -n "$LIFECYCLE_PREV_BACKUP" && -s "$LIFECYCLE_PREV_BACKUP" ]]; then
-    cp -p "$LIFECYCLE_PREV_BACKUP" "$LIFECYCLE_OVERRIDE_FILE"
-    log "restored previous lifecycle override from backup"
-  else
-    rm -f "$LIFECYCLE_OVERRIDE_FILE"
-    log "removed lifecycle override (previous state was absent)"
+# action=alias only: never trust on-disk prior file as rollback target.
+# Runtime may be off while a stale unapplied override still has alias=true; restoring
+# that file after the canary would re-enable alias on recreate. Instead: write a
+# compose-validated explicit OFF (all three flags false) to disk and snapshot it as
+# the sole restore baseline used by restore_lifecycle_override / fail_transition_restore.
+establish_alias_off_rollback_baseline() {
+  log "establishing alias rollback baseline: explicit OFF (compose-validated; ignore stale on-disk)"
+  write_lifecycle_override "false" "false" "false"
+  mkdir -p "$LIFECYCLE_PERSIST_DIR"
+  LIFECYCLE_PREV_BACKUP="$(mktemp "${LIFECYCLE_PERSIST_DIR}/.alias-off-baseline.XXXXXX")"
+  cp -p "$LIFECYCLE_OVERRIDE_FILE" "$LIFECYCLE_PREV_BACKUP"
+  LIFECYCLE_PREV_STATE="present"
+  # Sanity: baseline file must encode all three flags false (defense in depth).
+  if ! grep -qE "${FLAG_ALIAS}:[[:space:]]*\"false\"" "$LIFECYCLE_PREV_BACKUP" \
+    || ! grep -qE "${FLAG_PENDING}:[[:space:]]*\"false\"" "$LIFECYCLE_PREV_BACKUP" \
+    || ! grep -qE "${FLAG_DEPROVISION}:[[:space:]]*\"false\"" "$LIFECYCLE_PREV_BACKUP"; then
+    cleanup_prev_backup
+    fail "alias OFF rollback baseline missing explicit false flags after write"
   fi
+  if grep -qE "${FLAG_ALIAS}:[[:space:]]*\"true\"" "$LIFECYCLE_PREV_BACKUP"; then
+    cleanup_prev_backup
+    fail "alias OFF rollback baseline must not contain AUTH_LOGIN_USE_ALIASES true"
+  fi
+  log "alias rollback baseline ready: explicit OFF on disk + backup (stale prior file discarded)"
+}
+
+restore_lifecycle_override() {
+  # Restore rollback baseline after a failed transition (or alias success path OFF return).
+  if [[ "$LIFECYCLE_PREV_STATE" == "present" && -n "$LIFECYCLE_PREV_BACKUP" && -s "$LIFECYCLE_PREV_BACKUP" ]]; then
+    cp -p "$LIFECYCLE_PREV_BACKUP" "$LIFECYCLE_OVERRIDE_FILE" || return 1
+    log "restored lifecycle override from rollback baseline backup" || true
+  else
+    rm -f "$LIFECYCLE_OVERRIDE_FILE" || return 1
+    log "removed lifecycle override (previous state was absent)" || true
+  fi
+  return 0
 }
 
 cleanup_prev_backup() {
@@ -494,7 +814,10 @@ write_lifecycle_override() {
     echo "# OFF is an emergency operational rollback of these env gates only —"
     echo "# it does NOT reintroduce OR-column login fallback as a long-term design"
     echo "# (design lock Rev 4.2 §4.2 / §4.4: after T2b cutover, Auth reads aliases only)."
-    echo "# alias/pending/deprovision ON are NOT EXECUTABLE in this lane."
+    echo "# action=alias may write AUTH_LOGIN_USE_ALIASES=true transiently; success"
+    echo "# requires/proves OFF; failure restores the compose-validated explicit OFF"
+    echo "# rollback baseline (never a stale on-disk prior file). Runtime OFF cannot be"
+    echo "# proven if rollback recreate fails. pending/deprovision ON remain NOT EXECUTABLE."
     echo "services:"
     echo "  backend:"
     echo "    environment:"
@@ -567,6 +890,17 @@ assert_exact_mode_off() {
   return 1
 }
 
+assert_exact_mode_alias() {
+  local a p d m
+  read -r a p d m <<< "$(read_live_flags)"
+  if [[ "$a" == "true" && "$p" == "false" && "$d" == "false" && "$m" == "alias" ]]; then
+    log "exact mode proven after restart: alias (only AUTH_LOGIN_USE_ALIASES true)"
+    return 0
+  fi
+  log "post-restart mode is '${m}' (alias=${a} pending=${p} deprovision=${d}), expected alias with only alias true"
+  return 1
+}
+
 assert_exact_sha() {
   require_sha
   local live
@@ -580,14 +914,73 @@ assert_exact_sha() {
   log "exact deployed SHA OK: ${live}"
 }
 
+alias_exit_rollback_guard() {
+  local original_rc=$?
+  local restored="false" recreated="false" proved_off="false"
+  local emergency_log="${OUTPUT_DIR}/alias-emergency-rollback.log"
+
+  # Prevent recursion while the guard performs best-effort recovery.
+  trap - EXIT HUP INT TERM PIPE
+  if [[ "$ALIAS_ROLLBACK_ARMED" != "true" ]]; then
+    exit "$original_rc"
+  fi
+  ALIAS_ROLLBACK_ARMED="false"
+  [[ "$original_rc" -ne 0 ]] || original_rc=1
+
+  set +e
+  # Keep all recovery output off the SSH stdout/stderr pipe. A broken transport
+  # may be the reason this guard fired; logging to that pipe must not block OFF.
+  {
+    log "alias rollback guard fired; restoring explicit OFF baseline before exit"
+    if restore_lifecycle_override; then
+      restored="true"
+      if recreate_backend_only; then
+        recreated="true"
+        if [[ "$(resolve_deployed_sha)" == "$DEPLOY_SHA" ]] \
+          && assert_exact_mode_off \
+          && [[ "$(fetch_backend_health_ok)" == "true" ]]; then
+          proved_off="true"
+        fi
+      fi
+    fi
+    cleanup_prev_backup
+
+    if [[ "$restored" == "true" && "$recreated" == "true" && "$proved_off" == "true" ]]; then
+      log "alias rollback guard proved runtime OFF after interrupted/failed canary"
+    else
+      echo "[lifecycle-canary][error] alias rollback guard could not prove runtime OFF (restored=${restored} recreated=${recreated} proved_off=${proved_off}); operator must inspect staging" >&2
+    fi
+  } >> "$emergency_log" 2>&1
+  exit "$original_rc"
+}
+
+arm_alias_exit_rollback_guard() {
+  ALIAS_ROLLBACK_ARMED="true"
+  trap alias_exit_rollback_guard EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 141' PIPE
+}
+
+disarm_alias_exit_rollback_guard() {
+  ALIAS_ROLLBACK_ARMED="false"
+  trap - EXIT HUP INT TERM PIPE
+}
+
 fail_transition_restore() {
   local reason="$1"
   log "transition failure (${reason}); restoring previous lifecycle override and re-recreating backend"
   restore_lifecycle_override
   # Best-effort recreate after restore so live env matches restored override.
   recreate_backend_only || log "restore recreate did not reach health true; operator must inspect staging"
+  if [[ "$ACTION" == "alias" ]]; then
+    # This explicit failure path already attempted runtime restore. Avoid a
+    # second EXIT-handler recreate after its backup is cleaned below.
+    disarm_alias_exit_rollback_guard
+  fi
   cleanup_prev_backup
-  fail "action=off failed: ${reason} (previous override restored)"
+  fail "action=${ACTION} failed: ${reason} (previous override restored)"
 }
 
 # --- actions ---------------------------------------------------------------------------
@@ -695,9 +1088,11 @@ preflight_for_target() {
 
   case "$target" in
     off)
-      # Emergency env-gate clear is the only executable write path (handled by action=off).
+      # Emergency env-gate clear (handled by action=off).
       ;;
     alias)
+      # Stack readiness only. action=alias additionally requires secret files +
+      # real password-login / backfill / cutover-status proofs before any write.
       if [[ "$SNAP_MODE" != "off" && "$SNAP_MODE" != "alias" ]]; then
         PREFLIGHT_OK="false"
         PREFLIGHT_NOTE="other_lifecycle_flag_on"
@@ -708,9 +1103,6 @@ preflight_for_target() {
         PREFLIGHT_NOTE="alias_cutover_not_ready"
         return 0
       fi
-      # Even when stack looks ready: ON is NOT EXECUTABLE (no password-login proof).
-      PREFLIGHT_OK="false"
-      PREFLIGHT_NOTE="not_executable_no_real_verifier"
       ;;
     pending|deprovision)
       if [[ "$SNAP_MODE" != "off" && "$SNAP_MODE" != "$target" ]]; then
@@ -756,15 +1148,15 @@ action_preflight() {
   if [[ "$PREFLIGHT_OK" != "true" ]]; then
     fail "preflight failed: ${PREFLIGHT_NOTE}"
   fi
-  # Ready-looking preflight for alias/pending/deprovision still means NOT EXECUTABLE ON.
-  if [[ "$target" == "alias" || "$target" == "pending" || "$target" == "deprovision" ]]; then
+  # pending/deprovision remain NOT EXECUTABLE ON even when stack looks ready.
+  if [[ "$target" == "pending" || "$target" == "deprovision" ]]; then
     log "preflight assessed target=${target} note=${PREFLIGHT_NOTE} (ON transition NOT EXECUTABLE)"
   else
     log "preflight OK target=${target} note=${PREFLIGHT_NOTE}"
   fi
 }
 
-# Fail-closed: alias/pending/deprovision never apply. Preflight assessment only.
+# Fail-closed: pending/deprovision never apply. Preflight assessment only.
 action_not_executable_on() {
   local target="$1"
   capture_live_snapshot
@@ -788,7 +1180,7 @@ action_not_executable_on() {
     echo "transition_applied=false"
     echo "executable=false"
   } > "${OUTPUT_DIR}/summary.txt"
-  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (password-login / admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off only. transition_applied=false"
+  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|alias only. transition_applied=false"
 }
 
 # Sole executable env write: clear the exact three lifecycle flags to false.
@@ -847,6 +1239,137 @@ action_off() {
   log "action=off OK (emergency env-gate clear; NOT a design reintroduction of OR-column fallback)"
 }
 
+# Transient secret-backed alias cutover canary.
+# Success requires/proves OFF (mode+post-rollback login). Failure restores the
+# compose-validated explicit OFF rollback baseline before failing (never a stale
+# on-disk prior file). Persistent override is left explicitly OFF. Runtime OFF
+# cannot be proven if rollback recreate fails (OFF baseline restored on disk;
+# operator must inspect). Backfill rows may persist.
+action_alias() {
+  local pre_login_ok="false"
+  local post_on_login_ok="false"
+  local post_rollback_login_ok="false"
+  local rolled_back_to_off="false"
+  local alias_on_applied="false"
+  local note="alias_cutover_canary"
+
+  require_sha
+  require_canary_secret_files
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=alias"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=alias requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
+
+  capture_live_snapshot
+  assert_exact_sha
+  pin_live_backend_image_for_transition
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=alias"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=alias refused: backend_health_ok must be true before any env write"
+  fi
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=alias refused: live mode must be off before cutover (live='${SNAP_MODE}')"
+  fi
+  if [[ "$SNAP_MODE" != "$EXPECTED_CURRENT_MODE" ]]; then
+    fail "strict expected-current-mode transition failed: live='${SNAP_MODE}' expected_current_mode='${EXPECTED_CURRENT_MODE}'"
+  fi
+
+  # 1) Pre-write real password login (OR-column path while mode=off).
+  if prove_canary_password_login "pre_on"; then
+    pre_login_ok="true"
+  else
+    fail "action=alias refused: pre-ON password login failed (no env write performed)"
+  fi
+
+  # 2) T2a backfill + T2b readiness via admin JWT (no env write yet).
+  if ! run_alias_backfill; then
+    fail "action=alias refused: login-aliases backfill failed (no env write performed)"
+  fi
+  if ! run_alias_cutover_status; then
+    fail "action=alias refused: cutover-status not ready/canEnableCutover (no env write performed)"
+  fi
+
+  # 3) Explicit OFF rollback baseline (not stale on-disk) → write alias ON → recreate
+  #    → prove SHA/mode/health + post-ON login. fail_transition_restore always restores
+  #    that OFF baseline (never an arbitrary prior file).
+  establish_alias_off_rollback_baseline
+  # Arm before the persistent ON write. Any unhandled exit, SSH/HUP, cancellation,
+  # or signal in the ON window restores/recreates/proves the explicit OFF baseline.
+  arm_alias_exit_rollback_guard
+  write_lifecycle_override "true" "false" "false"
+  alias_on_applied="true"
+
+  if ! recreate_backend_only; then
+    fail_transition_restore "backend_health_not_true_after_restart"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail_transition_restore "post_restart_sha_mismatch"
+  fi
+  if ! assert_exact_mode_alias; then
+    fail_transition_restore "post_restart_mode_not_alias"
+  fi
+  if prove_canary_password_login "post_on"; then
+    post_on_login_ok="true"
+  else
+    fail_transition_restore "post_on_password_login_failed"
+  fi
+
+  # 4) Success path: restore explicit OFF baseline, re-recreate, prove OFF + login.
+  # If rollback recreate fails, runtime OFF cannot be proven (OFF baseline on disk).
+  log "alias ON proven; restoring explicit OFF rollback baseline (success requires/proves OFF; canary must not leave alias enabled)"
+  restore_lifecycle_override
+  if ! recreate_backend_only; then
+    fail "action=alias: ON proven but rollback recreate failed — runtime OFF cannot be proven (explicit OFF baseline restored on disk; operator must inspect staging)"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail "action=alias: rollback SHA mismatch after restore — runtime OFF not fully proven (operator must inspect staging)"
+  fi
+  if ! assert_exact_mode_off; then
+    fail "action=alias: rollback did not prove exact mode=off (operator must inspect staging)"
+  fi
+  if [[ "$(fetch_backend_health_ok)" != "true" ]]; then
+    fail "action=alias: rollback backend health not true — runtime OFF not fully proven (operator must inspect staging)"
+  fi
+  if prove_canary_password_login "post_rollback"; then
+    post_rollback_login_ok="true"
+  else
+    fail "action=alias: post-rollback password login failed after mode=off proof (operator must inspect credentials/stack)"
+  fi
+  rolled_back_to_off="true"
+  disarm_alias_exit_rollback_guard
+  cleanup_prev_backup
+
+  capture_live_snapshot
+  note="alias_cutover_canary_success_proved_off"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "alias" "true" "true" "$note"
+  {
+    echo "action=alias"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=true"
+    echo "from_mode=off"
+    echo "to_mode=off"
+    echo "alias_on_applied=${alias_on_applied}"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "post_on_login_ok=${post_on_login_ok}"
+    echo "post_rollback_login_ok=${post_rollback_login_ok}"
+    echo "rolled_back_to_off=${rolled_back_to_off}"
+    echo "backfill_ok=${BACKFILL_OK:-false}"
+    echo "backfill_inserted=${BACKFILL_INSERTED:-0}"
+    echo "backfill_collisions=${BACKFILL_COLLISIONS:-0}"
+    echo "backfill_skipped_empty=${BACKFILL_SKIPPED:-0}"
+    echo "cutover_ready=${CUTOVER_READY:-false}"
+    echo "cutover_can_enable=${CUTOVER_CAN_ENABLE:-false}"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=alias OK (transient ON proven; success proved OFF; backfill may persist)"
+}
+
 # --- main ------------------------------------------------------------------------------
 
 main() {
@@ -857,7 +1380,7 @@ main() {
     status) action_status ;;
     preflight) action_preflight ;;
     off) action_off ;;
-    alias) action_not_executable_on alias ;;
+    alias) action_alias ;;
     pending) action_not_executable_on pending ;;
     deprovision) action_not_executable_on deprovision ;;
     *) fail "invalid ACTION='${ACTION}' (status|preflight|off|alias|pending|deprovision)" ;;

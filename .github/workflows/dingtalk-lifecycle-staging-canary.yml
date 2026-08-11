@@ -5,14 +5,21 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 # Staging-only MINIMAL SAFE operator lane for DingTalk lifecycle env gates.
 # One dispatch = ONE action. All lifecycle flags remain OFF by default.
 #
-# EXECUTABLE: status | preflight | off
-#   off = emergency env-gate clear of the three lifecycle flags only (with
-#   previous-override restore on restart/health/mode failure).
+# EXECUTABLE: status | preflight | off | alias
+#   off   = emergency env-gate clear of the three lifecycle flags only (with
+#           previous-override restore on restart/health/mode failure).
+#   alias = TRANSIENT secret-backed alias cutover canary. Success requires/proves
+#           OFF; failure restores the OFF override before failing. Runtime OFF
+#           cannot be proven if rollback recreate itself fails. Requires full
+#           deploy SHA, expected_current_mode=off, secrets.ATTENDANCE_ADMIN_JWT
+#           + secrets.LIFECYCLE_CANARY_LOGIN_IDENTIFIER
+#           + secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD (materialized as chmod-600
+#           files; never shell-interpolated into remote argv/logs).
 #
-# NOT EXECUTABLE: alias | pending | deprovision
+# NOT EXECUTABLE: pending | deprovision
 #   Fail-closed preflight-only. Env flip alone is not a canary — there is no
-#   secret-backed real verifier for password-login proof, admit→activate, or
-#   sync→deprovision. transition_applied is always false for these actions.
+#   secret-backed real verifier for admit→activate or sync→deprovision.
+#   transition_applied is always false for these actions.
 #
 # See:
 #   docs/development/dingtalk-lifecycle-canary-separate-go-20260724.md
@@ -25,25 +32,25 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status/preflight/off = executable; alias/pending/deprovision = NOT EXECUTABLE (fail-closed preflight-only)'
+        description: 'status/preflight/off/alias = executable; pending/deprovision = NOT EXECUTABLE (fail-closed preflight-only)'
         required: true
         type: choice
         # Quote 'off' — YAML 1.1 bare off becomes boolean false.
         options: [status, preflight, 'off', alias, pending, deprovision]
         default: status
       target_mode:
-        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). ON targets assess readiness only — never apply.'
+        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). pending/deprovision assess readiness only — never apply.'
         required: false
         type: choice
         options: ['off', alias, pending, deprovision]
         default: 'off'
       expected_current_mode:
-        description: 'Required for action=off: live mode before clear (off|alias|pending|deprovision|multi-on). Optional for preflight.'
+        description: 'Required for action=off (live mode before clear) and action=alias (must be off). Optional for preflight.'
         required: false
         type: string
         default: ''
       deploy_sha:
-        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off; optional exact-match for preflight.'
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off and action=alias; optional exact-match for preflight.'
         required: false
         default: ''
 
@@ -59,7 +66,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +77,9 @@ jobs:
           TARGET_MODE: ${{ inputs.target_mode }}
           EXPECTED_CURRENT_MODE: ${{ inputs.expected_current_mode }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          # Intentionally NO alias login secrets here — presence is checked only in
+          # Run remote action after demoting env → non-exported shell vars + unset
+          # (bash -n and other children must not inherit raw secret env).
         run: |
           set -euo pipefail
           case "$ACTION" in status|preflight|off|alias|pending|deprovision) ;; *)
@@ -86,7 +96,7 @@ jobs:
             ;; esac
           fi
 
-          # Only action=off is an executable transition (env write).
+          # action=off is an executable emergency clear.
           if [[ "$ACTION" == "off" ]]; then
             if [[ -z "$EXPECTED_CURRENT_MODE" ]]; then
               echo "expected_current_mode is required for action=off (use multi-on when live is multi-on)" >&2
@@ -98,13 +108,26 @@ jobs:
             fi
           fi
 
+          # action=alias: structural inputs only here. Secret presence is checked in
+          # Run remote action (success requires/proves OFF; failure restores OFF override first).
+          if [[ "$ACTION" == "alias" ]]; then
+            if [[ "$EXPECTED_CURRENT_MODE" != "off" ]]; then
+              echo "expected_current_mode must be exactly 'off' for action=alias (no auto-selection)" >&2
+              exit 2
+            fi
+            if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=alias, got: '$DEPLOY_SHA'" >&2
+              exit 2
+            fi
+          fi
+
           if [[ -n "$DEPLOY_SHA" && ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "deploy_sha must be empty or the FULL 40-char lowercase commit SHA, got: '$DEPLOY_SHA'" >&2
             exit 2
           fi
 
-          # Document that alias/pending/deprovision are NOT EXECUTABLE (remote fails closed).
-          if [[ "$ACTION" == "alias" || "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
+          # Document that pending/deprovision are NOT EXECUTABLE (remote fails closed).
+          if [[ "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
             echo "NOTE: action=$ACTION is NOT EXECUTABLE in this lane (no real verifier). Remote will fail-closed with transition_applied=false." >&2
           fi
 
@@ -150,8 +173,24 @@ jobs:
           EXPECTED_CURRENT_MODE: ${{ inputs.expected_current_mode }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
+          # Alias secrets are materialized INSIDE this step under EXIT trap — never
+          # via a prior step secrets_dir output (cross-step leak / cancel gap).
+          ATTENDANCE_ADMIN_JWT: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+          LIFECYCLE_CANARY_LOGIN_IDENTIFIER: ${{ secrets.LIFECYCLE_CANARY_LOGIN_IDENTIFIER }}
+          LIFECYCLE_CANARY_LOGIN_PASSWORD: ${{ secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD }}
         run: |
           set -euo pipefail
+          # --- SECRET DEMOTE (builtins only; no external child before unset) -------------
+          # GHA injects secrets as exported env for this step. Copy into non-exported
+          # shell variables, then unset the exported names so mktemp/ssh/scp/bash -n
+          # children never inherit raw secret env. Presence checks + printf use the
+          # shell vars only; those are unset immediately after materialize writes.
+          _CANARY_JWT="${ATTENDANCE_ADMIN_JWT-}"
+          _CANARY_IDENT="${LIFECYCLE_CANARY_LOGIN_IDENTIFIER-}"
+          _CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"
+          unset ATTENDANCE_ADMIN_JWT LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD
+          # --- end secret demote; external commands allowed after this point ------------
+
           ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
@@ -166,6 +205,94 @@ jobs:
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
           mkdir -p output/lifecycle-canary
 
+          # Per-run cleanup targets only. NEVER touch persistent ~/.metasheet2 overrides.
+          CLEAN_LOCAL_SECRETS_DIR=""
+          CLEAN_REMOTE_SECRETS_DIR=""
+          CLEAN_REMOTE_RUNNER_DIR="${RUNNER_DIR}"
+          CLEAN_REMOTE_OUTPUT_DIR="${remote_output_dir}"
+          # OUTPUT_COLLECTED gates whether trap may remove remote_output_dir before scp.
+          OUTPUT_COLLECTED=0
+
+          cleanup_canary_ephemeral_paths() {
+            # EXIT/INT/TERM: wipe local secret temp dir + per-run remote dirs.
+            # Does not delete persistent lifecycle/attendance overrides under .metasheet2.
+            set +e
+            if [[ -n "${CLEAN_LOCAL_SECRETS_DIR:-}" && -d "${CLEAN_LOCAL_SECRETS_DIR}" ]]; then
+              rm -rf "${CLEAN_LOCAL_SECRETS_DIR}"
+            fi
+            if [[ -n "${DEPLOY_USER:-}" && -n "${DEPLOY_HOST:-}" ]]; then
+              remote_rm=""
+              if [[ -n "${CLEAN_REMOTE_SECRETS_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_SECRETS_DIR}"
+              fi
+              if [[ -n "${CLEAN_REMOTE_RUNNER_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_RUNNER_DIR}"
+              fi
+              # Preserve remote_output_dir until artifacts are collected (or early fail).
+              if [[ "${OUTPUT_COLLECTED}" == "1" && -n "${CLEAN_REMOTE_OUTPUT_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_OUTPUT_DIR}"
+              fi
+              if [[ -n "${remote_rm// /}" ]]; then
+                # shellcheck disable=SC2086
+                ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+                  "bash -o pipefail -c 'rm -rf ${remote_rm}'" >/dev/null 2>&1
+              fi
+            fi
+            set -e
+          }
+
+          # For alias: materialize chmod-600 secret files LOCALLY under EXIT trap, then
+          # scp path-only into the per-run remote directory. Never pass secrets_dir
+          # across steps (cancel/failure gap). Password written with printf '%s' (exact bytes).
+          remote_secrets_dir=""
+          canary_jwt_export=""
+          canary_ident_export=""
+          canary_pass_export=""
+          if [[ "$ACTION" == "alias" ]]; then
+            # Install trap BEFORE any secret materialization (mktemp/write/chmod).
+            trap cleanup_canary_ephemeral_paths EXIT INT TERM
+            # Presence via non-exported shell vars only (env already unset above).
+            if [[ -z "${_CANARY_JWT}" || -z "${_CANARY_IDENT}" || -z "${_CANARY_PASS}" ]]; then
+              echo "alias requires ATTENDANCE_ADMIN_JWT + LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (checked in Run remote action only)" >&2
+              unset _CANARY_JWT _CANARY_IDENT _CANARY_PASS
+              exit 2
+            fi
+            secrets_dir="$(mktemp -d "${RUNNER_TEMP}/lifecycle-canary-secrets.XXXXXX")"
+            # Register for trap wipe immediately after mktemp succeeds (before write/chmod).
+            CLEAN_LOCAL_SECRETS_DIR="${secrets_dir}"
+            chmod 700 "$secrets_dir"
+            umask 077
+            # Exact secret bytes from non-exported shell vars — printf '%s' preserves payload.
+            printf '%s' "${_CANARY_JWT}" > "${secrets_dir}/admin.jwt"
+            printf '%s' "${_CANARY_IDENT}" > "${secrets_dir}/login.identifier"
+            printf '%s' "${_CANARY_PASS}" > "${secrets_dir}/login.password"
+            # Drop shell-held secret values as soon as files are written.
+            unset _CANARY_JWT _CANARY_IDENT _CANARY_PASS
+            chmod 600 "${secrets_dir}/admin.jwt" "${secrets_dir}/login.identifier" "${secrets_dir}/login.password"
+            for f in admin.jwt login.identifier login.password; do
+              [[ -s "${secrets_dir}/${f}" ]] || { echo "secret file empty after materialize: ${f}" >&2; exit 2; }
+            done
+            remote_secrets_dir="${RUNNER_DIR}/.canary-secrets"
+            CLEAN_REMOTE_SECRETS_DIR="${remote_secrets_dir}"
+            # Remote copy only after local materialize succeeded under trap coverage.
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; mkdir -p ${remote_secrets_dir}; chmod 700 ${remote_secrets_dir}'"
+            scp $ssh_opts \
+              "${secrets_dir}/admin.jwt" \
+              "${secrets_dir}/login.identifier" \
+              "${secrets_dir}/login.password" \
+              "$DEPLOY_USER@$DEPLOY_HOST:${remote_secrets_dir}/"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/admin.jwt ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password'"
+            canary_jwt_export="export CANARY_ADMIN_JWT_FILE='${remote_secrets_dir}/admin.jwt'"
+            canary_ident_export="export CANARY_LOGIN_IDENTIFIER_FILE='${remote_secrets_dir}/login.identifier'"
+            canary_pass_export="export CANARY_LOGIN_PASSWORD_FILE='${remote_secrets_dir}/login.password'"
+          else
+            # Non-alias: drop any unused shell copies; clean per-run runner/output on exit.
+            unset _CANARY_JWT _CANARY_IDENT _CANARY_PASS
+            trap cleanup_canary_ephemeral_paths EXIT INT TERM
+          fi
+
           remote_script="set -euo pipefail
           export ACTION='${ACTION}'
           export TARGET_MODE='${TARGET_MODE}'
@@ -175,9 +302,18 @@ jobs:
           export DEPLOY_PATH='${DEPLOY_PATH}'
           export OUTPUT_DIR='${remote_output_dir}'
           export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
+          ${canary_jwt_export}
+          ${canary_ident_export}
+          ${canary_pass_export}
           rm -rf '${remote_output_dir}'
           mkdir -p '${remote_output_dir}'
-          bash '${RUNNER_DIR}/dingtalk-lifecycle-staging-canary-remote.sh'"
+          set +e
+          bash '${RUNNER_DIR}/dingtalk-lifecycle-staging-canary-remote.sh'
+          remote_action_rc=\$?
+          set -e
+          # Best-effort in-script secret wipe; EXIT trap also removes secrets/runner.
+          if [[ -n '${remote_secrets_dir}' ]]; then rm -rf '${remote_secrets_dir}'; fi
+          exit \"\${remote_action_rc}\""
           escaped_script="$(printf '%s' "$remote_script" | sed "s/'/'\\\\''/g")"
 
           set +e
@@ -187,7 +323,9 @@ jobs:
           scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/lifecycle-canary/ 2>&1 \
             | tee -a output/lifecycle-canary/ssh.log
           scp_rc=${PIPESTATUS[0]}
-          # Cleanup removes ONLY per-run dirs. NEVER touch persistent overrides.
+          # Mark collected so EXIT trap may remove remote_output_dir (per-run only).
+          OUTPUT_COLLECTED=1
+          # Explicit cleanup (also covered by trap). NEVER touch persistent overrides.
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${RUNNER_DIR}'" \
             >> output/lifecycle-canary/ssh.log 2>&1
@@ -220,9 +358,11 @@ jobs:
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
-            echo "**Executable:** status / preflight / off only."
-            echo "**NOT EXECUTABLE:** alias / pending / deprovision (no real canary verifier)."
+            echo "**Executable:** status / preflight / off / alias (alias success requires/proves OFF; failure restores OFF override before failing)."
+            echo "**NOT EXECUTABLE:** pending / deprovision (no real canary verifier)."
             echo "OFF is emergency env-gate rollback only — not OR-column design reintroduction."
+            echo "Alias canary requires ATTENDANCE_ADMIN_JWT + LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD secrets (file transport)."
+            echo "Runtime OFF cannot be proven if alias rollback recreate itself fails (override restored on disk)."
             if [[ -f output/lifecycle-canary/summary.txt ]]; then
               echo ""
               echo '```text'
