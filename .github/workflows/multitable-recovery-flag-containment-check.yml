@@ -32,9 +32,11 @@ name: Multitable Recovery-Flag Containment Check
 #   1. Running env: every expected container must be observed running and have its live env checked;
 #      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
 #   2. Running database schema: the backend container runs the read-only, values-free schema helper.
-#      The nine recovery-authority triggers, their six function bodies, and the meta_links live-target
-#      FK must match the exact default-inert fingerprints: triggers disabled and FK NO ACTION. Missing
-#      DATABASE_URL/helper/permissions, an unexpectedly enabled trigger, or any shape drift ⇒ FAIL.
+#      The nine recovery-authority triggers and their six function bodies must match the exact
+#      default-inert fingerprints (triggers disabled), and NO foreign-key constraint may cover
+#      meta_links.foreign_record_id — any FK on that column fails regardless of constraint name,
+#      referenced table/column, validation state, or ON DELETE action. Missing DATABASE_URL/helper/
+#      permissions, an unexpectedly enabled trigger, or any shape drift ⇒ FAIL.
 #   3. Next-restart (authoritative): the compose project's OWN config is derived from the running
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
@@ -135,8 +137,8 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
-          SCHEMA_HELPER_SHA256="cd017cd6e754d0e7d802b9ae27a116769969ef5078e811391d3bde6ef68f0182"
-          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture"
+          SCHEMA_HELPER_SHA256="d8e8669a0e027480edd32703fa6b014e9e23124d4ef28293fab3d428c505dd00"
+          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           fail=0
           checked=0
 
@@ -303,7 +305,7 @@ jobs:
           echo "== summary =="
           echo "containers expected: $checked"
           if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
-          echo "VERDICT: PASS — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected enabled fingerprint"
+          echo "VERDICT: PASS — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected default-inert posture (triggers disabled, no meta_links.foreign_record_id FK)"
           REMOTE
 
       - name: Upload report

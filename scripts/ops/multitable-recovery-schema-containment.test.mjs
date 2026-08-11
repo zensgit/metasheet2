@@ -21,10 +21,11 @@ function expectedCopy() {
   return structuredClone(expectedSchemaSnapshot())
 }
 
-test('expected schema posture is exact: 9 disabled triggers and 6 functions', () => {
+test('expected schema posture is exact: 9 disabled triggers, 6 functions, zero foreign_record_id FKs', () => {
   const expected = expectedCopy()
   assert.equal(expected.authorityTriggers.length, 9)
   assert.equal(expected.authorityFunctions.length, 6)
+  assert.equal(expected.metaLinksForeignRecordFks.length, 0)
   assert.ok(
     expected.authorityTriggers.every((trigger) => trigger.enabled === 'D'),
   )
@@ -32,6 +33,72 @@ test('expected schema posture is exact: 9 disabled triggers and 6 functions', ()
   const assessment = assessSchemaSnapshot(expected)
   assert.equal(assessment.ok, true)
   assert.match(renderAssessment(assessment), /^VERDICT: PASS -/m)
+})
+
+test('any FK covering meta_links.foreign_record_id fails closed — NO ACTION and CASCADE both red', async () => {
+  // Mutation shape mirrors what queryRecoverySchemaSnapshot returns for
+  //   ALTER TABLE meta_links ADD CONSTRAINT <name>
+  //     FOREIGN KEY (foreign_record_id) REFERENCES meta_records(id)
+  //     ON DELETE NO ACTION NOT VALID          -> confdeltype 'a'
+  // and the same with ON DELETE CASCADE       -> confdeltype 'c'.
+  // The invariant is column-scoped and absolute: BOTH actions must turn the check red.
+  const seededFks = [
+    { constraint_name: 'meta_links_frid_noaction_fkey', on_delete_action: 'a' },
+    { constraint_name: 'meta_links_frid_cascade_fkey', on_delete_action: 'c' },
+  ]
+  for (const seededFk of seededFks) {
+    const snapshot = expectedCopy()
+    snapshot.metaLinksForeignRecordFks = [seededFk]
+
+    const assessment = assessSchemaSnapshot(snapshot)
+    assert.equal(assessment.ok, false)
+    const rendered = renderAssessment(assessment)
+    assert.match(rendered, /meta-links-foreign-record-id-fk-absence: FAIL/)
+    assert.ok(
+      rendered.includes(`constraint="${seededFk.constraint_name}"`),
+      'failure diagnostics must name the offending constraint',
+    )
+    assert.ok(
+      rendered.includes(`on_delete_action='${seededFk.on_delete_action}'`),
+      'failure diagnostics must show the ON DELETE action letter',
+    )
+    assert.match(rendered, /^VERDICT: FAIL -/m)
+    assert.doesNotMatch(rendered, /VERDICT: PASS/)
+
+    const result = await runSchemaContainment({
+      env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
+      querySnapshot: async () => snapshot,
+    })
+    assert.equal(result.exitCode, 1)
+    assert.doesNotMatch(result.output, /VERDICT: PASS/)
+  }
+})
+
+test('with the FK removed the helper returns PASS with the exact workflow sentinel line', async () => {
+  const snapshot = expectedCopy()
+  snapshot.metaLinksForeignRecordFks = []
+  const result = await runSchemaContainment({
+    env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
+    querySnapshot: async () => snapshot,
+  })
+  assert.equal(result.exitCode, 0)
+  assert.match(result.output, /meta-links-foreign-record-id-fk-absence: PASS count=0\/0/)
+
+  // The workflow greps its SCHEMA_PASS_LINE with `grep -qxF` (exact full line). Keep the helper's
+  // PASS sentinel and the workflow constant in lockstep, or leg 2 fails at runtime despite exit 0.
+  const workflow = readFileSync(
+    join(
+      repoRoot,
+      '.github/workflows/multitable-recovery-flag-containment-check.yml',
+    ),
+    'utf8',
+  )
+  const sentinel = workflow.match(/^\s*SCHEMA_PASS_LINE="(.+)"$/m)
+  assert.ok(sentinel, 'workflow must define SCHEMA_PASS_LINE')
+  assert.ok(
+    result.output.split('\n').includes(sentinel[1]),
+    'helper PASS output must contain the exact SCHEMA_PASS_LINE the workflow greps for',
+  )
 })
 
 test('missing or unexpectedly enabled authority triggers fail closed', () => {

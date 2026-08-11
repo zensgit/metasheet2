@@ -3,9 +3,15 @@
 /**
  * Read-only database-schema containment check for the Time Machine recovery line.
  *
- * The helper intentionally reports only object counts, deterministic fingerprints, and verdicts.
- * It never prints DATABASE_URL, query results, row data, or raw database errors. Run it inside the
- * backend container so it observes the same DATABASE_URL as the running service.
+ * The helper intentionally reports only object counts, deterministic fingerprints, verdicts, and —
+ * on failure — schema-metadata identifiers (e.g. an offending constraint name and its ON DELETE
+ * action letter). It never prints DATABASE_URL, query results, row data, or raw database errors.
+ * Run it inside the backend container so it observes the same DATABASE_URL as the running service.
+ *
+ * Invariant guarded alongside the trigger/function fingerprints: `meta_links.foreign_record_id`
+ * must carry NO foreign-key constraint at all — any pg_constraint `contype = 'f'` row on meta_links
+ * whose conkey covers that column fails the check, regardless of constraint name, referenced
+ * table/column, validation state, or ON DELETE action.
  */
 
 import { createHash } from 'node:crypto'
@@ -379,6 +385,13 @@ function canonicalFunction(row) {
   }
 }
 
+function canonicalMetaLinksForeignRecordFk(row) {
+  return {
+    constraintName: String(row.constraintName ?? row.constraint_name ?? ''),
+    onDeleteAction: String(row.onDeleteAction ?? row.on_delete_action ?? ''),
+  }
+}
+
 function sortByJson(rows) {
   return [...rows].sort((left, right) =>
     JSON.stringify(left).localeCompare(JSON.stringify(right)),
@@ -392,6 +405,11 @@ function canonicalSnapshot(snapshot) {
     ),
     authorityFunctions: sortByJson(
       (snapshot.authorityFunctions ?? []).map(canonicalFunction),
+    ),
+    metaLinksForeignRecordFks: sortByJson(
+      (snapshot.metaLinksForeignRecordFks ?? []).map(
+        canonicalMetaLinksForeignRecordFk,
+      ),
     ),
   }
 }
@@ -421,6 +439,18 @@ function assessSchemaSnapshot(snapshot) {
       actual: actual.authorityFunctions,
       expected: expected.authorityFunctions,
     },
+    {
+      // The invariant is column-scoped and absolute: NO foreign-key constraint may cover
+      // meta_links.foreign_record_id — any hit fails regardless of constraint name, referenced
+      // table/column, validation state, or ON DELETE action. Expected is therefore always [].
+      id: 'meta-links-foreign-record-id-fk-absence',
+      actual: actual.metaLinksForeignRecordFks,
+      expected: expected.metaLinksForeignRecordFks,
+      diagnostics: actual.metaLinksForeignRecordFks.map(
+        (fk) =>
+          `forbidden foreign key covers meta_links.foreign_record_id: constraint="${fk.constraintName}" on_delete_action='${fk.onDeleteAction}' — drop it; no FK is allowed on this column`,
+      ),
+    },
   ].map((check) => ({
     id: check.id,
     ok: JSON.stringify(check.actual) === JSON.stringify(check.expected),
@@ -428,6 +458,7 @@ function assessSchemaSnapshot(snapshot) {
     expectedCount: check.expected.length,
     actualFingerprint: fingerprint(check.actual),
     expectedFingerprint: fingerprint(check.expected),
+    diagnostics: check.diagnostics ?? [],
   }))
 
   return {
@@ -443,11 +474,16 @@ function renderAssessment(assessment) {
     lines.push(
       `${check.id}: ${verdict} count=${check.actualCount}/${check.expectedCount} fingerprint=${check.actualFingerprint} expected=${check.expectedFingerprint}`,
     )
+    if (!check.ok) {
+      for (const diagnostic of check.diagnostics ?? []) {
+        lines.push(`  ${diagnostic}`)
+      }
+    }
   }
   lines.push(
     assessment.ok
-      ? 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture'
-      : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, or fingerprint-drifted',
+      ? 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links'
+      : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, fingerprint-drifted, or meta_links.foreign_record_id carries a foreign key',
   )
   return lines.join('\n')
 }
@@ -523,10 +559,30 @@ async function queryRecoverySchemaSnapshot(databaseUrl) {
       [AUTHORITY_FUNCTION_NAMES],
     )
 
+    // Column-scoped FK absence: every pg_constraint FK on meta_links whose conkey (constrained
+    // column attnum array) covers the attnum of meta_links.foreign_record_id. Constraint name,
+    // referenced table/column, validation state (NOT VALID included), and ON DELETE action are
+    // deliberately NOT filtered on — a column hit alone is a violation.
+    const metaLinksFks = await client.query(
+      `SELECT
+         con.conname AS constraint_name,
+         con.confdeltype AS on_delete_action
+       FROM pg_catalog.pg_constraint con
+       JOIN pg_catalog.pg_attribute attr
+         ON attr.attrelid = con.conrelid
+        AND attr.attname = 'foreign_record_id'
+        AND NOT attr.attisdropped
+      WHERE con.contype = 'f'
+        AND con.conrelid = 'public.meta_links'::regclass
+        AND attr.attnum = ANY (con.conkey)
+      ORDER BY con.conname`,
+    )
+
     await client.query('COMMIT')
     return {
       authorityTriggers: triggers.rows,
       authorityFunctions: functions.rows,
+      metaLinksForeignRecordFks: metaLinksFks.rows,
     }
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {})
