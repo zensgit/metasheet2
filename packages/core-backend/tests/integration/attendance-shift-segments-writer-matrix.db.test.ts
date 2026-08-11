@@ -126,12 +126,43 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return `w3wm-${tag}-${randomUUID().slice(0, 8)}`
   }
 
-  async function mintToken(userId: string): Promise<string> {
+  async function enableShadowPosture(orgId: string): Promise<void> {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    await pool.query(
+      `INSERT INTO attendance_calculation_rollout_state
+         (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
+       VALUES ($1, 'shadow', 'w4c3b-p12-test', 'TEST_FIXTURE', 'w4c3b-p12-test', 1, NULL)`,
+      [orgId],
+    )
+  }
+
+  async function mintToken(userId: string, tenantId?: string): Promise<string> {
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
     )
     expect(res.status, res.raw).toBe(200)
     return (res.body as { token?: string })?.token ?? ''
+  }
+
+  async function seedActiveIdentity(userId: string, orgId: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO users (
+       id, email, username, name, password_hash, role, permissions,
+       is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'W3 Writer Matrix User', 'x', 'user', '["attendance:admin"]'::jsonb,
+                 true, false, 'activated', now(), now())
+       ON CONFLICT (id) DO UPDATE
+         SET is_active = true,
+             activation_status = 'activated',
+             permissions = '["attendance:admin"]'::jsonb`,
+      [userId, `${userId}@example.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [userId, orgId],
+    )
   }
 
   function authHeaders(token: string, orgId: string) {
@@ -157,6 +188,106 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   async function countRows(table: string, orgId: string, extra = ''): Promise<number> {
     const r = await pool.query(`SELECT COUNT(*)::int AS n FROM ${table} WHERE org_id = $1 ${extra}`, [orgId])
     return Number(r.rows[0]?.n ?? 0)
+  }
+
+  async function waitForBlockedPid(blockerPid: number): Promise<number> {
+    const deadline = Date.now() + 10000
+    for (;;) {
+      const result = await pool.query(
+        `SELECT pid
+           FROM pg_stat_activity
+          WHERE pid <> $1
+            AND $1 = ANY(pg_blocking_pids(pid))
+          ORDER BY pid`,
+        [blockerPid],
+      )
+      const blockedPid = Number(result.rows[0]?.pid)
+      if (Number.isInteger(blockedPid) && blockedPid > 0) return blockedPid
+      if (Date.now() > deadline) {
+        throw new Error(`no backend became blocked by pid ${blockerPid} (vacuous concurrency proof)`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  async function waitUntilBlockedBy(blockedPid: number, blockerPid: number): Promise<void> {
+    const deadline = Date.now() + 10000
+    for (;;) {
+      const result = await pool.query('SELECT pg_blocking_pids($1)::int[] AS blockers', [blockedPid])
+      if ((result.rows[0]?.blockers ?? []).includes(blockerPid)) return
+      if (Date.now() > deadline) {
+        throw new Error(`pid ${blockedPid} never blocked by ${blockerPid} (vacuous concurrency proof)`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  async function expectBlockedOnScheduleLock(
+    blockedPid: number,
+    orgId: string,
+    userIds: string[],
+  ): Promise<void> {
+    const result = await pool.query(
+      `SELECT classid::bigint AS class_id,
+              objid::bigint AS object_id,
+              hashtext($2::text)::oid::bigint AS expected_class_id,
+              ARRAY(
+                SELECT hashtext(value)::oid::bigint
+                  FROM unnest($3::text[]) AS value
+              ) AS expected_object_ids
+         FROM pg_locks
+        WHERE pid = $1
+          AND locktype = 'advisory'
+          AND granted = false`,
+      [blockedPid, `attendance-schedule:${orgId}`, userIds],
+    )
+    const matched = result.rows.some((row) => (
+      Number(row.class_id) === Number(row.expected_class_id)
+      && row.expected_object_ids.map(Number).includes(Number(row.object_id))
+    ))
+    if (!matched) throw new Error(`blocked on the wrong advisory key: ${JSON.stringify(result.rows)}`)
+  }
+
+  async function loadApprovalCursor(requestId: string): Promise<{ version: number; node: string }> {
+    const result = await pool.query(
+      `SELECT ai.version, ai.current_node_key
+         FROM attendance_requests request
+         JOIN approval_instances ai ON ai.id = request.approval_instance_id
+        WHERE request.id = $1::uuid`,
+      [requestId],
+    )
+    expect(result.rows).toHaveLength(1)
+    expect(typeof result.rows[0].current_node_key).toBe('string')
+    return {
+      version: Number(result.rows[0].version),
+      node: String(result.rows[0].current_node_key),
+    }
+  }
+
+  async function expectRequestDecisionOperation(orgId: string, operationId: string): Promise<void> {
+    const result = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM attendance_result_operations
+           WHERE org_id = $1 AND operation_id = $2::uuid AND entrypoint = 'request_decision') AS operations,
+         (SELECT count(*)::int FROM attendance_result_event_outbox
+           WHERE org_id = $1 AND operation_id = $2::uuid AND entrypoint = 'request_decision') AS outbox`,
+      [orgId, operationId],
+    )
+    expect(result.rows[0]).toEqual({ operations: 1, outbox: 1 })
+  }
+
+  async function loadPublishedCandidates(
+    client: import('pg').PoolClient,
+    input: { orgId: string; userId: string; workDates: string[] },
+  ): Promise<any[]> {
+    const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
+    return plugin.__attendanceWorkDateResolverForTests.loadPublishedCandidatesForWorkDateResolver(
+      {
+        query: async (text: string, params?: unknown[]) =>
+          (await client.query(text, params as never[])).rows,
+      },
+      { ...input, lockScheduleFacts: true },
+    )
   }
 
   async function segmentCount(shiftId: string): Promise<number> {
@@ -226,7 +357,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('creates a legacy-envelope shift with a persisted segment 0 (dual-write)', async () => {
     const orgId = org('create-legacy')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const res = await createShiftViaApi(token, orgId, { name: 'Day', timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00' })
     expect(res.status, res.raw).toBe(201)
     const shift = res.body.data
@@ -246,7 +377,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('creates a multi-segment shift with derived envelope and preview-only capability', async () => {
     const orgId = org('create-multi')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const res = await createShiftViaApi(token, orgId, {
       name: 'Split',
       timezone: 'UTC',
@@ -280,7 +411,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rejects invalid segment arrays with a typed 422 and zero writes', async () => {
     const orgId = org('create-invalid')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const before = await countRows('attendance_shifts', orgId)
 
     const overlap = await createShiftViaApi(token, orgId, {
@@ -316,7 +447,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('metadata-only PUT preserves segments; start/end-only PUT on a multi-segment shift is rejected', async () => {
     const orgId = org('put-modes')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
 
     const metadata = await putJson(`/api/attendance/shifts/${multiId}`, token, orgId, { name: 'Split Renamed', lateGraceMinutes: 7 })
@@ -357,7 +488,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('blocks converting one segment to multiple while an active assignment references the shift', async () => {
     const orgId = org('put-conversion')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const shiftId = created.body.data.id as string
     await seedPublishedAssignment(orgId, `${orgId}-worker`, shiftId, '2049-06-10')
@@ -375,7 +506,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('blocks converting one segment to multiple when only ended assignment history references the shift', async () => {
     const orgId = org('put-ended-conversion')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, { name: 'Historic Day', workStartTime: '09:00', workEndTime: '18:00' })
     const shiftId = created.body.data.id as string
     await seedPublishedAssignment(orgId, `${orgId}-worker`, shiftId, '2020-01-06')
@@ -393,10 +524,13 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   })
 
   it('fails closed before a historical import can calculate a forced multi-segment shift with the legacy envelope', async () => {
-    const orgId = org('runtime-ended-guard')
-    const userId = `${orgId}-worker`
+    const orgId = randomUUID()
+    const userId = randomUUID()
+    const adminId = randomUUID()
     const workDate = '2020-01-06'
-    const token = await mintToken(`${orgId}-admin`)
+    await seedActiveIdentity(adminId, orgId)
+    await seedActiveIdentity(userId, orgId)
+    const token = await mintToken(adminId, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Historic Split',
       timezone: 'UTC',
@@ -442,7 +576,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = org('runtime-punch-guard')
     const userId = `${orgId}-worker`
     const workDate = '2024-10-07'
-    const token = await mintToken(userId)
+    const token = await mintToken(userId, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Punch Split',
       timezone: 'UTC',
@@ -485,7 +619,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rename + rejected segment conversion is atomic and leaves legacy rotation rules untouched', async () => {
     const orgId = org('put-rename-atomic')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Legacy Named',
       workStartTime: '09:00',
@@ -524,7 +658,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('rename normalization rolls back when the later shift update fails', async () => {
     const orgId = org('rename-update-failure')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Atomic Legacy Name',
       workStartTime: '09:00',
@@ -580,8 +714,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('cross-org: a shift is invisible and unreferenceable from another org', async () => {
     const orgX = org('xorg-x')
     const orgY = org('xorg-y')
-    const tokenX = await mintToken(`${orgX}-admin`)
-    const tokenY = await mintToken(`${orgY}-admin`)
+    const tokenX = await mintToken(`${orgX}-admin`, orgX)
+    const tokenY = await mintToken(`${orgY}-admin`, orgY)
     const multiId = await createMultiShift(tokenX, orgX)
 
     const detail = await requestJson(`${baseUrl}/api/attendance/shifts/${multiId}`, { headers: authHeaders(tokenY, orgY) })
@@ -599,7 +733,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: draft + active assignment create/update return typed 422 with zero writes', async () => {
     const orgId = org('matrix-assign')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -654,7 +788,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: rotation rule create/update return typed 422 with zero writes', async () => {
     const orgId = org('matrix-rules')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -684,7 +818,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: generated rotation assignment create/update (draft + active) return typed 422 with zero writes', async () => {
     const orgId = org('matrix-rotasgn')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     // Rule seeded directly: the API create would (correctly) 422 on M.
     const ruleId = randomUUID()
@@ -752,7 +886,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('legacy duplicate-name rotation references fail closed when any matching shift is multi-segment', async () => {
     const orgId = org('matrix-legacy-name')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     await createShiftViaApi(token, orgId, {
       name: 'Duplicate',
       workStartTime: '09:00',
@@ -778,7 +912,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: fixed schedule apply and rebuild return typed 422 with zero writes', async () => {
     const orgId = org('matrix-fixed')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
 
     const group = await postJson('/api/attendance/groups', token, orgId, {
@@ -811,7 +945,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: shift-swap create returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-swap')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Other', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -831,7 +965,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: schedule-dispatch create returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-dispatch')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const multiId = await createMultiShift(token, orgId)
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
@@ -849,9 +983,76 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(await countRows('attendance_requests', orgId)).toBe(0)
   })
 
+  it('P12: dedicated shift-swap and schedule-dispatch creates append version-1 snapshots', async () => {
+    const orgId = randomUUID()
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
+    await enableShadowPosture(orgId)
+
+    const requesterShift = (await createShiftViaApi(token, orgId, {
+      name: 'P12 requester',
+      workStartTime: '09:00',
+      workEndTime: '13:00',
+    })).body.data.id as string
+    const counterpartyShift = (await createShiftViaApi(token, orgId, {
+      name: 'P12 counterparty',
+      workStartTime: '14:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const requesterAssignmentId = await seedPublishedAssignment(
+      orgId,
+      actorId,
+      requesterShift,
+      '2049-06-14',
+    )
+    const counterpartyAssignmentId = await seedPublishedAssignment(
+      orgId,
+      `${orgId}-counterparty`,
+      counterpartyShift,
+      '2049-06-15',
+    )
+    const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
+      requesterAssignmentId,
+      counterpartyAssignmentId,
+      operationId: randomUUID(),
+    })
+    expect(swap.status, swap.raw).toBe(201)
+    expect(swap.body.data.requestSnapshot).toMatchObject({ version: 1 })
+    const swapRequestId = swap.body.data.request.id as string
+
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+    const dispatchUserId = `${orgId}-dispatch-user`
+    await seedActiveIdentity(dispatchUserId, orgId)
+    const dispatch = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: dispatchUserId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: requesterShift,
+      startDate: '2049-06-16',
+      endDate: '2049-06-16',
+      operationId: randomUUID(),
+    })
+    expect(dispatch.status, dispatch.raw).toBe(201)
+    expect(dispatch.body.data.requestSnapshot).toMatchObject({ version: 1 })
+    const dispatchRequestId = dispatch.body.data.request.id as string
+
+    const snapshots = await pool.query(
+      `SELECT request_id::text AS request_id, version, request_type
+         FROM attendance_request_calculation_snapshots
+        WHERE org_id = $1 AND request_id = ANY($2::uuid[])
+        ORDER BY request_type`,
+      [orgId, [swapRequestId, dispatchRequestId]],
+    )
+    expect(snapshots.rows).toEqual([
+      { request_id: dispatchRequestId, version: 1, request_type: 'schedule_dispatch' },
+      { request_id: swapRequestId, version: 1, request_type: 'shift_swap' },
+    ])
+  })
+
   it('matrix: schedule publication fails closed when a draft shift became multi-segment', async () => {
     const orgId = org('matrix-publish')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
@@ -872,14 +1073,440 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(persisted.rows[0].publish_status).toBe('draft')
   })
 
+  it('P27: schedule publication consumes the canonical posture seam before publishing a multi-segment reference', async () => {
+    const orgId = randomUUID()
+    const token = await mintToken(`${orgId}-admin`, orgId)
+    const single = await createShiftViaApi(token, orgId, { name: 'P27 Day', workStartTime: '09:00', workEndTime: '18:00' })
+    const singleId = single.body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId: `${orgId}-worker`,
+      shiftId: singleId,
+      startDate: '2049-06-11',
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+
+    await injectSecondSegment(orgId, singleId)
+    await enableShadowPosture(orgId)
+    const publish = await postJson('/api/attendance/schedule-publications', token, orgId, { assignmentIds: [draftId] })
+    expect(publish.status, publish.raw).toBe(200)
+    const persisted = await pool.query('SELECT publish_status FROM attendance_shift_assignments WHERE id = $1', [draftId])
+    expect(persisted.rows[0].publish_status).toBe('published')
+  })
+
+  it('P27: rotation publication consumes the same posture seam before publishing a multi-segment reference', async () => {
+    const orgId = randomUUID()
+    const token = await mintToken(`${orgId}-admin`, orgId)
+    const single = await createShiftViaApi(token, orgId, { name: 'P27 Rotation Day', workStartTime: '09:00', workEndTime: '18:00' })
+    const singleId = single.body.data.id as string
+    const rule = await postJson('/api/attendance/rotation-rules', token, orgId, {
+      name: 'P27 Rotation',
+      shiftSequence: [singleId],
+    })
+    expect(rule.status, rule.raw).toBe(201)
+    const ruleId = rule.body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/rotation-assignments', token, orgId, {
+      userId: `${orgId}-worker`,
+      rotationRuleId: ruleId,
+      startDate: '2049-06-12',
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+
+    await injectSecondSegment(orgId, singleId)
+    await enableShadowPosture(orgId)
+    const publish = await postJson('/api/attendance/schedule-publications', token, orgId, {
+      rotationAssignmentIds: [draftId],
+    })
+    expect(publish.status, publish.raw).toBe(200)
+    const persisted = await pool.query('SELECT publish_status FROM attendance_rotation_assignments WHERE id = $1', [draftId])
+    expect(persisted.rows[0].publish_status).toBe('published')
+  })
+
+  it('P27: calculation-first holds the shared schedule context until publication can commit', async () => {
+    const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
+    const loadCandidates = plugin.__attendanceWorkDateResolverForTests.loadPublishedCandidatesForWorkDateResolver
+    const orgId = randomUUID()
+    const userId = `${orgId}-worker`
+    const workDate = '2049-06-17'
+    const token = await mintToken(`${orgId}-admin`, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, {
+      name: 'P27 calculation first',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId,
+      shiftId,
+      startDate: workDate,
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+    await enableShadowPosture(orgId)
+
+    const calculationClient = await pool.connect()
+    try {
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const calculationTrx = {
+        query: async (text: string, params?: unknown[]) =>
+          (await calculationClient.query(text, params as never[])).rows,
+      }
+      const frozenCandidates = await loadCandidates(calculationTrx, {
+        orgId,
+        userId,
+        workDates: [workDate],
+        lockScheduleFacts: true,
+      })
+      expect(frozenCandidates).toEqual([])
+
+      const publishPromise = postJson('/api/attendance/schedule-publications', token, orgId, {
+        assignmentIds: [draftId],
+      })
+      await waitForBlockedPid(calculationPid)
+      await calculationClient.query('COMMIT')
+
+      const publish = await publishPromise
+      expect(publish.status, publish.raw).toBe(200)
+      const persisted = await pool.query(
+        'SELECT publish_status FROM attendance_shift_assignments WHERE id = $1',
+        [draftId],
+      )
+      expect(persisted.rows[0].publish_status).toBe('published')
+    } finally {
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      calculationClient.release()
+    }
+  })
+
+  it('P27: publication-first holds the exclusive schedule context without mixing the calculation snapshot', async () => {
+    const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
+    const loadCandidates = plugin.__attendanceWorkDateResolverForTests.loadPublishedCandidatesForWorkDateResolver
+    const orgId = randomUUID()
+    const userId = `${orgId}-worker`
+    const workDate = '2049-06-18'
+    const token = await mintToken(`${orgId}-admin`, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, {
+      name: 'P27 publication first',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+    })).body.data.id as string
+    const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
+      userId,
+      shiftId,
+      startDate: workDate,
+    })
+    expect(draft.status, draft.raw).toBe(201)
+    const draftId = draft.body.data.assignment.id as string
+    await enableShadowPosture(orgId)
+
+    const suffix = randomUUID().replaceAll('-', '')
+    const functionName = `w4c3b_p27_pause_${suffix}`
+    const triggerName = `w4c3b_p27_pause_${suffix}`
+    const pauseKey = BigInt(`0x${suffix.slice(0, 15)}`).toString()
+    await pool.query(
+      `CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+       BEGIN
+         IF NEW.id = '${draftId}'::uuid THEN
+           PERFORM pg_advisory_xact_lock(${pauseKey}::bigint);
+         END IF;
+         RETURN NEW;
+       END;
+       $$ LANGUAGE plpgsql`,
+    )
+    await pool.query(
+      `CREATE TRIGGER ${triggerName}
+       BEFORE UPDATE ON attendance_shift_assignments
+       FOR EACH ROW EXECUTE FUNCTION ${functionName}()`,
+    )
+
+    const pauseClient = await pool.connect()
+    const calculationClient = await pool.connect()
+    try {
+      await pauseClient.query('BEGIN')
+      const pausePid = Number((await pauseClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await pauseClient.query('SELECT pg_advisory_xact_lock($1::bigint)', [pauseKey])
+
+      const publishPromise = postJson('/api/attendance/schedule-publications', token, orgId, {
+        assignmentIds: [draftId],
+      })
+      const publicationPid = await waitForBlockedPid(pausePid)
+
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const calculationTrx = {
+        query: async (text: string, params?: unknown[]) =>
+          (await calculationClient.query(text, params as never[])).rows,
+      }
+      const candidatesPromise = loadCandidates(calculationTrx, {
+        orgId,
+        userId,
+        workDates: [workDate],
+        lockScheduleFacts: true,
+      })
+      await waitUntilBlockedBy(calculationPid, publicationPid)
+
+      await pauseClient.query('COMMIT')
+      const publish = await publishPromise
+      expect(publish.status, publish.raw).toBe(200)
+      const candidates = await candidatesPromise
+      // SERIALIZABLE fixes its snapshot on the shared-lock statement before it
+      // waits. This overlapping transaction therefore remains wholly before the
+      // publication; it must not splice the newly committed row into that frozen
+      // context. A fresh transaction below observes the complementary state.
+      expect(candidates).toEqual([])
+      await calculationClient.query('COMMIT')
+
+      const freshClient = await pool.connect()
+      let freshCandidates
+      try {
+        await freshClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        freshCandidates = await loadCandidates({
+          query: async (text: string, params?: unknown[]) =>
+            (await freshClient.query(text, params as never[])).rows,
+        }, {
+          orgId,
+          userId,
+          workDates: [workDate],
+          lockScheduleFacts: true,
+        })
+        await freshClient.query('COMMIT')
+      } finally {
+        await freshClient.query('ROLLBACK').catch(() => undefined)
+        freshClient.release()
+      }
+      expect(freshCandidates).toHaveLength(1)
+      expect(freshCandidates[0]).toMatchObject({
+        orgId,
+        userId,
+        workDate,
+        shiftId,
+        assignmentId: draftId,
+        source: 'shift',
+      })
+    } finally {
+      await pauseClient.query('ROLLBACK').catch(() => undefined)
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      pauseClient.release()
+      calculationClient.release()
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON attendance_shift_assignments`).catch(() => undefined)
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => undefined)
+    }
+  })
+
+  it('P18: calculation-first serializes shift-swap finalization through the request operation boundary', async () => {
+    const orgId = randomUUID()
+    const requesterId = randomUUID()
+    const counterpartyId = randomUUID()
+    const lockProbeDate = '2049-06-18'
+    const requesterDate = '2049-06-19'
+    const counterpartyDate = '2049-06-20'
+    await seedActiveIdentity(requesterId, orgId)
+    await seedActiveIdentity(counterpartyId, orgId)
+    const requesterToken = await mintToken(requesterId, orgId)
+    const counterpartyToken = await mintToken(counterpartyId, orgId)
+    await enableShadowPosture(orgId)
+
+    const requesterShift = (await createShiftViaApi(requesterToken, orgId, {
+      name: 'P18 requester shift', workStartTime: '09:00', workEndTime: '13:00',
+    })).body.data.id as string
+    const counterpartyShift = (await createShiftViaApi(requesterToken, orgId, {
+      name: 'P18 counterparty shift', workStartTime: '14:00', workEndTime: '18:00',
+    })).body.data.id as string
+    const requesterAssignmentId = await seedPublishedAssignment(
+      orgId, requesterId, requesterShift, requesterDate,
+    )
+    const counterpartyAssignmentId = await seedPublishedAssignment(
+      orgId, counterpartyId, counterpartyShift, counterpartyDate,
+    )
+    const create = await postJson('/api/attendance/shift-swap-requests', requesterToken, orgId, {
+      requesterAssignmentId,
+      counterpartyAssignmentId,
+      operationId: randomUUID(),
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+    const accept = await postJson(
+      `/api/attendance/shift-swap-requests/${requestId}/accept`,
+      counterpartyToken,
+      orgId,
+      { operationId: randomUUID() },
+    )
+    expect(accept.status, accept.raw).toBe(200)
+    const approval = await loadApprovalCursor(requestId)
+
+    const calculationClient = await pool.connect()
+    try {
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const frozenRequester = await loadPublishedCandidates(calculationClient, {
+        orgId, userId: requesterId, workDates: [lockProbeDate],
+      })
+      const frozenCounterparty = await loadPublishedCandidates(calculationClient, {
+        orgId, userId: counterpartyId, workDates: [lockProbeDate],
+      })
+      expect(frozenRequester).toEqual([])
+      expect(frozenCounterparty).toEqual([])
+
+      const operationId = randomUUID()
+      const approvePromise = postJson(
+        `/api/attendance/requests/${requestId}/approve`,
+        requesterToken,
+        orgId,
+        {
+          operationId,
+          expectedApprovalVersion: approval.version,
+          expectedApprovalNode: approval.node,
+          comment: 'P18 calculation-first swap',
+        },
+      )
+      const blockedPid = await waitForBlockedPid(calculationPid)
+      await expectBlockedOnScheduleLock(blockedPid, orgId, [requesterId, counterpartyId])
+      await calculationClient.query('COMMIT')
+
+      const approve = await approvePromise
+      expect(approve.status, approve.raw).toBe(200)
+      await expectRequestDecisionOperation(orgId, operationId)
+
+      const freshClient = await pool.connect()
+      try {
+        await freshClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        const freshRequester = await loadPublishedCandidates(freshClient, {
+          orgId, userId: requesterId, workDates: [counterpartyDate],
+        })
+        const freshCounterparty = await loadPublishedCandidates(freshClient, {
+          orgId, userId: counterpartyId, workDates: [requesterDate],
+        })
+        await freshClient.query('COMMIT')
+        expect(freshRequester[0]).toMatchObject({ shiftId: counterpartyShift })
+        expect(freshCounterparty[0]).toMatchObject({ shiftId: requesterShift })
+      } finally {
+        await freshClient.query('ROLLBACK').catch(() => undefined)
+        freshClient.release()
+      }
+    } finally {
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      calculationClient.release()
+    }
+  }, 90_000)
+
+  it('P18: schedule-dispatch finalization blocks calculation until one coherent writer transaction commits', async () => {
+    const orgId = randomUUID()
+    const actorId = randomUUID()
+    const subjectId = randomUUID()
+    const workDate = '2049-06-21'
+    await seedActiveIdentity(actorId, orgId)
+    await seedActiveIdentity(subjectId, orgId)
+    const token = await mintToken(actorId, orgId)
+    await enableShadowPosture(orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, {
+      name: 'P18 dispatch shift', workStartTime: '09:00', workEndTime: '18:00',
+    })).body.data.id as string
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+    const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: subjectId,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: workDate,
+      endDate: workDate,
+      operationId: randomUUID(),
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+    const approval = await loadApprovalCursor(requestId)
+
+    const suffix = randomUUID().replaceAll('-', '')
+    const functionName = `w4c3b_p18_pause_${suffix}`
+    const triggerName = `w4c3b_p18_pause_${suffix}`
+    const pauseKey = BigInt(`0x${suffix.slice(0, 15)}`).toString()
+    await pool.query(
+      `CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+       BEGIN
+         IF NEW.org_id = '${orgId}' AND NEW.user_id = '${subjectId}' THEN
+           PERFORM pg_advisory_xact_lock(${pauseKey}::bigint);
+         END IF;
+         RETURN NEW;
+       END;
+       $$ LANGUAGE plpgsql`,
+    )
+    await pool.query(
+      `CREATE TRIGGER ${triggerName}
+       BEFORE INSERT ON attendance_shift_assignments
+       FOR EACH ROW EXECUTE FUNCTION ${functionName}()`,
+    )
+
+    const pauseClient = await pool.connect()
+    const calculationClient = await pool.connect()
+    try {
+      await pauseClient.query('BEGIN')
+      const pausePid = Number((await pauseClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await pauseClient.query('SELECT pg_advisory_xact_lock($1::bigint)', [pauseKey])
+
+      const operationId = randomUUID()
+      const approvePromise = postJson(
+        `/api/attendance/requests/${requestId}/approve`,
+        token,
+        orgId,
+        {
+          operationId,
+          expectedApprovalVersion: approval.version,
+          expectedApprovalNode: approval.node,
+          comment: 'P18 writer-first dispatch',
+        },
+      )
+      const writerPid = await waitForBlockedPid(pausePid)
+
+      const calculationPid = Number((await calculationClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await calculationClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      const candidatesPromise = loadPublishedCandidates(calculationClient, {
+        orgId, userId: subjectId, workDates: [workDate],
+      })
+      await waitUntilBlockedBy(calculationPid, writerPid)
+
+      await pauseClient.query('COMMIT')
+      const approve = await approvePromise
+      expect(approve.status, approve.raw).toBe(200)
+      const frozenCandidates = await candidatesPromise
+      expect(frozenCandidates).toEqual([])
+      await calculationClient.query('COMMIT')
+      await expectRequestDecisionOperation(orgId, operationId)
+
+      const freshClient = await pool.connect()
+      try {
+        await freshClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        const freshCandidates = await loadPublishedCandidates(freshClient, {
+          orgId, userId: subjectId, workDates: [workDate],
+        })
+        await freshClient.query('COMMIT')
+        expect(freshCandidates).toHaveLength(1)
+        expect(freshCandidates[0]).toMatchObject({ orgId, userId: subjectId, workDate, shiftId })
+      } finally {
+        await freshClient.query('ROLLBACK').catch(() => undefined)
+        freshClient.release()
+      }
+    } finally {
+      await pauseClient.query('ROLLBACK').catch(() => undefined)
+      await calculationClient.query('ROLLBACK').catch(() => undefined)
+      pauseClient.release()
+      calculationClient.release()
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON attendance_shift_assignments`).catch(() => undefined)
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => undefined)
+    }
+  }, 90_000)
+
   it('matrix: shift-swap final approval fails closed after the source shift became multi-segment', async () => {
     const orgId = org('matrix-swap-final')
-    const requesterToken = await mintToken(`${orgId}-a`)
-    const counterpartyToken = await mintToken(`${orgId}-b`)
+    const requesterId = `${orgId}-a`
+    const counterpartyId = `${orgId}-b`
+    await seedActiveIdentity(requesterId, orgId)
+    await seedActiveIdentity(counterpartyId, orgId)
+    const requesterToken = await mintToken(requesterId, orgId)
+    const counterpartyToken = await mintToken(counterpartyId, orgId)
     const shiftA = (await createShiftViaApi(requesterToken, orgId, { name: 'A', workStartTime: '09:00', workEndTime: '13:00' })).body.data.id as string
     const shiftB = (await createShiftViaApi(requesterToken, orgId, { name: 'B', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
-    const assignmentA = await seedPublishedAssignment(orgId, `${orgId}-a`, shiftA, '2049-06-14')
-    const assignmentB = await seedPublishedAssignment(orgId, `${orgId}-b`, shiftB, '2049-06-15')
+    const assignmentA = await seedPublishedAssignment(orgId, requesterId, shiftA, '2049-06-14')
+    const assignmentB = await seedPublishedAssignment(orgId, counterpartyId, shiftB, '2049-06-15')
 
     const create = await postJson('/api/attendance/shift-swap-requests', requesterToken, orgId, {
       requesterAssignmentId: assignmentA,
@@ -913,7 +1540,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: schedule-dispatch final approval fails closed after the target shift became multi-segment', async () => {
     const orgId = org('matrix-dispatch-final')
-    const token = await mintToken(`${orgId}-admin`)
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
@@ -948,7 +1577,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('matrix: automatic matching apply returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-automatch')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = 'true'
     try {
       const settings = await putJson('/api/attendance/settings', token, orgId, {
@@ -1012,7 +1641,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('delete: typed 409 with zero writes for every durable blocker class', async () => {
     const orgId = org('delete-blockers')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
 
     async function expectDeleteBlocked(shiftId: string, blocker: string) {
       const segmentsBefore = await segmentCount(shiftId)
@@ -1092,7 +1721,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
   it('delete: rejected/cancelled evidence does not block, remains stored, and reads redact the raw UUID', async () => {
     const orgId = org('delete-evidence')
-    const requesterToken = await mintToken(`${orgId}-a`)
+    const requesterToken = await mintToken(`${orgId}-a`, orgId)
     const shiftA = (await createShiftViaApi(requesterToken, orgId, { name: 'Ev A', workStartTime: '09:00', workEndTime: '13:00' })).body.data.id as string
     const shiftB = (await createShiftViaApi(requesterToken, orgId, { name: 'Ev B', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
 
@@ -1218,7 +1847,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('read hardening: an orphaned schedule-dispatch request never trusts or exposes a metadata-only shift UUID', async () => {
     const orgId = org('orphan-dispatch')
     const userId = `${orgId}-user`
-    const token = await mintToken(userId)
+    const token = await mintToken(userId, orgId)
     const orphanRequestId = randomUUID()
     const rawShiftId = randomUUID()
     await pool.query(
@@ -1264,7 +1893,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const plugin = require('../../../../plugins/plugin-attendance/index.cjs')
     const service = plugin.__attendanceShiftServiceForTests.getService()
     const orgId = org('concurrency')
-    const token = await mintToken(`${orgId}-admin`)
+    const token = await mintToken(`${orgId}-admin`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Race', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
 
     const wrap = (client: import('pg').PoolClient) => ({

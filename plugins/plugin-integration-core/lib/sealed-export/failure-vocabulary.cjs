@@ -79,6 +79,7 @@ const SEALED_EXPORT_FAILURE_REASONS = Object.freeze([
 ])
 
 const FAILURE_REASON_SET = new Set(SEALED_EXPORT_FAILURE_REASONS)
+const TRUSTED_SEALED_EXPORT_ERRORS = new WeakSet()
 
 // The fixed substitute §10 names for an undeclared reason.
 const SEALED_EXPORT_FIXED_INTERNAL_REASON = 'SEALED_EXPORT_INTERNAL_ERROR'
@@ -86,17 +87,26 @@ const SEALED_EXPORT_FIXED_INTERNAL_REASON = 'SEALED_EXPORT_INTERNAL_ERROR'
 // ---------------------------------------------------------------------------
 // Latent-surface partition (§10 "runtime consumer pin", named honestly).
 //
-// S1 ships NO runtime consumer — the slice is latent by authorization, so there is
-// no runtime to pin. What CAN be pinned exactly is which reasons this latent
+// S1 plus the owner-authorized S2 producer, S3 private-ingestion and S4 generation
+// kernel slices ship NO runtime consumer. What CAN be pinned exactly is which reasons this whole latent
 // surface can actually raise and which it cannot. The two lists are asserted
-// disjoint and to union to the full vocabulary; a new throw site that lights up an
-// UNREACHED reason, or one that stops reaching a REACHED reason, REDs the pin.
+// disjoint and to union to the full vocabulary; a new throw site that lights up
+// an UNREACHED reason, or one that stops reaching a REACHED reason, REDs the pin.
 // ---------------------------------------------------------------------------
-const SEALED_EXPORT_S1_REACHED_REASONS = Object.freeze([
+const SEALED_EXPORT_LATENT_REACHED_REASONS = Object.freeze([
+  'SEALED_EXPORT_PROFILE_UNCERTIFIED',
   'SEALED_EXPORT_SNAPSHOT_PROOF_UNAVAILABLE',
+  'SEALED_EXPORT_CAPTURE_FAILED',
+  'SEALED_EXPORT_CAPTURE_INCOMPLETE',
+  'SEALED_EXPORT_SIGNER_UNENROLLED',
+  'SEALED_EXPORT_SIGNER_EXPIRED',
+  'SEALED_EXPORT_SIGNER_REVOKED',
   'SEALED_EXPORT_MANIFEST_INVALID',
+  'SEALED_EXPORT_MANIFEST_SIGNATURE_INVALID',
   'SEALED_EXPORT_MANIFEST_BINDING_MISMATCH',
   'SEALED_EXPORT_MANIFEST_SCHEMA_MISMATCH',
+  'SEALED_EXPORT_MANIFEST_SNAPSHOT_MISMATCH',
+  'SEALED_EXPORT_MANIFEST_REPLAYED',
   'SEALED_EXPORT_UPLOAD_SESSION_INVALID',
   'SEALED_EXPORT_CHUNK_UNDECLARED',
   'SEALED_EXPORT_CHUNK_DIGEST_MISMATCH',
@@ -106,29 +116,17 @@ const SEALED_EXPORT_S1_REACHED_REASONS = Object.freeze([
   'SEALED_EXPORT_ARTIFACT_DIGEST_MISMATCH',
   'SEALED_EXPORT_ROW_COUNT_MISMATCH',
   'SEALED_EXPORT_BUDGET_EXCEEDED',
-  'SEALED_EXPORT_INTERNAL_ERROR',
-])
-
-// Reasons whose preconditions belong to slices S2-S6 (capture, signing, upload
-// sessions, tombstones, staging, apply, CAS). S1 owns no code that can raise them.
-const SEALED_EXPORT_S1_UNREACHED_REASONS = Object.freeze([
-  'SEALED_EXPORT_PROFILE_UNCERTIFIED',
-  'SEALED_EXPORT_BINDING_UNQUALIFIED',
-  'SEALED_EXPORT_CAPTURE_FAILED',
-  'SEALED_EXPORT_CAPTURE_INCOMPLETE',
-  'SEALED_EXPORT_SIGNER_UNENROLLED',
-  'SEALED_EXPORT_SIGNER_EXPIRED',
-  'SEALED_EXPORT_SIGNER_REVOKED',
-  'SEALED_EXPORT_MANIFEST_SIGNATURE_INVALID',
-  'SEALED_EXPORT_MANIFEST_SNAPSHOT_MISMATCH',
-  'SEALED_EXPORT_MANIFEST_REPLAYED',
   'SEALED_EXPORT_ARTIFACT_EXPIRED',
   'SEALED_EXPORT_STAGING_WRITE_FAILED',
+  'SEALED_EXPORT_BINDING_UNQUALIFIED',
   'SEALED_EXPORT_SEAL_INCOMPLETE',
   'SEALED_EXPORT_APPLY_INCOMPLETE',
   'SEALED_EXPORT_GENERATION_VERIFY_FAILED',
   'SEALED_EXPORT_VISIBILITY_CAS_CONFLICT',
+  'SEALED_EXPORT_INTERNAL_ERROR',
 ])
+
+const SEALED_EXPORT_LATENT_UNREACHED_REASONS = Object.freeze([])
 
 // ---------------------------------------------------------------------------
 // Details discipline (§10: "fixed field names, booleans, counts, and safe tokens").
@@ -313,24 +311,40 @@ function failSealedExport(reason, details) {
   // reason cannot be trusted to be about anything this vocabulary knows.
   const safeDetails = declared ? buildSafeDetails(details) : Object.freeze({})
   if (safeDetails === null) {
-    throw new SealedExportError(SEALED_EXPORT_FIXED_INTERNAL_REASON, Object.freeze({}))
+    const error = new SealedExportError(
+      SEALED_EXPORT_FIXED_INTERNAL_REASON,
+      Object.freeze({}),
+    )
+    TRUSTED_SEALED_EXPORT_ERRORS.add(error)
+    throw error
   }
-  throw new SealedExportError(safeReason, safeDetails)
+  const error = new SealedExportError(safeReason, safeDetails)
+  TRUSTED_SEALED_EXPORT_ERRORS.add(error)
+  throw error
 }
 
 function isDeclaredFailureReason(reason) {
   return typeof reason === 'string' && FAILURE_REASON_SET.has(reason)
 }
 
+function isTrustedSealedExportError(error) {
+  return (
+    error !== null
+    && typeof error === 'object'
+    && TRUSTED_SEALED_EXPORT_ERRORS.has(error)
+  )
+}
+
 module.exports = {
   SEALED_EXPORT_FAILURE_REASONS,
   SEALED_EXPORT_FIXED_INTERNAL_REASON,
-  SEALED_EXPORT_S1_REACHED_REASONS,
-  SEALED_EXPORT_S1_UNREACHED_REASONS,
+  SEALED_EXPORT_LATENT_REACHED_REASONS,
+  SEALED_EXPORT_LATENT_UNREACHED_REASONS,
   SEALED_EXPORT_DETAIL_FIELDS,
   SEALED_EXPORT_SAFE_DETAIL_TOKENS,
   SealedExportError,
   failSealedExport,
   isDeclaredFailureReason,
+  isTrustedSealedExportError,
   __internals: Object.freeze({ buildSafeDetails, isSafeDetailCount }),
 }

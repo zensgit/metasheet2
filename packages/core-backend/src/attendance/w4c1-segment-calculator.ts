@@ -47,11 +47,17 @@ import type {
 } from './w4c0-write-boundary-types'
 import {
   parseAttendanceInstantMsV1,
+  resolveAttendanceInstantBoundaryMetadataV1,
   isAttendanceCalendarDateKeyV1,
   isAttendanceWallTimeHHMMV1,
   resolveAttendanceLocalWallTimeV1,
   validateAttendanceIanaTimezoneV1,
 } from './w4c1-strict-time'
+import {
+  normalizeAttendanceFlexPolicyV1,
+  resolveAttendanceFlexExpectationV1,
+  type AttendanceFlexPolicyRequiredDurationV1,
+} from './w5-flex-policy'
 
 export const ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 = 'w4c1-segment-calculator@1'
 
@@ -188,10 +194,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!isPlainObject(value)) return false
+  if (Object.getOwnPropertySymbols(value).length > 0) return false
   const own = Object.getOwnPropertyNames(value)
   if (own.length !== keys.length) return false
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(value, key)) return false
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || descriptor.get || descriptor.set) return false
+  }
+  return true
+}
+
+function hasDenseDataArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value) || Object.getOwnPropertySymbols(value).length > 0) return false
+  const own = Object.getOwnPropertyNames(value)
+  if (own.length !== value.length + 1 || !own.includes('length')) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !('value' in descriptor)) return false
   }
   return true
 }
@@ -308,8 +328,24 @@ const SEGMENT_KEYS = [
   'earlyLeaveGraceMinutes',
 ] as const
 
-function validateFrozenContextShape(context: unknown): context is FrozenAttendanceContextV1 {
-  if (!hasExactKeys(context, CONTEXT_KEYS)) return false
+/**
+ * Accept the legacy W4 exact key set OR the same set plus optional `flexPolicy`
+ * (W5). Unknown keys fail closed. Absent flexPolicy means strict.
+ */
+export function validateFrozenContextShape(context: unknown): context is FrozenAttendanceContextV1 {
+  if (!isPlainObject(context)) return false
+  if (Object.getOwnPropertySymbols(context).length > 0) return false
+  const own = Object.getOwnPropertyNames(context)
+  const allowed = new Set<string>([...CONTEXT_KEYS, 'flexPolicy'])
+  if (own.length < CONTEXT_KEYS.length || own.length > CONTEXT_KEYS.length + 1) return false
+  for (const key of own) {
+    if (!allowed.has(key)) return false
+    const descriptor = Object.getOwnPropertyDescriptor(context, key)
+    if (!descriptor || descriptor.get || descriptor.set) return false
+  }
+  for (const key of CONTEXT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) return false
+  }
   const ctx = context as Record<string, unknown>
   if (ctx.schemaVersion !== 1) return false
   if (ctx.selector !== 'legacy') return false
@@ -324,7 +360,7 @@ function validateFrozenContextShape(context: unknown): context is FrozenAttendan
   if (!isNonNegativeInteger(ctx.severeLateThresholdMinutes)) return false
   if (!isNonNegativeInteger(ctx.absenceLateThresholdMinutes)) return false
   const segments = ctx.segments
-  if (!Array.isArray(segments) || segments.length < 1 || segments.length > 3) return false
+  if (!hasDenseDataArray(segments) || segments.length < 1 || segments.length > 3) return false
   let maxLateGrace = 0
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i]
@@ -358,6 +394,21 @@ function validateFrozenContextShape(context: unknown): context is FrozenAttendan
   const absence = ctx.absenceLateThresholdMinutes as number
   if (severe > 0 && severe < maxLateGrace) return false
   if (absence > 0 && absence < Math.max(severe, maxLateGrace)) return false
+
+  // W5: optional flexPolicy. Absent => strict. Multi-segment flex fails closed.
+  // Core hours (when set) are re-checked against segment 0 start so a corrupted
+  // freeze cannot bypass authoring's "every clamped interval covers core" gate.
+  if (Object.prototype.hasOwnProperty.call(ctx, 'flexPolicy')) {
+    const firstStart = (segments[0] as Record<string, unknown>).startTime
+    if (
+      normalizeAttendanceFlexPolicyV1(ctx.flexPolicy, {
+        segmentCount: segments.length,
+        segmentStartTime: typeof firstStart === 'string' ? firstStart : null,
+      }) === null
+    ) {
+      return false
+    }
+  }
   return true
 }
 
@@ -893,7 +944,90 @@ export function calculateAttendanceSegmentsV1(
     }
   }
 
-  // 10. Approved-fact application (lock 4.4). `minutes_only_unbounded`
+  // 10. Resolve planned expectations. Strict mode keeps the frozen segment
+  // anchors. Flex mode (W5 §3.3) resolves expected start from the first valid
+  // arrival clamped to the arrival window, then expected end = start +
+  // requiredMinutes. Grace is applied only AFTER this resolution.
+  // Optional core hours are an authoring/freeze guarantee (no new reasonCode).
+  const flexPolicy =
+    normalizeAttendanceFlexPolicyV1(
+      Object.prototype.hasOwnProperty.call(context, 'flexPolicy')
+        ? (context as FrozenAttendanceContextV1).flexPolicy
+        : undefined,
+      {
+        segmentCount: context.segments.length,
+        segmentStartTime: context.segments[0]?.startTime ?? null,
+      },
+    ) ?? { mode: 'strict' as const }
+
+  interface ResolvedExpectation {
+    start: FrozenBoundary
+    end: FrozenBoundary
+    planned: IntervalMs
+  }
+  const expectations: ResolvedExpectation[] = []
+
+  if (flexPolicy.mode === 'flex_required_duration') {
+    // Multi-segment flex is already rejected by validateFrozenContextShape.
+    // Single-segment only: resolve from segment-0 start + matched arrival.
+    const index = 0
+    const nominalStart = starts[index]
+    const actualInMs = actuals[index].inEvidence?.occurredAtMs ?? null
+    const flex = flexPolicy as AttendanceFlexPolicyRequiredDurationV1
+    const resolved = resolveAttendanceFlexExpectationV1({
+      policy: flex,
+      nominalStartMs: nominalStart.epochMs,
+      actualArrivalMs: actualInMs,
+    })
+    const expectedStartMetadata = resolveAttendanceInstantBoundaryMetadataV1(
+      context.timezone,
+      resolved.expectedStartMs,
+    )
+    const expectedEndMetadata = resolveAttendanceInstantBoundaryMetadataV1(
+      context.timezone,
+      resolved.expectedEndMs,
+    )
+    const expectedStart: FrozenBoundary = {
+      epochMs: resolved.expectedStartMs,
+      offsetMinutes: expectedStartMetadata.offsetMinutes,
+      fold: expectedStartMetadata.fold,
+      wallKey: nominalStart.wallKey,
+    }
+    const expectedEnd: FrozenBoundary = {
+      epochMs: resolved.expectedEndMs,
+      offsetMinutes: expectedEndMetadata.offsetMinutes,
+      fold: expectedEndMetadata.fold,
+      wallKey: ends[index].wallKey,
+    }
+    if (!(expectedStart.epochMs < expectedEnd.epochMs)) {
+      return review('invalid_segment_order')
+    }
+    // Flex expected boundaries must still sit inside the frozen absolute window
+    // (same containment rule as strict anchors).
+    for (const boundary of [expectedStart, expectedEnd]) {
+      if (boundary.epochMs < windows.absolute.s || boundary.epochMs > windows.absolute.e) {
+        return review('invalid_segment_order')
+      }
+    }
+    expectations.push({
+      start: expectedStart,
+      end: expectedEnd,
+      planned: { s: expectedStart.epochMs, e: expectedEnd.epochMs },
+    })
+  } else {
+    for (const segment of context.segments) {
+      const index = segment.index
+      const start = starts[index]
+      const end = ends[index]
+      expectations.push({
+        start,
+        end,
+        planned: { s: start.epochMs, e: end.epochMs },
+      })
+    }
+  }
+
+  // 11. Approved-fact application (lock 4.4). `minutes_only_unbounded`
   // leave/overtime and PARTIAL bounded leave coverage are faithfully
   // snapshotted by the caller but review-required here: they can neither
   // excuse a segment nor extend attribution. (Discretionary code assignment
@@ -903,14 +1037,15 @@ export function calculateAttendanceSegmentsV1(
   const overtimeSet = mergeIntervals(facts.boundedOvertimeIntervals)
   const excused: boolean[] = []
   for (const segment of context.segments) {
-    const planned: IntervalMs = { s: starts[segment.index].epochMs, e: ends[segment.index].epochMs }
+    const planned = expectations[segment.index].planned
     const covered = overlapWithSetMs(planned, leaveSet)
     const duration = planned.e - planned.s
     if (covered > 0 && covered < duration) return review('approved_fact_conflict')
     excused[segment.index] = covered === duration && duration > 0
   }
 
-  // 11. Per-segment metrics/status (lock 6.1) and daily aggregate (lock 6.3).
+  // 12. Per-segment metrics/status (lock 6.1) and daily aggregate (lock 6.3).
+  // Grace applies only after flex expectation is resolved (§3.3).
   const graceLateMs = context.segments[0].lateGraceMinutes * 60_000
   const graceEarlyMs = context.segments[0].earlyLeaveGraceMinutes * 60_000
   const segmentsOut: AttendanceCalculatedSegmentV1[] = []
@@ -924,25 +1059,25 @@ export function calculateAttendanceSegmentsV1(
 
   for (const segment of context.segments) {
     const index = segment.index
-    const start = starts[index]
-    const end = ends[index]
-    const planned: IntervalMs = { s: start.epochMs, e: end.epochMs }
+    const expectation = expectations[index]
+    const start = expectation.start
+    const end = expectation.end
+    const planned = expectation.planned
     const actual = actuals[index]
     const inMs = actual.inEvidence?.occurredAtMs ?? null
     const outMs = actual.outEvidence?.occurredAtMs ?? null
 
-    // Late/early come from the RAW actual boundaries versus the frozen grace
-    // thresholds (legacy-parity: minutes are measured beyond start+grace /
-    // before end-grace and floored to whole minutes).
+    // Late/early come from the RAW actual boundaries versus the (flex-resolved
+    // or strict) expected boundaries + frozen grace thresholds.
     const lateMinutes =
       inMs === null ? 0 : Math.max(0, Math.floor((inMs - (planned.s + graceLateMs)) / 60_000))
     const earlyLeaveMinutes =
       outMs === null ? 0 : Math.max(0, Math.floor((planned.e - graceEarlyMs - outMs) / 60_000))
 
     // Payable physical time (W4C-R1/R24): intersection of the actual interval
-    // with the planned segment, extended ONLY through validated bounded
-    // approved overtime and clipped to those exact approved intervals. A
-    // planned break can never be counted; missing boundaries synthesize no
+    // with the planned/expected segment, extended ONLY through validated
+    // bounded approved overtime and clipped to those exact approved intervals.
+    // A planned break can never be counted; missing boundaries synthesize no
     // work.
     let workedMinutes = 0
     let overtimeExtensionMinutes = 0

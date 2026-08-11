@@ -191,8 +191,29 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     .ifExists()
     .execute()
   await sql.raw(`DROP FUNCTION IF EXISTS ${MEMBERSHIP_USER_ORG_FUNCTION}()`).execute(db)
-  await sql`
-    ALTER TABLE attendance_groups
-      DROP CONSTRAINT IF EXISTS attendance_groups_id_org_unique
-  `.execute(db)
+  await sql.raw(`
+    DO $$
+    DECLARE
+      group_org_unique_index oid;
+    BEGIN
+      SELECT conindid
+        INTO group_org_unique_index
+        FROM pg_constraint
+       WHERE conname = '${GROUP_ORG_UNIQUE}'
+         AND conrelid = 'attendance_groups'::regclass;
+
+      IF group_org_unique_index IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_depend dependency
+             JOIN pg_constraint dependent_constraint
+               ON dependent_constraint.oid = dependency.objid
+            WHERE dependency.refobjid = group_org_unique_index
+              AND dependent_constraint.contype = 'f'
+         ) THEN
+        ALTER TABLE attendance_groups
+          DROP CONSTRAINT attendance_groups_id_org_unique;
+      END IF;
+    END $$;
+  `).execute(db)
 }

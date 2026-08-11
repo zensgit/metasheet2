@@ -23,6 +23,7 @@ const {
   buildConflictPolicyReview,
   loadTableScopeConflictPolicies,
   normalizeRunOnlyConflictPolicyReview,
+  POLICY_BOUNDARY_STORED,
 } = require('./stock-preparation-conflict-policies.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
@@ -908,7 +909,11 @@ async function applyStockPreparationAction(input = {}) {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
   })
-  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(tokenRecord.conflictPolicyReview)
+  // Stored boundary: consumeDryRunToken returns the record verbatim from the token store and merges
+  // nothing from the request, so this content is server-minted and was already validated at
+  // selection time. Re-validating it as a fresh selection would 422 an in-flight token issued before
+  // the policy-honesty guard landed — turning a stored artifact into a new failure.
+  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(tokenRecord.conflictPolicyReview, { boundary: POLICY_BOUNDARY_STORED })
   const tableScopeReview = input.policyStore
     ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
     : null

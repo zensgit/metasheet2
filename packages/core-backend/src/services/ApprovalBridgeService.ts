@@ -33,6 +33,30 @@ import {
   projectRecordLinkFormSnapshotForViewer,
   projectRecordLinkFormSnapshotsForViewerBatch,
 } from './approval-record-link-read-projection'
+import {
+  assertAttendanceCentralMutationFailClosed,
+  attendanceCentralApprovalErrorToServiceFields,
+} from '../attendance/w4c3b-central-approval-hooks'
+
+/**
+ * W4C-3b R0 test-only seam: pause after instance FOR UPDATE + pending check,
+ * before attendance fail-closed / terminal DML. Production never sets this.
+ */
+export type W4c3bBridgeDispatchBarrierPoint = 'after_instance_lock'
+
+type W4c3bBridgeDispatchBarrierFn = (
+  point: W4c3bBridgeDispatchBarrierPoint,
+  info: { instanceId: string },
+) => Promise<void>
+
+let bridgeDispatchTestBarrierForTests: W4c3bBridgeDispatchBarrierFn | null = null
+
+/** Test-only. Pass null to clear. */
+export function __setW4c3bBridgeDispatchTestBarrierForTests(
+  hook: W4c3bBridgeDispatchBarrierFn | null,
+): void {
+  bridgeDispatchTestBarrierForTests = hook
+}
 
 const logger = new Logger('ApprovalBridgeService')
 const PLM_SYNC_CONCURRENCY = 5
@@ -682,6 +706,23 @@ export class ApprovalBridgeService {
           409,
           APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
         )
+      }
+
+      if (bridgeDispatchTestBarrierForTests) {
+        await bridgeDispatchTestBarrierForTests('after_instance_lock', { instanceId: id })
+      }
+
+      // P17/P22: attendance instances cannot terminalize through the generic bridge.
+      // Classify + lock request before any instance/assignment DML (including
+      // adversarial published_definition_id rows).
+      try {
+        await assertAttendanceCentralMutationFailClosed(client, instance)
+      } catch (error) {
+        const fields = attendanceCentralApprovalErrorToServiceFields(error)
+        if (fields) {
+          throw new ServiceError(fields.message, fields.statusCode, fields.code)
+        }
+        throw error
       }
 
       const rejectCommentRequired = instance.policy_snapshot?.rejectCommentRequired !== false

@@ -52,6 +52,8 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn() }))
 
 vi.mock('../../src/auth/user-activate', () => ({
   activatePendingUser: activateMocks.activatePendingUser,
+  isActivateMode: (value: unknown) =>
+    value === 'temp_password' || value === 'sso' || value === 'admin_no_password',
 }))
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -253,10 +255,57 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
     })
   })
 
+  // Verify-workflow finding on #4843: the mapping/closure chains enumerate all 14 authored
+  // reasons but the HTTP surface drove only a subset — a route-layer special-case for any
+  // undriven code would have left every test green. Longhand on purpose (reading the table
+  // under test would assert the table equals itself); driver text walked on EVERY row.
+  it('ALL 14 authored reasons answer their ruled status over HTTP with our message and zero driver text', () => {
+    const cases: Array<[string, number, string]> = [
+      ['ACTIVATE_USER_REQUIRED', 400, 'A target user id is required to activate'],
+      ['ACTIVATE_USER_NOT_FOUND', 404, 'User not found'],
+      ['ACTIVATE_NOT_PENDING', 409, 'User is not pending activation'],
+      ['ACTIVATE_RACE', 409, 'User is no longer pending activation'],
+      ['ACTIVATE_ALIAS_CONFLICT', 409, 'A login identifier is already claimed by another account'],
+      ['ACTIVATE_ALIAS_REQUIRED', 409, 'Activation requires at least one usable login identifier'],
+      ['ACTIVATE_ALIAS_FAILED', 500, 'Failed to claim login alias during activation'],
+      ['ACTIVATE_SOURCE_MISSING', 409, 'No linked active directory account for activation'],
+      ['ACTIVATE_SOURCE_INACTIVE', 409, 'Directory account is inactive; cannot activate'],
+      ['ACTIVATE_INTEGRATION_INACTIVE', 409, 'Directory integration is not active; cannot activate'],
+      ['ACTIVATE_LINK_MISMATCH', 409, 'Directory link points to a different user'],
+      ['ACTIVATE_SOURCE_INELIGIBLE', 409, 'Directory source is not eligible for DingTalk SSO activation'],
+      ['ACTIVATE_ORG_MISMATCH', 409, 'orgId does not match the directory source integration for this user'],
+      ['ACTIVATE_ORG_AMBIGUOUS', 409, 'Multiple active directory sources in different orgs; orgId is required to disambiguate'],
+    ]
+    expect(cases).toHaveLength(14)
+    return cases.reduce(
+      (chain, [code, status, message]) => chain.then(async () => {
+        state.activateImpl = () => {
+          throw Object.assign(new Error(DRIVER_TEXT), { code })
+        }
+        const res = await invokeActivate('user-1')
+        for (const fragment of DRIVER_FRAGMENTS) {
+          expect(
+            findStringOccurrences(res.body, fragment),
+            `DRIVER TEXT LEAK on ${code}: '${fragment}' reached the client.`,
+          ).toEqual([])
+        }
+        expect({ status: res.statusCode, body: res.body }).toEqual({
+          status,
+          body: { ok: false, error: { code, message, details: undefined } },
+        })
+      }),
+      Promise.resolve(),
+    )
+  })
+
   it('the other two newly-ruled reasons answer 409 over HTTP as well', () => {
     const cases: Array<[string, number, string]> = [
       ['ACTIVATE_INTEGRATION_INACTIVE', 409, 'Directory integration is not active; cannot activate'],
       ['ACTIVATE_SOURCE_MISSING', 409, 'No linked active directory account for activation'],
+      // Closeout review P1: derived-org confirmation failure surfaces as 409 with OUR message.
+      ['ACTIVATE_ORG_MISMATCH', 409, 'orgId does not match the directory source integration for this user'],
+      // #4833: dual-ACTIVE-source ambiguity surfaces as 409 with OUR message.
+      ['ACTIVATE_ORG_AMBIGUOUS', 409, 'Multiple active directory sources in different orgs; orgId is required to disambiguate'],
     ]
     return cases.reduce(
       (chain, [code, status, message]) => chain.then(async () => {

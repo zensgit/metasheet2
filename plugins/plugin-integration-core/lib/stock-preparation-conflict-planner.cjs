@@ -43,6 +43,11 @@ const IDENTITY_FIELD_IDS = Object.freeze([
   'sourceVersion',
 ])
 
+// Frozen persisted vocabulary. Tokens are NEVER removed from this list: table-scope policy
+// selections are persisted under `integration:table-action:conflict-policies:` and re-validated
+// against this list on read, so dropping a token would turn "this selection does nothing" into
+// "this stored row no longer loads" — strictly worse. See IMPLEMENTED/UNIMPLEMENTED below for
+// which of these a client may actually SELECT.
 const DUPLICATE_EXPANDED_KEY_POLICIES = Object.freeze([
   'hold',
   'keep_multiple_rows',
@@ -51,6 +56,16 @@ const DUPLICATE_EXPANDED_KEY_POLICIES = Object.freeze([
   'skip_selected',
   'source_correction_required',
 ])
+
+// The single policy that can turn a duplicate group into write decisions. Pinned as a constant so
+// the resolution gate in resolveDuplicateExpandedRows() and the implemented-policy derivation below
+// cannot drift apart under a rename.
+const DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY = 'keep_multiple_rows'
+
+// The catch-all held reason heldReasonForDuplicatePolicy() returns for any policy the planner has
+// no named handling for. A policy that lands here is inert: selecting it is accepted, changes
+// nothing, and the rows hold anonymously.
+const DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON = 'unsupported_policy'
 
 const DUPLICATE_SOURCE_DETAIL_FIELDS = Object.freeze([
   'sourceDetailId',
@@ -329,7 +344,10 @@ function duplicateExpandedGroupDiagnostic(key, rows, index) {
       any: sourceDetail || pathParent || sortLine,
     },
     recommendedDefault: 'hold',
-    allowedPolicies: DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    // Only the policies a client may actually select. `unimplementedPolicies` keeps the refused
+    // tokens visible (a stored selection can still name one) without advertising them as choices.
+    allowedPolicies: IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    unimplementedPolicies: UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
   }
 }
 
@@ -373,7 +391,10 @@ function duplicateExpandedKeyDiagnostics(groupedRows) {
       sortLine: groups.filter((group) => group.stableDiscriminators.sortLine).length,
     },
     defaultPolicy: 'hold',
-    allowedPolicies: DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    // Only the policies a client may actually select (this is the list the workbench dropdown is
+    // built from). `unimplementedPolicies` keeps the refused tokens visible without offering them.
+    allowedPolicies: IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    unimplementedPolicies: UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
     groups,
   }
 }
@@ -401,8 +422,31 @@ function duplicatePolicySelections(review) {
 function heldReasonForDuplicatePolicy(policy) {
   if (policy === 'hold') return 'default_hold'
   if (policy === 'source_correction_required') return 'source_correction_required'
-  return 'unsupported_policy'
+  return DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON
 }
+
+// DERIVED FROM BEHAVIOUR, not hand-copied. A policy counts as implemented iff the planner does
+// something NAMED with it: either it reaches resolution (keep_multiple_rows) or it holds under its
+// own named reason. Anything that falls through to the catch-all `unsupported_policy` reason is,
+// by definition, inert. This derivation is fail-closed: a token added to the frozen vocabulary
+// without planner handling is automatically NOT selectable, and a future slice that implements one
+// of the three inert strategies makes it selectable only by giving it real behaviour here.
+const IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES = Object.freeze(
+  DUPLICATE_EXPANDED_KEY_POLICIES.filter((policy) => (
+    policy === DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY
+    || heldReasonForDuplicatePolicy(policy) !== DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON
+  )),
+)
+
+// merge_quantity / select_representative / skip_selected. Unimplemented BY DECISION, not by
+// oversight: each destroys or alters a business quantity (sum / discard / drop) and in a
+// materials-requirement context a wrong quantity is a wrong requirement. Implementing them needs a
+// design lock, an audit trail and reversibility — a separate owner decision. They stay in the
+// frozen vocabulary so stored selections keep loading; they are refused at the selection boundary
+// so the refusal lands on the operator who chose one instead of surfacing later as a silent hold.
+const UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES = Object.freeze(
+  DUPLICATE_EXPANDED_KEY_POLICIES.filter((policy) => !IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.includes(policy)),
+)
 
 function duplicateGroupDiscriminator(rows) {
   if (hasDistinctStableDiscriminator(rows, DUPLICATE_SOURCE_DETAIL_FIELDS)) {
@@ -434,7 +478,7 @@ function duplicateResolvedKey(baseKey, groupFingerprint, discriminatorKind, disc
 function emptyDuplicateResolutionSummary() {
   return {
     conflictType: 'duplicate_expanded_key',
-    resolvedPolicy: 'keep_multiple_rows',
+    resolvedPolicy: DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
     resolvedGroupCount: 0,
     resolvedRowCount: 0,
     heldGroupCount: 0,
@@ -507,7 +551,7 @@ function resolveDuplicateExpandedRows({ expandedKeyed, existingKeyed, duplicateP
 
     const fingerprint = stableFingerprint(key)
     const selected = selections.get(fingerprint) || { policy: 'hold', scope: 'default' }
-    if (selected.policy !== 'keep_multiple_rows') {
+    if (selected.policy !== DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY) {
       duplicateExpandedKeys.add(key)
       addHeldDuplicateResolution(resolution, {
         fingerprint,
@@ -892,12 +936,17 @@ module.exports = {
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
   DUPLICATE_EXPANDED_KEY_POLICIES,
+  DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
+  DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON,
+  IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
+  UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   StockPreparationConflictPlannerError,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
     changedFields,
+    heldReasonForDuplicatePolicy,
     duplicateExpandedKeyDiagnosticsForRows,
     duplicateGroupDiscriminator,
     duplicateResolvedKey,

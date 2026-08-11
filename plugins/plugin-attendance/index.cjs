@@ -13,6 +13,9 @@ const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
+const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -549,6 +552,37 @@ let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
 let reportSyncScheduledTriggerSchedulerUnregister = null
 let annualLeaveAccrualSchedulerUnregister = null
+// W4C-2 Stage D (#4556 lock 7.1a delivery side): the durable result-event outbox drain
+// worker. `w4OutboxDrainRunOnce` is non-null ONLY when the activate-time env gate passed
+// (ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty AND the host port present) — the
+// test probe reads it to prove "no env => no worker => byte-identical runtime".
+let w4OutboxDrainSchedulerUnregister = null
+let w4OutboxDrainRunOnce = null
+// W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+// Same env-gated-at-registration posture as the outbox drain worker directly above: no env =>
+// no job object exists at all => byte-identical runtime. `w4ScheduledRunSweepRunOnce` is
+// non-null ONLY when the activate-time env gate passed.
+let w4ScheduledRunSweepSchedulerUnregister = null
+let w4ScheduledRunSweepRunOnce = null
+// W4C-2 remediation P2 (#4612 review "腿1"): test-only synchronization point that
+// fires on the POST /api/attendance/punch route AFTER its own pre-boundary
+// work-date resolution has already succeeded and BEFORE the canonical
+// write-boundary transaction (w4LiveScheduledBoundary.executeLivePunch) begins.
+// Exists ONLY so a real-DB test can construct a GENUINE two-connection race
+// against the in-transaction ambiguous/shift-changed re-derivation added by
+// P1-3 (deriveLegacyLivePunchAttributionV1) — a second connection commits a
+// conflicting shift-assignment write while connection A is suspended here, so
+// A's canonical transaction re-reads live DB state and observes the change.
+// The setter fails outside a test runtime, matching the existing
+// __setAttendanceW4DigestSeamForTests precedent in w4c0-identity.ts — production
+// construction never calls it, so an unset seam is a plain no-op on every request.
+let attendanceW4LivePunchPreBoundarySeamForTests = null
+function __setAttendanceW4LivePunchPreBoundarySeamForTests(seam) {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('W4C2_LIVE_PUNCH_PRE_BOUNDARY_SEAM_FORBIDDEN')
+  }
+  attendanceW4LivePunchPreBoundarySeamForTests = typeof seam === 'function' ? seam : null
+}
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -2842,14 +2876,14 @@ async function loadAttendanceReportRecordsSyncUserPage(db, orgId, from, to, opti
       `SELECT COUNT(*)::int AS total
        FROM (
          SELECT DISTINCT user_id
-         FROM attendance_records
+         FROM attendance_current_records
          WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
        ) users_with_records`,
       [orgId, from, to]
     )
     const rows = await db.query(
       `SELECT DISTINCT user_id
-       FROM attendance_records
+       FROM attendance_current_records
        WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
        ORDER BY user_id ASC
        LIMIT $4 OFFSET $5`,
@@ -2961,7 +2995,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
             ar.meta, u.name AS user_name, u.username AS username,
             u.employee_no AS employee_no, u.department AS department,
             u.position AS position, u.hire_date AS hire_date
-     FROM attendance_records ar
+     FROM attendance_current_records ar
      LEFT JOIN users u ON u.id = ar.user_id
      WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
      ORDER BY ar.work_date DESC
@@ -4068,7 +4102,7 @@ async function loadAttendancePeriodSummaryEmployeeInfo(db, orgId, userId, from, 
      FROM users u
      LEFT JOIN LATERAL (
        SELECT meta
-       FROM attendance_records
+       FROM attendance_current_records
        WHERE user_id = u.id
          AND org_id = $2
          AND work_date BETWEEN $3 AND $4
@@ -5677,6 +5711,10 @@ function normalizeImportPayload(payload) {
   if (next.csvText === undefined) next.csvText = next.csv_text
   if (next.csvOptions === undefined) next.csvOptions = next.csv_options
   if (next.idempotencyKey === undefined) next.idempotencyKey = next.idempotency_key
+  if (next.convertedArtifactFileId === undefined) {
+    next.convertedArtifactFileId = next.converted_artifact_file_id
+  }
+  if (next.convertedSheetName === undefined) next.convertedSheetName = next.converted_sheet_name
   return next
 }
 
@@ -5724,7 +5762,7 @@ async function createImportCommitToken({ db, orgId, userId }) {
 
   // Production mode: tokens must be shareable across multiple backend instances.
   // When enforcement is enabled, require DB persistence and fail fast if the table is missing.
-  if (requireImportCommitToken) {
+        if (requireImportCommitToken) {
     if (!db) {
       throw new HttpError(
         503,
@@ -6022,7 +6060,7 @@ async function readDingTalkJsonSafely(response) {
   }
 }
 
-async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS }) {
+async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS, logger }) {
   let lastError = null
   const maskedUrl = maskDingTalkUrlForLog(url)
   for (let attempt = 1; attempt <= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS; attempt += 1) {
@@ -6038,7 +6076,7 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
         const message = data?.errmsg || `HTTP ${response.status}`
         if (attempt < ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS && shouldRetryDingTalkRequest({ status: response.status, errcode: data?.errcode })) {
           const delay = calculateDingTalkRetryDelay(attempt)
-          logger.warn('Retrying DingTalk request', { url: maskedUrl, attempt, delay, status: response.status, errcode: data?.errcode, message })
+          logger?.warn('Retrying DingTalk request', { url: maskedUrl, attempt, delay, status: response.status, errcode: data?.errcode, message })
           await sleepMs(delay)
           continue
         }
@@ -6049,14 +6087,14 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
       lastError = error
       if (attempt >= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS) break
       const delay = calculateDingTalkRetryDelay(attempt)
-      logger.warn('DingTalk request attempt failed', { url: maskedUrl, attempt, delay, error: error?.message || String(error) })
+      logger?.warn('DingTalk request attempt failed', { url: maskedUrl, attempt, delay, error: error?.message || String(error) })
       await sleepMs(delay)
     }
   }
   throw lastError || new Error('DingTalk request failed')
 }
 
-async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
+async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl, logger }) {
   if (!appKey || !appSecret) {
     throw new Error('DingTalk appKey/appSecret required')
   }
@@ -6066,7 +6104,7 @@ async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
     return cached.token
   }
   const tokenUrl = `${baseUrl}/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`
-  const data = await requestDingTalkJsonWithRetry({ url: tokenUrl })
+  const data = await requestDingTalkJsonWithRetry({ url: tokenUrl, logger })
   const accessToken = data?.access_token
   const expiresInSeconds = Number(data?.expires_in ?? 7200)
   const safeTtlMs = Number.isFinite(expiresInSeconds) && expiresInSeconds > 300
@@ -6087,7 +6125,7 @@ function normalizeDingTalkDateRange(value, fallback) {
   return text
 }
 
-async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnIds, fromDate, toDate }) {
+async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnIds, fromDate, toDate, logger }) {
   const url = `${baseUrl}/topapi/attendance/getcolumnval?access_token=${encodeURIComponent(accessToken)}`
   const body = {
     userid: userId,
@@ -6100,6 +6138,7 @@ async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnI
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    logger,
   })
   return data?.result ?? {}
 }
@@ -6145,6 +6184,7 @@ function getImportUploadPaths({ orgId, fileId }) {
   return {
     dir,
     csvPath: resolveImportUploadWithinBase(dir, `${fileId}.csv`),
+    artifactPath: resolveImportUploadWithinBase(dir, `${fileId}.artifact`),
     metaPath: resolveImportUploadWithinBase(dir, `${fileId}.json`),
   }
 }
@@ -6247,6 +6287,57 @@ function getOrgId(req) {
   if (typeof raw === 'string' && raw.trim().length > 0) return raw
   if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
   return DEFAULT_ORG_ID
+}
+
+function getAuthenticatedOrgId(req) {
+  const user = req.user
+  const raw = user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
+}
+
+function getAuthenticatedUserId(req) {
+  const user = req.user
+  const raw = user?.id ?? user?.sub ?? user?.userId
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
+}
+
+function resolveAttendanceGroupRouteActorContext(req, res) {
+  const userId = getAuthenticatedUserId(req)
+  if (!userId) {
+    res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+    return null
+  }
+
+  const orgId = getAuthenticatedOrgId(req)
+  if (!orgId) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+    return null
+  }
+
+  const selectorValues = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
+    .flatMap(value => Array.isArray(value) ? value : [value])
+    .filter(value => value !== undefined && value !== null)
+  if (selectorValues.some(value => value !== orgId)) {
+    res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+    return null
+  }
+
+  return { userId, orgId }
+}
+
+function getAuthenticatedTokenSubjectUserId(req) {
+  const user = req.user
+  // jwtAuthMiddleware exposes the verified principal as canonical id; another
+  // authenticated provider may retain sub/userId. Keep this derivation
+  // independent from actor selection; core rejects any mismatch.
+  const raw = user?.sub ?? user?.userId ?? user?.id
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
 }
 
 function getUserLabel(req, fallback) {
@@ -8233,6 +8324,27 @@ function getAttendanceShiftService() {
   return attendanceShiftService
 }
 
+let attendanceGroupFixedScheduleConfigService = null
+function getAttendanceGroupFixedScheduleConfigService() {
+  if (!attendanceGroupFixedScheduleConfigService) {
+    attendanceGroupFixedScheduleConfigService = attendanceGroupFixedScheduleConfigServiceLib
+      .createAttendanceGroupFixedScheduleConfigService({ HttpError })
+  }
+  return attendanceGroupFixedScheduleConfigService
+}
+
+let attendanceGroupFixedScheduleEffectivenessService = null
+function getAttendanceGroupFixedScheduleEffectivenessService() {
+  if (!attendanceGroupFixedScheduleEffectivenessService) {
+    attendanceGroupFixedScheduleEffectivenessService = attendanceGroupFixedScheduleEffectivenessServiceLib
+      .createAttendanceGroupFixedScheduleEffectivenessService({
+        HttpError,
+        buildAttendanceGroupFixedScheduleProducerKey,
+      })
+  }
+  return attendanceGroupFixedScheduleEffectivenessService
+}
+
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
   if (!workContext || workContext.source === 'rule') return
   const shift = workContext.rule
@@ -9513,13 +9625,335 @@ function mapImportBatchRow(row) {
 		  }
 		}
 
+		function normalizeAttendanceSyncImportLockWitness(value) {
+		  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+		  const rolloutKey = typeof value.rolloutKey === 'string' ? value.rolloutKey : ''
+		  const legacyIdempotencyKey = typeof value.legacyIdempotencyKey === 'string'
+		    ? value.legacyIdempotencyKey
+		    : ''
+		  const helperWaitMs = Number(value.helperWaitMs)
+		  const transactionLockTimeoutMs = Number(value.transactionLockTimeoutMs)
+		  if (
+		    !/^-?\d+$/.test(rolloutKey)
+		    || !/^-?\d+$/.test(legacyIdempotencyKey)
+		    || !Number.isInteger(helperWaitMs)
+		    || helperWaitMs <= 0
+		    || !Number.isInteger(transactionLockTimeoutMs)
+		    || transactionLockTimeoutMs <= 0
+		  ) {
+		    return null
+		  }
+		  try {
+		    const rollout = BigInt(rolloutKey)
+		    const legacy = BigInt(legacyIdempotencyKey)
+		    if (BigInt.asIntN(64, rollout) !== rollout || BigInt.asIntN(64, legacy) !== legacy) return null
+		  } catch (_error) {
+		    return null
+		  }
+		  return {
+		    rolloutKey,
+		    legacyIdempotencyKey,
+		    helperWaitMs,
+		    transactionLockTimeoutMs,
+		  }
+		}
+
+		function projectAttendanceImportExecutionReasonCode(row) {
+		  const isV1 = Number(row?.w4_contract_version) === 1
+		  const status = typeof row?.status === 'string' ? row.status.trim().toLowerCase() : ''
+		  const reason = typeof row?.w4_execution_reason_code === 'string'
+		    ? row.w4_execution_reason_code.trim()
+		    : ''
+		  const isExistingSuspendedPair =
+		    status === 'queued' && reason === 'SEGMENT_CALCULATION_SUSPENDED'
+		  return isV1 && reason && (status === 'failed' || isExistingSuspendedPair)
+		    ? { executionReasonCode: reason }
+		    : {}
+		}
+
+		function classifyAttendanceV1ImportReservationForSync(status) {
+		  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : ''
+		  return normalized === 'queued' || normalized === 'running'
+		    ? 'in_progress'
+		    : 'conflict'
+		}
+
+		function importQueryRows(result) {
+		  if (Array.isArray(result)) return result
+		  return Array.isArray(result?.rows) ? result.rows : []
+		}
+
+		function applyAttendanceReservedImportJobSnapshot(row, reservation) {
+		  const snapshot = reservation?.kind === 'existing'
+		    ? reservation.jobSnapshot
+		    : null
+		  if (!snapshot || typeof snapshot !== 'object') return row
+			  return {
+			    ...row,
+			    status: snapshot.status,
+			    progress: snapshot.progress,
+			    total: snapshot.total,
+			    error: snapshot.error,
+			    w4_execution_reason_code: snapshot.executionReasonCode,
+			    started_at: snapshot.startedAt,
+		    finished_at: snapshot.finishedAt,
+		    created_at: snapshot.createdAt,
+		    updated_at: snapshot.updatedAt,
+		  }
+		}
+
+		function attendanceSyncImportLockBusyError(code) {
+		  const status = code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' ? 503 : 409
+		  return new HttpError(status, code, code)
+		}
+
+			async function acquireAttendanceSyncImportReservationLocks(client, {
+		  orgId,
+		  idempotencyKey,
+		  witness,
+		  monotonicNow = () => performance.now(),
+		}) {
+		  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		  if (!clean) return
+		  const normalizedWitness = normalizeAttendanceSyncImportLockWitness(witness)
+		  if (!normalizedWitness) {
+		    await acquireImportIdempotencyLock(client, orgId, clean)
+		    return
+		  }
+
+		  const deadline = monotonicNow() + normalizedWitness.helperWaitMs
+		  const takeLock = async (sql, params, code) => {
+		    const remaining = Math.ceil(deadline - monotonicNow())
+		    if (remaining <= 0) throw attendanceSyncImportLockBusyError(code)
+		    await client.query("SELECT set_config('lock_timeout', $1, true)", [String(remaining)])
+		    try {
+		      await client.query(sql, params)
+		    } catch (error) {
+		      if (String(error?.code ?? '') === '55P03') {
+		        throw attendanceSyncImportLockBusyError(code)
+		      }
+		      throw error
+		    }
+		    if (monotonicNow() > deadline) throw attendanceSyncImportLockBusyError(code)
+		  }
+
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock_shared($1::bigint)',
+		    [normalizedWitness.rolloutKey],
+		    'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
+		  )
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+		    [String(orgId ?? ''), clean],
+		    'ATTENDANCE_OPERATION_IN_PROGRESS'
+		  )
+		  await takeLock(
+		    'SELECT pg_advisory_xact_lock($1::bigint)',
+		    [normalizedWitness.legacyIdempotencyKey],
+		    'ATTENDANCE_OPERATION_IN_PROGRESS'
+		  )
+			  await client.query("SELECT set_config('lock_timeout', $1, true)", [
+			    String(normalizedWitness.transactionLockTimeoutMs),
+			  ])
+			}
+
+			async function runAttendanceLegacyNullVersionCommitAtomically({
+			  db,
+			  jobId,
+			  orgId,
+			  lockIdentity,
+			  lockWitness,
+			  commitLegacy,
+			  buildTerminal,
+			  afterCommit = null,
+			}) {
+			  const canonicalJobId = normalizeUuidString(jobId)
+			  const trimmedOrgId = typeof orgId === 'string' ? orgId.trim() : ''
+			  const canonicalOrgId = trimmedOrgId === DEFAULT_ORG_ID
+			    ? DEFAULT_ORG_ID
+			    : normalizeUuidString(trimmedOrgId)
+			  const canonicalLockIdentity = typeof lockIdentity === 'string'
+			    ? lockIdentity.trim()
+			    : ''
+			  if (!canonicalJobId || !canonicalOrgId || !canonicalLockIdentity) {
+			    throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_IDENTITY_INVALID')
+			  }
+			  if (!normalizeAttendanceSyncImportLockWitness(lockWitness)) {
+			    throw new Error('ATTENDANCE_IMPORT_LEGACY_ROLLOUT_WITNESS_INVALID')
+			  }
+			  if (
+			    typeof commitLegacy !== 'function' ||
+			    typeof buildTerminal !== 'function' ||
+			    (afterCommit !== null && typeof afterCommit !== 'function')
+			  ) {
+			    throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_ADAPTER_INVALID')
+			  }
+
+			  const commitResult = await db.transaction(async (trx) => {
+			    await trx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+			    await acquireAttendanceSyncImportReservationLocks(trx, {
+			      orgId: canonicalOrgId,
+			      idempotencyKey: canonicalLockIdentity,
+			      witness: lockWitness,
+			    })
+			    const lockedJobs = importQueryRows(await trx.query(
+				      `SELECT id::text AS id, org_id, status, idempotency_key
+				         FROM attendance_import_jobs
+				        WHERE id = $1::uuid
+				          AND org_id = $2::text
+				          AND w4_contract_version IS NULL
+				          AND status IN ('queued', 'running')
+				        FOR UPDATE`,
+				      [canonicalJobId, canonicalOrgId]
+				    ))
+				    if (lockedJobs.length !== 1) {
+				      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_LOCK_REJECTED')
+				    }
+				    const lockedIdentity = typeof lockedJobs[0].idempotency_key === 'string'
+				      && lockedJobs[0].idempotency_key.trim()
+				      ? lockedJobs[0].idempotency_key.trim()
+				      : canonicalJobId
+				    if (lockedIdentity !== canonicalLockIdentity) {
+				      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_IDENTITY_CHANGED')
+				    }
+				    const commitResult = await commitLegacy(trx)
+			    const terminal = buildTerminal(commitResult)
+			    const progress = Number(terminal?.progress)
+			    const total = Number(terminal?.total)
+			    if (!Number.isFinite(progress) || progress < 0 || !Number.isFinite(total) || total < 0) {
+			      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_TERMINAL_INVALID')
+			    }
+			    const rows = await trx.query(
+			      `UPDATE attendance_import_jobs
+			          SET status = 'completed',
+			              progress = $3,
+			              total = $4,
+			              error = NULL,
+			              payload = $5::jsonb,
+			              finished_at = now(),
+			              updated_at = now()
+			        WHERE id = $1::uuid
+			          AND org_id = $2::text
+			          AND w4_contract_version IS NULL
+			          AND status IN ('queued', 'running')
+			        RETURNING id`,
+			      [canonicalJobId, canonicalOrgId, Math.floor(progress), Math.floor(total), JSON.stringify(terminal.payload)]
+			    )
+			    if (importQueryRows(rows).length !== 1) {
+			      throw new Error('ATTENDANCE_IMPORT_LEGACY_JOB_TERMINAL_REJECTED')
+			    }
+			    return commitResult
+			  })
+			  if (afterCommit) await afterCommit()
+			  return commitResult
+			}
+
+			const ATTENDANCE_IMPORT_STARTUP_RECOVERY_PAGE_SIZE = 50
+
+			async function drainAttendanceImportStartupRecoveryPages({
+			  db,
+			  cutoff,
+			  enqueueJob,
+			  drainCleanup,
+			  pageSize = ATTENDANCE_IMPORT_STARTUP_RECOVERY_PAGE_SIZE,
+			}) {
+			  const limit = Math.max(1, Math.min(500, Math.floor(Number(pageSize) || 0)))
+			  let jobs = 0
+			  let jobCursor = null
+			  for (;;) {
+			    const rows = importQueryRows(await db.query(
+			      `SELECT id, created_at
+			         FROM attendance_import_jobs
+			        WHERE status IN ('queued', 'running')
+			          AND created_at < $1::timestamptz
+			          AND (
+			            $2::timestamptz IS NULL OR
+			            (created_at, id) > ($2::timestamptz, $3::uuid)
+			          )
+			        ORDER BY created_at ASC, id ASC
+			        LIMIT $4`,
+			      [cutoff, jobCursor?.createdAt ?? null, jobCursor?.id ?? null, limit]
+			    ))
+			    for (const row of rows) {
+			      await enqueueJob(row.id)
+			      jobs += 1
+			    }
+			    if (rows.length < limit) break
+			    const last = rows[rows.length - 1]
+			    jobCursor = { createdAt: last.created_at, id: last.id }
+			  }
+
+			  let cleanups = 0
+			  let cleanupCursor = null
+			  for (;;) {
+			    const rows = importQueryRows(await db.query(
+			      `SELECT cleanup.job_id, cleanup.created_at
+			         FROM attendance_import_upload_cleanup_commands AS cleanup
+			         INNER JOIN attendance_import_jobs AS job
+			           ON job.id = cleanup.job_id
+			          AND job.org_id = cleanup.org_id
+			        WHERE job.w4_contract_version = 1
+			          AND job.status = 'completed'
+			          AND cleanup.created_at < $1::timestamptz
+			          AND (
+			            cleanup.status IN ('pending', 'failed_retryable') OR
+			            (cleanup.status = 'processing' AND cleanup.lease_expires_at <= now())
+			          )
+			          AND (
+			            $2::timestamptz IS NULL OR
+			            (cleanup.created_at, cleanup.job_id) > ($2::timestamptz, $3::uuid)
+			          )
+			        ORDER BY cleanup.created_at ASC, cleanup.job_id ASC
+			        LIMIT $4`,
+			      [cutoff, cleanupCursor?.createdAt ?? null, cleanupCursor?.jobId ?? null, limit]
+			    ))
+			    for (const row of rows) {
+			      await drainCleanup(row.job_id)
+			      cleanups += 1
+			    }
+			    if (rows.length < limit) break
+			    const last = rows[rows.length - 1]
+			    cleanupCursor = { createdAt: last.created_at, jobId: last.job_id }
+			  }
+
+			  return { jobs, cleanups }
+			}
+
+		async function loadAttendanceV1ImportReservationForSync(client, orgId, idempotencyKey) {
+		  const result = await client.query(
+		    `SELECT id::text AS id, status
+		       FROM attendance_import_jobs
+		      WHERE org_id = $1
+		        AND idempotency_key = $2
+		        AND w4_contract_version = 1
+		      ORDER BY id
+		      FOR UPDATE`,
+		    [orgId, idempotencyKey]
+		  )
+		  const rows = importQueryRows(result)
+		  if (rows.length === 0) return null
+		  if (rows.length > 1) return { kind: 'conflict' }
+		  return {
+		    kind: classifyAttendanceV1ImportReservationForSync(rows[0].status),
+		  }
+		}
+
+		function assertAttendanceV1ImportReservationAllowsSync(reservation) {
+		  if (!reservation) return
+		  const code = reservation.kind === 'in_progress'
+		    ? 'ATTENDANCE_OPERATION_IN_PROGRESS'
+		    : 'ATTENDANCE_OPERATION_BATCH_CONFLICT'
+		  throw new HttpError(409, code, code)
+		}
+
 		async function acquireAttendanceRequestLock(client, orgId, userId, workDate, requestType) {
 		  try {
 		    await client.query(
 		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
 		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
 		    )
-		  } catch (_error) {
+		  } catch (error) {
+		    if (client?.__w4CanonicalTrx === true) throw error
 		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
 		  }
 		}
@@ -10086,15 +10520,23 @@ function attendanceShiftWindowsOverlapForSlotConflict(leftShift, rightShift) {
   return left.startMinutes < right.endMinutes && right.startMinutes < left.endMinutes
 }
 
-async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId) {
+async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, options = {}) {
   try {
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
       [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
     )
-  } catch (_error) {
+  } catch (error) {
+    if (options.required === true) throw error
     // Best-effort: preserve save behavior if advisory locks are unavailable.
   }
+}
+
+async function acquireAttendanceScheduleAssignmentReadLock(client, orgId, userId) {
+  await client.query(
+    'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
+    [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+  )
 }
 
 function getAttendanceScheduleAssignmentConflictType(draftKind, existingKind) {
@@ -10326,14 +10768,14 @@ function isTemporaryShiftOverlayRowForFixedScheduleDraft(row, draft, overlaps = 
   )
 }
 
-async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
+async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds, options = {}) {
   const lockUserIds = Array.from(new Set(
     (Array.isArray(userIds) ? userIds : [])
       .map((value) => String(value || '').trim())
       .filter(Boolean)
   )).sort()
   for (const userId of lockUserIds) {
-    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId)
+    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId, options)
   }
   return lockUserIds
 }
@@ -10600,15 +11042,63 @@ async function softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, 
   return rows.map(mapAssignmentRow)
 }
 
+class AttendanceGroupFixedScheduleTransactionAbort extends Error {
+  constructor(result) {
+    super(result.message)
+    this.result = result
+  }
+}
+
+async function runAttendanceGroupFixedScheduleTransaction(db, operation) {
+  return db.transaction(async (trx) => {
+    const result = await operation(trx)
+    if (!result.ok) {
+      throw new AttendanceGroupFixedScheduleTransactionAbort(result)
+    }
+    return result
+  })
+}
+
+function respondAttendanceGroupFixedScheduleTransactionAbort(res, error) {
+  if (!(error instanceof AttendanceGroupFixedScheduleTransactionAbort)) return false
+  const result = error.result
+  res.status(result.status).json({
+    ok: false,
+    error: {
+      code: result.code,
+      message: result.message,
+      ...(result.details === undefined ? {} : { details: result.details }),
+    },
+  })
+  return true
+}
+
 async function applyAttendanceGroupFixedSchedule(db, input) {
+  // FSER-3 (#4709): consume the desired config inside this transaction. Validation of
+  // group/shift/date/targets and the config row lock (or first-create insert) happen
+  // here, BEFORE any per-user target lock taken by the plan builder below; a failed
+  // apply rolls the first-create config insert back with every other write.
+  const { config } = await getAttendanceGroupFixedScheduleConfigService().resolveConfigForApplyRebuild(db, {
+    orgId: input.orgId,
+    groupId: input.groupId,
+    shiftId: input.shiftId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    expectedConfigRevision: input.expectedConfigRevision,
+    updatedBy: input.updatedBy,
+  })
+  // The transactionally reloaded config row is authoritative; never materialize from a
+  // client-supplied shadow copy once the config exists. For a matching candidate these
+  // values are identical, preserving the existing producer key and response shape.
+  const effectiveInput = { ...input, shiftId: config.shiftId, startDate: config.startDate, endDate: config.endDate }
   // W3 erratum: typed 422 + zero writes when a multi-segment shift is applied while
   // authoritative segment calculation is OFF for the org.
   await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
-    orgId: input.orgId,
-    shiftId: input.shiftId,
+    orgId: effectiveInput.orgId,
+    shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_apply',
   })
-  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, { lockTargets: true })
   if (!result.ok) return result
   const plan = result.data
   if (plan.blockingConflicts.length > 0) {
@@ -10621,18 +11111,18 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
     }
   }
 
-  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
-  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(effectiveInput, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, effectiveInput, plan.wouldCreate, producerMetadata)
 
   // S1 daily compliance cap: project every user that received a managed row over the apply window and
   // roll the whole apply back (throw → txn rollback → 422) if any day would exceed the cap. Guards the
   // bulk side-door alongside the per-record save routes (no known bypass window).
   for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
     await enforceShiftComplianceCap(db, {
-      orgId: input.orgId,
+      orgId: effectiveInput.orgId,
       userId: targetUserId,
-      fromDate: input.startDate,
-      toDate: input.endDate,
+      fromDate: effectiveInput.startDate,
+      toDate: effectiveInput.endDate,
     })
   }
 
@@ -10647,14 +11137,27 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  // FSER-3 (#4709): same config-consumption contract as apply — the config row is
+  // locked (or atomically first-created) before any target lock, and the reloaded row
+  // is the only authoritative source of the materialized values.
+  const { config } = await getAttendanceGroupFixedScheduleConfigService().resolveConfigForApplyRebuild(db, {
+    orgId: input.orgId,
+    groupId: input.groupId,
+    shiftId: input.shiftId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    expectedConfigRevision: input.expectedConfigRevision,
+    updatedBy: input.updatedBy,
+  })
+  const effectiveInput = { ...input, shiftId: config.shiftId, startDate: config.startDate, endDate: config.endDate }
   // W3 erratum: typed 422 + zero writes when a multi-segment shift is rebuilt while
   // authoritative segment calculation is OFF for the org.
   await getAttendanceShiftService().assertShiftReferenceAllowed(db, {
-    orgId: input.orgId,
-    shiftId: input.shiftId,
+    orgId: effectiveInput.orgId,
+    shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_rebuild',
   })
-  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, {
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, {
     lockTargets: true,
     lockManagedRowsForProducerKey: true,
   })
@@ -10670,26 +11173,26 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
     }
   }
 
-  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
-  await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, activeManagedRows.map(row => row.user_id))
-  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, effectiveInput)
+  await acquireAttendanceScheduleAssignmentLocks(db, effectiveInput.orgId, activeManagedRows.map(row => row.user_id))
+  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, effectiveInput)
   const targetUserIds = new Set(plan.target.userIds)
   const deactivateIds = lockedManagedRows
     .filter(row => !targetUserIds.has(String(row.user_id || '').trim()))
     .map(row => row.id)
 
-  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
-  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
-  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, deactivateIds)
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(effectiveInput, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, effectiveInput, plan.wouldCreate, producerMetadata)
+  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, effectiveInput, deactivateIds)
 
   // S1 daily compliance cap: project after BOTH insert + deactivate so the resolver sees the final
   // active set (stale managed rows already deactivated). Throw → txn rollback → 422 on any over-cap day.
   for (const targetUserId of new Set(plan.wouldCreate.map((item) => item.userId))) {
     await enforceShiftComplianceCap(db, {
-      orgId: input.orgId,
+      orgId: effectiveInput.orgId,
       userId: targetUserId,
-      fromDate: input.startDate,
-      toDate: input.endDate,
+      fromDate: effectiveInput.startDate,
+      toDate: effectiveInput.endDate,
     })
   }
 
@@ -12538,7 +13041,7 @@ async function snapshotCycleSettlementOnClose(trx, cycle) {
   })
   const userRows = await trx.query(
     `SELECT DISTINCT user_id FROM (
-       SELECT user_id FROM attendance_records WHERE org_id = $1 AND work_date >= $2 AND work_date <= $3
+       SELECT user_id FROM attendance_current_records WHERE org_id = $1 AND work_date >= $2 AND work_date <= $3
        UNION
        SELECT user_id FROM attendance_requests WHERE org_id = $1 AND status = 'approved' AND work_date >= $2 AND work_date <= $3
        UNION
@@ -12583,7 +13086,7 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
        COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
        COALESCE(SUM(CASE WHEN ${countedDaySql} AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
        COALESCE(SUM(CASE WHEN NOT ${countedDaySql} THEN 1 ELSE 0 END), 0)::int AS off_days
-     FROM attendance_records
+     FROM attendance_current_records
      WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
     [userId, orgId, from, to]
   )
@@ -13528,21 +14031,73 @@ const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
 })
 
 // 补卡规则 MP-2 §4.4: derive the anomaly facts for a (org,user,workDate) from SERVER-SIDE TRUTH —
-// attendance_records.status / missing-side / late+early minutes / RT-1a tier meta — never from client
+// the current attendance record's status / missing-side / late+early minutes / RT-1a tier meta — never from client
 // anomaly prefill. Returns an ARRAY of fact tokens (a record can match several, e.g. late_early). This
 // is intentionally a plain read (no FOR UPDATE): it observes truth, it does not mutate the record, so it
 // must not contend with the concurrent punch/approval write paths. Shared by the MP-2 type gate and the
 // MP-3 snapshot.matchedAnomalyTypes. Fail-closed: an unresolvable / fact-less day yields [].
+// W4C-3c P20: singular active-current helpers from the host port (w4c3c-active-current).
+// Set at activate; fail closed when the least-privilege port is missing.
+let attendanceW4ActiveCurrentPort = null
+// W4C-3c record operation boundary — set at activate; routes resolve at call time.
+let w4RecordOperationBoundary = null
+let attendanceW4SegmentCalculationPortRef = null
+
+function requireAttendanceActiveCurrentPort() {
+  if (!attendanceW4ActiveCurrentPort) {
+    throw new HttpError(
+      503,
+      'W4_ACTIVE_CURRENT_PORT_UNAVAILABLE',
+      'Canonical active-current helper port unavailable',
+    )
+  }
+  return attendanceW4ActiveCurrentPort
+}
+
+function pluginQueryAdapter(dbOrTrx) {
+  return async (sqlText, params) => {
+    const rows = await dbOrTrx.query(sqlText, params ? [...params] : [])
+    return { rows: Array.isArray(rows) ? rows : rows?.rows ?? [] }
+  }
+}
+
+function requireStrictCurrentPolicyTimezone(workContext, record) {
+  const port = attendanceW4SegmentCalculationPortRef
+  if (!port || typeof port.validateIanaTimezone !== 'function') {
+    throw new HttpError(
+      503,
+      'W4_TIMEZONE_VALIDATOR_UNAVAILABLE',
+      'Strict timezone validation service unavailable',
+    )
+  }
+  const candidate =
+    workContext?.rule && typeof workContext.rule.timezone === 'string'
+      ? workContext.rule.timezone
+      : (typeof record?.timezone === 'string' ? record.timezone : null)
+  try {
+    return port.validateIanaTimezone(candidate)
+  } catch (_error) {
+    throw new HttpError(
+      409,
+      'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+      'current_policy recompute requires a valid frozen IANA timezone',
+    )
+  }
+}
+
+async function listActiveCurrentAttendanceRecordsForAnomalyListing(db, options) {
+  const port = requireAttendanceActiveCurrentPort()
+  return port.listForAnomalyListing(pluginQueryAdapter(db), options)
+}
+
+async function loadActiveCurrentAttendanceRecordForMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
+  const port = requireAttendanceActiveCurrentPort()
+  return port.loadForMakeupAnomalyFacts(pluginQueryAdapter(trx), { orgId, userId, workDate })
+}
+
 async function deriveMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
   const facts = new Set()
-  const rows = await trx.query(
-    `SELECT status, first_in_at, last_out_at, late_minutes, early_leave_minutes, is_workday, meta
-     FROM attendance_records
-     WHERE org_id = $1 AND user_id = $2 AND work_date = $3
-     LIMIT 1`,
-    [orgId, userId, workDate]
-  )
-  const record = rows[0] ?? null
+  const record = await loadActiveCurrentAttendanceRecordForMakeupAnomalyFacts(trx, { orgId, userId, workDate })
   if (record) {
     const status = record.status ? String(record.status) : ''
     const lateMinutes = Number(record.late_minutes ?? 0)
@@ -13960,7 +14515,7 @@ function mergeSettings(base, update) {
   })
 }
 
-async function loadSettings(db) {
+async function loadSettings(db, { failClosed = false } = {}) {
   try {
     const rows = await db.query('SELECT value FROM system_configs WHERE key = $1', [SETTINGS_KEY])
     if (!rows.length) return { ...DEFAULT_SETTINGS }
@@ -13968,6 +14523,7 @@ async function loadSettings(db) {
     return normalizeSettings(raw)
   } catch (error) {
     if (isDatabaseSchemaError(error)) return { ...DEFAULT_SETTINGS }
+    if (failClosed) throw error
     return { ...DEFAULT_SETTINGS }
   }
 }
@@ -14688,12 +15244,16 @@ function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezon
  * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
  * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
  */
-async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId }) {
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId, lockScheduleFacts = false }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+
+  if (lockScheduleFacts) {
+    await acquireAttendanceScheduleAssignmentReadLock(db, targetOrg, userId)
+  }
 
   const candidates = []
 
@@ -14713,7 +15273,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND COALESCE(a.publish_status, 'published') = 'published'
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.user_id, a.slot_index ASC NULLS FIRST, a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of assignmentRows || []) {
@@ -14758,7 +15319,8 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
          AND r.is_active = true
          AND a.start_date <= $3::date
          AND (a.end_date IS NULL OR a.end_date >= $4::date)
-       ORDER BY a.start_date DESC, a.created_at DESC`,
+       ORDER BY a.start_date DESC, a.created_at DESC
+       ${lockScheduleFacts ? 'FOR SHARE OF a' : ''}`,
       [targetOrg, userId, dates.reduce((a, b) => (a > b ? a : b)), dates.reduce((a, b) => (a < b ? a : b))]
     )
     for (const row of rotationRows || []) {
@@ -14804,32 +15366,37 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
   return candidates
 }
 
-async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }) {
+async function listActiveCurrentOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
     : []
   if (!userId || dates.length === 0) return []
+  const port = explicitPort ?? requireAttendanceActiveCurrentPort()
+  const rows = await port.listOpenForWorkDateResolver(pluginQueryAdapter(db), {
+    orgId: targetOrg,
+    userId,
+    workDates: dates,
+  })
+  return (rows || []).map((row) => ({
+    orgId: row.org_id,
+    userId: row.user_id,
+    workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
+    firstInAt: row.first_in_at,
+    lastOutAt: row.last_out_at,
+    status: row.status,
+  }))
+}
+
+async function loadOpenRecordsForWorkDateResolver(db, { orgId, userId, workDates }, explicitPort = null) {
   try {
-    const rows = await db.query(
-      `SELECT user_id, org_id, work_date, first_in_at, last_out_at, status
-       FROM attendance_records
-       WHERE org_id = $1
-         AND user_id = $2
-         AND work_date = ANY($3::date[])
-         AND first_in_at IS NOT NULL
-         AND last_out_at IS NULL`,
-      [targetOrg, userId, dates]
+    return await listActiveCurrentOpenRecordsForWorkDateResolver(
+      db,
+      { orgId, userId, workDates },
+      explicitPort,
     )
-    return (rows || []).map((row) => ({
-      orgId: row.org_id,
-      userId: row.user_id,
-      workDate: normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10),
-      firstInAt: row.first_in_at,
-      lastOutAt: row.last_out_at,
-      status: row.status,
-    }))
   } catch (error) {
+    if (error instanceof HttpError && error.code === 'W4_ACTIVE_CURRENT_PORT_UNAVAILABLE') throw error
     if (isDatabaseSchemaError(error)) return []
     throw error
   }
@@ -14900,7 +15467,8 @@ async function loadWorkDateAttributionTailMinutes(db) {
   }
 }
 
-function createPluginAttendanceWorkDateResolver(db) {
+function createPluginAttendanceWorkDateResolver(db, options = {}) {
+  const explicitActiveCurrentPort = options.activeCurrent ?? null
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
     buildZonedDate,
@@ -14908,10 +15476,13 @@ function createPluginAttendanceWorkDateResolver(db) {
     normalizeTimeString,
     resolveOvernightFlag,
     async loadPublishedCandidates(args) {
-      return loadPublishedCandidatesForWorkDateResolver(db, args)
+      return loadPublishedCandidatesForWorkDateResolver(db, {
+        ...args,
+        lockScheduleFacts: options.lockScheduleFacts === true,
+      })
     },
     async loadOpenRecords(args) {
-      return loadOpenRecordsForWorkDateResolver(db, args)
+      return loadOpenRecordsForWorkDateResolver(db, args, explicitActiveCurrentPort)
     },
     async loadApprovedOvertimeWindows(args) {
       return loadApprovedOvertimeWindowsForWorkDateResolver(db, args)
@@ -14954,6 +15525,8 @@ async function resolveImportRowWorkDateAttribution(options) {
     return { resolution: null, frozenAttribution: null }
   }
   const { adapters } = createPluginAttendanceWorkDateResolver(db)
+  // W4C-3a: request the full winner so prepareOnly can freeze closed attribution/context.
+  // Opt-in flag is byte-identical for callers that ignore the additive out-params.
   const resolution = await adapters.import.resolveImportWorkDate({
     orgId,
     userId,
@@ -14962,6 +15535,7 @@ async function resolveImportRowWorkDateAttribution(options) {
     calendarWorkDate: workDate,
     explicitWorkDate: workDate,
     explicitShiftId: explicitShiftId || null,
+    includeFullWinner: true,
   })
   if (resolution.kind === 'ambiguous') {
     throw new HttpError(
@@ -18056,7 +18630,7 @@ async function resolveAttendanceComprehensiveHoursPreviewPeriod(db, orgId, perio
 
 async function assertAttendanceComprehensiveHoursPreviewSchemaReady(db, orgId, metric) {
   const tables = metric === 'actual'
-    ? ['attendance_records', 'attendance_requests']
+    ? ['attendance_current_records', 'attendance_requests']
     : [
       'attendance_rules',
       'attendance_holidays',
@@ -19260,6 +19834,35 @@ async function applyImportHeavyTransactionTimeout(client) {
   if (client) client.__attendanceImportStatementTimeoutMs = normalized
 }
 
+const ATTENDANCE_SYNC_IMPORT_TRANSACTION_MAX_RETRIES = 2
+
+function isAttendanceSyncImportRetryableTransactionError(error) {
+  const code = String(error?.code ?? '')
+  return code === '40001' || code === '40P01'
+}
+
+async function runAttendanceSyncImportSerializableTransaction(db, runAttempt) {
+  let attempt = 0
+  for (;;) {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+        if (trx) delete trx.__attendanceImportStatementTimeoutMs
+        await applyImportHeavyTransactionTimeout(trx)
+        return runAttempt(trx, attempt)
+      })
+    } catch (error) {
+      if (
+        !isAttendanceSyncImportRetryableTransactionError(error)
+        || attempt >= ATTENDANCE_SYNC_IMPORT_TRANSACTION_MAX_RETRIES
+      ) {
+        throw error
+      }
+      attempt += 1
+    }
+  }
+}
+
 async function loadAttendanceRecordForUpdate(client, { userId, workDate, orgId }) {
   const rows = await client.query(
     'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
@@ -19420,6 +20023,20 @@ async function upsertAttendanceRecord(options) {
   // this helper backwards compatible.
   const loadedExistingRow = existingRow ?? await loadAttendanceRecordForUpdate(client, { userId, workDate, orgId })
   const existing = loadedExistingRow ? [loadedExistingRow] : []
+
+  // W4C-3c: ordinary punch/import/approval/recompute/manual cannot reactivate
+  // an operator-retired parent — fail closed with zero writes.
+  if (
+    existing[0]
+    && String(existing[0].visibility_state ?? '') === 'retired'
+    && String(existing[0].visibility_reason ?? '') === 'operator_retirement'
+  ) {
+    throw new HttpError(
+      409,
+      'ATTENDANCE_RECORD_OPERATOR_RETIRED',
+      'attendance record is operator-retired',
+    )
+  }
 
   const values = computeAttendanceRecordUpsertValues({
     existingRow: existing[0] ?? null,
@@ -19596,6 +20213,530 @@ function computeAttendanceRecordUpsertValues(options) {
     metaJson: JSON.stringify(finalMeta ?? {}),
     sourceBatchId: finalSourceBatchId,
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// W4C-3a — raw import evidence + frozen import snapshot producers (prepareOnly).
+// Presence is exact: `undefined` ⇒ absent; any other value (incl. null / 0) ⇒ present.
+// Evidence is captured from the source row BEFORE computed/policy/engine overrides.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function rawImportFieldPresence(value) {
+  if (value === undefined) return { present: false, value: null }
+  return { present: true, value: value === undefined ? null : value }
+}
+
+function firstDefinedPresence(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate !== undefined) return candidate
+  }
+  return undefined
+}
+
+function toRawImportInstantIso(value) {
+  if (value == null) return null
+  if (value instanceof Date) {
+    const ms = value.getTime()
+    return Number.isFinite(ms) ? value.toISOString() : null
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const ms = Date.parse(trimmed)
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null
+  }
+  return null
+}
+
+function toRawImportNonNegInt(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  const floored = Math.floor(numeric)
+  if (floored < 0) return null
+  return floored
+}
+
+function toRawImportBoolean(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (!normalized) return null
+    if (['true', '1', 'yes', 'y', '是'].includes(normalized)) return true
+    if (['false', '0', 'no', 'n', '否'].includes(normalized)) return false
+  }
+  return null
+}
+
+function toRawImportString(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed ? trimmed : null
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return null
+}
+
+function sha256HexOfUtf8(text) {
+  return crypto.createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex')
+}
+
+async function sha256HexOfFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const stream = fs.createReadStream(filePath)
+    stream.on('error', reject)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+function resolveLegacyImportRowSourceKind({ payload, csvFileId }) {
+  if (csvFileId) return 'uploaded_csv'
+  if (typeof payload?.csvText === 'string' && payload.csvText.length > 0) return 'inline_csv'
+  if (Array.isArray(payload?.rows)) return 'direct_rows'
+  if (Array.isArray(payload?.entries)) return 'entries'
+  return 'dingtalk_tabular'
+}
+
+function canonicalLegacyImportFingerprintJson(value) {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalLegacyImportFingerprintJson(entry)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalLegacyImportFingerprintJson(value[key])}`)
+    return `{${entries.join(',')}}`
+  }
+  const encoded = JSON.stringify(value)
+  if (encoded === undefined) throw new Error('W4C3A_LEGACY_INPUT_FINGERPRINT_VALUE_INVALID')
+  return encoded
+}
+
+function buildLegacyImportInputFingerprintV1({
+  payload,
+  orgId,
+  requesterId,
+  idempotencyKey,
+  csvFileId,
+}) {
+  const legacyRowSourceKind = resolveLegacyImportRowSourceKind({ payload, csvFileId })
+  const sourceInput = legacyRowSourceKind === 'uploaded_csv'
+    ? { csvFileId }
+    : legacyRowSourceKind === 'inline_csv'
+      ? { csvText: payload.csvText }
+      : legacyRowSourceKind === 'direct_rows'
+        ? { rows: payload.rows }
+        : legacyRowSourceKind === 'entries'
+          ? { entries: payload.entries }
+          : { columns: payload.columns, data: payload.data }
+  const fingerprintInput = {
+    schemaVersion: 1,
+    kind: 'normal',
+    orgId,
+    createdBy: requesterId,
+    legacyRowSourceKind,
+    sourceInput,
+    source: payload.source ?? null,
+    fallbackUserId: payload.userId ?? requesterId,
+    userMap: payload.userMap ?? null,
+    userMapKeyField: payload.userMapKeyField ?? null,
+    userMapSourceFields: payload.userMapSourceFields ?? null,
+    mode: payload.mode ?? null,
+    batchMeta: payload.batchMeta ?? null,
+    idempotencyKey: idempotencyKey || null,
+    ruleSetId: payload.ruleSetId ?? null,
+    mappingProfileId: payload.mappingProfileId ?? null,
+    mapping: payload.mapping ?? null,
+    engine: payload.engine ?? null,
+    statusMap: payload.statusMap ?? null,
+    timezone: payload.timezone ?? null,
+    groupSync: payload.groupSync ?? null,
+    returnItems: payload.returnItems !== false,
+    skippedSampleLimit: payload.skippedSampleLimit ?? null,
+    csvOptions: payload.csvOptions ?? null,
+    convertedArtifactFileId: payload.convertedArtifactFileId ?? null,
+    convertedSheetName: payload.convertedSheetName ?? null,
+  }
+  return sha256HexOfUtf8(canonicalLegacyImportFingerprintJson(fingerprintInput))
+}
+
+/**
+ * Closed provenance for RawImportEvidenceV1. Differentiates direct rows / entries /
+ * inline CSV / uploaded CSV / DingTalk tabular via transport + sourceRef, without
+ * embedding filesystem paths or secrets.
+ */
+function buildImportRowProvenanceV1(options = {}) {
+  const kind = options.legacyRowSourceKind || 'direct_rows'
+  const batchId = typeof options.batchId === 'string' && options.batchId.trim()
+    ? options.batchId.trim()
+    : 'unknown-batch'
+  const fileId = typeof options.csvFileId === 'string' && options.csvFileId.trim()
+    ? options.csvFileId.trim()
+    : null
+  const convertedSheetName = typeof options.convertedSheetName === 'string' && options.convertedSheetName.trim()
+    ? options.convertedSheetName.trim()
+    : null
+  const artifactSha256 = typeof options.artifactSha256 === 'string' && /^[0-9a-f]{64}$/.test(options.artifactSha256)
+    ? options.artifactSha256
+    : null
+  const normalizedCsvSha256 = typeof options.normalizedCsvSha256 === 'string'
+    && /^[0-9a-f]{64}$/.test(options.normalizedCsvSha256)
+    ? options.normalizedCsvSha256
+    : null
+
+  if (convertedSheetName) {
+    return {
+      transport: 'xlsx_client_converted_csv',
+      sourceRef: `attendance-import:${batchId}:xlsx_client_converted_csv`,
+      artifactSha256,
+      normalizedCsvSha256,
+      convertedSheetName,
+    }
+  }
+  if (kind === 'uploaded_csv') {
+    return {
+      transport: 'csv_upload',
+      sourceRef: fileId
+        ? `attendance-import:${batchId}:uploaded_csv:${fileId}`
+        : `attendance-import:${batchId}:uploaded_csv`,
+      artifactSha256,
+      normalizedCsvSha256,
+      convertedSheetName: null,
+    }
+  }
+  if (kind === 'inline_csv') {
+    return {
+      transport: 'csv_text',
+      sourceRef: `attendance-import:${batchId}:inline_csv`,
+      artifactSha256: null,
+      normalizedCsvSha256,
+      convertedSheetName: null,
+    }
+  }
+  // direct_rows | entries | dingtalk_tabular share transport `rows` but keep distinct sourceRef.
+  return {
+    transport: 'rows',
+    sourceRef: `attendance-import:${batchId}:${kind}`,
+    artifactSha256: null,
+    normalizedCsvSha256: null,
+    convertedSheetName: null,
+  }
+}
+
+/**
+ * Build parser-valid RawImportEvidenceV1 from pre-override source values.
+ * `fields` / `metrics` entries use undefined = absent; null / 0 / '' stay present.
+ */
+function buildRawImportEvidenceV1(options = {}) {
+  const sourceOrdinal = Number(options.sourceOrdinal)
+  if (!Number.isInteger(sourceOrdinal) || sourceOrdinal < 0) {
+    throw new Error('W4C3A_RAW_IMPORT_EVIDENCE_ORDINAL_INVALID')
+  }
+  const raw = options.fields && typeof options.fields === 'object' ? options.fields : {}
+  const rawMetrics = options.metrics && typeof options.metrics === 'object' ? options.metrics : {}
+
+  const firstInIso = raw.firstInAt === undefined
+    ? undefined
+    : toRawImportInstantIso(raw.firstInAt)
+  const lastOutIso = raw.lastOutAt === undefined
+    ? undefined
+    : toRawImportInstantIso(raw.lastOutAt)
+
+  const fields = {
+    userId: rawImportFieldPresence(
+      raw.userId === undefined ? undefined : toRawImportString(raw.userId),
+    ),
+    workDate: rawImportFieldPresence(
+      raw.workDate === undefined ? undefined : toRawImportString(raw.workDate),
+    ),
+    timezone: rawImportFieldPresence(
+      raw.timezone === undefined ? undefined : toRawImportString(raw.timezone),
+    ),
+    firstInAt: rawImportFieldPresence(firstInIso),
+    lastOutAt: rawImportFieldPresence(lastOutIso),
+    status: rawImportFieldPresence(
+      raw.status === undefined ? undefined : toRawImportString(raw.status),
+    ),
+    isWorkday: rawImportFieldPresence(
+      raw.isWorkday === undefined ? undefined : toRawImportBoolean(raw.isWorkday),
+    ),
+  }
+
+  const metrics = {
+    workMinutes: rawImportFieldPresence(
+      rawMetrics.workMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.workMinutes),
+    ),
+    lateMinutes: rawImportFieldPresence(
+      rawMetrics.lateMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.lateMinutes),
+    ),
+    earlyLeaveMinutes: rawImportFieldPresence(
+      rawMetrics.earlyLeaveMinutes === undefined
+        ? undefined
+        : toRawImportNonNegInt(rawMetrics.earlyLeaveMinutes),
+    ),
+    leaveMinutes: rawImportFieldPresence(
+      rawMetrics.leaveMinutes === undefined ? undefined : toRawImportNonNegInt(rawMetrics.leaveMinutes),
+    ),
+    overtimeMinutes: rawImportFieldPresence(
+      rawMetrics.overtimeMinutes === undefined
+        ? undefined
+        : toRawImportNonNegInt(rawMetrics.overtimeMinutes),
+    ),
+  }
+
+  const punches = []
+  if (fields.firstInAt.present && fields.firstInAt.value !== null) {
+    punches.push({ direction: 'check_in', occurredAt: fields.firstInAt.value })
+  }
+  if (fields.lastOutAt.present && fields.lastOutAt.value !== null) {
+    punches.push({ direction: 'check_out', occurredAt: fields.lastOutAt.value })
+  }
+
+  const provenance = options.provenance && typeof options.provenance === 'object'
+    ? {
+        transport: options.provenance.transport,
+        sourceRef: options.provenance.sourceRef,
+        artifactSha256: options.provenance.artifactSha256 ?? null,
+        normalizedCsvSha256: options.provenance.normalizedCsvSha256 ?? null,
+        convertedSheetName: options.provenance.convertedSheetName ?? null,
+      }
+    : {
+        transport: 'rows',
+        sourceRef: `attendance-import:unknown:${sourceOrdinal}`,
+        artifactSha256: null,
+        normalizedCsvSha256: null,
+        convertedSheetName: null,
+      }
+
+  return {
+    schemaVersion: 1,
+    sourceOrdinal,
+    punches,
+    fields,
+    metrics,
+    provenance,
+  }
+}
+
+function freezeNonNegIntOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  const floored = Math.floor(numeric)
+  if (!Number.isSafeInteger(floored) || floored < 0) return null
+  return floored
+}
+
+function freezeStatusOrNull(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text || null
+}
+
+function buildImportPolicyOutputV1(options = {}) {
+  return {
+    status: freezeStatusOrNull(options.status),
+    workMinutes: freezeNonNegIntOrNull(options.workMinutes),
+    lateMinutes: freezeNonNegIntOrNull(options.lateMinutes),
+    earlyLeaveMinutes: freezeNonNegIntOrNull(options.earlyLeaveMinutes),
+    leaveMinutes: freezeNonNegIntOrNull(options.leaveMinutes),
+    overtimeMinutes: freezeNonNegIntOrNull(options.overtimeMinutes),
+  }
+}
+
+/**
+ * Per-source freeze leaf carried on prepareOnly upsert items, then folded into
+ * closed recordWrite attributionSnapshot / policySnapshot wrappers.
+ */
+function buildImportCanonicalFreezeSourceV1(options = {}) {
+  const sourceOrdinal = Number(options.sourceOrdinal)
+  if (!Number.isInteger(sourceOrdinal) || sourceOrdinal < 0) {
+    throw new Error('W4C3A_IMPORT_FREEZE_SOURCE_ORDINAL_INVALID')
+  }
+  if (!options.attribution || typeof options.attribution !== 'object') {
+    throw new Error('W4C3A_IMPORT_ATTRIBUTION_PROOF_MISSING')
+  }
+  if (!options.policySourceProof || typeof options.policySourceProof !== 'object') {
+    throw new Error('W4C3A_IMPORT_POLICY_PROOF_MISSING')
+  }
+  const sourceFingerprint = options.policySourceProof.sourceFingerprint
+  const sourceDefinition = options.policySourceProof.sourceDefinition
+  if (
+    typeof sourceFingerprint !== 'string'
+    || !/^[0-9a-f]{64}$/.test(sourceFingerprint)
+    || !sourceDefinition
+    || typeof sourceDefinition !== 'object'
+  ) {
+    throw new Error('W4C3A_IMPORT_POLICY_PROOF_INVALID')
+  }
+  return {
+    sourceOrdinal,
+    attribution: options.attribution,
+    importAttributionReconstruction: options.importAttributionReconstruction ?? null,
+    context: options.context ?? null,
+    sourceFingerprint,
+    sourceDefinition,
+    output: buildImportPolicyOutputV1(options.output || {}),
+  }
+}
+
+/** Closed attributionSnapshot wrapper — same shape for single and folded targets. */
+function buildClosedImportAttributionSnapshotV1(sources) {
+  const ordered = (Array.isArray(sources) ? [...sources] : [])
+    .map((source) => ({
+      sourceOrdinal: Number(source.sourceOrdinal),
+      attribution: source.attribution,
+      context: source.context === undefined ? null : source.context,
+      importAttributionReconstruction: source.importAttributionReconstruction ?? null,
+    }))
+    .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
+  return {
+    schemaVersion: 2,
+    sources: ordered,
+  }
+}
+
+/** Closed policySnapshot wrapper — same shape for single and folded targets. */
+function buildClosedImportPolicySnapshotV1(sources) {
+  const ordered = (Array.isArray(sources) ? [...sources] : [])
+    .map((source) => ({
+      sourceOrdinal: Number(source.sourceOrdinal),
+      sourceFingerprint: String(source.sourceFingerprint),
+      sourceDefinition: source.sourceDefinition,
+      output: buildImportPolicyOutputV1(source.output || {}),
+    }))
+    .sort((left, right) => left.sourceOrdinal - right.sourceOrdinal)
+  return {
+    schemaVersion: 2,
+    sources: ordered,
+  }
+}
+
+function foldAttendanceImportPreparedTargets({ items, existingMap, orgId, sourceBatchId }) {
+  const groups = new Map()
+  for (const item of items) {
+    const workDate = normalizeDateOnly(item.workDate) ?? item.workDate
+    const targetRef = JSON.stringify([orgId, item.userId, workDate])
+    let group = groups.get(targetRef)
+    if (!group) {
+      group = { targetRef, workDate, items: [] }
+      groups.set(targetRef, group)
+    }
+    group.items.push(item)
+  }
+
+  const recordWrites = []
+  const targetRefBySourceOrdinal = new Map()
+  for (const group of groups.values()) {
+    // Source-row order: sort by sourceOrdinal so wrappers exactly match sourceOrdinals.
+    group.items.sort((left, right) => Number(left.sourceOrdinal) - Number(right.sourceOrdinal))
+    const firstItem = group.items[0]
+    const existingRow = existingMap.get(`${firstItem.userId}:${group.workDate}`) ?? undefined
+    let calculationBase = existingRow
+    let prepared = null
+    for (const item of group.items) {
+      const values = computeAttendanceRecordUpsertValues({
+        existingRow: calculationBase,
+        updateFirstInAt: item.updateFirstInAt,
+        updateLastOutAt: item.updateLastOutAt,
+        workDate: item.workDate,
+        mode: item.mode,
+        statusOverride: item.statusOverride,
+        overrideMetrics: item.overrideMetrics,
+        isWorkday: item.isWorkday,
+        meta: item.meta,
+        sourceBatchId: item.sourceBatchId,
+        rule: item.rule,
+        leaveMinutes: item.leaveMinutes,
+        overtimeMinutes: item.overtimeMinutes,
+      })
+      prepared = {
+        userId: item.userId,
+        orgId,
+        workDate: group.workDate,
+        timezone: item.timezone,
+        firstInAt: values.firstInAt,
+        lastOutAt: values.lastOutAt,
+        workMinutes: values.workMinutes,
+        lateMinutes: values.lateMinutes,
+        earlyLeaveMinutes: values.earlyLeaveMinutes,
+        status: values.status,
+        isWorkday: values.isWorkday,
+        metaJson: values.metaJson,
+        sourceBatchId: existingRow ? null : sourceBatchId,
+      }
+      calculationBase = {
+        first_in_at: prepared.firstInAt,
+        last_out_at: prepared.lastOutAt,
+        work_minutes: prepared.workMinutes,
+        late_minutes: prepared.lateMinutes,
+        early_leave_minutes: prepared.earlyLeaveMinutes,
+        status: prepared.status,
+        is_workday: prepared.isWorkday,
+        meta: normalizeMetadata(prepared.metaJson),
+        source_batch_id: prepared.sourceBatchId,
+      }
+      targetRefBySourceOrdinal.set(item.sourceOrdinal, group.targetRef)
+    }
+
+    const lastItem = group.items[group.items.length - 1]
+    const compatibilityMetadata = normalizeMetadata(prepared.metaJson)
+    const sourceOrdinals = group.items.map((item) => item.sourceOrdinal)
+    const freezeSources = group.items.map((item) => {
+      if (!item.canonicalFreezeSource) {
+        throw new Error('W4C3A_IMPORT_FREEZE_SOURCE_MISSING')
+      }
+      return item.canonicalFreezeSource
+    })
+    const folded = group.items.length > 1
+    recordWrites.push({
+      orgId,
+      userId: lastItem.userId,
+      workDate: group.workDate,
+      sourceOrdinals,
+      mergeMode: lastItem.mode,
+      firstInAt: prepared.firstInAt instanceof Date
+        ? prepared.firstInAt.toISOString()
+        : (prepared.firstInAt ?? null),
+      lastOutAt: prepared.lastOutAt instanceof Date
+        ? prepared.lastOutAt.toISOString()
+        : (prepared.lastOutAt ?? null),
+      workMinutes: prepared.workMinutes ?? null,
+      lateMinutes: prepared.lateMinutes ?? null,
+      earlyLeaveMinutes: prepared.earlyLeaveMinutes ?? null,
+      status: prepared.status ?? null,
+      isWorkday: prepared.isWorkday ?? null,
+      timezone: prepared.timezone,
+      compatibilityMetadata,
+      // Closed freeze wrappers — identical shape for single and folded targets.
+      attributionSnapshot: buildClosedImportAttributionSnapshotV1(freezeSources),
+      policySnapshot: buildClosedImportPolicySnapshotV1(freezeSources),
+      // Compatibility-only leaves (not closed freeze contracts).
+      profileSnapshot: folded
+        ? {
+            sourceOrdinals,
+            sources: group.items.map((item) => normalizeMetadata(item.meta)?.profile ?? null),
+          }
+        : (compatibilityMetadata?.profile ?? {}),
+      multiPunchSnapshot: folded
+        ? {
+            sourceOrdinals,
+            sources: group.items.map((item) => normalizeMetadata(item.meta)?.multiPunch ?? null),
+          }
+        : (compatibilityMetadata?.multiPunch ?? {}),
+      sourceBatchId,
+      resultSlots: {},
+    })
+  }
+
+  return { recordWrites, targetRefBySourceOrdinal }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -19790,21 +20931,9 @@ function buildManualResultEditMarker(editRow, record) {
   }
 }
 
-async function attachManualResultEditMarkerToRecord(trx, record, marker) {
-  if (!record?.id) return record
-  const meta = {
-    ...normalizeMetadata(record.meta),
-    manual_result_edit: marker,
-  }
-  const rows = await trx.query(
-    `UPDATE attendance_records
-        SET meta = $3::jsonb, updated_at = now()
-      WHERE id = $1 AND org_id = $2
-      RETURNING *`,
-    [record.id, record.org_id, JSON.stringify(meta)]
-  )
-  return rows[0] ?? { ...record, meta }
-}
+// W4C-3c P05: post-write attachManualResultEditMarkerToRecord removed entirely.
+// Marker is frozen in the same projection write (legacy) or manual_override_snapshot
+// on the W4 calculation (shadow/authoritative) via the record-operation boundary.
 
 function buildAttendanceResultEditNotificationReasonSummary(reason) {
   const text = typeof reason === 'string' ? reason.trim() : ''
@@ -19920,6 +21049,30 @@ function mapResultEditRow(row) {
   }
 }
 
+async function resolveAttendanceResultEditWindowContext(trx, {
+  orgId,
+  userId,
+  workDate,
+  editWindowDays,
+}) {
+  const context = await resolveWorkContext({ db: trx, orgId, userId, workDate })
+  const timezone = context?.rule?.timezone
+  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
+  }
+  const todayKey = toWorkDate(new Date(), timezone)
+  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
+  const workMs = Date.parse(`${workDate}T00:00:00Z`)
+  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
+  }
+  const diffDays = Math.floor((todayMs - workMs) / 86400000)
+  if (diffDays > editWindowDays) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  }
+  return { context, timezone }
+}
+
 // AE-1 transactional write helper. Locks the target record (id+org, cross-org miss → 404 with no leak), runs
 // the editable-source / closed-cycle / edit-window guards, applies the §3.5a normalization via
 // upsertAttendanceRecord (statusOverride + overrideMetrics, NOT a naked status UPDATE so meta tiers stay
@@ -19996,28 +21149,24 @@ async function applyAttendanceResultEdit(trx, options) {
   }
 
   // (4) Resolve the record's effective rule + timezone (drives §3.5a tier recompute + the edit window).
-  const context = await resolveWorkContext({ db: trx, orgId, userId: record.user_id, workDate })
-  const timezone = context?.rule?.timezone
-  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
-    // Fail-closed: without a resolvable zone the edit window cannot be verified safely.
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
-  }
-
   // (5) Edit window (§3.3 / §9.1) — work_date within editWindowDays of org-tz today.
-  const todayKey = toWorkDate(new Date(), timezone)
-  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
-  const workMs = Date.parse(`${workDate}T00:00:00Z`)
-  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
-  }
-  const diffDays = Math.floor((todayMs - workMs) / 86400000)
-  if (diffDays > editWindowDays) {
-    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  const { context, timezone } = await resolveAttendanceResultEditWindowContext(trx, {
+    orgId,
+    userId: record.user_id,
+    workDate,
+    editWindowDays,
+  })
+
+  // W4C-3c: operator-retired parents are terminal for ordinary writers (including manual edit).
+  if (String(record.visibility_state ?? '') === 'retired'
+    && String(record.visibility_reason ?? '') === 'operator_retirement') {
+    throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
   }
 
   // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
   // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
   // W2 recompute adapter: preserve frozen work-date attribution (never re-resolve against current schedule).
+  // W4C-3c P05: freeze the manual override marker into THIS write — no post-write meta patch.
   const recordMetaForRecompute = normalizeMetadata(record?.meta)
   const rawFrozenForRecompute = recordMetaForRecompute?.[FROZEN_ATTRIBUTION_KEY]
     ?? recordMetaForRecompute?.workDateAttributionV1
@@ -20041,15 +21190,81 @@ async function applyAttendanceResultEdit(trx, options) {
     ambiguousCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_AMBIGUOUS',
     mismatchCode: 'ATTENDANCE_RESULT_EDIT_WORK_DATE_MISMATCH',
   })
-  const recomputeMeta = recomputeResolution.kind === 'resolved'
-    ? {
-        [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
-          recomputeResolution,
-          { orgId, userId: record.user_id },
-        ),
-      }
-    : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : undefined)
   const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
+  const beforeSnapshot = buildResultEditSnapshot(record)
+  // Provisional after-image for the audit row (pre-upsert). The single projection write
+  // below freezes the full marker (including audit id) — no post-write meta UPDATE.
+  const provisionalAfter = {
+    ...beforeSnapshot,
+    status: targetStatus,
+    workMinutes: metrics.workMinutes,
+    lateMinutes: metrics.lateMinutes,
+    earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+  }
+
+  // (7) Immutable audit row first so the marker can carry auditId in the same projection write.
+  // UNIQUE(org_id, idempotency_key) is the concurrency backstop.
+  let auditRow
+  try {
+    const inserted = await trx.query(
+      `INSERT INTO attendance_record_result_edits
+        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+         reason, evidence, actor_user_id, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
+       RETURNING *`,
+      [
+        orgId,
+        recordId,
+        record.user_id,
+        workDate,
+        beforeStatus,
+        targetStatus,
+        JSON.stringify(beforeSnapshot),
+        JSON.stringify(provisionalAfter),
+        reason,
+        JSON.stringify(normalizedEvidence),
+        actorUserId,
+        idempotencyKey,
+      ]
+    )
+    auditRow = inserted[0]
+  } catch (error) {
+    if (error?.code === '23505') {
+      const raceRows = await trx.query(
+        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+        [orgId, idempotencyKey]
+      )
+      const prior = raceRows[0]
+      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: null }
+      }
+      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+    }
+    throw error
+  }
+
+  const frozenMarker = buildManualResultEditMarker(auditRow, {
+    status: targetStatus,
+    work_minutes: metrics.workMinutes,
+    late_minutes: metrics.lateMinutes,
+    early_leave_minutes: metrics.earlyLeaveMinutes,
+    work_date: workDate,
+    first_in_at: record.first_in_at,
+    last_out_at: record.last_out_at,
+    is_workday: record.is_workday,
+  })
+  const recomputeMeta = {
+    ...(recomputeResolution.kind === 'resolved'
+      ? {
+          [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+            recomputeResolution,
+            { orgId, userId: record.user_id },
+          ),
+        }
+      : (frozenForRecompute ? { [FROZEN_ATTRIBUTION_KEY]: frozenForRecompute } : {})),
+    // W4C-3c P05: freeze override in the same projection write — no post-write meta patch.
+    manual_result_edit: frozenMarker,
+  }
   const updated = await upsertAttendanceRecord({
     userId: record.user_id,
     orgId,
@@ -20073,53 +21288,7 @@ async function applyAttendanceResultEdit(trx, options) {
     client: trx,
   })
 
-  const beforeSnapshot = buildResultEditSnapshot(record)
-  let afterSnapshot = buildResultEditSnapshot(updated)
-
-  // (7) Write the immutable audit row. The UNIQUE(org_id, idempotency_key) is the concurrency backstop: a
-  // racing same-key insert from another txn surfaces as 23505 → re-run the same compare-then-{ok|409}.
-  let auditRow
-  try {
-    const inserted = await trx.query(
-      `INSERT INTO attendance_record_result_edits
-        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
-         reason, evidence, actor_user_id, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
-       RETURNING *`,
-      [
-        orgId,
-        recordId,
-        record.user_id,
-        workDate,
-        beforeStatus,
-        targetStatus,
-        JSON.stringify(beforeSnapshot),
-        JSON.stringify(afterSnapshot),
-        reason,
-        JSON.stringify(normalizedEvidence),
-        actorUserId,
-        idempotencyKey,
-      ]
-    )
-    auditRow = inserted[0]
-  } catch (error) {
-    if (error?.code === '23505') {
-      const raceRows = await trx.query(
-        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
-        [orgId, idempotencyKey]
-      )
-      const prior = raceRows[0]
-      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
-        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: updated }
-      }
-      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
-    }
-    throw error
-  }
-
-  const marker = buildManualResultEditMarker(auditRow, updated)
-  const markedRecord = await attachManualResultEditMarkerToRecord(trx, updated, marker)
-  afterSnapshot = buildResultEditSnapshot(markedRecord)
+  const afterSnapshot = buildResultEditSnapshot(updated)
   let finalAuditRow = auditRow
   if (notifyAffectedEmployee === false) {
     finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
@@ -20130,7 +21299,7 @@ async function applyAttendanceResultEdit(trx, options) {
   } else {
     const delivery = await enqueueAttendanceResultEditNotification(trx, {
       orgId,
-      record: markedRecord,
+      record: updated,
       auditRow,
       beforeStatus,
       targetStatus,
@@ -20147,7 +21316,7 @@ async function applyAttendanceResultEdit(trx, options) {
   return {
     alreadyApplied: false,
     edit: mapResultEditRow(finalAuditRow),
-    record: markedRecord,
+    record: updated,
     beforeSnapshot,
     afterSnapshot,
   }
@@ -20689,23 +21858,49 @@ async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
   return map
 }
 
+const ATTENDANCE_IMPORT_PREPARED_RECORD_KEYS = Object.freeze([
+  'userId',
+  'orgId',
+  'workDate',
+  'timezone',
+  'firstInAt',
+  'lastOutAt',
+  'workMinutes',
+  'lateMinutes',
+  'earlyLeaveMinutes',
+  'status',
+  'isWorkday',
+  'metaJson',
+  'sourceBatchId',
+])
+
+function prepareAttendanceImportRecordRows(rows) {
+  if (!Array.isArray(rows)) return Object.freeze([])
+  return Object.freeze(rows.map((row) => Object.freeze(
+    Object.fromEntries(
+      ATTENDANCE_IMPORT_PREPARED_RECORD_KEYS.map((key) => [key, row?.[key]])
+    )
+  )))
+}
+
 async function batchUpsertAttendanceRecords(client, rows, options = {}) {
+  const preparedRows = prepareAttendanceImportRecordRows(rows)
   const strategy = typeof options?.strategy === 'string'
     ? options.strategy.trim().toLowerCase()
     : null
   const totalRows = Number.isFinite(Number(options?.totalRows))
     ? Math.max(0, Math.floor(Number(options.totalRows)))
-    : rows.length
+    : preparedRows.length
   if (strategy === 'values' || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') {
-    return batchUpsertAttendanceRecordsValues(client, rows)
+    return batchUpsertAttendanceRecordsValues(client, preparedRows)
   }
   if (strategy === 'staging') {
-    return batchUpsertAttendanceRecordsStaging(client, rows, { totalRows })
+    return batchUpsertAttendanceRecordsStaging(client, preparedRows, { totalRows })
   }
   if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging') {
-    return batchUpsertAttendanceRecordsStaging(client, rows, { totalRows })
+    return batchUpsertAttendanceRecordsStaging(client, preparedRows, { totalRows })
   }
-  return batchUpsertAttendanceRecordsUnnest(client, rows)
+  return batchUpsertAttendanceRecordsUnnest(client, preparedRows)
 }
 
 async function batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items }) {
@@ -21098,6 +22293,469 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
   return { outsideGeofence }
 }
 
+// ---------------------------------------------------------------------------------------------
+// W4C-2 (#4556 lock §8.1/§12.3) — the closed legacy execution adapters the plugin injects ONCE
+// into the canonical live/scheduled write boundary at activate. Routes submit pure data; every
+// byte of legacy DML below runs inside the boundary's SERIALIZABLE transaction (the `trx`
+// argument is the boundary's plugin-shaped transaction wrapper, never the pool).
+// ---------------------------------------------------------------------------------------------
+
+// P01 (live punch) verbatim former POST /api/attendance/punch transaction body, with the P02
+// second mutable post-upsert pass REMOVED (lock §4.4: "The exact current
+// `applyAttendanceInOutMergePolicy` branch behavior is lifted into a pure frozen policy before
+// calculation. W4 changes no `internalWinsOnIn`/`externalWinsOnOut` meaning; it removes only the
+// second mutable post-upsert pass"). The frozen merge-policy DECISION is computed purely (host
+// port `applyMergePolicyPure` — one source, no drift) BEFORE the single record write, so the
+// final row/response bytes are identical to the old append-then-override sequence while the
+// second UPDATE no longer exists. Random IDs are generated inside this function so a
+// whole-transaction 40001 retry re-runs it safely.
+//
+// P3-3 explicit guarantee (W4C-1 gate handover): the pure merge decision needs only the
+// POST-APPEND boundary VALUES, never a written intermediate row — the same single statement that
+// persists the record row also carries the merged boundaries, so the "no record row yet" branch
+// the pure policy cannot express is structurally unreachable here.
+//
+// W4C-2 remediation P1-3 (#4612 gate finding c-5082182541): `rule` and
+// `punchWorkDateResolution` are derived HERE, in-transaction, from the boundary's
+// closed args — they are NO LONGER accepted as route-computed values crossing
+// into the transaction (see w4c2-live-scheduled-boundary.ts's module comment
+// and `AttendanceLivePunchLegacyArgsV1`). `groupAttendanceType` is omitted,
+// same as the route's own final resolver call for this code path.
+//
+// W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`, fixed on
+// top of P1-3): the FIRST version of this function recomputed
+// `calendarWorkDate` from `timezone` — but `timezone` on the boundary's args
+// is the route's POST-resolution value (the WINNING shift's own rule
+// timezone), not the PRE-resolution value the route actually fed into its own
+// `resolvePunchWorkDateByShiftWindow` call. The two diverge exactly when that
+// call resolves a shift AND the winning shift row's OWN `timezone` column is
+// non-blank and differs from the PRE-resolution value —
+// resolvePunchWorkDateByShiftWindow's `nextTimezone` takes the winning
+// shift's rule timezone unconditionally whenever it is set, WITHOUT
+// re-consulting the client's request body; an explicit client-supplied
+// timezone does NOT prevent the overwrite (real fixture, zero concurrency,
+// single punch: client `Asia/Tokyo`, winning shift `UTC` — see
+// `punchSchema.timezone`, client-supplied and optional). Recomputing
+// with the wrong timezone re-invokes the resolver with DIFFERENT input than
+// the route used, which can return a DIFFERENT resolution (different
+// `reasonCode`/`evidenceSnapshot`/even a different winning shift) — a
+// `legacy_projection_only` byte-red-line break AND, since a `resolved` kind
+// gets permanently frozen into `record.meta` on first write (see
+// `buildFrozenWorkDateAttribution` below), a PERMANENT wrong evidence
+// snapshot. Fix: use `requestTimezone` — the boundary's closed projection of
+// the route's own PRE-resolution `timezone` local variable (see
+// `AttendanceLivePunchBoundaryInputV1.requestTimezone`'s doc comment for the
+// exact route line this mirrors) — for BOTH the `calendarWorkDate` recompute
+// and the resolver call's own `timezone` argument. `requestTimezone` is a
+// pure projection of `(occurredAt, client-or-default tz)`, not a
+// route-computed "prepared plan" (the resolution/rule outputs are still
+// derived here, in-transaction, from that projection) — it does not
+// reintroduce the kind of route-smuggled value P1-3 removed.
+async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurredAt, requestTimezone }) {
+  const calendarWorkDate = toWorkDate(occurredAt, requestTimezone)
+  const defaultRule = await loadDefaultRule(trx, orgId)
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx)
+  const resolution = await adapters.live.resolvePunchWorkDate({
+    orgId,
+    userId,
+    occurredAt,
+    timezone: requestTimezone,
+    calendarWorkDate,
+  })
+  if (resolution.kind === 'resolved') {
+    const resolvedShift = await loadShiftById(trx, orgId, resolution.shiftId)
+    if (!resolvedShift) {
+      // Assignment/shift row changed between the route's read and this
+      // transaction (deleted mid-flight) — a closed, values-free 409 (not a
+      // raw Error, which `respondIfW4BoundaryError`/`instanceof HttpError`
+      // would NOT recognize and which would fall through to a generic 500).
+      //
+      // Reachability (#4612 gate2 靶3, corrected): this is NOT provable
+      // unreachable from "SERIALIZABLE snapshot consistency" — that argument
+      // only guarantees the SAME inputs read twice see the same data, and P1
+      // above is proof that this function's two resolver inputs were NOT
+      // always the same. The real, narrower reason this branch is defensive
+      // (not provably dead, but not reachable via the P1 tz-drift path
+      // either): the route's own `rehydrateResolvedWorkDateContext` (this
+      // file, `resolvePunchWorkDateByShiftWindow` call site) ALREADY runs the
+      // identical `loadShiftById(orgId, resolution.shiftId)` against ITS OWN
+      // resolution before the route ever calls into this boundary — if that
+      // lookup were going to fail, the route fails first (a different error)
+      // and this transaction never starts. This branch remains defensive
+      // scaffolding for a lookup this function does not need to prove
+      // reachable to justify a closed 409 instead of an unmapped 500.
+      throw new HttpError(
+        409,
+        'W4C2_LEGACY_RESOLVED_SHIFT_NOT_FOUND',
+        'Resolved shift row changed during in-transaction legacy attribution re-derivation'
+      )
+    }
+    return { rule: resolvedShift, punchWorkDateResolution: resolution }
+  }
+  if (resolution.kind === 'ambiguous') {
+    // The route's own pre-boundary resolution already 422s a fresh ambiguity
+    // before ever calling into the boundary (WORK_DATE_ATTRIBUTION_AMBIGUOUS);
+    // reaching this branch means DB state changed between the route's read and
+    // this transaction (assignment edited mid-flight) — fail closed with a
+    // closed, values-free 409 rather than silently pick a rule the route never
+    // validated. (W4C-2 remediation: this IS a new narrow rejection surface,
+    // introduced deliberately by moving resolution in-transaction for P1-3 —
+    // it replaces the PRE-FIX silent behavior of writing against the route's
+    // stale resolution. See PR body §"W4C-2 修复轮" for the disclosure.)
+    //
+    // Reachability (#4612 gate2 靶3, corrected): "reaching this branch means
+    // DB state changed" is true ONLY given this function's resolver call
+    // receives the SAME input the route's own resolver call received (P1
+    // above). Before the P1 fix, a client tz/winning-shift-tz mismatch alone
+    // (zero concurrency) could make this function re-invoke the resolver with
+    // a DIFFERENT `calendarWorkDate` than the route used and land here even
+    // with an UNCHANGED DB — i.e. the "only a real race reaches this" claim
+    // was false while `requestTimezone` did not exist. With `requestTimezone`
+    // now guaranteeing input-equivalence with the route's own call, a genuine
+    // DB-state change is once again the only remaining path here.
+    throw new HttpError(
+      409,
+      'W4C2_LEGACY_WORK_DATE_ATTRIBUTION_AMBIGUOUS_IN_TRANSACTION',
+      'Work date attribution became ambiguous during in-transaction re-derivation; refusing silent choice'
+    )
+  }
+  const context = await resolveWorkContext({
+    db: trx,
+    orgId,
+    userId,
+    workDate: calendarWorkDate,
+    defaultRule,
+  })
+  return { rule: context.rule, punchWorkDateResolution: resolution }
+}
+
+async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
+  const {
+    userId,
+    orgId,
+    workDate,
+    eventType,
+    source,
+    location,
+    meta,
+    timezone,
+    requestTimezone,
+    isWorkday,
+  } = args
+  const occurredAt = new Date(args.occurredAt)
+  // P1 fix: requestTimezone (the route's PRE-resolution input), NEVER
+  // timezone (the route's POST-resolution persistence value) — see this
+  // function's own module comment above `deriveLegacyLivePunchAttributionV1`.
+  const { rule, punchWorkDateResolution } = await deriveLegacyLivePunchAttributionV1(trx, {
+    orgId,
+    userId,
+    occurredAt,
+    requestTimezone,
+  })
+  const settings = await getSettings(trx)
+
+  const event = await trx.query(
+    `INSERT INTO attendance_events
+     (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+     RETURNING *`,
+    [
+      randomUUID(),
+      userId,
+      orgId,
+      workDate,
+      occurredAt,
+      eventType,
+      source,
+      timezone,
+      JSON.stringify(location ?? {}),
+      JSON.stringify(meta ?? {}),
+    ]
+  )
+
+  const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
+  // Freeze work-date attribution on first resolved write; later corrections/recomputes
+  // preserve this snapshot rather than re-resolving against current schedule.
+  const existingMeta = normalizeMetadata(protectedRecord?.meta)
+  const alreadyFrozen = parseFrozenWorkDateAttribution(
+    existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
+  )
+  let recordMeta
+  if (alreadyFrozen) {
+    recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
+  } else if (punchWorkDateResolution?.kind === 'resolved') {
+    recordMeta = {
+      [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+        punchWorkDateResolution,
+        { orgId, userId },
+      ),
+    }
+  }
+
+  const appendUpsert = () => upsertAttendanceRecord({
+    userId,
+    orgId,
+    workDate,
+    timezone,
+    rule: { ...rule, timezone },
+    updateFirstInAt: eventType === 'check_in' ? occurredAt : null,
+    updateLastOutAt: eventType === 'check_out' ? occurredAt : null,
+    mode: 'append',
+    isWorkday,
+    leaveMinutes: 0,
+    overtimeMinutes: 0,
+    meta: recordMeta,
+    existingRow: protectedRecord,
+    client: trx,
+  })
+
+  const mergePolicy = settings?.punchPolicy?.merge ?? DEFAULT_SETTINGS.punchPolicy.merge
+  const internalWinsOnIn = mergePolicy.internalWinsOnIn === true
+  const externalWinsOnOut = mergePolicy.externalWinsOnOut === true
+
+  let record
+  if (!internalWinsOnIn && !externalWinsOnOut) {
+    // Merge policy disabled (default): exactly the former single append upsert.
+    record = await appendUpsert()
+  } else {
+    // The same per-day event read the removed second pass performed, under the
+    // same record row lock, inside the same transaction.
+    const eventsForDay = await trx.query(
+      `SELECT event_type, source, occurred_at
+       FROM attendance_events
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date = $3
+         AND event_type IN ('check_in', 'check_out')
+       ORDER BY occurred_at ASC, id ASC`,
+      [userId, orgId, workDate]
+    )
+    // Post-append boundaries computed WITHOUT writing (exact value mirror of
+    // computeAttendanceRecordUpsertValues mode='append').
+    const protectedFirstMs = attendanceTimeMs(protectedRecord?.first_in_at)
+    const protectedLastMs = attendanceTimeMs(protectedRecord?.last_out_at)
+    const punchMs = attendanceTimeMs(occurredAt)
+    let appendFirstMs = protectedFirstMs
+    let appendLastMs = protectedLastMs
+    if (eventType === 'check_in' && punchMs != null) {
+      appendFirstMs = appendFirstMs == null || punchMs < appendFirstMs ? punchMs : appendFirstMs
+    }
+    if (eventType === 'check_out' && punchMs != null) {
+      appendLastMs = appendLastMs == null || punchMs > appendLastMs ? punchMs : appendLastMs
+    }
+    const decision = mergePolicyPure({
+      internalWinsOnIn,
+      externalWinsOnOut,
+      recordFirstInAtMs: appendFirstMs,
+      recordLastOutAtMs: appendLastMs,
+      protectedRecordFirstInAtMs: protectedFirstMs,
+      protectedRecordLastOutAtMs: protectedLastMs,
+      // Events with an unreadable instant were skipped by every legacy
+      // candidate pick and can never equal a finite protected value — dropping
+      // them before the strict pure policy is decision-identical.
+      events: eventsForDay
+        .map((row) => ({
+          eventType: row.event_type,
+          source: row.source,
+          occurredAtMs: attendanceTimeMs(row.occurred_at),
+        }))
+        .filter((row) => row.occurredAtMs != null),
+    })
+    if (!decision.changed) {
+      record = await appendUpsert()
+    } else {
+      const approvedMinutes = await loadApprovedMinutes(trx, orgId, userId, workDate)
+      record = await upsertAttendanceRecord({
+        userId,
+        orgId,
+        workDate,
+        timezone,
+        rule: { ...rule, timezone },
+        updateFirstInAt: decision.nextFirstInAtMs == null ? null : new Date(decision.nextFirstInAtMs),
+        updateLastOutAt: decision.nextLastOutAtMs == null ? null : new Date(decision.nextLastOutAtMs),
+        mode: 'override',
+        isWorkday,
+        leaveMinutes: approvedMinutes.leaveMinutes,
+        overtimeMinutes: approvedMinutes.overtimeMinutes,
+        meta: recordMeta,
+        existingRow: protectedRecord,
+        client: trx,
+      })
+    }
+  }
+
+  return { event: event[0], record, workDateResolution: punchWorkDateResolution }
+}
+
+// W4C-2: in-transaction W2 re-resolution (freeze step) — live channel. The opt-in
+// `includeFullWinner` out-params carry the winner's absolute/attribution windows and wall-time
+// provenance for the strict V2 rebuild; without the flag the resolver output is byte-identical.
+async function resolveW4LiveCandidateInTransactionV1(trx, args) {
+  // P18/P27: the canonical W4 transaction holds a shared lock on every
+  // published assignment candidate it freezes. Schedule publication and
+  // terminal schedule writers take the conflicting row lock, so either commit
+  // order observes one coherent schedule-fact version.
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
+  return adapters.live.resolvePunchWorkDate({
+    orgId: args.orgId,
+    userId: args.userId,
+    occurredAt: new Date(args.occurredAt),
+    timezone: args.timezone,
+    calendarWorkDate: args.calendarWorkDate,
+    includeFullWinner: true,
+  })
+}
+
+// W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
+async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
+  return adapters.scheduled.resolveScheduledWorkDate({
+    orgId: args.orgId,
+    userId: args.userId,
+    timezone: args.timezone,
+    calendarWorkDate: args.calendarWorkDate,
+    includeFullWinner: true,
+  })
+}
+
+// W4C-2: frozen calculation context from the winning shift (lock §4.1 FrozenAttendanceContextV1,
+// selector 'legacy'). Returns null whenever the closed shape cannot be represented faithfully
+// (missing shift, >3 segments, non-contiguous indexes, non-zero start offset, unreadable time)
+// — the boundary then records a review-required shadow calculation instead of guessing.
+async function buildW4ShadowFrozenContextV1(trx, args) {
+  const { orgId, userId, workDate, shiftId, timezone, isWorkday, holidayKind } = args
+  const shiftRows = await trx.query(
+    'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+    [shiftId, orgId]
+  )
+  const shift = shiftRows[0]
+  if (!shift) return null
+  const lateGraceMinutes = Math.max(0, Math.floor(Number(shift.late_grace_minutes) || 0))
+  const earlyLeaveGraceMinutes = Math.max(0, Math.floor(Number(shift.early_grace_minutes) || 0))
+  const segmentRows = await trx.query(
+    `SELECT segment_index, start_time, end_time, start_day_offset, end_day_offset
+     FROM attendance_shift_segments
+     WHERE org_id = $1 AND shift_id = $2
+     ORDER BY segment_index ASC`,
+    [orgId, shiftId]
+  )
+  let segments
+  if (segmentRows.length > 0) {
+    if (segmentRows.length > 3) return null
+    segments = []
+    for (let i = 0; i < segmentRows.length; i += 1) {
+      const row = segmentRows[i]
+      const index = Number(row.segment_index)
+      const startDayOffset = Number(row.start_day_offset ?? 0)
+      const endDayOffset = Number(row.end_day_offset ?? 0)
+      const startTime = normalizeTimeString(row.start_time)
+      const endTime = normalizeTimeString(row.end_time)
+      if (index !== i || startDayOffset !== 0 || (endDayOffset !== 0 && endDayOffset !== 1) || !startTime || !endTime) {
+        return null
+      }
+      segments.push({
+        index,
+        startTime,
+        endTime,
+        startDayOffset: 0,
+        endDayOffset,
+        lateGraceMinutes,
+        earlyLeaveGraceMinutes,
+      })
+    }
+  } else {
+    const startTime = normalizeTimeString(shift.work_start_time)
+    const endTime = normalizeTimeString(shift.work_end_time)
+    if (!startTime || !endTime) return null
+    segments = [{
+      index: 0,
+      startTime,
+      endTime,
+      startDayOffset: 0,
+      endDayOffset: resolveOvernightFlag(shift.is_overnight, startTime, endTime) ? 1 : 0,
+      lateGraceMinutes,
+      earlyLeaveGraceMinutes,
+    }]
+  }
+  const rule = await loadDefaultRule(trx, orgId)
+  const severeLateThresholdMinutes = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+    ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+    : DEFAULT_RULE.severeLateThresholdMinutes
+  const absenceLateThresholdMinutes = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+    ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+    : DEFAULT_RULE.absenceLateThresholdMinutes
+  // W5: freeze flex policy from the shift row. Absent/strict columns => omit
+  // flexPolicy so legacy W4 frozen-context bytes stay exact for strict shifts.
+  const flexMode = shift.flex_mode === 'flex_required_duration'
+    ? 'flex_required_duration'
+    : 'strict'
+  let flexPolicy = null
+  if (flexMode === 'flex_required_duration') {
+    // Multi-segment flex is rejected at write time; fail closed here too so a
+    // corrupted row cannot become a frozen multi-segment flex context.
+    if (segments.length !== 1) return null
+    const requiredMinutes = Math.floor(Number(shift.flex_required_minutes))
+    const arrivalWindowBeforeMinutes = Math.floor(Number(shift.flex_arrival_window_before_minutes))
+    const arrivalWindowAfterMinutes = Math.floor(Number(shift.flex_arrival_window_after_minutes))
+    if (
+      !Number.isInteger(requiredMinutes) || requiredMinutes <= 0 || requiredMinutes > 1440
+      || !Number.isInteger(arrivalWindowBeforeMinutes) || arrivalWindowBeforeMinutes < 0
+      || !Number.isInteger(arrivalWindowAfterMinutes) || arrivalWindowAfterMinutes < 0
+    ) {
+      return null
+    }
+    const coreStartTime = shift.flex_core_start_time
+      ? normalizeTimeString(shift.flex_core_start_time)
+      : null
+    const coreEndTime = shift.flex_core_end_time
+      ? normalizeTimeString(shift.flex_core_end_time)
+      : null
+    if ((coreStartTime === null) !== (coreEndTime === null)) return null
+    // Re-check the authoring core-coverage guarantee at freeze time so a
+    // corrupted row cannot enter the w4c1 calculator path.
+    if (coreStartTime !== null && coreEndTime !== null) {
+      const parseHm = (value) => {
+        if (typeof value !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) return null
+        return Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5))
+      }
+      const segmentStartMin = parseHm(segments[0].startTime)
+      const coreStartMin = parseHm(coreStartTime)
+      const coreEndMin = parseHm(coreEndTime)
+      if (segmentStartMin === null || coreStartMin === null || coreEndMin === null) return null
+      if (!(coreEndMin > coreStartMin)) return null
+      const earliest = segmentStartMin - arrivalWindowBeforeMinutes
+      const latest = segmentStartMin + arrivalWindowAfterMinutes
+      if (!(latest <= coreStartMin && earliest + requiredMinutes >= coreEndMin)) return null
+    }
+    flexPolicy = {
+      mode: 'flex_required_duration',
+      requiredMinutes,
+      arrivalWindowBeforeMinutes,
+      arrivalWindowAfterMinutes,
+      coreStartTime,
+      coreEndTime,
+    }
+  }
+  const context = {
+    schemaVersion: 1,
+    selector: 'legacy',
+    orgId,
+    userId,
+    workDate,
+    timezone: typeof shift.timezone === 'string' && shift.timezone ? shift.timezone : timezone,
+    shiftId,
+    isWorkday: isWorkday !== false,
+    holidayKind: holidayKind ?? null,
+    calculationGroupId: null,
+    roundingMinutes: Math.max(0, Math.floor(Number(shift.rounding_minutes) || 0)),
+    severeLateThresholdMinutes,
+    absenceLateThresholdMinutes,
+    segments,
+  }
+  if (flexPolicy) context.flexPolicy = flexPolicy
+  return context
+}
+
 async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
   if (!userIds || userIds.length === 0) return []
   return db.query(
@@ -21153,6 +22811,7 @@ function clearHolidaySyncSchedule() {
 // query on holiday-rest days for orgs that haven't configured any policy).
 async function runAutoAbsenceForOrgDate(db, options) {
   const { orgId, workDate, logger, emit, skipDedup = false } = options
+  const recoveryRunId = typeof options.recoveryRunId === 'string' ? options.recoveryRunId : null
   const rule = options.rule ?? await loadDefaultRule(db, orgId)
   let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
   if (calendarOverrides === null) {
@@ -21167,13 +22826,37 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
   const holiday = await loadHoliday(db, orgId, workDate)
   // Optimization preserved ONLY when no policy can flip the holiday verdict.
-  if (calendarOverrides.length === 0 && holiday && holiday.isWorkingDay === false) {
+  if (recoveryRunId === null && calendarOverrides.length === 0 && holiday && holiday.isWorkingDay === false) {
     return { skipped: true, reason: 'holiday-rest-no-policy', total: 0 }
   }
   const key = `${orgId}:${workDate}`
-  if (!skipDedup && key === lastAutoAbsenceKey) {
+  const legacyDedupHit = !skipDedup && key === lastAutoAbsenceKey
+  const w4Boundary = options.w4Boundary ?? null
+  // Bare-module consumers have no posture-aware boundary, so retain the
+  // historical process-local dedup exactly. Production callers pass the
+  // boundary: it alone may honor this signal after proving the org is legacy;
+  // W4 postures always continue into the durable class-01 run protocol.
+  if (!w4Boundary && legacyDedupHit) {
     return { skipped: true, reason: 'dedup', total: 0 }
   }
+  // W4C-2 P2-1 fix (#4612 verdict second gate round): this query intentionally carries NO
+  // `ORDER BY` — restored to the exact pre-amendment (main) shape, byte-identical for the
+  // `legacy_projection_only` posture's `targetUsers`/`reviewRequired`/`reasons` construction
+  // (they are built by a single sequential loop over `userRows`, so row order is the entire
+  // ordering change; PostgreSQL's row order here was, and remains, unspecified absent an
+  // explicit sort).
+  //
+  // `O-2`/`OD-W4C-51=(a)` (RATIFIED, Bundle A, PR #4617) does NOT require pinning THIS query:
+  // it requires the frozen target-set fingerprint's resume recomputation (amendment section
+  // 1.7 step 3) to be a deterministic function of membership, and that is already, separately,
+  // guaranteed by `resolveAttendanceScheduledRunTargetSetV1`'s own explicit
+  // `sort((a, b) => a.userId < b.userId ...)` (w4c2-scheduled-run.ts) — a pure, in-process sort
+  // applied to whatever order this query returns. A prior revision of this comment claimed an
+  // `ORDER BY uo.user_id ASC` here was required for that fingerprint's byte-stability; that
+  // claim was never true (the fingerprint's ordinal comes from the TS-side sort, never from
+  // SQL row order) and, once added, silently changed the `legacy_projection_only` posture's
+  // byte-identical-to-main red line (verdict P2-1) — removing it restores that red line with
+  // zero effect on the W4 branch's frozen ordinal/fingerprint.
   const userRows = await db.query(
     `SELECT uo.user_id
      FROM user_orgs uo
@@ -21237,9 +22920,75 @@ async function runAutoAbsenceForOrgDate(db, options) {
       })
     }
   }
-  const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
+  // W4C-2 (#4556 lock §12.3): the scheduled direct insert is removed from the production
+  // initiators — both the cron callback (P03) and the administrator run (P04) supply the
+  // canonical boundary (`options.w4Boundary` + `options.initiator`), which executes the SAME
+  // closed absence adapter inside its canonical transaction (legacy posture: byte-identical
+  // single INSERT..SELECT; W4 posture: one durable scheduled operation per user). The direct
+  // `generateAbsenceRecords(db, ...)` call below remains ONLY for bare-module consumers that
+  // construct their own `db` (no host services port exists there, so no boundary can) — the
+  // production initiators fail closed instead of taking this branch when the boundary is
+  // missing (see the cron run loop and POST /api/attendance/auto-absence/run).
+  let rows
+  let suspendedByRollout = false
+  // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): for the w4
+  // branch (shadow/eligible/authoritative), run-level events are inserted
+  // into the durable outbox by the boundary's own finalization transaction
+  // and delivered ONLY via the dispatcher (owner red line, 2026-07-28
+  // addendum) — this caller's own synchronous `emit(...)` calls below MUST
+  // NOT also fire for that branch (double delivery). `legacy_projection_only`
+  // is UNCHANGED: it keeps the existing synchronous best-effort emit with
+  // byte-identical bytes, exactly as before this cutover.
+  let w4EventsHandledByDispatcher = false
+  if (w4Boundary) {
+    const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
+    // W4C-2 remediation P1-4 (#4612 gate finding): admin_run MUST carry the
+    // real host-authenticated administrator identity (route-supplied plain
+    // data, minted into a witness INSIDE the boundary — never the internal
+    // scheduler constant); cron MUST carry exactly null. The boundary rejects
+    // any other combination before minting any witness.
+    const adminActorId = initiator === 'admin_run' ? (options.adminActorId || null) : null
+    if (recoveryRunId !== null && typeof w4Boundary.recoverScheduledRun !== 'function') {
+      throw new Error('W4C2_SCHEDULED_RUN_RECOVERY_BOUNDARY_UNAVAILABLE')
+    }
+    const boundaryInput = {
+      orgId,
+      workDate,
+      timezone: rule.timezone,
+      targetUserIds: targetUsers,
+      // Same pre-resolved review list this function already computed above
+      // (attendance-work-date-resolver.cjs, unchanged) — the durable run's
+      // own target set (w4c2-scheduled-run.ts section 1.2/1.3) covers
+      // `review` targets too, never a re-derivation.
+      reviewTargets: reviewRequired.map((entry) => ({ userId: entry.userId, reasonCode: entry.reasonCode })),
+      initiator,
+      legacyDedupHit,
+    }
+    const outcome = recoveryRunId === null
+      ? await w4Boundary.executeScheduledRun({ ...boundaryInput, adminActorId })
+      : await w4Boundary.recoverScheduledRun({ ...boundaryInput, runId: recoveryRunId })
+    if (outcome.kind === 'suspended') {
+      suspendedByRollout = true
+      rows = []
+    } else if (outcome.kind === 'legacy_dedup') {
+      return { skipped: true, reason: 'dedup', total: 0 }
+    } else {
+      rows = outcome.rows
+      w4EventsHandledByDispatcher = outcome.kind === 'w4'
+    }
+  } else {
+    if (recoveryRunId !== null) {
+      throw new Error('W4C2_SCHEDULED_RUN_RECOVERY_BOUNDARY_UNAVAILABLE')
+    }
+    rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
+  }
+  if (suspendedByRollout) {
+    // Suspended rollout posture: closed synchronous outcome, zero source DML,
+    // no generated/review events (values-free reason code only).
+    return { skipped: true, reason: 'segment_calculation_suspended', total: 0 }
+  }
   if (!skipDedup) lastAutoAbsenceKey = key
-  if (emit) {
+  if (emit && !w4EventsHandledByDispatcher) {
     emit('attendance.absence.generated', {
       orgId,
       workDate,
@@ -21266,7 +23015,7 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
 }
 
-function scheduleAutoAbsence({ db, logger, emit }) {
+function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
   if (!settings.autoAbsence?.enabled) return
@@ -21283,28 +23032,61 @@ function scheduleAutoAbsence({ db, logger, emit }) {
   const delay = next.getTime() - now.getTime()
 
   const run = async () => {
+    // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
+    // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
+    if (!w4Boundary) {
+      logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+      return
+    }
+    // P1-1 fix, item 3 (#4612 verdict second gate round): the org-list query itself is a
+    // single legitimate whole-tick failure (nothing per-org to isolate before org ids exist).
+    // Everything AFTER this point is isolated PER (org, offset) below — a prior revision wrapped
+    // the entire double loop in ONE try, so a single org's `AttendanceW4ScheduledRunIdentityError`
+    // (e.g. the target-set-drift fail-closed remediation, amendment section 1.7 step 3) or the
+    // new `W4C2_SCHEDULED_RUN_TARGET_CONTENDED` retry-exhaustion outcome (P1-2 fix) aborted the
+    // REST of that tick's orgs and lookback days too, repeating every day the stuck workDate
+    // stayed inside the lookback window.
+    let orgIds
     try {
-      const lookbackDays = settings.autoAbsence.lookbackDays || 1
       const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      const orgIds = orgRows.length > 0
+      orgIds = orgRows.length > 0
         ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
         : [DEFAULT_ORG_ID]
-      for (const orgId of orgIds) {
-        const rule = await loadDefaultRule(db, orgId)
-        for (let offset = 1; offset <= lookbackDays; offset += 1) {
-          const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
-          const workDate = toWorkDate(targetDate, rule.timezone)
+    } catch (error) {
+      logger.error('Auto absence job failed (org list)', error)
+      return
+    }
+    const lookbackDays = settings.autoAbsence.lookbackDays || 1
+    for (const orgId of orgIds) {
+      let rule
+      try {
+        rule = await loadDefaultRule(db, orgId)
+      } catch (error) {
+        logger.error('Auto absence job failed for org (rule load)', { orgId, error })
+        continue
+      }
+      for (let offset = 1; offset <= lookbackDays; offset += 1) {
+        const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
+        const workDate = toWorkDate(targetDate, rule.timezone)
+        try {
           await runAutoAbsenceForOrgDate(db, {
             orgId,
             workDate,
             rule,
             logger,
             emit,
+            w4Boundary,
+            initiator: 'cron',
           })
+        } catch (error) {
+          // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
+          // module (e.g. "Auto absence generated for ${workDate}" a few lines below), never
+          // the offending business value. One org/date's failure (drift wedge, target-set
+          // contention exhaustion, or any other error) must not skip the remaining orgs/dates
+          // in this tick.
+          logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
         }
       }
-    } catch (error) {
-      logger.error('Auto absence job failed', error)
     }
   }
 
@@ -22176,9 +23958,29 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  // W4C-2 Stage D: runtime probe for the env-gated outbox drain worker. `getState().gated`
+  // is true ONLY when activate saw ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty
+  // (no env => no worker); `runOnce()` is the EXACT closure the shared scheduler ticks, so
+  // a test drain proves the production glue (port dispatcher + plugin emitEvent), not a copy.
+  __attendanceW4OutboxDrainForTests: {
+    getState: () => ({ gated: w4OutboxDrainRunOnce !== null }),
+    runOnce: () => (w4OutboxDrainRunOnce
+      ? w4OutboxDrainRunOnce()
+      : Promise.reject(new Error('W4_OUTBOX_DRAIN_NOT_GATED'))),
+  },
   __attendanceShiftServiceForTests: {
     lib: attendanceShiftServiceLib,
     getService: getAttendanceShiftService,
+  },
+  // FSER-3 (#4709): direct-call seam for the fixed-schedule apply/rebuild write paths
+  // so lock-order (config FOR UPDATE before any per-user advisory target lock) and
+  // canonical producer-key parity can be proven without a full HTTP harness.
+  __attendanceGroupFixedScheduleForTests: {
+    applyAttendanceGroupFixedSchedule,
+    rebuildAttendanceGroupFixedSchedule,
+    buildAttendanceGroupFixedScheduleProducerKey,
+    runAttendanceGroupFixedScheduleTransaction,
+    configServiceLib: attendanceGroupFixedScheduleConfigServiceLib,
   },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
@@ -22186,6 +23988,22 @@ module.exports = {
     parseImportedPunchDateTimes,
     resolvePunchWorkDateByShiftWindow,
   },
+  // W4C-2 remediation (advisor declare-item, PR #4612): direct-call seam for the
+  // in-transaction legacy attribution re-derivation added by P1-3, so its narrow
+  // ambiguous/shift-row-changed rejection branches can be proven without needing
+  // a genuine two-connection race (the branch is reachable only via a real
+  // concurrent modification between the route's pre-check and this transaction;
+  // this seam tests the branch's OWN behavior once hit, not end-to-end HTTP
+  // reachability of the race itself).
+  __attendanceW4c2LegacyAttributionForTests: {
+    deriveLegacyLivePunchAttributionV1,
+    HttpError,
+  },
+  // W4C-2 remediation P2 (#4612 review "腿1"): installs/clears the pre-boundary race
+  // seam declared above (POST /api/attendance/punch, after route precheck, before the
+  // canonical write-boundary transaction). Pass null to clear. Throws outside a test
+  // runtime — see the setter's own guard.
+  __setAttendanceW4LivePunchPreBoundarySeamForTests,
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
@@ -22208,6 +24026,17 @@ module.exports = {
     lib: attendanceWorkDateResolverLib,
     adaptersLib: attendanceWorkDateAdaptersLib,
   },
+  __attendanceMakeupPunchForTests: {
+    deriveMakeupAnomalyFacts,
+  },
+  // W4C-3c test seams — boundary still enforces capability/authorization.
+  get __attendanceW4RecordOperationBoundaryForTests() {
+    return w4RecordOperationBoundary
+  },
+  get __attendanceW4ActiveCurrentPortForTests() {
+    return attendanceW4ActiveCurrentPort
+  },
+  __attendanceW4CurrentPolicyTimezoneForTests: requireStrictCurrentPolicyTimezone,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -22215,6 +24044,30 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+    rawImportFieldPresence,
+    firstDefinedPresence,
+    buildRawImportEvidenceV1,
+    buildImportRowProvenanceV1,
+    buildImportCanonicalFreezeSourceV1,
+    buildClosedImportAttributionSnapshotV1,
+    buildClosedImportPolicySnapshotV1,
+    resolveLegacyImportRowSourceKind,
+    sha256HexOfUtf8,
+  },
+  __attendanceW4C3aSyncCompatibilityForTests: {
+    foldAttendanceImportPreparedTargets,
+    prepareAttendanceImportRecordRows,
+    normalizeAttendanceSyncImportLockWitness,
+    projectAttendanceImportExecutionReasonCode,
+    classifyAttendanceV1ImportReservationForSync,
+    acquireAttendanceSyncImportReservationLocks,
+    loadAttendanceV1ImportReservationForSync,
+    assertAttendanceV1ImportReservationAllowsSync,
+    isAttendanceSyncImportRetryableTransactionError,
+    runAttendanceSyncImportSerializableTransaction,
+    runAttendanceLegacyNullVersionCommitAtomically,
+    drainAttendanceImportStartupRecoveryPages,
+    applyAttendanceReservedImportJobSnapshot,
   },
   __attendanceImportPathForTests: {
     getImportUploadPaths,
@@ -22266,6 +24119,7 @@ module.exports = {
     clampLotValidityDays,
     overtimeBankCapDecision,
     buildCycleSettlementRows,
+    snapshotCycleSettlementOnClose,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
@@ -22314,6 +24168,7 @@ module.exports = {
     getAttendanceReportPeriodSummariesDescriptor,
     getAttendanceReportPeriodSummariesViewDescriptor,
     ensureAttendanceReportPeriodSummaries,
+    loadAttendancePeriodSummaryEmployeeInfo,
     resolveAttendanceReportPeriodSummaryManagedFormulaFields,
     buildAttendanceReportPeriodSummaryValueFields,
     buildAttendanceReportPeriodSummaryValueColumns,
@@ -22532,6 +24387,373 @@ module.exports = {
       }
     }
 
+    // W4C-2 (#4556 lock §12.2 last sentence; #4607 gate handover P3-4): default-rule and
+    // shift timezone WRITES must pass the single strict W4 IANA validator
+    // (`validateAttendanceIanaTimezoneV1`, host-provided via the least-privilege
+    // `attendanceW4SegmentCalculation` port — same posture as approvalAssigneeResolver:
+    // the plugin never copies the validator, one source, no drift). A persisted invalid
+    // zone must never become a future calculation input, so a timezone-carrying write
+    // FAILS CLOSED when the port is absent instead of falling back to the looser local
+    // Intl probe (which accepts offset forms like "+05:00"). Reads and writes that do
+	    // not carry a timezone value are untouched.
+	    const attendanceW4SegmentCalculationPort = context?.services?.attendanceW4SegmentCalculation ?? null
+	    // W4C-3c P20: singular active-current helper port (never re-implemented in the plugin).
+	    attendanceW4ActiveCurrentPort = attendanceW4SegmentCalculationPort?.activeCurrent ?? null
+
+	    // W4C-3b P12 (lock §7.2 / §12.5 / OD-W4C-33): immutable request calculation
+	    // snapshot plumbing via the least-privilege host port. legacy_projection_only
+	    // is a no-op inside the host (zero snapshot rows). Missing methods keep
+	    // pre-P12 request behavior (byte-identical when posture is legacy).
+	    const rethrowAttendanceRequestSnapshotError = (error) => {
+	      if (error && typeof error === 'object' && typeof error.code === 'string' && String(error.code).startsWith('W4C3B_REQUEST_SNAPSHOT_')) {
+	        const status = Number.isInteger(error.statusCode) ? error.statusCode : 409
+	        throw new HttpError(status, error.code, error.message || error.code)
+	      }
+	      throw error
+	    }
+	    const buildRequestSnapshotPayloadFieldsFromDraft = (draftOrRow, metadata) => {
+	      const meta = normalizeMetadata(metadata ?? draftOrRow?.metadata)
+	      const minutesRaw = meta.minutes
+	      const minutes =
+	        typeof minutesRaw === 'number' && Number.isFinite(minutesRaw) && minutesRaw >= 0
+	          ? Math.trunc(minutesRaw)
+	          : null
+	      const leaveTypeCode =
+	        typeof meta.leaveType?.code === 'string' && meta.leaveType.code.trim()
+	          ? meta.leaveType.code.trim()
+	          : typeof meta.leaveTypeCode === 'string' && meta.leaveTypeCode.trim()
+	            ? meta.leaveTypeCode.trim()
+	            : null
+	      const outdoor = normalizeMetadata(meta.outdoorPunch)
+	      let outdoorPunch = null
+	      if (
+	        outdoor
+	        && (outdoor.eventType === 'check_in' || outdoor.eventType === 'check_out')
+	        && typeof outdoor.occurredAt === 'string'
+	        && outdoor.occurredAt
+	        && typeof outdoor.timezone === 'string'
+	        && outdoor.timezone
+	      ) {
+	        outdoorPunch = {
+	          eventType: outdoor.eventType,
+	          occurredAt: outdoor.occurredAt,
+	          timezone: outdoor.timezone,
+	          source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
+	        }
+	      }
+	      return { minutes, leaveTypeCode, outdoorPunch }
+	    }
+	    const buildRequestSnapshotPayloadFromDraft = (draft, metadata) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCalculationPayloadFromRequestRow !== 'function') return null
+	      return port.buildRequestCalculationPayloadFromRequestRow({
+	        workDate: draft.workDate,
+	        requestedInAt: draft.requestedInAt ?? null,
+	        requestedOutAt: draft.requestedOutAt ?? null,
+	        reason: draft.reason ?? null,
+	        ...buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+	      })
+	    }
+	    const buildUnsupportedRequestSnapshotMaterial = (reason = 'missing') => {
+	      const port = attendanceW4SegmentCalculationPort
+	      const attributionSnapshot =
+	        port && typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	          ? port.buildUnsupportedRequestAttributionSnapshot(reason)
+	          : {
+	              posture: 'unsupported',
+	              sourceSchemaVersion: null,
+	              reason,
+	              sourceFingerprint: null,
+	            }
+	      return { attributionSnapshot, contextSnapshot: null }
+	    }
+	    const resolveRequestCreationSnapshotMaterial = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildRequestCreationAttributionSnapshotV1 !== 'function') {
+	        return buildUnsupportedRequestSnapshotMaterial('missing')
+	      }
+	      const defaultRule = await loadDefaultRule(trx, args.orgId)
+	      const workContext = await resolveWorkContext({
+	        db: trx,
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: args.workDate,
+	        defaultRule,
+	      })
+	      const timezone =
+	        typeof workContext?.rule?.timezone === 'string' && workContext.rule.timezone
+	          ? workContext.rule.timezone
+	          : defaultRule.timezone
+	      const resolution = args.occurredAt
+	        ? await resolveW4LiveCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            occurredAt: args.occurredAt,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	        : await resolveW4ScheduledCandidateInTransactionV1(trx, {
+	            orgId: args.orgId,
+	            userId: args.userId,
+	            timezone,
+	            calendarWorkDate: args.workDate,
+	          })
+	      const attributionSnapshot = port.buildRequestCreationAttributionSnapshotV1({
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        nowIso: new Date().toISOString(),
+	        resolution,
+	      })
+	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
+	        return { attributionSnapshot, contextSnapshot: null }
+	      }
+	      const contextSnapshot = await buildW4ShadowFrozenContextV1(trx, {
+	        orgId: args.orgId,
+	        userId: args.userId,
+	        workDate: attributionSnapshot.value.workDate,
+	        shiftId: attributionSnapshot.value.shiftId,
+	        timezone:
+	          resolution?.fullWinner && typeof resolution.fullWinner.timezone === 'string'
+	            ? resolution.fullWinner.timezone
+	            : timezone,
+	        isWorkday: workContext?.isWorkingDay !== false,
+	        holidayKind: workContext?.holiday?.kind ?? null,
+	      })
+	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
+	      return { attributionSnapshot, contextSnapshot }
+	    }
+	    const buildRequestSnapshotToken = (appendResult) =>
+	      appendResult && appendResult.kind === 'appended'
+	        ? {
+	            version: appendResult.snapshot.version,
+	            fingerprint: appendResult.snapshot.payloadFingerprint,
+	          }
+	        : null
+	    const appendRequestCalculationSnapshotOnCreate = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnCreate !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnCreate({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot:
+	            args.attributionSnapshot
+	            ?? (typeof port.buildUnsupportedRequestAttributionSnapshot === 'function'
+	              ? port.buildUnsupportedRequestAttributionSnapshot('missing')
+	              : {
+	                posture: 'unsupported',
+	                sourceSchemaVersion: null,
+	                reason: 'missing',
+	                sourceFingerprint: null,
+	              }),
+	          contextSnapshot: args.contextSnapshot ?? null,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const appendRequestCalculationSnapshotOnEdit = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.appendRequestCalculationSnapshotOnEdit !== 'function') return null
+	      try {
+	        return await port.appendRequestCalculationSnapshotOnEdit({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          currentRequestType: args.currentRequestType,
+	          subjectUserId: args.subjectUserId,
+	          actorUserId: args.actorUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	          payload: args.payload,
+	          payloadFields: args.payloadFields ?? null,
+	          attributionSnapshot: args.attributionSnapshot,
+	          contextSnapshot: args.contextSnapshot,
+	          resolveSnapshots: args.resolveSnapshots,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const lockRequestSnapshotBeforeTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.lockRequestSnapshotBeforeTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.lockRequestSnapshotBeforeTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const bindRequestSnapshotOnTerminalDecision = async (trx, args) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.bindRequestSnapshotOnTerminalDecision !== 'function') {
+	        return { kind: 'legacy_skipped', writePosture: 'legacy_projection_only' }
+	      }
+	      try {
+	        return await port.bindRequestSnapshotOnTerminalDecision({
+	          client: trx,
+	          orgId: args.orgId,
+	          requestId: args.requestId,
+	          requestType: args.requestType,
+	          subjectUserId: args.subjectUserId,
+	          action: args.action,
+	          approvalVersion: args.approvalVersion,
+	          approvalRecordId: args.approvalRecordId,
+	          expectedSnapshotVersion: args.expectedSnapshotVersion,
+	          expectedSnapshotFingerprint: args.expectedSnapshotFingerprint,
+	        })
+	      } catch (error) {
+	        rethrowAttendanceRequestSnapshotError(error)
+	      }
+	    }
+	    const requestSnapshotTerminalBindingMetaKey =
+	      attendanceW4SegmentCalculationPort
+	      && typeof attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey === 'string'
+	        ? attendanceW4SegmentCalculationPort.requestSnapshotTerminalBindingMetaKey
+	        : 'w4RequestSnapshotTerminalBinding'
+
+	    const buildAttendanceSyncImportReservationLockWitness = ({ orgId, idempotencyKey }) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.buildLegacyImportReservationLockWitness !== 'function') {
+	        throw new HttpError(
+	          503,
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        )
+	      }
+	      try {
+	        const witness = port.buildLegacyImportReservationLockWitness({ orgId, idempotencyKey })
+	        // A legacy org outside the canonical W4 rollout domain cannot own a
+	        // V1 reservation. Preserve its existing sync path; the locked
+	        // reservation recheck below still fails closed if such a row exists.
+	        if (witness === null) return null
+	        if (!normalizeAttendanceSyncImportLockWitness(witness)) {
+	          throw new Error('ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_INVALID')
+	        }
+	        return witness
+	      } catch (_error) {
+	        throw new HttpError(
+	          503,
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	          'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        )
+	      }
+	    }
+	    // Returns true when it has already written the response (invalid zone / port missing); callers must return.
+	    const respondUnlessStrictIanaTimezoneWrite = (res, zone, fieldName = 'timezone') => {
+      if (zone === undefined || zone === null) return false
+      const port = attendanceW4SegmentCalculationPort
+      if (!port || typeof port.validateIanaTimezone !== 'function') {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_TIMEZONE_VALIDATOR_UNAVAILABLE', message: 'Strict timezone validation service unavailable' },
+        })
+        return true
+      }
+      try {
+        port.validateIanaTimezone(zone)
+        return false
+      } catch (_error) {
+        // Values-free: the submitted zone is never echoed back.
+        res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: `${fieldName} must be a valid IANA time zone` },
+        })
+        return true
+      }
+    }
+
+    // W4C-2 (#4556 lock §8.1/§12.3): the canonical live/scheduled write boundary. Constructed
+    // ONCE at activate — the plugin injects its closed legacy execution adapters (module
+    // functions over the boundary's own transaction wrapper); routes submit pure data and no
+    // per-request callback exists (lock §4.1). When the host port is absent (non-core host /
+    // bare-module harness) the boundary is null and every production initiator FAILS CLOSED
+    // (503 / skipped job) instead of re-entering the old writer.
+    const w4MergePolicyPure =
+      attendanceW4SegmentCalculationPort && typeof attendanceW4SegmentCalculationPort.applyMergePolicyPure === 'function'
+        ? attendanceW4SegmentCalculationPort.applyMergePolicyPure
+        : null
+    // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round): the ONE
+    // new port method for the lock §8.2 step 7 source-definition fingerprint
+    // half. Required for the SAME reason `w4MergePolicyPure` is required
+    // above — if the host provided the boundary factory but NOT this method,
+    // the route would have no way to supply `outerSourceDefinitionFingerprint`
+    // and every ordinary (non-race) punch would false-drift into
+    // `review_required` (a `null` outer value could never match a real inner
+    // one). Folding it into the SAME required-methods gate that already
+    // fails closed (503) keeps that failure mode unreachable — the boundary
+    // itself simply does not exist when this method is missing, exactly
+    // like the `applyMergePolicyPure`/`createLiveScheduledBoundary` case.
+    const w4ComputeOuterSourceDefinitionFingerprint =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1 === 'function'
+        ? attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1
+        : null
+    const w4LiveScheduledBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
+      && w4MergePolicyPure
+      && w4ComputeOuterSourceDefinitionFingerprint
+        ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
+            legacyAdapters: {
+              applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
+              applyScheduledAbsenceLegacy: (trx, args) =>
+                generateAbsenceRecords(trx, args.orgId, args.workDate, args.timezone, args.userIds),
+              resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),
+              resolveScheduledCandidate: (trx, args) => resolveW4ScheduledCandidateInTransactionV1(trx, args),
+              buildShadowFrozenContext: (trx, args) => buildW4ShadowFrozenContextV1(trx, args),
+            },
+          })
+        : null
+    // Assigned later once request adapters are closed over; outdoor punch may
+    // call it before the assignment line in source order but only after activate.
+    let w4RequestOperationBoundary = null
+    // Values-free HTTP mapping for typed W4 boundary/registry/command/authorization errors
+    // (closed codes only; the raw caller value is never echoed). Returns true when handled.
+    const W4_ERROR_NAMES = new Set([
+      'AttendanceW4OperationError',
+      'AttendanceW4RegistryError',
+      'AttendanceW4CommandError',
+      'AttendanceW4AuthorizationError',
+      'AttendanceW4LiveScheduledBoundaryError',
+      'AttendanceW4RequestBoundaryError',
+      'ApprovedLeaveCancellationError',
+      'AttendanceW4MergePolicyError',
+      // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
+      // durable run-creation/resume/outcome/finalization machine's own
+      // values-free error class (w4c2-scheduled-run.ts).
+      'AttendanceW4ScheduledRunIdentityError',
+      // W4C-3c manual / recompute / ops_retirement apply modules.
+      'AttendanceW4ManualOverrideError',
+      'AttendanceW4RecomputeError',
+      'AttendanceW4OpsRetirementError',
+      'AttendanceW4RecordBoundaryError',
+    ])
+    const respondIfW4BoundaryError = (res, error) => {
+      if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
+      const code = typeof error.code === 'string' && error.code ? error.code : 'W4_OPERATION_FAILED'
+      const status = Number.isInteger(error.httpStatus) ? error.httpStatus : 422
+      res.status(status).json({ ok: false, error: { code, message: code } })
+      return true
+    }
+
     // T3-2: register the working-day calendar provider (adapter) the approval SLA path consults through
     // the WorkdayCalendarPort. This is the ONLY approval↔attendance coupling — approval never reads
     // attendance_* tables; it calls resolve(orgId, asOf) and receives a snapshot day-mask. The adapter
@@ -22621,6 +24843,38 @@ module.exports = {
       return false
     }
 
+    async function resolveAttendanceFixedScheduleRouteActorContext(req, res) {
+      const userId = getAuthenticatedUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = getAuthenticatedOrgId(req)
+      if (!orgId) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+        return null
+      }
+
+      const orgSelectors = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
+        .flatMap(value => Array.isArray(value) ? value : [value])
+        .filter(value => value !== undefined && value !== null)
+      const userSelectors = [req.headers['x-user-id']]
+        .flatMap(value => Array.isArray(value) ? value : [value])
+        .filter(value => value !== undefined && value !== null)
+      if (orgSelectors.some(value => value !== orgId) || userSelectors.some(value => value !== userId)) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        return null
+      }
+
+      try {
+        return { userId, orgId, fullAdmin: await hasAttendanceAdminAccess(userId) }
+      } catch (error) {
+        logger.error('Attendance fixed schedule actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
     async function resolveAttendanceSchedulerScopeActor(req, res) {
       const userId = getUserId(req)
       if (!userId) {
@@ -22633,6 +24887,19 @@ module.exports = {
         return { userId, orgId, fullAdmin }
       } catch (error) {
         logger.error('Attendance scheduler scope actor resolution failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    async function resolveAttendanceGroupRouteSchedulerScopeActor(req, res) {
+      const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      if (!actorAccess) return null
+      try {
+        const fullAdmin = await hasAttendanceAdminAccess(actorAccess.userId)
+        return { ...actorAccess, fullAdmin }
+      } catch (error) {
+        logger.error('Attendance group-route scheduler actor resolution failed', error)
         res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
         return null
       }
@@ -23097,30 +25364,6 @@ module.exports = {
       return resolveAttendanceUserSchedulerScopeFacts(client, orgId, requestRow?.user_id, { workDate })
     }
 
-    async function assertAttendanceRequestApprovalAllowed(req, { client, requestRow }) {
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        throw new HttpError(401, 'UNAUTHORIZED', 'User ID not found')
-      }
-      const orgId = requestRow?.org_id ?? getOrgId(req)
-
-      if (await canAccessOtherUsers(requesterId)) return
-
-      const actorContext = await loadAttendanceScopeContextForUser(client, orgId, requesterId)
-      const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, client)
-      const facts = await resolveAttendanceRequestApprovalScopeFacts(client, orgId, requestRow)
-      const allowed = scopes.some(scope =>
-        attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts)
-      )
-      if (!allowed) {
-        throw new HttpError(
-          403,
-          'SCHEDULER_SCOPE_FORBIDDEN',
-          'Scheduler scope does not allow this attendance approval action'
-        )
-      }
-    }
-
     async function assertAttendanceRecordExportAllowed(req, res, { orgId, userId, from, to }) {
       const access = await resolveAttendanceSchedulerScopeActor(req, res)
       if (!access) return null
@@ -23254,6 +25497,16 @@ module.exports = {
       return assertAttendanceImportRowsAllowed(req, res, { ...options, operation: 'commit' })
     }
 
+    async function assertAttendanceGroupInActorOrg(client, res, { groupId, orgId }) {
+      const rows = await client.query(
+        'SELECT id FROM attendance_groups WHERE id = $1 AND org_id = $2 LIMIT 1',
+        [groupId, orgId]
+      )
+      if (rows.length) return true
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+      return false
+    }
+
     function withAttendanceGroupMemberAccess(handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
@@ -23262,9 +25515,17 @@ module.exports = {
           return
         }
 
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+
         const invokeHandler = async () => {
           try {
-            await handler(req, res, next)
+            const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+              groupId,
+              orgId: actorAccess.orgId,
+            })
+            if (!groupExists) return
+            await handler(req, res, next, actorAccess)
           } catch (error) {
             if (error instanceof HttpError && !res.headersSent) {
               res.status(error.status).json({
@@ -23281,20 +25542,13 @@ module.exports = {
           }
         }
 
-        const userId = getUserId(req)
-        if (!userId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
-
         if (process.env.RBAC_BYPASS === 'true') {
           await invokeHandler()
           return
         }
 
         try {
-          const orgId = getOrgId(req)
-          if (await hasAttendanceAdminAccess(userId) || await userManagesAttendanceGroup(orgId, groupId, userId)) {
+          if (await hasAttendanceAdminAccess(actorAccess.userId)) {
             await invokeHandler()
             return
           }
@@ -23659,6 +25913,10 @@ module.exports = {
 
     const punchSchema = z.object({
       eventType: z.enum(['check_in', 'check_out']),
+      // W4C-2 (#4556 lock §7.1): optional client-supplied stable operation UUID — a
+      // response-loss retry with the same key and congruent payload replays the stored
+      // response. Absent (every pre-W4 client) => the legacy null-ID command contract.
+      operationId: z.string().uuid().optional(),
       occurredAt: z.string().optional(),
       occurred_at: z.string().optional(),
       timezone: z.string().optional(),
@@ -23680,6 +25938,20 @@ module.exports = {
       endDayOffset: z.number().int().min(0).max(1).optional(),
     }).strict()
 
+    // W5: route-level shape gate only; strict discriminated validation and
+    // multi-segment rejection live in the canonical shift service.
+    const shiftFlexPolicySchema = z.union([
+      z.object({ mode: z.literal('strict') }).strict(),
+      z.object({
+        mode: z.literal('flex_required_duration'),
+        requiredMinutes: z.number().int().min(1).max(1440),
+        arrivalWindowBeforeMinutes: z.number().int().min(0),
+        arrivalWindowAfterMinutes: z.number().int().min(0),
+        coreStartTime: z.string().nullable().optional(),
+        coreEndTime: z.string().nullable().optional(),
+      }).strict(),
+    ])
+
     const shiftCreateSchema = z.object({
       name: z.string().trim().min(1).max(200),
       timezone: z.string().optional(),
@@ -23691,6 +25963,7 @@ module.exports = {
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
       workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+      flexPolicy: shiftFlexPolicySchema.optional(),
       orgId: z.string().optional(),
     }).strict()
     const shiftUpdateSchema = shiftCreateSchema.partial()
@@ -24110,6 +26383,8 @@ module.exports = {
 	      csvFileId: z.string().uuid().optional(),
 	      fileId: z.string().uuid().optional(),
 	      csvText: z.string().optional(),
+	      convertedArtifactFileId: z.string().uuid().optional(),
+	      convertedSheetName: z.string().trim().min(1).max(200).optional(),
 	      csvOptions: z.object({
 	        delimiter: z.string().optional(),
 	        headerRowIndex: z.number().int().nonnegative().optional(),
@@ -24128,6 +26403,16 @@ module.exports = {
       })).optional(),
 		      statusMap: z.record(z.string()).optional(),
 		      mode: z.enum(['merge', 'override']).optional(),
+		    }).superRefine((payload, ctx) => {
+		      const hasArtifact = Boolean(payload.convertedArtifactFileId)
+		      const hasSheet = Boolean(payload.convertedSheetName)
+		      if (hasArtifact !== hasSheet) {
+		        ctx.addIssue({
+		          code: z.ZodIssueCode.custom,
+		          path: hasArtifact ? ['convertedSheetName'] : ['convertedArtifactFileId'],
+		          message: 'convertedArtifactFileId and convertedSheetName must be provided together',
+		        })
+		      }
 		    })
 
 		    // ============================================================
@@ -24232,15 +26517,55 @@ module.exports = {
 
 		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
 		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
+		      if (meta.kind === 'xlsx_client_source_artifact') {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+		      }
 		      const paths = getImportUploadPaths({ orgId, fileId })
 		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
 		      return { csvText, meta }
 		    }
 
+		    const loadImportConvertedArtifactProofOrThrow = async ({ orgId, fileId, requesterId }) => {
+		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
+		      if (
+		        meta.kind !== 'xlsx_client_source_artifact'
+		        || meta.orgId !== orgId
+		        || meta.createdBy !== requesterId
+		      ) {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import artifact not found')
+		      }
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      let stat
+		      let sha256
+		      try {
+		        stat = await fsp.stat(paths.artifactPath)
+		        sha256 = await sha256HexOfFile(paths.artifactPath)
+		      } catch {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import artifact not found')
+		      }
+		      if (
+		        !stat.isFile()
+		        || stat.size !== Number(meta.bytes)
+		        || !/^[0-9a-f]{64}$/.test(String(meta.sha256 ?? ''))
+		        || sha256 !== meta.sha256
+		      ) {
+		        throw new HttpError(
+		          409,
+		          'ATTENDANCE_IMPORT_ARTIFACT_INTEGRITY_MISMATCH',
+		          'ATTENDANCE_IMPORT_ARTIFACT_INTEGRITY_MISMATCH'
+		        )
+		      }
+		      return { sha256, bytes: stat.size }
+		    }
+
 		    const deleteImportUpload = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) return
 		      const paths = getImportUploadPaths({ orgId, fileId })
-		      await Promise.allSettled([fsp.unlink(paths.csvPath), fsp.unlink(paths.metaPath)])
+		      await Promise.allSettled([
+		        fsp.unlink(paths.csvPath),
+		        fsp.unlink(paths.artifactPath),
+		        fsp.unlink(paths.metaPath),
+		      ])
 		    }
 
 		    // Best-effort cleanup to avoid upload directory growth if users preview but never commit.
@@ -24629,10 +26954,26 @@ module.exports = {
 	      }
 	    }
 
-	    const mapImportJobRow = (row) => {
-	      const payload = normalizeMetadata(row.payload)
-	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
-	      const status = normalizeImportJobStatus(row.status)
+		    const mapImportJobRow = (row) => {
+		      const status = normalizeImportJobStatus(row.status)
+		      const isV1 = Number(row.w4_contract_version) === 1
+		      if (
+		        isV1 &&
+		        status === 'completed' &&
+		        (!row.w4_terminal_response ||
+		          typeof row.w4_terminal_response !== 'object' ||
+		          Array.isArray(row.w4_terminal_response))
+		      ) {
+		        const error = new Error('ATTENDANCE_IMPORT_LEGACY_TERMINAL_RESPONSE_MISSING')
+		        error.code = 'ATTENDANCE_IMPORT_LEGACY_TERMINAL_RESPONSE_MISSING'
+		        throw error
+		      }
+		      const payload = normalizeMetadata(
+		        isV1 && status === 'completed'
+		          ? row.w4_terminal_response
+		          : row.payload
+		      )
+		      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
 	      const progress = Number(row.progress ?? 0)
 	      const total = Number(row.total ?? 0)
 	      const summary = normalizeMetadata(payload?.summary)
@@ -24688,10 +27029,11 @@ module.exports = {
 	        failedRows,
 	        skippedCount,
 	        skippedRows,
-	        elapsedMs,
-	        throughputRowsPerSec,
-	        error: row.error ?? null,
-	        preview,
+		        elapsedMs,
+		        throughputRowsPerSec,
+		        error: row.error ?? null,
+		        ...projectAttendanceImportExecutionReasonCode(row),
+		        preview,
 	        startedAt: row.started_at ?? null,
 	        finishedAt: row.finished_at ?? null,
 	        createdAt: row.created_at ?? null,
@@ -24725,45 +27067,57 @@ module.exports = {
 
 	    const getQueueService = () => context?.services?.queue
 
-	    const buildImportJobProjectionSql = () => `
-	      SELECT
-	        id,
-	        org_id,
-	        batch_id,
-	        created_by,
-	        idempotency_key,
-	        status,
-	        progress,
-	        total,
-	        error,
-	        started_at,
-	        finished_at,
-	        created_at,
-	        updated_at,
-	        CASE
-	          WHEN payload IS NULL THEN NULL
-	          ELSE payload - 'rows' - 'entries' - 'csvText'
-	        END AS payload
-	      FROM attendance_import_jobs`
+		    const buildImportJobProjectionSql = () => `
+		      SELECT
+		        job.id,
+		        job.org_id,
+		        job.batch_id,
+		        job.created_by,
+		        job.idempotency_key,
+		        job.status,
+		        job.progress,
+		        job.total,
+		        job.error,
+		        job.started_at,
+		        job.finished_at,
+		        job.created_at,
+		        job.updated_at,
+		        job.w4_contract_version,
+		        job.w4_legacy_input_fingerprint,
+		        job.w4_execution_reason_code,
+		        CASE
+		          WHEN job.payload IS NULL THEN NULL
+		          ELSE job.payload - 'rows' - 'entries' - 'csvText'
+		        END AS payload,
+		        terminal.response AS w4_terminal_response
+		      FROM attendance_import_jobs AS job
+		      LEFT JOIN attendance_import_legacy_terminal_responses AS terminal
+		        ON terminal.job_id = job.id AND terminal.org_id = job.org_id`
 
-	    const loadImportJob = async (jobId, orgId) => {
-	      const rows = await db.query(
-	        `${buildImportJobProjectionSql()} WHERE id = $1 AND org_id = $2`,
-	        [jobId, orgId]
-	      )
-	      return rows.length ? rows[0] : null
+		    const loadImportJob = async (jobId, orgId) => {
+		      const rows = await db.query(
+		        `${buildImportJobProjectionSql()} WHERE job.id = $1 AND job.org_id = $2`,
+		        [jobId, orgId]
+		      )
+		      return rows.length ? rows[0] : null
 	    }
 
 	    const loadImportJobByIdempotencyKey = async (orgId, idempotencyKey) => {
-	      if (!idempotencyKey) return null
-	      const rows = await db.query(
-	        `${buildImportJobProjectionSql()}
-	         WHERE org_id = $1 AND idempotency_key = $2
-	         ORDER BY created_at DESC
-	         LIMIT 1`,
-	        [orgId, idempotencyKey]
-	      )
+		      if (!idempotencyKey) return null
+		      const rows = await db.query(
+		        `${buildImportJobProjectionSql()}
+		         WHERE job.org_id = $1 AND job.idempotency_key = $2
+		         ORDER BY job.created_at DESC
+		         LIMIT 1`,
+		        [orgId, idempotencyKey]
+		      )
 	      return rows.length ? rows[0] : null
+	    }
+
+	    const mapReservedImportJobRow = (row, reservation) => {
+	      return mapImportJobRow(
+	        applyAttendanceReservedImportJobSnapshot(row, reservation),
+	      )
 	    }
 
 	    const updateImportJobProgress = async ({ jobId, orgId, status, progress, total, error, startedAt, finishedAt }) => {
@@ -25021,7 +27375,96 @@ module.exports = {
 	      )
 	    }
 
-	    const activeAsyncImportJobIds = new Set()
+		    const activeAsyncImportJobIds = new Set()
+
+		    const deleteImportUploadForDurableCleanup = async ({ orgId, fileId }) => {
+		      if (!isUuidLike(fileId)) {
+		        throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_IDENTITY_INVALID')
+		      }
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      const settled = await Promise.allSettled([
+		        fsp.unlink(paths.csvPath),
+		        fsp.unlink(paths.metaPath),
+		      ])
+		      for (const result of settled) {
+		        if (result.status === 'fulfilled') continue
+		        if (result.reason && result.reason.code === 'ENOENT') continue
+		        throw result.reason
+		      }
+		    }
+
+		    const drainImportUploadCleanupCommand = async (jobId) => {
+		      const rowId = String(jobId || '').trim()
+		      if (!isUuidLike(rowId)) return false
+		      const claimToken = randomUUID()
+		      const leaseExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+		      try {
+		        const claimRows = await db.query(
+		          `SELECT attendance_claim_import_upload_cleanup_command(
+		             $1::uuid, $2::uuid, $3::timestamptz
+		           ) AS claimed`,
+		          [rowId, claimToken, leaseExpiresAt]
+		        )
+		        if (!claimRows.length || claimRows[0].claimed !== true) return false
+
+		        const commandRows = await db.query(
+		          `SELECT org_id, file_id::text AS file_id
+		             FROM attendance_import_upload_cleanup_commands
+		            WHERE job_id = $1::uuid
+		              AND status = 'processing'
+		              AND claim_token = $2::uuid`,
+		          [rowId, claimToken]
+		        )
+		        if (commandRows.length !== 1) {
+		          throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_COMMAND_MISSING')
+		        }
+
+		        const command = commandRows[0]
+		        await deleteImportUploadForDurableCleanup({
+		          orgId: String(command.org_id),
+		          fileId: String(command.file_id),
+		        })
+		        const finishRows = await db.query(
+		          `SELECT attendance_finish_import_upload_cleanup_command(
+		             $1::uuid, $2::uuid, 'completed', NULL
+		           ) AS finished`,
+		          [rowId, claimToken]
+		        )
+		        if (!finishRows.length || finishRows[0].finished !== true) {
+		          throw new Error('ATTENDANCE_IMPORT_UPLOAD_CLEANUP_FINISH_REJECTED')
+		        }
+		        return true
+		      } catch (error) {
+		        try {
+		          await db.query(
+		            `SELECT attendance_finish_import_upload_cleanup_command(
+		               $1::uuid, $2::uuid, 'failed_retryable', 'UPLOAD_DELETE_FAILED'
+		             ) AS finished`,
+		            [rowId, claimToken]
+		          )
+		        } catch (finishError) {
+		          logger.warn('Attendance durable import upload cleanup state update failed', finishError)
+		        }
+		        logger.warn('Attendance durable import upload cleanup attempt failed', error)
+		        return false
+		      }
+		    }
+
+		    /**
+	     * W4C-3a values-free host call. Accepts only jobId. Production must not
+	     * pass payload/orgId/rules/settings/profile/effect callbacks.
+	     */
+	    const callAttendanceLegacyPlanHostV1 = async (jobId) => {
+	      const port = attendanceW4SegmentCalculationPort
+	      if (!port || typeof port.processLegacyImportPlan !== 'function') {
+	        const err = new Error('ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING')
+	        err.code = 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING'
+	        err.retryable = false
+	        throw err
+	      }
+	      // Exact single-key envelope — never spread job rows or request state.
+	      return port.processLegacyImportPlan({ jobId })
+	    }
 
 	    const processAsyncImportCommitJob = async ({ jobId }) => {
 	      const rowId = String(jobId || '').trim()
@@ -25029,81 +27472,88 @@ module.exports = {
 
 	      activeAsyncImportJobIds.add(rowId)
 	      try {
-	        const jobRows = await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [rowId])
-	        if (!jobRows.length) return
+	        // Classification read only: discriminator + status. Never SELECT payload
+	        // (or SELECT *) before the V1 branch — V1 must not hydrate legacy payload.
+	        const classifyRows = await db.query(
+	          `SELECT id, status, w4_contract_version
+	             FROM attendance_import_jobs
+	            WHERE id = $1`,
+	          [rowId],
+	        )
+	        if (!classifyRows.length) return
 
+	        const classifyRow = classifyRows[0]
+		        const status = normalizeImportJobStatus(classifyRow.status)
+		        const w4ContractVersionRaw = classifyRow.w4_contract_version
+		        const isV1 =
+		          w4ContractVersionRaw === 1 ||
+		          w4ContractVersionRaw === '1' ||
+		          Number(w4ContractVersionRaw) === 1
+		        const isLegacy =
+		          w4ContractVersionRaw === null ||
+		          w4ContractVersionRaw === undefined
+		        if (status === 'completed') {
+		          if (isV1) await drainImportUploadCleanupCommand(rowId)
+		          return
+		        }
+
+		        // W4C-3a: V1 jobs are values-free and must call the host processor
+		        // with only jobId. Governed null-version legacy jobs keep the
+		        // byte-compatible commitAttendanceImportPayload path.
+		        if (isV1) {
+		          try {
+		            const outcome = await callAttendanceLegacyPlanHostV1(rowId)
+		            if (outcome && (outcome.kind === 'completed' || outcome.kind === 'suspended' || outcome.kind === 'failed')) {
+		              // Terminal outcomes are owned by the core processor / durable
+		              // job row. Plugin must not call updateImportJobProgress as a
+		              // second V1 terminal writer.
+		              if (outcome.kind === 'completed') {
+		                await drainImportUploadCleanupCommand(rowId)
+		              }
+		              return
+	            }
+	            // not_found or unexpected: fail closed without legacy hydration.
+	            logger.warn('Attendance V1 legacy-plan processor returned non-terminal', {
+	              jobId: rowId,
+	              kind: outcome?.kind ?? null,
+	            })
+	            return
+	          } catch (error) {
+	            // Missing port is non-retryable fail-closed (no second writer).
+	            // Transient processor throws rethrow so the queue can retry.
+	            if (error?.code === 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING') {
+	              logger.error('Attendance V1 legacy-plan host port missing', { jobId: rowId })
+	              return
+	            }
+	            logger.error('Attendance V1 legacy-plan processor failed', error)
+	            throw error
+		          }
+		        }
+		        if (!isLegacy) {
+		          logger.error('Attendance async import job has unsupported contract version', {
+		            jobId: rowId,
+		            w4ContractVersion: w4ContractVersionRaw,
+		          })
+		          return
+		        }
+
+		        // Legacy null-version path only: hydrate payload and org-scoped fields.
+	        const jobRows = await db.query(
+	          `SELECT id, org_id, batch_id, created_by, idempotency_key, status, payload, total
+	             FROM attendance_import_jobs
+	            WHERE id = $1`,
+	          [rowId],
+	        )
+	        if (!jobRows.length) return
 	        const jobRow = jobRows[0]
 	        const orgId = jobRow.org_id ?? DEFAULT_ORG_ID
 	        const batchId = jobRow.batch_id
 	        const requesterId = jobRow.created_by
 	        const payload = normalizeMetadata(jobRow.payload)
 	        const isPreviewJob = payload?.__jobType === 'preview'
-	        const status = normalizeImportJobStatus(jobRow.status)
 	        const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
-	        if (status === 'completed') return
 
-	        if (!isPreviewJob) {
-	          // If the batch already exists, treat the job as complete (idempotent re-run).
-	          try {
-	            const batchRows = await db.query(
-	              'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
-	              [batchId, orgId]
-	            )
-	            if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
-	              const batchMeta = normalizeMetadata(batchRows[0].meta)
-	              const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
-	              const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
-	              const processedRows = Math.max(0, rowCount - skippedCount)
-	              await updateImportJobProgress({
-	                jobId: rowId,
-	                orgId,
-	                status: 'completed',
-	                progress: rowCount,
-	                total: rowCount,
-	                error: null,
-	                finishedAt: true,
-	              })
-	              await db.query(
-	                'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-	                [
-	                  rowId,
-	                  orgId,
-	                  JSON.stringify(
-	                    buildAsyncCommitJobSummaryPayload({
-	                      basePayload: payload,
-	                      rowCount,
-	                      processedRows,
-	                      failedRows: skippedCount,
-	                      elapsedMs: 0,
-	                      engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
-	                      recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
-	                        batchMeta,
-	                        rowCount,
-	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                      ),
-	                      itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
-	                        batchMeta,
-	                        rowCount,
-	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                      ),
-	                      chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
-	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                      ),
-	                      skippedCount,
-	                      skippedRows,
-	                      idempotencyKey,
-	                    })
-	                  ),
-	                ]
-	              )
-	              return
-	            }
-	          } catch (_error) {
-	            // Ignore and proceed - batch may not exist yet.
-	          }
-	        }
-
-	        await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
+		        await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
 
 	        if (isPreviewJob) {
 	          try {
@@ -25127,97 +27577,83 @@ module.exports = {
 	          return
 	        }
 
-	        let lastProgressWriteAt = 0
-	        let lastProgressValue = -1
-	        const onProgress = async ({ imported, total }) => {
-	          const now = Date.now()
-	          const nextProgress = Number(imported ?? 0)
-	          const nextTotal = Number(total ?? 0)
-	          if (!Number.isFinite(nextProgress) || !Number.isFinite(nextTotal)) return
-	          if (nextProgress === lastProgressValue && now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS) return
-	          if (now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS && nextProgress < lastProgressValue + 300) return
-
-	          lastProgressWriteAt = now
-	          lastProgressValue = nextProgress
-	          await updateImportJobProgress({
-	            jobId: rowId,
-	            orgId,
-	            progress: nextProgress,
-	            total: nextTotal,
-	          })
-	        }
-
-	        try {
-	          const commitResult = await commitAttendanceImportPayload({
-	            payload,
-	            orgId,
-	            requesterId,
-	            batchId,
-	            idempotencyKey,
-	            onProgress,
-	          })
-
-	          await updateImportJobProgress({
-	            jobId: rowId,
-	            orgId,
-	            status: 'completed',
-	            progress: commitResult.imported ?? 0,
-	            total: commitResult.rowCount ?? 0,
-	            error: null,
-	            finishedAt: true,
-	          })
-
-	          const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
-	            commitResult,
-	            commitResult?.meta,
-	            commitResult?.summary
-	          )
-	          // Drop large payload after completion while preserving compact progress metadata.
-		          const summaryPayload = buildAsyncCommitJobSummaryPayload({
-		            basePayload: payload,
-		            rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
-		            processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
-		            failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
-		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-		            engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
-		            recordUpsertStrategy:
-		              commitResult.recordUpsertStrategy
-		              ?? commitResult?.meta?.recordUpsertStrategy
-		              ?? resolveImportRecordUpsertStrategyFromMeta(
-		                payload,
-		                commitResult.rowCount ?? commitResult.imported ?? 0,
-		                commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		              ),
-		            itemsInsertStrategy:
-		              commitResult.itemsInsertStrategy
-		              ?? commitResult?.meta?.itemsInsertStrategy
-		              ?? resolveImportItemsInsertStrategyFromMeta(
-		                payload,
-		                commitResult.rowCount ?? commitResult.imported ?? 0,
-		                commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		              ),
-		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
-		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		            ),
-		            skippedCount,
-		            skippedRows,
-		            idempotencyKey,
+		        try {
+		          const lockIdentity = idempotencyKey?.trim() || rowId
+		          const lockWitness = buildAttendanceSyncImportReservationLockWitness({
+		            orgId,
+		            idempotencyKey: lockIdentity,
 		          })
-	          await db.query(
-	            'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-	            [rowId, orgId, JSON.stringify(summaryPayload)]
-	          )
-	        } catch (error) {
-	          const message = String(error?.message ?? error ?? 'Unknown error')
-	          logger.error('Attendance async import commit failed', error)
-	          await updateImportJobProgress({
-	            jobId: rowId,
-	            orgId,
-	            status: 'failed',
-	            error: message,
-	            finishedAt: true,
-	          })
-	        }
+		          if (lockWitness === null) {
+		            throw new Error('ATTENDANCE_IMPORT_LEGACY_ROLLOUT_WITNESS_INVALID')
+		          }
+			          const uploadFileId = resolveImportUploadFileId(payload)
+			          await runAttendanceLegacyNullVersionCommitAtomically({
+		            db,
+		            jobId: rowId,
+		            orgId,
+		            lockIdentity,
+		            lockWitness,
+		            commitLegacy: (trx) => commitAttendanceImportPayload({
+		              payload,
+		              orgId,
+		              requesterId,
+		              batchId,
+			              idempotencyKey,
+			              transactionClient: trx,
+			              deferUploadCleanup: true,
+			            }),
+		            buildTerminal: (commitResult) => {
+		              const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
+		                commitResult,
+		                commitResult?.meta,
+		                commitResult?.summary
+		              )
+		              return {
+		                progress: commitResult.imported ?? 0,
+		                total: commitResult.rowCount ?? 0,
+		                payload: buildAsyncCommitJobSummaryPayload({
+		                  basePayload: payload,
+		                  rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
+		                  processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
+		                  failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
+		                  elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		                  engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		                  recordUpsertStrategy:
+		                    commitResult.recordUpsertStrategy
+		                    ?? commitResult?.meta?.recordUpsertStrategy
+		                    ?? resolveImportRecordUpsertStrategyFromMeta(
+		                      payload,
+		                      commitResult.rowCount ?? commitResult.imported ?? 0,
+		                      commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		                    ),
+		                  itemsInsertStrategy:
+		                    commitResult.itemsInsertStrategy
+		                    ?? commitResult?.meta?.itemsInsertStrategy
+		                    ?? resolveImportItemsInsertStrategyFromMeta(
+		                      payload,
+		                      commitResult.rowCount ?? commitResult.imported ?? 0,
+		                      commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		                    ),
+		                  chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		                    commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		                  ),
+		                  skippedCount,
+		                  skippedRows,
+		                  idempotencyKey,
+		                }),
+			              }
+			            },
+			            afterCommit: uploadFileId
+			              ? () => deleteImportUpload({
+			                  orgId,
+			                  fileId: uploadFileId,
+			                })
+			              : null,
+			          })
+		        } catch (error) {
+		          logger.error('Attendance async import commit failed', error)
+		          throw error
+		        }
 	      } finally {
 	        activeAsyncImportJobIds.delete(rowId)
 	      }
@@ -25226,10 +27662,11 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
-	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
-	      const commitStartedAtMs = Date.now()
-	      if (cleanIdempotency) {
+			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false }) => {
+		      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		      const trustedIntegrationId = normalizeUuidString(integrationId)
+		      const commitStartedAtMs = Date.now()
+			      if (cleanIdempotency && !prepareOnly && !transactionClient) {
 	        const existing = await loadIdempotentImportBatch(db, orgId, cleanIdempotency)
 	        if (existing) {
 	          const existingRowCount = existing.imported + existing.skipped
@@ -25278,27 +27715,43 @@ module.exports = {
 	        orgId,
 	        fallbackUserId: payload.userId ?? requesterId,
 	      })
-	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
-	      const groupNames = new Map()
+		      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
+		      const groupNames = new Map()
+		      const groupFirstSourceOrdinals = new Map()
 	      const scopeWorkDates = new Set()
 	      const scopeUserIds = new Set()
-	      const rowScan = await rowSource.iterateRows((row) => {
+		      const rowScan = await rowSource.iterateRows((row, sourceOrdinal) => {
 	        const workDate = row?.workDate
 	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
 	        const rowUserId = resolveRowUserId({
 	          row,
-	          fallbackUserId: requesterId,
+	          fallbackUserId: payload.userId ?? requesterId,
 	          userMap: payload.userMap,
 	          userMapKeyField: payload.userMapKeyField,
 	          userMapSourceFields: payload.userMapSourceFields,
 	        })
 	        if (rowUserId) scopeUserIds.add(rowUserId)
-	        if (groupSync) appendAttendanceGroupName(groupNames, row)
+		        if (groupSync) {
+		          appendAttendanceGroupName(groupNames, row)
+		          const groupKey = resolveAttendanceGroupKey(row)
+		          if (groupKey && !groupFirstSourceOrdinals.has(groupKey)) {
+		            groupFirstSourceOrdinals.set(groupKey, sourceOrdinal)
+		          }
+		        }
 	        return true
 	      })
 	      const rowCount = rowScan.rowCount
 	      const csvWarnings = rowScan.warnings
 	      const csvFileId = rowSource.csvFileId ?? null
+	      const legacyInputFingerprint = prepareOnly
+	        ? buildLegacyImportInputFingerprintV1({
+	            payload,
+	            orgId,
+	            requesterId,
+	            idempotencyKey: cleanIdempotency,
+	            csvFileId,
+	          })
+	        : null
 
 	      if (rowCount === 0) {
 	        throw new Error('No rows to import')
@@ -25356,13 +27809,57 @@ module.exports = {
 	        if (skippedSampleLimit === null || skipped.length < skippedSampleLimit) skipped.push(entry)
 	      }
 		      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
-	      const resolvedBatchId = batchId || randomUUID()
-	      let batchMeta = null
-	      let idempotentInTransaction = null
+		      const resolvedBatchId = batchId || randomUUID()
+		      let batchMeta = null
+		      let idempotentInTransaction = null
+		      const preparedPlanItems = []
+		      const preparedPlanRecordWrites = []
+		      const preparedPlanGroupEffects = []
+	      // W4C-3a prepareOnly: freeze closed provenance once per plan (no path/secret leakage).
+	      let prepareOnlyProvenance = null
+	      if (prepareOnly) {
+	        const legacyRowSourceKindForEvidence = resolveLegacyImportRowSourceKind({ payload, csvFileId })
+	        let artifactSha256 = null
+	        let normalizedCsvSha256 = null
+	        const convertedSheetName = typeof payload?.convertedSheetName === 'string'
+	          && payload.convertedSheetName.trim()
+	          ? payload.convertedSheetName.trim()
+	          : null
+	        const convertedArtifactFileId = typeof payload?.convertedArtifactFileId === 'string'
+	          && payload.convertedArtifactFileId.trim()
+	          ? payload.convertedArtifactFileId.trim()
+	          : null
+	        if (legacyRowSourceKindForEvidence === 'inline_csv' && typeof payload.csvText === 'string') {
+	          normalizedCsvSha256 = sha256HexOfUtf8(payload.csvText)
+	        } else if (legacyRowSourceKindForEvidence === 'uploaded_csv' && csvFileId) {
+	          const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
+	          normalizedCsvSha256 = await sha256HexOfFile(csvPath)
+	          if (!convertedSheetName) artifactSha256 = normalizedCsvSha256
+	        }
+	        if (convertedSheetName && convertedArtifactFileId) {
+	          const artifactProof = await loadImportConvertedArtifactProofOrThrow({
+	            orgId,
+	            fileId: convertedArtifactFileId,
+	            requesterId,
+	          })
+	          artifactSha256 = artifactProof.sha256
+	        }
+	        prepareOnlyProvenance = buildImportRowProvenanceV1({
+	          legacyRowSourceKind: legacyRowSourceKindForEvidence,
+	          batchId: resolvedBatchId,
+	          csvFileId,
+	          artifactSha256,
+	          normalizedCsvSha256,
+	          convertedSheetName,
+	        })
+	      }
 
-	      await db.transaction(async (trx) => {
+		      const runCommitTransaction = transactionClient
+		        ? async (handler) => handler(transactionClient)
+		        : async (handler) => db.transaction(handler)
+		      await runCommitTransaction(async (trx) => {
 	        await applyImportHeavyTransactionTimeout(trx)
-	        if (cleanIdempotency) {
+		        if (cleanIdempotency && !prepareOnly) {
 	          await acquireImportIdempotencyLock(trx, orgId, cleanIdempotency)
 	          const existing = await loadIdempotentImportBatch(trx, orgId, cleanIdempotency)
 	          if (existing) {
@@ -25371,39 +27868,57 @@ module.exports = {
 	          }
 	        }
 
-	        let groupIdMap = null
-	        let groupCreated = 0
-	        if (groupSync) {
-	          groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
-	          if (groupSync.autoCreate && groupNames.size) {
+		        let groupIdMap = null
+		        let groupCreated = 0
+		        if (groupSync) {
+		          groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
+		          if (!prepareOnly && groupSync.autoCreate && groupNames.size) {
 	            const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
 	              ruleSetId: groupSync.ruleSetId,
 	              timezone: groupSync.timezone,
 	            })
 	            groupIdMap = ensured.map
-	            groupCreated = ensured.created
-	          }
-	        }
+		            groupCreated = ensured.created
+		          }
+		        }
+		        if (prepareOnly && groupSync?.autoCreate) {
+		          for (const [normalizedName, displayName] of groupNames.entries()) {
+		            if (groupIdMap?.has(normalizedName)) continue
+		            preparedPlanGroupEffects.push({
+		              kind: 'ensure_group',
+		              normalizedName,
+		              displayName,
+		              code: null,
+		              timezone: groupSync.timezone ?? DEFAULT_RULE.timezone,
+		              ruleSetId: groupSync.ruleSetId,
+		              firstSourceOrdinal: groupFirstSourceOrdinals.get(normalizedName) ?? 0,
+		            })
+		          }
+		        }
 	        const groupMembersToInsert = new Map()
 		        batchMeta = {
 		          ...(payload.batchMeta ?? {}),
-		          idempotencyKey: cleanIdempotency || undefined,
 		          engine: importEngine,
 		          chunkConfig: importChunkConfig,
 		          recordUpsertStrategy: importRecordUpsertStrategy,
 		          itemsInsertStrategy: importItemsInsertStrategy,
 		          mappingProfileId: payload.mappingProfileId ?? null,
-		          groupSync: groupSync
-		            ? {
-	                autoCreate: groupSync.autoCreate,
-	                autoAssignMembers: groupSync.autoAssignMembers,
-	                ruleSetId: groupSync.ruleSetId,
-	                timezone: groupSync.timezone,
-	              }
-	            : undefined,
-	          groupCreated,
-	          async: true,
-	        }
+		          groupCreated,
+		          async: true,
+		        }
+		        if (cleanIdempotency) batchMeta.idempotencyKey = cleanIdempotency
+		        if (trustedIntegrationId) {
+		          batchMeta.source = 'integration'
+		          batchMeta.integrationId = trustedIntegrationId
+		        }
+		        if (groupSync) {
+		          batchMeta.groupSync = {
+		            autoCreate: groupSync.autoCreate,
+		            autoAssignMembers: groupSync.autoAssignMembers,
+		            ruleSetId: groupSync.ruleSetId,
+		            timezone: groupSync.timezone,
+		          }
+		        }
 
 	        const batchInsert = idempotencyEnabled
 	          ? {
@@ -25439,12 +27954,13 @@ module.exports = {
 	                JSON.stringify(batchMeta),
 	              ],
 	            }
-	        await trx.query(batchInsert.sql, batchInsert.params)
+		        if (!prepareOnly) await trx.query(batchInsert.sql, batchInsert.params)
 
 		        const importItemsBuffer = []
 		        const flushImportItems = async () => {
 		          if (!importItemsBuffer.length) return
 		          const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
+		          if (prepareOnly) return
 		          await batchInsertAttendanceImportItems(trx, {
 		            batchId: resolvedBatchId,
 		            orgId,
@@ -25453,7 +27969,29 @@ module.exports = {
 		            strategy: importItemsInsertStrategy,
 		          })
 		        }
-		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
+		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot, sourceOrdinal, reasonCode, rawEvidence }) => {
+		          if (prepareOnly) {
+		            preparedPlanItems.push({
+		              kind: 'skip',
+		              ordinal: sourceOrdinal,
+		              semanticOrdinal: null,
+		              resolvedUserId: userId ?? null,
+		              resolvedWorkDate: normalizeDateOnly(workDate) ?? null,
+		              reasonCode,
+		              warnings: Array.isArray(previewSnapshot?.warnings) ? previewSnapshot.warnings : [],
+		              previewSnapshot: previewSnapshot ?? {},
+		              rawEvidence: rawEvidence ?? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: userId ?? undefined,
+		                  workDate: workDate ?? undefined,
+		                },
+		                metrics: {},
+		                provenance: prepareOnlyProvenance,
+		              }),
+		            })
+		            return
+		          }
 		          importItemsBuffer.push({
 		            id: randomUUID(),
 	            userId: userId ?? null,
@@ -25524,8 +28062,13 @@ module.exports = {
 				            const flushRecordUpserts = async () => {
 				              if (!recordUpsertsBuffer.length) return
 				              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
-				              const chunkUserIds = chunk.map((item) => item.userId)
-				              const chunkWorkDates = chunk.map((item) => normalizeDateOnly(item.workDate) ?? item.workDate)
+		              const uniqueTargets = new Map()
+		              for (const item of chunk) {
+		                const workDate = normalizeDateOnly(item.workDate) ?? item.workDate
+		                uniqueTargets.set(`${item.userId}:${workDate}`, { userId: item.userId, workDate })
+		              }
+		              const chunkUserIds = Array.from(uniqueTargets.values(), (item) => item.userId)
+		              const chunkWorkDates = Array.from(uniqueTargets.values(), (item) => item.workDate)
 
 				              const existingRows = await queryImportHeavy(
 				                trx,
@@ -25541,6 +28084,37 @@ module.exports = {
 	          for (const row of existingRows) {
 	            const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
 	            existingMap.set(`${row.user_id}:${workDateKey}`, row)
+	          }
+
+	          if (prepareOnly) {
+	            const folded = foldAttendanceImportPreparedTargets({
+	              items: chunk,
+	              existingMap,
+	              orgId,
+	              sourceBatchId: resolvedBatchId,
+	            })
+	            preparedPlanRecordWrites.push(...folded.recordWrites)
+	            const applyItems = chunk
+	              .map((item) => ({ item, targetRef: folded.targetRefBySourceOrdinal.get(item.sourceOrdinal) }))
+	              .sort((left, right) => left.item.sourceOrdinal - right.item.sourceOrdinal)
+	            let semanticOrdinal = preparedPlanItems.filter((item) => item.kind === 'apply').length
+	            for (const { item, targetRef } of applyItems) {
+	              if (!targetRef) throw new Error('Attendance prepared target fold failed')
+	              if (!item.rawEvidence) {
+	                throw new Error('Attendance prepareOnly apply item missing rawEvidence')
+	              }
+	              preparedPlanItems.push({
+	                kind: 'apply',
+	                ordinal: item.sourceOrdinal,
+	                semanticOrdinal,
+	                targetRef,
+	                previewSnapshot: item.previewSnapshot ?? {},
+	                rawEvidence: item.rawEvidence,
+	              })
+	              semanticOrdinal += 1
+	            }
+	            importedCount += chunk.length
+	            return
 	          }
 
 	          const upsertRows = []
@@ -25577,7 +28151,6 @@ module.exports = {
 	              sourceBatchId: values.sourceBatchId,
 	            })
 	          }
-
 	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 	            strategy: importRecordUpsertStrategy,
             totalRows: rowCount,
@@ -25627,25 +28200,25 @@ module.exports = {
 	        }
 	        const enqueueRecordUpsert = async (item) => {
 	          recordUpsertsBuffer.push(item)
-	          if (recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
+	          if (!prepareOnly && recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
 	            await flushRecordUpserts()
 	          }
 	        }
 
 	        const seenRowKeys = new Set()
-	        await rowSource.iterateRows(async (row) => {
+	        await rowSource.iterateRows(async (row, sourceOrdinal) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
 	            row,
-	            fallbackUserId: requesterId,
+	            fallbackUserId: payload.userId ?? requesterId,
 	            userMap: payload.userMap,
 	            userMapKeyField: payload.userMapKeyField,
 	            userMapSourceFields: payload.userMapSourceFields,
 	          })
 	          const userProfile = resolveRowUserProfile({
 	            row,
-	            fallbackUserId: requesterId,
+	            fallbackUserId: payload.userId ?? requesterId,
 	            userMap: payload.userMap,
 	            userMapKeyField: payload.userMapKeyField,
 	            userMapSourceFields: payload.userMapSourceFields,
@@ -25679,11 +28252,38 @@ module.exports = {
 	          }
 		          if (importWarnings.length) {
 		            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		            const skipRawEvidence = prepareOnly
+		              ? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: rowUserId ?? (row?.fields?.userId !== undefined ? row.fields.userId : undefined),
+		                  workDate: workDate === undefined || workDate === null || workDate === ''
+		                    ? (workDate === undefined ? undefined : null)
+		                    : workDate,
+		                  timezone: row?.fields?.timezone !== undefined ? row.fields.timezone : undefined,
+		                  firstInAt: row?.fields?.firstInAt !== undefined ? row.fields.firstInAt : undefined,
+		                  lastOutAt: row?.fields?.lastOutAt !== undefined ? row.fields.lastOutAt : undefined,
+		                  status: row?.fields?.status !== undefined ? row.fields.status : undefined,
+		                  isWorkday: row?.fields?.isWorkday !== undefined ? row.fields.isWorkday : undefined,
+		                },
+		                metrics: {
+		                  workMinutes: firstDefinedPresence(row?.fields?.workMinutes, row?.fields?.workHours),
+		                  lateMinutes: row?.fields?.lateMinutes,
+		                  earlyLeaveMinutes: row?.fields?.earlyLeaveMinutes,
+		                  leaveMinutes: firstDefinedPresence(row?.fields?.leaveMinutes, row?.fields?.leaveHours),
+		                  overtimeMinutes: firstDefinedPresence(row?.fields?.overtimeMinutes, row?.fields?.overtimeHours),
+		                },
+		                provenance: prepareOnlyProvenance,
+		              })
+		              : undefined
 		            await enqueueImportItem({
 	              userId: rowUserId ?? null,
 	              workDate: workDate ?? null,
 		              recordId: null,
 		              previewSnapshot: snapshot,
+		              sourceOrdinal,
+		              reasonCode: 'validation',
+		              rawEvidence: skipRawEvidence,
 		            })
 		            appendSkipped({
 		              userId: rowUserId ?? null,
@@ -25698,18 +28298,52 @@ module.exports = {
 	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
+		            const duplicateRawEvidence = prepareOnly
+		              ? buildRawImportEvidenceV1({
+		                sourceOrdinal,
+		                fields: {
+		                  userId: rowUserId,
+		                  workDate,
+		                  timezone: row?.fields?.timezone !== undefined ? row.fields.timezone : undefined,
+		                  firstInAt: row?.fields?.firstInAt !== undefined ? row.fields.firstInAt : undefined,
+		                  lastOutAt: row?.fields?.lastOutAt !== undefined ? row.fields.lastOutAt : undefined,
+		                  status: row?.fields?.status !== undefined ? row.fields.status : undefined,
+		                  isWorkday: row?.fields?.isWorkday !== undefined ? row.fields.isWorkday : undefined,
+		                },
+		                metrics: {
+		                  workMinutes: firstDefinedPresence(row?.fields?.workMinutes, row?.fields?.workHours),
+		                  lateMinutes: row?.fields?.lateMinutes,
+		                  earlyLeaveMinutes: row?.fields?.earlyLeaveMinutes,
+		                  leaveMinutes: firstDefinedPresence(row?.fields?.leaveMinutes, row?.fields?.leaveHours),
+		                  overtimeMinutes: firstDefinedPresence(row?.fields?.overtimeMinutes, row?.fields?.overtimeHours),
+		                },
+		                provenance: prepareOnlyProvenance,
+		              })
+		              : undefined
 		            await enqueueImportItem({
 		              userId: rowUserId,
 		              workDate,
 		              recordId: null,
 		              previewSnapshot: snapshot,
+		              sourceOrdinal,
+		              reasonCode: 'duplicate',
+		              rawEvidence: duplicateRawEvidence,
 		            })
 		            appendSkipped({ userId: rowUserId, workDate, warnings })
 		            releaseImportRowMemory(row)
 		            return true
-		          }
+	          }
 	          seenRowKeys.add(dedupKey)
-	          if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
+	          const prepareOnlyGroupResolvable = groupKey
+	            && (groupIdMap?.has(groupKey) || (groupSync?.autoCreate && groupNames.has(groupKey)))
+	          if (prepareOnly && groupSync?.autoAssignMembers && prepareOnlyGroupResolvable && rowUserId) {
+	            preparedPlanGroupEffects.push({
+	              kind: 'ensure_member',
+	              groupRef: groupKey,
+	              userId: rowUserId,
+	              firstSourceOrdinal: sourceOrdinal,
+	            })
+	          } else if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
 	            const groupEntry = groupIdMap.get(groupKey)
 	            if (groupEntry?.id) {
 	              groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
@@ -25806,9 +28440,25 @@ module.exports = {
 	            ? baseRuleForMetrics
 	            : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
+	          // Capture raw source presence BEFORE parse/fallback so prepareOnly evidence
+	          // can distinguish absent keys from present-null / present-zero values.
+	          // Presence probes use firstDefinedPresence (undefined-only). Legacy parse paths
+	          // keep `??` so null still falls through to hour aliases — prepareOnly=false
+	          // metrics behavior is unchanged.
+	          const rawFirstInValue = valueFor('firstInAt')
+	          const rawLastOutValue = valueFor('lastOutAt')
+	          const rawStatusValue = valueFor('status')
+	          const rawTimezoneValue = valueFor('timezone')
+	          const rawIsWorkdayValue = valueFor('isWorkday')
+	          const rawWorkMinutesPresence = firstDefinedPresence(valueFor('workMinutes'), valueFor('workHours'))
+	          const rawLateMinutesValue = valueFor('lateMinutes')
+	          const rawEarlyLeaveMinutesValue = valueFor('earlyLeaveMinutes')
+	          const rawLeaveMinutesPresence = firstDefinedPresence(valueFor('leaveMinutes'), valueFor('leaveHours'))
+	          const rawOvertimeMinutesPresence = firstDefinedPresence(valueFor('overtimeMinutes'), valueFor('overtimeHours'))
+
 	          const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-	            firstInValue: valueFor('firstInAt'),
-	            lastOutValue: valueFor('lastOutAt'),
+	            firstInValue: rawFirstInValue,
+	            lastOutValue: rawLastOutValue,
 	            workDate,
 	            rule: ruleForMetrics,
 	          })
@@ -25822,14 +28472,52 @@ module.exports = {
 		            timezone: ruleForMetrics.timezone,
 	            explicitShiftId: valueFor('shiftId') || valueFor('shift_id') || null,
 	          })
-	          const statusRaw = valueFor('status')
+	          const statusRaw = rawStatusValue
 	          const statusOverride = statusRaw != null ? resolveStatusOverride(statusRaw, statusMap) : null
 
 	          const workMinutes = parseMinutesValue(valueFor('workMinutes') ?? valueFor('workHours'), dataTypeFor('workMinutes') ?? dataTypeFor('workHours'))
-	          const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-	          const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+	          const lateMinutes = parseMinutesValue(rawLateMinutesValue, dataTypeFor('lateMinutes'))
+	          const earlyLeaveMinutes = parseMinutesValue(rawEarlyLeaveMinutesValue, dataTypeFor('earlyLeaveMinutes'))
 	          const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
 	          const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+	          // Raw evidence must bind imported values before computed/policy/engine overrides.
+	          const rowRawEvidence = prepareOnly
+	            ? buildRawImportEvidenceV1({
+	              sourceOrdinal,
+	              fields: {
+	                userId: rowUserId ?? undefined,
+	                workDate: workDate ?? undefined,
+	                timezone: rawTimezoneValue,
+	                firstInAt: rawFirstInValue === undefined
+	                  ? undefined
+	                  : (firstInAt ?? null),
+	                lastOutAt: rawLastOutValue === undefined
+	                  ? undefined
+	                  : (lastOutAt ?? null),
+	                status: rawStatusValue,
+	                isWorkday: rawIsWorkdayValue,
+	              },
+	              metrics: {
+	                workMinutes: rawWorkMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(workMinutes) ? workMinutes : null),
+	                lateMinutes: rawLateMinutesValue === undefined
+	                  ? undefined
+	                  : (Number.isFinite(lateMinutes) ? lateMinutes : null),
+	                earlyLeaveMinutes: rawEarlyLeaveMinutesValue === undefined
+	                  ? undefined
+	                  : (Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : null),
+	                leaveMinutes: rawLeaveMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(leaveMinutes) ? leaveMinutes : null),
+	                overtimeMinutes: rawOvertimeMinutesPresence === undefined
+	                  ? undefined
+	                  : (Number.isFinite(overtimeMinutes) ? overtimeMinutes : null),
+	              },
+	              provenance: prepareOnlyProvenance,
+	            })
+	            : null
 
 	          const computed = computeMetrics({
 	            rule: ruleForMetrics,
@@ -25957,6 +28645,7 @@ module.exports = {
 	          meta.source = {
 	            source: payload.source ?? null,
 	            mappingProfileId: payload.mappingProfileId ?? null,
+	            ...(trustedIntegrationId ? { integrationId: trustedIntegrationId } : {}),
 	          }
 	          meta = attachAttendanceImportMultiPunchMeta(meta, {
 	            valueFor,
@@ -25979,6 +28668,192 @@ module.exports = {
 	            meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
 	          }
 
+	          // prepareOnly: freeze closed AttendanceAttributionSnapshotV1 + FrozenAttendanceContextV1
+	          // and closed policy source leaf for recordWrite wrappers.
+	          let canonicalFreezeSource = null
+	          if (prepareOnly) {
+	            const importProofPort = attendanceW4SegmentCalculationPort
+	            if (
+	              !importProofPort
+	              || typeof importProofPort.buildImportAttributionFreeze !== 'function'
+	              || typeof importProofPort.buildImportPolicySourceProof !== 'function'
+	            ) {
+	              throw new HttpError(
+	                503,
+	                'ATTENDANCE_IMPORT_FREEZE_PROOF_HOST_MISSING',
+	                'ATTENDANCE_IMPORT_FREEZE_PROOF_HOST_MISSING'
+	              )
+	            }
+	            let attributionSnapshot = {
+	              posture: 'unsupported',
+	              sourceSchemaVersion: null,
+	              reason: importAttribution.resolution ? 'unresolved' : 'missing',
+	              sourceFingerprint: null,
+	            }
+	            let importAttributionReconstruction = null
+	            const resolvedImport = importAttribution.resolution
+	            const fullWinner = resolvedImport?.kind === 'resolved'
+	              ? resolvedImport.fullWinner
+	              : null
+	            if (fullWinner) {
+	              const absoluteStartAt = toRawImportInstantIso(fullWinner.absoluteWindow?.startAt)
+	              const absoluteEndAt = toRawImportInstantIso(fullWinner.absoluteWindow?.endAt)
+	              const attributionStartAt = toRawImportInstantIso(fullWinner.attributionWindow?.startAt)
+	              const attributionEndAt = toRawImportInstantIso(fullWinner.attributionWindow?.endAt)
+	              const approvedOvertimeWindows = (Array.isArray(resolvedImport.approvedOvertimeWindows)
+	                ? resolvedImport.approvedOvertimeWindows
+	                : []
+	              ).flatMap((entry) => {
+	                const anchor = parseOvertimeAttributionV1(entry?.anchor)
+	                const approvedEndAt = toRawImportInstantIso(entry?.approvedEndAt)
+	                if (
+	                  !anchor
+	                  || !approvedEndAt
+	                  || String(entry?.orgId) !== String(orgId)
+	                  || String(entry?.userId) !== String(rowUserId)
+	                  || String(entry?.workDate) !== String(resolvedImport.workDate)
+	                  || String(entry?.shiftId) !== String(resolvedImport.shiftId)
+	                  || anchor.orgId !== String(orgId)
+	                  || anchor.userId !== String(rowUserId)
+	                  || anchor.workDate !== String(resolvedImport.workDate)
+	                  || anchor.shiftId !== String(resolvedImport.shiftId)
+	                ) {
+	                  return []
+	                }
+	                return [{
+	                  requestId: String(entry.requestId),
+	                  approvedEndAt,
+	                  anchor,
+	                }]
+	              })
+	              if (absoluteStartAt && absoluteEndAt && attributionStartAt && attributionEndAt) {
+	                let attributionProof
+	                try {
+	                  attributionProof = importProofPort.buildImportAttributionFreeze({
+	                    orgId,
+	                    userId: rowUserId,
+	                    workDate: String(resolvedImport.workDate),
+	                    shiftId: String(resolvedImport.shiftId),
+	                    reasonCode: String(resolvedImport.reasonCode ?? 'SINGLE_MATCHING_CANDIDATE'),
+	                    resolvedAt: new Date().toISOString(),
+	                    timezone: String(fullWinner.timezone),
+	                    workStartTime: String(fullWinner.workStartTime),
+	                    workEndTime: String(fullWinner.workEndTime),
+	                    isOvernight: Boolean(fullWinner.isOvernight),
+	                    candidateAbsoluteWindow: { startAt: absoluteStartAt, endAt: absoluteEndAt },
+	                    candidateAttributionWindow: {
+	                      startAt: attributionStartAt,
+	                      endAt: attributionEndAt,
+	                    },
+	                    attributionTailMinutes: Number(resolvedImport.attributionTailMinutes),
+	                    approvedOvertimeWindows,
+	                  })
+	                } catch (_error) {
+	                  throw new HttpError(
+	                    503,
+	                    'ATTENDANCE_IMPORT_ATTRIBUTION_PROOF_INVALID',
+	                    'ATTENDANCE_IMPORT_ATTRIBUTION_PROOF_INVALID'
+	                  )
+	                }
+	                if (attributionProof?.kind === 'resolved_v2') {
+	                  attributionSnapshot = attributionProof.attribution
+	                  importAttributionReconstruction = attributionProof.reconstruction
+	                }
+	              }
+	            }
+	            let frozenImportContext = null
+	            if (
+	              attributionSnapshot.posture === 'resolved_v2'
+	              && importAttribution.resolution?.kind === 'resolved'
+	              && importAttribution.resolution.shiftId
+	            ) {
+	              const winnerTimezone = importAttribution.resolution.fullWinner
+	                && typeof importAttribution.resolution.fullWinner.timezone === 'string'
+	                && importAttribution.resolution.fullWinner.timezone
+	                ? importAttribution.resolution.fullWinner.timezone
+	                : (ruleForMetrics.timezone ?? context.rule?.timezone)
+	              frozenImportContext = await buildW4ShadowFrozenContextV1(trx, {
+	                orgId,
+	                userId: rowUserId,
+	                workDate: importAttribution.resolution.workDate,
+	                shiftId: importAttribution.resolution.shiftId,
+	                timezone: winnerTimezone,
+	                isWorkday: context.isWorkingDay,
+	                holidayKind: context.holiday
+	                  ? (context.holiday.type
+	                    ?? (context.holiday.isWorkingDay === false ? 'holiday' : 'working_day_override'))
+	                  : null,
+	              })
+	            }
+	            const ruleVersion = activeRuleSetId
+	              ? `rule-set:${activeRuleSetId}`
+	              : 'org-default-rule'
+	            const engineVersion = engineResult ? 'attendance-rule-engine@1' : null
+	            const appliedPolicyRules = Array.isArray(policyResult?.appliedRules)
+	              ? policyResult.appliedRules
+	              : []
+	            const appliedEngineRules = Array.isArray(engineResult?.appliedRules)
+	              ? engineResult.appliedRules
+	              : []
+	            const userGroups = Array.isArray(policyResult?.userGroups)
+	              ? policyResult.userGroups
+	              : []
+	            let policySourceProof
+	            try {
+	              policySourceProof = importProofPort.buildImportPolicySourceProof({
+	                ruleVersion,
+	                engineVersion,
+	                rule: {
+	                  timezone: ruleForMetrics?.timezone ?? null,
+	                  workStartTime: ruleForMetrics?.workStartTime ?? null,
+	                  workEndTime: ruleForMetrics?.workEndTime ?? null,
+	                  lateGraceMinutes: freezeNonNegIntOrNull(ruleForMetrics?.lateGraceMinutes),
+	                  earlyGraceMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.earlyGraceMinutes ?? ruleForMetrics?.earlyLeaveGraceMinutes
+	                  ),
+	                  roundingMinutes: freezeNonNegIntOrNull(ruleForMetrics?.roundingMinutes),
+	                  severeLateThresholdMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.severeLateThresholdMinutes
+	                  ),
+	                  absenceLateThresholdMinutes: freezeNonNegIntOrNull(
+	                    ruleForMetrics?.absenceLateThresholdMinutes
+	                  ),
+	                  workingDays: Array.isArray(ruleForMetrics?.workingDays)
+	                    ? ruleForMetrics.workingDays
+	                    : [],
+	                },
+	                policy: {
+	                  appliedRules: appliedPolicyRules,
+	                  userGroups,
+	                },
+	                engine: engineVersion === null
+	                  ? null
+	                  : { appliedRules: appliedEngineRules },
+	              })
+	            } catch (_error) {
+	              throw new HttpError(
+	                503,
+	                'ATTENDANCE_IMPORT_POLICY_PROOF_INVALID',
+	                'ATTENDANCE_IMPORT_POLICY_PROOF_INVALID'
+	              )
+	            }
+	            canonicalFreezeSource = buildImportCanonicalFreezeSourceV1({
+	              sourceOrdinal,
+	              attribution: attributionSnapshot,
+	              importAttributionReconstruction,
+	              context: frozenImportContext,
+	              policySourceProof,
+	              output: {
+	                status: finalMetrics.status,
+	                workMinutes: finalMetrics.workMinutes,
+	                lateMinutes: finalMetrics.lateMinutes,
+	                earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+	                leaveMinutes: effectiveLeaveMinutes,
+	                overtimeMinutes: effectiveOvertimeMinutes,
+	              },
+	            })
+	          }
+
 	          const snapshot = {
 	            metrics: {
 	              workMinutes: finalMetrics.workMinutes,
@@ -25991,8 +28866,9 @@ module.exports = {
 	            policy: meta?.policy ?? null,
 	            engine: meta?.engine ?? null,
 	          }
-	          await enqueueRecordUpsert({
-	            userId: rowUserId,
+		          await enqueueRecordUpsert({
+		            sourceOrdinal,
+		            userId: rowUserId,
 	            workDate,
 	            timezone: context.rule.timezone,
 	            rule: context.rule,
@@ -26012,6 +28888,8 @@ module.exports = {
 	            meta: meta ?? undefined,
 	            sourceBatchId: resolvedBatchId,
 	            previewSnapshot: snapshot,
+	            rawEvidence: rowRawEvidence ?? undefined,
+	            canonicalFreezeSource: canonicalFreezeSource ?? undefined,
 	            engine: engineResult
 	              ? {
 	                  appliedRules: engineResult.appliedRules,
@@ -26029,7 +28907,7 @@ module.exports = {
 	        await flushRecordUpserts()
 	        await flushImportItems()
 
-	        if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
+		        if (!prepareOnly && groupSync?.autoAssignMembers && groupMembersToInsert.size) {
 	          const groupMembersAdded = await insertAttendanceGroupMembers(trx, orgId, Array.from(groupMembersToInsert.values()))
 	          if (batchMeta) {
 	            batchMeta.groupMembersAdded = groupMembersAdded
@@ -26039,7 +28917,7 @@ module.exports = {
 	            )
 	          }
 	        }
-		        if (skippedCount) {
+		        if (!prepareOnly && skippedCount) {
 		          const updatedMeta = {
 		            ...(batchMeta ?? {}),
 		            skippedCount,
@@ -26053,8 +28931,80 @@ module.exports = {
 			        }
 			      })
 
-		      if (csvFileId) {
-		        await deleteImportUpload({ orgId, fileId: csvFileId })
+			      if (!prepareOnly && csvFileId && !deferUploadCleanup) {
+			        await deleteImportUpload({ orgId, fileId: csvFileId })
+		      }
+
+		      if (prepareOnly) {
+		        const source = ['dingtalk', 'manual', 'dingtalk_csv', 'dingtalk_api', 'csv']
+		          .includes(payload.source)
+		          ? payload.source
+		          : null
+		        const memberEffects = new Map()
+		        const groupEffects = []
+		        for (const effect of preparedPlanGroupEffects) {
+		          if (effect.kind === 'ensure_group') {
+		            groupEffects.push(effect)
+		            continue
+		          }
+		          const key = `${effect.groupRef}:${effect.userId}`
+		          if (!memberEffects.has(key)) memberEffects.set(key, effect)
+		        }
+		        groupEffects.push(...memberEffects.values())
+		        const legacyRowSourceKind = resolveLegacyImportRowSourceKind({ payload, csvFileId })
+		        return {
+		          orgId,
+		          actorId: requesterId,
+		          batchId: resolvedBatchId,
+		          idempotencyKey: cleanIdempotency || null,
+		          legacyInputFingerprint,
+		          payload: {
+		            __jobType: 'commit',
+		            idempotencyKey: cleanIdempotency || null,
+		            __importEngine: importEngine,
+		            recordUpsertStrategy: importRecordUpsertStrategy,
+		            itemsInsertStrategy: importItemsInsertStrategy,
+		            __w4ContractVersion: 1,
+		          },
+		          legacyRowSourceKind,
+		          legacySourceRowLimit: legacyRowSourceKind === 'uploaded_csv' || legacyRowSourceKind === 'inline_csv'
+		            ? ATTENDANCE_IMPORT_CSV_MAX_ROWS
+		            : null,
+		          batch: {
+		            kind: 'normal',
+		            source,
+		            ruleSetId: payload.ruleSetId ?? null,
+		            mappingSnapshot: mapping,
+		            sourceRowCount: rowCount,
+		            status: 'committed',
+		            idempotencyKey: cleanIdempotency || null,
+		            visibilityRule: 'org',
+		            engine: importEngine,
+		            chunkConfig: importChunkConfig,
+		            recordUpsertStrategy: importRecordUpsertStrategy,
+		            itemsInsertStrategy: importItemsInsertStrategy,
+		            mappingProfileId: payload.mappingProfileId ?? null,
+		            compatibilityMetadata: batchMeta ?? {},
+		            groupSync: groupSync ?? null,
+		            itemReturnPolicy: { returnItems: false, itemsLimit: null },
+		            skippedSamplePolicy: {
+		              limit: skippedSampleLimit ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT,
+		            },
+		            resultSlots: {
+		              groupCreated: 'ensure_group_returned_row_count',
+		              groupMembersAdded: 'ensure_member_inserted_row_count',
+		            },
+		          },
+		          artifactCleanup: csvFileId
+		            ? { kind: 'uploaded_import_file', fileId: csvFileId, expectedOwnerOrgId: orgId }
+		            : { kind: 'none' },
+		          items: preparedPlanItems.sort((left, right) => left.ordinal - right.ordinal),
+		          recordWrites: preparedPlanRecordWrites,
+		          groupEffects,
+		          // P06 sync response surface: preparation-time group warnings.
+		          groupWarnings,
+		          csvWarnings,
+		        }
 		      }
 
 	      if (idempotentInTransaction) {
@@ -26117,23 +29067,17 @@ module.exports = {
 	    if (ATTENDANCE_IMPORT_ASYNC_ENABLED) {
 	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort and
 	      // should run for both queue-backed and fallback in-process modes.
-	      setImmediate(async () => {
-	        try {
-	          const rows = await db.query(
-	            `SELECT id, org_id
-	             FROM attendance_import_jobs
-	             WHERE status IN ('queued', 'running')
-	               AND created_at < $1::timestamptz
-	             ORDER BY created_at ASC
-	             LIMIT 50`,
-	            [attendanceImportAsyncStartupCutoff]
-	          )
-	          for (const row of rows) {
-	            await enqueueImportJob(row.id)
-	          }
-	        } catch (error) {
-	          logger.warn('Attendance async import requeue skipped', error)
-	        }
+		      setImmediate(async () => {
+		        try {
+		          await drainAttendanceImportStartupRecoveryPages({
+		            db,
+		            cutoff: attendanceImportAsyncStartupCutoff,
+		            enqueueJob: enqueueImportJob,
+		            drainCleanup: drainImportUploadCleanupCommand,
+		          })
+			        } catch (error) {
+		          logger.warn('Attendance async import requeue skipped', error)
+		        }
 	      })
 	    }
 
@@ -26318,6 +29262,15 @@ module.exports = {
             }
           }
 
+          // W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`):
+          // snapshot the PRE-resolution timezone — the exact value fed into the
+          // resolvePunchWorkDateByShiftWindow call directly below — BEFORE
+          // `timezone` is reassigned to the POST-resolution value a few lines
+          // down. The canonical write boundary's in-transaction legacy
+          // re-derivation must reproduce THIS call, not the reassigned one; see
+          // AttendanceLivePunchBoundaryInputV1.requestTimezone's doc comment.
+          const requestTimezone = timezone
+
           const punchWorkDate = await resolvePunchWorkDateByShiftWindow({
             db,
             orgId,
@@ -26344,7 +29297,93 @@ module.exports = {
           workDate = punchWorkDate.workDate
           context = punchWorkDate.context
           timezone = punchWorkDate.timezone
-          const punchWorkDateResolution = punchWorkDate.resolution || null
+          // W4C-2 remediation P1-3: punchWorkDate.resolution is no longer
+          // threaded into the canonical boundary as a route-prepared value —
+          // applyLivePunchProjectionLegacyV1 re-derives its own resolution
+          // in-transaction. The route still needs workDate/context/timezone
+          // above for its OWN pre-boundary gating (unscheduled-block check,
+          // outdoor-approval flow) — only the resolution OBJECT itself is no
+          // longer smuggled through.
+
+          // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round):
+          // OUTER half of the lock §8.2 step 7 source-definition fingerprint
+          // gate. Computed HERE — immediately alongside `punchWorkDate`,
+          // the SAME provenance point `punchWorkDate.shiftId` (the identity
+          // half, below) already uses — and deliberately NOT right before
+          // the boundary call further down: any later placement risks
+          // running AFTER a test/production race window has already closed
+          // (a real placement bug caught empirically in this round — moving
+          // this block past the `__setAttendanceW4LivePunchPreBoundarySeamForTests`
+          // await made every seam-based race leg's fingerprint conjunct a
+          // silent no-op, since by the time the seam's `await` resolves the
+          // race has ALREADY committed, so a POST-seam outer read would see
+          // the SAME post-race state the freeze step's inner read does).
+          //
+          // Byte-identical-by-construction to the freeze step's own
+          // in-transaction call — SAME function
+          // (`resolveW4LiveCandidateInTransactionV1`), SAME args shape
+          // (`calendarWorkDate` omitted, exactly like the boundary's own
+          // `resolveLiveCandidate` adapter call site), only the connection
+          // differs (`db`, not `trx`) because this runs BEFORE the
+          // transaction opens. No induction over `toWorkDate` equivalence is
+          // relied on here (unlike `resolvePunchWorkDateByShiftWindow`'s
+          // explicit `calendarWorkDate: workDate` above, which this
+          // deliberately does NOT reuse/extend — see PR body for why an
+          // `includeFullWinner` extension of that shared call was rejected
+          // as the closing mechanism).
+          //
+          // Gated on the SAME env var that gates the posture allowlist
+          // (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`) AND on the port
+          // method's presence (guards a partial/legacy host the same way
+          // the later `!w4LiveScheduledBoundary` check does — that check
+          // still fires normally a few lines down if the boundary itself is
+          // unavailable; this guard only prevents a crash on the READ
+          // happening before that check): when the env is unset, no org can
+          // ever resolve to a non-legacy posture, so the freeze step's
+          // `identityDrift` code this value feeds never executes — skipping
+          // the extra read keeps the default-off deployment's per-request
+          // DB cost byte-identical to before this change.
+          let outerSourceDefinitionFingerprint = null
+          // O-5 probe (#4612 gate3 P2-1 round 3): hoisted out of the `if` block below
+          // (was block-scoped `const`) so the test-only pre-boundary seam a few lines
+          // down can pass the SAME raw resolution/context objects through to a test —
+          // no behavior change, pure scoping (still only ever assigned inside the same
+          // guarded block, still `null` under the identical conditions as before).
+          let outerResolution = null
+          let outerContext = null
+          if (
+            w4ComputeOuterSourceDefinitionFingerprint
+            && String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+          ) {
+            outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
+              orgId,
+              userId,
+              occurredAt: occurredAt.toISOString(),
+              timezone: requestTimezone,
+            })
+            if (outerResolution && outerResolution.kind === 'resolved') {
+              outerContext = await buildW4ShadowFrozenContextV1(db, {
+                orgId,
+                userId,
+                workDate: outerResolution.workDate,
+                shiftId: outerResolution.shiftId,
+                timezone:
+                  outerResolution.fullWinner && typeof outerResolution.fullWinner.timezone === 'string'
+                    ? outerResolution.fullWinner.timezone
+                    : requestTimezone,
+                isWorkday: context.isWorkingDay,
+                holidayKind: null,
+              })
+              outerSourceDefinitionFingerprint = w4ComputeOuterSourceDefinitionFingerprint({
+                orgId,
+                userId,
+                source: 'live_resolution',
+                nowIso: new Date().toISOString(),
+                resolution: outerResolution,
+                context: outerContext,
+              })
+            }
+          }
 
           // Punch-policy S1 (#2203): block a punch on a day with no schedule when the org opted into
           // unscheduled.mode='block'. workDate is the FINAL (tz-recalculated) date. Default 'allow' and
@@ -26373,247 +29412,146 @@ module.exports = {
           const punchMeta = parsed.data.meta ?? {}
           const outdoorMarker = punchMeta.outdoor === true || punchMeta.outdoorPunch === true
           if (outdoorPolicy.requireApproval === true && (outsideGeofence || outdoorMarker)) {
+            // W4C-3b: outdoor approval create enters the canonical request_create
+            // boundary (routeVariant=outdoor) before first approval/request DML.
+            if (!w4RequestOperationBoundary) {
+              res.status(503).json({
+                ok: false,
+                error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+              })
+              return
+            }
             const eventType = parsed.data.eventType
             const note = typeof punchMeta.note === 'string' ? punchMeta.note.trim() : ''
-            if (outdoorPolicy.requireNote === true && !note) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
-              return
-            }
-            // S2 outdoor-punch-photo design-lock (2026-07-10) G3: requirePhoto is nested exactly like
-            // requireNote — both only ever apply to an ACCEPTED outdoor candidate (requireApproval=true
-            // is the precondition for outdoor punches existing at all; with it off, an outside-fence
-            // punch already 403s as LOCATION_RESTRICTED, so there is no "accepted outdoor punch" to
-            // attach evidence to — no separate enforcement path is opened for that case).
-            // G2: any photoFileId supplied is verified against the `files` table (row exists, owner_id
-            // is the punching user, meta.contentType is image/*) — never trusted as a bare client string.
             const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
-            if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
-              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
-              return
-            }
-            let photoFileId = null
-            if (rawPhotoFileId) {
-              // F2 files-acl-tombstone design-lock (2026-07-10): `DELETE /api/files/:id` now tombstones
-              // the row (`deleted_at`) instead of hard-deleting it — this filter is what makes a
-              // tombstoned id read as "no such evidence" here, same as the pre-tombstone hard-delete did.
-              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1', [rawPhotoFileId])
-              const photoRow = photoRows[0] ?? null
-              const photoMeta = normalizeMetadata(photoRow?.meta)
-              // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
-              // is client-asserted (multer trusts the multipart part's Content-Type header as-is), so a
-              // forged `image/png` declaration on a non-image body previously passed this check. Rows
-              // written by the sniff-aware upload path (core routes/files.ts) carry `meta.sniffed ===
-              // true` — a PATH MARKER, not a content-type value — and ONLY those rows are held to the
-              // sniffed verdict: `meta.sniffedContentType` must be present and start with `image/`, else
-              // invalid (a magic-byte miss on a real upload is rejected here — this is what closes the
-              // forged-MIME gap). Rows with no `sniffed` key predate this slice and fall back to the
-              // pre-existing `meta.contentType` check byte-for-byte — old evidence is not retroactively
-              // invalidated. (Considered writing `sniffedContentType` unconditionally with a null
-              // sentinel on a miss instead of this separate marker — rejected: JSON key-present-but-null
-              // vs key-absent is a classic wire-format footgun, and a plain boolean path marker is more
-              // explicit and reusable by any future consumer of this table.)
-              let photoContentTypeValid
-              if (photoMeta.sniffed === true) {
-                const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
-                photoContentTypeValid = sniffedContentType.startsWith('image/')
-              } else {
-                const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
-                photoContentTypeValid = photoContentType.startsWith('image/')
-              }
-              if (!photoRow || photoRow.owner_id !== userId || !photoContentTypeValid) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
-                return
-              }
-              photoFileId = rawPhotoFileId
-            }
-            // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
-            const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
-            let flow = null
-            if (requestedFlowId) {
-              flow = await loadApprovalFlow(db, orgId, { flowId: requestedFlowId })
-              if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: '外勤审批流不存在或未启用' } })
-                return
-              }
-            } else {
-              // #2304 §2.5: with no explicit approvalFlowId, require a UNIQUE active outdoor_punch flow.
-              // `loadApprovalFlow` would silently pick the newest (ORDER BY created_at) when several are
-              // active — that could route approvals to the wrong people. Demand exactly one (LIMIT 2 → ≠1
-              // ⇒ 422), so an ambiguous setup is rejected instead of guessed.
-              const activeFlows = await db.query(
-                `SELECT * FROM attendance_approval_flows
-                 WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
-                 ORDER BY created_at DESC LIMIT 2`,
-                [orgId]
-              )
-              if (activeFlows.length !== 1) {
-                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_APPROVAL_FLOW_REQUIRED', message: activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId' } })
-                return
-              }
-              flow = mapApprovalFlowRow(activeFlows[0])
-            }
-
-            const draft = {
-              orgId,
-              workDate,
-              requestType: 'outdoor_punch',
-              requestedInAt: eventType === 'check_in' ? occurredAt : null,
-              requestedOutAt: eventType === 'check_out' ? occurredAt : null,
-              reason: note || null,
-              metadata: {
-                outdoorPunch: {
-                  version: 1,
+            try {
+              const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
+              const outcome = await w4RequestOperationBoundary.execute({
+                kind: 'request_create',
+                operationId,
+                correlationId: requestCorrelationId(req, operationId, 'outdoor-create'),
+                routeVariant: 'outdoor',
+                routeInput: {
+                  actorId: userId,
+                  tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+                  requesterName: getUserLabel(req, userId),
+                  orgId,
+                  workDate,
                   eventType,
                   occurredAt: occurredAt.toISOString(),
-                  workDate,
                   timezone,
                   source: parsed.data.source ?? 'mobile',
                   location: parsed.data.location ?? punchMeta.location ?? null,
-                  note: note || null,
-                  detection: outsideGeofence ? 'outside_geofence' : 'marker',
-                  // S2 outdoor-punch-photo design-lock (2026-07-10): photoFileId is written ONLY when a
-                  // verified photo was supplied, so a punch with requirePhoto=false and no photo produces
-                  // the pre-slice metadata.outdoorPunch shape byte-for-byte (no null-valued key added).
-                  ...(photoFileId ? { photoFileId } : {}),
+                  note,
+                  photoFileId: rawPhotoFileId || null,
+                  outsideGeofence: outsideGeofence === true,
+                  outdoorPolicy: {
+                    requireApproval: outdoorPolicy.requireApproval === true,
+                    requireNote: outdoorPolicy.requireNote === true,
+                    requirePhoto: outdoorPolicy.requirePhoto === true,
+                    approvalFlowId: typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId : '',
+                  },
                 },
-                approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
-              },
-            }
-            const requestId = randomUUID()
-            const approvalId = `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation: a dynamic-kind step
-            // anywhere in the flow blocks request-create (flag OFF / port missing / kind unimplemented),
-            // so a later dynamic step cannot start a flow and strand it mid-flight.
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create (org-scoped port); assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId, flowSteps: draft.metadata.approvalFlow.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId, requestId, orgId, userId, requesterName: getUserLabel(req, userId), draft, orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata.approvalFlow.steps, 0, approvalPayload.requesterSnapshot
-            )
-            try {
-              const request = await db.transaction(async (trx) => {
-                await acquireAttendanceRequestLock(trx, orgId, userId, workDate, 'outdoor_punch')
-                // Outdoor dedup key includes eventType (#2304 §2.2): same-day outdoor check_in + check_out
-                // can coexist; a 2nd pending/approved of the SAME eventType is the duplicate.
-                const dup = await trx.query(
-                  `SELECT id FROM attendance_requests
-                   WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
-                     AND status IN ('pending', 'approved')
-                     AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
-                   LIMIT 1`,
-                  [orgId, userId, workDate, eventType]
-                )
-                if (dup.length > 0) {
-                  throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
-                }
-                await upsertAttendanceApprovalInstance(trx, approvalPayload)
-                await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-                const rows = await trx.query(
-                  `INSERT INTO attendance_requests
-                   (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-                   RETURNING *`,
-                  [requestId, userId, orgId, workDate, 'outdoor_punch', draft.requestedInAt, draft.requestedOutAt, draft.reason, 'pending', approvalId, JSON.stringify(draft.metadata)]
-                )
-                return rows[0]
               })
-              emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
-              res.status(202).json({ ok: true, data: { pendingApproval: true, request: mapAttendanceRequestRow(request) } })
+              if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+                emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
+              }
+              res.status(202).json(outcome.response)
               return
             } catch (error) {
               if (error instanceof HttpError) {
                 res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
                 return
               }
+              if (respondIfW4BoundaryError(res, error)) return
               throw error
             }
           }
 
-          const result = await db.transaction(async (trx) => {
-            const event = await trx.query(
-              `INSERT INTO attendance_events
-               (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
-               RETURNING *`,
-              [
-                randomUUID(),
-                userId,
-                orgId,
-                workDate,
-                occurredAt,
-                parsed.data.eventType,
-                parsed.data.source ?? 'manual',
-                timezone,
-                JSON.stringify(parsed.data.location ?? {}),
-                JSON.stringify(parsed.data.meta ?? {}),
-              ]
-            )
-
-            const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
-            // Freeze work-date attribution on first resolved write; later corrections/recomputes
-            // preserve this snapshot rather than re-resolving against current schedule.
-            const existingMeta = normalizeMetadata(protectedRecord?.meta)
-            const alreadyFrozen = parseFrozenWorkDateAttribution(
-              existingMeta?.[FROZEN_ATTRIBUTION_KEY] ?? existingMeta?.workDateAttributionV1,
-            )
-            let recordMeta
-            if (alreadyFrozen) {
-              recordMeta = { [FROZEN_ATTRIBUTION_KEY]: alreadyFrozen }
-            } else if (punchWorkDateResolution?.kind === 'resolved') {
-              recordMeta = {
-                [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
-                  punchWorkDateResolution,
-                  { orgId, userId },
-                ),
-              }
-            }
-            let record = await upsertAttendanceRecord({
-              userId,
-              orgId,
-              workDate,
-              timezone,
-              rule: { ...context.rule, timezone },
-              updateFirstInAt: parsed.data.eventType === 'check_in' ? occurredAt : null,
-              updateLastOutAt: parsed.data.eventType === 'check_out' ? occurredAt : null,
-              mode: 'append',
-              isWorkday: context.isWorkingDay,
-              leaveMinutes: 0,
-              overtimeMinutes: 0,
-              meta: recordMeta,
-              existingRow: protectedRecord,
-              client: trx,
+          // W4C-2 (#4556 lock §8.1/§12.3): P01/P02 cutover. The former inline transaction body
+          // is now the closed legacy adapter (`applyLivePunchProjectionLegacyV1`, injected once
+          // at activate) executed inside the canonical write boundary — operation claim and
+          // suspension preflight precede the first source DML; the `legacy_projection_only`
+          // null-ID path runs the same adapter bytes with zero operation/calculation/outbox
+          // rows. A missing boundary FAILS CLOSED; the old inline writer no longer exists here.
+          if (!w4LiveScheduledBoundary) {
+            res.status(503).json({
+              ok: false,
+              error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
             })
-            record = await applyAttendanceInOutMergePolicy({
-              client: trx,
-              userId,
-              orgId,
-              workDate,
-              timezone,
-              rule: { ...context.rule, timezone },
-              isWorkday: context.isWorkingDay,
-              settings: punchPolicySettings,
-              record,
-              protectedRecord,
+            return
+          }
+          // W4C-2 remediation P2 (#4612 review "腿1"): test-only race seam — see the
+          // module-level declaration and __setAttendanceW4LivePunchPreBoundarySeamForTests
+          // above. Unset in production (and in every test that never installs it), this
+          // is a plain no-op; the route's control flow is byte-identical either way.
+          // O-5 probe (#4612 gate3 P2-1 round 3): `outerResolution`/`outerContext` are
+          // ALSO passed through (additive field, ignored by every pre-existing seam
+          // callback that destructures only `{orgId, userId, workDate, timezone}` or
+          // takes no argument at all) — the exact raw values this route's outer
+          // source-definition-fingerprint computation above already used, so a test can
+          // reconstruct the RAW outer attribution value (via
+          // `__computeAttendanceOuterAttributionValueForTestsV1`) and diff it
+          // field-by-field against the freeze step's persisted `attribution_snapshot`.
+          if (attendanceW4LivePunchPreBoundarySeamForTests) {
+            await attendanceW4LivePunchPreBoundarySeamForTests({
+              orgId, userId, workDate, timezone, outerResolution, outerContext,
             })
-
-            return { event: event[0], record, workDateResolution: punchWorkDateResolution }
-          })
-
-          emitEvent('attendance.punched', {
-            userId,
+          }
+          const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
             orgId,
-            workDate,
+            userId,
+            operationId: typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null,
             eventType: parsed.data.eventType,
-            occurredAt: occurredAt.toISOString(),
+            occurredAtRaw: rawOccurredAt ?? null,
+            occurredAtResolved: occurredAt.toISOString(),
             timezone,
+            requestTimezone,
+            source: parsed.data.source ?? 'manual',
+            location: parsed.data.location ?? null,
+            meta: parsed.data.meta ?? null,
+            photoFileRef:
+              typeof parsed.data.photoFileId === 'string' && parsed.data.photoFileId.trim()
+                ? parsed.data.photoFileId.trim()
+                : null,
+            workDate,
+            // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥): the route's
+            // OWN pre-transaction winning shift identity — same provenance as
+            // `workDate` above (`punchWorkDate`, not the reassigned
+            // `context`/`timezone` locals) — threaded through for the step-7
+            // candidate-identity gate. `null` only on the unresolved-fallback
+            // branch of `resolvePunchWorkDateByShiftWindow` (no shift
+            // resolved at all); the ambiguous branch already returned 422
+            // above and never reaches here.
+            shiftId:
+              typeof punchWorkDate.shiftId === 'string' && punchWorkDate.shiftId ? punchWorkDate.shiftId : null,
+            // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round):
+            // the route's own PRE-transaction source-definition fingerprint
+            // — see the block above that computes it, and
+            // `AttendanceLivePunchBoundaryInputV1.outerSourceDefinitionFingerprint`'s
+            // own doc comment for the full contract.
+            outerSourceDefinitionFingerprint,
+            isWorkday: context.isWorkingDay,
+            holidayKind: null,
           })
-          res.json({ ok: true, data: result })
+          if (boundaryOutcome.kind === 'legacy' || boundaryOutcome.kind === 'legacy_compat') {
+            // Lock §12.3 legacy-posture leg: the same synchronous best-effort emit as before.
+            // Shadow results deliver durably through the outbox row instead; a replay emits
+            // nothing (zero DML happened).
+            emitEvent('attendance.punched', {
+              userId,
+              orgId,
+              workDate,
+              eventType: parsed.data.eventType,
+              occurredAt: occurredAt.toISOString(),
+              timezone,
+            })
+          }
+          res.json({ ok: true, data: boundaryOutcome.response })
         } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
           if (error instanceof HttpError) {
             res.status(error.status).json({
               ok: false,
@@ -26773,7 +29711,7 @@ module.exports = {
         try {
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
-             FROM attendance_records
+             FROM attendance_current_records
              WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
             [targetUserId, orgId, from, to]
           )
@@ -26783,7 +29721,7 @@ module.exports = {
             `SELECT ar.*, u.name AS user_name, u.username AS username,
                     u.employee_no AS employee_no, u.department AS department,
                     u.position AS position, u.hire_date AS hire_date
-             FROM attendance_records ar
+             FROM attendance_current_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
              ORDER BY ar.work_date DESC
@@ -27029,7 +29967,7 @@ module.exports = {
 	          const userClause = parsed.data.userId ? `AND r.user_id = $${params.push(parsed.data.userId)}` : ''
 	          const candidateRows = await db.query(
 		            `SELECT r.*
-		             FROM attendance_records r
+		             FROM attendance_current_records r
 		             WHERE r.org_id = $1
 		               AND r.work_date BETWEEN $2::date AND $3::date
 		               AND (${buildOwedPunchRecordPredicateSql('r')})
@@ -27161,7 +30099,7 @@ module.exports = {
 	        }
 
 	        try {
-	          const result = await db.transaction(async (trx) => {
+	          const result = await db.transaction(async function enqueueManualMissedPunchReminderTransaction(trx) {
 	            // Serialize the whole idempotency group before looking for source_id rows.
 	            await trx.query(
 	              'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
@@ -27185,6 +30123,7 @@ module.exports = {
 	               FROM attendance_records r
 	               WHERE r.org_id = $1
 	                 AND r.id = ANY($2::uuid[])
+	                 AND r.visibility_state = 'active'
 	                 AND COALESCE(r.is_workday, true) = true
 	                 AND (
 	                   (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
@@ -27360,11 +30299,7 @@ module.exports = {
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 	        const anomalyFilter = parsed.data.filter ?? 'all'
-	        const owedPunchFilterClause = anomalyFilter === 'owed_punch'
-	          ? `AND (${buildOwedPunchRecordPredicateSql()})`
-	          : ''
-
-	        const extractWarnings = (snapshot) => {
+		        const extractWarnings = (snapshot) => {
 	          if (!snapshot || typeof snapshot !== 'object') return []
 	          const out = []
 	          if (Array.isArray(snapshot.warnings)) out.push(...snapshot.warnings)
@@ -27389,32 +30324,36 @@ module.exports = {
 	        }
 
 	        try {
-	          const countRows = await db.query(
-	            `SELECT COUNT(*)::int AS total
-	             FROM attendance_records
-	             WHERE user_id = $1
-	               AND org_id = $2
-	               AND work_date BETWEEN $3 AND $4
-	               AND COALESCE(is_workday, true) = true
-	               AND COALESCE(status, '') <> ALL($5)
-	               ${owedPunchFilterClause}`,
-	            [targetUserId, orgId, from, to, excludedStatuses]
-	          )
+	          // W4C-3c P20 anomaly listing: canonical active-current helper surface.
+	          const countRows = await listActiveCurrentAttendanceRecordsForAnomalyListing(db, {
+	            userId: targetUserId,
+	            orgId,
+	            from,
+	            to,
+	            excludedStatuses,
+		            owedPunchOnly: anomalyFilter === 'owed_punch',
+	            countOnly: true,
+	          })
 	          const total = Number(countRows[0]?.total ?? 0)
 
-	          const rows = await db.query(
-	            `SELECT *
-	             FROM attendance_records
-	             WHERE user_id = $1
-	               AND org_id = $2
-	               AND work_date BETWEEN $3 AND $4
-	               AND COALESCE(is_workday, true) = true
-	               AND COALESCE(status, '') <> ALL($5)
-	               ${owedPunchFilterClause}
-	             ORDER BY work_date DESC
-	             LIMIT $6 OFFSET $7`,
-	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
-	          )
+	          const rows = await listActiveCurrentAttendanceRecordsForAnomalyListing(db, {
+	            userId: targetUserId,
+	            orgId,
+	            from,
+	            to,
+	            excludedStatuses,
+		            owedPunchOnly: anomalyFilter === 'owed_punch',
+	            limit: pageSize,
+	            offset,
+	          })
+
+	          const calculationPosture = await db.transaction(async (trx) => {
+	            const port = attendanceW4SegmentCalculationPort
+	            if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+	              throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+	            }
+	            return port.resolveOrgSegmentCalculationPosture(trx, orgId)
+	          })
 
 	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
 	            orgId,
@@ -27468,8 +30407,14 @@ module.exports = {
 	              prefetched: workContextPrefetch.prefetched,
 	            })
 
+	            const expectedCalculation = resolveW4c3cExpectedCalculation(
+	              row,
+	              calculationPosture?.effectiveState,
+	            )
 	            return {
 	              recordId: row.id,
+	              expectedCalculationId: expectedCalculation.id,
+	              expectedCalculationVersion: expectedCalculation.version,
 	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
@@ -27521,6 +30466,84 @@ module.exports = {
 	      })
 	    )
 
+	    // Preserve the original XLSX bytes separately from the client-converted
+	    // CSV. The artifact is provenance only and is never parsed as business data.
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/import/upload-artifact',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const orgId = getOrgId(req)
+	        const requesterId = getUserId(req)
+	        if (!requesterId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+
+	        const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+	        const filename = String(req.query?.filename ?? req.query?.name ?? req.headers['x-filename'] ?? '')
+	        const allowedTypes = new Set([
+	          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	          'application/octet-stream',
+	        ])
+	        if (contentType.startsWith('multipart/')) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Use a raw XLSX body, not multipart/form-data' } })
+	          return
+	        }
+	        if (!filename.toLowerCase().endsWith('.xlsx') || !allowedTypes.has(contentType)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'A raw .xlsx artifact is required' } })
+	          return
+	        }
+
+	        const fileId = randomUUID()
+	        const paths = getImportUploadPaths({ orgId, fileId })
+	        const createdAt = new Date().toISOString()
+	        const expiresAt = new Date(Date.now() + ATTENDANCE_IMPORT_UPLOAD_TTL_MS).toISOString()
+
+	        try {
+	          await fsp.mkdir(paths.dir, { recursive: true })
+	          const meter = new ImportUploadMeter(ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES)
+	          await pipeline(req, meter, fs.createWriteStream(paths.artifactPath))
+	          if (meter.bytes === 0) {
+	            throw new HttpError(400, 'VALIDATION_ERROR', 'XLSX artifact is empty')
+	          }
+	          const sha256 = await sha256HexOfFile(paths.artifactPath)
+	          const meta = {
+	            kind: 'xlsx_client_source_artifact',
+	            fileId,
+	            orgId,
+	            createdBy: requesterId,
+	            filename: filename.slice(0, 200),
+	            contentType,
+	            bytes: meter.bytes,
+	            sha256,
+	            createdAt,
+	            expiresAt,
+	          }
+	          await fsp.writeFile(paths.metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+	          res.status(201).json({
+	            ok: true,
+	            data: {
+	              fileId,
+	              sha256,
+	              bytes: meter.bytes,
+	              createdAt,
+	              expiresAt,
+	              maxBytes: ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES,
+	            },
+	          })
+	        } catch (error) {
+	          await deleteImportUpload({ orgId, fileId })
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import artifact upload failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to upload XLSX artifact' } })
+	        }
+	      })
+	    )
+
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/anomaly-result-edits',
@@ -27536,7 +30559,11 @@ module.exports = {
 	            lateMinutes: z.number().int().min(0).optional(),
 	            earlyLeaveMinutes: z.number().int().min(0).optional(),
 	          }).optional(),
-	          idempotencyKey: z.string().min(1).max(200),
+		          // Stable caller UUID for W4 claim/seal (lock §4.1). Server never generates one.
+		          operationId: z.string().uuid().optional(),
+		          expectedCalculationId: z.string().uuid().nullable().optional(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable().optional(),
+		          idempotencyKey: z.string().min(1).max(200),
 	        })
 
 	        const parsed = schema.safeParse(req.body ?? {})
@@ -27592,38 +30619,188 @@ module.exports = {
 	          return
 	        }
 
+	        // W4C-3c: only through the record-operation boundary (manual_edit capability).
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+	        // operationId: prefer explicit client UUID; allow idempotencyKey only when it is already a UUID.
+	        // Server NEVER invents a random identity (lock §4.1).
+	        const explicitOp =
+	          typeof parsed.data.operationId === 'string' ? parsed.data.operationId.trim().toLowerCase() : ''
+	        const idemAsUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idempotencyKey)
+	          ? idempotencyKey.toLowerCase()
+	          : null
+	        const operationId = explicitOp || idemAsUuid
 	        try {
-	          const result = await db.transaction(async (trx) => applyAttendanceResultEdit(trx, {
-	            orgId,
-	            recordId: parsed.data.recordId,
-	            targetStatus: parsed.data.targetStatus,
-	            overrideMetrics: parsed.data.overrideMetrics ?? null,
-	            reason,
-	            evidence: evidenceResult.value,
-	            actorUserId,
-	            idempotencyKey,
-	            editWindowDays: policy.editWindowDays,
-	            notifyAffectedEmployee: policy.notifyAffectedEmployee !== false,
-	          }))
-	          res.json({
-	            ok: true,
-	            data: {
-	              alreadyApplied: result.alreadyApplied === true,
-	              edit: result.edit,
-	              record: result.record ? buildResultEditSnapshot(result.record) : null,
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'manual_edit',
+	            // null is allowed only for legacy_projection_only byte-compat path inside the boundary.
+	            operationId: operationId || null,
+	            correlationId: `manual-edit:${orgId}:${parsed.data.recordId}:${idempotencyKey}`,
+	            routeInput: {
+	              orgId,
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+		              recordId: parsed.data.recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId ?? null,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion ?? null,
+		              targetStatus: parsed.data.targetStatus,
+	              overrideMetrics: parsed.data.overrideMetrics ?? null,
+	              reason,
+	              evidence: evidenceResult.value,
+	              idempotencyKey,
+	              editWindowDays: policy.editWindowDays,
+	              notifyAffectedEmployee: policy.notifyAffectedEmployee !== false,
+	              // Surface missing UUID early for W4 postures via adapter.
+	              requireStableOperationId: true,
 	            },
 	          })
+	          res.json(outcome.response)
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
 	            return
 	          }
+	          if (respondIfW4BoundaryError(res, error)) return
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
 	          }
 	          logger.error('Attendance result edit failed', error)
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to edit attendance result' } })
+	        }
+	      })
+	    )
+
+	    // W4C-3c: prior-policy / current-policy recompute (new capability, not a migration).
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/records/:id/recompute',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+		          policy: z.enum(['frozen_prior', 'current_policy']).default('frozen_prior'),
+		          // Required stable caller UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
+	        })
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+		        const recordId = normalizeUuidString(req.params.id)
+		        if (!recordId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'record id must be a uuid' } })
+	          return
+	        }
+	        try {
+	          const operationId = String(parsed.data.operationId).toLowerCase()
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'recompute',
+	            operationId,
+	            correlationId: `recompute:${getOrgId(req)}:${recordId}:${parsed.data.policy}`,
+	            routeInput: {
+	              orgId: getOrgId(req),
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              policy: parsed.data.policy,
+	            },
+	          })
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          logger.error('Attendance recompute failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to recompute' } })
+	        }
+	      })
+	    )
+
+	    // W4C-3c: operator retirement — never DELETE; only ops_retirement boundary.
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/records/:id/ops-retirement',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+	          reason: z.string().min(1).max(2000),
+	          ticket: z.string().min(1).max(128),
+		          // Required operator command UUID — no server random fallback (lock §4.1).
+		          operationId: z.string().uuid(),
+		          expectedCalculationId: z.string().uuid().nullable(),
+		          expectedCalculationVersion: z.number().int().min(1).nullable(),
+	        })
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        if (!w4RecordOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical record operation boundary unavailable' },
+	          })
+	          return
+	        }
+		        const recordId = normalizeUuidString(req.params.id)
+		        if (!recordId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'record id must be a uuid' } })
+	          return
+	        }
+	        try {
+	          const operationId = String(parsed.data.operationId).toLowerCase()
+	          const outcome = await w4RecordOperationBoundary.execute({
+	            kind: 'ops_retirement',
+	            operationId,
+	            correlationId: `ops-retirement:${getOrgId(req)}:${recordId}:${parsed.data.ticket}`,
+	            routeInput: {
+	              orgId: getOrgId(req),
+	              actorId: actorUserId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+	              actorPosture: 'attendance_admin',
+		              recordId,
+		              expectedCalculationId: parsed.data.expectedCalculationId,
+		              expectedCalculationVersion: parsed.data.expectedCalculationVersion,
+		              reason: parsed.data.reason,
+	              ticket: parsed.data.ticket,
+	            },
+	          })
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          logger.error('Attendance ops retirement failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to retire record' } })
 	        }
 	      })
 	    )
@@ -27774,6 +30951,10 @@ module.exports = {
     )
 
     const requestWriteSchema = z.object({
+      // W4C-3b P13: a stable client UUID identifies create/edit retries. Omitted
+      // by every legacy client, which preserves the null-operation path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       workDate: z.string().optional(),
       work_date: z.string().optional(),
       date: z.string().optional(),
@@ -27800,6 +30981,10 @@ module.exports = {
       attachment_url: z.string().optional(),
       approvalFlowId: z.string().optional(),
       approval_flow_id: z.string().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(1).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(1).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       orgId: z.string().optional(),
       org_id: z.string().optional(),
     })
@@ -27824,6 +31009,36 @@ module.exports = {
       return uuid
     }
 
+    function respondIfInvalidRequestUuidReferences(res, input) {
+      const references = [
+        ['leaveTypeId', 'leaveTypeId'],
+        ['leave_type_id', 'leaveTypeId'],
+        ['overtimeRuleId', 'overtimeRuleId'],
+        ['overtime_rule_id', 'overtimeRuleId'],
+        ['approvalFlowId', 'approvalFlowId'],
+        ['approval_flow_id', 'approvalFlowId'],
+      ]
+      try {
+        for (const [key, fieldName] of references) {
+          if (input[key] !== undefined) {
+            normalizeRequestUuidReferenceInput(input[key], null, fieldName)
+          }
+        }
+        return false
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error
+        res.status(error.status).json({
+          ok: false,
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+          },
+        })
+        return true
+      }
+    }
+
     async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
       if (requestRow.user_id === requesterId) return
       const allowed = await canAccessOtherUsers(requesterId)
@@ -27833,6 +31048,9 @@ module.exports = {
     }
 
     const shiftSwapCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       requesterAssignmentId: z.string().optional(),
       requester_assignment_id: z.string().optional(),
       counterpartyAssignmentId: z.string().optional(),
@@ -27843,6 +31061,9 @@ module.exports = {
     })
 
     const scheduleDispatchCreateSchema = z.object({
+      // W4C-3b: client-stable retry identity; omitted => null-ID legacy path.
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
       userId: z.string().min(1).optional(),
       user_id: z.string().min(1).optional(),
       targetScheduleGroupId: z.string().optional(),
@@ -28270,7 +31491,12 @@ module.exports = {
         'counterpartyAssignmentId'
       )
 
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [requesterSource.userId, counterpartySource.userId])
+      await acquireAttendanceScheduleAssignmentLocks(
+        client,
+        orgId,
+        [requesterSource.userId, counterpartySource.userId],
+        { required: true }
+      )
       await enforceShiftSwapEditWindow(client, [
         requesterSource.workDate,
         counterpartySource.workDate,
@@ -28402,7 +31628,8 @@ module.exports = {
             `${String(userId ?? '')}:${String(targetScheduleGroupId ?? '')}:${Number(slotIndex ?? 0)}`,
           ]
         )
-      } catch (_error) {
+      } catch (error) {
+        if (client?.__w4CanonicalTrx === true) throw error
         // Best-effort: if advisory locks are unavailable, the exact source_key unique index still catches exact
         // duplicates, but overlapping windows rely on the pre-insert SELECT.
       }
@@ -28665,7 +31892,7 @@ module.exports = {
       const settings = await getSettings(client)
       const slotResolution = resolveScheduleDispatchSlotIndex(settings, detail.slot_index)
       await acquireScheduleDispatchWindowLock(client, orgId, detail.user_id, targetGroup.id, slotResolution.slotIndex)
-      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id])
+      await acquireAttendanceScheduleAssignmentLocks(client, orgId, [detail.user_id], { required: true })
       await enforceScheduleDispatchEditWindow(client, [detail.start_date, detail.end_date])
       await assertScheduleDispatchProtectedRowsAbsent(client, { orgId, detail })
 
@@ -28766,7 +31993,7 @@ module.exports = {
       return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
-    async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
+    async function resolveAttendanceRequestDraft(client, parsedData, existingRequest = null) {
       const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
       const existingMetadata = normalizeMetadata(existingRequest?.metadata)
       const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
@@ -28899,7 +32126,7 @@ module.exports = {
       let leaveType = null
       let overtimeRule = null
       if (requestType === 'leave') {
-        leaveType = await loadLeaveType(db, orgId, {
+        leaveType = await loadLeaveType(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id),
             existingLeaveType.id,
@@ -28922,7 +32149,7 @@ module.exports = {
           durationMinutes = leaveType.defaultMinutesPerDay
         }
       } else if (requestType === 'overtime') {
-        overtimeRule = await loadOvertimeRule(db, orgId, {
+        overtimeRule = await loadOvertimeRule(client, orgId, {
           id: normalizeRequestUuidReferenceInput(
             firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id),
             existingOvertimeRule.id,
@@ -28962,7 +32189,7 @@ module.exports = {
         )
       }
 
-      const approvalFlow = await loadApprovalFlow(db, orgId, {
+      const approvalFlow = await loadApprovalFlow(client, orgId, {
         requestType,
         flowId: normalizeRequestUuidReferenceInput(
           firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
@@ -29011,7 +32238,7 @@ module.exports = {
         }
       }
       if (requestType === 'overtime') {
-        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(db, {
+        const overtimeSegmentation = await maybeBuildOvertimeSegmentationSnapshot(client, {
           orgId,
           userId: existingRequest?.user_id,
           workDate,
@@ -29054,7 +32281,7 @@ module.exports = {
               'Cannot freeze overtime attribution without a subject userId',
             )
           }
-          const { adapters } = createPluginAttendanceWorkDateResolver(db)
+          const { adapters } = createPluginAttendanceWorkDateResolver(client)
           const freeze = await adapters.overtime.freezeRequestCreationAnchor({
             orgId,
             userId: createUserId,
@@ -29091,6 +32318,3184 @@ module.exports = {
       }
     }
 
+    const resolveSchema = z.object({
+      comment: z.string().optional(),
+      metadata: z.record(z.unknown()).optional(),
+    })
+    const requestCancellationActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedSnapshotVersion: z.coerce.number().int().min(0).optional(),
+      expected_snapshot_version: z.coerce.number().int().min(0).optional(),
+      expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    })
+    const requestDecisionActionSchema = resolveSchema.extend({
+      operationId: z.string().uuid().optional(),
+      operation_id: z.string().uuid().optional(),
+      expectedApprovalVersion: z.coerce.number().int().min(0).optional(),
+      expected_approval_version: z.coerce.number().int().min(0).optional(),
+      expectedApprovalNode: z.string().min(1).max(128).optional(),
+      expected_approval_node: z.string().min(1).max(128).optional(),
+    })
+    const requestBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid().nullable(),
+      requestBody: requestWriteSchema,
+    }).strict()
+
+    function resolveRequestOperationId(parsedData) {
+      const camel = parsedData.operationId ?? null
+      const snake = parsedData.operation_id ?? null
+      if (camel && snake && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'operationId aliases must match')
+      }
+      return camel ?? snake
+    }
+
+    function requestCorrelationId(req, operationId, kind) {
+      const raw = req.correlationId
+        ?? req.headers?.['x-correlation-id']
+        ?? req.headers?.['x-request-id']
+      const first = Array.isArray(raw) ? raw[0] : raw
+      if (typeof first === 'string' && first.length > 0 && first.length <= 128) return first
+      return `${kind}:${operationId ?? randomUUID()}`
+    }
+
+    function requestCommandPayload(parsedData, draft, mode, requestId = null) {
+      const finalWrite = {
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason ?? null,
+        minutes: Number.isFinite(Number(draft.metadata?.minutes)) ? Number(draft.metadata.minutes) : null,
+        leaveTypeId: draft.metadata?.leaveType?.id ?? null,
+        leaveTypeCode: draft.metadata?.leaveType?.code ?? null,
+        overtimeRuleId: draft.metadata?.overtimeRule?.id ?? null,
+        overtimeRuleName: draft.metadata?.overtimeRule?.name ?? null,
+        attachmentUrl: draft.metadata?.attachmentUrl ?? null,
+        approvalFlowId: draft.metadata?.approvalFlow?.id ?? null,
+      }
+      if (mode === 'create') {
+        return { requestType: draft.requestType, requestWrite: finalWrite }
+      }
+
+      const patch = {}
+      const include = (target, aliases) => aliases.some(key => Object.prototype.hasOwnProperty.call(parsedData, key))
+      if (include(parsedData, ['workDate', 'work_date', 'date'])) patch.workDate = finalWrite.workDate
+      if (include(parsedData, ['requestType', 'request_type', 'type'])) patch.requestType = finalWrite.requestType
+      if (include(parsedData, ['requestedInAt', 'requested_in_at', 'clockIn'])) patch.requestedInAt = finalWrite.requestedInAt
+      if (include(parsedData, ['requestedOutAt', 'requested_out_at', 'clockOut'])) patch.requestedOutAt = finalWrite.requestedOutAt
+      if (include(parsedData, ['reason'])) patch.reason = finalWrite.reason
+      if (include(parsedData, ['minutes'])) patch.minutes = finalWrite.minutes
+      if (include(parsedData, ['leaveTypeId', 'leave_type_id'])) patch.leaveTypeId = finalWrite.leaveTypeId
+      if (include(parsedData, ['leaveTypeCode', 'leave_type_code'])) patch.leaveTypeCode = finalWrite.leaveTypeCode
+      if (include(parsedData, ['overtimeRuleId', 'overtime_rule_id'])) patch.overtimeRuleId = finalWrite.overtimeRuleId
+      if (include(parsedData, ['overtimeRuleName', 'overtime_rule_name'])) patch.overtimeRuleName = finalWrite.overtimeRuleName
+      if (include(parsedData, ['attachmentUrl', 'attachment_url'])) patch.attachmentUrl = finalWrite.attachmentUrl
+      if (include(parsedData, ['approvalFlowId', 'approval_flow_id'])) patch.approvalFlowId = finalWrite.approvalFlowId
+      return {
+        requestId,
+        expectedSnapshotVersion: firstDefinedValue(
+          parsedData.expectedSnapshotVersion,
+          parsedData.expected_snapshot_version,
+        ) ?? null,
+        expectedSnapshotHash: firstDefinedValue(
+          parsedData.expectedSnapshotFingerprint,
+          parsedData.expected_snapshot_fingerprint,
+        ) ?? null,
+        patch,
+      }
+    }
+
+    // W4C-3b: one request_create adapter multiplexes generic + outdoor +
+    // schedule_dispatch + shift_swap. The host supplies routeVariant; body keys
+    // cannot spoof it. prepare owns non-locking reads; execute owns locks and the
+    // first source DML so completed replay can return before source locking.
+    const outdoorCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      workDate: z.string().min(1),
+      eventType: z.enum(['check_in', 'check_out']),
+      occurredAt: z.string().min(1),
+      timezone: z.string().min(1),
+      source: z.string().min(1),
+      location: z.unknown().nullable(),
+      note: z.string(),
+      photoFileId: z.string().nullable(),
+      outsideGeofence: z.boolean(),
+      outdoorPolicy: z.object({
+        requireApproval: z.boolean().optional(),
+        requireNote: z.boolean().optional(),
+        requirePhoto: z.boolean().optional(),
+        approvalFlowId: z.string().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const scheduleDispatchCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorFullAdmin: z.boolean(),
+      requesterName: z.string().min(1),
+      orgId: z.string().min(1),
+      input: z.object({
+        userId: z.string().min(1),
+        targetScheduleGroupId: z.string().min(1),
+        targetShiftId: z.string().min(1),
+        startDate: z.string().min(1),
+        endDate: z.string().min(1),
+        slotIndex: z.number().int().min(0).max(2).nullable().optional(),
+        reason: z.string().nullable().optional(),
+        approvalFlowId: z.string().nullable().optional(),
+      }).passthrough(),
+    }).strict()
+
+    const shiftSwapCreateRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      requesterName: z.string().min(1).nullable(),
+      orgId: z.string().min(1),
+      requesterAssignmentId: z.string().uuid(),
+      counterpartyAssignmentId: z.string().uuid(),
+      approvalFlowId: z.string().uuid().nullable(),
+      reason: z.string().nullable(),
+    }).strict()
+
+    const shiftSwapStoredSubjectScopeSchema = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('self'), userId: z.string().min(1) }).strict(),
+      z.object({
+        kind: z.literal('explicit_users'),
+        userIds: z.array(z.string().min(1)).length(1),
+      }).strict(),
+    ])
+
+    const SHIFT_SWAP_CREATE_SOURCE_REF = 'plugin-attendance:POST /api/attendance/shift-swap-requests'
+
+    function withoutOperationIdentity(input) {
+      const { operationId: _operationId, operation_id: _operationIdSnake, ...payload } = input
+      return payload
+    }
+
+    function requestCreateIdentityFromRoute(variant, route, identityOverride = null) {
+      let requestType
+      let requestWrite
+      if (variant === 'generic') {
+        const rawRequestType = firstDefinedValue(
+          route.requestBody.requestType,
+          route.requestBody.request_type,
+          route.requestBody.type,
+        )
+        requestType = typeof rawRequestType === 'string' && rawRequestType.trim()
+          ? rawRequestType.trim()
+          : 'attendance_request'
+        requestWrite = withoutOperationIdentity(route.requestBody)
+      } else if (variant === 'outdoor') {
+        requestType = 'outdoor_punch'
+        requestWrite = {
+          workDate: route.workDate,
+          eventType: route.eventType,
+          occurredAt: route.occurredAt,
+          timezone: route.timezone,
+          source: route.source,
+          location: route.location,
+          note: route.note,
+          photoFileId: route.photoFileId,
+          outsideGeofence: route.outsideGeofence,
+          outdoorPolicy: route.outdoorPolicy,
+        }
+      } else if (variant === 'schedule_dispatch') {
+        requestType = 'schedule_dispatch'
+        requestWrite = route.input
+      } else if (variant === 'shift_swap') {
+        requestType = 'shift_swap'
+        requestWrite = {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          approvalFlowId: route.approvalFlowId,
+          reason: route.reason,
+        }
+      } else {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      }
+      const defaultSubjectUserId = variant === 'schedule_dispatch' ? route.input.userId : route.actorId
+      const subjectUserId = identityOverride?.subjectUserId ?? defaultSubjectUserId
+      const crossUser = String(subjectUserId) !== String(route.actorId)
+      const actorPosture = identityOverride?.actorPosture ?? (variant === 'schedule_dispatch'
+        ? (route.actorFullAdmin === true ? 'attendance_admin' : (crossUser ? 'operator' : 'self'))
+        : 'self')
+      return {
+        orgId: route.orgId,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [subjectUserId] }
+          : { kind: 'self', userId: subjectUserId },
+        commandPayload: { requestType, requestWrite },
+        state: null,
+      }
+    }
+
+    async function resolveShiftSwapRequestCreateIdentity(trx, route, operation) {
+      if (operation.operationId) {
+        const operationRows = await trx.query(
+          `SELECT identity_source_kind, source_ref, actor_id, actor_posture, subject_scope
+             FROM attendance_result_operations
+            WHERE org_id = $1
+              AND entrypoint = 'request_create'
+              AND operation_id = $2::uuid`,
+          [route.orgId, operation.operationId],
+        )
+        if (operationRows.length > 1) {
+          throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity is ambiguous')
+        }
+        if (operationRows.length === 1) {
+          const operationRow = operationRows[0]
+          if (
+            operationRow.identity_source_kind !== 'direct_request_create'
+            || operationRow.source_ref !== SHIFT_SWAP_CREATE_SOURCE_REF
+          ) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation identity does not match this route')
+          }
+          const subjectScope = shiftSwapStoredSubjectScopeSchema.safeParse(operationRow.subject_scope)
+          if (!subjectScope.success) {
+            throw new HttpError(409, 'ATTENDANCE_OPERATION_CONFLICT', 'Attendance operation subject is invalid')
+          }
+          const subjectUserId = subjectScope.data.kind === 'self'
+            ? subjectScope.data.userId
+            : subjectScope.data.userIds[0]
+          return requestCreateIdentityFromRoute('shift_swap', route, {
+            subjectUserId,
+            actorPosture: operationRow.actor_posture,
+          })
+        }
+      }
+
+      const assignmentRows = await trx.query(
+        `SELECT user_id
+           FROM attendance_shift_assignments
+          WHERE id = $1::uuid AND org_id = $2`,
+        [route.requesterAssignmentId, route.orgId],
+      )
+      if (assignmentRows.length !== 1) {
+        throw new HttpError(404, 'SHIFT_ASSIGNMENT_NOT_FOUND', 'Shift assignment not found')
+      }
+      const subjectUserId = String(assignmentRows[0].user_id)
+      const crossUser = subjectUserId !== route.actorId
+      if (crossUser && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const actorPosture = crossUser
+        ? ((await hasAttendanceAdminAccess(route.actorId)) ? 'attendance_admin' : 'operator')
+        : 'self'
+      return requestCreateIdentityFromRoute('shift_swap', route, { subjectUserId, actorPosture })
+    }
+
+    async function prepareRequestCreateIdentity(trx, rawInput, operation) {
+      const variant = operation?.routeVariant
+      if (variant === 'generic') {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.orgId || route.requestId !== null) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        return requestCreateIdentityFromRoute(variant, route)
+      }
+      if (variant === 'outdoor') {
+        return requestCreateIdentityFromRoute(variant, outdoorCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'schedule_dispatch') {
+        return requestCreateIdentityFromRoute(variant, scheduleDispatchCreateRouteInputSchema.parse(rawInput))
+      }
+      if (variant === 'shift_swap') {
+        return resolveShiftSwapRequestCreateIdentity(
+          trx,
+          shiftSwapCreateRouteInputSchema.parse(rawInput),
+          operation,
+        )
+      }
+      throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+    }
+
+    async function prepareGenericRequestCreate(trx, rawInput) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.orgId || route.requestId !== null) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const draft = await resolveAttendanceRequestDraft(
+        trx,
+        route.requestBody,
+        { org_id: route.orgId, user_id: route.actorId },
+      )
+      let makeupPunchPolicy = null
+      if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+        const settings = await getSettings(trx)
+        if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      return {
+        ...requestCreateIdentityFromRoute('generic', route),
+        state: {
+          routeVariant: 'generic',
+          route,
+          draft,
+          makeupPunchPolicy,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeGenericRequestCreate(trx, prepared) {
+      const {
+        route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
+      const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+        orgId: route.orgId,
+        userId: route.actorId,
+        workDate: draft.workDate,
+        requestType: draft.requestType,
+      })
+      if (duplicateRequest) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+      }
+      if (makeupPunchPolicy) {
+        const enforcement = await enforceMakeupPunchPolicy(trx, {
+          policy: makeupPunchPolicy,
+          orgId: route.orgId,
+          subjectUserId: route.actorId,
+          requesterId: route.actorId,
+          requestId: null,
+          draft,
+        })
+        draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          draft.workDate,
+          draft.requestType,
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: draft.requestType,
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate: draft.workDate,
+        }),
+      })
+      const response = {
+        ok: true,
+        data: {
+          request: mapAttendanceRequestRow(rows[0]),
+          ...(buildRequestSnapshotToken(snapshotAppend)
+            ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+            : {}),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate: draft.workDate,
+            requestType: draft.requestType,
+          },
+        }],
+      }
+    }
+
+    async function prepareOutdoorRequestCreate(trx, rawInput) {
+      const route = outdoorCreateRouteInputSchema.parse(rawInput)
+      const { outdoorPolicy, eventType, workDate, note } = route
+      const occurredAt = new Date(route.occurredAt)
+      if (Number.isNaN(occurredAt.getTime())) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid outdoor punch occurredAt')
+      }
+      if (outdoorPolicy.requireNote === true && !note) {
+        throw new HttpError(422, 'OUTDOOR_NOTE_REQUIRED', '外勤打卡需填写备注')
+      }
+      const rawPhotoFileId = typeof route.photoFileId === 'string' ? route.photoFileId.trim() : ''
+      if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
+        throw new HttpError(422, 'OUTDOOR_PHOTO_REQUIRED', '外勤打卡需上传照片证据')
+      }
+      let photoFileId = null
+      if (rawPhotoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+          [rawPhotoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        let photoContentTypeValid
+        if (photoMeta.sniffed === true) {
+          const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
+          photoContentTypeValid = sniffedContentType.startsWith('image/')
+        } else {
+          const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+          photoContentTypeValid = photoContentType.startsWith('image/')
+        }
+        if (!photoRow || photoRow.owner_id !== route.actorId || !photoContentTypeValid) {
+          throw new HttpError(422, 'OUTDOOR_PHOTO_INVALID', '照片证据无效')
+        }
+        photoFileId = rawPhotoFileId
+      }
+      const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
+      let flow = null
+      if (requestedFlowId) {
+        flow = await loadApprovalFlow(trx, route.orgId, { flowId: requestedFlowId })
+        if (!flow || flow.requestType !== 'outdoor_punch' || flow.isActive !== true) {
+          throw new HttpError(422, 'OUTDOOR_APPROVAL_FLOW_REQUIRED', '外勤审批流不存在或未启用')
+        }
+      } else {
+        const activeFlows = await trx.query(
+          `SELECT * FROM attendance_approval_flows
+           WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
+           ORDER BY created_at DESC LIMIT 2`,
+          [route.orgId],
+        )
+        if (activeFlows.length !== 1) {
+          throw new HttpError(
+            422,
+            'OUTDOOR_APPROVAL_FLOW_REQUIRED',
+            activeFlows.length === 0 ? '外勤审批流未配置' : '存在多个启用的外勤审批流，请指定 approvalFlowId',
+          )
+        }
+        flow = mapApprovalFlowRow(activeFlows[0])
+      }
+      const draft = {
+        orgId: route.orgId,
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: eventType === 'check_in' ? occurredAt : null,
+        requestedOutAt: eventType === 'check_out' ? occurredAt : null,
+        reason: note || null,
+        metadata: {
+          outdoorPunch: {
+            version: 1,
+            eventType,
+            occurredAt: occurredAt.toISOString(),
+            workDate,
+            timezone: route.timezone,
+            source: route.source,
+            location: route.location ?? null,
+            note: note || null,
+            detection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+            ...(photoFileId ? { photoFileId } : {}),
+          },
+          approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
+        },
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata.approvalFlow.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: route.actorId,
+        flowSteps: draft.metadata.approvalFlow.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: route.actorId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata.approvalFlow.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const requestWrite = {
+        workDate,
+        requestType: 'outdoor_punch',
+        requestedInAt: draft.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+        requestedOutAt: draft.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+        reason: draft.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: flow.id,
+        outdoorEventType: eventType,
+        outdoorOccurredAt: occurredAt.toISOString(),
+        outdoorTimezone: route.timezone,
+        outdoorSource: route.source,
+        outdoorPhotoFileId: photoFileId,
+        outdoorDetection: route.outsideGeofence ? 'outside_geofence' : 'marker',
+      }
+      return {
+        ...requestCreateIdentityFromRoute('outdoor', route),
+        state: {
+          routeVariant: 'outdoor',
+          route,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+          eventType,
+          workDate,
+          occurredAtIso: occurredAt.toISOString(),
+          flow,
+          photoFileId,
+        },
+      }
+    }
+
+    async function executeOutdoorRequestCreate(trx, prepared) {
+      const {
+        route, draft, requestId, approvalId, approvalPayload, approvalAssignments, eventType, workDate,
+        flow, photoFileId,
+      } = prepared.state
+      await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, workDate, 'outdoor_punch')
+      if (photoFileId) {
+        const photoRows = await trx.query(
+          'SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL FOR KEY SHARE',
+          [photoFileId],
+        )
+        const photoRow = photoRows[0] ?? null
+        const photoMeta = normalizeMetadata(photoRow?.meta)
+        const contentType = photoMeta.sniffed === true
+          ? photoMeta.sniffedContentType
+          : photoMeta.contentType
+        if (!photoRow || photoRow.owner_id !== route.actorId || typeof contentType !== 'string' || !contentType.startsWith('image/')) {
+          throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor photo evidence changed during request creation')
+        }
+      }
+      const currentFlow = await loadApprovalFlow(trx, route.orgId, { flowId: flow.id })
+      if (
+        !currentFlow
+        || currentFlow.requestType !== 'outdoor_punch'
+        || currentFlow.isActive !== true
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(flow.steps)
+      ) {
+        throw new HttpError(409, 'OUTDOOR_SOURCE_CHANGED', 'Outdoor approval flow changed during request creation')
+      }
+      const dup = await trx.query(
+        `SELECT id FROM attendance_requests
+         WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = 'outdoor_punch'
+           AND status IN ('pending', 'approved')
+           AND metadata -> 'outdoorPunch' ->> 'eventType' = $4
+         LIMIT 1`,
+        [route.orgId, route.actorId, workDate, eventType],
+      )
+      if (dup.length > 0) {
+        throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const rows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          route.actorId,
+          route.orgId,
+          workDate,
+          'outdoor_punch',
+          draft.requestedInAt,
+          draft.requestedOutAt,
+          draft.reason,
+          'pending',
+          approvalId,
+          JSON.stringify(draft.metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'outdoor_punch',
+        subjectUserId: route.actorId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: route.actorId,
+          workDate,
+          occurredAt: prepared.state.occurredAtIso,
+        }),
+      })
+      return {
+        response: {
+          ok: true,
+          data: {
+            pendingApproval: true,
+            request: mapAttendanceRequestRow(rows[0]),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.outdoorPunch.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: route.actorId,
+            workDate,
+            eventType,
+          },
+        }],
+      }
+    }
+
+    async function prepareScheduleDispatchRequestCreate(trx, rawInput) {
+      const route = scheduleDispatchCreateRouteInputSchema.parse(rawInput)
+      const input = route.input
+      const groupRows = await trx.query(
+        `SELECT *
+           FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          LIMIT 1`,
+        [input.targetScheduleGroupId, route.orgId],
+      )
+      const targetGroup = groupRows[0]
+      if (!targetGroup) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
+      }
+      const shiftRows = await trx.query(
+        `SELECT id
+           FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          LIMIT 1`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (!shiftRows.length) {
+        throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
+      }
+      const settings = await getSettings(trx)
+      const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
+      const target = buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetDepartmentRef: targetGroup.department_ref ?? null,
+      })
+      const actorAccess = {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, actorAccess, target)
+      const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      const sourceKey = buildScheduleDispatchSourceKey({
+        userId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+      })
+      const metadata = {
+        scheduleDispatch: {
+          userId: input.userId,
+          targetScheduleGroupId: targetGroup.id,
+          targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
+          targetDepartmentRef: targetGroup.department_ref ?? null,
+          targetShiftId: input.targetShiftId,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          slotIndex: slotResolution.slotIndex,
+          sourceKey,
+        },
+        approvalFlow: {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        },
+      }
+      const draft = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: input.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: input.userId,
+        requesterName: route.requesterName,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(input.userId) !== String(route.actorId)
+      // Human schedule-scope operators are never the internal scheduler posture.
+      const actorPosture = route.actorFullAdmin === true
+        ? 'attendance_admin'
+        : (crossUser ? 'operator' : 'self')
+      const requestWrite = {
+        workDate: input.startDate,
+        requestType: 'schedule_dispatch',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: input.reason ?? null,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow.id,
+        targetUserId: input.userId,
+        targetScheduleGroupId: targetGroup.id,
+        targetShiftId: input.targetShiftId,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        slotIndex: slotResolution.slotIndex,
+        sourceKey,
+      }
+      return {
+        ...requestCreateIdentityFromRoute('schedule_dispatch', route),
+        state: {
+          routeVariant: 'schedule_dispatch',
+          route,
+          input,
+          targetGroup,
+          slotResolution,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeScheduleDispatchRequestCreate(trx, prepared) {
+      const {
+        route, input, targetGroup, slotResolution, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      await acquireScheduleDispatchWindowLock(
+        trx,
+        route.orgId,
+        input.userId,
+        targetGroup.id,
+        slotResolution.slotIndex,
+      )
+      await acquireAttendanceRequestLock(trx, route.orgId, input.userId, input.startDate, 'schedule_dispatch')
+      const lockedGroupRows = await trx.query(
+        `SELECT * FROM attendance_schedule_groups
+          WHERE id = $1 AND org_id = $2 AND is_active = true
+          FOR UPDATE`,
+        [targetGroup.id, route.orgId],
+      )
+      const lockedGroup = lockedGroupRows[0] ?? null
+      if (
+        !lockedGroup
+        || lockedGroup.attendance_group_id !== targetGroup.attendance_group_id
+        || lockedGroup.department_ref !== targetGroup.department_ref
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch group changed during request creation')
+      }
+      const lockedShiftRows = await trx.query(
+        `SELECT id FROM attendance_shifts
+          WHERE id = $1 AND org_id = $2
+          FOR UPDATE`,
+        [input.targetShiftId, route.orgId],
+      )
+      if (lockedShiftRows.length !== 1) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch shift changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftId: input.targetShiftId,
+        producer: 'schedule_dispatch_create',
+      })
+      await assertScheduleDispatchScopeAllowed(trx, route.orgId, {
+        userId: route.actorId,
+        orgId: route.orgId,
+        fullAdmin: route.actorFullAdmin === true,
+      }, buildScheduleDispatchSchedulerScopeTarget({
+        userId: input.userId,
+        targetScheduleGroupId: lockedGroup.id,
+        targetDepartmentRef: lockedGroup.department_ref ?? null,
+      }))
+      const currentFlow = await resolveScheduleDispatchApprovalFlow(trx, route.orgId, input.approvalFlowId)
+      if (
+        currentFlow.id !== metadata.approvalFlow.id
+        || JSON.stringify(currentFlow.steps) !== JSON.stringify(metadata.approvalFlow.steps)
+      ) {
+        throw new HttpError(409, 'SCHEDULE_DISPATCH_SOURCE_CHANGED', 'Schedule-dispatch approval flow changed during request creation')
+      }
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1
+            AND d.user_id = $2
+            AND d.target_schedule_group_id = $3
+            AND d.slot_index = $4
+            AND d.start_date <= $6::date
+            AND d.end_date >= $5::date
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          input.userId,
+          route.orgId,
+          input.startDate,
+          input.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'schedule_dispatch',
+        subjectUserId: input.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: input.userId,
+          workDate: input.startDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_schedule_dispatch_requests
+         (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
+          target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
+         VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
+        [
+          requestId,
+          route.orgId,
+          input.userId,
+          targetGroup.id,
+          targetGroup.attendance_group_id ?? null,
+          targetGroup.department_ref ?? null,
+          input.targetShiftId,
+          slotResolution.slotIndex,
+          input.startDate,
+          input.endDate,
+          sourceKey,
+        ],
+      )
+      const detail = await loadScheduleDispatchDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            scheduleDispatch: mapScheduleDispatchRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: input.userId,
+            workDate: input.startDate,
+            requestType: 'schedule_dispatch',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    async function prepareShiftSwapRequestCreate(trx, rawInput) {
+      const route = shiftSwapCreateRouteInputSchema.parse(rawInput)
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId),
+        )
+      }
+      const requesterRow = lockedSourceRows.get(route.requesterAssignmentId)
+      const counterpartyRow = lockedSourceRows.get(route.counterpartyAssignmentId)
+      const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
+      const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
+      if (requesterSource.userId !== route.actorId) {
+        const allowed = await canAccessOtherUsers(route.actorId)
+        if (!allowed) {
+          throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+        }
+      }
+      if (requesterSource.userId === counterpartySource.userId) {
+        throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
+      }
+      const sourceKey = buildShiftSwapSourceKey(route.requesterAssignmentId, route.counterpartyAssignmentId)
+      const approvalFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      if (route.approvalFlowId && !approvalFlow) {
+        throw new HttpError(
+          422,
+          'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED',
+          'Shift-swap approval flow does not exist or is inactive',
+          singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'),
+        )
+      }
+      const metadata = {
+        shiftSwap: {
+          requesterAssignmentId: route.requesterAssignmentId,
+          counterpartyAssignmentId: route.counterpartyAssignmentId,
+          requesterUserId: requesterSource.userId,
+          counterpartyUserId: counterpartySource.userId,
+          requesterWorkDate: requesterSource.workDate,
+          counterpartyWorkDate: counterpartySource.workDate,
+        },
+      }
+      if (approvalFlow) {
+        metadata.approvalFlow = {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        }
+      }
+      const draft = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        metadata,
+      }
+      const requestId = randomUUID()
+      const approvalId = `apv_${randomUUID()}`
+      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        flowSteps: draft.metadata?.approvalFlow?.steps,
+        context,
+      })
+      const approvalPayload = buildAttendanceApprovalInstancePayload({
+        approvalId,
+        requestId,
+        orgId: route.orgId,
+        userId: requesterSource.userId,
+        requesterName: route.requesterName ?? requesterSource.userId,
+        draft,
+        orgRelations,
+      })
+      const approvalAssignments = buildAttendanceApprovalAssignments(
+        draft.metadata?.approvalFlow?.steps,
+        0,
+        approvalPayload.requesterSnapshot,
+      )
+      const crossUser = String(requesterSource.userId) !== String(route.actorId)
+      let actorPosture = 'self'
+      if (crossUser) {
+        const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+        actorPosture = fullAdmin ? 'attendance_admin' : 'operator'
+      }
+      const requestWrite = {
+        workDate: requesterSource.workDate,
+        requestType: 'shift_swap',
+        requestedInAt: null,
+        requestedOutAt: null,
+        reason: route.reason,
+        minutes: null,
+        leaveTypeId: null,
+        leaveTypeCode: null,
+        overtimeRuleId: null,
+        overtimeRuleName: null,
+        attachmentUrl: null,
+        approvalFlowId: approvalFlow?.id ?? null,
+        requesterAssignmentId: route.requesterAssignmentId,
+        counterpartyAssignmentId: route.counterpartyAssignmentId,
+        requesterUserId: requesterSource.userId,
+        counterpartyUserId: counterpartySource.userId,
+        requesterWorkDate: requesterSource.workDate,
+        counterpartyWorkDate: counterpartySource.workDate,
+        sourceKey,
+      }
+      return {
+        ...requestCreateIdentityFromRoute('shift_swap', route, {
+          subjectUserId: requesterSource.userId,
+          actorPosture,
+        }),
+        state: {
+          routeVariant: 'shift_swap',
+          route,
+          requesterSource,
+          counterpartySource,
+          sourceKey,
+          metadata,
+          draft,
+          requestId,
+          approvalId,
+          approvalPayload,
+          approvalAssignments,
+        },
+      }
+    }
+
+    async function executeShiftSwapRequestCreate(trx, prepared) {
+      const {
+        route, requesterSource, counterpartySource, sourceKey, metadata, draft,
+        requestId, approvalId, approvalPayload, approvalAssignments,
+      } = prepared.state
+      const lockedSourceRows = new Map()
+      for (const assignmentId of [route.requesterAssignmentId, route.counterpartyAssignmentId].sort()) {
+        lockedSourceRows.set(
+          assignmentId,
+          await loadShiftSwapSourceAssignment(trx, route.orgId, assignmentId, { forUpdate: true }),
+        )
+      }
+      const lockedRequesterSource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.requesterAssignmentId),
+        'requesterAssignmentId',
+      )
+      const lockedCounterpartySource = normalizeShiftSwapSourceSnapshot(
+        lockedSourceRows.get(route.counterpartyAssignmentId),
+        'counterpartyAssignmentId',
+      )
+      if (
+        JSON.stringify(lockedRequesterSource) !== JSON.stringify(requesterSource)
+        || JSON.stringify(lockedCounterpartySource) !== JSON.stringify(counterpartySource)
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap source assignment changed during request creation')
+      }
+      await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+        orgId: route.orgId,
+        shiftRefs: [lockedRequesterSource.shiftId, lockedCounterpartySource.shiftId],
+        producer: 'shift_swap_create',
+      })
+      if (lockedRequesterSource.userId !== route.actorId && !(await canAccessOtherUsers(route.actorId))) {
+        throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
+      }
+      const currentFlow = await loadActiveApprovalFlowForRequestType(
+        trx,
+        route.orgId,
+        'shift_swap',
+        route.approvalFlowId,
+      )
+      const preparedFlow = normalizeMetadata(metadata.approvalFlow)
+      if (
+        (currentFlow?.id ?? null) !== (preparedFlow.id ?? null)
+        || JSON.stringify(currentFlow?.steps ?? []) !== JSON.stringify(preparedFlow.steps ?? [])
+      ) {
+        throw new HttpError(409, 'SHIFT_SWAP_SOURCE_CHANGED', 'Shift-swap approval flow changed during request creation')
+      }
+      await acquireAttendanceRequestLock(
+        trx,
+        route.orgId,
+        requesterSource.userId,
+        requesterSource.workDate,
+        'shift_swap',
+      )
+      const duplicateRows = await trx.query(
+        `SELECT d.request_id
+           FROM attendance_shift_swap_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE d.org_id = $1 AND d.source_key = $2
+            AND r.status IN ('pending', 'approved')
+          LIMIT 1`,
+        [route.orgId, sourceKey],
+      )
+      if (duplicateRows.length) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
+      }
+      const sourceConflict = await findShiftSwapSourceConflict(
+        trx,
+        route.orgId,
+        [route.requesterAssignmentId, route.counterpartyAssignmentId],
+      )
+      if (sourceConflict) {
+        throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
+      }
+      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      const requestRows = await trx.query(
+        `INSERT INTO attendance_requests
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         RETURNING *`,
+        [
+          requestId,
+          requesterSource.userId,
+          route.orgId,
+          requesterSource.workDate,
+          route.reason,
+          approvalId,
+          JSON.stringify(metadata),
+        ],
+      )
+      const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
+        orgId: route.orgId,
+        requestId,
+        requestType: 'shift_swap',
+        subjectUserId: requesterSource.userId,
+        actorUserId: route.actorId,
+        payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, metadata),
+        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+          orgId: route.orgId,
+          userId: requesterSource.userId,
+          workDate: requesterSource.workDate,
+        }),
+      })
+      await trx.query(
+        `INSERT INTO attendance_shift_swap_requests
+         (request_id, org_id, requester_user_id, counterparty_user_id,
+          requester_assignment_id, counterparty_assignment_id,
+          requester_work_date, counterparty_work_date,
+          requester_shift_id, counterparty_shift_id,
+          requester_slot_index, counterparty_slot_index,
+          requester_start_date, requester_end_date,
+          counterparty_start_date, counterparty_end_date,
+          requester_publish_status, counterparty_publish_status,
+          requester_producer_type, counterparty_producer_type,
+          requester_assignment_kind, counterparty_assignment_kind,
+          source_key)
+         VALUES
+         ($1, $2, $3, $4,
+          $5, $6,
+          $7, $8,
+          $9, $10,
+          $11, $12,
+          $13, $14,
+          $15, $16,
+          $17, $18,
+          $19, $20,
+          $21, $22,
+          $23)`,
+        [
+          requestId,
+          route.orgId,
+          requesterSource.userId,
+          counterpartySource.userId,
+          requesterSource.id,
+          counterpartySource.id,
+          requesterSource.workDate,
+          counterpartySource.workDate,
+          requesterSource.shiftId,
+          counterpartySource.shiftId,
+          requesterSource.slotIndex,
+          counterpartySource.slotIndex,
+          requesterSource.startDate,
+          requesterSource.endDate,
+          counterpartySource.startDate,
+          counterpartySource.endDate,
+          requesterSource.publishStatus,
+          counterpartySource.publishStatus,
+          requesterSource.producerType,
+          counterpartySource.producerType,
+          requesterSource.assignmentKind,
+          counterpartySource.assignmentKind,
+          sourceKey,
+        ],
+      )
+      const detail = await loadShiftSwapDetail(trx, route.orgId, requestId)
+      return {
+        response: {
+          ok: true,
+          data: {
+            request: mapAttendanceRequestRow(requestRows[0]),
+            shiftSwap: mapShiftSwapRequestRow(detail),
+            ...(buildRequestSnapshotToken(snapshotAppend)
+              ? { requestSnapshot: buildRequestSnapshotToken(snapshotAppend) }
+              : {}),
+          },
+        },
+        resolvedRequestId: requestId,
+        lifecycleEvents: [{
+          eventKind: 'attendance.requested',
+          payload: {
+            orgId: route.orgId,
+            userId: requesterSource.userId,
+            workDate: requesterSource.workDate,
+            requestType: 'shift_swap',
+            requestId,
+          },
+        }],
+      }
+    }
+
+    const requestCreateAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCreateIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestCreate(trx, rawInput, operation) {
+        const variant = operation?.routeVariant
+        if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
+        if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
+        if (variant === 'schedule_dispatch') return prepareScheduleDispatchRequestCreate(trx, rawInput)
+        if (variant === 'shift_swap') return prepareShiftSwapRequestCreate(trx, rawInput)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      },
+      async execute(trx, prepared, operation) {
+        const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
+        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
+        if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
+        if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
+        if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+      },
+    }
+
+    async function loadRequestOperationIdentityRow(trx, route) {
+      const rows = route.orgId
+        ? await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid AND org_id = $2
+              LIMIT 1`,
+            [route.requestId, route.orgId],
+          )
+        : await trx.query(
+            `SELECT id, org_id, user_id, approval_instance_id, request_type
+               FROM attendance_requests
+              WHERE id = $1::uuid
+              LIMIT 1`,
+            [route.requestId],
+          )
+      if (rows.length !== 1) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+      return rows[0]
+    }
+
+    function requestPendingEditIdentityPayload(requestBody, requestId, operationId) {
+      const expectedSnapshotVersion = firstDefinedValue(
+        requestBody.expectedSnapshotVersion,
+        requestBody.expected_snapshot_version,
+      )
+      const expectedSnapshotHash = firstDefinedValue(
+        requestBody.expectedSnapshotFingerprint,
+        requestBody.expected_snapshot_fingerprint,
+      )
+      if (operationId && (expectedSnapshotVersion === undefined || expectedSnapshotHash === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_EDIT_OCC_REQUIRED',
+          'expectedSnapshotVersion and expectedSnapshotFingerprint are required with operationId',
+        )
+      }
+      const {
+        operationId: _operationId,
+        operation_id: _operationIdSnake,
+        expectedSnapshotVersion: _expectedVersion,
+        expected_snapshot_version: _expectedVersionSnake,
+        expectedSnapshotFingerprint: _expectedHash,
+        expected_snapshot_fingerprint: _expectedHashSnake,
+        ...patch
+      } = requestBody
+      return {
+        requestId,
+        expectedSnapshotVersion: expectedSnapshotVersion ?? 1,
+        expectedSnapshotHash: expectedSnapshotHash ?? '0'.repeat(64),
+        patch,
+      }
+    }
+
+    async function prepareRequestPendingEditIdentity(trx, rawInput, operation) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      if (!route.requestId) {
+        throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+      }
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture: crossUser ? 'attendance_admin' : 'self',
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: requestPendingEditIdentityPayload(
+          route.requestBody,
+          route.requestId,
+          operation.operationId,
+        ),
+        state: null,
+      }
+    }
+
+    const requestPendingEditAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestPendingEditIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestPendingEdit(trx, rawInput, operation) {
+        const route = requestBoundaryRouteInputSchema.parse(rawInput)
+        if (!route.requestId) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
+        }
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const existingRequest = requestRows[0]
+        await ensureAttendanceRequestAccess(existingRequest, route.actorId, 'edit request')
+        if (existingRequest.status !== 'pending') {
+          throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
+        }
+        const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
+        const makeupTypeInvolved =
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
+          MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
+        let makeupPunchPolicy = null
+        if (makeupTypeInvolved) {
+          const settings = await getSettings(trx)
+          if (settings?.makeupPunchPolicy?.enabled === true) {
+            makeupPunchPolicy = settings.makeupPunchPolicy
+            if (existingRequest.user_id !== route.actorId) {
+              throw new HttpError(
+                422,
+                'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
+                'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled',
+              )
+            }
+          }
+        }
+        const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          flowSteps: draft.metadata?.approvalFlow?.steps,
+          context,
+        })
+        const approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId: route.requestId,
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          userId: existingRequest.user_id,
+          requesterName: existingRequest.user_id,
+          draft,
+          orgRelations,
+        })
+        const approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps,
+          0,
+          approvalPayload.requesterSnapshot,
+        )
+        const identity = await prepareRequestPendingEditIdentity(trx, rawInput, operation)
+        return {
+          ...identity,
+          state: { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments },
+        }
+      },
+      execute: async function executeRequestPendingEdit(trx, prepared) {
+        const { route, existingRequest, draft, makeupPunchPolicy, approvalId, approvalPayload, approvalAssignments } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(existingRequest)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during edit preparation')
+        }
+        const expectedSnapshotVersion = firstDefinedValue(
+          route.requestBody.expectedSnapshotVersion,
+          route.requestBody.expected_snapshot_version,
+        )
+        const expectedSnapshotFingerprint = firstDefinedValue(
+          route.requestBody.expectedSnapshotFingerprint,
+          route.requestBody.expected_snapshot_fingerprint,
+        )
+        await acquireAttendanceRequestLock(
+          trx,
+          existingRequest.org_id,
+          existingRequest.user_id,
+          draft.workDate,
+          draft.requestType,
+        )
+        const duplicateRows = await trx.query(
+          `SELECT id
+           FROM attendance_requests
+           WHERE org_id = $1 AND user_id = $2 AND work_date = $3 AND request_type = $4
+             AND status IN ('pending', 'approved') AND id <> $5
+           LIMIT 1`,
+          [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, route.requestId],
+        )
+        if (duplicateRows.length > 0) {
+          throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+        }
+        if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const enforcement = await enforceMakeupPunchPolicy(trx, {
+            policy: makeupPunchPolicy,
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            subjectUserId: existingRequest.user_id,
+            requesterId: route.actorId,
+            requestId: route.requestId,
+            draft,
+          })
+          draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
+        }
+        const snapshotAppend = await appendRequestCalculationSnapshotOnEdit(trx, {
+          orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+          requestId: route.requestId,
+          requestType: draft.requestType,
+          currentRequestType: existingRequest.request_type,
+          subjectUserId: existingRequest.user_id,
+          actorUserId: route.actorId,
+          expectedSnapshotVersion,
+          expectedSnapshotFingerprint,
+          payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
+          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
+            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+            userId: existingRequest.user_id,
+            workDate: draft.workDate,
+          }),
+        })
+        await upsertAttendanceApprovalInstance(trx, approvalPayload)
+        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+        const rows = await trx.query(
+          `UPDATE attendance_requests
+           SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+           WHERE id = $1
+           RETURNING *`,
+          [
+            route.requestId,
+            draft.workDate,
+            draft.requestType,
+            draft.requestedInAt,
+            draft.requestedOutAt,
+            draft.reason,
+            JSON.stringify(draft.metadata),
+            approvalId,
+          ],
+        )
+        const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
+        return {
+          response: {
+            ok: true,
+            data: {
+              request: mapAttendanceRequestRow(rows[0]),
+              ...(snapshotToken ? { requestSnapshot: snapshotToken } : {}),
+            },
+          },
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.updated',
+            payload: {
+              requestId: route.requestId,
+              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+              userId: existingRequest.user_id,
+            },
+          }],
+        }
+      },
+    }
+
+    const requestActionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid(),
+      requestBody: requestCancellationActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+    const requestDecisionBoundaryRouteInputSchema = z.object({
+      actorId: z.string().min(1),
+      tokenSubjectUserId: z.string().min(1),
+      actorName: z.string().min(1),
+      orgId: z.string().min(1).nullable(),
+      requestId: z.string().uuid(),
+      action: z.enum(['approve', 'reject']),
+      requestBody: requestDecisionActionSchema,
+      ipAddress: z.string().nullable(),
+      userAgent: z.string().nullable(),
+    }).strict()
+
+    async function resolveRequestCancellationActorPosture(trx, route, requestRow, options = {}) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the cancellation actor')
+      }
+      if (String(requestRow.user_id) === route.actorId) return 'self'
+
+      if (options.legacyAuthorization === true) {
+        if (options.allowScopedOperator === true) return 'operator'
+        if (await canAccessOtherUsers(route.actorId)) {
+          return await hasAttendanceAdminAccess(route.actorId) ? 'attendance_admin' : 'operator'
+        }
+        throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (actorRows[0].platform_admin === true) return 'platform_admin'
+
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      if (options.allowScopedOperator === true) return 'operator'
+
+      const permissionRows = await trx.query(
+        `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id
+               WHERE ur.user_id = $1
+                 AND rp.permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM users u
+              WHERE u.id = $1
+                AND COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| $2::text[]
+           )
+           LIMIT 1`,
+        [route.actorId, ['attendance:admin', 'attendance:*', '*:*']],
+      )
+      if (permissionRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+      return 'attendance_admin'
+    }
+
+    async function loadLatestRequestSnapshotToken(trx, route, requestRow, options = {}) {
+      const lockClause = options.forUpdate === true ? 'FOR UPDATE' : ''
+      const snapshotRows = await trx.query(
+        `SELECT version, payload_fingerprint
+           FROM attendance_request_calculation_snapshots
+          WHERE org_id = $1 AND request_id = $2::uuid
+          ORDER BY version DESC
+          LIMIT 1
+          ${lockClause}`,
+        [requestRow.org_id ?? DEFAULT_ORG_ID, route.requestId],
+      )
+      const snapshot = snapshotRows[0] ?? null
+      const version = snapshot ? Number(snapshot.version) : 0
+      const fingerprint = snapshot ? String(snapshot.payload_fingerprint ?? '') : '0'.repeat(64)
+      if (!Number.isSafeInteger(version) || version < 0 || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_INVALID', 'Request snapshot is invalid')
+      }
+      const expectedVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      )
+      const expectedFingerprint = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      )
+      if (expectedVersion !== undefined && Number(expectedVersion) !== version) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_VERSION_CONFLICT', 'Request snapshot version conflict')
+      }
+      if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+        throw new HttpError(409, 'REQUEST_SNAPSHOT_FINGERPRINT_CONFLICT', 'Request snapshot fingerprint conflict')
+      }
+      return { version, fingerprint }
+    }
+
+    async function resolveStableCrossUserPosture(trx, actorId, fallback, orgId) {
+      const rows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'`,
+        [actorId],
+      )
+      if (rows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      if (rows[0].platform_admin === true) return 'platform_admin'
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE`,
+        [actorId, orgId],
+      )
+      if (membershipRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this request operation')
+      }
+      return fallback
+    }
+
+    async function prepareRequestCancelIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      if (
+        (operation.routeVariant === 'schedule_dispatch_cancel' && identityRow.request_type !== 'schedule_dispatch')
+        || (operation.routeVariant === 'shift_swap_cancel' && identityRow.request_type !== 'shift_swap')
+      ) {
+        throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      let actorPosture = options.actorPosture ?? 'self'
+      if (crossUser && options.actorPosture === undefined) {
+        actorPosture = operation.routeVariant === 'schedule_dispatch_cancel'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, 'attendance_admin', identityRow.org_id)
+      }
+      const expectedSnapshotVersion = firstDefinedValue(
+        route.requestBody.expectedSnapshotVersion,
+        route.requestBody.expected_snapshot_version,
+      ) ?? 0
+      const expectedSnapshotHash = firstDefinedValue(
+        route.requestBody.expectedSnapshotFingerprint,
+        route.requestBody.expected_snapshot_fingerprint,
+      ) ?? '0'.repeat(64)
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id ?? null,
+          expectedSnapshotVersion,
+          expectedSnapshotHash,
+          reason: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
+    const requestCancelAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestCancelIdentity(trx, rawInput, operation)
+      },
+      prepare: async function prepareRequestCancel(trx, rawInput, operation) {
+        const route = requestActionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        if (
+          (operation.routeVariant === 'schedule_dispatch_cancel' && requestRow.request_type !== 'schedule_dispatch')
+          || (operation.routeVariant === 'shift_swap_cancel' && requestRow.request_type !== 'shift_swap')
+        ) {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
+        const approvedLeave = requestRow.status === 'approved' && requestRow.request_type === 'leave'
+
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, orgId, route.requestId, {
+            userId: route.actorId,
+            orgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: false })
+        }
+        const actorPosture = await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: await resolveRequestLegacyAuthorization(trx, requestRow),
+          },
+        )
+        const snapshot = await loadLatestRequestSnapshotToken(trx, route, requestRow)
+        const approvalId = requestRow.approval_instance_id ?? null
+        let approval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1',
+            [approvalId],
+          )
+          approval = approvalRows[0] ?? null
+        }
+        const identity = await prepareRequestCancelIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture } : undefined,
+        )
+        return {
+          ...identity,
+          state: { route, requestRow, approvalId, approval, approvedLeave, actorPosture: identity.actorPosture },
+        }
+      },
+      execute: async function executeRequestCancel(trx, prepared, operation) {
+        const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        const lockedRequestRows = await trx.query(
+          'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+          [route.requestId],
+        )
+        if (
+          lockedRequestRows.length !== 1
+          || JSON.stringify(lockedRequestRows[0]) !== JSON.stringify(requestRow)
+        ) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request changed during cancellation preparation')
+        }
+        const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const scopedDispatch = requestRow.request_type === 'schedule_dispatch'
+        if (scopedDispatch) {
+          await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, route.requestId, {
+            userId: route.actorId,
+            orgId: requestOrgId,
+            fullAdmin: await hasAttendanceAdminAccess(route.actorId),
+          }, { forUpdate: true })
+        }
+        await resolveRequestCancellationActorPosture(
+          trx,
+          route,
+          requestRow,
+          {
+            allowScopedOperator: scopedDispatch,
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          },
+        )
+        await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
+        if (requestRow.status !== 'pending' && !approvedLeave) {
+          throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
+        }
+        let cancellationCalculation = null
+        if (approvedLeave && operation.acceptedWritePosture !== 'legacy_projection_only') {
+          const requestWorkDate = normalizeDateOnly(requestRow.work_date)
+          if (!requestWorkDate || !/^\d{4}-\d{2}-\d{2}$/.test(requestWorkDate)) {
+            throw new HttpError(409, 'REQUEST_WORK_DATE_INVALID', 'Request work date is invalid')
+          }
+          const port = attendanceW4SegmentCalculationPort
+          if (!port || typeof port.appendApprovedLeaveCancellationCalculation !== 'function' || !operation.operationId) {
+            throw new HttpError(503, 'W4C3B_P14_HOST_PORT_MISSING', 'W4C3B_P14_HOST_PORT_MISSING')
+          }
+          cancellationCalculation = await port.appendApprovedLeaveCancellationCalculation({
+            client: trx,
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            workDate: requestWorkDate,
+            requestId: route.requestId,
+            operationId: operation.operationId,
+            actorId: route.actorId,
+            correlationId: operation.correlationId,
+            mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
+          })
+          if (cancellationCalculation.kind === 'review_required') {
+            throw new HttpError(
+              409,
+              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              'Approved leave cancellation requires attendance review',
+              singleValidationDetail('calculation', cancellationCalculation.reason),
+            )
+          }
+        }
+
+        if (approvalId && lockedApproval) {
+          const newVersion = Number(lockedApproval.version ?? 0) + 1
+          const approvalUpdateRows = await trx.query(
+            `UPDATE approval_instances
+                SET status = $1, version = $2, updated_at = now()
+              WHERE id = $3 AND version = $4 AND status = $5
+              RETURNING id`,
+            ['cancelled', newVersion, approvalId, lockedApproval.version, lockedApproval.status],
+          )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation')
+          }
+          await deactivateAttendanceApprovalAssignments(trx, approvalId)
+          await trx.query(
+            `INSERT INTO approval_records
+             (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+            [
+              approvalId,
+              'revoke',
+              route.actorId,
+              route.actorName,
+              route.requestBody.comment ?? null,
+              lockedApproval.status,
+              'cancelled',
+              lockedApproval.version,
+              newVersion,
+              JSON.stringify({ ...(route.requestBody.metadata ?? {}), w4ActorPosture: actorPosture }),
+              route.ipAddress,
+              route.userAgent,
+            ],
+          )
+        }
+
+        const resolvedAt = new Date()
+        const updatedRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'cancelled', resolved_by = $2, resolved_at = $3, updated_at = now()
+            WHERE id = $1::uuid AND org_id = $4 AND status = $5
+            RETURNING *`,
+          [route.requestId, route.actorId, resolvedAt, requestOrgId, requestRow.status],
+        )
+        if (updatedRows.length !== 1) throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state conflict')
+        if (requestRow.request_type === 'shift_swap') {
+          await archiveShiftSwapSourceKey(trx, requestOrgId, route.requestId)
+        } else if (requestRow.request_type === 'schedule_dispatch') {
+          await closeScheduleDispatchRequest(trx, requestOrgId, route.requestId)
+        }
+
+        let reversal = null
+        if (approvedLeave) {
+          reversal = await reverseLeaveBalanceDeduction(trx, {
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            requestId: route.requestId,
+          })
+        }
+        let response = {
+          ok: true,
+          data: {
+            requestId: route.requestId,
+            status: 'cancelled',
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            reversal,
+            ...(cancellationCalculation ? { cancellationCalculation } : {}),
+          },
+        }
+        if (operation.routeVariant === 'schedule_dispatch_cancel') {
+          const detail = await loadScheduleDispatchDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              scheduleDispatch: mapScheduleDispatchRequestRow({
+                ...detail,
+                request_status: 'cancelled',
+                publish_status: 'cancelled',
+              }),
+            },
+          }
+        } else if (operation.routeVariant === 'shift_swap_cancel') {
+          const detail = await loadShiftSwapDetail(trx, requestOrgId, route.requestId)
+          response = {
+            ok: true,
+            data: {
+              shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }),
+            },
+          }
+        }
+        return {
+          response,
+          resolvedRequestId: route.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.request.cancelled',
+            payload: {
+              requestId: route.requestId,
+              status: 'cancelled',
+              orgId: requestOrgId,
+              userId: requestRow.user_id,
+            },
+          }],
+        }
+      },
+    }
+
+    function resolveRequestDecisionExpectedValue(body, camelKey, snakeKey, label) {
+      const camel = body[camelKey]
+      const snake = body[snakeKey]
+      if (camel !== undefined && snake !== undefined && camel !== snake) {
+        throw new HttpError(400, 'VALIDATION_ERROR', `${label} aliases must match`)
+      }
+      return camel ?? snake
+    }
+
+    async function resolveRequestLegacyAuthorization(trx, requestRow) {
+      const port = attendanceW4SegmentCalculationPort
+      if (!port || typeof port.resolveOrgSegmentCalculationPosture !== 'function') {
+        throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Canonical attendance write boundary unavailable')
+      }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const posture = await port.resolveOrgSegmentCalculationPosture(trx, orgId)
+      return posture?.effectiveState === 'legacy'
+    }
+
+    async function resolveRequestDecisionActorAccess(trx, route, requestRow, options = {}) {
+      if (route.tokenSubjectUserId !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the decision actor')
+      }
+      const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+      const assertSchedulerScopeAllowed = async () => {
+        const actorContext = await loadAttendanceScopeContextForUser(trx, orgId, route.actorId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext, trx)
+        const facts = await resolveAttendanceRequestApprovalScopeFacts(trx, orgId, requestRow)
+        const schedulerAllowed = scopes.some(scope =>
+          attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'approve', facts),
+        )
+        if (!schedulerAllowed) {
+          throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this attendance approval action')
+        }
+      }
+
+      // The legacy posture retains the shipped RBAC/scheduler-scope contract. In particular, legacy
+      // callers are not required to have the durable users/user_orgs rows introduced by W4C-3b.
+      // Preparation defers mutable authorization to execute so an exact operation replay can return
+      // its sealed response after an intervening permission change.
+      if (options.legacyAuthorization === true) {
+        if (options.enforceSchedulerScope === false) {
+          return { actorPosture: 'operator', fullAdmin: false }
+        }
+        if (await canAccessOtherUsers(route.actorId)) {
+          const fullAdmin = await hasAttendanceAdminAccess(route.actorId)
+          return {
+            actorPosture: fullAdmin ? 'attendance_admin' : 'operator',
+            fullAdmin,
+          }
+        }
+        await assertSchedulerScopeAllowed()
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [route.actorId],
+      )
+      if (actorRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+      if (actorRows[0].platform_admin === true) {
+        return { actorPosture: 'platform_admin', fullAdmin: true }
+      }
+
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [route.actorId, orgId],
+      )
+      if (membershipRows.length !== 1) throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+
+      const permissionRows = await trx.query(
+        `SELECT permission_code FROM user_permissions WHERE user_id = $1
+         UNION
+         SELECT rp.permission_code
+           FROM user_roles ur
+           JOIN role_permissions rp ON rp.role_id = ur.role_id
+          WHERE ur.user_id = $1`,
+        [route.actorId],
+      )
+      const directUserRows = await trx.query(
+        `SELECT COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) AS permissions
+           FROM users u WHERE u.id = $1 FOR KEY SHARE`,
+        [route.actorId],
+      )
+      const permissions = new Set(permissionRows.map(row => String(row.permission_code)))
+      for (const permission of normalizeStringArray(directUserRows[0]?.permissions)) permissions.add(permission)
+      const attendanceAdmin = permissions.has('attendance:admin')
+        || permissions.has('attendance:*')
+        || permissions.has('*:*')
+      const attendanceApprover = attendanceAdmin || permissions.has('attendance:approve')
+      if (attendanceApprover) {
+        return {
+          actorPosture: attendanceAdmin ? 'attendance_admin' : 'operator',
+          fullAdmin: attendanceAdmin,
+        }
+      }
+
+      // Exact operation replay is authorized by its durable operation identity. Preparation still
+      // proves the authenticated actor is an active member of the request org, but intentionally
+      // defers mutable scheduler-scope facts to execute. Otherwise revoking a scheduler scope after
+      // commit makes the same operationId unable to return its already-sealed response.
+      if (options.enforceSchedulerScope === false) {
+        return { actorPosture: 'operator', fullAdmin: false }
+      }
+
+      await assertSchedulerScopeAllowed()
+      return { actorPosture: 'operator', fullAdmin: false }
+    }
+
+    function resolveLockedAttendanceApprovalFlowState(approval, flowMeta, flowSteps) {
+      const approvalStepIndex = Number(approval.current_step ?? 0)
+      const stepInRange = Number.isInteger(approvalStepIndex)
+        && approvalStepIndex >= 0
+        && (flowSteps.length === 0 ? approvalStepIndex === 0 : approvalStepIndex < flowSteps.length)
+      const expectedNodeKey = buildAttendanceApprovalNodeKey(approvalStepIndex)
+      const lockedNodeKey = approval.current_node_key || expectedNodeKey
+      const rawMetadataStep = flowMeta.currentStep
+      const metadataStepMatches = rawMetadataStep === undefined
+        || (Number.isInteger(Number(rawMetadataStep)) && Number(rawMetadataStep) === approvalStepIndex)
+      if (!stepInRange || lockedNodeKey !== expectedNodeKey || !metadataStepMatches) {
+        throw new HttpError(
+          409,
+          'APPROVAL_FLOW_STATE_CONFLICT',
+          'Locked approval step does not match the frozen request flow state',
+        )
+      }
+      return {
+        currentStepIndex: approvalStepIndex,
+        currentNodeKey: lockedNodeKey,
+        currentStep: flowSteps[approvalStepIndex],
+      }
+    }
+
+    async function prepareRequestDecisionIdentity(trx, rawInput, operation, options = {}) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identityRow = await loadRequestOperationIdentityRow(trx, route)
+      const isShiftSwapConsent = operation.routeVariant === 'shift_swap_accept'
+        || operation.routeVariant === 'shift_swap_reject'
+      if (isShiftSwapConsent) {
+        if (identityRow.request_type !== 'shift_swap') {
+          throw new HttpError(404, 'NOT_FOUND', 'Request not found for this route family')
+        }
+        const expectedAction = operation.routeVariant === 'shift_swap_accept' ? 'approve' : 'reject'
+        if (route.action !== expectedAction) {
+          throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
+        }
+        return {
+          orgId: identityRow.org_id,
+          actorId: route.actorId,
+          actorPosture: 'self',
+          tokenSubjectUserId: route.tokenSubjectUserId,
+          subjectUserId: route.actorId,
+          subjectScope: { kind: 'self', userId: route.actorId },
+          commandPayload: {
+            requestId: route.requestId,
+            approvalRef: identityRow.approval_instance_id ?? `shift-swap:${route.requestId}`,
+            expectedApprovalVersion: 0,
+            expectedApprovalNode: 'shift_swap_consent',
+            action: route.action,
+            decisionChannel: 'web',
+            comment: normalizeOptionalText(route.requestBody.comment),
+            meta: route.requestBody.metadata ?? null,
+          },
+          state: null,
+        }
+      }
+
+      const expectedApprovalVersion = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalVersion',
+        'expected_approval_version',
+        'expectedApprovalVersion',
+      )
+      const expectedApprovalNode = resolveRequestDecisionExpectedValue(
+        route.requestBody,
+        'expectedApprovalNode',
+        'expected_approval_node',
+        'expectedApprovalNode',
+      )
+      if (operation.operationId && (expectedApprovalVersion === undefined || expectedApprovalNode === undefined)) {
+        throw new HttpError(
+          400,
+          'REQUEST_DECISION_OCC_REQUIRED',
+          'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+        )
+      }
+      const crossUser = String(identityRow.user_id) !== route.actorId
+      const actorPosture = options.actorPosture
+        ?? (crossUser && identityRow.request_type === 'schedule_dispatch'
+          ? 'operator'
+          : await resolveStableCrossUserPosture(trx, route.actorId, crossUser ? 'operator' : 'self', identityRow.org_id))
+      return {
+        orgId: identityRow.org_id,
+        actorId: route.actorId,
+        actorPosture,
+        tokenSubjectUserId: route.tokenSubjectUserId,
+        subjectUserId: identityRow.user_id,
+        subjectScope: crossUser
+          ? { kind: 'explicit_users', userIds: [identityRow.user_id] }
+          : { kind: 'self', userId: identityRow.user_id },
+        commandPayload: {
+          requestId: route.requestId,
+          approvalRef: identityRow.approval_instance_id,
+          expectedApprovalVersion: expectedApprovalVersion ?? 0,
+          expectedApprovalNode: expectedApprovalNode ?? 'step:0',
+          action: route.action,
+          decisionChannel: 'web',
+          comment: normalizeOptionalText(route.requestBody.comment),
+          meta: route.requestBody.metadata ?? null,
+        },
+        state: null,
+      }
+    }
+
+    async function prepareShiftSwapConsent(trx, rawInput, operation) {
+      const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+      const identity = await prepareRequestDecisionIdentity(trx, rawInput, operation)
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(detail.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (detail.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (detail.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      return { ...identity, state: { route } }
+    }
+
+    async function executeShiftSwapConsent(trx, prepared) {
+      const { route } = prepared.state
+      const decision = route.action === 'approve' ? 'accepted' : 'rejected'
+      const row = await loadShiftSwapDetail(trx, route.orgId, route.requestId, { forUpdate: true })
+      if (!row) throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
+      if (String(row.counterparty_user_id) !== route.actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
+      }
+      if (row.request_status !== 'pending') {
+        throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
+      }
+      if (row.counterparty_status !== 'pending') {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+      const consentRows = await trx.query(
+        `UPDATE attendance_shift_swap_requests
+            SET counterparty_status = $3,
+                counterparty_responded_at = now(),
+                updated_at = now()
+          WHERE org_id = $1 AND request_id = $2 AND counterparty_status = 'pending'
+          RETURNING request_id`,
+        [route.orgId, route.requestId, decision],
+      )
+      if (consentRows.length !== 1) {
+        throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
+      }
+
+      if (decision === 'rejected') {
+        if (row.approval_instance_id) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [row.approval_instance_id],
+          )
+          if (approvalRows.length > 0) {
+            const approval = approvalRows[0]
+            const newVersion = Number(approval.version ?? 0) + 1
+            const updateRows = await trx.query(
+              `UPDATE approval_instances
+                  SET status = 'rejected', version = $2, updated_at = now()
+                WHERE id = $1 AND version = $3 AND status = $4
+                RETURNING id`,
+              [row.approval_instance_id, newVersion, approval.version, approval.status],
+            )
+            if (updateRows.length !== 1) {
+              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during shift-swap rejection')
+            }
+            await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
+            await trx.query(
+              `INSERT INTO approval_records
+               (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+               VALUES ($1, 'reject', $2, $3, $4, $5, 'rejected', $6, $7, $8::jsonb, $9, $10)`,
+              [
+                row.approval_instance_id,
+                route.actorId,
+                route.actorName,
+                route.requestBody.comment ?? null,
+                approval.status,
+                approval.version,
+                newVersion,
+                JSON.stringify(route.requestBody.metadata ?? {}),
+                route.ipAddress,
+                route.userAgent,
+              ],
+            )
+          }
+        }
+        const requestRows = await trx.query(
+          `UPDATE attendance_requests
+              SET status = 'rejected', resolved_by = $3, resolved_at = now(), updated_at = now()
+            WHERE id = $1 AND org_id = $2 AND status = 'pending'
+            RETURNING id`,
+          [route.requestId, route.orgId, route.actorId],
+        )
+        if (requestRows.length !== 1) {
+          throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Shift-swap request changed during rejection')
+        }
+        await archiveShiftSwapSourceKey(trx, route.orgId, route.requestId)
+      }
+
+      const detail = await loadShiftSwapDetail(trx, route.orgId, route.requestId)
+      const response = {
+        ok: true,
+        data: {
+          shiftSwap: mapShiftSwapRequestRow({
+            ...detail,
+            request_status: decision === 'rejected' ? 'rejected' : detail?.request_status,
+          }),
+        },
+      }
+      return {
+        response,
+        resolvedRequestId: route.requestId,
+        lifecycleEvents: [{
+          eventKind: decision === 'rejected' ? 'attendance.resolved' : 'attendance.request.updated',
+          payload: {
+            requestId: route.requestId,
+            orgId: route.orgId,
+            userId: row.requester_user_id,
+            counterpartyUserId: route.actorId,
+            decision,
+          },
+        }],
+      }
+    }
+
+    const requestDecisionAdapter = {
+      async prepareIdentity(trx, rawInput, operation) {
+        return prepareRequestDecisionIdentity(trx, rawInput, operation)
+      },
+      async prepare(trx, rawInput, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return prepareShiftSwapConsent(trx, rawInput, operation)
+        }
+        const route = requestDecisionBoundaryRouteInputSchema.parse(rawInput)
+        const requestRows = await trx.query(
+          route.orgId
+            ? 'SELECT * FROM attendance_requests WHERE id = $1::uuid AND org_id = $2'
+            : 'SELECT * FROM attendance_requests WHERE id = $1::uuid',
+          route.orgId ? [route.requestId, route.orgId] : [route.requestId],
+        )
+        if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+        const requestRow = requestRows[0]
+        const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+        const legacyAuthorization = await resolveRequestLegacyAuthorization(trx, requestRow)
+        const decisionAccess = await resolveRequestDecisionActorAccess(
+          trx,
+          route,
+          requestRow,
+          { enforceSchedulerScope: false, legacyAuthorization },
+        )
+        const approvalId = requestRow.approval_instance_id
+        if (!approvalId) throw new HttpError(400, 'INVALID_STATE', 'Missing approval instance')
+        const approvalRows = await trx.query(
+          'SELECT * FROM approval_instances WHERE id = $1',
+          [approvalId],
+        )
+        if (approvalRows.length === 0) throw new HttpError(400, 'INVALID_STATE', 'Approval instance missing')
+        const approval = approvalRows[0]
+        const requestMetadata = normalizeMetadata(requestRow.metadata)
+        const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
+        const flowSteps = normalizeApprovalSteps(flowMeta.steps)
+        const { currentNodeKey } = resolveLockedAttendanceApprovalFlowState(
+          approval,
+          flowMeta,
+          flowSteps,
+        )
+        const expectedApprovalVersionInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalVersion',
+          'expected_approval_version',
+          'expectedApprovalVersion',
+        )
+        const expectedApprovalNodeInput = resolveRequestDecisionExpectedValue(
+          route.requestBody,
+          'expectedApprovalNode',
+          'expected_approval_node',
+          'expectedApprovalNode',
+        )
+        if (operation.operationId && (expectedApprovalVersionInput === undefined || expectedApprovalNodeInput === undefined)) {
+          throw new HttpError(
+            400,
+            'REQUEST_DECISION_OCC_REQUIRED',
+            'expectedApprovalVersion and expectedApprovalNode are required with operationId',
+          )
+        }
+        const expectedApprovalVersion = expectedApprovalVersionInput ?? Number(approval.version ?? 0)
+        const expectedApprovalNode = expectedApprovalNodeInput ?? currentNodeKey
+        const identity = await prepareRequestDecisionIdentity(
+          trx,
+          rawInput,
+          operation,
+          operation.operationId === null ? { actorPosture: decisionAccess.actorPosture } : undefined,
+        )
+        return {
+          ...identity,
+          state: {
+            route,
+            expectedApprovalVersion,
+            expectedApprovalNode,
+          },
+        }
+      },
+      async execute(trx, prepared, operation) {
+        if (operation.routeVariant === 'shift_swap_accept' || operation.routeVariant === 'shift_swap_reject') {
+          return executeShiftSwapConsent(trx, prepared)
+        }
+        const result = await executeRequestDecisionInTransaction(trx, prepared.state, operation)
+        return {
+          response: { ok: true, data: result },
+          resolvedRequestId: result.requestId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: {
+              requestId: result.requestId,
+              status: result.status,
+              orgId: result.orgId,
+              userId: result.userId,
+            },
+          }],
+        }
+      },
+    }
+
+    w4RequestOperationBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createRequestOperationBoundary === 'function'
+        ? attendanceW4SegmentCalculationPort.createRequestOperationBoundary({
+            adapters: {
+              request_create: requestCreateAdapter,
+              request_pending_edit: requestPendingEditAdapter,
+              request_decision: requestDecisionAdapter,
+              request_cancel: requestCancelAdapter,
+            },
+          })
+        : null
+
+    // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
+	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
+	      const rows = await trx.query(
+	        `SELECT r.*,
+	                r.id::text AS id, r.user_id::text AS user_id, r.org_id::text AS org_id,
+	                r.work_date::text AS work_date,
+	                r.current_calculation_id::text AS current_calculation_id,
+	                current_calc.version AS current_calculation_version,
+	                latest_calc.id::text AS latest_calculation_id,
+	                latest_calc.version AS latest_calculation_version
+	           FROM attendance_records r
+	           LEFT JOIN attendance_record_calculations current_calc
+	             ON current_calc.id = r.current_calculation_id
+	            AND current_calc.attendance_record_id = r.id
+	            AND current_calc.org_id = r.org_id
+	           LEFT JOIN LATERAL (
+	             SELECT c.id, c.version
+	               FROM attendance_record_calculations c
+	              WHERE c.attendance_record_id = r.id
+	                AND c.org_id = r.org_id
+	                AND c.outcome = 'completed'
+	              ORDER BY c.version DESC
+	              LIMIT 1
+	           ) latest_calc ON TRUE
+	          WHERE r.id = $1::uuid AND r.org_id = $2
+	          LIMIT 1`,
+	        [recordId, orgId],
+	      )
+	      return rows[0] ?? null
+	    }
+
+	    function resolveW4c3cExpectedCalculation(record, posture) {
+	      if (posture === 'shadow' || posture === 'eligible') {
+	        return {
+	          id: record.latest_calculation_id ?? null,
+	          version: record.latest_calculation_version == null
+	            ? null
+	            : Number(record.latest_calculation_version),
+	        }
+	      }
+	      return {
+	        id: record.current_calculation_id ?? null,
+	        version: record.current_calculation_version == null
+	          ? null
+	          : Number(record.current_calculation_version),
+	      }
+	    }
+
+	    function assertW4c3cExpectedCalculation(record, commandPayload, posture) {
+	      if (posture === 'legacy_projection_only') return
+	      const actual = resolveW4c3cExpectedCalculation(record, posture)
+	      if (
+	        commandPayload.expectedCalculationId !== actual.id
+	        || commandPayload.expectedCalculationVersion !== actual.version
+	      ) {
+	        throw new HttpError(
+	          409,
+	          'ATTENDANCE_RECORD_VERSION_CONFLICT',
+	          'attendance record calculation changed; refresh and retry',
+	        )
+	      }
+	    }
+
+    /**
+     * W4C-3c: in-transaction authorization for manual_edit / recompute / ops_retirement.
+     * Patterned after resolveRequestCancellationActorPosture (token-subject bind, active user,
+     * activated activation_status, active org membership, attendance admin permission).
+     * Platform admin (user_roles.role_id = 'admin') is an explicit override.
+     * Runs before any W4 result DML in prepare().
+     */
+    async function resolveRecordOperationAdminActorPosture(trx, routeInput, orgId) {
+      // Exact product bind: authenticated token subject must equal actor before any W4 result DML.
+      // Patterned after resolveRequestCancellationActorPosture — no null soft-pass, no header/RBAC bypass.
+      const actorId = String(routeInput?.actorId || '')
+      const tokenSubjectUserId =
+        routeInput?.tokenSubjectUserId === null || routeInput?.tokenSubjectUserId === undefined
+          ? ''
+          : String(routeInput.tokenSubjectUserId)
+      if (!actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires an actor')
+      }
+      if (tokenSubjectUserId !== actorId) {
+        throw new HttpError(403, 'FORBIDDEN', 'Authenticated subject does not match the record operation actor')
+      }
+
+      const actorRows = await trx.query(
+        `SELECT EXISTS (
+                  SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role_id = 'admin'
+                ) AS platform_admin
+           FROM users u
+          WHERE u.id = $1
+            AND u.is_active = TRUE
+            AND COALESCE(u.activation_status, 'activated') = 'activated'
+          FOR KEY SHARE`,
+        [actorId],
+      )
+      if (actorRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation actor is inactive or not activated')
+      }
+      if (actorRows[0].platform_admin === true || actorRows[0].platform_admin === 't') {
+        return 'platform_admin'
+      }
+
+      const membershipRows = await trx.query(
+        `SELECT 1 FROM user_orgs
+          WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE
+          FOR KEY SHARE`,
+        [actorId, orgId],
+      )
+      if (membershipRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires active org membership')
+      }
+
+      const permissionRows = await trx.query(
+        `SELECT 1
+           WHERE EXISTS (
+             SELECT 1 FROM user_permissions
+              WHERE user_id = $1
+                AND permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id
+               WHERE ur.user_id = $1
+                 AND rp.permission_code = ANY($2::text[])
+           )
+           OR EXISTS (
+             SELECT 1 FROM users u
+              WHERE u.id = $1
+                AND COALESCE(to_jsonb(u)->'permissions', '[]'::jsonb) ?| $2::text[]
+           )
+           LIMIT 1`,
+        [actorId, ['attendance:admin', 'attendance:*', '*:*']],
+      )
+      if (permissionRows.length !== 1) {
+        throw new HttpError(403, 'FORBIDDEN', 'Record operation requires attendance admin permission')
+      }
+      return 'attendance_admin'
+    }
+    function buildW4c3cManualOperations(targetStatus, beforeRecord, overrideMetrics) {
+      const normalized = applyResultEditMetricNormalization(targetStatus, beforeRecord, overrideMetrics)
+      return [
+        { op: 'set', field: 'status', value: targetStatus },
+        { op: 'set', field: 'workMinutes', value: normalized.workMinutes },
+        { op: 'set', field: 'lateMinutes', value: normalized.lateMinutes },
+        { op: 'set', field: 'earlyLeaveMinutes', value: normalized.earlyLeaveMinutes },
+      ]
+    }
+    function w4c3cStableJson(value) {
+      return JSON.stringify(value ?? null)
+    }
+    async function insertW4c3cManualResultEditAuditRow(trx, {
+      auditId, orgId, recordId, subjectUserId, workDate, beforeStatus, afterStatus,
+      beforeSnapshot, afterSnapshot, reason, evidence, actorUserId, idempotencyKey,
+    }) {
+      // Complete payload congruence: record, status, metrics (after_snapshot), reason, evidence.
+      // Same status with different metrics/reason/evidence is a conflict — never congruent.
+      const existing = await trx.query(
+        `SELECT id::text AS id, record_id::text AS record_id, after_status,
+                after_snapshot, reason, evidence
+           FROM attendance_record_result_edits
+          WHERE org_id = $1 AND idempotency_key = $2
+          LIMIT 1`,
+        [orgId, idempotencyKey],
+      )
+      if (existing[0]) {
+        const sameAuditId = String(existing[0].id) === String(auditId)
+        const sameRecord = String(existing[0].record_id) === String(recordId)
+        const sameStatus = String(existing[0].after_status) === String(afterStatus)
+        const sameAfter = w4c3cStableJson(existing[0].after_snapshot) === w4c3cStableJson(afterSnapshot)
+        const sameReason = String(existing[0].reason ?? '') === String(reason ?? '')
+        const sameEvidence = w4c3cStableJson(existing[0].evidence) === w4c3cStableJson(evidence ?? [])
+        if (!sameAuditId || !sameRecord || !sameStatus || !sameAfter || !sameReason || !sameEvidence) {
+          throw new HttpError(
+            409,
+            'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT',
+            'idempotency key already used with a different payload',
+          )
+        }
+        return { alreadyApplied: true, auditId: existing[0].id }
+      }
+      const inserted = await trx.query(
+        `INSERT INTO attendance_record_result_edits
+          (id, org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+           reason, evidence, actor_user_id, idempotency_key)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13)
+         RETURNING id::text AS id`,
+        [
+          auditId,
+          orgId,
+          recordId,
+          subjectUserId,
+          workDate,
+          beforeStatus,
+          afterStatus,
+          JSON.stringify(beforeSnapshot),
+          JSON.stringify(afterSnapshot),
+          reason,
+          JSON.stringify(evidence ?? []),
+          actorUserId,
+          idempotencyKey,
+        ],
+      )
+      return { alreadyApplied: false, auditId: inserted[0]?.id ?? null }
+    }
+    const manualEditAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        // Authorization before any result DML (capability proved in-transaction).
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+        // Ordinary path: never reactivate any retired parent (operator_retirement keeps required code).
+        if (String(record.visibility_state) === 'retired') {
+          const reason = String(record.visibility_reason || '')
+          if (reason === 'operator_retirement') {
+            throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
+          }
+          throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
+        }
+	        const operations = buildW4c3cManualOperations(
+	          routeInput.targetStatus,
+	          record,
+	          routeInput.overrideMetrics,
+	        )
+	        return Object.freeze({
+	          orgId,
+	          actorId: String(routeInput.actorId),
+	          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            operations,
+	            reason: String(routeInput.reason || 'manual override'),
+            evidence: {
+              items: Array.isArray(routeInput.evidence) ? routeInput.evidence : [],
+            },
+          }),
+	          state: Object.freeze({
+	            record,
+	            routeInput,
+	            operations,
+	          }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        const { routeInput, operations, record } = prepared.state
+	        assertW4c3cExpectedCalculation(record, prepared.commandPayload, posture)
+	        if (posture === 'authoritative' || posture === 'shadow') {
+	          const port = attendanceW4SegmentCalculationPort
+          if (!port || typeof port.appendManualOverrideCalculation !== 'function') {
+            throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Manual override calculation port unavailable')
+          }
+          if (!operation.operationId) {
+            throw new HttpError(
+              400,
+              'W4C3C_MANUAL_EDIT_OPERATION_ID_REQUIRED',
+              'manual_edit requires a stable caller operationId UUID for W4 postures',
+            )
+          }
+          await resolveAttendanceResultEditWindowContext(trx, {
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate: String(record.work_date).slice(0, 10),
+            editWindowDays: routeInput.editWindowDays,
+          })
+          // Shape raw client for the TS apply module.
+          const client = {
+            query: async (sqlText, params) => {
+              const rows = await trx.query(sqlText, params ?? [])
+              return { rows: Array.isArray(rows) ? rows : [] }
+            },
+          }
+          // editId is durable marker identity; bind it to the sealed operationId for stability.
+          const editId = operation.operationId
+	          const result = await port.appendManualOverrideCalculation({
+            client,
+            orgId: prepared.orgId,
+            recordId: String(record.id),
+	            expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	            expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+            operationId: operation.operationId,
+            actorId: prepared.actorId,
+            correlationId: operation.correlationId,
+            reason: prepared.commandPayload.reason,
+            evidence: prepared.commandPayload.evidence,
+            operations,
+	            mode: posture,
+	            editId,
+	          })
+	          if (posture === 'shadow') {
+	            const legacy = await applyAttendanceResultEdit(trx, {
+	              orgId: prepared.orgId,
+	              recordId: String(record.id),
+	              targetStatus: routeInput.targetStatus,
+	              overrideMetrics: routeInput.overrideMetrics ?? null,
+	              reason: prepared.commandPayload.reason,
+	              evidence: routeInput.evidence ?? [],
+	              actorUserId: prepared.actorId,
+	              idempotencyKey: String(routeInput.idempotencyKey),
+	              editWindowDays: routeInput.editWindowDays,
+	              notifyAffectedEmployee: routeInput.notifyAffectedEmployee !== false,
+	            })
+	            return {
+	              response: {
+	                ok: true,
+	                data: {
+	                  alreadyApplied: legacy.alreadyApplied === true,
+	                  edit: legacy.edit,
+	                  record: legacy.record ? buildResultEditSnapshot(legacy.record) : null,
+	                  calculationId: result.calculationId,
+	                  projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+	                  mode: posture,
+	                },
+	              },
+	              resolvedRecordId: String(record.id),
+	              resolvedCalculationId: result.calculationId,
+	              lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+	            }
+	          }
+	          let finalAuditRow = null
+	          let responseRecord = null
+          // AE-1/AE-2 remain part of the authoritative route contract. Errors
+          // propagate so calculation, projection, audit, and notification stay
+          // in the same transaction.
+          if (result.kind === 'appended') {
+	            const postWriteRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!postWriteRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing after apply')
+	            }
+	            const beforeSnapshot = buildResultEditSnapshot(record)
+	            const afterSnapshot = buildResultEditSnapshot(postWriteRecord)
+            const audit = await insertW4c3cManualResultEditAuditRow(trx, {
+              auditId: editId,
+              orgId: prepared.orgId,
+              recordId: String(record.id),
+              subjectUserId: prepared.subjectUserId,
+              workDate: String(record.work_date).slice(0, 10),
+              beforeStatus: String(record.status ?? ''),
+              afterStatus: result.projection.status,
+              beforeSnapshot,
+              afterSnapshot,
+              reason: prepared.commandPayload.reason,
+              evidence: routeInput.evidence ?? [],
+              actorUserId: prepared.actorId,
+              idempotencyKey: String(routeInput.idempotencyKey),
+            })
+            const auditRow = { id: audit.auditId }
+            if (routeInput.notifyAffectedEmployee === false) {
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                skippedReason: 'policy_disabled',
+              })
+            } else {
+              const delivery = await enqueueAttendanceResultEditNotification(trx, {
+                orgId: prepared.orgId,
+	                record: postWriteRecord,
+                auditRow,
+                beforeStatus: String(record.status ?? ''),
+                targetStatus: result.projection.status,
+                reason: prepared.commandPayload.reason,
+              })
+              finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+                orgId: prepared.orgId,
+                auditRow,
+                deliveryId: delivery?.id ?? null,
+                skippedReason: delivery ? null : 'recipient_unavailable',
+              })
+            }
+	            responseRecord = afterSnapshot
+	          } else {
+	            const replayRecord = await loadW4c3cRecordSubjectForOperation(
+	              trx,
+	              prepared.orgId,
+	              String(record.id),
+	            )
+	            if (!replayRecord) {
+	              throw new HttpError(500, 'W4C3C_MANUAL_EDIT_DATABASE_RESULT_INVALID', 'manual edit parent row missing on replay')
+	            }
+	            const replayAuditRows = await trx.query(
+              `SELECT * FROM attendance_record_result_edits
+                WHERE org_id = $1 AND idempotency_key = $2
+                LIMIT 1`,
+              [prepared.orgId, String(routeInput.idempotencyKey)],
+            )
+            if (replayAuditRows.length !== 1) {
+              throw new HttpError(
+                409,
+                'ATTENDANCE_RESULT_EDIT_REPLAY_INCOMPLETE',
+                'manual edit replay is missing its durable audit row',
+              )
+	            }
+	            finalAuditRow = replayAuditRows[0]
+	            responseRecord = buildResultEditSnapshot(replayRecord)
+	          }
+          return {
+            response: {
+              ok: true,
+              data: {
+                alreadyApplied: result.kind === 'replay',
+                edit: mapResultEditRow(finalAuditRow),
+                record: responseRecord,
+                calculationId: result.calculationId,
+                projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+                mode: posture,
+              },
+            },
+            resolvedRecordId: String(record.id),
+            resolvedCalculationId: result.calculationId,
+            lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+          }
+        }
+        // legacy_projection_only: single-write compatibility path (meta marker
+        // in the same upsert). W4 postures returned through the branch above.
+        const legacy = await applyAttendanceResultEdit(trx, {
+          orgId: prepared.orgId,
+          recordId: String(record.id),
+          targetStatus: routeInput.targetStatus,
+          overrideMetrics: routeInput.overrideMetrics ?? null,
+          reason: prepared.commandPayload.reason,
+          evidence: routeInput.evidence ?? [],
+          actorUserId: prepared.actorId,
+          idempotencyKey: String(routeInput.idempotencyKey),
+          editWindowDays: routeInput.editWindowDays,
+          notifyAffectedEmployee: routeInput.notifyAffectedEmployee !== false,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: legacy.alreadyApplied === true,
+              edit: legacy.edit,
+              record: legacy.record ? buildResultEditSnapshot(legacy.record) : null,
+            },
+          },
+          resolvedRecordId: String(record.id),
+          resolvedCalculationId: null,
+          lifecycleEvents: [{ eventKind: 'attendance.resolved', payload: { kind: 'manual_edit', recordId: String(record.id) } }],
+        }
+      },
+    }
+    const recomputeAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+        if (String(record.visibility_state) === 'retired') {
+          const reason = String(record.visibility_reason || '')
+          if (reason === 'operator_retirement') {
+            throw new HttpError(409, 'ATTENDANCE_RECORD_OPERATOR_RETIRED', 'attendance record is operator-retired')
+          }
+          throw new HttpError(409, 'ATTENDANCE_RECORD_RETIRED', 'attendance record is retired')
+        }
+        const policy = routeInput.policy === 'current_policy' ? 'current_policy' : 'frozen_prior'
+	        return Object.freeze({
+          orgId,
+          actorId: String(routeInput.actorId),
+          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            policy,
+	          }),
+	          state: Object.freeze({ record, policy, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
+        if (posture === 'legacy_projection_only') {
+          throw new HttpError(409, 'W4C3C_RECOMPUTE_REQUIRES_W4_POSTURE', 'recompute requires shadow or authoritative posture')
+        }
+        const port = attendanceW4SegmentCalculationPort
+        if (!port || typeof port.appendRecomputeCalculation !== 'function') {
+          throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Recompute calculation port unavailable')
+        }
+        if (!operation.operationId) {
+          throw new HttpError(
+            400,
+            'W4C3C_RECOMPUTE_OPERATION_ID_REQUIRED',
+            'recompute requires a stable caller operationId UUID',
+          )
+        }
+        const client = {
+          query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+        }
+        let currentPolicyAttribution
+        let currentPolicyContext
+        if (prepared.state.policy === 'current_policy') {
+          // Resolve authoritative current schedule attribution and build a real
+          // frozen context through existing resolver + buildW4ShadowFrozenContextV1.
+          // Fail closed with zero writes on incomplete resolution (no empty-segment placeholder).
+          const workDate = String(prepared.state.record.work_date).slice(0, 10)
+          const workContext = await resolveWorkContext({
+            db: trx,
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate,
+          })
+          const timezone = requireStrictCurrentPolicyTimezone(workContext, prepared.state.record)
+          const shiftId = workContext?.shiftId || workContext?.rule?.shiftId || null
+          if (!shiftId) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not resolve an authoritative shift',
+            )
+          }
+          const { adapters: recomputeAdapters } = createPluginAttendanceWorkDateResolver(trx)
+          const resolution = await recomputeAdapters.recompute.resolveRecomputeWorkDate({
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            occurredAt: null,
+            timezone,
+            calendarWorkDate: workDate,
+            frozenAttribution: null,
+            recordMeta: null,
+            includeFullWinner: true,
+          })
+          if (!resolution || resolution.kind !== 'resolved' || !resolution.shiftId) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute work-date resolution is not resolved',
+            )
+          }
+          const attributionSnapshot =
+            typeof port.buildRequestCreationAttributionSnapshotV1 === 'function'
+              ? port.buildRequestCreationAttributionSnapshotV1({
+                  orgId: prepared.orgId,
+                  userId: prepared.subjectUserId,
+                  nowIso: new Date().toISOString(),
+                  resolution,
+                })
+              : null
+          if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not freeze resolved_v2 attribution',
+            )
+          }
+          const frozenContext = await buildW4ShadowFrozenContextV1(trx, {
+            orgId: prepared.orgId,
+            userId: prepared.subjectUserId,
+            workDate: attributionSnapshot.value.workDate || workDate,
+            shiftId: attributionSnapshot.value.shiftId || resolution.shiftId,
+            timezone:
+              resolution.fullWinner && typeof resolution.fullWinner.timezone === 'string'
+                ? resolution.fullWinner.timezone
+                : timezone,
+            isWorkday: workContext?.isWorkingDay !== false,
+            holidayKind: workContext?.holiday?.kind ?? null,
+          })
+          if (
+            !frozenContext
+            || !Array.isArray(frozenContext.segments)
+            || frozenContext.segments.length < 1
+            || frozenContext.segments.length > 3
+          ) {
+            throw new HttpError(
+              409,
+              'W4C3C_RECOMPUTE_CURRENT_POLICY_INCOMPLETE',
+              'current_policy recompute could not build a real frozen context with segments',
+            )
+          }
+          currentPolicyAttribution = attributionSnapshot
+          currentPolicyContext = frozenContext
+        }
+        const result = await port.appendRecomputeCalculation({
+          client,
+          orgId: prepared.orgId,
+          recordId: String(prepared.state.record.id),
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+          operationId: operation.operationId,
+          actorId: prepared.actorId,
+          correlationId: operation.correlationId,
+          policy: prepared.state.policy,
+          mode: posture === 'authoritative' ? 'authoritative' : 'shadow',
+          currentPolicyAttribution,
+          currentPolicyContext,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: result.kind === 'replay',
+              calculationId: result.calculationId,
+              policy: prepared.state.policy,
+              contextDecision: result.kind === 'appended' ? result.contextDecision : null,
+              projectedStatus: result.kind === 'appended' ? result.projectedStatus : null,
+            },
+          },
+          resolvedRecordId: String(prepared.state.record.id),
+          resolvedCalculationId: result.calculationId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: { kind: 'recompute', policy: prepared.state.policy, recordId: String(prepared.state.record.id) },
+          }],
+        }
+      },
+    }
+    const opsRetirementAdapter = {
+      async prepareIdentity(trx, routeInput) {
+        return this.prepare(trx, routeInput)
+      },
+      async prepare(trx, routeInput) {
+        const orgId = String(routeInput.orgId)
+        const recordId = String(routeInput.recordId)
+        const actorPosture = await resolveRecordOperationAdminActorPosture(trx, routeInput, orgId)
+        const record = await loadW4c3cRecordSubjectForOperation(trx, orgId, recordId)
+        if (!record) throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+	        return Object.freeze({
+          orgId,
+          actorId: String(routeInput.actorId),
+          actorPosture,
+	          tokenSubjectUserId: routeInput.tokenSubjectUserId ?? null,
+	          subjectUserId: String(record.user_id),
+	          targetWorkDate: String(record.work_date).slice(0, 10),
+	          subjectScope: { kind: 'explicit_users', userIds: [String(record.user_id)] },
+	          commandPayload: Object.freeze({
+	            recordId,
+	            expectedCalculationId: routeInput.expectedCalculationId ?? null,
+	            expectedCalculationVersion: routeInput.expectedCalculationVersion ?? null,
+	            reason: String(routeInput.reason || 'operator retirement'),
+	            ticket: String(routeInput.ticket || 'OPS-RETIRE'),
+	          }),
+	          state: Object.freeze({ record, routeInput }),
+	        })
+	      },
+	      async execute(trx, prepared, operation) {
+	        const posture = operation.acceptedWritePosture
+	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
+        // RATIFIED §4.1: legacy_projection_only must emit no W4 calculation/pointer/outbox.
+        // Do not invent a legacy delete path.
+        if (posture !== 'authoritative') {
+          throw new HttpError(
+            409,
+            'W4C3C_OPS_RETIREMENT_REQUIRES_AUTHORITATIVE_POSTURE',
+            'ops_retirement requires authoritative posture',
+          )
+        }
+        const port = attendanceW4SegmentCalculationPort
+        if (!port || typeof port.appendOperatorRetirementCalculation !== 'function') {
+          throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Ops retirement port unavailable')
+        }
+        if (!operation.operationId) {
+          throw new HttpError(
+            400,
+            'W4C3C_OPS_RETIREMENT_OPERATION_ID_REQUIRED',
+            'ops_retirement requires a stable operator command operationId UUID',
+          )
+        }
+        const client = {
+          query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+        }
+        const mode = posture === 'authoritative' ? 'authoritative' : 'shadow'
+        const result = await port.appendOperatorRetirementCalculation({
+          client,
+          orgId: prepared.orgId,
+          recordId: String(prepared.state.record.id),
+	          expectedCalculationId: prepared.commandPayload.expectedCalculationId,
+	          expectedCalculationVersion: prepared.commandPayload.expectedCalculationVersion,
+          operationId: operation.operationId,
+          actorId: prepared.actorId,
+          correlationId: operation.correlationId,
+          reason: prepared.commandPayload.reason,
+          ticket: prepared.commandPayload.ticket,
+          mode,
+        })
+        return {
+          response: {
+            ok: true,
+            data: {
+              alreadyApplied: result.kind === 'replay',
+              calculationId: result.calculationId,
+              visibilityReason: result.kind === 'appended' ? result.visibilityReason : 'operator_retirement',
+            },
+          },
+          resolvedRecordId: String(prepared.state.record.id),
+          resolvedCalculationId: result.calculationId,
+          lifecycleEvents: [{
+            eventKind: 'attendance.resolved',
+            payload: { kind: 'ops_retirement', recordId: String(prepared.state.record.id) },
+          }],
+        }
+      },
+    }
+
+    w4RecordOperationBoundary =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.createRecordOperationBoundary === 'function'
+        ? attendanceW4SegmentCalculationPort.createRecordOperationBoundary({
+            adapters: {
+              manual_edit: manualEditAdapter,
+              recompute: recomputeAdapter,
+              ops_retirement: opsRetirementAdapter,
+            },
+          })
+        : null
+    attendanceW4SegmentCalculationPortRef = attendanceW4SegmentCalculationPort
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
@@ -29105,6 +35510,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const userId = getUserId(req)
         if (!userId) {
@@ -29113,9 +35519,39 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        let draft
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
         try {
-          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId, user_id: userId })
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'request-create'),
+            routeVariant: 'generic',
+            routeInput: {
+              actorId: userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId,
+              requesterName: getUserLabel(req, userId),
+              orgId,
+              requestId: null,
+              requestBody: parsed.data,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.requested', {
+              orgId,
+              userId,
+              workDate: request?.workDate,
+              requestType: request?.requestType,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -29128,106 +35564,7 @@ module.exports = {
             })
             return
           }
-          throw error
-        }
-
-        // 补卡规则 MP-2/MP-3: only the three makeup request types read this policy. Gating the settings
-        // read behind the cheap request-type check keeps leave/overtime/etc byte-identical (zero new
-        // queries) when makeupPunchPolicy is disabled. Enforcement itself runs inside the txn below.
-        let makeupPunchPolicy = null
-        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-          const settings = await getSettings(db)
-          if (settings?.makeupPunchPolicy?.enabled === true) {
-            makeupPunchPolicy = settings.makeupPunchPolicy
-          }
-        }
-
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
-        // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-        // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-          orgId, userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-        })
-        const approvalPayload = buildAttendanceApprovalInstancePayload({
-          approvalId,
-          requestId,
-          orgId,
-          userId,
-          requesterName: getUserLabel(req, userId),
-          draft,
-          orgRelations,
-        })
-        const approvalAssignments = buildAttendanceApprovalAssignments(
-          draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-        )
-
-        try {
-          const request = await db.transaction(async (trx) => {
-            await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
-            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
-              orgId,
-              userId,
-              workDate: draft.workDate,
-              requestType: draft.requestType,
-            })
-            if (duplicateRequest) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-            // 补卡规则 MP-2/MP-3: enforce inside the txn, after the lock + duplicate guard, so the quota
-            // count and the insert below are consistent with the per-(org,user,workDate,requestType) lock.
-            // On success, persist a FRESH per-write policy snapshot onto the request metadata that the
-            // final approval will audit (never re-reading the live policy).
-            if (makeupPunchPolicy) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId,
-                subjectUserId: userId,
-                requesterId: userId,
-                requestId: null,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                userId,
-                orgId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                'pending',
-                approvalId,
-                JSON.stringify(draft.metadata),
-              ]
-            )
-
-            return rows[0]
-          })
-
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: draft.workDate,
-            requestType: draft.requestType,
-          })
-          res.status(201).json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-            return
-          }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -29235,6 +35572,7 @@ module.exports = {
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
         }
+        return
       })
     )
 
@@ -29356,12 +35694,32 @@ module.exports = {
             return
           }
           await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
-          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
-            db,
-            orgId,
-            [mapAttendanceRequestRow(rows[0])]
-          )
-          res.json({ ok: true, data: { request: requests[0] } })
+	          const requests = await applyScheduleDispatchMetadataLabelsToRequests(
+	            db,
+	            orgId,
+	            [mapAttendanceRequestRow(rows[0])]
+	          )
+	          const snapshotRows = await db.query(
+	            `SELECT version, payload_fingerprint
+	               FROM attendance_request_calculation_snapshots
+	              WHERE org_id = $1 AND request_id = $2::uuid
+	              ORDER BY version DESC
+	              LIMIT 1`,
+	            [orgId, requestId]
+	          )
+	          const requestSnapshot = snapshotRows.length === 1
+	            ? {
+	                version: Number(snapshotRows[0].version),
+	                fingerprint: String(snapshotRows[0].payload_fingerprint),
+	              }
+	            : null
+	          res.json({
+	            ok: true,
+	            data: {
+	              request: requests[0],
+	              ...(requestSnapshot ? { requestSnapshot } : {}),
+	            },
+	          })
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -29381,14 +35739,14 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleDispatchCreateSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json(validationErrorBody('Invalid schedule-dispatch request payload', formatZodValidationDetails(parsed.error)))
           return
         }
-        const orgId = getOrgId(req)
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         let input
         try {
           input = normalizeScheduleDispatchCreateInput(parsed.data)
@@ -29400,175 +35758,54 @@ module.exports = {
           throw error
         }
         if (!await enforceShiftEditWindow(res, [input.startDate, input.endDate])) return
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
         try {
-          const result = await db.transaction(async (trx) => {
-            const groupRows = await trx.query(
-              `SELECT *
-                 FROM attendance_schedule_groups
-                WHERE id = $1 AND org_id = $2 AND is_active = true
-                LIMIT 1`,
-              [input.targetScheduleGroupId, orgId]
-            )
-            const targetGroup = groupRows[0]
-            if (!targetGroup) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target schedule group not found')
-            }
-            const shiftRows = await trx.query(
-              `SELECT id
-                 FROM attendance_shifts
-                WHERE id = $1 AND org_id = $2
-                LIMIT 1`,
-              [input.targetShiftId, orgId]
-            )
-            if (!shiftRows.length) {
-              throw new HttpError(404, 'NOT_FOUND', 'Target shift not found')
-            }
-            // W3 erratum: typed 422 + zero writes when the dispatch targets a
-            // multi-segment shift while segment calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-create'),
+            routeVariant: 'schedule_dispatch',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorFullAdmin: actorAccess.fullAdmin === true,
+              requesterName: getUserLabel(req, input.userId),
               orgId,
-              shiftId: input.targetShiftId,
-              producer: 'schedule_dispatch_create',
-            })
-            const settings = await getSettings(trx)
-            const slotResolution = resolveScheduleDispatchSlotIndex(settings, input.slotIndex)
-
-            const target = buildScheduleDispatchSchedulerScopeTarget({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              targetDepartmentRef: targetGroup.department_ref ?? null,
-            })
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, target)
-
-            await acquireScheduleDispatchWindowLock(trx, orgId, input.userId, targetGroup.id, slotResolution.slotIndex)
-            const approvalFlow = await resolveScheduleDispatchApprovalFlow(trx, orgId, input.approvalFlowId)
-            const sourceKey = buildScheduleDispatchSourceKey({
-              userId: input.userId,
-              targetScheduleGroupId: targetGroup.id,
-              startDate: input.startDate,
-              endDate: input.endDate,
-              slotIndex: slotResolution.slotIndex,
-            })
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_schedule_dispatch_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1
-                  AND d.user_id = $2
-                  AND d.target_schedule_group_id = $3
-                  AND d.slot_index = $4
-                  AND d.start_date <= $6::date
-                  AND d.end_date >= $5::date
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, input.userId, targetGroup.id, slotResolution.slotIndex, input.startDate, input.endDate]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, input.userId, input.startDate, 'schedule_dispatch')
-            const metadata = {
-              scheduleDispatch: {
+              input: {
                 userId: input.userId,
-                targetScheduleGroupId: targetGroup.id,
-                targetAttendanceGroupId: targetGroup.attendance_group_id ?? null,
-                targetDepartmentRef: targetGroup.department_ref ?? null,
+                targetScheduleGroupId: input.targetScheduleGroupId,
                 targetShiftId: input.targetShiftId,
                 startDate: input.startDate,
                 endDate: input.endDate,
-                slotIndex: slotResolution.slotIndex,
-                sourceKey,
+                slotIndex: input.slotIndex ?? null,
+                reason: input.reason ?? null,
+                approvalFlowId: input.approvalFlowId ?? null,
               },
-              approvalFlow: {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              },
-            }
-            const draft = {
-              workDate: input.startDate,
-              requestType: 'schedule_dispatch',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason: input.reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: input.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: input.userId,
-              requesterName: getUserLabel(req, input.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                input.userId,
-                orgId,
-                input.startDate,
-                input.reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-            await trx.query(
-              `INSERT INTO attendance_schedule_dispatch_requests
-               (request_id, org_id, dispatch_type, user_id, target_schedule_group_id, target_attendance_group_id,
-                target_department_ref, target_shift_id, slot_index, start_date, end_date, publish_status, source_key)
-               VALUES ($1, $2, 'daily', $3, $4, $5, $6, $7, $8, $9::date, $10::date, 'pending', $11)`,
-              [
-                requestId,
-                orgId,
-                input.userId,
-                targetGroup.id,
-                targetGroup.attendance_group_id ?? null,
-                targetGroup.department_ref ?? null,
-                input.targetShiftId,
-                slotResolution.slotIndex,
-                input.startDate,
-                input.endDate,
-                sourceKey,
-              ]
-            )
-            const detail = await loadScheduleDispatchDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
-          })
-          emitEvent('attendance.scheduleDispatch.requested', { orgId, requestId, userId: input.userId })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              scheduleDispatch: mapScheduleDispatchRequestRow(result.detail),
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.scheduleDispatch.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: input.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message, ...(Array.isArray(error.details) && error.details.length ? { details: error.details } : {}) } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_schedule_dispatch_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', message: 'A schedule-dispatch request already exists for this user/group/date window' } })
             return
@@ -29587,10 +35824,12 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-dispatch-requests',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
-        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch' })
+        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'dispatch', actorAccess })
         if (!access) return
+        const orgId = access.access.orgId
         const status = typeof req.query.status === 'string' && req.query.status.trim() ? req.query.status.trim() : null
         const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : null
         const targetScheduleGroupId = typeof req.query.targetScheduleGroupId === 'string' && req.query.targetScheduleGroupId.trim()
@@ -29725,65 +35964,48 @@ module.exports = {
         }
         const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
         if (!actorAccess) return
-        try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadScheduleDispatchDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Schedule-dispatch request not found')
-            }
-            await assertScheduleDispatchScopeAllowed(trx, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget(row))
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Schedule-dispatch request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    actorAccess.userId,
-                    getUserLabel(req, actorAccess.userId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-            await trx.query(
-              `UPDATE attendance_requests
-                  SET status = 'cancelled',
-                      resolved_by = $3,
-                      resolved_at = now(),
-                      updated_at = now()
-                WHERE id = $1 AND org_id = $2`,
-              [requestId, orgId, actorAccess.userId]
-            )
-            await closeScheduleDispatchRequest(trx, orgId, requestId)
-            return loadScheduleDispatchDetail(trx, orgId, requestId)
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid schedule-dispatch cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
           })
-          emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId, userId: detail?.user_id })
-          res.json({ ok: true, data: { scheduleDispatch: mapScheduleDispatchRequestRow({ ...detail, request_status: 'cancelled', publish_status: 'cancelled' }) } })
+          return
+        }
+        try {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'schedule-dispatch-cancel'),
+            routeVariant: 'schedule_dispatch_cancel',
+            routeInput: {
+              actorId: actorAccess.userId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorAccess.userId,
+              actorName: getUserLabel(req, actorAccess.userId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.scheduleDispatch.cancelled', { orgId, requestId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance schedule-dispatch tables missing' } })
             return
@@ -29858,191 +36080,41 @@ module.exports = {
         }
 
         const reason = normalizeOptionalText(parsed.data.reason)
-        const requestId = randomUUID()
-        const approvalId = `apv_${randomUUID()}`
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
 
         try {
-          const result = await db.transaction(async (trx) => {
-            const lockedSourceRows = new Map()
-            for (const assignmentId of [requesterAssignmentId, counterpartyAssignmentId].sort()) {
-              lockedSourceRows.set(
-                assignmentId,
-                await loadShiftSwapSourceAssignment(trx, orgId, assignmentId, { forUpdate: true })
-              )
-            }
-            const requesterRow = lockedSourceRows.get(requesterAssignmentId)
-            const counterpartyRow = lockedSourceRows.get(counterpartyAssignmentId)
-            const requesterSource = normalizeShiftSwapSourceSnapshot(requesterRow, 'requesterAssignmentId')
-            const counterpartySource = normalizeShiftSwapSourceSnapshot(counterpartyRow, 'counterpartyAssignmentId')
-
-            // W3 erratum: the swap snapshots both shift ids — a multi-segment shift
-            // fails closed with a typed 422 and zero writes while segment
-            // calculation is OFF for the org.
-            await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_create',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-create'),
+            routeVariant: 'shift_swap',
+            routeInput: {
+              actorId: actorUserId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? actorUserId,
+              requesterName: getUserLabel(req, '') || null,
               orgId,
-              shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
-              producer: 'shift_swap_create',
-            })
-
-            if (requesterSource.userId !== actorUserId) {
-              const allowed = await canAccessOtherUsers(actorUserId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
-              }
-            }
-            if (requesterSource.userId === counterpartySource.userId) {
-              throw new HttpError(422, 'SHIFT_SWAP_REQUIRES_TWO_USERS', 'Shift-swap requires two different users')
-            }
-
-            const sourceKey = buildShiftSwapSourceKey(requesterAssignmentId, counterpartyAssignmentId)
-            const duplicateRows = await trx.query(
-              `SELECT d.request_id
-                 FROM attendance_shift_swap_requests d
-                 JOIN attendance_requests r ON r.id = d.request_id
-                WHERE d.org_id = $1 AND d.source_key = $2
-                  AND r.status IN ('pending', 'approved')
-                LIMIT 1`,
-              [orgId, sourceKey]
-            )
-            if (duplicateRows.length) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_REQUEST', 'A shift-swap request already exists for these assignments')
-            }
-            const sourceConflict = await findShiftSwapSourceConflict(trx, orgId, [requesterAssignmentId, counterpartyAssignmentId])
-            if (sourceConflict) {
-              throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
-            }
-
-            await acquireAttendanceRequestLock(trx, orgId, requesterSource.userId, requesterSource.workDate, 'shift_swap')
-            const approvalFlow = await loadActiveApprovalFlowForRequestType(trx, orgId, 'shift_swap', approvalFlowId)
-            if (approvalFlowId && !approvalFlow) {
-              throw new HttpError(422, 'SHIFT_SWAP_APPROVAL_FLOW_REQUIRED', 'Shift-swap approval flow does not exist or is inactive', singleValidationDetail('approvalFlowId', 'Provide an active shift_swap approvalFlowId'))
-            }
-            const metadata = {
-              shiftSwap: {
-                requesterAssignmentId,
-                counterpartyAssignmentId,
-                requesterUserId: requesterSource.userId,
-                counterpartyUserId: counterpartySource.userId,
-                requesterWorkDate: requesterSource.workDate,
-                counterpartyWorkDate: counterpartySource.workDate,
-              },
-            }
-            if (approvalFlow) {
-              metadata.approvalFlow = {
-                id: approvalFlow.id,
-                name: approvalFlow.name,
-                steps: approvalFlow.steps,
-                currentStep: 0,
-              }
-            }
-            const draft = {
-              workDate: requesterSource.workDate,
-              requestType: 'shift_swap',
-              requestedInAt: null,
-              requestedOutAt: null,
-              reason,
-              metadata,
-            }
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId, userId: requesterSource.userId, flowSteps: draft.metadata?.approvalFlow?.steps, context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId,
-              userId: requesterSource.userId,
-              requesterName: getUserLabel(req, requesterSource.userId),
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const requestRows = await trx.query(
-              `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-               VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
-               RETURNING *`,
-              [
-                requestId,
-                requesterSource.userId,
-                orgId,
-                requesterSource.workDate,
-                reason,
-                approvalId,
-                JSON.stringify(metadata),
-              ]
-            )
-
-            await trx.query(
-              `INSERT INTO attendance_shift_swap_requests
-               (request_id, org_id, requester_user_id, counterparty_user_id,
-                requester_assignment_id, counterparty_assignment_id,
-                requester_work_date, counterparty_work_date,
-                requester_shift_id, counterparty_shift_id,
-                requester_slot_index, counterparty_slot_index,
-                requester_start_date, requester_end_date,
-                counterparty_start_date, counterparty_end_date,
-                requester_publish_status, counterparty_publish_status,
-                requester_producer_type, counterparty_producer_type,
-                requester_assignment_kind, counterparty_assignment_kind,
-                source_key)
-               VALUES
-               ($1, $2, $3, $4,
-                $5, $6,
-                $7, $8,
-                $9, $10,
-                $11, $12,
-                $13, $14,
-                $15, $16,
-                $17, $18,
-                $19, $20,
-                $21, $22,
-                $23)`,
-              [
-                requestId,
-                orgId,
-                requesterSource.userId,
-                counterpartySource.userId,
-                requesterSource.id,
-                counterpartySource.id,
-                requesterSource.workDate,
-                counterpartySource.workDate,
-                requesterSource.shiftId,
-                counterpartySource.shiftId,
-                requesterSource.slotIndex,
-                counterpartySource.slotIndex,
-                requesterSource.startDate,
-                requesterSource.endDate,
-                counterpartySource.startDate,
-                counterpartySource.endDate,
-                requesterSource.publishStatus,
-                counterpartySource.publishStatus,
-                requesterSource.producerType,
-                counterpartySource.producerType,
-                requesterSource.assignmentKind,
-                counterpartySource.assignmentKind,
-                sourceKey,
-              ]
-            )
-            const detail = await loadShiftSwapDetail(trx, orgId, requestId)
-            return { request: requestRows[0], detail }
-          })
-
-          emitEvent('attendance.shiftSwap.requested', { orgId, requestId, userId: result.request.user_id })
-          res.status(201).json({
-            ok: true,
-            data: {
-              request: mapAttendanceRequestRow(result.request),
-              shiftSwap: mapShiftSwapRequestRow(result.detail),
+              requesterAssignmentId,
+              counterpartyAssignmentId,
+              approvalFlowId: approvalFlowId ?? null,
+              reason: reason ?? null,
             },
           })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            const request = outcome.response?.data?.request
+            emitEvent('attendance.shiftSwap.requested', {
+              orgId,
+              requestId: request?.id,
+              userId: request?.user_id ?? request?.userId,
+            })
+          }
+          res.status(201).json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({
@@ -30055,6 +36127,7 @@ module.exports = {
             })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (error?.code === '23505' && error?.constraint === 'uq_attendance_shift_swap_requests_source_key') {
             res.status(409).json({ ok: false, error: { code: 'DUPLICATE_SHIFT_SWAP_REQUEST', message: 'A shift-swap request already exists for these assignments' } })
             return
@@ -30171,6 +36244,13 @@ module.exports = {
     )
 
     async function respondShiftSwapConsent(req, res, decision) {
+      const parsed = requestDecisionActionSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json(
+          validationErrorBody('Invalid shift-swap consent payload', formatZodValidationDetails(parsed.error)),
+        )
+        return
+      }
       const requesterId = getUserId(req)
       if (!requesterId) {
         res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -30182,80 +36262,43 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
       try {
-        const detail = await db.transaction(async (trx) => {
-          const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-          if (!row) {
-            throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-          }
-          if (row.counterparty_user_id !== requesterId) {
-            throw new HttpError(403, 'FORBIDDEN', 'Only the counterparty can decide shift-swap consent')
-          }
-          if (row.request_status !== 'pending') {
-            throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-          }
-          if (row.counterparty_status !== 'pending') {
-            throw new HttpError(409, 'SHIFT_SWAP_CONSENT_ALREADY_DECIDED', 'Counterparty consent has already been decided')
-          }
-          await trx.query(
-            `UPDATE attendance_shift_swap_requests
-                SET counterparty_status = $3,
-                    counterparty_responded_at = now(),
-                    updated_at = now()
-              WHERE org_id = $1 AND request_id = $2`,
-            [orgId, requestId, decision]
-          )
-          if (decision === 'rejected') {
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['rejected', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'reject', $2, $3, NULL, $4, 'rejected', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'rejected',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	          }
-	          return loadShiftSwapDetail(trx, orgId, requestId)
-	        })
-        emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
-        res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: decision === 'rejected' ? 'rejected' : detail.request_status }) } })
+        const operationId = resolveRequestOperationId(parsed.data)
+        const action = decision === 'accepted' ? 'approve' : 'reject'
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `shift-swap-${decision}`),
+          routeVariant: decision === 'accepted' ? 'shift_swap_accept' : 'shift_swap_reject',
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId,
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          emitEvent(`attendance.shiftSwap.${decision}`, { orgId, requestId, userId: requesterId })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
           res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
           return
@@ -30281,6 +36324,13 @@ module.exports = {
       'POST',
       '/api/attendance/shift-swap-requests/:id/cancel',
       withPermission('attendance:write', async (req, res) => {
+        const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json(
+            validationErrorBody('Invalid shift-swap cancellation payload', formatZodValidationDetails(parsed.error)),
+          )
+          return
+        }
         const requesterId = getUserId(req)
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -30292,70 +36342,41 @@ module.exports = {
           respondInvalidUuid(res)
           return
         }
+        if (!w4RequestOperationBoundary) {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
         try {
-          const detail = await db.transaction(async (trx) => {
-            const row = await loadShiftSwapDetail(trx, orgId, requestId, { forUpdate: true })
-            if (!row) {
-              throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
-            }
-            if (row.requester_user_id !== requesterId) {
-              const allowed = await canAccessOtherUsers(requesterId)
-              if (!allowed) {
-                throw new HttpError(403, 'FORBIDDEN', 'No access to cancel shift-swap request')
-              }
-            }
-            if (row.request_status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Shift-swap request is already resolved')
-            }
-            if (row.approval_instance_id) {
-              const approvalRows = await trx.query(
-                'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-                [row.approval_instance_id]
-              )
-              if (approvalRows.length > 0) {
-                const approval = approvalRows[0]
-                const newVersion = Number(approval.version ?? 0) + 1
-                await trx.query(
-                  'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                  ['cancelled', newVersion, row.approval_instance_id]
-                )
-                await deactivateAttendanceApprovalAssignments(trx, row.approval_instance_id)
-                await trx.query(
-                  `INSERT INTO approval_records
-                   (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                   VALUES ($1, 'revoke', $2, $3, NULL, $4, 'cancelled', $5, $6, '{}'::jsonb, $7, $8)`,
-                  [
-                    row.approval_instance_id,
-                    requesterId,
-                    getUserLabel(req, requesterId),
-                    approval.status,
-                    approval.version,
-                    newVersion,
-                    req.ip ?? null,
-                    req.get('user-agent') ?? null,
-                  ]
-                )
-              }
-            }
-	            await trx.query(
-	              `UPDATE attendance_requests
-	                  SET status = 'cancelled',
-	                      resolved_by = $3,
-	                      resolved_at = now(),
-	                      updated_at = now()
-	                WHERE id = $1 AND org_id = $2`,
-	              [requestId, orgId, requesterId]
-	            )
-	            await archiveShiftSwapSourceKey(trx, orgId, requestId)
-	            return loadShiftSwapDetail(trx, orgId, requestId)
-	          })
-          emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
-          res.json({ ok: true, data: { shiftSwap: mapShiftSwapRequestRow({ ...detail, request_status: 'cancelled' }) } })
+          const operationId = resolveRequestOperationId(parsed.data)
+          const outcome = await w4RequestOperationBoundary.execute({
+            kind: 'request_cancel',
+            operationId,
+            correlationId: requestCorrelationId(req, operationId, 'shift-swap-cancel'),
+            routeVariant: 'shift_swap_cancel',
+            routeInput: {
+              actorId: requesterId,
+              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+              actorName: getUserLabel(req, requesterId),
+              orgId,
+              requestId,
+              requestBody: parsed.data,
+              ipAddress: req.ip ?? null,
+              userAgent: req.get('user-agent') ?? null,
+            },
+          })
+          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+            emitEvent('attendance.shiftSwap.cancelled', { orgId, requestId, userId: requesterId })
+          }
+          res.json(outcome.response)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
+          if (respondIfW4BoundaryError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance shift-swap tables missing' } })
             return
@@ -30380,6 +36401,7 @@ module.exports = {
           )
           return
         }
+        if (respondIfInvalidRequestUuidReferences(res, parsed.data)) return
 
         const requesterId = getUserId(req)
         if (!requesterId) {
@@ -30387,203 +36409,76 @@ module.exports = {
           return
         }
 
-        const requestId = normalizeUuidString(req.params.id)
-        if (!requestId) {
-          respondInvalidUuid(res)
-          return
-        }
-
-        try {
-          const request = await db.transaction(async (trx) => {
-            const requestRows = await trx.query(
-              'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-              [requestId]
-            )
-            if (requestRows.length === 0) {
-              throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-            }
-
-            const existingRequest = requestRows[0]
-            await ensureAttendanceRequestAccess(existingRequest, requesterId, 'edit request')
-            if (existingRequest.status !== 'pending') {
-              throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
-            }
-
-            const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
-
-            // 补卡规则 MP-2/MP-3: only read the policy when a makeup type is involved (existing OR edited
-            // type), so non-makeup edits stay byte-identical. When enabled, cross-user editing of a makeup
-            // request is fail-closed (Q6: cannot yet audit the real submitter). Enabled-gated so disabled
-            // customers keep the current canAccessOtherUsers cross-user edit behavior.
-            const makeupTypeInvolved =
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
-              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
-            let makeupPunchPolicy = null
-            if (makeupTypeInvolved) {
-              const settings = await getSettings(db)
-              if (settings?.makeupPunchPolicy?.enabled === true) {
-                makeupPunchPolicy = settings.makeupPunchPolicy
-                if (existingRequest.user_id !== requesterId) {
-                  throw new HttpError(
-                    422,
-                    'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
-                    'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled'
-                  )
-                }
-              }
-            }
-
-            await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
-            const duplicateRows = await trx.query(
-              `SELECT id
-               FROM attendance_requests
-               WHERE org_id = $1
-                 AND user_id = $2
-                 AND work_date = $3
-                 AND request_type = $4
-                 AND status IN ('pending', 'approved')
-                 AND id <> $5
-               LIMIT 1`,
-              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, requestId]
-            )
-            if (duplicateRows.length > 0) {
-              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-            }
-
-            // 补卡规则 MP-2/MP-3: enforce on the EDITED makeup type, inside the txn after the lock +
-            // duplicate guard, excluding the current request id from the quota count. Recompute a FRESH
-            // snapshot every successful update — resolveAttendanceRequestDraft rebuilds metadata from
-            // scratch (it never copies makeupPunchPolicySnapshot), so the stale snapshot is dropped and
-            // the metadata siblings (attachmentUrl/approvalFlow) are preserved.
-            if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
-              const enforcement = await enforceMakeupPunchPolicy(trx, {
-                policy: makeupPunchPolicy,
-                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-                subjectUserId: existingRequest.user_id,
-                requesterId,
-                requestId,
-                draft,
-              })
-              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
-            }
-
-            const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
-            // S7-1 §4.1 runtime fail-closed — whole-flow scan BEFORE any mutation (see request-create note).
-            assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-            // S7-2/S7-3 §3.4: freeze direct_manager/dept_head once at create; assignment build reads only the snapshot.
-            const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              flowSteps: draft.metadata?.approvalFlow?.steps,
-              context,
-            })
-            const approvalPayload = buildAttendanceApprovalInstancePayload({
-              approvalId,
-              requestId,
-              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-              userId: existingRequest.user_id,
-              requesterName: existingRequest.user_id,
-              draft,
-              orgRelations,
-            })
-            const approvalAssignments = buildAttendanceApprovalAssignments(
-              draft.metadata?.approvalFlow?.steps, 0, approvalPayload.requesterSnapshot
-            )
-            await upsertAttendanceApprovalInstance(trx, approvalPayload)
-            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
-
-            const rows = await trx.query(
-              `UPDATE attendance_requests
-               SET work_date = $2,
-                   request_type = $3,
-                   requested_in_at = $4,
-                   requested_out_at = $5,
-                   reason = $6,
-                   metadata = $7::jsonb,
-                   approval_instance_id = $8,
-                   updated_at = now()
-               WHERE id = $1
-               RETURNING *`,
-              [
-                requestId,
-                draft.workDate,
-                draft.requestType,
-                draft.requestedInAt,
-                draft.requestedOutAt,
-                draft.reason,
-                JSON.stringify(draft.metadata),
-                approvalId,
-              ]
-            )
-            return rows[0]
-          })
-
-          emitEvent('attendance.request.updated', {
-            requestId: request.id,
-            orgId: request.org_id ?? DEFAULT_ORG_ID,
-            userId: request.user_id,
-          })
-          res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
-        } catch (error) {
-          if (error instanceof HttpError) {
-            res.status(error.status).json({
-              ok: false,
-              error: {
-                code: error.code,
-                message: error.message,
-                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-              },
-            })
-            return
-          }
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance request update failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
-        }
+	        const requestId = normalizeUuidString(req.params.id)
+	        if (!requestId) {
+	          respondInvalidUuid(res)
+	          return
+	        }
+	        if (!w4RequestOperationBoundary) {
+	          res.status(503).json({
+	            ok: false,
+	            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+	          })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        try {
+	          const operationId = resolveRequestOperationId(parsed.data)
+	          const outcome = await w4RequestOperationBoundary.execute({
+	            kind: 'request_pending_edit',
+	            operationId,
+	            correlationId: requestCorrelationId(req, operationId, 'request-edit'),
+	            routeVariant: null,
+	            routeInput: {
+	              actorId: requesterId,
+	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+	              requesterName: getUserLabel(req, requesterId),
+	              orgId: null,
+	              requestId,
+	              requestBody: parsed.data,
+	            },
+	          })
+	          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+	            const request = outcome.response?.data?.request
+	            emitEvent('attendance.request.updated', {
+	              requestId,
+	              orgId: request?.orgId ?? DEFAULT_ORG_ID,
+	              userId: request?.userId,
+	            })
+	          }
+	          res.json(outcome.response)
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({
+	              ok: false,
+	              error: {
+	                code: error.code,
+	                message: error.message,
+	                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+	              },
+	            })
+	            return
+	          }
+	          if (respondIfW4BoundaryError(res, error)) return
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance request update failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
+	        }
+	        return
       })
     )
 
-    const resolveSchema = z.object({
-      comment: z.string().optional(),
-      metadata: z.record(z.unknown()).optional(),
-    })
-
-    async function resolveRequest(req, res, action) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
-      if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-        return
-      }
-
-      const requesterId = getUserId(req)
-      if (!requesterId) {
-        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-        return
-      }
-
-      const requestId = normalizeUuidString(req.params.id)
-      if (!requestId) {
-        respondInvalidUuid(res)
-        return
-      }
-
-      const decisionComment = normalizeOptionalText(parsed.data.comment)
-      if (action === 'reject' && !decisionComment) {
-        res.status(400).json(
-          validationErrorBody(
-            'Rejection comment is required',
-            singleValidationDetail('comment', 'Required when rejecting an attendance request')
-          )
-        )
-        return
-      }
-      const decisionActorName = getUserLabel(req, requesterId)
-
-      try {
-        const result = await db.transaction(async (trx) => {
+    async function executeRequestDecisionInTransaction(trx, state, operation) {
+          const { route, expectedApprovalVersion, expectedApprovalNode } = state
+          const requesterId = route.actorId
+          const requestId = route.requestId
+          const action = route.action
+          const parsed = { data: route.requestBody }
+          const decisionComment = normalizeOptionalText(route.requestBody.comment)
+          const decisionActorName = route.actorName
           const requestRows = await trx.query(
             'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
             [requestId]
@@ -30593,7 +36488,9 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          await assertAttendanceRequestApprovalAllowed(req, { client: trx, requestRow })
+          const decisionAccess = await resolveRequestDecisionActorAccess(trx, route, requestRow, {
+            legacyAuthorization: operation?.acceptedWritePosture === 'legacy_projection_only',
+          })
           if (requestRow.status !== 'pending') {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
@@ -30613,15 +36510,25 @@ module.exports = {
 
           const approval = approvalRows[0]
           const requestMetadata = normalizeMetadata(requestRow.metadata)
-          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          const requestType = requestRow.request_type
           const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
           const flowSteps = normalizeApprovalSteps(flowMeta.steps)
-          const rawStepIndex = Number(flowMeta.currentStep ?? 0)
-          const currentStepIndex = flowSteps.length > 0
-            ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
-            : 0
-          const currentStep = flowSteps[currentStepIndex]
+          const lockedFlowState = resolveLockedAttendanceApprovalFlowState(
+            approval,
+            flowMeta,
+            flowSteps,
+          )
+          const lockedApprovalNode = lockedFlowState.currentNodeKey
+          if (
+            approval.status !== 'pending'
+            || Number(approval.version ?? 0) !== Number(expectedApprovalVersion)
+            || lockedApprovalNode !== expectedApprovalNode
+          ) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version, node, or status changed')
+          }
+          const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
+          const requestType = requestRow.request_type
+          const currentStepIndex = lockedFlowState.currentStepIndex
+          const currentStep = lockedFlowState.currentStep
 
           // Action authorization (RATIFIED S7 lock §3.1/§3.2 + owner erratum 2026-07-16, OD-S7-0
           // scheduler-scope carve-out). The mode is keyed on the request's CREATION-FROZEN
@@ -30647,7 +36554,7 @@ module.exports = {
               trx,
               orgId,
               requestId,
-              { userId: requesterId, orgId, fullAdmin: await hasAttendanceAdminAccess(requesterId) },
+              { userId: requesterId, orgId, fullAdmin: decisionAccess.fullAdmin },
               { forUpdate: true }
             )
           }
@@ -30655,17 +36562,15 @@ module.exports = {
           if (isScopeNativeDispatch) {
             await assertDispatchScopeAllowed()
           } else {
-            const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
             const actorIsAssigned = await isAttendanceActorAssignedForNode(
               trx,
               approvalId,
-              currentNodeKey,
+              lockedApprovalNode,
               requesterId,
               logger
             )
             if (!actorIsAssigned) {
-              const adminOverride = await hasAttendanceAdminAccess(requesterId)
-              if (!adminOverride) {
+              if (!decisionAccess.fullAdmin) {
                 throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
               }
             }
@@ -30682,6 +36587,20 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
           let finalOvertimeAnchor = null
+          let lockedRequestSnapshot = null
+
+          // W4C-3b P12: lock latest immutable request snapshot BEFORE any terminal
+          // approval/request DML. Authoritative + missing snapshot fails closed here
+          // (zero terminal writes). Shadow missing is allowed (unsupported pre-W4).
+          // legacy_projection_only is a no-op.
+          if (isFinalApproval) {
+            lockedRequestSnapshot = await lockRequestSnapshotBeforeTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+            })
+          }
 
           // W2: final overtime approval must validate its creation-frozen anchor before any
           // approval/request/accounting write. Throwing here leaves the whole transaction untouched.
@@ -30715,7 +36634,7 @@ module.exports = {
           const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           // S7-1 §4.1 runtime fail-closed — step-advance: if the step about to become active is dynamic
           // and the trigger set holds (flag OFF / port missing / kind unimplemented), fail BEFORE the
-          // approval_instances UPDATE and the assignment swap. This whole branch runs inside db.transaction,
+          // approval_instances UPDATE and the assignment swap. This whole branch runs inside the canonical transaction,
           // so the throw rolls back atomically — no advanced current_step, no swapped assignments, no
           // appended approval record, and never the legacy admin fallback.
           if (!isFinalApproval) {
@@ -30730,16 +36649,33 @@ module.exports = {
             ? null
             : buildAttendanceApprovalAssignments(flowSteps, nextStepIndex, frozenRequesterSnapshot)
 
-          await trx.query(
+          const approvalUpdateRows = await trx.query(
             `UPDATE approval_instances
              SET status = $1,
                  version = $2,
                  current_step = $3,
                  current_node_key = $4,
                  updated_at = now()
-             WHERE id = $5`,
-            [newStatus, newVersion, nextStepIndex, buildAttendanceApprovalNodeKey(nextStepIndex), approvalId]
+             WHERE id = $5
+               AND version = $6
+               AND status = 'pending'
+               AND current_step = $7
+               AND COALESCE(current_node_key, $8) = $8
+             RETURNING id`,
+            [
+              newStatus,
+              newVersion,
+              nextStepIndex,
+              buildAttendanceApprovalNodeKey(nextStepIndex),
+              approvalId,
+              expectedApprovalVersion,
+              currentStepIndex,
+              lockedApprovalNode,
+            ]
           )
+          if (approvalUpdateRows.length !== 1) {
+            throw new HttpError(409, 'APPROVAL_VERSION_CONFLICT', 'Approval version or status changed')
+          }
 
           if (isFinalApproval) {
             await deactivateAttendanceApprovalAssignments(trx, approvalId)
@@ -30757,10 +36693,13 @@ module.exports = {
             stepName: currentStep?.name ?? null,
           }
 
-          await trx.query(
+          // W4C-3b P12: RETURNING id is required so the terminal binding records
+          // the durable approval_records primary key (never form_snapshot).
+          const approvalRecordRows = await trx.query(
             `INSERT INTO approval_records
              (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+             RETURNING id`,
             [
               approvalId,
               action,
@@ -30772,14 +36711,50 @@ module.exports = {
               approval.version,
               newVersion,
               JSON.stringify(recordMetadata),
-              req.ip ?? null,
-              req.get('user-agent') ?? null,
+              route.ipAddress,
+              route.userAgent,
             ]
           )
+          const approvalRecordIdRaw = approvalRecordRows?.[0]?.id
+          const approvalRecordId =
+            approvalRecordIdRaw === null || approvalRecordIdRaw === undefined
+              ? null
+              : String(approvalRecordIdRaw)
+          if (isFinalApproval && !approvalRecordId) {
+            throw new HttpError(
+              500,
+              'APPROVAL_RECORD_ID_MISSING',
+              'Terminal approval record did not return an id'
+            )
+          }
 
           const nextMetadata = { ...requestMetadata }
           if (finalOvertimeAnchor) {
             nextMetadata[OVERTIME_ATTRIBUTION_KEY] = finalOvertimeAnchor
+          }
+          // W4C-3b P12: seal closed terminal binding from locked snapshot +
+          // approval version + RETURNING id. Mutable form_snapshot is never used.
+          if (isFinalApproval) {
+            const bindResult = await bindRequestSnapshotOnTerminalDecision(trx, {
+              orgId,
+              requestId,
+              requestType,
+              subjectUserId: requestRow.user_id,
+              action,
+              approvalVersion: newVersion,
+              approvalRecordId,
+              expectedSnapshotVersion:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.version
+                  : undefined,
+              expectedSnapshotFingerprint:
+                lockedRequestSnapshot && lockedRequestSnapshot.kind === 'locked'
+                  ? lockedRequestSnapshot.snapshot.payloadFingerprint
+                  : undefined,
+            })
+            if (bindResult && (bindResult.kind === 'bound' || bindResult.kind === 'unsupported_pre_w4_shadow')) {
+              nextMetadata[requestSnapshotTerminalBindingMetaKey] = bindResult.binding
+            }
           }
           let scheduleDispatchFinalization = null
           if (requestType === 'schedule_dispatch' && action === 'approve' && isFinalApproval) {
@@ -30790,7 +36765,7 @@ module.exports = {
               actorAccess: {
                 userId: requesterId,
                 orgId,
-                fullAdmin: await hasAttendanceAdminAccess(requesterId),
+                fullAdmin: decisionAccess.fullAdmin,
               },
             })
             nextMetadata.scheduleDispatchFinalization = {
@@ -30845,26 +36820,34 @@ module.exports = {
             }
           }
 
-	          if (isFinalApproval) {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
-	               WHERE id = $1`,
-	              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
-	            )
+		          if (isFinalApproval) {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
+		               WHERE id = $1 AND org_id = $6 AND status = 'pending'
+		               RETURNING id`,
+		              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata), orgId]
+		            )
+		            if (requestUpdateRows.length !== 1) {
+		              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+		            }
 	            if (requestType === 'shift_swap' && action !== 'approve') {
 	              await archiveShiftSwapSourceKey(trx, orgId, requestId)
 	            } else if (requestType === 'schedule_dispatch' && action !== 'approve') {
 	              await closeScheduleDispatchRequest(trx, orgId, requestId)
 	            }
-	          } else {
-	            await trx.query(
-	              `UPDATE attendance_requests
-	               SET metadata = $2::jsonb, updated_at = now()
-               WHERE id = $1`,
-              [requestId, JSON.stringify(nextMetadata)]
-            )
-          }
+		          } else {
+		            const requestUpdateRows = await trx.query(
+		              `UPDATE attendance_requests
+		               SET metadata = $2::jsonb, updated_at = now()
+	               WHERE id = $1 AND org_id = $3 AND status = 'pending'
+	               RETURNING id`,
+	              [requestId, JSON.stringify(nextMetadata), orgId]
+	            )
+	            if (requestUpdateRows.length !== 1) {
+	              throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Request state changed')
+	            }
+	          }
 
           let record = null
           if (action === 'approve' && isFinalApproval) {
@@ -31295,31 +37278,103 @@ module.exports = {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
             record,
-            orgId,
+            orgId: null,
             userId: requestRow.user_id,
             approvalStep: {
               index: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
               total: flowSteps.length,
             },
           }
-        })
+    }
 
-        emitEvent('attendance.resolved', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
+    async function resolveRequest(req, res, action) {
+      const rawBody = req.body ?? {}
+      const hasOperationId = rawBody && typeof rawBody === 'object' && (
+        Object.prototype.hasOwnProperty.call(rawBody, 'operationId')
+        || Object.prototype.hasOwnProperty.call(rawBody, 'operation_id')
+      )
+      const parsed = hasOperationId
+        ? requestDecisionActionSchema.safeParse(rawBody)
+        : resolveSchema.safeParse(rawBody)
+      if (!parsed.success) {
+        res.status(400).json(hasOperationId
+          ? validationErrorBody('Invalid attendance request decision payload', formatZodValidationDetails(parsed.error))
+          : { ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        return
+      }
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return
+      }
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
+      const orgId = getOrgId(req)
+      const decisionComment = normalizeOptionalText(parsed.data.comment)
+      if (action === 'reject' && !decisionComment) {
+        res.status(400).json(
+          validationErrorBody(
+            'Rejection comment is required',
+            singleValidationDetail('comment', 'Required when rejecting an attendance request'),
+          ),
+        )
+        return
+      }
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
         })
-        res.json({ ok: true, data: result })
+        return
+      }
+      let operationId = null
+      try {
+        operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_decision',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, `request-${action}`),
+          routeVariant: null,
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId: null,
+            requestId,
+            action,
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
+        })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.resolved', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status,
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (respondShiftComplianceCapExceeded(res, error)) return
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(operationId && Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
-          // Surface the underlying missing table/column during integration testing and misconfigured deploys.
-          // The response stays generic to avoid leaking schema details to clients.
           logger.error('Attendance resolveRequest failed due to missing tables/columns', error)
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
@@ -31330,9 +37385,14 @@ module.exports = {
     }
 
     async function cancelRequest(req, res) {
-      const parsed = resolveSchema.safeParse(req.body ?? {})
+      const parsed = requestCancellationActionSchema.safeParse(req.body ?? {})
       if (!parsed.success) {
-        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        res.status(400).json(
+          validationErrorBody(
+            'Invalid attendance request cancellation payload',
+            formatZodValidationDetails(parsed.error),
+          ),
+        )
         return
       }
 
@@ -31347,128 +37407,58 @@ module.exports = {
         respondInvalidUuid(res)
         return
       }
+      const orgId = getOrgId(req)
+
+      if (!w4RequestOperationBoundary) {
+        res.status(503).json({
+          ok: false,
+          error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+        })
+        return
+      }
 
       try {
-        const result = await db.transaction(async (trx) => {
-          const requestRows = await trx.query(
-            'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-            [requestId]
-          )
-          if (requestRows.length === 0) {
-            throw new HttpError(404, 'NOT_FOUND', 'Request not found')
-          }
-
-          const requestRow = requestRows[0]
-          // #7 (design-lock #3034): a leave may be cancelled AFTER approval (→ reverse its deducted balance
-          // below). The status machine is loosened ONLY for request_type='leave'; every other request type
-          // (shift_swap / schedule_dispatch / …) stays pending-only, unchanged.
-          const isApprovedLeaveCancellation =
-            requestRow.status === 'approved' && requestRow.request_type === 'leave'
-          if (requestRow.status !== 'pending' && !isApprovedLeaveCancellation) {
-            throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
-          }
-          const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          if (requestRow.request_type === 'schedule_dispatch') {
-            await assertScheduleDispatchRequestScopeAllowed(trx, requestOrgId, requestId, {
-              userId: requesterId,
-              orgId: requestOrgId,
-              fullAdmin: await hasAttendanceAdminAccess(requesterId),
-            }, { forUpdate: true })
-          }
-
-          if (requestRow.request_type !== 'schedule_dispatch' && requestRow.user_id !== requesterId) {
-            const allowed = await canAccessOtherUsers(requesterId)
-            if (!allowed) {
-              throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
-            }
-          }
-
-          const approvalId = requestRow.approval_instance_id
-          if (approvalId) {
-            const approvalRows = await trx.query(
-              'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-              [approvalId]
-            )
-            if (approvalRows.length > 0) {
-              const approval = approvalRows[0]
-              const newStatus = 'cancelled'
-              const newVersion = Number(approval.version ?? 0) + 1
-
-              await trx.query(
-                'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-                [newStatus, newVersion, approvalId]
-              )
-              await deactivateAttendanceApprovalAssignments(trx, approvalId)
-
-              await trx.query(
-                `INSERT INTO approval_records
-                 (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
-                [
-                  approvalId,
-                  'revoke',
-                  requesterId,
-                  getUserLabel(req, requesterId),
-                  parsed.data.comment ?? null,
-                  approval.status,
-                  newStatus,
-                  approval.version,
-                  newVersion,
-                  JSON.stringify(parsed.data.metadata ?? {}),
-                  req.ip ?? null,
-                  req.get('user-agent') ?? null,
-                ]
-              )
-            }
-          }
-
-          const resolvedAt = new Date()
-          await trx.query(
-            `UPDATE attendance_requests
-             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-             WHERE id = $1`,
-            [requestId, 'cancelled', requesterId, resolvedAt]
-          )
-          if (requestRow.request_type === 'shift_swap') {
-            await archiveShiftSwapSourceKey(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestId)
-          } else if (requestRow.request_type === 'schedule_dispatch') {
-            await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
-          }
-
-          // #7 (design-lock #3034): cancelling an APPROVED leave reverses whatever balance its approval
-          // deducted (annual_leave / comp_time_leave), in the SAME txn. Symmetric + safe for any approved
-          // leave: if nothing was deducted (e.g. annual policy off → no deduct events for this requestId),
-          // the reverse is a no-op. Idempotent inside (a re-cancel finds the existing 'reverse' → no-op).
-          let reversal = null
-          if (isApprovedLeaveCancellation) {
-            reversal = await reverseLeaveBalanceDeduction(trx, {
-              orgId: requestOrgId,
-              userId: requestRow.user_id,
-              requestId,
-            })
-          }
-
-          return {
+        const operationId = resolveRequestOperationId(parsed.data)
+        const outcome = await w4RequestOperationBoundary.execute({
+          kind: 'request_cancel',
+          operationId,
+          correlationId: requestCorrelationId(req, operationId, 'request-cancel'),
+          routeVariant: null,
+          routeInput: {
+            actorId: requesterId,
+            tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
+            actorName: getUserLabel(req, requesterId),
+            orgId: null,
             requestId,
-            status: 'cancelled',
-            orgId: requestOrgId,
-            userId: requestRow.user_id,
-            reversal,
-          }
+            requestBody: parsed.data,
+            ipAddress: req.ip ?? null,
+            userAgent: req.get('user-agent') ?? null,
+          },
         })
 
-        emitEvent('attendance.request.cancelled', {
-          requestId: result.requestId,
-          status: result.status,
-          orgId: result.orgId,
-          userId: result.userId,
-        })
-        res.json({ ok: true, data: result })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
+          const result = outcome.response?.data
+          emitEvent('attendance.request.cancelled', {
+            requestId: result?.requestId ?? requestId,
+            status: result?.status ?? 'cancelled',
+            orgId: result?.orgId,
+            userId: result?.userId,
+          })
+        }
+        res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
-          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          res.status(error.status).json({
+            ok: false,
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+            },
+          })
           return
         }
+        if (respondIfW4BoundaryError(res, error)) return
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
@@ -32060,6 +38050,8 @@ module.exports = {
       'GET',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
+        const actor = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actor) return
         const schema = z.object({
           orgId: z.string().optional(),
           requestType: z.string().optional(),
@@ -32078,7 +38070,7 @@ module.exports = {
         }
 
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
+        const orgId = actor.orgId
         const params = [orgId]
         let filters = ''
         if (parsed.data.requestType) {
@@ -32343,8 +38335,10 @@ module.exports = {
           return
         }
 
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!routeActorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const params = [orgId]
         let activeFilter = ''
         if (parsed.data.isActive !== undefined) {
@@ -32394,13 +38388,15 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-rules',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!routeActorAccess) return
         const parsed = rotationRuleCreateSchema.safeParse(normalizeRotationRulePayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
 
         try {
           const normalizedSequence = await validateRotationShiftSequenceIds(db, orgId, parsed.data.shiftSequence)
@@ -32468,13 +38464,15 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const parsed = rotationRuleUpdateSchema.safeParse(normalizeRotationRulePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -32563,7 +38561,9 @@ module.exports = {
       'GET',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -32596,7 +38596,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const ruleId = normalizeUuidString(req.params.id)
         if (!ruleId) {
           respondInvalidUuid(res)
@@ -32629,6 +38631,8 @@ module.exports = {
       'GET',
       '/api/attendance/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           orgId: z.string().optional(),
           publishStatus: z.enum(['draft', 'pending', 'published', 'all']).optional(),
@@ -32647,10 +38651,10 @@ module.exports = {
         }
 
         const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
 
         try {
           const countParams = [orgId]
@@ -32723,13 +38727,15 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
         if (!rotationRuleId) {
           respondInvalidUuid(res, 'rotationRuleId')
@@ -32752,7 +38758,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const ruleRows = await db.query(
@@ -32827,13 +38833,15 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -32841,9 +38849,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -32989,7 +38994,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-drafts/rotation-assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -32997,9 +39004,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -33058,13 +39062,15 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
         if (!rotationRuleId) {
           respondInvalidUuid(res, 'rotationRuleId')
@@ -33087,7 +39093,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const ruleRows = await db.query(
@@ -33170,13 +39176,15 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -33184,9 +39192,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -33342,7 +39347,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rotation-assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -33350,9 +39357,6 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const existingRows = await db.query(
             'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
             [assignmentId, orgId]
@@ -33417,7 +39421,9 @@ module.exports = {
       '/api/attendance/rules/default',
       withPermission('attendance:read', async (req, res) => {
         try {
-          const orgId = getOrgId(req)
+          const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+          if (!routeActorAccess) return
+          const orgId = routeActorAccess.orgId
           const rule = await loadDefaultRule(db, orgId)
           res.json({ ok: true, data: rule })
         } catch (error) {
@@ -33483,6 +39489,13 @@ module.exports = {
           return
         }
 
+        // W4C-2 (#4607 P3-4): a default-rule timezone WRITE goes through the strict W4
+        // IANA validator (offset forms, whitespace, non-IANA strings all fail closed).
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
+          return
+        }
+
         const orgId = getOrgId(req)
         try {
           const rule = await db.transaction(async (trx) => {
@@ -33533,7 +39546,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-sets',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -33573,7 +39588,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -33604,8 +39621,10 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/rule-templates',
-      withPermission('attendance:admin', async (_req, res) => {
-        const orgId = getOrgId(_req)
+      withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const library = await getTemplateLibrary(db, orgId)
         const versions = await getTemplateLibraryVersions(db, orgId)
         res.json({
@@ -33623,7 +39642,9 @@ module.exports = {
       'GET',
       '/api/attendance/rule-templates/versions/:versionId',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const target = await getTemplateLibraryVersionPayload(db, orgId, req.params.versionId, null)
         if (!target) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
@@ -33640,6 +39661,8 @@ module.exports = {
       'PUT',
       '/api/attendance/rule-templates',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const parsed = templateLibrarySchema.safeParse(req.body ?? {})
         let templates = null
         if (Array.isArray(req.body)) {
@@ -33653,7 +39676,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         try {
           const saved = await saveTemplateLibrary(db, orgId, templates, getUserId(req))
           res.json({ ok: true, data: { templates: saved } })
@@ -33668,6 +39691,8 @@ module.exports = {
       'POST',
       '/api/attendance/rule-templates/restore',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const parsed = templateLibraryRestoreSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
@@ -33678,7 +39703,7 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const target = await getTemplateLibraryVersionPayload(db, orgId, versionId ?? null, version)
         if (!target) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
@@ -33697,8 +39722,10 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/rule-sets/template',
-      withPermission('attendance:admin', async (_req, res) => {
-        const orgId = getOrgId(_req)
+      withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const templateLibrary = await getTemplateLibrary(db, orgId)
         res.json({
           ok: true,
@@ -33841,7 +39868,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const payload = {
           name: parsed.data.name,
           description: parsed.data.description ?? null,
@@ -33919,7 +39948,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -34008,7 +40039,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const ruleSetId = normalizeUuidString(req.params.id)
         if (!ruleSetId) {
           respondInvalidUuid(res)
@@ -34058,7 +40091,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         let config = parsed.data.config ?? {}
         let ruleSetId = parsed.data.ruleSetId
 
@@ -34335,6 +40370,7 @@ module.exports = {
 	          const rowCount = validation.rowCount
 
 	          const meta = {
+	            kind: 'csv_upload',
 	            fileId,
 	            orgId,
 	            createdBy: requesterId,
@@ -34413,13 +40449,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const requesterId = importAccess.userId
 	        const userId = parsed.data.userId ?? requesterId
 	        if (!userId) {
 	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
@@ -35133,842 +41165,137 @@ module.exports = {
 	            logger.warn('Attendance import commit token invalid; continuing without enforcement.')
 	          }
 	        }
-	          const importEngine = resolveImportEngineByRowCount(rows.length)
-	          const importChunkConfig = resolveImportChunkConfig(importEngine)
-	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	            rowCount: rows.length,
-	            engine: importEngine,
-	          })
-	          const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
-	            rowCount: rows.length,
-	            engine: importEngine,
-	          })
+	          // W4C-3a P06: preparation-only plan, then least-privilege core
+	          // commitSyncImportPlan for the independent SERIALIZABLE effect trx.
+	          // Route keeps HTTP serializer / idempotency / token / auth order.
+	          const syncImportPort = attendanceW4SegmentCalculationPort
+	          if (!syncImportPort || typeof syncImportPort.commitSyncImportPlan !== 'function') {
+	            res.status(503).json({
+	              ok: false,
+	              error: {
+	                code: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+	                message: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+	              },
+	            })
+	            return
+	          }
 
-          const baseRule = await loadDefaultRule(db, orgId)
-          const settings = await getSettings(db)
-          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
-          const groupSync = normalizeGroupSyncOptions(
-            parsed.data.groupSync,
-            parsed.data.ruleSetId,
-            parsed.data.timezone
-          )
-          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
-          const groupWarnings = []
-          if (groupNames.size && !groupSync?.autoCreate) {
-            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
-            for (const [key, name] of groupNames.entries()) {
-              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
-            }
-          }
-          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
-            for (const key of groupNames.keys()) {
-              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
-            }
-          }
-          const ruleSetConfigCache = new Map()
-          if (parsed.data.ruleSetId && ruleSetConfig) {
-            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
-          }
-          const engineCache = new Map()
-          let payloadEngine = null
-          if (parsed.data.engine) {
-            try {
-              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (commit payload)', error)
-            }
-          }
-
-	          const statusMap = parsed.data.statusMap ?? {}
 	          const returnItems = parsed.data.returnItems !== false
 	          const itemsLimit = returnItems && typeof parsed.data.itemsLimit === 'number'
 	            ? parsed.data.itemsLimit
 	            : null
-	          const results = []
-	          let importedCount = 0
-	          const skipped = []
-	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
 	          const batchId = randomUUID()
-	          let batchMeta = null
-	          let idempotentInTransaction = null
-
-          await db.transaction(async (trx) => {
-	            await applyImportHeavyTransactionTimeout(trx)
-	            if (idempotencyKey) {
-	              await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
-	              const existing = await loadIdempotentImportBatch(
-	                trx,
-	                orgId,
-	                idempotencyKey,
-	                importAccess.fullImport ? undefined : { createdBy: requesterId }
-	              )
-              if (existing) {
-                idempotentInTransaction = existing
-                return
-              }
-            }
-
-            let groupIdMap = null
-            let groupCreated = 0
-            if (groupSync) {
-              groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
-              if (groupSync.autoCreate && groupNames.size) {
-                const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
-                  ruleSetId: groupSync.ruleSetId,
-                  timezone: groupSync.timezone,
-                })
-                groupIdMap = ensured.map
-                groupCreated = ensured.created
-              }
-            }
-            const groupMembersToInsert = new Map()
-	            batchMeta = {
-	              ...(parsed.data.batchMeta ?? {}),
-	              idempotencyKey: idempotencyKey || undefined,
-	              engine: importEngine,
-	              chunkConfig: importChunkConfig,
-	              recordUpsertStrategy: importRecordUpsertStrategy,
-	              itemsInsertStrategy: importItemsInsertStrategy,
-	              mappingProfileId: parsed.data.mappingProfileId ?? null,
-	              groupSync: groupSync
-	                ? {
-                    autoCreate: groupSync.autoCreate,
-                    autoAssignMembers: groupSync.autoAssignMembers,
-                    ruleSetId: groupSync.ruleSetId,
-                    timezone: groupSync.timezone,
-                  }
-	                : undefined,
-	              groupCreated,
-	            }
-	            const batchInsert = idempotencyEnabled
-	              ? {
-	                  sql: `INSERT INTO attendance_import_batches
-	                   (id, org_id, idempotency_key, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, now(), now())`,
-	                  params: [
-	                    batchId,
-	                    orgId,
-	                    idempotencyKey,
-	                    requesterId,
-	                    parsed.data.source ?? null,
-	                    parsed.data.ruleSetId ?? null,
-	                    JSON.stringify(mapping),
-	                    rows.length,
-	                    'committed',
-	                    JSON.stringify(batchMeta),
-	                  ],
-	                }
-	              : {
-	                  sql: `INSERT INTO attendance_import_batches
-	                   (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
-	                  params: [
-	                    batchId,
-	                    orgId,
-	                    requesterId,
-	                    parsed.data.source ?? null,
-	                    parsed.data.ruleSetId ?? null,
-	                    JSON.stringify(mapping),
-	                    rows.length,
-	                    'committed',
-	                    JSON.stringify(batchMeta),
-	                  ],
-	                }
-		            await trx.query(batchInsert.sql, batchInsert.params)
-
-			            const importItemsBuffer = []
-			            const flushImportItems = async () => {
-			              if (!importItemsBuffer.length) return
-			              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
-			              await batchInsertAttendanceImportItems(trx, {
-			                batchId,
-			                orgId,
-			                items: chunk,
-			                totalRows: rows.length,
-			                strategy: importItemsInsertStrategy,
-			              })
-			            }
-				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
-				              importItemsBuffer.push({
-				                id: randomUUID(),
-			                userId: userId ?? null,
-			                workDate: workDate ?? null,
-			                recordId: recordId ?? null,
-			                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
-			              })
-			              if (importItemsBuffer.length >= importChunkConfig.itemsChunkSize) {
-			                await flushImportItems()
-			              }
-			            }
-
-			            // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
-			            const scopeWorkDates = new Set()
-			            const scopeUserIds = new Set()
-			            for (const row of rows) {
-			              const workDate = row?.workDate
-			              if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-			              const rowUserId = resolveRowUserId({
-			                row,
-			                fallbackUserId: requesterId,
-			                userMap: parsed.data.userMap,
-			                userMapKeyField: parsed.data.userMapKeyField,
-			                userMapSourceFields: parsed.data.userMapSourceFields,
-			              })
-			              if (rowUserId) scopeUserIds.add(rowUserId)
-			            }
-			            const scopeWorkDateList = Array.from(scopeWorkDates)
-			            const scopeUserIdList = Array.from(scopeUserIds)
-			            let scopeFromDate = null
-			            let scopeToDate = null
-			            for (const dateKey of scopeWorkDateList) {
-			              if (!scopeFromDate || dateKey < scopeFromDate) scopeFromDate = dateKey
-			              if (!scopeToDate || dateKey > scopeToDate) scopeToDate = dateKey
-			            }
-			            const scopeSpanDays = scopeFromDate && scopeToDate ? Math.max(0, diffDays(scopeFromDate, scopeToDate)) + 1 : 0
-			            const shouldPrefetchWorkContext = Boolean(
-			              scopeFromDate
-			              && scopeToDate
-			              && scopeUserIdList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_USERS
-			              && scopeWorkDateList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES
-			              && scopeSpanDays <= ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS
-			            )
-			            const prefetchedWorkContext = {
-			              holidaysByDate: new Map(),
-			              shiftAssignmentsByUser: new Map(),
-			              rotationAssignmentsByUser: new Map(),
-			              rotationShiftsById: new Map(),
-			            }
-			            if (shouldPrefetchWorkContext) {
-			              prefetchedWorkContext.holidaysByDate = await loadHolidayMapByDates(trx, orgId, scopeWorkDateList)
-			              prefetchedWorkContext.shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(
-			                trx,
-			                orgId,
-			                scopeUserIdList,
-			                scopeFromDate,
-			                scopeToDate
-			              )
-			              const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
-			                trx,
-			                orgId,
-			                scopeUserIdList,
-			                scopeFromDate,
-			                scopeToDate
-			              )
-			              prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
-			              prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
-			            } else if (scopeUserIdList.length || scopeWorkDateList.length) {
-			              logger.info('Attendance import scope prefetch skipped due to limits', {
-			                orgId,
-			                users: scopeUserIdList.length,
-			                workDates: scopeWorkDateList.length,
-			                spanDays: scopeSpanDays,
-			                maxUsers: ATTENDANCE_IMPORT_PREFETCH_MAX_USERS,
-			                maxWorkDates: ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES,
-			                maxSpanDays: ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS,
-			              })
-			            }
-
-			            // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
-			            const recordUpsertsBuffer = []
-			            const flushRecordUpserts = async () => {
-			              if (!recordUpsertsBuffer.length) return
-			              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
-			              const chunkUserIds = chunk.map((item) => item.userId)
-			              const chunkWorkDates = chunk.map((item) => item.workDate)
-
-				              const existingRows = await queryImportHeavy(
-				                trx,
-				                `SELECT ar.*
-				                 FROM attendance_records ar
-				                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
-				                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
-				                 WHERE ar.org_id = $1
-				                 FOR UPDATE`,
-					                [orgId, chunkUserIds, chunkWorkDates]
-					              )
-				              const existingMap = new Map()
-				              for (const row of existingRows) {
-				                const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
-				                existingMap.set(`${row.user_id}:${workDateKey}`, row)
-				              }
-
-				              const upsertRows = []
-				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const existingRow = existingMap.get(`${item.userId}:${workDateKey}`) ?? undefined
-				                const values = computeAttendanceRecordUpsertValues({
-				                  existingRow,
-				                  updateFirstInAt: item.updateFirstInAt,
-				                  updateLastOutAt: item.updateLastOutAt,
-				                  workDate: workDateKey,
-				                  mode: item.mode,
-				                  statusOverride: item.statusOverride,
-				                  overrideMetrics: item.overrideMetrics,
-				                  isWorkday: item.isWorkday,
-				                  meta: item.meta,
-				                  sourceBatchId: item.sourceBatchId,
-				                  rule: item.rule,
-				                  leaveMinutes: item.leaveMinutes,
-				                  overtimeMinutes: item.overtimeMinutes,
-				                })
-				                upsertRows.push({
-				                  userId: item.userId,
-				                  orgId,
-				                  workDate: workDateKey,
-				                  timezone: item.timezone,
-				                  firstInAt: values.firstInAt,
-				                  lastOutAt: values.lastOutAt,
-				                  workMinutes: values.workMinutes,
-				                  lateMinutes: values.lateMinutes,
-				                  earlyLeaveMinutes: values.earlyLeaveMinutes,
-				                  status: values.status,
-				                  isWorkday: values.isWorkday,
-				                  metaJson: values.metaJson,
-				                  sourceBatchId: values.sourceBatchId,
-				                })
-				              }
-
-				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
-				                strategy: importRecordUpsertStrategy,
-                    totalRows: rows.length,
-				              })
-
-					              for (const item of chunk) {
-					                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-					                let record = upserted.get(`${item.userId}:${workDateKey}`)
-					                if (!record?.id) {
-					                  const fallbackRows = await queryImportHeavy(
-					                    trx,
-					                    `SELECT id, user_id, work_date
-					                       FROM attendance_records
-					                      WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
-					                      LIMIT 1`,
-					                    [orgId, item.userId, workDateKey]
-					                  )
-					                  if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
-					                    record = fallbackRows[0]
-					                  }
-					                }
-					                if (!record?.id) {
-					                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
-					                }
-
-				                await enqueueImportItem({
-				                  userId: item.userId,
-				                  workDate: workDateKey,
-				                  recordId: record.id,
-				                  previewSnapshot: item.previewSnapshot,
-				                })
-
-				                importedCount += 1
-				                if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
-				                  results.push({
-				                    id: record.id,
-				                    userId: item.userId,
-				                    workDate: workDateKey,
-				                    engine: item.engine,
-				                  })
-				                }
-				              }
-				            }
-				            const enqueueRecordUpsert = async (item) => {
-				              recordUpsertsBuffer.push(item)
-				              if (recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
-			                await flushRecordUpserts()
-			              }
-			            }
-
-			            const seenRowKeys = new Set()
-			            for (const row of rows) {
-			              const workDate = row.workDate
-			              const groupKey = resolveAttendanceGroupKey(row)
-			              const rowUserId = resolveRowUserId({
-                row,
-                fallbackUserId: requesterId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const userProfile = resolveRowUserProfile({
-                row,
-                fallbackUserId: requesterId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const importWarnings = []
-              if (!rowUserId) {
-                importWarnings.push(buildUnresolvedRowUserWarning({
-                  row,
-                  userMapKeyField: parsed.data.userMapKeyField,
-                  userMapSourceFields: parsed.data.userMapSourceFields,
-                }))
-              }
-              if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length) {
-                const missingRequired = requiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
-                if (missingRequired.length) {
-                  importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
-                }
-              }
-	              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-	                const missingPunch = punchRequiredFields.filter((field) => {
-	                  const value = resolveRequiredFieldValue(row, field)
-	                  return value === undefined || value === null || value === ''
-	                })
-	                if (missingPunch.length) {
-	                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-	                }
-	              }
-		              if (importWarnings.length) {
-		                const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-		                await enqueueImportItem({
-		                  userId: rowUserId ?? null,
-		                  workDate: workDate ?? null,
-		                  recordId: null,
-		                  previewSnapshot: snapshot,
-		                })
-		                skipped.push({
-		                  userId: rowUserId ?? null,
-		                  workDate: workDate ?? null,
-		                  warnings: importWarnings,
-		                })
-		                releaseImportRowMemory(row)
-	                continue
-	              }
-
-		              const dedupKey = `${rowUserId}:${workDate}`
-		              if (seenRowKeys.has(dedupKey)) {
-		                const warnings = ['Duplicate row in payload (same userId + workDate)']
-		                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-		                await enqueueImportItem({
-		                  userId: rowUserId,
-		                  workDate,
-		                  recordId: null,
-		                  previewSnapshot: snapshot,
-		                })
-		                skipped.push({ userId: rowUserId, workDate, warnings })
-		                releaseImportRowMemory(row)
-		                continue
-		              }
-	              seenRowKeys.add(dedupKey)
-	              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-	                const groupEntry = groupIdMap.get(groupKey)
-	                if (groupEntry?.id) {
-	                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
-	                }
-	              }
-              let activeRuleSetId = parsed.data.ruleSetId ?? null
-              let activeRuleSetConfig = ruleSetConfig
-              if (!activeRuleSetId && groupRuleSetMap.size) {
-                if (groupKey && groupRuleSetMap.has(groupKey)) {
-                  activeRuleSetId = groupRuleSetMap.get(groupKey)
-                }
-              }
-              if (!activeRuleSetConfig && activeRuleSetId) {
-                if (ruleSetConfigCache.has(activeRuleSetId)) {
-                  activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
-                } else {
-                  activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
-                  ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
-                }
-              }
-
-              const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
-              const ruleOverride = override
-                ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-                : baseRule
-
-              let engine = payloadEngine
-              if (!engine && activeRuleSetConfig?.engine) {
-                if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
-                  engine = engineCache.get(activeRuleSetId)
-                } else {
-                  try {
-                    engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
-                    if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
-	                  } catch (error) {
-	                    logger.warn('Attendance rule engine config invalid (rule set)', error)
-	                  }
-	                }
-	              }
-	              const context = resolveWorkContextFromPrefetch({
-	                orgId,
-	                userId: rowUserId,
-	                workDate,
-	                defaultRule: ruleOverride,
-	                prefetched: prefetchedWorkContext,
-	              }) ?? await resolveWorkContext({
-	                db: trx,
-	                orgId,
-	                userId: rowUserId,
-	                workDate,
-	                defaultRule: ruleOverride,
-	              })
-              const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-              const valueFor = (key) => {
-                if (mapped[key]?.value !== undefined) return mapped[key].value
-                if (row.fields?.[key] !== undefined) return row.fields[key]
-                const profileValue = resolveProfileValue(userProfile, key)
-                if (profileValue !== undefined) return profileValue
-                return undefined
-              }
-              const dataTypeFor = (key) => mapped[key]?.dataType
-              const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
-
-              const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-              augmentFieldValuesWithDates(fieldValues, workDate)
-              const holidayMeta = resolveHolidayMeta(context.holiday)
-              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-              fieldValues.holiday_first_day = holidayMeta.isFirstDay
-
-              const baseFacts = {
-                userId: rowUserId,
-                orgId,
-                workDate,
-                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                isHoliday: Boolean(context.holiday),
-                isWorkingDay: context.isWorkingDay,
-              }
-              const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
-              const shiftOverride = resolveShiftOverrideFromMappings(
-                activeRuleSetConfig?.policies?.shiftMappings,
-                baseFacts,
-                fieldValues,
-                baseUserGroups
-              )
-
-              const shiftRange = resolveShiftTimeRange(shiftNameRaw)
-              const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
-              const ruleForMetrics = shiftRange
-                ? baseRuleForMetrics
-                : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
-
-              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-                firstInValue: valueFor('firstInAt'),
-                lastOutValue: valueFor('lastOutAt'),
-                workDate,
-                rule: ruleForMetrics,
-              })
-              const importAttribution = await resolveImportRowWorkDateAttribution({
-                db: trx,
-                orgId,
-                userId: rowUserId,
-                workDate,
-                firstInAt,
-                lastOutAt,
-	              timezone: ruleForMetrics.timezone,
-                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
-              })
-              const statusRaw = valueFor('status')
-              const statusOverride = statusRaw != null
-                ? resolveStatusOverride(statusRaw, statusMap)
-                : null
-
-              const workMinutes = parseMinutesValue(
-                valueFor('workMinutes') ?? valueFor('workHours'),
-                dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
-              )
-              const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-              const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
-              const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
-              const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
-
-              const computed = computeMetrics({
-                rule: ruleForMetrics,
-                firstInAt,
-                lastOutAt,
-                workDate,
-                isWorkingDay: context.isWorkingDay,
-                leaveMinutes,
-                overtimeMinutes,
-              })
-              const initialMetrics = {
-                workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
-                lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
-                earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
-                status: statusOverride ?? computed.status,
-              }
-
-              const approvalSummary = valueFor('approvalSummary')
-                ?? valueFor('attendance_approve')
-                ?? valueFor('attendanceApprove')
-
-              const policyBaseMetrics = {
-                ...initialMetrics,
-                leaveMinutes: leaveMinutes ?? 0,
-                overtimeMinutes: overtimeMinutes ?? 0,
-              }
-              const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
-              const holidayPolicyResult = applyHolidayPolicy({
-                settings,
-                holiday: context.holiday,
-                holidayMeta,
-                metrics: policyBaseMetrics,
-                approvalSummary,
-                policyContext: holidayPolicyContext,
-              })
-              const policyResult = applyAttendancePolicies({
-                policies: activeRuleSetConfig?.policies,
-                facts: {
-                  userId: rowUserId,
-                  orgId,
-                  workDate,
-                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                  isHoliday: Boolean(context.holiday),
-                  isWorkingDay: context.isWorkingDay,
-                  holidayName: holidayMeta.name,
-                  holidayDayIndex: holidayMeta.dayIndex,
-                  holidayFirstDay: holidayMeta.isFirstDay,
-                },
-                fieldValues,
-                metrics: holidayPolicyResult.metrics,
-                options: { skipRules: resolvePolicySkipRules(settings) },
-              })
-              const effective = policyResult.metrics
-              let engineResult = null
-              if (engine) {
-                const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
-                const roleTags = Array.isArray(rawRoleTags)
-                  ? rawRoleTags
-                  : typeof rawRoleTags === 'string' && rawRoleTags.trim()
-                    ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
-                    : []
-
-                engineResult = engine.evaluate({
-                  record: {
-                    userId: rowUserId,
-                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
-                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
-                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
-                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
-                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                    is_holiday: Boolean(context.holiday),
-                    is_workday: context.isWorkingDay,
-                    holiday_name: holidayMeta.name ?? undefined,
-                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
-                    holiday_first_day: holidayMeta.isFirstDay,
-                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
-                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
-                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
-                  },
-                  profile: {
-                    roleTags,
-                    role: valueFor('role') ?? valueFor('职位'),
-                    department: valueFor('department'),
-                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                  },
-                  approvals: approvalSummary ?? [],
-                  calc: {
-                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
-                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
-                  },
-                })
-              }
-              const baseMetrics = {
-                ...effective,
-                leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
-                overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
-              }
-              const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
-              const finalMetrics = engineAdjustment.metrics
-              const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
-                ? finalMetrics.leaveMinutes
-                : leaveMinutes
-              const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
-                ? finalMetrics.overtimeMinutes
-                : overtimeMinutes
-
-              const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
-              let meta = null
-              if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
-                meta = {
-                  policy: {
-                    warnings: policyWarnings,
-                    appliedRules: policyResult.appliedRules,
-                    userGroups: policyResult.userGroups,
-                  },
-                }
-              }
-              if (profileSnapshot) {
-                meta = meta ?? {}
-                meta.profile = profileSnapshot
-              }
-              meta = meta ?? {}
-              meta.metrics = {
-                leaveMinutes: effectiveLeaveMinutes,
-                overtimeMinutes: effectiveOvertimeMinutes,
-              }
-              meta.source = {
-                source: parsed.data.source ?? null,
-                mappingProfileId: parsed.data.mappingProfileId ?? null,
-              }
-              meta = attachAttendanceImportMultiPunchMeta(meta, {
-                valueFor,
-                workDate,
-                rule: ruleForMetrics,
-                clearMissing: (parsed.data.mode ?? 'override') === 'override',
-              })
-              if (importAttribution.frozenAttribution) {
-                meta = meta ?? {}
-                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
-              }
-		              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
-	                meta = meta ?? {}
-	                meta.engine = {
-	                  appliedRules: engineResult.appliedRules,
-	                  warnings: engineResult.warnings,
-	                  reasons: engineResult.reasons,
-	                  overrides: engineAdjustment.meta?.overrides ?? null,
-	                  base: engineAdjustment.meta?.base ?? null,
-	                }
-	              }
-
-	              const snapshot = {
-	                metrics: {
-	                  workMinutes: finalMetrics.workMinutes,
-	                  lateMinutes: finalMetrics.lateMinutes,
-                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                  leaveMinutes: effectiveLeaveMinutes,
-                  overtimeMinutes: effectiveOvertimeMinutes,
-                  status: finalMetrics.status,
-                },
-	                policy: meta?.policy ?? null,
-	                engine: meta?.engine ?? null,
-	              }
-	              await enqueueRecordUpsert({
-	                userId: rowUserId,
-	                workDate,
-	                timezone: context.rule.timezone,
-	                rule: context.rule,
-	                updateFirstInAt: firstInAt,
-	                updateLastOutAt: lastOutAt,
-	                mode: parsed.data.mode ?? 'override',
-	                statusOverride,
-	                overrideMetrics: {
-	                  workMinutes: finalMetrics.workMinutes,
-	                  lateMinutes: finalMetrics.lateMinutes,
-	                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-	                  status: finalMetrics.status,
-	                },
-	                isWorkday: context.isWorkingDay,
-	                leaveMinutes: effectiveLeaveMinutes,
-	                overtimeMinutes: effectiveOvertimeMinutes,
-	                meta: meta ?? undefined,
-	                sourceBatchId: batchId,
-	                previewSnapshot: snapshot,
-	                engine: engineResult
-	                  ? {
-	                      appliedRules: engineResult.appliedRules,
-	                      warnings: engineResult.warnings,
-	                      reasons: engineResult.reasons,
-	                      overrides: engineAdjustment.meta?.overrides ?? null,
-	                      base: engineAdjustment.meta?.base ?? null,
-	                    }
-	                  : null,
-	              })
-	              releaseImportRowMemory(row)
-			            }
-
-			            await flushRecordUpserts()
-			            await flushImportItems()
-
-		            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-		              const groupMembersAdded = await insertAttendanceGroupMembers(
-		                trx,
-		                orgId,
-                Array.from(groupMembersToInsert.values())
-              )
-              if (batchMeta) {
-                batchMeta.groupMembersAdded = groupMembersAdded
-                await trx.query(
-                  'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                  [batchId, orgId, JSON.stringify(batchMeta)]
-                )
-              }
-            }
-            if (skipped.length) {
-              const updatedMeta = {
-                ...(batchMeta ?? {}),
-                skippedCount: skipped.length,
-                skippedRows: skipped.slice(0, 50),
-              }
-              await trx.query(
-                'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                [batchId, orgId, JSON.stringify(updatedMeta)]
-              )
-              batchMeta = updatedMeta
-	            }
+	          const preparedPlan = await commitAttendanceImportPayload({
+	            payload: parsed.data,
+	            orgId,
+	            requesterId,
+	            batchId,
+	            idempotencyKey,
+	            prepareOnly: true,
+	          })
+	          // Pass the prepared plan through unchanged. Do not re-fingerprint
+	          // attribution/policy leaves here — core freeze authority is separate.
+	          const commitResult = await syncImportPort.commitSyncImportPlan({
+	            ...preparedPlan,
+	            actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+	            tokenSubjectUserId: requesterId,
+	            itemReturnPolicy: {
+	              returnItems,
+	              itemsLimit,
+	            },
+	            csvWarnings: Array.isArray(preparedPlan.csvWarnings)
+	              ? preparedPlan.csvWarnings
+	              : csvWarnings,
+	            groupWarnings: Array.isArray(preparedPlan.groupWarnings)
+	              ? preparedPlan.groupWarnings
+	              : [],
 	          })
 
-	          // Best-effort cleanup: once commit succeeds, the uploaded CSV is no longer needed.
-	          if (csvFileId) {
-	            await deleteImportUpload({ orgId, fileId: csvFileId })
+	          // Best-effort post-commit upload cleanup (governing P06 order).
+	          if (
+	            preparedPlan.artifactCleanup
+	            && preparedPlan.artifactCleanup.kind === 'uploaded_import_file'
+	            && preparedPlan.artifactCleanup.fileId
+	          ) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: preparedPlan.artifactCleanup.fileId,
+	            })
+	          }
+	          if (parsed.data.convertedArtifactFileId) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: parsed.data.convertedArtifactFileId,
+	            })
 	          }
 
-	          if (idempotentInTransaction) {
-	            const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
-	            const idempotentEngine = resolveImportEngineFromMeta(
-	              idempotentInTransaction.meta,
-	              idempotentRowCount
-	            )
+	          if (commitResult.idempotent) {
 	            res.json({
 	              ok: true,
 	              data: {
-	                batchId: idempotentInTransaction.batchId,
-	                imported: idempotentInTransaction.imported,
-	                processedRows: idempotentInTransaction.imported,
-	                failedRows: idempotentInTransaction.skipped,
-	                elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	                engine: idempotentEngine,
-	                recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
-	                  idempotentInTransaction.meta,
-	                  idempotentRowCount,
-	                  idempotentEngine
-	                ),
+	                batchId: commitResult.batchId,
+	                imported: commitResult.imported,
+	                processedRows: commitResult.processedRows,
+	                failedRows: commitResult.failedRows,
+	                elapsedMs: commitResult.elapsedMs,
+	                engine: commitResult.engine,
+	                recordUpsertStrategy: commitResult.recordUpsertStrategy,
 	                items: [],
 	                skipped: [],
-                csvWarnings: [],
-                groupWarnings: [],
-                meta: idempotentInTransaction.meta,
-                idempotent: true,
-              },
-            })
-            return
-          }
+	                csvWarnings: [],
+	                groupWarnings: [],
+	                meta: commitResult.meta,
+	                idempotent: true,
+	              },
+	            })
+	            return
+	          }
 
 	          res.json({
 	            ok: true,
 	            success: true,
 	            data: {
-	              batchId,
-	              imported: importedCount,
-	              processedRows: importedCount,
-	              failedRows: skipped.length,
-	              elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	              engine: importEngine,
-	              recordUpsertStrategy: importRecordUpsertStrategy,
-	              items: returnItems ? results : [],
-	              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
-              skipped,
-              csvWarnings: [...csvWarnings, ...groupWarnings],
-              groupWarnings,
-              meta: batchMeta,
-            },
-          })
+	              batchId: commitResult.batchId,
+	              imported: commitResult.imported,
+	              processedRows: commitResult.processedRows,
+	              failedRows: commitResult.failedRows,
+	              elapsedMs: commitResult.elapsedMs,
+	              engine: commitResult.engine,
+	              recordUpsertStrategy: commitResult.recordUpsertStrategy,
+	              items: commitResult.items,
+	              itemsTruncated: commitResult.itemsTruncated,
+	              skipped: commitResult.skipped,
+	              csvWarnings: [...(commitResult.csvWarnings ?? []), ...(commitResult.groupWarnings ?? [])],
+	              groupWarnings: commitResult.groupWarnings ?? [],
+	              meta: commitResult.meta,
+	            },
+	          })
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          const errorCode = typeof error?.code === 'string' && error.code
+	            ? error.code
+	            : (typeof error?.message === 'string' ? error.message : '')
+	          if (errorCode === 'ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED' || errorCode === 'W4_BATCH_LIMIT_EXCEEDED') {
+	            res.status(422).json({ ok: false, error: { code: 'W4_BATCH_LIMIT_EXCEEDED', message: 'W4_BATCH_LIMIT_EXCEEDED' } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_IN_PROGRESS') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_CONFLICT' || errorCode === 'ATTENDANCE_OPERATION_BATCH_CONFLICT') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'SEGMENT_CALCULATION_SUSPENDED') {
+	            res.status(503).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'W4C3A_IMPORT_FREEZE_INVALID') {
+	            res.status(422).json({ ok: false, error: { code: errorCode, message: errorCode } })
 	            return
 	          }
 	          if (isDatabaseSchemaError(error)) {
@@ -36204,21 +41531,64 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!importAccess) return
+        if (!importAccess.fullImport) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Full attendance import permission required' } })
+          return
+        }
+        const requesterId = importAccess.userId
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
 
+	      const legacyPlanPort = attendanceW4SegmentCalculationPort
+	      if (!legacyPlanPort || typeof legacyPlanPort.reserveLegacyImportPlan !== 'function') {
+	        res.status(503).json({
+	          ok: false,
+	          error: {
+	            code: 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	            message: 'ATTENDANCE_IMPORT_LEGACY_PLAN_HOST_PORT_MISSING',
+	          },
+	        })
+	        return
+	      }
+
         const cleanIdempotencyKey = typeof parsed.data.idempotencyKey === 'string'
           ? parsed.data.idempotencyKey.trim()
           : ''
+		const requestLegacyInputFingerprint = buildLegacyImportInputFingerprintV1({
+		  payload: {
+		    ...parsed.data,
+		    returnItems: false,
+		    skippedSampleLimit: normalizeImportSkippedSampleLimit(parsed.data.skippedSampleLimit)
+		      ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT,
+		  },
+		  orgId,
+		  requesterId,
+		  idempotencyKey: cleanIdempotencyKey,
+		  csvFileId: resolveImportUploadFileId(parsed.data) || null,
+		})
 
         // First: dedupe retries without consuming a new commit token.
         if (cleanIdempotencyKey) {
           try {
             const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
             if (existingJob) {
+		      if (
+		        Number(existingJob.w4_contract_version) === 1
+		        && existingJob.w4_legacy_input_fingerprint !== requestLegacyInputFingerprint
+		      ) {
+		        res.status(409).json({
+		          ok: false,
+		          error: {
+		            code: 'ATTENDANCE_IMPORT_IDEMPOTENCY_INPUT_CONFLICT',
+		            message: 'Idempotency key is already bound to different import input',
+		          },
+		        })
+		        return
+		      }
               res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
               return
             }
@@ -36259,57 +41629,50 @@ module.exports = {
         }
 
 	        try {
-	          const jobId = randomUUID()
 	          const batchId = randomUUID()
-	          let total = 0
-	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
-	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-	          else if (resolveImportUploadFileId(parsed.data)) {
-	            const csvFileId = resolveImportUploadFileId(parsed.data)
-	            const meta = await loadImportUploadMeta({ orgId, fileId: csvFileId })
-	            if (!meta) {
-	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
-	            }
-	            if (meta && isImportUploadExpired(meta)) {
-	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
-	            }
-	            const hint = Number(meta?.rowCount ?? 0)
-	            total = Number.isFinite(hint) && hint > 0 ? hint : 0
-	          }
-	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
-
-	          const sanitizedPayload = sanitizeImportJobPayload({
-	            ...parsed.data,
-	            __importEngine: resolveImportEngineByRowCount(total),
+	          const preparedPlan = await commitAttendanceImportPayload({
+	            payload: {
+	              ...parsed.data,
+	              returnItems: false,
+	              skippedSampleLimit: normalizeImportSkippedSampleLimit(parsed.data.skippedSampleLimit)
+	                ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT,
+	            },
+	            orgId,
+	            requesterId,
+	            batchId,
+	            idempotencyKey: cleanIdempotencyKey,
+	            prepareOnly: true,
 	          })
-
-          const status = 'queued'
-          await db.query(
-            `INSERT INTO attendance_import_jobs
-             (id, org_id, batch_id, created_by, idempotency_key, status, progress, total, payload, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now(), now())`,
-            [
-              jobId,
-              orgId,
-              batchId,
-              requesterId,
-              cleanIdempotencyKey || null,
-              status,
-              0,
-              total,
-              JSON.stringify(sanitizedPayload),
-            ]
-          )
-
-          const jobRow = await loadImportJob(jobId, orgId)
+	          if (preparedPlan.legacyInputFingerprint !== requestLegacyInputFingerprint) {
+	            throw new Error('W4C3A_LEGACY_INPUT_FINGERPRINT_DERIVATION_DRIFT')
+	          }
+	          const reservation = await legacyPlanPort.reserveLegacyImportPlan({
+	            ...preparedPlan,
+	            actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+	            tokenSubjectUserId: requesterId,
+	          })
+	          const jobId = reservation.jobId
+	          const jobRow = await loadImportJob(jobId, orgId)
           if (!jobRow) {
             res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create import job' } })
             return
           }
 
-          await enqueueImportJob(jobId)
+	          if (reservation.kind === 'created') await enqueueImportJob(jobId)
+	          if (parsed.data.convertedArtifactFileId) {
+	            await deleteImportUpload({
+	              orgId,
+	              fileId: parsed.data.convertedArtifactFileId,
+	            })
+	          }
 
-          res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
+	          res.json({
+	            ok: true,
+	            data: {
+	              job: mapReservedImportJobRow(jobRow, reservation),
+	              ...(reservation.kind === 'existing' ? { idempotent: true } : {}),
+	            },
+	          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -36465,533 +41828,179 @@ module.exports = {
             return
           }
         }
-	          const importEngine = resolveImportEngineByRowCount(rows.length)
-	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	            rowCount: rows.length,
-	            engine: importEngine,
-	          })
 
-          const baseRule = await loadDefaultRule(db, orgId)
-          const settings = await getSettings(db)
-          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
-          const groupSync = normalizeGroupSyncOptions(
-            parsed.data.groupSync,
-            parsed.data.ruleSetId,
-            parsed.data.timezone
-          )
-          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
-          const groupWarnings = []
-          if (groupNames.size && !groupSync?.autoCreate) {
-            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
-            for (const [key, name] of groupNames.entries()) {
-              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
-            }
-          }
-          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
-            for (const key of groupNames.keys()) {
-              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
-            }
-          }
-
-          const ruleSetConfigCache = new Map()
-          if (parsed.data.ruleSetId && ruleSetConfig) {
-            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
-          }
-
-          const engineCache = new Map()
-          let payloadEngine = null
-          if (parsed.data.engine) {
-            try {
-              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (import payload)', error)
-            }
-          }
-
-          const statusMap = parsed.data.statusMap ?? {}
-          const results = []
-          const skipped = []
-          let groupCreated = 0
-          let groupMembersAdded = 0
-          await db.transaction(async (trx) => {
-            await applyImportHeavyTransactionTimeout(trx)
-            let groupIdMap = null
-            if (groupSync) {
-              groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
-              if (groupSync.autoCreate && groupNames.size) {
-                const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
-                  ruleSetId: groupSync.ruleSetId,
-                  timezone: groupSync.timezone,
-                })
-                groupIdMap = ensured.map
-                groupCreated = ensured.created
-              }
-            }
-            const groupMembersToInsert = new Map()
-            for (const row of rows) {
-              const workDate = row.workDate
-              const groupKey = resolveAttendanceGroupKey(row)
-              const rowUserId = resolveRowUserId({
-                row,
-                fallbackUserId: userId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const userProfile = resolveRowUserProfile({
-                row,
-                fallbackUserId: userId,
-                userMap: parsed.data.userMap,
-                userMapKeyField: parsed.data.userMapKeyField,
-                userMapSourceFields: parsed.data.userMapSourceFields,
-              })
-              const importWarnings = []
-              if (!rowUserId) {
-                importWarnings.push(buildUnresolvedRowUserWarning({
-                  row,
-                  userMapKeyField: parsed.data.userMapKeyField,
-                  userMapSourceFields: parsed.data.userMapSourceFields,
-                }))
-              }
-              if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length) {
-                const missingRequired = requiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
-                if (missingRequired.length) {
-                  importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
-                }
-              }
-              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-                const missingPunch = punchRequiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
-                if (missingPunch.length) {
-                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-                }
-              }
-              if (importWarnings.length) {
-                skipped.push({
-                  userId: rowUserId ?? null,
-                  workDate: workDate ?? null,
-                  warnings: importWarnings,
-                })
-                continue
-              }
-              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-                const groupEntry = groupIdMap.get(groupKey)
-                if (groupEntry?.id) {
-                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
-                }
-              }
-              let activeRuleSetId = parsed.data.ruleSetId ?? null
-              let activeRuleSetConfig = ruleSetConfig
-              if (!activeRuleSetId && groupRuleSetMap.size) {
-                if (groupKey && groupRuleSetMap.has(groupKey)) {
-                  activeRuleSetId = groupRuleSetMap.get(groupKey)
-                }
-              }
-              if (!activeRuleSetConfig && activeRuleSetId) {
-                if (ruleSetConfigCache.has(activeRuleSetId)) {
-                  activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
-                } else {
-                  activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
-                  ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
-                }
-              }
-
-              const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
-              const ruleOverride = override
-                ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-                : baseRule
-
-              let engine = payloadEngine
-              if (!engine && activeRuleSetConfig?.engine) {
-                if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
-                  engine = engineCache.get(activeRuleSetId)
-                } else {
-                  try {
-                    engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
-                    if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
-                  } catch (error) {
-                    logger.warn('Attendance rule engine config invalid (rule set)', error)
-                  }
-                }
-              }
-              const context = await resolveWorkContext({
-                db: trx,
-                orgId,
-                userId: rowUserId,
-                workDate,
-                defaultRule: ruleOverride,
-              })
-              const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-              const valueFor = (key) => {
-                if (mapped[key]?.value !== undefined) return mapped[key].value
-                if (row.fields?.[key] !== undefined) return row.fields[key]
-                const profileValue = resolveProfileValue(userProfile, key)
-                if (profileValue !== undefined) return profileValue
-                return undefined
-              }
-              const dataTypeFor = (key) => mapped[key]?.dataType
-              const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
-
-              const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-              augmentFieldValuesWithDates(fieldValues, workDate)
-              const holidayMeta = resolveHolidayMeta(context.holiday)
-              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-              fieldValues.holiday_first_day = holidayMeta.isFirstDay
-
-              const baseFacts = {
-                userId: rowUserId,
-                orgId,
-                workDate,
-                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                isHoliday: Boolean(context.holiday),
-                isWorkingDay: context.isWorkingDay,
-              }
-              const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
-              const shiftOverride = resolveShiftOverrideFromMappings(
-                activeRuleSetConfig?.policies?.shiftMappings,
-                baseFacts,
-                fieldValues,
-                baseUserGroups
-              )
-
-              const shiftRange = resolveShiftTimeRange(shiftNameRaw)
-              const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
-              const ruleForMetrics = shiftRange
-                ? baseRuleForMetrics
-                : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
-
-              const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-                firstInValue: valueFor('firstInAt'),
-                lastOutValue: valueFor('lastOutAt'),
-                workDate,
-                rule: ruleForMetrics,
-              })
-              const importAttribution = await resolveImportRowWorkDateAttribution({
-                db: trx,
-                orgId,
-                userId: rowUserId,
-                workDate,
-                firstInAt,
-                lastOutAt,
-                timezone: ruleForMetrics.timezone,
-                explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
-              })
-              const statusRaw = valueFor('status')
-              const statusOverride = statusRaw != null
-                ? resolveStatusOverride(statusRaw, statusMap)
-                : null
-
-              const workMinutes = parseMinutesValue(
-                valueFor('workMinutes') ?? valueFor('workHours'),
-                dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
-              )
-              const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-              const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
-              const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
-              const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
-
-              const computed = computeMetrics({
-                rule: ruleForMetrics,
-                firstInAt,
-                lastOutAt,
-                workDate,
-                isWorkingDay: context.isWorkingDay,
-                leaveMinutes,
-                overtimeMinutes,
-              })
-              const initialMetrics = {
-                workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
-                lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
-                earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
-                status: statusOverride ?? computed.status,
-              }
-
-              const approvalSummary = valueFor('approvalSummary')
-                ?? valueFor('attendance_approve')
-                ?? valueFor('attendanceApprove')
-
-              const policyBaseMetrics = {
-                ...initialMetrics,
-                leaveMinutes: leaveMinutes ?? 0,
-                overtimeMinutes: overtimeMinutes ?? 0,
-              }
-              const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
-              const holidayPolicyResult = applyHolidayPolicy({
-                settings,
-                holiday: context.holiday,
-                holidayMeta,
-                metrics: policyBaseMetrics,
-                approvalSummary,
-                policyContext: holidayPolicyContext,
-              })
-              const policyResult = applyAttendancePolicies({
-                policies: activeRuleSetConfig?.policies,
-                facts: {
-                  userId: rowUserId,
-                  orgId,
-                  workDate,
-                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                  isHoliday: Boolean(context.holiday),
-                  isWorkingDay: context.isWorkingDay,
-                  holidayName: holidayMeta.name,
-                  holidayDayIndex: holidayMeta.dayIndex,
-                  holidayFirstDay: holidayMeta.isFirstDay,
-                },
-                fieldValues,
-                metrics: holidayPolicyResult.metrics,
-                options: { skipRules: resolvePolicySkipRules(settings) },
-              })
-              const effective = policyResult.metrics
-              let engineResult = null
-              if (engine) {
-                const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
-                const roleTags = Array.isArray(rawRoleTags)
-                  ? rawRoleTags
-                  : typeof rawRoleTags === 'string' && rawRoleTags.trim()
-                    ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
-                    : []
-
-                engineResult = engine.evaluate({
-                  record: {
-                    userId: rowUserId,
-                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
-                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
-                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
-                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
-                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                    is_holiday: Boolean(context.holiday),
-                    is_workday: context.isWorkingDay,
-                    holiday_name: holidayMeta.name ?? undefined,
-                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
-                    holiday_first_day: holidayMeta.isFirstDay,
-                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
-                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
-                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
-                  },
-                  profile: {
-                    roleTags,
-                    role: valueFor('role') ?? valueFor('职位'),
-                    department: valueFor('department'),
-                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
-                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
-                  },
-                  approvals: approvalSummary ?? [],
-                  calc: {
-                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
-                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
-                  },
-                })
-            }
-              const baseMetrics = {
-                ...effective,
-                leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
-                overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
-              }
-              const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
-            const finalMetrics = engineAdjustment.metrics
-              const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
-                ? finalMetrics.leaveMinutes
-                : leaveMinutes
-              const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
-                ? finalMetrics.overtimeMinutes
-                : overtimeMinutes
-
-              const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
-              let meta = null
-              if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
-                meta = {
-                  policy: {
-                    warnings: policyWarnings,
-                    appliedRules: policyResult.appliedRules,
-                    userGroups: policyResult.userGroups,
-                  },
-                }
-              }
-              if (profileSnapshot) {
-                meta = meta ?? {}
-                meta.profile = profileSnapshot
-              }
-              meta = meta ?? {}
-              meta.metrics = {
-                leaveMinutes: effectiveLeaveMinutes,
-                overtimeMinutes: effectiveOvertimeMinutes,
-              }
-              meta.source = {
-                source: parsed.data.source ?? null,
-                mappingProfileId: parsed.data.mappingProfileId ?? null,
-              }
-              meta = attachAttendanceImportMultiPunchMeta(meta, {
-                valueFor,
-                workDate,
-                rule: ruleForMetrics,
-                clearMissing: (parsed.data.mode ?? 'override') === 'override',
-              })
-              if (importAttribution.frozenAttribution) {
-                meta = meta ?? {}
-                meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
-              }
-              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
-                meta = meta ?? {}
-                meta.engine = {
-                  appliedRules: engineResult.appliedRules,
-                  warnings: engineResult.warnings,
-                  reasons: engineResult.reasons,
-                  overrides: engineAdjustment.meta?.overrides ?? null,
-                  base: engineAdjustment.meta?.base ?? null,
-                }
-              }
-
-              const record = await upsertAttendanceRecord({
-                userId: rowUserId,
-                orgId,
-                workDate,
-                timezone: context.rule.timezone,
-                rule: context.rule,
-                updateFirstInAt: firstInAt,
-                updateLastOutAt: lastOutAt,
-                mode: parsed.data.mode ?? 'override',
-                statusOverride,
-                overrideMetrics: {
-                  workMinutes: finalMetrics.workMinutes,
-                  lateMinutes: finalMetrics.lateMinutes,
-                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                  status: finalMetrics.status,
-                },
-                isWorkday: context.isWorkingDay,
-                leaveMinutes: effectiveLeaveMinutes,
-                overtimeMinutes: effectiveOvertimeMinutes,
-                meta: meta ?? undefined,
-                client: trx,
-              })
-              results.push({
-                id: record.id,
-                userId: rowUserId,
-                workDate,
-                engine: engineResult
-                  ? {
-                      appliedRules: engineResult.appliedRules,
-                      warnings: engineResult.warnings,
-                      reasons: engineResult.reasons,
-                      overrides: engineAdjustment.meta?.overrides ?? null,
-                      base: engineAdjustment.meta?.base ?? null,
-                    }
-                  : null,
-              })
-            }
-            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-              groupMembersAdded = await insertAttendanceGroupMembers(
-                trx,
-                orgId,
-                Array.from(groupMembersToInsert.values())
-              )
-            }
-          })
-
-	          const importedCount = results.length
-	          const responseMeta = groupSync
-	            ? {
-	                groupCreated,
-	                groupMembersAdded,
-	                groupSync: {
-	                  autoCreate: groupSync.autoCreate,
-	                  autoAssignMembers: groupSync.autoAssignMembers,
-	                  ruleSetId: groupSync.ruleSetId,
-	                  timezone: groupSync.timezone,
-	                },
-	              }
-	            : null
-	          res.json({
-	            ok: true,
-	            data: {
-	              imported: importedCount,
-	              processedRows: importedCount,
-	              failedRows: skipped.length,
-	              elapsedMs: 0,
-	              engine: importEngine,
-	              recordUpsertStrategy: importRecordUpsertStrategy,
-	              batchId: null,
-	              idempotent: false,
-	              items: results,
-	              itemsTruncated: false,
-	              skipped,
-	              csvWarnings: [...csvWarnings, ...groupWarnings],
-	              groupWarnings,
-	              meta: responseMeta,
+	        const syncImportPort = attendanceW4SegmentCalculationPort
+	        if (!syncImportPort || typeof syncImportPort.commitSyncImportPlan !== 'function') {
+	          res.status(503).json({
+	            ok: false,
+	            error: {
+	              code: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+	              message: 'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
 	            },
 	          })
-	        } catch (error) {
-	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-	            return
-	          }
-	          if (isDatabaseSchemaError(error)) {
-	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-	            return
-	          }
-	          logger.error('Attendance import failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
-        }
-      }
+	          return
+	        }
+
+	        const batchId = randomUUID()
+	        const preparedPlan = await commitAttendanceImportPayload({
+	          payload: parsed.data,
+	          orgId,
+	          requesterId,
+	          batchId,
+	          // The legacy route never exposed or honored idempotency semantics.
+	          idempotencyKey: null,
+	          prepareOnly: true,
+	        })
+	        const commitResult = await syncImportPort.commitSyncImportPlan({
+	          ...preparedPlan,
+	          actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+	          tokenSubjectUserId: requesterId,
+	          // Frozen P09 response semantics always return every imported item,
+	          // even when the request contains returnItems=false.
+	          itemReturnPolicy: { returnItems: true, itemsLimit: null },
+	          csvWarnings: preparedPlan.csvWarnings ?? [],
+	          groupWarnings: preparedPlan.groupWarnings ?? [],
+	        })
+
+	        if (
+	          preparedPlan.artifactCleanup
+	          && preparedPlan.artifactCleanup.kind === 'uploaded_import_file'
+	          && preparedPlan.artifactCleanup.fileId
+	        ) {
+	          await deleteImportUpload({
+	            orgId,
+	            fileId: preparedPlan.artifactCleanup.fileId,
+	          })
+	        }
+	        if (parsed.data.convertedArtifactFileId) {
+	          await deleteImportUpload({
+	            orgId,
+	            fileId: parsed.data.convertedArtifactFileId,
+	          })
+	        }
+
+	        const committedMeta = normalizeMetadata(commitResult.meta)
+	        const committedGroupSync = normalizeMetadata(committedMeta.groupSync)
+	        const legacyResponseMeta = committedMeta.groupSync
+	          ? {
+	              groupCreated: Number(committedMeta.groupCreated ?? 0),
+	              groupMembersAdded: Number(committedMeta.groupMembersAdded ?? 0),
+	              groupSync: {
+	                autoCreate: Boolean(committedGroupSync.autoCreate),
+	                autoAssignMembers: Boolean(committedGroupSync.autoAssignMembers),
+	                ruleSetId: committedGroupSync.ruleSetId ?? null,
+	                timezone: committedGroupSync.timezone ?? null,
+	              },
+	            }
+	          : null
+	        res.json({
+	          ok: true,
+	          data: {
+	            imported: commitResult.imported,
+	            processedRows: commitResult.processedRows,
+	            failedRows: commitResult.failedRows,
+	            elapsedMs: 0,
+	            engine: commitResult.engine,
+	            recordUpsertStrategy: commitResult.recordUpsertStrategy,
+	            batchId: null,
+	            idempotent: false,
+	            items: commitResult.items,
+	            itemsTruncated: false,
+	            skipped: commitResult.skipped,
+	            csvWarnings: [
+	              ...(commitResult.csvWarnings ?? []),
+	              ...(commitResult.groupWarnings ?? []),
+	            ],
+	            groupWarnings: commitResult.groupWarnings ?? [],
+	            meta: legacyResponseMeta,
+	          },
+	        })
+	        return
+
+	      } catch (error) {
+	        if (error instanceof HttpError) {
+	          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	          return
+	        }
+	        const errorCode = typeof error?.code === 'string' && error.code
+	          ? error.code
+	          : (typeof error?.message === 'string' ? error.message : '')
+	        if (errorCode === 'ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED' || errorCode === 'W4_BATCH_LIMIT_EXCEEDED') {
+	          res.status(422).json({ ok: false, error: { code: 'W4_BATCH_LIMIT_EXCEEDED', message: 'W4_BATCH_LIMIT_EXCEEDED' } })
+	          return
+	        }
+	        if (errorCode === 'ATTENDANCE_OPERATION_IN_PROGRESS') {
+	          res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	          return
+	        }
+	        if (errorCode === 'ATTENDANCE_OPERATION_CONFLICT' || errorCode === 'ATTENDANCE_OPERATION_BATCH_CONFLICT') {
+	          res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	          return
+	        }
+	        if (errorCode === 'SEGMENT_CALCULATION_SUSPENDED') {
+	          res.status(503).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	          return
+	        }
+	        if (errorCode === 'W4C3A_IMPORT_FREEZE_INVALID') {
+	          res.status(422).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	          return
+	        }
+	        if (isDatabaseSchemaError(error)) {
+	          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	          return
+	        }
+	        logger.error('Attendance import failed', error)
+	        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
+	      }
+	    }
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/integrations',
-      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const status = typeof req.query.status === 'string' ? req.query.status : null
+	  context.api.http.addRoute(
+	    'GET',
+	    '/api/attendance/integrations',
+	    withAttendanceImportPermission(async (req, res) => {
+	      const orgId = getOrgId(req)
+	      const { page, pageSize, offset } = parsePagination(req.query)
+	      const status = typeof req.query.status === 'string' ? req.query.status : null
 
-        try {
-          const where = ['org_id = $1']
-          const params = [orgId]
-          if (status) {
-            where.push(`status = $${params.length + 1}`)
-            params.push(status)
-          }
-          const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
-          const totalRows = await db.query(
-            `SELECT COUNT(*)::int AS total FROM attendance_integrations ${whereClause}`,
-            params
-          )
-          const rows = await db.query(
-            `SELECT * FROM attendance_integrations
-             ${whereClause}
-             ORDER BY created_at DESC
-             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-            [...params, pageSize, offset]
-          )
-          res.json({
-            ok: true,
-            data: {
-              items: rows.map(mapIntegrationRow),
-              total: totalRows[0]?.total ?? 0,
-              page,
-              pageSize,
-            },
-          })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance integrations query failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load integrations' } })
-        }
-      })
-    )
+	      try {
+	        const where = ['org_id = $1']
+	        const params = [orgId]
+	        if (status) {
+	          where.push(`status = $${params.length + 1}`)
+	          params.push(status)
+	        }
+	        const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+	        const totalRows = await db.query(
+	          `SELECT COUNT(*)::int AS total FROM attendance_integrations ${whereClause}`,
+	          params
+	        )
+	        const rows = await db.query(
+	          `SELECT * FROM attendance_integrations
+	           ${whereClause}
+	           ORDER BY created_at DESC
+	           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+	          [...params, pageSize, offset]
+	        )
+	        res.json({
+	          ok: true,
+	          data: {
+	            items: rows.map(mapIntegrationRow),
+	            total: totalRows[0]?.total ?? 0,
+	            page,
+	            pageSize,
+	          },
+	        })
+	      } catch (error) {
+	        if (isDatabaseSchemaError(error)) {
+	          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	          return
+	        }
+	        logger.error('Attendance integrations query failed', error)
+	        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load integrations' } })
+	      }
+	    })
+	  )
 
     context.api.http.addRoute(
       'POST',
@@ -37184,6 +42193,8 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
+	    const importAccess = await resolveAttendanceImportActor(req, res)
+	    if (!importAccess) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -37220,6 +42231,7 @@ module.exports = {
               appKey: config.appKey,
               appSecret: config.appSecret,
               baseUrl: config.baseUrl,
+              logger,
             })
             const columns = Array.isArray(config.columns) && config.columns.length
               ? config.columns
@@ -37241,6 +42253,7 @@ module.exports = {
                   columnIds: config.columnIds,
                   fromDate,
                   toDate,
+                  logger,
                 })
                 const payload = {
                   column_vals: result.column_vals ?? [],
@@ -37262,393 +42275,88 @@ module.exports = {
               userMapSourceFields: config.userMapSourceFields,
               mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
             }
+	        const scopedAccess = await assertAttendanceImportCommitAllowed(req, res, {
+	          orgId,
+	          rows: allRows,
+	          payload,
+	          fallbackUserId: requesterId,
+	          actorAccess: importAccess,
+	        })
+	        if (!scopedAccess) {
+	          await updateIntegrationRun(db, run.id, {
+	            status: 'failed',
+	            message: 'Integration import scope denied',
+	            meta: { imported: 0, skipped: 0, batchId: null, partialErrors },
+	            finishedAt: new Date().toISOString(),
+	          })
+	          return
+	        }
             if (parsed.data.dryRun) {
-              imported = 0
-              skipped = []
-            } else {
-              const importResponse = await (async () => {
-                const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
-                if (!parsedImport.success) throw new Error(parsedImport.error.message)
-                const importUserId = payload.userId ?? requesterId
-                const importOrgId = orgId
-                const importRows = Array.isArray(parsedImport.data.rows) ? parsedImport.data.rows : []
-                let ruleSetConfig = null
-                const profile = resolveImportProfileForPayload(parsedImport.data)
-                const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
-                const mapping = parsedImport.data.mapping?.columns
-                  ?? parsedImport.data.mapping?.fields
-                  ?? (profileMapping.length ? profileMapping : undefined)
-                  ?? ruleSetConfig?.mappings?.columns
-                  ?? ruleSetConfig?.mappings?.fields
-                  ?? []
-                const requiredFields = profile?.requiredFields ?? []
-                const punchRequiredFields = profile?.punchRequiredFields ?? []
-                const baseRule = await loadDefaultRule(db, orgId)
-                const override = normalizeRuleOverride(ruleSetConfig?.rule)
-                const ruleOverride = override
-                  ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-                  : baseRule
-                const settings = await getSettings(db)
-                const statusMap = parsedImport.data.statusMap ?? {}
-                const results = []
-                const skippedRows = []
-                const newBatchId = randomUUID()
-                const batchMeta = {
-                  source: 'integration',
+              const runResult = await updateIntegrationRun(db, run.id, {
+                status: partialErrors.length ? 'partial' : 'success',
+                message: partialErrors.length
+                  ? `Dry run completed with ${partialErrors.length} partial errors`
+                  : 'Dry run completed',
+                meta: {
+                  imported: 0,
+                  skipped: 0,
+                  batchId: null,
+                  partialErrors,
+                  dryRun: true,
+                  from: fromDate,
+                  to: toDate,
+                },
+                finishedAt: new Date().toISOString(),
+              })
+              res.json({
+                ok: true,
+                data: {
                   integrationId,
-                  mappingProfileId: parsedImport.data.mappingProfileId ?? null,
+                  imported: 0,
+                  skipped: [],
+                  batchId: null,
+                  partialErrors,
+                  run: runResult,
+                  dryRun: true,
+                },
+              })
+              return
+            } else {
+              if (allRows.length > 0) {
+                const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
+                if (!parsedImport.success) {
+                  throw new HttpError(400, 'VALIDATION_ERROR', parsedImport.error.message)
                 }
-
-                await db.transaction(async (trx) => {
-                  await trx.query(
-                    `INSERT INTO attendance_import_batches
-                     (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
-                    [
-                      newBatchId,
-                      orgId,
-                      requesterId,
-                      payload.source ?? null,
-                      null,
-                      JSON.stringify(mapping),
-                      importRows.length,
-                      'committed',
-                      JSON.stringify(batchMeta),
-                    ]
+                const syncImportPort = attendanceW4SegmentCalculationPort
+                if (!syncImportPort || typeof syncImportPort.commitSyncImportPlan !== 'function') {
+                  throw new HttpError(
+                    503,
+                    'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING',
+                    'ATTENDANCE_IMPORT_SYNC_HOST_PORT_MISSING'
                   )
-
-                  const seenRowKeys = new Set()
-                  for (const row of importRows) {
-                    const workDate = row.workDate
-                    const rowUserId = resolveRowUserId({
-                      row,
-                      fallbackUserId: importUserId,
-                      userMap: parsedImport.data.userMap,
-                      userMapKeyField: parsedImport.data.userMapKeyField,
-                      userMapSourceFields: parsedImport.data.userMapSourceFields,
-                    })
-                    const userProfile = resolveRowUserProfile({
-                      row,
-                      fallbackUserId: importUserId,
-                      userMap: parsedImport.data.userMap,
-                      userMapKeyField: parsedImport.data.userMapKeyField,
-                      userMapSourceFields: parsedImport.data.userMapSourceFields,
-                    })
-                    const importWarnings = []
-                    if (!rowUserId) {
-                      importWarnings.push(buildUnresolvedRowUserWarning({
-                        row,
-                        userMapKeyField: parsedImport.data.userMapKeyField,
-                        userMapSourceFields: parsedImport.data.userMapSourceFields,
-                      }))
-                    }
-                    if (!workDate) importWarnings.push('Missing workDate')
-                    if (requiredFields.length) {
-                      const missingRequired = requiredFields.filter((field) => {
-                        const value = resolveRequiredFieldValue(row, field)
-                        return value === undefined || value === null || value === ''
-                      })
-                      if (missingRequired.length) {
-                        importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
-                      }
-                    }
-                    if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-                      const missingPunch = punchRequiredFields.filter((field) => {
-                        const value = resolveRequiredFieldValue(row, field)
-                        return value === undefined || value === null || value === ''
-                      })
-                      if (missingPunch.length) {
-                        importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-                      }
-                    }
-                    if (importWarnings.length) {
-                      const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-                      await trx.query(
-                        `INSERT INTO attendance_import_items
-                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                        [
-                          randomUUID(),
-                          newBatchId,
-                          orgId,
-                          rowUserId ?? null,
-                          workDate ?? null,
-                          null,
-                          JSON.stringify(snapshot),
-                        ]
-                      )
-                      skippedRows.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings: importWarnings })
-                      continue
-                    }
-
-                    const dedupKey = `${rowUserId}:${workDate}`
-                    if (seenRowKeys.has(dedupKey)) {
-                      const warnings = ['Duplicate row in payload (same userId + workDate)']
-                      const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-                      await trx.query(
-                        `INSERT INTO attendance_import_items
-                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                        [
-                          randomUUID(),
-                          newBatchId,
-                          orgId,
-                          rowUserId,
-                          workDate,
-                          null,
-                          JSON.stringify(snapshot),
-                        ]
-                      )
-                      skippedRows.push({ userId: rowUserId, workDate, warnings })
-                      continue
-                    }
-                    seenRowKeys.add(dedupKey)
-                    const context = await resolveWorkContext({
-                      db: trx,
-                      orgId,
-                      userId: rowUserId,
-                      workDate,
-                      defaultRule: ruleOverride,
-                    })
-                    const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-                    const valueFor = (key) => {
-                      if (mapped[key]?.value !== undefined) return mapped[key].value
-                      if (row.fields?.[key] !== undefined) return row.fields[key]
-                      const profileValue = resolveProfileValue(userProfile, key)
-                      if (profileValue !== undefined) return profileValue
-                      return undefined
-                    }
-                    const dataTypeFor = (key) => mapped[key]?.dataType
-                    const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
-
-                    const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
-                    const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-                    augmentFieldValuesWithDates(fieldValues, workDate)
-                    const holidayMeta = resolveHolidayMeta(context.holiday)
-                    if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-                    if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-                    fieldValues.holiday_first_day = holidayMeta.isFirstDay
-
-                    const baseFacts = {
-                      userId: rowUserId,
-                      orgId,
-                      workDate,
-                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                      isHoliday: Boolean(context.holiday),
-                      isWorkingDay: context.isWorkingDay,
-                    }
-                    const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
-                    const shiftOverride = resolveShiftOverrideFromMappings(
-                      ruleSetConfig?.policies?.shiftMappings,
-                      baseFacts,
-                      fieldValues,
-                      baseUserGroups
-                    )
-
-                    const shiftRange = resolveShiftTimeRange(shiftNameRaw)
-                    const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
-                    const ruleForMetrics = shiftRange
-                      ? baseRuleForMetrics
-                      : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
-
-                    const { firstInAt, lastOutAt } = parseImportedPunchDateTimes({
-                      firstInValue: valueFor('firstInAt'),
-                      lastOutValue: valueFor('lastOutAt'),
-                      workDate,
-                      rule: ruleForMetrics,
-                    })
-                    const importAttribution = await resolveImportRowWorkDateAttribution({
-                      db: trx,
-                      orgId,
-                      userId: rowUserId,
-                      workDate,
-                      firstInAt,
-                      lastOutAt,
-                      timezone: ruleForMetrics.timezone,
-                      explicitShiftId: valueFor('shiftId') ?? valueFor('shift_id') ?? null,
-                    })
-                    const statusRaw = valueFor('status')
-                    const statusOverride = statusRaw != null
-                      ? resolveStatusOverride(statusRaw, statusMap)
-                      : null
-
-                    const workMinutes = parseMinutesValue(
-                      valueFor('workMinutes') ?? valueFor('workHours'),
-                      dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
-                    )
-                    const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
-                    const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
-                    const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
-                    const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
-
-                    const computed = computeMetrics({
-                      rule: ruleForMetrics,
-                      firstInAt,
-                      lastOutAt,
-                      workDate,
-                      isWorkingDay: context.isWorkingDay,
-                      leaveMinutes,
-                      overtimeMinutes,
-                    })
-                    const initialMetrics = {
-                      workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
-                      lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
-                      earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
-                      status: statusOverride ?? computed.status,
-                    }
-
-                    const approvalSummary = valueFor('approvalSummary')
-                      ?? valueFor('attendance_approve')
-                      ?? valueFor('attendanceApprove')
-
-                    const policyBaseMetrics = {
-                      ...initialMetrics,
-                      leaveMinutes: leaveMinutes ?? 0,
-                      overtimeMinutes: overtimeMinutes ?? 0,
-                    }
-                    const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
-                    const holidayPolicyResult = applyHolidayPolicy({
-                      settings,
-                      holiday: context.holiday,
-                      holidayMeta,
-                      metrics: policyBaseMetrics,
-                      approvalSummary,
-                      policyContext: holidayPolicyContext,
-                    })
-                    const policyResult = applyAttendancePolicies({
-                      policies: ruleSetConfig?.policies,
-                      facts: {
-                        userId: rowUserId,
-                        orgId,
-                        workDate,
-                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                        isHoliday: Boolean(context.holiday),
-                        isWorkingDay: context.isWorkingDay,
-                        holidayName: holidayMeta.name,
-                        holidayDayIndex: holidayMeta.dayIndex,
-                        holidayFirstDay: holidayMeta.isFirstDay,
-                      },
-                      fieldValues,
-                      metrics: holidayPolicyResult.metrics,
-                      options: { skipRules: resolvePolicySkipRules(settings) },
-                    })
-                    const effective = policyResult.metrics
-                    const baseMetrics = {
-                      ...effective,
-                      leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
-                      overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
-                    }
-                    const finalMetrics = baseMetrics
-                    const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
-                      ? finalMetrics.leaveMinutes
-                      : leaveMinutes
-                    const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
-                      ? finalMetrics.overtimeMinutes
-                      : overtimeMinutes
-
-                    const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
-                    let meta = null
-                    if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
-                      meta = {
-                        policy: {
-                          warnings: policyWarnings,
-                          appliedRules: policyResult.appliedRules,
-                          userGroups: policyResult.userGroups,
-                        },
-                      }
-                    }
-                    if (profileSnapshot) {
-                      meta = meta ?? {}
-                      meta.profile = profileSnapshot
-                    }
-                    meta = meta ?? {}
-                    meta.metrics = {
-                      leaveMinutes: effectiveLeaveMinutes,
-                      overtimeMinutes: effectiveOvertimeMinutes,
-                    }
-                    meta.source = {
-                      source: payload.source ?? null,
-                      mappingProfileId: payload.mappingProfileId ?? null,
-                      integrationId,
-                    }
-                    meta = attachAttendanceImportMultiPunchMeta(meta, {
-                      valueFor,
-                      workDate,
-                      rule: ruleForMetrics,
-                      clearMissing: (parsedImport.data.mode ?? 'override') === 'override',
-                    })
-                    if (importAttribution.frozenAttribution) {
-                      meta = meta ?? {}
-                      meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution
-                    }
-
-                    const record = await upsertAttendanceRecord({
-                      userId: rowUserId,
-                      orgId,
-                      workDate,
-                      timezone: context.rule.timezone,
-                      rule: context.rule,
-                      updateFirstInAt: firstInAt,
-                      updateLastOutAt: lastOutAt,
-                      mode: parsedImport.data.mode ?? 'override',
-                      statusOverride,
-                      overrideMetrics: {
-                        workMinutes: finalMetrics.workMinutes,
-                        lateMinutes: finalMetrics.lateMinutes,
-                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                        status: finalMetrics.status,
-                      },
-                      isWorkday: context.isWorkingDay,
-                      leaveMinutes: effectiveLeaveMinutes,
-                      overtimeMinutes: effectiveOvertimeMinutes,
-                      meta: meta ?? undefined,
-                      sourceBatchId: newBatchId,
-                      client: trx,
-                    })
-
-                    const snapshot = {
-                      metrics: {
-                        workMinutes: finalMetrics.workMinutes,
-                        lateMinutes: finalMetrics.lateMinutes,
-                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                        leaveMinutes: effectiveLeaveMinutes,
-                        overtimeMinutes: effectiveOvertimeMinutes,
-                        status: finalMetrics.status,
-                      },
-                      policy: meta?.policy ?? null,
-                    }
-
-                    await trx.query(
-                      `INSERT INTO attendance_import_items
-                       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                      [
-                        randomUUID(),
-                        newBatchId,
-                        orgId,
-                        rowUserId,
-                        workDate,
-                        record.id,
-                        JSON.stringify(snapshot),
-                      ]
-                    )
-
-                    results.push({ id: record.id, userId: rowUserId, workDate })
-                  }
-
-                  if (skippedRows.length) {
-                    await trx.query(
-                      'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-                      [newBatchId, orgId, JSON.stringify({ ...batchMeta, skippedCount: skippedRows.length, skippedRows: skippedRows.slice(0, 50) })]
-                    )
-                  }
+                }
+                const newBatchId = randomUUID()
+                const preparedPlan = await commitAttendanceImportPayload({
+                  payload: parsedImport.data,
+                  orgId,
+                  requesterId,
+                  batchId: newBatchId,
+                  idempotencyKey: null,
+                  prepareOnly: true,
+                  integrationId,
                 })
-
-                return { results, skipped: skippedRows, batchId: newBatchId }
-              })()
-              imported = importResponse.results.length
-              skipped = importResponse.skipped
-              batchId = importResponse.batchId
+                const commitResult = await syncImportPort.commitSyncImportPlan({
+                  ...preparedPlan,
+                  actorPosture: importAccess.fullAdmin ? 'platform_admin' : 'attendance_admin',
+                  tokenSubjectUserId: requesterId,
+                  itemReturnPolicy: { returnItems: true, itemsLimit: null },
+                  csvWarnings: preparedPlan.csvWarnings ?? [],
+                  groupWarnings: preparedPlan.groupWarnings ?? [],
+                })
+                imported = commitResult.imported
+                skipped = commitResult.skipped
+                batchId = commitResult.batchId
+              }
             }
           }
 
@@ -37660,7 +42368,7 @@ module.exports = {
             status: partialErrors.length ? 'partial' : 'success',
             message: partialErrors.length
               ? `Sync completed with ${partialErrors.length} partial errors`
-              : (parsed.data.dryRun ? 'Dry run completed' : 'Sync completed'),
+              : 'Sync completed',
             meta: {
               imported,
               skipped: skipped.length,
@@ -37688,10 +42396,6 @@ module.exports = {
           }
 	          if (run?.id) {
             try {
-              await db.query(
-                'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
-                [integrationId, orgId]
-              )
               await updateIntegrationRun(db, run.id, {
                 status: 'failed',
                 message: error?.message || 'Integration sync failed',
@@ -37712,6 +42416,25 @@ module.exports = {
 	          }
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          const errorCode = typeof error?.code === 'string' && error.code
+	            ? error.code
+	            : (typeof error?.message === 'string' ? error.message : '')
+	          if (errorCode === 'ATTENDANCE_OPERATION_IN_PROGRESS') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'ATTENDANCE_OPERATION_CONFLICT' || errorCode === 'ATTENDANCE_OPERATION_BATCH_CONFLICT') {
+	            res.status(409).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'SEGMENT_CALCULATION_SUSPENDED') {
+	            res.status(503).json({ ok: false, error: { code: errorCode, message: errorCode } })
+	            return
+	          }
+	          if (errorCode === 'W4C3A_IMPORT_FREEZE_INVALID') {
+	            res.status(422).json({ ok: false, error: { code: errorCode, message: errorCode } })
 	            return
 	          }
 	          logger.error('Attendance integration sync failed', error)
@@ -37982,43 +42705,85 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/rollback/:id',
-      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+      async (req, res) => {
+        const actorId = getAuthenticatedUserId(req)
+        const tokenSubjectUserId = getAuthenticatedTokenSubjectUserId(req)
+        if (!actorId || !tokenSubjectUserId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const orgId = getAuthenticatedOrgId(req)
+        if (!orgId) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+          return
+        }
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
           return
         }
         try {
-          const batchRows = await db.query(
-            'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
-            [batchId, orgId]
-          )
-          if (!batchRows.length) {
+          const rollbackPort = context?.services?.attendanceImportRollback
+          if (!rollbackPort || typeof rollbackPort.rollbackImportBatchV1 !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'ATTENDANCE_IMPORT_ROLLBACK_HOST_PORT_MISSING',
+                message: 'Attendance import rollback is unavailable',
+              },
+            })
+            return
+          }
+          const result = await rollbackPort.rollbackImportBatchV1({
+            orgId,
+            batchId,
+            actorId,
+            tokenSubjectUserId,
+          })
+          if (result.kind === 'legacy') {
+            res.json({
+              ok: true,
+              data: {
+                id: result.id,
+                deleted: result.deleted,
+                status: result.status,
+              },
+            })
+            return
+          }
+          res.json({
+            ok: true,
+            data: {
+              id: result.id,
+              affected: result.affected,
+              restored: result.restored,
+              retired: result.retired,
+              status: result.status,
+            },
+          })
+        } catch (error) {
+          if (error?.code === 'IMPORT_ROLLBACK_NOT_FOUND') {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import batch not found' } })
             return
           }
-          const batch = batchRows[0]
-          if (batch.status === 'rolled_back') {
-            res.json({ ok: true, data: { id: batchId, deleted: 0, status: 'rolled_back' } })
+          if (error?.code === 'IMPORT_ROLLBACK_AUTHORIZATION_STALE') {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
             return
           }
-
-          let deletedCount = 0
-          await db.transaction(async (trx) => {
-            const deleted = await trx.query(
-              'DELETE FROM attendance_records WHERE source_batch_id = $1 AND org_id = $2 RETURNING id',
-              [batchId, orgId]
-            )
-            deletedCount = deleted.length
-            await trx.query(
-              'UPDATE attendance_import_batches SET status = $3, updated_at = now() WHERE id = $1 AND org_id = $2',
-              [batchId, orgId, 'rolled_back']
-            )
-          })
-
-          res.json({ ok: true, data: { id: batchId, deleted: deletedCount, status: 'rolled_back' } })
-        } catch (error) {
+          if (error?.code === 'IMPORT_ROLLBACK_COMMAND_INVALID') {
+            res.status(400).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
+          if (
+            error?.code === 'IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE' ||
+            error?.code === 'IMPORT_ROLLBACK_BATCH_CHANGED' ||
+            error?.code === 'IMPORT_ROLLBACK_SUPERSEDED' ||
+            error?.code === 'IMPORT_ROLLBACK_PREIMAGE_INVALID' ||
+            error?.code === 'IMPORT_ROLLBACK_CONFLICT'
+          ) {
+            res.status(409).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -38026,7 +42791,7 @@ module.exports = {
           logger.error('Attendance import rollback failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rollback import batch' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -39013,7 +43778,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -39062,7 +43829,9 @@ module.exports = {
       'GET',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39071,22 +43840,28 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
-             FROM attendance_groups g
-             LEFT JOIN (
-               SELECT group_id, COUNT(*)::int AS member_count
-               FROM attendance_group_members
-               WHERE org_id = $2
-               GROUP BY group_id
-             ) member_counts ON member_counts.group_id = g.id
-             WHERE g.id = $1 AND g.org_id = $2`,
+            `SELECT *
+             FROM attendance_groups
+             WHERE id = $1 AND org_id = $2`,
             [groupId, orgId]
           )
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
           }
-          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+          const memberCountRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_group_members
+             WHERE group_id = $1 AND org_id = $2`,
+            [groupId, orgId]
+          )
+          res.json({
+            ok: true,
+            data: mapAttendanceGroupRow({
+              ...rows[0],
+              member_count: Number(memberCountRows[0]?.total ?? 0),
+            }),
+          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -39102,6 +43877,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           name: z.string().min(1),
           code: z.string().trim().optional().nullable(),
@@ -39117,7 +43894,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         let name
         let timezone
         let attendanceType
@@ -39168,6 +43945,8 @@ module.exports = {
       'PUT',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           name: z.string().min(1),
           code: z.string().trim().optional().nullable(),
@@ -39183,7 +43962,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39273,7 +44052,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39303,8 +44084,8 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res) => {
-        const orgId = getOrgId(req)
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39348,7 +44129,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res) => {
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
         const schema = z.object({
           userId: z.string().optional(),
           userIds: z.array(z.string()).optional(),
@@ -39360,7 +44141,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39406,8 +44187,8 @@ module.exports = {
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/groups/:id/members/:userId',
-      withAttendanceGroupMemberAccess(async (req, res) => {
-        const orgId = getOrgId(req)
+      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39439,7 +44220,9 @@ module.exports = {
       'GET',
       '/api/attendance/groups/:id/managers',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39448,6 +44231,8 @@ module.exports = {
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const countRows = await db.query(
             'SELECT COUNT(*)::int AS total FROM attendance_group_managers WHERE org_id = $1 AND group_id = $2',
             [orgId, groupId]
@@ -39485,6 +44270,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/managers',
       withPermission('attendance:admin', async (req, res) => {
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           userId: z.string().trim().min(1),
           role: z.string(),
@@ -39496,7 +44283,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39515,13 +44302,15 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const rows = await db.query(
             `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, now(), now())
              ON CONFLICT (org_id, group_id, user_id, role)
              DO UPDATE SET updated_at = attendance_group_managers.updated_at
              RETURNING *`,
-            [orgId, groupId, parsed.data.userId.trim(), role, getUserId(req) ?? null]
+            [orgId, groupId, parsed.data.userId.trim(), role, actorAccess.userId]
           )
           res.json({ ok: true, data: mapAttendanceGroupManagerRow(rows[0]) })
         } catch (error) {
@@ -39543,7 +44332,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/groups/:id/managers/:managerId',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39555,6 +44346,8 @@ module.exports = {
           return
         }
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const rows = await db.query(
             'DELETE FROM attendance_group_managers WHERE id = $1 AND org_id = $2 AND group_id = $3 RETURNING id',
             [managerId, orgId, groupId]
@@ -39576,9 +44369,175 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/effectiveness',
+      async (req, res, next) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        return withPermission('attendance:admin', async (permissionReq, permissionRes) => {
+          const groupId = normalizeUuidString(permissionReq.params.groupId)
+          if (!groupId) {
+            respondInvalidUuid(permissionRes, 'groupId')
+            return
+          }
+          try {
+            const effectiveness = await getAttendanceGroupFixedScheduleEffectivenessService().getEffectiveness(db, {
+              orgId: actorAccess.orgId,
+              groupId,
+            })
+            permissionRes.json({ ok: true, data: effectiveness })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              permissionRes.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            if (isDatabaseSchemaError(error)) {
+              permissionRes.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
+              return
+            }
+            logger.error('Attendance group fixed schedule effectiveness read failed', error)
+            permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
+          }
+        })(req, res, next)
+      }
+    )
+
+    // #4709 FSER-4 prerequisite (contract amendment §2, RATIFIED
+    // `45d71c4209af35a63768ce7ce9f576377f6b8ce4`, OD-4709-2=(a)): a member-safe
+    // self projection beside the admin aggregate above. Uses `attendance:read`
+    // (not `attendance:admin`) and never accepts a caller-supplied subject/org
+    // selector — `resolveAttendanceFixedScheduleSelfRouteIdentity` rejects a
+    // body/query `userId`/`orgId` with 400 and a mismatched `x-user-id`/
+    // `x-org-id` header with 403, both before any scoped SQL; only the
+    // authenticated principal names the subject and org. The service itself
+    // (`getSelfEffectiveness`) then proves group membership + subject/org
+    // liveness in one query before loading any config or assignment fact, and
+    // returns a distinct exact-key projection — never the admin response's
+    // `coverage`/`drift`/`managedSets` or any raw user id.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:groupId/fixed-schedule/effectiveness/me',
+      async (req, res, next) => {
+        const identity = resolveAttendanceFixedScheduleSelfRouteIdentity({
+          authenticatedUserId: getAuthenticatedUserId(req),
+          authenticatedOrgId: getAuthenticatedOrgId(req),
+          body: req.body,
+          query: req.query,
+          headers: req.headers,
+        })
+        if (!identity.ok) {
+          res.status(identity.status).json({ ok: false, error: { code: identity.code, message: identity.message } })
+          return
+        }
+        return withPermission('attendance:read', async (permissionReq, permissionRes) => {
+          const groupId = normalizeUuidString(permissionReq.params.groupId)
+          if (!groupId) {
+            respondInvalidUuid(permissionRes, 'groupId')
+            return
+          }
+          try {
+            const effectiveness = await getAttendanceGroupFixedScheduleEffectivenessService().getSelfEffectiveness(db, {
+              orgId: identity.orgId,
+              groupId,
+              userId: identity.userId,
+            })
+            permissionRes.json({ ok: true, data: effectiveness })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              permissionRes.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            if (isDatabaseSchemaError(error)) {
+              permissionRes.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance fixed schedule tables missing' } })
+              return
+            }
+            logger.error('Attendance group fixed schedule self effectiveness read failed', error)
+            permissionRes.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read fixed schedule effectiveness' } })
+          }
+        })(req, res, next)
+      }
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/groups/:groupId/fixed-schedule/config',
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const groupId = normalizeUuidString(req.params.groupId)
+        if (!groupId) {
+          respondInvalidUuid(res, 'groupId')
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!startDate || !endDate || startDate > endDate) {
+          res.status(400).json({
+            ok: false,
+            error: { code: 'VALIDATION_ERROR', message: 'A valid startDate on or before endDate is required.' },
+          })
+          return
+        }
+
+        try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+            groupId,
+            orgId: actorAccess.orgId,
+          })
+          if (!groupExists) return
+          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
+          if (!access) return
+          const config = await db.transaction(trx => getAttendanceGroupFixedScheduleConfigService().upsertConfig(trx, {
+            orgId: access.orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+            updatedBy: access.userId,
+          }))
+          res.json({ ok: true, data: config })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule config save failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save fixed schedule config' } })
+        }
+      }
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/preview',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
+        if (!actorAccess.fullAdmin) {
+          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+          return
+        }
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -39592,7 +44551,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39619,6 +44578,8 @@ module.exports = {
         }
 
         try {
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
           const preview = await buildAttendanceGroupFixedSchedulePreview(db, {
             orgId,
             groupId,
@@ -39645,18 +44606,21 @@ module.exports = {
           logger.error('Attendance group fixed schedule preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview fixed schedule' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/apply',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -39665,7 +44629,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39692,32 +44656,26 @@ module.exports = {
         }
 
         try {
-          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId })
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
+          const access = await assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
-          const result = await db.transaction((trx) => applyAttendanceGroupFixedSchedule(trx, {
+          const result = await runAttendanceGroupFixedScheduleTransaction(db, (trx) => applyAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
             shiftId,
             startDate,
             endDate,
+            expectedConfigRevision: parsed.data.expectedConfigRevision,
+            updatedBy: access.userId,
           }))
-          if (!result.ok) {
-            res.status(result.status).json({
-              ok: false,
-              error: {
-                code: result.code,
-                message: result.message,
-                details: result.details,
-              },
-            })
-            return
-          }
           for (const assignment of result.data.created) {
             emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           }
           res.status(201).json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceGroupFixedScheduleTransactionAbort(res, error)) return
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -39734,11 +44692,14 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/rebuild',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
           endDate: z.string().min(1),
           orgId: z.string().optional(),
+          expectedConfigRevision: z.number().int().min(1).optional(),
         }).strict()
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -39747,7 +44708,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39774,27 +44735,20 @@ module.exports = {
         }
 
         try {
-          const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId })
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
+          const access = await assertAttendanceGroupFixedScheduleRebuildAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
-          const result = await db.transaction((trx) => rebuildAttendanceGroupFixedSchedule(trx, {
+          const result = await runAttendanceGroupFixedScheduleTransaction(db, (trx) => rebuildAttendanceGroupFixedSchedule(trx, {
             orgId,
             groupId,
             shiftId,
             startDate,
             endDate,
+            expectedConfigRevision: parsed.data.expectedConfigRevision,
+            updatedBy: access.userId,
           }))
-          if (!result.ok) {
-            res.status(result.status).json({
-              ok: false,
-              error: {
-                code: result.code,
-                message: result.message,
-                details: result.details,
-              },
-            })
-            return
-          }
           for (const assignment of result.data.created) {
             emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           }
@@ -39803,6 +44757,7 @@ module.exports = {
           }
           res.json({ ok: true, data: result.data })
         } catch (error) {
+          if (respondAttendanceGroupFixedScheduleTransactionAbort(res, error)) return
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -39819,6 +44774,8 @@ module.exports = {
       'POST',
       '/api/attendance/groups/:id/fixed-schedule/clear',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
+        if (!actorAccess) return
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -39832,7 +44789,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -39859,7 +44816,9 @@ module.exports = {
         }
 
         try {
-          const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId })
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
+          if (!groupExists) return
+          const access = await assertAttendanceGroupFixedScheduleClearAllowed(req, res, { groupId, actorAccess })
           if (!access) return
 
           const result = await db.transaction((trx) => clearAttendanceGroupFixedScheduleManagedRows(trx, {
@@ -39927,11 +44886,13 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const { page, pageSize, offset } = parsePagination(req.query)
         const includeInactive = parseBoolean(req.query.includeInactive, false)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           const activeClause = includeInactive ? '' : 'AND g.is_active = true'
           const countParams = [orgId]
@@ -39974,14 +44935,16 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           const rows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -40015,12 +44978,14 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-groups',
       withPermission('attendance:admin', async (req, res) => {
+        const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!routeActorAccess) return
         const parsed = scheduleGroupCreateSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = routeActorAccess.orgId
         const actorId = getUserId(req)
         let input
         try {
@@ -40084,19 +45049,19 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleGroupSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -40200,14 +45165,14 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-groups/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
@@ -40268,15 +45233,17 @@ module.exports = {
       'GET',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
         const { page, pageSize, offset } = parsePagination(req.query)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view', actorAccess })
         if (!viewAccess) return
+        const orgId = viewAccess.access.orgId
         try {
           let memberFilter = { fullGroup: true, userIds: [] }
           if (!viewAccess.access.fullAdmin) {
@@ -40336,12 +45303,13 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-groups/:id/members',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = scheduleGroupMemberSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
@@ -40360,8 +45328,10 @@ module.exports = {
         const access = await assertAttendanceSchedulerScopeAllowed(req, res, {
           action: 'dispatch',
           target: { scheduleGroupIds: [groupId], userIds: input.userIds },
+          actorAccess,
         })
         if (!access) return
+        const orgId = access.orgId
         const actorId = access.userId
         try {
           const created = []
@@ -40418,7 +45388,6 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-groups/:id/members/:memberId',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const groupId = normalizeUuidString(req.params.id)
         const memberId = normalizeUuidString(req.params.memberId)
         if (!groupId) {
@@ -40429,8 +45398,9 @@ module.exports = {
           respondInvalidUuid(res, 'memberId')
           return
         }
-        const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
         if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const existingRows = await db.query(
             `SELECT user_id
@@ -40742,7 +45712,9 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
           return
         }
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const rangeStart = from ?? '0001-01-01'
         const rangeEnd = to ?? ATTENDANCE_SCHEDULE_OPEN_END_DATE
 
@@ -41005,7 +45977,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -41063,7 +46037,15 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        // W4C-2 (#4607 P3-4): shift timezone WRITES use the same single strict W4 IANA validator.
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
+          return
+        }
+
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           // W3: one canonical writer — segments (validated) or a synthesized segment 0
@@ -41094,7 +46076,15 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        // W4C-2 (#4607 P3-4): shift timezone WRITES use the same single strict W4 IANA validator.
+        if (parsed.data.timezone !== undefined
+            && respondUnlessStrictIanaTimezoneWrite(res, parsed.data.timezone)) {
+          return
+        }
+
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
@@ -41125,7 +46115,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(req.params.id)
         if (!shiftId) {
           respondInvalidUuid(res)
@@ -41397,10 +46389,17 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
         const publishStatusFilter = normalizeAttendanceSchedulePublishStatusFilter(parsed.data.publishStatus)
-        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'view' })
+        const schedulerActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!schedulerActorAccess) return
+        const viewAccess = await loadAttendanceSchedulerScopesForAction(req, res, {
+          action: 'view',
+          actorAccess: schedulerActorAccess,
+        })
         if (!viewAccess) return
 
         try {
@@ -41488,13 +46487,15 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-drafts/assignments',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {
           respondInvalidUuid(res, 'shiftId')
@@ -41524,7 +46525,7 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess })
           if (!access) return
 
           const shiftRows = await db.query(
@@ -41625,6 +46626,8 @@ module.exports = {
       'PUT',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -41638,7 +46641,6 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -41646,8 +46648,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const orgId = actorAccess.orgId
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -41814,7 +46815,6 @@ module.exports = {
       'DELETE',
       '/api/attendance/schedule-drafts/assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -41822,8 +46822,9 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
+          const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
           if (!actorAccess) return
+          const orgId = actorAccess.orgId
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -41896,7 +46897,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {
           respondInvalidUuid(res, 'shiftId')
@@ -41919,7 +46922,11 @@ module.exports = {
           const windowAccess = await enforceShiftEditWindow(res, [payload.startDate])
           if (!windowAccess) return
 
-          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload })
+          const access = await assertAttendanceScheduleAssignmentDispatchAllowed(req, res, {
+            orgId,
+            payload,
+            actorAccess: routeActorAccess,
+          })
           if (!access) return
 
           const shiftRows = await db.query(
@@ -42023,7 +47030,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -42031,8 +47040,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const actorAccess = routeActorAccess
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -42209,7 +47217,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/assignments/:id',
       async (req, res) => {
-        const orgId = getOrgId(req)
+        const routeActorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!routeActorAccess) return
+        const orgId = routeActorAccess.orgId
         const assignmentId = normalizeUuidString(req.params.id)
         if (!assignmentId) {
           respondInvalidUuid(res)
@@ -42217,8 +47227,7 @@ module.exports = {
         }
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
+          const actorAccess = routeActorAccess
 
           const existingRows = await db.query(
             'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
@@ -42427,6 +47436,8 @@ module.exports = {
       'POST',
       '/api/attendance/schedule-publications',
       async (req, res) => {
+        const actorAccess = await resolveAttendanceGroupRouteSchedulerScopeActor(req, res)
+        if (!actorAccess) return
         const parsed = schedulePublicationSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -42457,7 +47468,7 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const orgId = actorAccess.orgId
         const actorUserId = getUserId(req) || null
         const preflightOnly = parsed.data.preflightOnly === true
         const requestedKeys = [
@@ -42466,9 +47477,6 @@ module.exports = {
         ].sort()
 
         try {
-          const actorAccess = await resolveAttendanceSchedulerScopeActor(req, res)
-          if (!actorAccess) return
-
           const initialRows = await loadAttendanceSchedulePublicationRows(db, orgId, assignmentIds, rotationAssignmentIds)
           if (!assertAttendanceSchedulePublicationTargets(res, initialRows, requestedKeys)) return
 
@@ -42489,7 +47497,12 @@ module.exports = {
 
           const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
           const result = await db.transaction(async (trx) => {
-            await acquireAttendanceScheduleAssignmentLocks(trx, orgId, initialRows.map(row => row.user_id))
+            await acquireAttendanceScheduleAssignmentLocks(
+              trx,
+              orgId,
+              initialRows.map(row => row.user_id),
+              { required: true },
+            )
             const settings = await getSettings(trx)
             const lockedRows = await loadAttendanceSchedulePublicationRows(trx, orgId, assignmentIds, rotationAssignmentIds, { forUpdate: true })
             const lockedKeys = new Set(lockedRows.map(row => `${row.kind}:${row.id}`))
@@ -42515,6 +47528,15 @@ module.exports = {
             // A draft created while its shift was single-segment must still fail
             // closed here (typed 422, zero writes) if the shift became multi-segment
             // before publication while segment calculation is OFF for the org.
+            // W4C-3b P27: the publication writer consumes the host's one org-scoped
+            // posture seam on THIS transaction. An absent port is the closed legacy
+            // posture; passing the explicit boolean below prevents this route from
+            // consulting the shift service's private environment predicate.
+            const publicationReferencePosture =
+              attendanceW4SegmentCalculationPort
+              && typeof attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture === 'function'
+                ? await attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture(trx, orgId)
+                : { effectiveState: 'legacy', referenceSegments: false }
             const publicationShiftService = getAttendanceShiftService()
             for (const row of lockedRows) {
               if (row.kind === 'shift') {
@@ -42522,6 +47544,7 @@ module.exports = {
                   orgId,
                   shiftId: row.shift_id,
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }
@@ -42541,6 +47564,7 @@ module.exports = {
                   orgId,
                   shiftRefs: ruleRow.shift_sequence ?? [],
                   producer: 'schedule_publication',
+                  referenceSegments: publicationReferencePosture.referenceSegments,
                 })
               }
             }
@@ -42677,7 +47701,9 @@ module.exports = {
       '/api/attendance/comprehensive-hours/preview',
       withPermission('attendance:admin', async (req, res) => {
         try {
-          const result = await previewAttendanceComprehensiveHours(db, getOrgId(req), req.body ?? {})
+          const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+          if (!routeActorAccess) return
+          const result = await previewAttendanceComprehensiveHours(db, routeActorAccess.orgId, req.body ?? {})
           if (!result.ok) {
             res.status(result.status || 400).json({
               ok: false,
@@ -42733,12 +47759,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const actorId = getUserId(req)
-        if (!actorId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const { orgId, userId: actorId } = actorAccess
         // §3b: scope gate — admin OR manages this group (owner/sub-owner). RBAC_BYPASS short-circuits (tests).
         try {
           if (process.env.RBAC_BYPASS !== 'true'
@@ -42870,12 +47893,9 @@ module.exports = {
           return
         }
 
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found.' } })
-          return
-        }
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const { orgId, userId: requesterId } = actorAccess
 
         // Per-mode RBAC. Outer withPermission('attendance:read') already
         // gates entry; cross-user / admin checks layer on top.
@@ -42972,8 +47992,11 @@ module.exports = {
           return
         }
 
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+
         try {
-          const orgId = getOrgId(req)
+          const orgId = actorAccess.orgId
           const result = await resolveEffectiveCalendar(db, {
             orgId,
             from,
@@ -43022,13 +48045,15 @@ module.exports = {
           return
         }
 
-	        const orgId = getOrgId(req)
-	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
-	        if (!dateRange.ok) {
-	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
-	          return
-	        }
-	        const { from, to } = dateRange
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -43162,21 +48187,108 @@ module.exports = {
         }
         const targetOrgId = parsed.data.orgId || getOrgId(req) || DEFAULT_ORG_ID
         try {
+          // W4C-2 (#4556 lock §12.3): P04 cutover — the administrator initiator supplies the
+          // canonical boundary (initiator 'admin_run'; a distinct durable run identity from the
+          // cron initiator) and FAILS CLOSED when it is unavailable, never the direct insert.
+          // `skipDedup` only skips the in-process key; durable scheduled-run replay lives in
+          // the registry and cannot be bypassed by it.
+          if (!w4LiveScheduledBoundary) {
+            res.status(503).json({
+              ok: false,
+              error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+            })
+            return
+          }
+          // W4C-2 remediation P1-4 (#4612 gate finding): the ROUTE'S OWN
+          // authenticated actor id (already RBAC-gated by withPermission
+          // above) is the real administrator identity that must enter the
+          // operation's actor field and audit chain — never the internal
+          // scheduler constant. getUserId(req) is guaranteed non-null here
+          // (withPermission/withAnyPermission already 401s a missing one).
           const result = await runAutoAbsenceForOrgDate(db, {
             orgId: targetOrgId,
             workDate,
             logger,
             emit: emitEvent,
             skipDedup: true,
+            w4Boundary: w4LiveScheduledBoundary,
+            initiator: 'admin_run',
+            adminActorId: getUserId(req),
           })
           res.json({ ok: true, data: result })
         } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
           }
           logger.error('Manual auto-absence run failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run auto absence' } })
+        }
+      })
+    )
+
+    // P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+    // transition): the actual exit for a scheduled run wedged by target-set drift
+    // (`W4C2_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT`, section 1.7 step 3) or by any other
+    // "cannot progress" condition — section 1.7's own closing sentence: "A run that cannot
+    // progress...is closed by the explicit `abandoned` transition." Section 1.1.2's own
+    // authorization/lock-order/org-anchor/audit/concurrency/idempotency contract lives
+    // entirely inside `abandonAttendanceScheduledRunV1` (via the host port); this route
+    // supplies only the RBAC gate, the route's own authenticated actor id, and pure request
+    // data — same posture as `POST /api/attendance/auto-absence/run` immediately above.
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/auto-absence/scheduled-runs/:runId/abandon',
+      withPermission('attendance:admin', async (req, res) => {
+        const paramsSchema = z.object({ runId: z.string().uuid() })
+        const parsedParams = paramsSchema.safeParse(req.params ?? {})
+        if (!parsedParams.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsedParams.error.message } })
+          return
+        }
+        const bodySchema = z.object({
+          orgId: z.string().optional(),
+          reasonCode: z.literal('ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED').optional(),
+        })
+        const parsedBody = bodySchema.safeParse(req.body ?? {})
+        if (!parsedBody.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsedBody.error.message } })
+          return
+        }
+        const targetOrgId = parsedBody.data.orgId || getOrgId(req) || DEFAULT_ORG_ID
+        const reasonCode = parsedBody.data.reasonCode || 'ATTENDANCE_SCHEDULED_RUN_OPERATOR_ABANDONED'
+        if (!attendanceW4SegmentCalculationPort || typeof attendanceW4SegmentCalculationPort.abandonScheduledRun !== 'function') {
+          res.status(503).json({
+            ok: false,
+            error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' },
+          })
+          return
+        }
+        try {
+          // The route's OWN authenticated actor id (already RBAC-gated by withPermission
+          // above) is the real administrator identity that enters the abandon transition's
+          // audit fields — never a request-body-supplied identity (same P1-4 discipline the
+          // admin_run scheduled-run initiator already follows).
+          const outcome = await attendanceW4SegmentCalculationPort.abandonScheduledRun({
+            orgId: targetOrgId,
+            runId: parsedParams.data.runId,
+            adminActorId: getUserId(req),
+            reasonCode,
+          })
+          res.json({ ok: true, data: outcome })
+        } catch (error) {
+          if (respondIfW4BoundaryError(res, error)) {
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Scheduled-run abandon failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to abandon scheduled run' } })
         }
       })
     )
@@ -43260,7 +48372,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
 
         try {
           const payload = resolveHolidayWritePayload(parsed.data)
@@ -43309,7 +48423,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const holidayId = normalizeUuidString(req.params.id)
         if (!holidayId) {
           respondInvalidUuid(res)
@@ -43366,7 +48482,9 @@ module.exports = {
       'DELETE',
       '/api/attendance/holidays/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const holidayId = normalizeUuidString(req.params.id)
         if (!holidayId) {
           respondInvalidUuid(res)
@@ -44256,7 +49374,7 @@ module.exports = {
             return
           }
           const saved = await saveSettings(db, merged)
-          scheduleAutoAbsence({ db, logger, emit: emitEvent })
+          scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
           scheduleHolidaySync({ db, logger, emit: emitEvent })
           emitEvent('attendance.settings.updated', {
             settings: saved,
@@ -44339,7 +49457,7 @@ module.exports = {
                     ar.meta, u.name AS user_name, u.username AS username,
                     u.employee_no AS employee_no, u.department AS department,
                     u.position AS position, u.hire_date AS hire_date
-             FROM attendance_records ar
+             FROM attendance_current_records ar
              LEFT JOIN users u ON u.id = ar.user_id
              WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
              ORDER BY ar.work_date DESC
@@ -44428,7 +49546,7 @@ module.exports = {
 
 	    try {
 	      await getSettings(db)
-	      scheduleAutoAbsence({ db, logger, emit: emitEvent })
+	      scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
 	      scheduleHolidaySync({ db, logger, emit: emitEvent })
 	      scheduleImportUploadCleanup()
 	      if (autoShiftAutoWriteSchedulerUnregister) {
@@ -44476,6 +49594,69 @@ module.exports = {
 	        name: 'attendance-annual-leave-accrual',
 	        run: () => runAnnualLeaveAccrualScheduledTriggerOnce(db, logger, { emitEvent }),
 	      }) ?? null
+	      // W4C-2 Stage D (#4556 lock 7.1a delivery side): durable result-event outbox drain
+	      // worker. Unlike the dormant-run jobs above, REGISTRATION ITSELF is env-gated on the
+	      // SAME variable as the posture allowlist (ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+	      // non-empty): no env => no job object exists at all => byte-identical runtime (the
+	      // lock's disabled=byte-identical bar — shadow orgs cannot exist without this env, so
+	      // no outbox row can ever wait on a worker this gate withheld). The drain pass is the
+	      // host port's dispatcher (SKIP LOCKED claim -> emit -> same-transaction delivered
+	      // flip, per-row failure containment); this closure only glues it to the plugin's
+	      // emitEvent. Ticking cadence is owned by the shared attendance scheduler
+	      // (ATTENDANCE_SCHEDULER_ENABLED), same as every other job registered here.
+	      if (w4OutboxDrainSchedulerUnregister) {
+	        w4OutboxDrainSchedulerUnregister()
+	        w4OutboxDrainSchedulerUnregister = null
+	      }
+	      w4OutboxDrainRunOnce = null
+	      const w4OutboxDrainEnvGate = String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+	      if (
+	        w4OutboxDrainEnvGate
+	        && attendanceW4SegmentCalculationPort
+	        && typeof attendanceW4SegmentCalculationPort.drainResultEventOutbox === 'function'
+	      ) {
+	        w4OutboxDrainRunOnce = () => attendanceW4SegmentCalculationPort.drainResultEventOutbox({
+	          emit: (delivery) => { emitEvent(delivery.eventKind, delivery.payload) },
+	        })
+	        w4OutboxDrainSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	          name: 'attendance-w4-result-outbox-drain',
+	          run: w4OutboxDrainRunOnce,
+	        }) ?? null
+	      }
+	      // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery
+	      // sweep, "No stuck absorbing state"). Same env-gated-at-registration posture as the
+	      // outbox drain worker directly above (SAME variable, SAME reasoning: no env => no job
+	      // object exists at all => byte-identical runtime). All-terminal candidates finalize;
+	      // nonterminal candidates rebuild the SAME plugin-owned rule/calendar/membership
+	      // context as an ordinary run, then resume the exact scanned run id. One candidate's
+	      // failure is contained by the host worker and cannot skip later candidates.
+	      if (w4ScheduledRunSweepSchedulerUnregister) {
+	        w4ScheduledRunSweepSchedulerUnregister()
+	        w4ScheduledRunSweepSchedulerUnregister = null
+	      }
+	      w4ScheduledRunSweepRunOnce = null
+	      if (
+	        w4OutboxDrainEnvGate
+	        && attendanceW4SegmentCalculationPort
+	        && typeof attendanceW4SegmentCalculationPort.sweepScheduledRuns === 'function'
+	      ) {
+	        w4ScheduledRunSweepRunOnce = () => attendanceW4SegmentCalculationPort.sweepScheduledRuns({
+	          recoverCandidate: (candidate) => runAutoAbsenceForOrgDate(db, {
+	            orgId: candidate.orgId,
+	            workDate: candidate.workDate,
+	            logger,
+	            emit: emitEvent,
+	            skipDedup: true,
+	            w4Boundary: w4LiveScheduledBoundary,
+	            initiator: candidate.initiator,
+	            recoveryRunId: candidate.runId,
+	          }),
+	        })
+	        w4ScheduledRunSweepSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	          name: 'attendance-w4-scheduled-run-sweep',
+	          run: w4ScheduledRunSweepRunOnce,
+	        }) ?? null
+	      }
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -44506,6 +49687,16 @@ module.exports = {
 	      reportSyncScheduledTriggerSchedulerUnregister()
 	      reportSyncScheduledTriggerSchedulerUnregister = null
 	    }
+	    if (w4OutboxDrainSchedulerUnregister) {
+	      w4OutboxDrainSchedulerUnregister()
+	      w4OutboxDrainSchedulerUnregister = null
+	    }
+	    w4OutboxDrainRunOnce = null
+	    if (w4ScheduledRunSweepSchedulerUnregister) {
+	      w4ScheduledRunSweepSchedulerUnregister()
+	      w4ScheduledRunSweepSchedulerUnregister = null
+	    }
+	    w4ScheduledRunSweepRunOnce = null
 	    if (annualLeaveAccrualSchedulerUnregister) {
 	      annualLeaveAccrualSchedulerUnregister()
 	      annualLeaveAccrualSchedulerUnregister = null

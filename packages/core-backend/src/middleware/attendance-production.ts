@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express'
+import { apiPathEquals, apiPathHasPrefix, isApiPath } from '../auth/api-path-policy'
 import { Logger, getLogContext } from '../core/logger'
 import { query } from '../db/pg'
 import { TokenBucketRateLimiter } from '../integration/rate-limiting/token-bucket'
@@ -20,6 +21,14 @@ type AttendanceSettings = {
 }
 
 const logger = new Logger('AttendanceProduction')
+
+// The two API subtrees these middlewares govern. Declared once and compared through the shared policy
+// (`apiPathHasPrefix`) so the audit trail, the IP allowlist and the rate limiter recognise the same
+// requests as the session gate does.
+const ATTENDANCE_PREFIX = '/api/attendance'
+const ATTENDANCE_ADMIN_PREFIX = '/api/attendance-admin'
+const ATTENDANCE_IMPORT_PREFIX = '/api/attendance/import'
+
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 10_000
 
@@ -92,8 +101,12 @@ function isIpAllowed(ip: string, allowlist: string[]): boolean {
 
 function normalizeRouteForLabels(pathname: string): string {
   // Replace UUID-like segments and numeric segments with :id for low-cardinality labels.
+  // Case-folded first, for the same reason the shared path policy is case-insensitive: the router
+  // treats path case as insignificant, so two spellings of one route must produce ONE label (and one
+  // audit `route` value) rather than two.
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  return pathname
+  return (pathname || '')
+    .toLowerCase()
     .split('/')
     .map((seg) => {
       if (!seg) return seg
@@ -120,26 +133,36 @@ function statusClassOf(statusCode: number): string {
   return `${Math.floor(statusCode / 100)}xx`
 }
 
+/**
+ * Operation labels, keyed by (method, normalized route). Routes are compared through the shared policy
+ * (`apiPathEquals`) so this table recognises the same routes as the gate and the limiter.
+ * §7.6 `notification_redeliver` is a send-triggering, platform-admin-only mutation — it gets a
+ * first-class label instead of the `other` bucket so the audit trail (and metrics) name the action.
+ */
+const ATTENDANCE_OPERATION_LABELS: readonly { method: string; route: string; operation: string }[] = [
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/preview`, operation: 'import_preview' },
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/preview-async`, operation: 'import_preview_async' },
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/upload`, operation: 'import_upload' },
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/upload-artifact`, operation: 'import_artifact_upload' },
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/commit`, operation: 'import_commit' },
+  { method: 'POST', route: `${ATTENDANCE_IMPORT_PREFIX}/commit-async`, operation: 'import_commit_async' },
+  { method: 'GET', route: `${ATTENDANCE_IMPORT_PREFIX}/jobs/:id`, operation: 'import_job_poll' },
+  { method: 'GET', route: `${ATTENDANCE_IMPORT_PREFIX}/batches/:id/export.csv`, operation: 'import_export_csv' },
+  { method: 'POST', route: `${ATTENDANCE_PREFIX}/requests`, operation: 'request_create' },
+  { method: 'POST', route: `${ATTENDANCE_PREFIX}/requests/:id/approve`, operation: 'request_approve' },
+  { method: 'POST', route: `${ATTENDANCE_PREFIX}/requests/:id/reject`, operation: 'request_reject' },
+  { method: 'POST', route: `${ATTENDANCE_PREFIX}/punch`, operation: 'punch' },
+  { method: 'POST', route: `${ATTENDANCE_ADMIN_PREFIX}/users/batch/roles/assign`, operation: 'admin_batch_assign' },
+  { method: 'POST', route: `${ATTENDANCE_ADMIN_PREFIX}/users/batch/roles/unassign`, operation: 'admin_batch_unassign' },
+  { method: 'POST', route: `${ATTENDANCE_ADMIN_PREFIX}/notification-deliveries/:id/redeliver`, operation: 'notification_redeliver' },
+]
+
 function resolveAttendanceOperation(req: Request, normalizedRoute: string): string {
   const method = req.method.toUpperCase()
-  if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview') return 'import_preview'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview-async') return 'import_preview_async'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/import/upload') return 'import_upload'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit') return 'import_commit'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit-async') return 'import_commit_async'
-  if (method === 'GET' && normalizedRoute === '/api/attendance/import/jobs/:id') return 'import_job_poll'
-  if (method === 'GET' && normalizedRoute === '/api/attendance/import/batches/:id/export.csv') return 'import_export_csv'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/requests') return 'request_create'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/requests/:id/approve') return 'request_approve'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/requests/:id/reject') return 'request_reject'
-  if (method === 'POST' && normalizedRoute === '/api/attendance/punch') return 'punch'
-  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/assign') return 'admin_batch_assign'
-  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/unassign') return 'admin_batch_unassign'
-  // §7.6 operator-initiated redelivery of a single failed attendance-notification delivery. This is
-  // a send-triggering, platform-admin-only mutation — give it a first-class operation label instead
-  // of the `other` bucket so the audit trail (and metrics) name the action.
-  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/notification-deliveries/:id/redeliver') return 'notification_redeliver'
-  return 'other'
+  const hit = ATTENDANCE_OPERATION_LABELS.find(
+    (entry) => entry.method === method && apiPathEquals(normalizedRoute, entry.route),
+  )
+  return hit ? hit.operation : 'other'
 }
 
 const importTelemetryOperations = new Set([
@@ -162,17 +185,24 @@ function normalizeImportEngine(value: unknown): 'standard' | 'bulk' | null {
   return null
 }
 
+/**
+ * The chokepoint for BOTH attendance middlewares: `attendanceAuditMiddleware` (the audit trail) and
+ * `attendanceSecurityMiddleware` (the IP allowlist + the rate limiter) each return early when this is
+ * false. It therefore has to recognise exactly the same attendance requests the router will route —
+ * which is why it goes through the shared API path policy rather than testing path literals itself.
+ */
 function shouldAudit(req: Request): boolean {
-  if (!req.path.startsWith('/api/')) return false
-  if (req.path.startsWith('/api/attendance/')) return true
-  if (req.path.startsWith('/api/attendance-admin/')) return true
+  if (!isApiPath(req.path)) return false
+  if (apiPathHasPrefix(req.path, ATTENDANCE_PREFIX)) return true
+  if (apiPathHasPrefix(req.path, ATTENDANCE_ADMIN_PREFIX)) return true
   return false
 }
 
 function shouldLogAuditForRequest(req: Request): boolean {
   // Default to write operations + exports. Avoid logging high-volume reads.
   if (req.method !== 'GET') return true
-  return req.path.endsWith('.csv') || req.path.includes('/export')
+  const path = (req.path || '').toLowerCase()
+  return path.endsWith('.csv') || path.includes('/export')
 }
 
 function pickUserId(req: Request): string | null {
@@ -430,35 +460,43 @@ const importCommitLimiter = makeLimiter(Number(process.env.ATTENDANCE_RATE_LIMIT
 const exportLimiter = makeLimiter(Number(process.env.ATTENDANCE_RATE_LIMIT_EXPORT_PER_MIN ?? 60))
 const attendanceAdminWriteLimiter = makeLimiter(Number(process.env.ATTENDANCE_RATE_LIMIT_ADMIN_WRITE_PER_MIN ?? 120))
 
+/** True for a GET whose path ends in the CSV export suffix, compared case-insensitively like the router. */
+function isCsvExportPath(path: string): boolean {
+  return (path || '').toLowerCase().endsWith('/export.csv')
+}
+
 function pickLimiter(req: Request): { limiter: TokenBucketRateLimiter; keyPrefix: string } | null {
   const path = req.path
-  if (!path.startsWith('/api/')) return null
+  if (!isApiPath(path)) return null
 
-  if (path === '/api/attendance/import/prepare' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/prepare`) && req.method === 'POST') {
     return { limiter: importPrepareLimiter, keyPrefix: 'attendance_import_prepare' }
   }
-  if (path === '/api/attendance/import/preview' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/preview`) && req.method === 'POST') {
     return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_preview' }
   }
-  if (path === '/api/attendance/import/preview-async' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/preview-async`) && req.method === 'POST') {
     return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_preview_async' }
   }
-  if (path === '/api/attendance/import/upload' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/upload`) && req.method === 'POST') {
     return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_upload' }
   }
-  if (path === '/api/attendance/import/commit' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/upload-artifact`) && req.method === 'POST') {
+    return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_artifact_upload' }
+  }
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/commit`) && req.method === 'POST') {
     return { limiter: importCommitLimiter, keyPrefix: 'attendance_import_commit' }
   }
-  if (path === '/api/attendance/import/commit-async' && req.method === 'POST') {
+  if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/commit-async`) && req.method === 'POST') {
     return { limiter: importCommitLimiter, keyPrefix: 'attendance_import_commit_async' }
   }
-  if (path === '/api/attendance/export' && req.method === 'GET') {
+  if (apiPathEquals(path, `${ATTENDANCE_PREFIX}/export`) && req.method === 'GET') {
     return { limiter: exportLimiter, keyPrefix: 'attendance_export' }
   }
-  if (path.endsWith('/export.csv') && req.method === 'GET') {
+  if (isCsvExportPath(path) && req.method === 'GET') {
     return { limiter: exportLimiter, keyPrefix: 'attendance_export_csv' }
   }
-  if (path.startsWith('/api/attendance-admin/') && req.method !== 'GET') {
+  if (apiPathHasPrefix(path, ATTENDANCE_ADMIN_PREFIX) && req.method !== 'GET') {
     return { limiter: attendanceAdminWriteLimiter, keyPrefix: 'attendance_admin_write' }
   }
   return null
@@ -466,10 +504,10 @@ function pickLimiter(req: Request): { limiter: TokenBucketRateLimiter; keyPrefix
 
 function shouldEnforceAllowlist(req: Request): boolean {
   const path = req.path
-  if (path.startsWith('/api/attendance/import/')) return true
-  if (path.startsWith('/api/attendance-admin/')) return true
-  if (path === '/api/attendance/export') return true
-  if (path.endsWith('/export.csv')) return true
+  if (apiPathHasPrefix(path, ATTENDANCE_IMPORT_PREFIX)) return true
+  if (apiPathHasPrefix(path, ATTENDANCE_ADMIN_PREFIX)) return true
+  if (apiPathEquals(path, `${ATTENDANCE_PREFIX}/export`)) return true
+  if (isCsvExportPath(path)) return true
   return false
 }
 

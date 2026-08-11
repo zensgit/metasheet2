@@ -68,6 +68,7 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
+  "scripts/ops/multitable-onprem-package-verify.sh"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
   # (C3), evidence compiler (C10), delivery readiness compiler, postdeploy
   # smoke + summary, the #1542 metadata seed helper, mock fixtures, and the
@@ -86,6 +87,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
@@ -107,6 +109,7 @@ REQUIRED_PATHS=(
   "docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
+  "docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/development/k3wise-bridge-machine-codex-handoff-20260513.md"
@@ -352,16 +355,20 @@ function write_windows_first_hop_bootstrap_assets() {
 @echo off
 setlocal
 if "%~1"=="" (
-  echo Usage: ${PACKAGE_NAME}-deploy-bootstrap.bat ^<package.zip^|package.tgz^> [installed-root]
+  echo Usage: ${PACKAGE_NAME}-deploy-bootstrap.bat ^<package.zip^|package.tgz^> [installed-root] [install-deps:0^|1] [run-migrations:0^|1]
   exit /b 64
 )
 set "INSTALL_ROOT=%~2"
 if "%INSTALL_ROOT%"=="" set "INSTALL_ROOT=%cd%"
+set "INSTALL_DEPS=%~3"
+if "%INSTALL_DEPS%"=="" set "INSTALL_DEPS=1"
+set "RUN_MIGRATIONS=%~4"
+if "%RUN_MIGRATIONS%"=="" set "RUN_MIGRATIONS=1"
 REM First-hop bootstrap sidecar. Use this from a release download when the
 REM already-installed deploy.bat/launcher is too old to stage the new package
 REM under C:\ms-tmp. It intentionally bypasses the installed launcher and runs
 REM the fresh launcher sidecar next to this .bat file.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${PACKAGE_NAME}-deploy-bootstrap.ps1" -RootDir "%INSTALL_ROOT%" -PackageArchive "%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${PACKAGE_NAME}-deploy-bootstrap.ps1" -RootDir "%INSTALL_ROOT%" -PackageArchive "%~1" -InstallDeps "%INSTALL_DEPS%" -RunMigrations "%RUN_MIGRATIONS%"
 set "APPLY_EXIT=%ERRORLEVEL%"
 echo [multitable-onprem-deploy-bootstrap] apply exit=%APPLY_EXIT%
 exit /b %APPLY_EXIT%
@@ -631,6 +638,11 @@ First-hop bootstrap sidecar:
   ${PACKAGE_NAME}-deploy-bootstrap.ps1 (or the .bat wrapper) next to the package
   archive and run it from the existing install root:
     powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip
+  A no-dependency repair must explicitly disable migrations as the same atomic
+  mode; either of these forms preserves existing node_modules and uses the
+  rollback-protected package overlay:
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip -InstallDeps 0 -RunMigrations 0
+    .\${PACKAGE_NAME}-deploy-bootstrap.bat .\${PACKAGE_NAME}.zip . 0 0
   The sidecar uses the current launcher logic immediately, defaults staging to
   C:\ms-tmp on Windows, and invokes the staged package's fresh apply helper.
 

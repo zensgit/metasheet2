@@ -58,6 +58,17 @@ describe('mapActivateError (activate endpoint error surface)', () => {
       status: 409,
       message: 'No linked active directory account for activation',
     },
+    // Closeout review P1 (2026-08-08): org derives from the source integration in EVERY mode;
+    // a client orgId only confirms. 409 like the other configuration conflicts.
+    ACTIVATE_ORG_MISMATCH: {
+      status: 409,
+      message: 'orgId does not match the directory source integration for this user',
+    },
+    // #4833: ambiguity is a configuration conflict the caller can resolve — 409.
+    ACTIVATE_ORG_AMBIGUOUS: {
+      status: 409,
+      message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+    },
     ACTIVATE_SOURCE_INACTIVE: {
       status: 409,
       message: 'Directory account is inactive; cannot activate',
@@ -69,6 +80,10 @@ describe('mapActivateError (activate endpoint error surface)', () => {
     ACTIVATE_LINK_MISMATCH: {
       status: 409,
       message: 'Directory link points to a different user',
+    },
+    ACTIVATE_SOURCE_INELIGIBLE: {
+      status: 409,
+      message: 'Directory source is not eligible for DingTalk SSO activation',
     },
   }
 
@@ -94,7 +109,7 @@ describe('mapActivateError (activate endpoint error surface)', () => {
 
   it('asserts the RULED transcription covers exactly the policy table (no silent drift)', () => {
     expect(Object.keys(RULED).sort()).toEqual(Object.keys(ACTIVATE_ERROR_POLICY).sort())
-    expect(Object.keys(RULED)).toHaveLength(11)
+    expect(Object.keys(RULED)).toHaveLength(14)
   })
 
   it('collapses an unauthored but ACTIVATE_-shaped code — the fail-open the owner reproduced', () => {

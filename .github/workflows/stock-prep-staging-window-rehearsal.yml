@@ -1,0 +1,449 @@
+name: Stock-prep staging window rehearsal (ephemeral substrate)
+
+# OWNER AUTHORIZATION (2026-08-05, verbatim 「授权 staging 部署」). Substrate: the ephemeral-CI
+# variant, per the discretion the proposal reserved (「临时全新库是更干净的预演底座」) — a REAL
+# deployed package, REAL HTTP, REAL PostgreSQL 17 (the customer's major version), with the
+# in-repo mock K3 at the far end of the wire. This rehearses the entity-machine window runbook
+# end to end so first-run failures burn HERE, not in the one-shot customer window.
+#
+# mock pass != rehearsal pass != customer live pass — three layers, each honest.
+#
+# What this workflow NEVER does: publish a release (permissions: contents: read — structural),
+# touch the frozen S6-A lane, reference any MULTITABLE_* flag, reach any customer host, or
+# reach the shared long-lived staging host. Everything lives and dies inside this run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-prep-staging-window-rehearsal
+  cancel-in-progress: false
+
+env:
+  # Single source for every probe URL (three defaults exist in the wild: code 7778, template
+  # 8900, healthcheck 8900 — deriving everything from ONE variable avoids the triad footgun).
+  REHEARSAL_PORT: '8931'
+  MOCK_K3_PORT: '8977'
+  TENANT_ID: tenant_rehearsal
+  ADMIN_EMAIL: rehearsal-admin@ci.invalid
+  # CI-synthetic secrets for an ephemeral, run-scoped environment. Not real credentials.
+  ADMIN_PASSWORD: rehearsal-admin-pass-1
+  JWT_SECRET: rehearsal-ci-synthetic-jwt-secret-0123456789abcdef
+  # Verbatim the verified lane's exclusion list (stock-prep-main-package-verify.yml — its
+  # standalone drift-guard job pins this list against migration-replay.yml, so the ONE source
+  # of truth is guarded there; this workflow borrows the value, not the guard).
+  MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+
+jobs:
+  rehearse:
+    name: Build package, boot it, run the window runbook over HTTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rehearsal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rehearsal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Ensure psql (admin bootstrap hard-requires it; runners do not guarantee it)
+        run: command -v psql >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client)
+
+      - name: Install repo deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build the on-prem package (artifact of THIS commit)
+        id: pkg
+        env:
+          PACKAGE_TAG: rehearsal${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+          out_dir="output/releases/multitable-onprem"
+          pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          echo "pkg_tgz=${pkg_tgz}" >> "$GITHUB_OUTPUT"
+          echo "packageVerify=PASS"
+
+      - name: Unpack the package (recipe step 1)
+        id: unpack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
+          tar -xzf "${{ steps.pkg.outputs.pkg_tgz }}" -C "${RUNNER_TEMP}/pkgroot"
+          PKG_ROOT="$(find "${RUNNER_TEMP}/pkgroot" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$PKG_ROOT"
+          chmod +x "$PKG_ROOT/scripts/ops/"*.sh
+          echo "pkg_root=${PKG_ROOT}" >> "$GITHUB_OUTPUT"
+
+      - name: In-package dependency install (recipe step 2 — nodeModulesBundled=false by design)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: pnpm install --frozen-lockfile --reporter=append-only
+
+      - name: Compose the env file (recipe step 3; overrides appended LAST so they win on source)
+        run: |
+          set -euo pipefail
+          PKG_ROOT="${{ steps.unpack.outputs.pkg_root }}"
+          cp "$PKG_ROOT/docker/app.env.multitable-onprem.template" "$PKG_ROOT/docker/app.env"
+          {
+            echo ""
+            echo "# --- rehearsal overrides (run-scoped, synthetic) ---"
+            echo "PORT=${REHEARSAL_PORT}"
+            echo "HOST=127.0.0.1"
+            echo "JWT_SECRET=${JWT_SECRET}"
+            echo "POSTGRES_PASSWORD=postgres"
+            echo "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/rehearsal"
+            echo "BCRYPT_SALT_ROUNDS=12"
+            echo "ATTENDANCE_IMPORT_REQUIRE_TOKEN=1"
+            echo "UPLOAD_DIR=${RUNNER_TEMP}/uploads"
+          } >> "$PKG_ROOT/docker/app.env"
+          mkdir -p "${RUNNER_TEMP}/uploads"
+
+      - name: Migrations on the fresh PG 17 (recipe step 4 — Applied:0 before, Pending:0 after)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/rehearsal
+        run: |
+          set -euo pipefail
+          # PREFLIGHT A1: MEASURE the narrowing instead of asserting a literal against a literal.
+          # The provider DELETES excluded names from the map that feeds `Pending:`, so `Pending: 0`
+          # is scoped to whatever remains and cannot fail for the excluded six. Listing once with an
+          # EMPTY exclude set and once with the real one turns that invisible scope into a number
+          # produced by the runtime, and the difference must be exactly the size of the list.
+          MIGRATION_EXCLUDE= node packages/core-backend/dist/src/db/migrate.js --list \
+            | tee "${RUNNER_TEMP}/mig-unscoped.txt"
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-before.txt"
+          grep -q "Applied: 0" "${RUNNER_TEMP}/mig-before.txt"
+
+          known="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/mig-unscoped.txt" | awk '{print $2}')"
+          considered="$(grep -oE '^Pending: [0-9]+' "${RUNNER_TEMP}/mig-before.txt" | awk '{print $2}')"
+          if [ -z "${known}" ] || [ -z "${considered}" ]; then
+            echo "FATAL: could not read a Pending count from one of the listings; an unread file is not a measurement" >&2
+            exit 1
+          fi
+          echo "migrationsKnown=${known} migrationsConsidered=${considered} migrationsSkippedByName=$((known - considered))"
+          if [ "$((known - considered))" -ne 6 ]; then
+            echo "FATAL: the runtime skipped $((known - considered)) migrations by name, but MIGRATION_EXCLUDE names 6; the scope of Pending:0 is not what this lane claims" >&2
+            exit 1
+          fi
+          # And say so IN THE EVIDENCE, so the artifact bundle carries the narrowing rather than
+          # leaving a reader to infer "full migration set" from a bare `Pending: 0`.
+          echo "migrationScope=CI_EXCLUDED_6 customerOnPremRunsAll=true"
+          node packages/core-backend/dist/src/db/migrate.js
+          node packages/core-backend/dist/src/db/migrate.js --list | tee "${RUNNER_TEMP}/mig-after.txt"
+          # `Pending: 0` ALONE IS A FALSE GREEN HERE. This step inherits the workflow-level
+          # MIGRATION_EXCLUDE, and the provider REMOVES excluded names from the very map that feeds
+          # the Pending count — so for those six migrations the assertion CANNOT fail, whatever
+          # happened. Measured 311 known vs 305 considered; three of the six have real bodies that
+          # this repo's own S6A lane still lists as open defects.
+          #
+          # Keep the exclusion (deliberate, separately tracked) but make it VISIBLE, so the evidence
+          # reads "6 excluded by name" rather than "nothing pending", and so the list cannot grow
+          # silently under a green check.
+          # REVIEW P1 (owner round 20260806): a COUNT is not a SET. This asserted only
+          # "six names", so swapping 048 for 074 kept the count at 6 and every check green --
+          # while 074 was removed from the very map that feeds Pending, making `Pending: 0` true
+          # WITHOUT 074 ever running. Equal-size substitution was the hole; exact set equality
+          # against the authoritative list is the close.
+          #
+          # The list's ONE source of truth is migration-replay.yml (the main-package-verify lane
+          # pins itself against it byte-for-byte in its own drift-guard job). This lane previously
+          # "borrowed the value, not the guard" -- it now borrows the guard too.
+          #
+          # NOTE the path: this step's working-directory is the UNPACKED PACKAGE, not the repo, so
+          # the authoritative file must be addressed through github.workspace. A relative path
+          # would silently read nothing and this check would pass vacuously -- the exact failure
+          # mode it exists to prevent.
+          REPLAY_FILE="${{ github.workspace }}/.github/workflows/migration-replay.yml"
+          if [ ! -f "${REPLAY_FILE}" ]; then
+            echo "FATAL: ${REPLAY_FILE} not found; the exclusion check would read empty and pass vacuously" >&2
+            exit 1
+          fi
+          AUTHORITATIVE="$(grep -E '^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]' "${REPLAY_FILE}" \
+            | grep -vE '^[[:space:]]*#' \
+            | sed -E 's/^[[:space:]]*MIGRATION_EXCLUDE:[[:space:]]*//' \
+            | sed -E 's/[[:space:]]+$//' | sort -u)"
+          if [ -z "${AUTHORITATIVE}" ]; then
+            echo "FATAL: extracted an EMPTY authoritative list; an empty read is not agreement" >&2
+            exit 1
+          fi
+          # migration-replay.yml carries the identical value on two lines; `sort -u` collapses
+          # them, so anything but exactly one distinct value means the source itself disagrees.
+          DISTINCT="$(printf '%s\n' "${AUTHORITATIVE}" | grep -c .)"
+          if [ "${DISTINCT}" -ne 1 ]; then
+            echo "FATAL: migration-replay.yml holds ${DISTINCT} DIFFERENT MIGRATION_EXCLUDE values; no single authority to compare against" >&2
+            exit 1
+          fi
+          if [ "${AUTHORITATIVE}" != "${MIGRATION_EXCLUDE}" ]; then
+            echo "MIGRATION_EXCLUDE drifted from migration-replay.yml (exact set equality required)" >&2
+            echo "  authoritative: ${AUTHORITATIVE}" >&2
+            echo "  this lane:     ${MIGRATION_EXCLUDE}" >&2
+            exit 1
+          fi
+          echo "migrationExcludeMatchesAuthority=true"
+
+          # And prove the two migrations this lane's evidence depends on were CONSIDERED and RAN.
+          # `--list` names only PENDING migrations, so "applied" is established by construction:
+          #   (a) the file is present in the package under test  => it is in getMigrations()
+          #   (b) its name is absent from MIGRATION_EXCLUDE      => the provider did not drop it
+          #   (c) Pending: 0                                     => every member has executedAt
+          # REVIEW P3-B: there is a FOURTH skip path this chain does not name —
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS, whose members run as no-op history markers and cancel
+          # out of the known-vs-considered measurement. The conclusion still holds for 074/075
+          # specifically (verified: neither is in that list), but the chain as stated was
+          # incomplete, so it is stated completely here rather than left to read as exhaustive.
+          # All three together mean 074/075 executed. Remove any one and the conclusion fails --
+          # which is precisely why (b) is asserted per-name rather than inferred from a count.
+          # REVIEW P2-A: `find … | head -1` picks by readdir order, and the unpacked package has TWO
+          # matching directories — packages/core-backend/migrations (the only home of 074/075) and
+          # packages/core-backend/dist/src/db/migrations (zero 07* files). Depth-first descent emits
+          # the dist one first whenever `dist` precedes `migrations` in readdir, which on the runner
+          # is an ext4 hash order — i.e. undetermined. False-red only (it can never green-light an
+          # unapplied migration), but a lane that hard-fails on a coin flip buys nothing. Address
+          # the directory that actually holds the SQL.
+          MIG_DIR="packages/core-backend/migrations"
+          if [ ! -d "${MIG_DIR}" ]; then
+            echo "FATAL: ${MIG_DIR} is not in the package; (a) is unprovable" >&2
+            exit 1
+          fi
+          for m in 074_repair_sealed_export_runtime_authority_privileges.sql \
+                   075_grant_sealed_export_runtime_authority_row_lock.sql; do
+            if [ ! -f "${MIG_DIR}/${m}" ]; then
+              echo "FATAL: ${m} is not in the package under test" >&2
+              exit 1
+            fi
+            case ",${MIGRATION_EXCLUDE}," in
+              *",${m},"*)
+                echo "FATAL: ${m} is EXCLUDED, so Pending:0 would NOT prove it ran" >&2
+                exit 1
+                ;;
+            esac
+            echo "migrationProvenApplied=${m}"
+          done
+          # POSITIVE CONTROL for the grep itself: the capture must actually contain a Pending line,
+          # so an empty or truncated file cannot read as "0 pending".
+          grep -qE "^Pending: [0-9]+" "${RUNNER_TEMP}/mig-after.txt"
+          grep -q "Pending: 0" "${RUNNER_TEMP}/mig-after.txt"
+
+      - name: Bootstrap the admin principal (recipe step 5 — login is proven later, not here)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: |
+          set -euo pipefail
+          env ENV_FILE="${{ steps.unpack.outputs.pkg_root }}/docker/app.env" \
+              ADMIN_EMAIL="${ADMIN_EMAIL}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+              ADMIN_NAME="CI Rehearsal Admin" VERIFY_LOGIN=0 \
+              scripts/ops/attendance-onprem-bootstrap-admin.sh
+
+      - name: Start the backend FROM THE PACKAGE ROOT (recipe step 6 — plugin discovery is cwd-relative)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: |
+          set -euo pipefail
+          set -a; . ./docker/app.env; set +a
+          nohup node packages/core-backend/dist/src/index.js > "${RUNNER_TEMP}/backend.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/backend.pid"
+
+      - name: Readiness — health AND plugin-integration-core ACTIVE (recipe step 7; activation failure is silent at the HTTP layer)
+        run: |
+          set -euo pipefail
+          BASE="http://127.0.0.1:${REHEARSAL_PORT}"
+          # PREFLIGHT B3: nothing checked that the child SURVIVED. On an instant boot crash
+          # (missing dist entry, a throw before listen) connection-refused returns in ~0 ms, so the
+          # loop burned all 60 iterations x sleep 2 = two minutes before failing — and the stack
+          # trace sat in backend.log, which this workflow never printed (grep showed exactly two
+          # references: the redirect and the upload path). Root-causing a boot crash meant waiting
+          # out the timeout and then downloading an artifact.
+          BACKEND_PID="$(cat "${RUNNER_TEMP}/backend.pid")"
+          for i in $(seq 1 60); do
+            curl -fsS "$BASE/health" >/dev/null 2>&1 && break
+            if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
+              echo "the backend process exited during boot (pid ${BACKEND_PID} is gone) — not waiting out the timeout" >&2
+              break
+            fi
+            sleep 2
+          done
+          if ! curl -fsS "$BASE/health" >/dev/null 2>&1; then
+            echo "--- backend.log (last 200 lines) ---" >&2
+            tail -n 200 "${RUNNER_TEMP}/backend.log" >&2 || echo "(no backend.log was produced)" >&2
+            echo "------------------------------------" >&2
+            exit 1
+          fi
+          curl -fsS "$BASE/api/plugins" | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const p = (d.list || []).find((x) => x.name === "plugin-integration-core");
+            if (!p) { console.error("plugin-integration-core NOT LOADED"); process.exit(1); }
+            console.log("integrationPluginStatus=" + p.status);
+            if (p.status !== "active") { console.error(p.error || "not active"); process.exit(1); }'
+
+      - name: Start the mock K3 far end (from the repo checkout, seeded source catalogue)
+        run: |
+          set -euo pipefail
+          MOCK_K3_PORT="${MOCK_K3_PORT}" nohup node scripts/ops/fixtures/integration-k3wise/run-mock-k3-server.mjs \
+            > "${RUNNER_TEMP}/mock-k3.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/mock-k3.pid"
+          for i in $(seq 1 20); do
+            grep -q "MOCK_K3_BASE_URL=" "${RUNNER_TEMP}/mock-k3.log" && break
+            sleep 1
+          done
+          grep "MOCK_K3_BASE_URL=" "${RUNNER_TEMP}/mock-k3.log"
+
+      - name: Login for the write principal's token (recipe step 8 — token via login, never minted)
+        id: login
+        run: |
+          set -euo pipefail
+          BASE="http://127.0.0.1:${REHEARSAL_PORT}"
+          LOGIN_JSON="$(curl -fsS -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+            --data "{\"email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}")"
+          TOKEN="$(printf '%s' "$LOGIN_JSON" | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const t = (d && d.data && d.data.token) || d.token || "";
+            if (!t) { console.error("no token in login response"); process.exit(1); }
+            process.stdout.write(t);')"
+          echo "::add-mask::$TOKEN"
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "loginTokenObtained=PASS"
+
+      - name: RUN THE WINDOW RUNBOOK over HTTP (the rehearsal proper)
+        id: runbook
+        env:
+          BASE_URL: http://127.0.0.1:${{ env.REHEARSAL_PORT }}
+          TOKEN: ${{ steps.login.outputs.token }}
+          MOCK_K3_URL: http://127.0.0.1:${{ env.MOCK_K3_PORT }}
+          TENANT_ID: ${{ env.TENANT_ID }}
+        run: |
+          # PREFLIGHT B2: `run: node driver.mjs | tee log` WITHOUT pipefail is FAIL-OPEN — tee's
+          # exit code wins and the driver's process.exit(1) is masked, turning every failed gate
+          # into a green step. The block form with `set -o pipefail` is what makes the capture safe.
+          set -euo pipefail
+          node scripts/ops/stock-prep-window-rehearsal-driver.mjs \
+            | tee "${RUNNER_TEMP}/rehearsal.log"
+
+      - name: Surface REHEARSAL_SUMMARY (the lane's primary evidence)
+        if: always()
+        run: |
+          set -euo pipefail
+          # This one line carries every per-step count (sourceRows/add/written/failed/held/errorCode)
+          # AND the `sourceLeg: stand-in` caveat. It previously lived only in job scrollback, so the
+          # curated bundle a reviewer archives did not contain the lane's own verdict.
+          if [ -f "${RUNNER_TEMP}/rehearsal.log" ]; then
+            {
+              echo '## Rehearsal summary'
+              echo '```json'
+              grep '^REHEARSAL_SUMMARY=' "${RUNNER_TEMP}/rehearsal.log" | sed 's/^REHEARSAL_SUMMARY=//' || \
+                echo '{"note":"the driver produced no REHEARSAL_SUMMARY — it died before its own summary line"}'
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "the runbook step produced no log at all (it did not start)" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Save-only invariant seen from the WIRE (mock call log — synthetic keys only)
+        if: always()
+        run: |
+          set -euo pipefail
+          # Owner review (point E): the mock's stdout log used to carry NOTHING per-call, so the
+          # Submit/Audit absence check below always passed — vacuously, on an empty stream, not
+          # because save-only actually held. POSITIVE CONTROL FIRST: prove the log is really
+          # recording calls (run-mock-k3-server.mjs now wires a `K3CALL <METHOD> <pathname>`
+          # logger) before trusting an absence-based assertion built on top of it.
+          get_list_calls="$(grep -c "K3CALL POST /K3API/Material/GetList" "${RUNNER_TEMP}/mock-k3.log" || true)"
+          save_calls="$(grep -c "K3CALL POST /K3API/Material/Save" "${RUNNER_TEMP}/mock-k3.log" || true)"
+          echo "wireGetListCallsLogged=${get_list_calls:-0}"
+          echo "wireSaveCallsLogged=${save_calls:-0}"
+          # PREFLIGHT B1: this step is `if: always()`, and the runbook step had no `id:`, so the
+          # positive control could not tell "the logger is broken" from "the driver never got this
+          # far". 11 of the driver's 18 gates precede the first GetList and 14 precede the first
+          # Save, and record() hard-exits on the first failure — so ANY early failure produced a
+          # louder, more specific, WRONG diagnosis blaming the mock's logger, on the line right
+          # after printing GetList=1. It accused a subsystem that is provably innocent
+          # (mock-k3-webapi-server.mjs logs every request before the session gate and before
+          # routing) and contradicted data it had just printed itself.
+          #
+          # The positive control is only meaningful when the runbook actually reached those calls.
+          if [ "${{ steps.runbook.outcome }}" != "success" ]; then
+            echo "wirePositiveControlSkipped=runbook-did-not-complete (outcome=${{ steps.runbook.outcome }})"
+            echo "The runbook step failed before or during the rehearsal; the FAILED STEP ABOVE and" >&2
+            echo "REHEARSAL_SUMMARY name the actual failed gate. Counts above are informational only:" >&2
+            echo "an absent GetList/Save here means the driver never got that far, NOT that the mock" >&2
+            echo "stopped logging." >&2
+            exit 1
+          fi
+          if [ "${get_list_calls:-0}" -lt 1 ] || [ "${save_calls:-0}" -lt 1 ]; then
+            echo "FATAL: the runbook SUCCEEDED but mock-k3.log shows GetList=${get_list_calls:-0} Save=${save_calls:-0} K3CALL lines; the log is not actually recording wire calls, so the Submit/Audit absence check below would be meaningless" >&2
+            exit 1
+          fi
+          # POSITIVE ALLOWLIST, not a two-word denylist. The old check was
+          # `/K3API/Material/(Submit|Audit)` — pinned to ONE object and TWO verbs, so
+          # `/K3API/BOM/Submit` and `/K3API/BOM/Audit` sailed past while it printed PASS. Six
+          # lifecycle calls escaped it in one measured run. Denylists have unbounded complements;
+          # this lane makes a SMALL, KNOWN set of calls, so enumerate what is allowed and treat
+          # everything else as a violation. Same lesson the endpoint guard learned over eight
+          # escape axes.
+          allowed='^K3CALL (POST|GET) /K3API/(Login|Token/Create|Health|Material/(GetList|GetDetail|Save))/?$'
+          unexpected="$(grep -E "^K3CALL " "${RUNNER_TEMP}/mock-k3.log" | grep -vE "${allowed}" || true)"
+          if [ -n "${unexpected}" ]; then
+            echo "FATAL: the wire saw a call outside the save-only allowlist:" >&2
+            printf '%s\n' "${unexpected}" >&2
+            exit 1
+          fi
+          # POSITIVE CONTROL for the allowlist itself: it must REJECT a lifecycle write on any
+          # object, not just Material. Without this, a typo in the pattern silently allows all.
+          for probe in "K3CALL POST /K3API/Material/Submit" "K3CALL POST /K3API/BOM/Submit" "K3CALL POST /K3API/BOM/Audit"; do
+            if printf '%s\n' "${probe}" | grep -qE "${allowed}"; then
+              echo "FATAL: the allowlist accepts '${probe}' — it cannot detect a save-only violation" >&2
+              exit 1
+            fi
+          done
+          echo "wireSaveOnly=PASS"
+
+      - name: Upload boot/backend logs (synthetic environment only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-logs-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/mock-k3.log
+            ${{ runner.temp }}/mig-before.txt
+            ${{ runner.temp }}/mig-unscoped.txt
+            ${{ runner.temp }}/rehearsal.log
+            ${{ runner.temp }}/mig-after.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: |
+          [ -f "${RUNNER_TEMP}/backend.pid" ] && kill "$(cat "${RUNNER_TEMP}/backend.pid")" 2>/dev/null || true
+          [ -f "${RUNNER_TEMP}/mock-k3.pid" ] && kill "$(cat "${RUNNER_TEMP}/mock-k3.pid")" 2>/dev/null || true
+          true

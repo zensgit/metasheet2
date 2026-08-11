@@ -41,6 +41,7 @@ import type { AiUsageQueryFn } from './services/ai-usage-ledger'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
+import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
@@ -99,6 +100,71 @@ import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, F
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+// W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
+// `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
+import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
+import {
+  buildAttendanceRequestCreationAttributionSnapshotV1,
+  createAttendanceLiveScheduledBoundaryV1,
+  computeAttendanceOuterSourceDefinitionFingerprintV1,
+} from './attendance/w4c2-live-scheduled-boundary'
+import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+import {
+  AttendanceW4IdentityError,
+  acquireAttendanceCalculationRolloutLock,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+  type AttendanceW4TransactionClientV1,
+} from './attendance/w4c0-identity'
+import {
+  W4_ADVISORY_HELPER_WAIT_MS,
+  W4_TRANSACTION_LOCK_TIMEOUT_MS,
+} from './attendance/w4c0-operation-contract'
+// W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
+// connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
+// other `attendanceW4SegmentCalculation` port method below.
+import {
+  sweepAttendanceScheduledRunsOnceV1,
+  abandonScheduledRunOnceV1,
+  type AttendanceScheduledRunAdminAbandonInputV1,
+} from './attendance/w4c2-scheduled-run-ops-worker'
+import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
+import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from './attendance/w4c3a-import-proof'
+import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
+import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
+import { createAttendanceRecordOperationBoundaryV1 } from './attendance/w4c3c-record-operation-boundary'
+import { appendOperatorRetirementCalculationV1 } from './attendance/w4c3c-ops-retirement'
+import { appendRecomputeCalculationV1 } from './attendance/w4c3c-recompute'
+import { appendManualOverrideCalculationV1 } from './attendance/w4c3c-manual-edit-apply'
+import {
+  ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+  ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+  loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+  listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+  loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+  listActiveCurrentOpenRecordsForWorkDateResolverV1,
+} from './attendance/w4c3c-active-current'
+// W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
+import {
+  appendAttendanceRequestCreateSnapshotV1,
+  appendAttendanceRequestEditSnapshotV1,
+  bindAttendanceRequestTerminalSnapshotV1,
+  lockAttendanceRequestSnapshotBeforeTerminalDecisionV1,
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+  buildUnsupportedRequestAttributionSnapshotV1,
+  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+} from './attendance/w4c3b-request-snapshots'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
@@ -193,8 +259,8 @@ import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
 import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
-import workflowRouter from './routes/workflow'
-import workflowDesignerRouter from './routes/workflow-designer'
+import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
+import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
@@ -1289,7 +1355,10 @@ export class MetaSheetServer {
       // any non-allowlisted (method, path) falls through to jwtAuthMiddleware → 401, so a token can never
       // reach a write/side-effecting route outside the allowlist (kept in lockstep with the mounted guards).
       if (isOapiAllowlistRequest(req.method, req.path, req.headers.authorization)) return next()
-      if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
+      // API paths default INTO the session gate. `isApiPath` is the shared policy predicate
+      // (auth/api-path-policy.ts) that every layer asking this question uses, so the gate and the
+      // downstream audit/allowlist/limiter surfaces cannot disagree about what counts as API traffic.
+      if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
       return next()
     })
 
@@ -2022,6 +2091,317 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
+        // segment-calculation port. Least-privilege like approvalAssigneeResolver —
+        // only plugin-attendance receives it; every other plugin gets undefined and the
+        // consumer's fail-closed path. `validateIanaTimezone` is the ONE strict IANA
+        // validator (`w4c1-strict-time`); the plugin never re-implements it, so
+        // default-rule/shift timezone writes and the calculator share a single source.
+        attendanceW4SegmentCalculation:
+          manifest.name === 'plugin-attendance'
+            ? {
+                validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
+                // decision. The plugin's canonical live adapter consumes this
+                // instead of the removed second mutable post-upsert pass — the
+                // plugin never copies the branch logic, one source, no drift.
+                applyMergePolicyPure: (input: unknown) =>
+                  applyAttendanceInOutMergePolicyPureV1(
+                    input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],
+                  ),
+                // W4C-2: canonical live/scheduled write boundary (lock 8.1).
+                // The factory captures a dedicated-connection provider over the
+                // core pool; the plugin injects its legacy adapters once at
+                // activate and cuts P01-P04 over to the returned boundary.
+                createLiveScheduledBoundary: (config: {
+                  legacyAdapters: import('./attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+                }) =>
+                  createAttendanceLiveScheduledBoundaryV1({
+                    legacyAdapters: config.legacyAdapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                createRequestOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+                }) =>
+                  createAttendanceRequestOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                // W4C-3c: manual_edit / recompute / ops_retirement boundary.
+                createRecordOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+                }) =>
+                  createAttendanceRecordOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                appendOperatorRetirementCalculation: (input) =>
+                  appendOperatorRetirementCalculationV1(input),
+                appendRecomputeCalculation: (input) =>
+                  appendRecomputeCalculationV1(input),
+                appendManualOverrideCalculation: (input) =>
+                  appendManualOverrideCalculationV1(input),
+                activeCurrent: Object.freeze({
+                  relation: ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+                  visibilityPredicate: ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+                  loadForDecisionTrace: loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+                  listForAnomalyListing: listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+                  loadForMakeupAnomalyFacts: loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+                  listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1,
+                }),
+                appendApprovedLeaveCancellationCalculation: (input) =>
+                  appendApprovedLeaveCancellationCalculationV1(input),
+                resolveOrgSegmentCalculationPosture: async (
+                  trx: import('./types/plugin').DatabaseTransaction,
+                  orgId: string,
+                ) => {
+                  const shapedTrx = trx as import('./types/plugin').DatabaseTransaction & {
+                    readonly __w4CanonicalTrx?: true
+                  }
+                  const rawClient = trx?.__rawClient as AttendanceW4TransactionClientV1 | undefined
+                    ?? (shapedTrx?.__w4CanonicalTrx === true && typeof shapedTrx.query === 'function'
+                      ? {
+                          query: async (sqlText: string, params?: readonly unknown[]) => ({
+                            rows: await shapedTrx.query(sqlText, [...(params ?? [])]),
+                          }),
+                        }
+                      : undefined)
+                  if (!rawClient || typeof rawClient.query !== 'function') {
+                    throw new Error('W4C3B_TRANSACTION_CLIENT_REQUIRED')
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'legacy', referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(rawClient, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(rawClient, orgKey)
+                  return {
+                    effectiveState: posture.effectiveState,
+                    referenceSegments: posture.referenceSegments,
+                  }
+                },
+                // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
+                // round) — lock §8.2 step 7 second clause. Pure; no DB
+                // access; wraps the module's own private
+                // `attributionFromResolution` so the plugin can only ever
+                // ask "what fingerprint would THIS resolution+context
+                // produce", never reach the raw builder/fingerprint
+                // primitives for arbitrary data.
+                computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
+                  computeAttendanceOuterSourceDefinitionFingerprintV1(
+                    input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
+                buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
+                  buildAttendanceRequestCreationAttributionSnapshotV1(
+                    input as Parameters<typeof buildAttendanceRequestCreationAttributionSnapshotV1>[0],
+                  ),
+                // W4C-2: one outbox drain pass (lock 7.1a delivery side).
+                drainResultEventOutbox: async (options: {
+                  emit: (delivery: {
+                    eventKind: string
+                    payload: unknown
+                    payloadSchemaVersion: number
+                  }) => void | Promise<void>
+                  batchLimit?: number
+                }) => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  try {
+                    return await dispatchAttendanceResultEventOutboxV1(client, {
+                      emit: options.emit,
+                      batchLimit: options.batchLimit,
+                    })
+                  } finally {
+                    client.release()
+                  }
+                },
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7 "No
+                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick:
+                // all-terminal candidates finalize in core; nonterminal candidates call back
+                // into the plugin to rebuild current scheduling context and resume the exact
+                // scanned run id.
+                sweepScheduledRuns: async (options: {
+                  limit?: number
+                  recoverCandidate(candidate: {
+                    orgId: string
+                    initiator: 'cron' | 'admin_run'
+                    workDate: string
+                    runId: string
+                  }): Promise<void>
+                }) =>
+                  sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
+                    limit: options.limit,
+                    recoverCandidate: options.recoverCandidate,
+                    // #4770: values-free tick-summary observability (counts/backlog only —
+                    // `Logger` never receives an org id / user id / work date / run id here).
+                    // #4774 P2-1: this line is the ONLY thing that makes the tick line actually
+                    // emit in production — covered by leg 4 in
+                    // attendance-w4c2-sweep-call-through.db.test.ts (deleting it turns that leg
+                    // red while every other test in both new files stays green).
+                    logger: this.logger,
+                  }),
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
+                // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor
+                // id (already RBAC-gated by `withPermission('attendance:admin', ...)` at the
+                // call site) — never a request-body-supplied identity — matching the SAME
+                // P1-4 discipline `admin_run`'s scheduled-run initiator already follows.
+                abandonScheduledRun: async (input: {
+                  orgId: string
+                  runId: string
+                  adminActorId: string
+                  reasonCode: string
+                }) =>
+                  abandonScheduledRunOnceV1(
+                    poolManager.get().getInternalPool(),
+                    input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
+                  ),
+                // W4C-3a: values-free V1 legacy-plan processor. Plugin supplies
+                // only jobId; core owns SERIALIZABLE assembly and fixed effects.
+                processLegacyImportPlan: async (input: { jobId: string }) => {
+                  const jobId =
+                    typeof input === 'object' &&
+                    input !== null &&
+                    typeof input.jobId === 'string'
+                      ? input.jobId
+                      : ''
+                  const processor = createAttendanceLegacyPlanProcessorV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return processor.processLegacyImportPlanV1(jobId)
+                },
+                reserveLegacyImportPlan: async (input) => {
+                  const host = createAttendanceLegacyPlanReservationHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.reserveLegacyImportPlanV1(input)
+                },
+                // W4C-3a P06: least-privilege sync commit. Plugin supplies the
+                // prepareOnly plan; core owns the independent SERIALIZABLE
+                // source/effect transaction (no V1 job/plan/terminal DML).
+                commitSyncImportPlan: async (input) => {
+                  const host = createAttendanceSyncImportHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.commitSyncImportPlanV1(input)
+                },
+                buildImportAttributionFreeze:
+                  buildAttendanceImportAttributionFreezeV1,
+                buildImportPolicySourceProof:
+                  buildAttendanceImportPolicySourceProofV1,
+                buildLegacyImportReservationLockWitness: (input: {
+                  orgId: string
+                  idempotencyKey: string
+                }) => {
+                  let orgKey: ReturnType<
+                    typeof parseCanonicalAttendanceRolloutOrgKeyV1
+                  >
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(
+                      input?.orgId,
+                    )
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return null
+                    }
+                    throw error
+                  }
+                  const legacyKey =
+                    parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+                      orgId: orgKey,
+                      idempotencyKey: input?.idempotencyKey,
+                    })
+                  return {
+                    rolloutKey:
+                      buildAttendanceCalculationRolloutAdvisoryKey(
+                        orgKey,
+                      ).toString(),
+                    legacyIdempotencyKey:
+                      buildAttendanceLegacyIdempotencyAdvisoryKey(
+                        legacyKey,
+                      ).toString(),
+                    helperWaitMs: W4_ADVISORY_HELPER_WAIT_MS,
+                    transactionLockTimeoutMs:
+                      W4_TRANSACTION_LOCK_TIMEOUT_MS,
+                  }
+                },
+                // W4C-3b P12 (lock §4.2 / §7.2 / §12.5 / OD-W4C-33):
+                // least-privilege immutable request snapshot plumbing.
+                // Plugin supplies the existing request transaction client;
+                // core owns closed payload fingerprint, append, and terminal
+                // binding. No calculation/outbox/cancellation (P13/P14).
+                appendRequestCalculationSnapshotOnCreate: (
+                  input: Parameters<typeof appendAttendanceRequestCreateSnapshotV1>[0],
+                ) => appendAttendanceRequestCreateSnapshotV1(input),
+                appendRequestCalculationSnapshotOnEdit: (
+                  input: Parameters<typeof appendAttendanceRequestEditSnapshotV1>[0],
+                ) => appendAttendanceRequestEditSnapshotV1(input),
+                lockRequestSnapshotBeforeTerminalDecision: (
+                  input: Parameters<
+                    typeof lockAttendanceRequestSnapshotBeforeTerminalDecisionV1
+                  >[0],
+                ) => lockAttendanceRequestSnapshotBeforeTerminalDecisionV1(input),
+                bindRequestSnapshotOnTerminalDecision: (
+                  input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
+                ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                buildRequestCalculationPayloadFromRequestRow:
+                  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+                computeRequestPayloadFingerprint:
+                  computeAttendanceRequestPayloadFingerprintV1,
+                buildUnsupportedRequestAttributionSnapshot:
+                  buildUnsupportedRequestAttributionSnapshotV1,
+                requestSnapshotTerminalBindingMetaKey:
+                  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+              }
+            : undefined,
+        // W4C-3a P11/P23: separate least-privilege rollback port. The CJS
+        // plugin can submit only authenticated request identity + batch id;
+        // core owns target discovery, authorization, ids, locks and DML.
+        attendanceImportRollback:
+          manifest.name === 'plugin-attendance'
+            ? createAttendanceImportRollbackBoundaryV1({
+                acquireConnection: async () => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  return { client, release: () => client.release() }
+                },
+              })
+            : undefined,
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
@@ -2318,6 +2698,34 @@ export class MetaSheetServer {
         stopAttendanceScheduler()
       } catch (err) {
         this.logger.warn(`Attendance scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // BPMN workflow engine's `node-cron` minute poller (see `routes/workflow.ts` /
+    // `BPMNWorkflowEngine.shutdown()`; env-gated OFF by default via
+    // `ENABLE_BPMN_TIMER_POLLER`, see `bpmnTimerPollerConfig.ts`): previously only stopped
+    // on a real OS SIGTERM, never reached from a direct `.stop()` call (the common path in
+    // tests) — leaving it to keep querying the DB pool this same `stop()` closes just
+    // above. `BPMNWorkflowEngine.shutdown()` itself awaits any in-flight poller tick,
+    // which is the actual race-closing guarantee this needs.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // Symmetric to the above (P3-a, #4783 review): `routes/workflow-designer.ts`
+    // constructs its OWN independent `BPMNWorkflowEngine` instance (lazily, on first
+    // designer-route call), which the shutdown call above does not reach. Same
+    // env-gated poller, same in-flight-tick drain guarantee via
+    // `BPMNWorkflowEngine.shutdown()`, and equally safe to call when never initialized.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowDesignerEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow designer engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 

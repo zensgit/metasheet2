@@ -11,6 +11,10 @@
 //   5. Adapter testConnection on both
 //   6. Adapter Material Save-only upsert against mock K3 (autoSubmit=false, autoAudit=false)
 //   7. SQL channel read/upsert probes to verify the mock matches channel contract
+//   7d. THE RULED CHAIN end-to-end: read -> clean -> C6 dry-run -> approval token ->
+//       Save-only -> GetDetail read-back (value-verified) + never-saved negative control
+//   7a-2. The row just READ is fed to the REAL stock-prep intake (no per-connector mapper):
+//         0 row errors, key stable and source-namespaced, incomplete row rejected
 //   8. Compose evidence JSON (hardcoded for the values we just produced)
 //   9. evidence compiler: buildEvidenceReport(packet, evidence) → assert PASS
 //
@@ -26,12 +30,34 @@ import { buildEvidenceReport } from '../../integration-k3wise-live-poc-evidence.
 
 import { createMockK3WebApiServer } from './mock-k3-webapi-server.mjs'
 import { createMockSqlServerExecutor } from './mock-sqlserver-executor.mjs'
+import { createHmac, randomBytes } from 'node:crypto'
+
+// Per-run key, mirroring production's per-process key for the instance digest.
+const DEMO_INSTANCE_KEY = randomBytes(32)
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const require = createRequire(import.meta.url)
 const { createK3WiseWebApiAdapter } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
+const {
+  K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+} = require('../../../../plugins/plugin-integration-core/lib/read-source-k3-material-list-b4-contract.cjs')
+const { normalizeReadSourceConfig } = require('../../../../plugins/plugin-integration-core/lib/read-source-config.cjs')
+const { __internals: { contentKeyFor } } = require('../../../../plugins/plugin-integration-core/lib/read-source-config-store.cjs')
+const {
+  K3_WISE_C6_MAX_APPLY_ROWS,
+  K3_WISE_C6_WRITE_PROFILE,
+  createK3WiseC6WriteSource,
+  deriveK3WiseC6PlannerTargetConfig,
+} = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-c6-write-profile.cjs')
+const {
+  applyExternalWrite,
+  dryRunExternalWrite,
+} = require('../../../../plugins/plugin-integration-core/lib/external-write-dry-run.cjs')
+const {
+  normalizeStockPreparationReadonlyIntake,
+} = require('../../../../plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs')
 
 function assert(cond, message) {
   if (!cond) throw new Error(`mock PoC demo FAIL: ${message}`)
@@ -75,6 +101,10 @@ async function main() {
         healthPath: '/K3API/Health',
         autoSubmit: false,
         autoAudit: false,
+        // RATIFIED (owner, 20260805): material writes require the named customer profile —
+        // the save-only lock and maxApplyRows=3 arm through it. BOM (step 6b) is out of the
+        // guard's scope and keeps the generic template.
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
     }
     const k3Adapter = createK3WiseWebApiAdapter({ system: k3System, fetchImpl: globalThis.fetch })
@@ -164,6 +194,82 @@ async function main() {
     } catch (error) {
       throw new Error(`SQL channel readonly probe failed: ${error.message}`)
     }
+
+    // 7a-2. The row we JUST READ goes through the REAL stock-prep intake.
+    //
+    // This exercises the product path (source-run -> normalizeStockPreparationReadonlyIntake ->
+    // persist), not a per-connector mapper: the intake's alias lists already accept raw K3
+    // columns. An earlier version of this step called a separate K3 mapper, which turned out to
+    // duplicate the intake AND derive a conflicting erpMaterialId; that mapper was retracted.
+    // Feeding the intake the actual read output means a drift between "what the read returns"
+    // and "what the intake accepts" fails HERE rather than at a customer.
+    try {
+      const sourceRow = sqlReadResult.records[0]
+      const intakeRun = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      })
+
+      // Zero row errors IS the claim: the intake understood the raw K3 shape with no mapper.
+      assert(
+        intakeRun.evidence.result.rowErrors === 0,
+        `raw K3 row must produce 0 intake row errors, got ${intakeRun.evidence.result.rowErrors}`,
+      )
+      const intake = intakeRun.erpMaterials[0]
+      assert(intake.erpMaterialCode === sourceRow.FNumber, 'FNumber must land as erpMaterialCode')
+      assert(
+        intake.erpMaterialInternalId === String(sourceRow.FItemID),
+        'FItemID must land as erpMaterialInternalId',
+      )
+      assert(intake.erpMaterialName === sourceRow.FName, 'FName must land as erpMaterialName')
+
+      // Identity must be STABLE (re-reading the same material must not create a second row --
+      // erpMaterialId is the persist's key field) and NAMESPACED by source system (two ERPs that
+      // both number a material 1001 must not collide).
+      const again = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake-2',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      }).erpMaterials[0].erpMaterialId
+      assert(again === intake.erpMaterialId, 'the same material must derive the same key on re-read')
+
+      const otherSystem = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_other',
+        runId: 'mock-poc-intake-3',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [sourceRow],
+      }).erpMaterials[0].erpMaterialId
+      assert(
+        otherSystem !== intake.erpMaterialId,
+        'the same internal id from another source system must not collide',
+      )
+
+      // Negative control: without it, everything above would also pass if the intake were a
+      // pass-through that validated nothing. A row with no internal id must be a ROW ERROR.
+      const incomplete = normalizeStockPreparationReadonlyIntake({
+        sourceSystem: 'erp_k3',
+        runId: 'mock-poc-intake-neg',
+        startedAt: '2026-08-04T00:00:00.000Z',
+        createdBy: 'system',
+        erpMaterials: [{ FNumber: sourceRow.FNumber }],
+      })
+      assert(
+        incomplete.evidence.result.rowErrors > 0,
+        'a row without an internal id must be a row error, not a silent pass',
+      )
+
+      console.log(
+        '\u2713 step 7a-2: raw read row accepted by the real stock-prep intake (0 row errors; key stable and source-namespaced; incomplete row rejected)',
+      )
+    } catch (error) {
+      throw new Error(`K3 read -> stock-prep intake failed: ${error.message}`)
+    }
     try {
       const middleWriteResult = await sqlChannel.upsert({
         object: 'material_stage',
@@ -183,6 +289,161 @@ async function main() {
     }
     assert(sqlWriteRejected, 'SQL safety: write to t_ICItem must be rejected')
     console.log('✓ step 7c: SQL safety guard rejected INSERT into t_ICItem (core table)')
+
+    // 7d. THE RULED CHAIN, end to end: 读 → 清洗 → dry-run → token(人工批准的机械代理)
+    // → K3 Material Save-only → GetDetail 回读验证. Every hop is the REAL module — the C6
+    // planner, the C6 K3 write profile, the K3 adapter over real HTTP to the mock server.
+    // The only fakes are the wire's far end and the token store.
+    try {
+      const chainRows = [{ code: 'MAT-CHAIN-001', name: 'Chain material', spec: 'SPEC-CHAIN' }]
+      const chainTarget = {
+        id: 'chain-k3-target',
+        name: 'Chain K3 target',
+        kind: 'erp:k3-wise-webapi',
+        role: 'target',
+        status: 'active',
+        credentials: { username: 'demo', password: 'demo', acctId: 'AIS_TEST' },
+        config: {
+          baseUrl,
+          autoSubmit: false,
+          autoAudit: false,
+          objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+        },
+      }
+      const chainPipeline = {
+        id: 'pipe_chain',
+        tenantId: 'tenant_demo',
+        workspaceId: null,
+        sourceSystemId: 'source_demo',
+        sourceObject: 'materials',
+        targetSystemId: chainTarget.id,
+        targetObject: 'material',
+        createdBy: 'demo-operator',
+        fieldMappings: [
+          { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+          { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+          { sourceField: 'spec', targetField: 'FModel' },
+        ],
+      }
+      const flatConfig = deriveK3WiseC6PlannerTargetConfig({
+        system: chainTarget, object: 'material', fieldMappings: chainPipeline.fieldMappings,
+      })
+      const tokenMap = new Map()
+      const tokenStore = {
+        async get(key) { return tokenMap.get(key) || null },
+        async set(key, value) { tokenMap.set(key, JSON.parse(JSON.stringify(value))) },
+        async consume(key) { const v = tokenMap.get(key) || null; tokenMap.delete(key); return v },
+        async delete(key) { tokenMap.delete(key) },
+      }
+      const chainInputs = () => ({
+        pipeline: chainPipeline,
+        sourceSystem: { id: 'source_demo', kind: 'data-source:sql-readonly' },
+        targetSystem: { ...chainTarget, config: flatConfig },
+        sourceAdapter: { async read() { return { records: chainRows, done: true } } },
+        dataSourceWrites: createK3WiseC6WriteSource({
+          system: chainTarget,
+          createAdapter: (system) => createK3WiseWebApiAdapter({ system, fetchImpl: globalThis.fetch }),
+          // The B4 binding the ops runbook MINTS on the target environment — the demo stub
+          // stands in for the store row the real mint produces (owner review 20260805:
+          // C6 must CONSUME the approved binding, not merely coexist with it).
+          b4: {
+            readSourceConfigs: {
+              // Honours its arguments (review P1-2: a stub that ignores scope hides the gate).
+              async list(input = {}) {
+                // The row a genuine mint produces: ratified content + this environment's
+                // systemId, with the contentKey computed by the STORE's own function (review
+                // P2-E4 — the gate compares content keys, so a hand-written one would make the
+                // demo prove nothing).
+                const demoConfig = { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId: 'source_demo' }
+                const row = {
+                  id: 'rsc_demo_b4', tenantId: 'tenant_demo', workspaceId: null,
+                  object: 'material', status: 'approved', version: 1,
+                  contentKey: contentKeyFor(normalizeReadSourceConfig(demoConfig)),
+                  config: demoConfig,
+                }
+                if (input.tenantId !== row.tenantId) return []
+                if ((input.workspaceId ?? null) !== row.workspaceId) return []
+                if (input.status !== undefined && input.status !== row.status) return []
+                return [row]
+              },
+            },
+            tenantId: 'tenant_demo',
+            workspaceId: null,
+            pipelineSystemIds: ['source_demo', chainTarget.id],
+            targetSystemId: chainTarget.id,
+            // REVIEW P2-2 (owner ruling 20260806): this demo ran the ENTIRE C6 write lifecycle with the
+            // instance-identity gate STRUCTURALLY ABSENT — the b4 scope had no digest function and the
+            // gate was opt-in, so it silently did not run. The shipped offline PoC therefore "proved" a
+            // write path whose identity check was not there.
+            //
+            // Here the read record and the write target are the SAME physical K3 (one mock server, one
+            // account set), so their digests must be EQUAL — which is what the gate should conclude,
+            // rather than being skipped. Derived as production does: length-prefixed (kind, origin,
+            // acctId), fail-closed to null on any missing part.
+            async instanceDigestOf(input = {}) {
+              const id = typeof input === 'string' ? input : input.id
+              const system = id === chainTarget.id
+                ? chainTarget
+                : { kind: chainTarget.kind, config: { baseUrl: chainTarget.config.baseUrl }, credentials: chainTarget.credentials }
+              if (!system || typeof system.kind !== 'string' || !system.kind) return null
+              let origin
+              try {
+                origin = new URL((system.config && system.config.baseUrl) || '').origin
+              } catch {
+                return null
+              }
+              const c = (system.credentials && typeof system.credentials === 'object') ? system.credentials : {}
+              const acct = [c.acctId, c.accountSet, c.accountSetId].find((v) => v !== undefined && v !== null && v !== '')
+              if (acct === undefined) return null
+              const material = [system.kind, origin, String(acct)].map((part) => `${part.length}:${part}`).join('|')
+              return createHmac('sha256', DEMO_INSTANCE_KEY).update(material).digest('hex')
+            },
+          },
+        }),
+        targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
+        tokenStore,
+        dryRunUser: 'demo-operator',
+        dataSourceOwnerPrincipal: 'demo-owner',
+        maxRows: K3_WISE_C6_MAX_APPLY_ROWS,
+      })
+
+      const chainDryRun = await dryRunExternalWrite(chainInputs())
+      assert(chainDryRun.status === 'ready', `chain dry-run must be ready, got ${chainDryRun.status}`)
+      assert(chainDryRun.dryRunToken, 'chain dry-run must mint the approval token')
+      assert(chainDryRun.counts.add === 1, 'a new material must plan as add')
+
+      const chainApply = await applyExternalWrite({
+        ...chainInputs(),
+        dryRunToken: chainDryRun.dryRunToken,
+        applyUser: 'demo-operator',
+      })
+      assert(chainApply.counts.written === 1, `chain apply must write 1, got ${chainApply.counts.written}`)
+
+      // THE LAST LINK — post-save GetDetail read-back, value-verified (not presence-only):
+      // the read must return the material JUST WRITTEN with the APPROVED name carried through.
+      const readBackAdapter = createK3WiseWebApiAdapter({ system: chainTarget, fetchImpl: globalThis.fetch })
+      const readBack = await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-CHAIN-001' } })
+      assert(readBack.records.length === 1, 'read-back must return the saved material')
+      assert(readBack.records[0].FNumber === 'MAT-CHAIN-001', 'read-back key must match')
+      assert(readBack.records[0].FName === 'Chain material',
+        'read-back must carry the APPROVED value — presence alone proves nothing')
+
+      // Negative control: a never-saved number must be a business-level miss, proving the
+      // read-back above found the WRITE, not canned data.
+      let readBackMissRefused = false
+      try {
+        await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-NEVER-SAVED' } })
+      } catch (error) {
+        readBackMissRefused = error?.details?.code === 'K3_WISE_READ_BUSINESS_ERROR'
+      }
+      assert(readBackMissRefused, 'a never-saved material must be a business-level read miss')
+
+      const chainSubmits = mockK3.calls.filter((call) => /\/(Submit|Audit)$/.test(call.pathname))
+      assert(chainSubmits.length === 0, 'the FULL chain must stay Save-only: 0 Submit, 0 Audit')
+      console.log('✓ step 7d: RULED CHAIN end-to-end — read → clean → dry-run → token → Save-only → GetDetail read-back (value-verified; never-saved miss refused; 0 Submit/Audit)')
+    } catch (error) {
+      throw new Error(`ruled-chain end-to-end failed: ${error.message}`)
+    }
 
     // 8-9. Compose evidence + run compiler
     const evidence = {

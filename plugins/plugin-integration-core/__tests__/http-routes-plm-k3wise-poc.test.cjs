@@ -292,6 +292,29 @@ function createExternalSystemRegistry() {
       const system = systems.get(input.id)
       return system && inScope(system, input) ? clone(system) : null
     },
+    // OWNER RULING 20260806 [P1]. This LOCAL fixture stands in for the production registry and did
+    // NOT implement the new digest accessor — so the entire instance gate silently did not run
+    // here, and a PLM binding sailed through to the wire. "Mock is not the contract" again: a
+    // fixture missing a method is indistinguishable from a gate that decided to allow.
+    //
+    // Derived the SAME way production does (external-systems.cjs): length-prefixed
+    // (kind, origin, acctId), fail-closed to null on any missing part.
+    async getExternalSystemInstanceDigest(input = {}) {
+      const system = systems.get(input.id)
+      if (!system || !inScope(system, input)) return null
+      if (typeof system.kind !== 'string' || !system.kind) return null
+      let origin
+      try {
+        origin = new URL((system.config && system.config.baseUrl) || '').origin
+      } catch {
+        return null
+      }
+      const c = system.credentials && typeof system.credentials === 'object' ? system.credentials : {}
+      const acctId = [c.acctId, c.accountSet, c.accountSetId].find((v) => typeof v === 'string' && v.length > 0)
+      if (!acctId) return null
+      const material = [system.kind, origin, acctId].map((part) => `${part.length}:${part}`).join('|')
+      return require('node:crypto').createHmac('sha256', 'poc-fixture-key').update(material).digest('hex').slice(0, 16)
+    },
     async deleteExternalSystem(input = {}) {
       const system = systems.get(input.id)
       if (!system || !inScope(system, input)) return null
@@ -421,7 +444,7 @@ function createPipelineRegistry(db) {
   }
 }
 
-function createHarness() {
+function createHarness({ readSourceConfigStore } = {}) {
   const db = createMockDb()
   const externalSystemRegistry = createExternalSystemRegistry()
   const pipelineRegistry = createPipelineRegistry(db)
@@ -509,8 +532,13 @@ function createHarness() {
         async deleteTemplate() { return { deleted: 0 } },
         async instantiateTemplate() { return {} },
       },
-      // S2-c: satisfy requireService('readSourceConfigStore', ...) — this harness never exercises it.
-      readSourceConfigStore: {
+      // S2-c: satisfy requireService('readSourceConfigStore', ...). REVIEW P2-1 (round 9): this
+      // used to say "this harness never exercises it", and that was the gap — the B4 consumption
+      // SCOPE (tenant / workspace / pipeline-endpoint relation) is built in
+      // resolveC6WritePlanInputs and was verified only by a COPY of it in the profile suite, so
+      // fail-open widenings there stayed green. An injectable store lets a test drive the REAL
+      // route and observe the real scope.
+      readSourceConfigStore: readSourceConfigStore || {
         async saveVersion() { return {} },
         async list() { return [] },
         async get() { return {} },
@@ -612,6 +640,8 @@ async function createRouteControlPlaneScenario(routes) {
         baseUrl: 'https://k3.example.test',
         autoSubmit: false,
         autoAudit: false,
+        // RATIFIED (owner, 20260805): material writes require the named customer profile.
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
       credentials: {
         username: 'demo',
@@ -668,6 +698,296 @@ async function createRouteControlPlaneScenario(routes) {
   }
 }
 
+// REVIEW P2-1 (round 9): the B4 consumption SCOPE is assembled in http-routes'
+// `resolveC6WritePlanInputs` — tenantId, workspaceId, and the pipeline-endpoint relation. That
+// function is not exported, and the profile suite assembles the same object itself ("exactly the
+// way http-routes does"), so it judged a COPY: five anchored mutations to the real call sites —
+// including two FAIL-OPEN ones (workspaceId collapsed to null; pipelineSystemIds widened with an
+// unrelated system) — left every suite green. The second reinstates the round-3 defect of one
+// system's read contract vouching for another system's write.
+//
+// This drives the REAL route and observes the REAL scope object.
+const PROBE_WORKSPACE_ID = 'ws_b4_probe'
+
+async function assertB4ScopeIsWiredThroughTheRoute() {
+  const {
+    K3WISE_MATERIAL_LIST_B4_TEMPLATE,
+  } = require(path.join(__dirname, '..', 'lib', 'read-source-k3-material-list-b4-contract.cjs'))
+  const { contentKeyFor } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+  const { normalizeReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
+
+  function ratifiedRow({ systemId, workspaceId = 'ws_k3_poc' }) {
+    const config = { ...K3WISE_MATERIAL_LIST_B4_TEMPLATE, systemId }
+    return {
+      id: `rsc_${systemId}`,
+      object: 'material',
+      status: 'approved',
+      workspaceId,
+      config,
+      contentKey: contentKeyFor(normalizeReadSourceConfig(config)),
+    }
+  }
+
+  // `rows` is what the store returns; `listArgs` records what the ROUTE asked for.
+  async function dryRunWith(rows, { requestWorkspaceId, pairedReadBaseUrl } = {}) {
+    const listArgs = []
+    const harness = createHarness({
+      readSourceConfigStore: {
+        async saveVersion() { return {} },
+        async list(args) { listArgs.push(args); return rows(harnessScenario) },
+        async get() { return {} },
+        async approve() { return {} },
+        async retire() { return {} },
+        async listAudit() { return [] },
+        async getForRuntime() { return {} },
+      },
+    })
+    // Minimal WORKSPACE-SCOPED scenario, built here rather than by bending the shared PoC one:
+    // the probe needs a workspace-scoped pipeline (against a null-workspace pipeline, "collapse
+    // workspaceId to null" is indistinguishable from correct behaviour), and a workspace-scoped
+    // pipeline resolves only workspace-scoped systems.
+    const mkSystem = async (body) => {
+      const r = await invoke(harness.routes, 'POST', '/api/integration/external-systems', {
+        user: WRITE_USER,
+        body: { workspaceId: PROBE_WORKSPACE_ID, tenantId: TENANT_ID, ...body },
+      })
+      assertOkResponse(r, 201)
+      return r.body.data
+    }
+    // OWNER RULING 20260806 [P1] + earlier review: with `config: {}` this record's digest is null,
+    // so case (6) below refused it for "cannot tell" rather than for being a different instance —
+    // passing for the wrong reason. Given a SAME-ORIGIN, SAME-acctId identity, its digest is
+    // computable and differs ONLY by kind, which is what makes the case discriminating.
+    const plm = await mkSystem({
+      name: 'PLM probe', kind: 'plm:yuantus-wrapper', role: 'source', status: 'active',
+      config: { baseUrl: 'https://k3.example.test/plm-api' },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
+    // OWNER REVIEW 20260806 [P1]: the real customer topology is THREE records — a staging/PLM
+    // source, a K3 READ record, and a K3 WRITE target. Without the read record in this harness the
+    // same-instance check could only ever be handed the target twice, which is exactly how it came
+    // to compare the target with itself and pass.
+    const k3Read = pairedReadBaseUrl === undefined ? null : await mkSystem({
+      name: 'K3 read probe', kind: 'erp:k3-wise-webapi', role: 'source', status: 'active',
+      config: { baseUrl: pairedReadBaseUrl },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
+    const k3 = await mkSystem({
+      name: 'K3 probe', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active',
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+        ...(k3Read ? { pairedReadSystemId: k3Read.id } : {}),
+      },
+      credentials: { username: 'demo', password: 'secret', acctId: '001' },
+    })
+    assert.equal(plm.workspaceId, PROBE_WORKSPACE_ID, 'the probe systems must actually be workspace-scoped')
+    const mkPipeline = await invoke(harness.routes, 'POST', '/api/integration/pipelines', {
+      user: WRITE_USER,
+      body: {
+        ...materialPipelineBody({ sourceSystemId: plm.id, targetSystemId: k3.id }),
+        workspaceId: PROBE_WORKSPACE_ID,
+        name: 'B4 scope wiring probe',
+        // The PoC mappings include sourceId/revision, which the C6 field allowlist correctly
+        // refuses — the dry-run would never reach the B4 branch.
+        fieldMappings: [
+          { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+          { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+        ],
+      },
+    })
+    assertOkResponse(mkPipeline, 201)
+    assert.equal(mkPipeline.body.data.workspaceId, PROBE_WORKSPACE_ID,
+      'the probe pipeline must be workspace-scoped, or the workspaceId assertion cannot discriminate')
+    const harnessScenario = { plm, k3, k3Read, pipeline: mkPipeline.body.data }
+    const res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+      user: WRITE_USER,
+      params: { id: mkPipeline.body.data.id },
+      body: { tenantId: TENANT_ID, workspaceId: requestWorkspaceId || PROBE_WORKSPACE_ID },
+    })
+    return { res, listArgs, scenario: harnessScenario }
+  }
+
+  // (1) THE SCOPE THE ROUTE ASKS FOR. Kills the "drop readSourceConfigs" and "*ANY*" mutations:
+  // if the wiring stops passing the store, nothing is recorded here.
+  const seen = await dryRunWith(() => [])
+  assert.ok(seen.listArgs.length >= 1,
+    'the route must consult the read-source config store for the B4 binding — nothing was asked')
+  const args = seen.listArgs[0]
+  assert.equal(args.tenantId, TENANT_ID, 'B4 lookup must be scoped to the PIPELINE tenant')
+  assert.equal(args.status, 'approved', 'only approved bindings may be consulted')
+  assert.equal(args.limit, 500, 'the bounded page limit must reach the store')
+  // EXACT value, not merely present: collapsing this to a constant `null` is a FAIL-OPEN
+  // widening (a tenant-level binding would vouch for a workspace-scoped pipeline).
+  assert.equal(args.workspaceId, PROBE_WORKSPACE_ID,
+    'the workspace scope must be the PIPELINE\'s workspace, not a constant')
+
+  // (2) FAIL-OPEN #1 — a binding for an UNRELATED system must not satisfy the gate. This is the
+  // one that reinstates "one system's read contract vouching for another system's write".
+  const foreign = await dryRunWith(() => [ratifiedRow({ systemId: 'some-other-system-entirely' })])
+  const foreignErr = (foreign.res.body && foreign.res.body.error) || {}
+  const foreignDetails = foreignErr.details || {}
+  // Assert the COUNT, not merely "it failed": widening pipelineSystemIds makes this binding
+  // COUNT, and the dry-run may still fail downstream for an unrelated reason — a bare
+  // `status !== 200` passes either way and proves nothing. (It did: M15/M18 survived it.)
+  assert.equal(foreignDetails.code, 'C6_WRITE_B4_BINDING_REQUIRED',
+    `an unrelated system's binding must leave the gate unsatisfied, got: ${JSON.stringify(foreignErr)}`)
+  assert.equal(foreignDetails.bindingCount, 0,
+    'an unrelated system\'s binding must not be COUNTED — this is the round-3 defect (one system vouching for another)')
+
+  // (3) POSITIVE CONTROL — the same shape bound to a real pipeline endpoint behaves DIFFERENTLY.
+  // Without this, a route that refused every dry-run would satisfy (2).
+  // (4) THE APPLY CALL SITE. Behavioural coverage of apply would need a fully successful K3
+  // dry-run in this harness (credentials, source rows, token) — not achieved here, and stated
+  // rather than glossed. Dropping `readSourceConfigs` on apply fails CLOSED (the apply recompute
+  // re-runs the same gate and refuses), so this is "the feature silently dies", not a security
+  // hole. It is covered STRUCTURALLY: both call sites must pass the same inputs, and the
+  // positive control below proves the check can actually fail.
+  const routesSrc = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'lib', 'http-routes.cjs'), 'utf8')
+  // `= ` anchors this to CALL SITES: the declaration `function resolveC6WritePlanInputs({...})`
+  // otherwise matched too and made the count 3 (the same trap the requestJson enumeration hit).
+  const callSites = [...routesSrc.matchAll(/= resolveC6WritePlanInputs\(\{([^}]*)\}\)/g)].map((m) => m[1])
+  assert.equal(callSites.length, 2, `expected the dry-run and apply call sites, found ${callSites.length}`)
+  assert.deepEqual(callSites[0].split(',').map((t) => t.trim()).filter(Boolean).sort(),
+    callSites[1].split(',').map((t) => t.trim()).filter(Boolean).sort(),
+    'the apply call site must pass the SAME inputs as dry-run, or the revision fence compares different plans')
+  assert.ok(callSites.every((site) => /\breadSourceConfigs\b/.test(site)),
+    'both call sites must pass readSourceConfigs — without it the B4 gate is unreachable')
+  // POSITIVE CONTROL for the structural check itself.
+  assert.equal(/\breadSourceConfigs\b/.test('{ targetSystem, pipeline, context }'), false,
+    'the structural check must be able to FAIL — otherwise it asserts nothing')
+
+  // (5) REVIEW P3-3 (round 10): `http-routes.cjs` states the B4 scope is "never request-sourced",
+  // and nothing tested it — the probe body carried the SAME values as the pipeline, so it could
+  // not discriminate. The protective mechanism is upstream: the pipeline is resolved by an EXACT
+  // scope match, so a request claiming a different workspace never reaches the B4 branch at all.
+  // Assert that, rather than the comment's wording.
+  const spoofed = await dryRunWith(() => [], { requestWorkspaceId: 'ws_attacker_supplied' })
+  // The load-bearing assertion. Neutering the upstream scope match makes this RED.
+  assert.equal(spoofed.listArgs.length, 0,
+    'a request claiming a different workspace must not even reach the B4 lookup')
+  // NOT an independent assertion, and labelled rather than dropped: in this harness NO
+  // configuration of this route returns 200 (an honest call with 0 rows is 400; with a ratified
+  // row it is 500 on missing credentials), so `!== 200` is true by fixture construction. Kept
+  // only as a shape guard; the line above is what carries the property.
+  assert.notEqual(spoofed.res.statusCode, 200, 'and it must not succeed (vacuous here — see above)')
+
+  // (6) SAME-INSTANCE, THROUGH THE ROUTE. Mutation N3 exposed this gap: http-routes stopped
+  // passing `targetBaseUrl` and BOTH suites stayed green — the check was tested, its WIRING was
+  // not. Fifth occurrence of that pattern on this line.
+  //
+  // The witness is exact: a B4 row bound to the PLM SOURCE passes #4769's relation check (the
+  // source IS a pipeline endpoint), so only the same-instance check can stop it — and it must,
+  // because PLM is not the K3 being written. This is the round-3 defect in its newest disguise:
+  // one system's read contract certifying another system's write.
+  //
+  // EXACT-HEAD REVIEW P2-2 — why this now expects KIND, not INSTANCE. The reviewer showed this
+  // assertion was passing for the WRONG REASON: the PLM fixture carries `config: {}`, so
+  // `boundBaseUrl` was null and the gate took its "cannot tell" branch. It never exercised the
+  // "different instance" branch its own message named. Worse, the reviewer gave the PLM source a
+  // baseUrl SHARING the K3 target's origin and the binding was ACCEPTED — a PLM read contract
+  // certified the K3 write, failing only later at the read with a misleading 404. Origin equality
+  // says nothing about WHAT is at that origin, and on-prem PLM and K3 routinely share a host.
+  //
+  // The guard now checks the bound record's `kind` first, so a PLM binding is refused for being
+  // PLM — which is both the true reason and the one that still holds when the origins match.
+  const crossInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
+  const crossErr = ((crossInstance.res.body && crossInstance.res.body.error) || {})
+  assert.equal(crossErr.details && crossErr.details.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    'a SAME-ORIGIN, SAME-account-set NON-K3 record must not certify this write — kind participates '
+    + `in the instance digest, so its digest differs; got: ${JSON.stringify(crossErr)}`)
+
+  // (6b) OWNER REVIEW 20260806 [P1] — THE READ/WRITE COMPARISON ITSELF.
+  //
+  // Everything above binds B4 to the TARGET, which is how the check came to compare the target
+  // with itself: the driver made a separate K3 read record, minted B4 on the target, and the route
+  // loaded targetBaseUrl from that same target — so no read record ever entered the comparison and
+  // two different K3 instances would have passed. These two cases bind B4 to the REAL READ RECORD
+  // (admitted by the relation check because the target declares it as pairedReadSystemId) so the
+  // guard compares two GENUINELY DIFFERENT records.
+  //
+  // A -> A: read and write on the same physical K3 (same origin, different path — the step 0-b
+  // topology). MUST BE ACCEPTED. Without this control the negative case below could be satisfied
+  // by a guard that simply refuses everything.
+  const pairedSameInstance = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3.example.test/K3API-READ' },
+  )
+  const pairedSameErr = ((pairedSameInstance.res.body && pairedSameInstance.res.body.error) || {}).details || {}
+  // POSITIVE EQUALITY, not a list of `notEqual`s. "It is not error X" cannot distinguish
+  // "succeeded" from "failed for some other reason", and that is precisely how the #4784
+  // regression survived: the owner's review flipped `targetSystem.kind` to `targetSystem.role` at
+  // BOTH real C6 handlers and every suite stayed green, because every assertion here was of the
+  // not-this-particular-error family.
+  //
+  // K3_WISE_READ_FAILED is the RIGHT answer for this fixture: the plan cleared the B4 gate, the
+  // kind gate, the same-instance gate AND credential resolution, then made a real wire call to the
+  // paired read record's baseUrl, which the K3 fetch mock does not serve. Reaching a wire error is
+  // therefore proof that credentials were resolved.
+  //
+  // THIS IS ALSO THE REAL-ROUTE COVERAGE FOR #4784. Measured, not asserted:
+  //     baseline          -> K3_WISE_READ_FAILED        (adapter accessor, credentials present)
+  //     .kind -> .role    -> K3_WISE_CREDENTIALS_MISSING (public accessor strips them)
+  // The merged #4784 fix previously had only source-text regex plus a test-local reimplementation
+  // of the selection logic, so it protected nothing.
+  assert.equal(pairedSameErr.code, 'K3_WISE_READ_FAILED',
+    'the same-K3 paired read binding must clear every gate AND resolve credentials, reaching the '
+    + `wire; got: ${JSON.stringify(pairedSameErr)}`)
+  // (the equality above already pins this value; a following notEqual on the same value adds
+  // nothing and reads as if it were an independent check — #4784's guarantee rides the equality)
+
+  // A -> B: read record on a DIFFERENT K3 host. MUST BE REFUSED. This is the case the old
+  // arrangement was structurally incapable of producing at all.
+  const crossK3 = await dryRunWith(
+    (sc) => [ratifiedRow({ systemId: sc.k3Read.id })],
+    { pairedReadBaseUrl: 'https://k3-OTHER.example.test/K3API' },
+  )
+  const crossK3Err = ((crossK3.res.body && crossK3.res.body.error) || {}).details || {}
+  assert.equal(crossK3Err.code, 'K3_C6_B4_BINDING_INSTANCE_MISMATCH',
+    `a read record on ANOTHER K3 must not certify this write, got: ${JSON.stringify(crossK3Err)}`)
+
+  // (7) SELF-REFERENCE IS REFUSED.
+  //
+  // NIT (review r3): the attribution that used to sit here was stale. It said "mutation N3 is RED
+  // on this assertion and only this one", but SELF_REFERENTIAL now throws BEFORE `targetBaseUrl`
+  // is ever read, so N3 cannot reach it. Measured: N3 is RED on case 6b
+  // (INSTANCE_MISMATCH where K3_WISE_READ_FAILED was expected). Coverage is intact; the comment
+  // was pointing at the wrong case.
+  //
+  // D1 (20260806): this case's INTENT is now inverted, and the inversion is the point. Binding on
+  // the TARGET used to be the only arrangement that satisfied the relation check, so it had to be
+  // accepted — which is exactly why the gate degenerated into comparing the target with itself.
+  // Now that the real read record can be bound (via targetSystem.config.pairedReadSystemId), a
+  // self-referential binding is REFUSED, and that refusal is the invariant.
+  //
+  // Asserted as a POSITIVE equality: the old `notEqual(…, INSTANCE_MISMATCH)` still passes against
+  // the new behaviour (SELF_REFERENTIAL is also "not INSTANCE_MISMATCH"), so it would have recorded
+  // a silent semantic inversion as a pass. Same defect family as #4784.
+  const sameInstance = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.targetSystemId })])
+  const sameErr = ((sameInstance.res.body && sameInstance.res.body.error) || {})
+  assert.equal(sameErr.details && sameErr.details.code, 'K3_C6_B4_BINDING_SELF_REFERENTIAL',
+    'a binding on the write target ITSELF must be refused — a record cannot certify its own '
+    + `instance; got: ${JSON.stringify(sameErr)}`)
+
+  const related = await dryRunWith((sc) => [ratifiedRow({ systemId: sc.pipeline.sourceSystemId })])
+  const relatedDetails = ((related.res.body && related.res.body.error) || {}).details || {}
+  // NIT (review r4): the replacement assertion I put here was a VERBATIM DUPLICATE of case (6) —
+  // same helper, same argument, same expected code — so neutering the kind gate fails at case (6)
+  // and never reaches this line: zero marginal coverage. Removed rather than left as decoration.
+  //
+  // The property it was meant to carry (a binding on a real pipeline endpoint is COUNTED by the
+  // relation check rather than filtered out earlier) is already carried by the PAIR that exists:
+  // case (2) asserts bindingCount === 0 for an unrelated system, case (6) shows a real endpoint's
+  // binding reaching the kind gate. Both intact.
+  //
+  // The assertion this replaced was itself vacuous — `notEqual(relatedDetails.bindingCount, 0)`
+  // where the measured object has no bindingCount at all, i.e. notEqual(undefined, 0), true by
+  // absence. The notEqual family again.
+}
+
 async function main() {
   const harness = createHarness()
   const scenario = await createRouteControlPlaneScenario(harness.routes)
@@ -691,6 +1011,34 @@ async function main() {
   assert.equal(harness.db.tables.get('integration_dead_letters').length, 0)
   assert.equal(harness.feedbackUpdates.length, 0)
 
+  // --- OWNER REVIEW P1 (20260805) DELIBERATE FLIP -----------------------------------------
+  // Mirrors e2e-plm-k3wise-writeback.test.cjs's handling of the same guard.
+  // pipeline-runner.cjs's loadPipelineContext now fails closed on ANY non-dryRun runPipeline
+  // against a K3 WISE target (details.code === 'K3_WISE_PIPELINE_RUN_DISABLED', thrown before
+  // any adapter is created / any read or write happens) — the C6 dry-run -> approval-token ->
+  // apply lifecycle is the ONLY sanctioned K3 write entry point now. This live POST
+  // .../pipelines/:id/run call used to reach K3 Material/Save for both records and come back
+  // 202/partial (1 written GOOD-01 + 1 failed BAD-02, with matching ERP feedback rows); that
+  // path is refused before any of that happens. Disposition:
+  //   1. [FLIP 20260625->] Prove the refusal itself over HTTP: 422, envelope
+  //      { ok:false, error:{ code:'PipelineRunnerError', details:{ code:
+  //      'K3_WISE_PIPELINE_RUN_DISABLED' } } } (exact field path confirmed against a live run
+  //      of this harness — inferErrorCode() in http-routes.cjs falls back to error.name since
+  //      PipelineRunnerError never sets a top-level .code, so the machine-readable code lives
+  //      at error.details.code, not error.code) — with zero K3 Save/Submit/Audit calls, zero
+  //      ERP feedback writes, zero dead letters, and zero new run rows.
+  //   2. NOT reconstructed here: the live write's aggregate run-record semantics
+  //      (status='partial', rowsWritten=1/rowsFailed=1), the exact K3 Material/Save request
+  //      sequence (['GOOD-01','BAD-02']), and the synced/failed ERP-feedback field values
+  //      (erpExternalId/erpBillNo/erpResponseCode). These are generic, non-route-specific
+  //      mechanisms already covered elsewhere with real assertions: 'partial'-status run-record
+  //      aggregation via a mock (non-K3) target in pipeline-runner.test.cjs (e.g. its line-426
+  //      `assert.equal(first.run.status, 'partial')` and siblings), the K3 Save request body /
+  //      FNumber sequence via direct adapter.upsert() calls in k3-wise-c6-write-profile.test.cjs
+  //      and k3-wise-apply-row-limit.test.cjs, and the synced/failed erpFeedback field mapping
+  //      via a direct feedbackWriter.writeBack() call in e2e-plm-k3wise-writeback.test.cjs's own
+  //      post-flip body. Re-deriving any of those here would just re-test those other harnesses,
+  //      not additional product code for this route, so they are not duplicated in this file.
   res = await invoke(harness.routes, 'POST', '/api/integration/pipelines/:id/run', {
     user: WRITE_USER,
     params: { id: scenario.pipeline.id },
@@ -699,30 +1047,19 @@ async function main() {
       mode: 'incremental',
     },
   })
-  assertOkResponse(res, 202)
-  assert.equal(res.body.data.run.status, 'partial')
-  assert.equal(res.body.data.metrics.rowsRead, 2)
-  assert.equal(res.body.data.metrics.rowsCleaned, 2)
-  assert.equal(res.body.data.metrics.rowsWritten, 1)
-  assert.equal(res.body.data.metrics.rowsFailed, 1)
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.error.code, 'PipelineRunnerError')
+  assert.equal(res.body.error.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED')
 
-  const saveCalls = harness.k3FetchMock.calls.filter((call) => call.pathname === '/K3API/Material/Save')
-  assert.equal(saveCalls.length, 2)
-  assert.deepEqual(saveCalls.map((call) => (call.body.Model || call.body.Data).FNumber), ['GOOD-01', 'BAD-02'])
+  assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Save'), false)
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Submit'), false)
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Audit'), false)
-
-  assert.equal(harness.feedbackUpdates.length, 1)
-  assert.equal(harness.feedbackUpdates[0].projectId, PROJECT_ID)
-  assert.equal(harness.feedbackUpdates[0].objectId, 'standard_materials')
-  assert.equal(harness.feedbackUpdates[0].updates.length, 2)
-  const synced = harness.feedbackUpdates[0].updates.find((update) => update.status === 'synced')
-  const failed = harness.feedbackUpdates[0].updates.find((update) => update.status === 'failed')
-  assert.equal(synced.fields.erpSyncStatus, 'synced')
-  assert.equal(synced.fields.erpExternalId, 'k3_GOOD-01')
-  assert.equal(synced.fields.erpBillNo, 'BILL-GOOD-01')
-  assert.equal(failed.fields.erpSyncStatus, 'failed')
-  assert.equal(failed.fields.erpResponseCode, 'K3_MATERIAL_INVALID')
+  assert.equal(harness.feedbackUpdates.length, 0)
+  assert.equal(harness.db.tables.get('integration_dead_letters').length, 0,
+    'the guard fires before any write attempt — the refused live run leaves no dead letter')
+  assert.equal(harness.db.tables.get('integration_runs').length, 1,
+    'guard fires in loadPipelineContext, before runLogger.startRun — only the earlier dry run has a row')
 
   res = await invoke(harness.routes, 'GET', '/api/integration/runs', {
     user: READ_USER,
@@ -732,7 +1069,64 @@ async function main() {
     },
   })
   assertOkResponse(res, 200)
-  assert.deepEqual(new Set(res.body.data.map((run) => run.status)), new Set(['succeeded', 'partial']))
+  // [FLIP 20260625->] ORIGINAL SEMANTICS: two run rows here (dry-run 'succeeded' + live-run
+  // 'partial'). NEW CARRIER (converged to actual runtime output, confirmed by a live run of
+  // this harness): the live run above wrote no run row at all, so only the earlier dry run's
+  // 'succeeded' row survives.
+  assert.equal(res.body.data.length, 1)
+  assert.deepEqual(new Set(res.body.data.map((run) => run.status)), new Set(['succeeded']))
+
+  // [FLIP 20260625->] dead-letter generation, to feed the (preserved, unchanged below) redaction
+  // assertions. ORIGINAL SEMANTICS: the live run hit K3 Material/Save with the BAD-02 record and
+  // got back { success: false, code: 'K3_MATERIAL_INVALID', message: 'material code rejected' };
+  // pipeline-runner's writeDeadLetter() then persisted sourcePayload = sanitizeIntegrationPayload
+  // of the PLM-normalized source record (code:'bad-02', rawPayload redacted to '[redacted]' by
+  // payload-redaction.cjs's SENSITIVE_PAYLOAD_KEYS) and transformedPayload = the K3-shaped record
+  // (FNumber:'BAD-02'). NEW CARRIER: that live path is refused now, so insert the identically-
+  // shaped dead letter directly through a fresh createDeadLetterStore bound to the SAME mock db
+  // the harness's routes read from (same technique as e2e-plm-k3wise-writeback.test.cjs's
+  // directDeadLetters / pipeline-runner.test.cjs's k3Letters.createDeadLetter() direct-insert).
+  // createDeadLetter() re-applies sanitizeIntegrationPayload itself (see dead-letter.cjs's
+  // normalizeJsonPayload), so rawPayload is redacted to '[redacted]' by the store exactly as the
+  // live path would have produced it — not pre-redacted by this test.
+  const directDeadLetters = createDeadLetterStore({
+    db: harness.db,
+    idGenerator: () => `dl_direct_${harness.db.tables.get('integration_dead_letters').length + 1}`,
+  })
+  await directDeadLetters.createDeadLetter({
+    tenantId: TENANT_ID,
+    workspaceId: null,
+    runId: 'run_direct_bad02',
+    pipelineId: scenario.pipeline.id,
+    sourcePayload: {
+      sourceSystemId: scenario.plm.id,
+      sourceId: 'plm_bad',
+      objectType: 'material',
+      code: 'bad-02',
+      name: 'Bad material',
+      revision: 'A',
+      uom: 'PCS',
+      status: 'active',
+      updatedAt: '2026-05-07T09:05:00.000Z',
+      rawPayload: {
+        id: 'plm_bad',
+        itemCode: ' bad-02 ',
+        itemName: ' Bad material ',
+        revision: 'A',
+        unitName: 'PCS',
+        updated_at: '2026-05-07T09:05:00.000Z',
+      },
+    },
+    transformedPayload: {
+      FNumber: 'BAD-02',
+      FName: 'Bad material',
+      sourceId: 'plm_bad',
+      revision: 'A',
+      _integration_idempotency_key: 'BAD-02|A',
+    },
+    errorCode: 'K3_MATERIAL_INVALID',
+    errorMessage: 'material code rejected',
+  })
 
   res = await invoke(harness.routes, 'GET', '/api/integration/dead-letters', {
     user: READ_USER,
@@ -762,6 +1156,8 @@ async function main() {
   assert.equal(res.body.data[0].sourcePayload.rawPayload, '[redacted]')
   assert.equal(res.body.data[0].transformedPayload.FNumber, 'BAD-02')
   assert.equal(res.body.data[0].payloadRedacted, true)
+
+  await assertB4ScopeIsWiredThroughTheRoute()
 
   console.log('✓ http-routes-plm-k3wise-poc: REST PLM -> K3 WISE mock control-plane chain passed')
 }

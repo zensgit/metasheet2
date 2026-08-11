@@ -330,6 +330,9 @@ on:
       - 'apps/web/tests/StockPreparationDashboardView.spec.ts'
       - 'apps/web/tests/StockPreparationStageOverview.spec.ts'
       - 'apps/web/tests/StockPreparationStageStepper.spec.ts'
+      - 'apps/web/tests/k3-endpoint-vocab-mirror.spec.ts'
+      - 'apps/web/src/services/integration/k3WiseSetup.ts'
+      - 'plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs'
       - '.github/workflows/integration-guard.yml'
       - 'scripts/ops/integration-guard-guarded-paths.mjs'
       - 'scripts/ops/integration-guard-classify.mjs'
@@ -355,6 +358,61 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
+
+      # #4801 P1 (owner review, 2026-08-07) — INDEPENDENT INVOCATION OF THE CHAIN-COMPLETENESS GUARD.
+      # `plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs` walks that
+      # directory and requires every suite in it to appear in the package's `scripts.test` `&&`
+      # chain. As landed, its ONLY caller was that very chain — i.e. the guard's execution depended
+      # on the same list it exists to police. Deleting the one `node __tests__/test-chain-
+      # completeness.test.cjs` link from package.json and re-pinning the same-tree provenance
+      # manifest (`runtimeFiles.pluginPackageJson`) left every required check GREEN: the guard was
+      # not load-bearing, it was self-referential.
+      #
+      # Closed here by invoking it from OUTSIDE the package's own test list. Ungated on the scope
+      # verdict (no `if` at all — same rationale as `contract-self-check` below) and deliberately
+      # placed ABOVE `resolve-diff`: every un-`if`'d step still carries GitHub's implicit
+      # `if: success()`, so a step sitting below a fail-closed `resolve-diff` would be SKIPPED
+      # rather than run. Nothing upstream of this point can fail, so nothing can skip it. The guard
+      # is pure `node:fs` over the checkout — no pnpm install, no DB, ~30ms.
+      #
+      # OUTPUT FLOOR, not a bare exit code. The guard is a plain script that calls `main()` at
+      # module scope, so `node <file>` reports SUCCESS for a file whose `main()` call was deleted or
+      # which gained an early `process.exit(0)` — vacuous green, the same collapse class the
+      # `MIN_CONTRACT_TESTS` floor closes for the contract step below. So: capture stdout, require
+      # the `test-chain-completeness: <N> suites` summary line, and require N >= MIN_CHAINED_SUITES.
+      # The `✓` sigil is deliberately NOT part of the match (one character in a UTF-8 locale, three
+      # bytes under LC_ALL=C — the same trap documented for `ℹ` in the contract test).
+      #
+      # This step's `id`, its `shell`, the absence of `if`/`continue-on-error`, its position above
+      # `resolve-diff`, AND its `run:` text byte-for-byte are pinned by
+      # scripts/ops/integration-guard-required-wiring-contract.test.mjs
+      # (Pins 16/17), which itself executes in BOTH required contexts (`integration-guard` via
+      # `id: contract-self-check` below, and `test (20.x)` via plugin-tests.yml's
+      # `id: integration-guard-contract`) — so deleting this step is caught, and deleting the
+      # package-internal link is caught here.
+      - name: plugin-integration-core chain-completeness guard (independent of the package test list)
+        id: chain-completeness
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN_CHAINED_SUITES=150
+          GUARD=plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs
+          if ! guard_out="$(node "$GUARD" 2>&1)"; then
+            printf '%s\n' "$guard_out"
+            echo "chain-completeness: node exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$guard_out"
+          chained="$(printf '%s\n' "$guard_out" | grep -Eo 'test-chain-completeness: [0-9]+ suites' | tail -n 1 | grep -Eo '[0-9]+' || true)"
+          if [ -z "$chained" ]; then
+            echo "chain-completeness: no 'test-chain-completeness: <N> suites' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$chained" -lt "$MIN_CHAINED_SUITES" ]; then
+            echo "chain-completeness: only $chained suites were walked, expected at least $MIN_CHAINED_SUITES — a deleted main() call or an early process.exit(0) collapses this guard into a silent success" >&2
+            exit 1
+          fi
+          echo "chain-completeness: $chained suites, all executed by the package test chain (floor $MIN_CHAINED_SUITES)."
 
       # #4614 P2 fix: this used to be piped straight into the classifier step
       # (`resolve-diff | classify`), where a shell `pipefail` mechanism claim was made about how a
@@ -419,7 +477,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MIN_CONTRACT_TESTS=59
+          MIN_CONTRACT_TESTS=62
           if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
             printf '%s\n' "$contract_out"
             echo "integration-guard contract: node --test exited non-zero (output above)" >&2

@@ -5420,7 +5420,7 @@
                           class="attendance__btn"
                           type="button"
                           data-attendance-group-rule-policy-rule-sets-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets); closeAttendanceGroupRulePolicyDrawer()"
+                          @click="openAttendanceGroupRoute('rules', 'rule-sets'); closeAttendanceGroupRulePolicyDrawer()"
                         >
                           {{ tr('Open Rule Sets', '打开规则集') }}
                         </button>
@@ -5428,7 +5428,7 @@
                           class="attendance__btn"
                           type="button"
                           data-attendance-group-rule-policy-holidays-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupRulePolicyDrawer()"
+                          @click="openAttendanceGroupRoute('calendar', null); closeAttendanceGroupRulePolicyDrawer()"
                         >
                           {{ tr('Open Holidays', '打开节假日') }}
                         </button>
@@ -5535,7 +5535,7 @@
                           class="attendance__btn attendance__btn--compact"
                           type="button"
                           data-attendance-group-work-time-holidays-open
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupWorkTimeDrawer()"
+                          @click="openAttendanceGroupRoute('calendar', null); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Holidays', '打开节假日') }}
                         </button>
@@ -5545,21 +5545,24 @@
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-shifts-open
+                          @click="openAttendanceGroupRoute('schedule', 'shifts'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Shifts', '打开班次') }}
                         </button>
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-assignments-open
+                          @click="openAttendanceGroupRoute('schedule', 'assignments'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Assignments', '打开排班分配') }}
                         </button>
                         <button
                           class="attendance__btn"
                           type="button"
-                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench); closeAttendanceGroupWorkTimeDrawer()"
+                          data-attendance-group-work-time-advanced-scheduling-open
+                          @click="openAttendanceGroupRoute('schedule', 'advanced-scheduling'); closeAttendanceGroupWorkTimeDrawer()"
                         >
                           {{ tr('Open Advanced scheduling', '打开高级排班') }}
                         </button>
@@ -5651,7 +5654,8 @@
                       <button
                         class="attendance__btn"
                         type="button"
-                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+                        data-attendance-group-fixed-schedule-assignments-open
+                        @click="openAttendanceGroupRoute('schedule', 'assignments')"
                       >
                         {{ tr('Open Assignments', '打开排班分配') }}
                       </button>
@@ -5793,7 +5797,8 @@
                       <button
                         class="attendance__btn"
                         type="button"
-                        @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench)"
+                        data-attendance-group-advanced-scheduling-open
+                        @click="openAttendanceGroupRoute('schedule', 'advanced-scheduling')"
                       >
                         {{ tr('Open Advanced scheduling', '打开高级排班') }}
                       </button>
@@ -8931,6 +8936,11 @@
                   :analysis="shiftSegmentAnalysis"
                   :preview-only="shiftSegmentPreviewOnly"
                 />
+                <AttendanceShiftFlexPolicyEditor
+                  v-model:policy="shiftForm.flexPolicy"
+                  :flex-eligible="shiftSegmentAnalysis.flexEligible"
+                  :analysis="shiftFlexAnalysis"
+                />
                 <label class="attendance__field" for="attendance-shift-late-grace">
                   <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
                   <input
@@ -8988,6 +8998,7 @@
                       <th>{{ tr('Name', '名称') }}</th>
                       <th>{{ tr('Timezone', '时区') }}</th>
                       <th>{{ tr('Segments', '时段') }}</th>
+                      <th>{{ tr('Flex', '弹性') }}</th>
                       <th>{{ tr('Planned', '计划时长') }}</th>
                       <th>{{ tr('Working days', '工作日') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
@@ -9006,6 +9017,9 @@
                         >
                           {{ tr('Preview only', '仅供预览') }}
                         </span>
+                      </td>
+                      <td>
+                        <span data-attendance-shift-list-flex>{{ shiftFlexLabel(shift) }}</span>
                       </td>
                       <td class="attendance__tabular-number">{{ shiftPlannedMinutes(shift) }} {{ tr('min', '分钟') }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
@@ -9919,6 +9933,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
+import AttendanceShiftFlexPolicyEditor from './attendance/AttendanceShiftFlexPolicyEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 // W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
 import AttendanceDecisionTrace from './attendance/AttendanceDecisionTrace.vue'
@@ -9938,12 +9953,17 @@ import AttendanceContextHelp from './attendance/AttendanceContextHelp.vue'
 import type { AttendanceContextHelpEvidenceLink } from './attendance/attendanceContextHelp'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
 import {
+  analyzeAttendanceShiftFlexPolicy,
   analyzeAttendanceShiftSegments,
   calculateAttendanceShiftPlannedMinutes,
   cloneAttendanceShiftSegmentDrafts,
+  defaultAttendanceShiftFlexPolicy,
+  formatAttendanceShiftFlexPolicy,
   formatAttendanceShiftSegments,
   isAttendanceShiftPreviewOnly,
+  normalizeAttendanceShiftFlexPolicy,
   normalizeAttendanceShiftSegments,
+  type AttendanceShiftFlexPolicy,
   type AttendanceShiftSegment,
   type AttendanceShiftSegmentCapabilities,
   type AttendanceShiftSegmentDraft,
@@ -10085,6 +10105,9 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
+import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
+import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
+import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
   applyPayrollSummaryFieldsToConfig,
@@ -10210,16 +10233,28 @@ const props = withDefaults(
     mode?: AttendancePageMode
     initialSectionId?: string
     initialRequestId?: string
+    routeGroupContext?: {
+      group: AttendanceAuthorizedGroup
+      step: AttendanceGroupRouteStep
+      surface: AttendanceGroupRouteSurface | null
+      returnTo: string
+    } | null
   }>(),
   {
     mode: 'overview',
     initialSectionId: '',
     initialRequestId: '',
+    routeGroupContext: null,
   }
 )
 
 const emit = defineEmits<{
   (event: 'clear-section'): void
+  (event: 'open-group-route', target: {
+    groupId: string
+    step: AttendanceGroupRouteStep
+    surface: AttendanceGroupRouteSurface | null
+  }): void
 }>()
 
 const { locale, isZh } = useLocale()
@@ -10377,6 +10412,8 @@ interface AttendancePunchEvent {
 
 interface AttendanceAnomaly {
   recordId: string
+  expectedCalculationId: string | null
+  expectedCalculationVersion: number | null
   workDate: string
   status: string
   isWorkday?: boolean
@@ -10408,6 +10445,8 @@ type AttendanceResultEditAdminCapability = 'unknown' | 'checking' | 'allowed' | 
 
 interface AttendanceResultEditSnapshot {
   recordId: string
+  expectedCalculationId: string | null
+  expectedCalculationVersion: number | null
   userId: string
   workDate: string
   sourceStatus: string
@@ -11315,6 +11354,8 @@ interface AttendanceShift {
   segments?: AttendanceShiftSegment[]
   calculationMode?: 'envelope' | 'segments'
   plannedMinutes?: number
+  flexPolicy?: AttendanceShiftFlexPolicy
+  flexEligible?: boolean
   capabilities?: AttendanceShiftSegmentCapabilities
 }
 
@@ -11858,6 +11899,7 @@ const ruleTemplateLoading = ref(false)
 const ruleTemplateSaving = ref(false)
 const ruleTemplateRestoring = ref(false)
 const attendanceGroupLoading = ref(false)
+let attendanceGroupLoadGeneration = 0
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
@@ -14046,6 +14088,33 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
   )
 )
 
+function openAttendanceGroupRoute(
+  step: AttendanceGroupRouteStep,
+  surface: AttendanceGroupRouteSurface | null,
+): void {
+  const groupId = String(props.routeGroupContext?.group.id || attendanceGroupEditingId.value || '').trim()
+  if (!groupId) return
+  emit('open-group-route', { groupId, step, surface })
+}
+
+function attendanceGroupSummaryRouteTarget(actionKey: string): {
+  step: AttendanceGroupRouteStep
+  surface: AttendanceGroupRouteSurface | null
+} | null {
+  switch (actionKey) {
+    case 'open-shifts':
+      return { step: 'schedule', surface: 'shifts' }
+    case 'open-assignments':
+      return { step: 'schedule', surface: 'assignments' }
+    case 'open-advanced-scheduling':
+      return { step: 'schedule', surface: 'advanced-scheduling' }
+    case 'open-rule-sets':
+      return { step: 'rules', surface: 'rule-sets' }
+    default:
+      return null
+  }
+}
+
 function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction) {
   if (action.drawer === 'rule-policy') {
     openAttendanceGroupRulePolicyDrawer()
@@ -14057,6 +14126,11 @@ function handleAttendanceGroupSummaryAction(action: AttendanceGroupSummaryAction
   }
   if (action.drawer === 'punch-method') {
     openAttendanceGroupPunchMethodDrawer()
+    return
+  }
+  const routeTarget = attendanceGroupSummaryRouteTarget(action.key)
+  if (routeTarget) {
+    openAttendanceGroupRoute(routeTarget.step, routeTarget.surface)
     return
   }
   if (action.sectionId) {
@@ -14646,6 +14720,7 @@ const {
 // gates hash-restore/scroll-spy/keyboard-nav so a hidden workspace doesn't
 // silently mutate `adminActiveSectionId` or scroll behind the task home.
 function hasExplicitAdminSectionTarget(): boolean {
+  if (props.routeGroupContext) return true
   if (isKnownAdminSectionId(props.initialSectionId.trim())) return true
   if (typeof window === 'undefined') return false
   return isKnownAdminSectionId(window.location.hash.replace(/^#/, '').trim())
@@ -14653,6 +14728,7 @@ function hasExplicitAdminSectionTarget(): boolean {
 
 const adminTaskHomeOpen = ref(!hasExplicitAdminSectionTarget())
 const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHomeOpen.value)
+const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 
 // W4-1 (Wave 4 onboarding design-lock §6/§9 W4-1): seven-step setup-readiness wizard shell.
 // The composable owns fetch/state; this parent only wires load triggers + canonical navigation
@@ -14937,6 +15013,7 @@ function applySetupTemplate(): void {
       endTime: plan.shift.workEndTime,
       endDayOffset: plan.shift.workEndTime <= plan.shift.workStartTime ? 1 : 0,
     }])
+    shiftForm.flexPolicy = defaultAttendanceShiftFlexPolicy()
     shiftForm.lateGraceMinutes = plan.shift.lateGraceMinutes
     shiftForm.earlyGraceMinutes = plan.shift.earlyGraceMinutes
     shiftForm.roundingMinutes = plan.shift.roundingMinutes
@@ -15050,6 +15127,7 @@ const {
   showAdmin,
   adminForbidden,
   adminNavigationEnabled: showAdminSectionWorkspace,
+  adminRouteOwned: routeGroupContextActive,
   adminFocusCurrentSectionOnly: adminFocusedMode,
   previousAdminSectionId: computed(() => previousAdminSectionNavItem.value?.id ?? ''),
   nextAdminSectionId: computed(() => nextAdminSectionNavItem.value?.id ?? ''),
@@ -15276,6 +15354,10 @@ function showAdminTaskHome(): void {
 }
 
 async function focusInitialAttendanceSection(): Promise<void> {
+  if (showAdmin.value && props.routeGroupContext) {
+    hydrateAttendanceGroupFromRoute(props.routeGroupContext)
+    return
+  }
   const targetId = props.initialSectionId.trim()
   if (!targetId || !attendancePluginActive.value) return
 
@@ -15918,6 +16000,7 @@ const shiftForm = reactive({
       endDayOffset: 0,
     },
   ] as AttendanceShiftSegmentDraft[],
+  flexPolicy: defaultAttendanceShiftFlexPolicy() as AttendanceShiftFlexPolicy,
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
   roundingMinutes: 5,
@@ -16886,10 +16969,24 @@ async function ensureAttendanceResultEditCapability(): Promise<boolean> {
 }
 
 function attendanceResultEditIdempotencyKey(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  } catch { /* fall through */ }
-  return `attendance-result-edit-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+  const cryptoApi = globalThis.crypto as {
+    randomUUID?: () => string
+    getRandomValues?: <T extends ArrayBufferView>(array: T) => T
+  } | undefined
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
+
+  const bytes = new Uint8Array(16)
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 function normalizeAttendanceResultStatus(value: unknown): string {
@@ -16990,6 +17087,8 @@ async function openResultEditModal(item: AttendanceAnomaly): Promise<void> {
   attendanceResultEditModal.open = true
   attendanceResultEditModal.snapshot = {
     recordId: item.recordId,
+    expectedCalculationId: item.expectedCalculationId,
+    expectedCalculationVersion: item.expectedCalculationVersion,
     userId: normalizedUserId() ?? currentUserId.value ?? '',
     workDate: item.workDate,
     sourceStatus: normalizeAttendanceResultStatus(item.status),
@@ -17044,6 +17143,8 @@ async function submitResultEditModal(): Promise<void> {
     const body = {
       orgId: normalizedOrgId(),
       recordId: snapshot.recordId,
+      expectedCalculationId: snapshot.expectedCalculationId,
+      expectedCalculationVersion: snapshot.expectedCalculationVersion,
       targetStatus: attendanceResultEditModal.targetStatus,
       reason: attendanceResultEditModal.reason.trim() || undefined,
       evidence: buildAttendanceResultEditEvidence(),
@@ -17180,6 +17281,8 @@ async function openBatchAnomalyModal(): Promise<void> {
     batchClientId: attendanceResultEditIdempotencyKey(),
     rows: rows.map(item => ({
       recordId: item.recordId,
+      expectedCalculationId: item.expectedCalculationId,
+      expectedCalculationVersion: item.expectedCalculationVersion,
       workDate: item.workDate,
       targetUserId: normalizedUserId() ?? currentUserId.value ?? '',
       sourceStatus: normalizeAttendanceResultStatus(item.status),
@@ -17223,6 +17326,8 @@ async function submitBatchAnomalyModal(): Promise<void> {
           const body = {
             orgId: normalizedOrgId(),
             recordId: row.recordId,
+            expectedCalculationId: row.expectedCalculationId,
+            expectedCalculationVersion: row.expectedCalculationVersion,
             targetStatus,
             reason,
             evidence,
@@ -26273,8 +26378,17 @@ function syncShiftEnvelopeFields(): void {
 }
 
 const shiftSegmentAnalysis = computed(() => analyzeAttendanceShiftSegments(shiftForm.segments, tr))
+const shiftFlexAnalysis = computed(() => analyzeAttendanceShiftFlexPolicy(
+  shiftForm.flexPolicy,
+  shiftForm.segments.length,
+  tr,
+  shiftForm.segments[0]?.startTime ?? null,
+))
 
-const shiftSegmentValidationErrors = computed(() => shiftSegmentAnalysis.value.errors)
+const shiftSegmentValidationErrors = computed(() => [
+  ...shiftSegmentAnalysis.value.errors,
+  ...shiftFlexAnalysis.value.errors,
+])
 const editingShift = computed(() => (
   shiftEditingId.value
     ? shifts.value.find(shift => shift.id === shiftEditingId.value) ?? null
@@ -26290,7 +26404,14 @@ function shiftSegmentsLabel(shift: AttendanceShift): string {
   return formatAttendanceShiftSegments(shift, tr)
 }
 
+function shiftFlexLabel(shift: AttendanceShift): string {
+  return formatAttendanceShiftFlexPolicy(shift.flexPolicy, tr)
+}
+
 function shiftPlannedMinutes(shift: AttendanceShift): number {
+  if (shift.flexPolicy?.mode === 'flex_required_duration') {
+    return shift.plannedMinutes ?? shift.flexPolicy.requiredMinutes
+  }
   return calculateAttendanceShiftPlannedMinutes(shift)
 }
 
@@ -26313,6 +26434,7 @@ function resetShiftForm() {
     endTime: '18:00',
     endDayOffset: 0,
   }])
+  shiftForm.flexPolicy = defaultAttendanceShiftFlexPolicy()
   shiftForm.lateGraceMinutes = 10
   shiftForm.earlyGraceMinutes = 10
   shiftForm.roundingMinutes = 5
@@ -26326,6 +26448,7 @@ function editShift(shift: AttendanceShift) {
   shiftForm.workStartTime = shift.workStartTime
   shiftForm.workEndTime = shift.workEndTime
   replaceShiftSegments(normalizeAttendanceShiftSegments(shift))
+  shiftForm.flexPolicy = normalizeAttendanceShiftFlexPolicy(shift.flexPolicy)
   shiftForm.lateGraceMinutes = shift.lateGraceMinutes
   shiftForm.earlyGraceMinutes = shift.earlyGraceMinutes
   shiftForm.roundingMinutes = shift.roundingMinutes
@@ -26371,6 +26494,16 @@ async function saveShift() {
   shiftSaving.value = true
   const isEditing = Boolean(shiftEditingId.value)
   try {
+    const flexPolicyPayload = shiftForm.flexPolicy.mode === 'strict'
+      ? { mode: 'strict' as const }
+      : {
+          mode: 'flex_required_duration' as const,
+          requiredMinutes: Number(shiftForm.flexPolicy.requiredMinutes) || 0,
+          arrivalWindowBeforeMinutes: Number(shiftForm.flexPolicy.arrivalWindowBeforeMinutes) || 0,
+          arrivalWindowAfterMinutes: Number(shiftForm.flexPolicy.arrivalWindowAfterMinutes) || 0,
+          coreStartTime: shiftForm.flexPolicy.coreStartTime || null,
+          coreEndTime: shiftForm.flexPolicy.coreEndTime || null,
+        }
     const payload = {
       name: shiftForm.name,
       timezone: shiftForm.timezone,
@@ -26381,6 +26514,7 @@ async function saveShift() {
         endTime: segment.endTime,
         endDayOffset: segment.endDayOffset,
       })),
+      flexPolicy: flexPolicyPayload,
       lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,
       earlyGraceMinutes: Number(shiftForm.earlyGraceMinutes) || 0,
       roundingMinutes: Number(shiftForm.roundingMinutes) || 0,
@@ -27113,8 +27247,8 @@ function resetAttendanceGroupFixedSchedulePreview() {
   attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0]?.id ?? attendanceGroupFixedSchedulePreviewForm.shiftId
 }
 
-function editAttendanceGroup(item: AttendanceGroup) {
-  attendanceGroupActiveStage.value = 'basics'
+function editAttendanceGroup(item: AttendanceGroup, stage: AttendanceGroupWorkflowStage = 'basics') {
+  attendanceGroupActiveStage.value = stage
   const groupChanged = attendanceGroupMemberGroupId.value !== item.id
   attendanceGroupEditingId.value = item.id
   attendanceGroupForm.name = item.name
@@ -27142,6 +27276,21 @@ function startCreateAttendanceGroup() {
 
 function selectAttendanceGroup(item: AttendanceGroup) {
   editAttendanceGroup(item)
+}
+
+function hydrateAttendanceGroupFromRoute(context: NonNullable<typeof props.routeGroupContext>, group = context.group): void {
+  const hydration = hydrateAttendanceGroupRoute({
+    groups: attendanceGroups.value,
+    total: attendanceGroupsTotal.value,
+    group,
+    step: context.step,
+    surface: context.surface,
+    currentStage: attendanceGroupActiveStage.value,
+  })
+  attendanceGroups.value = hydration.groups
+  attendanceGroupsTotal.value = hydration.total
+  editAttendanceGroup(group, hydration.stage)
+  selectAdminSection(hydration.section)
 }
 
 function selectAttendanceGroupStage(stage: AttendanceGroupWorkflowStage): void {
@@ -27237,7 +27386,7 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
     adminForbidden.value = false
     const copiedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
-    if (copiedGroup?.id) {
+    if (copiedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(group => group.id === copiedGroup.id) ?? copiedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27250,22 +27399,38 @@ async function copyAttendanceGroup(item: AttendanceGroup) {
 }
 
 async function loadAttendanceGroups() {
+  const generation = ++attendanceGroupLoadGeneration
   attendanceGroupLoading.value = true
   try {
+    const previousRouteGroup = props.routeGroupContext
+      ? attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
+      : undefined
     const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
+    if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
+    if (generation !== attendanceGroupLoadGeneration) return
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
-    const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
+    if (props.routeGroupContext) {
+      const listedGroup = attendanceGroups.value.find(item => item.id === props.routeGroupContext?.group.id)
+      hydrateAttendanceGroupFromRoute(
+        props.routeGroupContext,
+        listedGroup
+          ? { ...props.routeGroupContext.group, ...listedGroup }
+          : previousRouteGroup ?? props.routeGroupContext.group,
+      )
+      return
+    }
+    const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
     if (selected) {
       editAttendanceGroup(selected)
@@ -27275,9 +27440,12 @@ async function loadAttendanceGroups() {
       resetAttendanceGroupForm()
     }
   } catch (error: any) {
+    if (generation !== attendanceGroupLoadGeneration) return
     setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
-    attendanceGroupLoading.value = false
+    if (generation === attendanceGroupLoadGeneration) {
+      attendanceGroupLoading.value = false
+    }
   }
 }
 
@@ -27319,8 +27487,11 @@ async function saveAttendanceGroup() {
     // populated instead of resetting, so the reset-side clear never fires here).
     clearSetupTemplatePrefillPending('group')
     const savedGroup = data.data as AttendanceGroup | undefined
+    if (savedGroup?.id && props.routeGroupContext?.group.id === savedGroup.id) {
+      hydrateAttendanceGroupFromRoute(props.routeGroupContext, savedGroup)
+    }
     await loadAttendanceGroups()
-    if (savedGroup?.id) {
+    if (savedGroup?.id && !props.routeGroupContext) {
       const freshGroup = attendanceGroups.value.find(item => item.id === savedGroup.id) ?? savedGroup
       editAttendanceGroup(freshGroup)
     }
@@ -27872,6 +28043,11 @@ async function deleteAttendanceGroup(id: string) {
       throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
     adminForbidden.value = false
+    if (props.routeGroupContext?.group.id === id) {
+      setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
+      emit('clear-section')
+      return
+    }
     await loadAttendanceGroups()
     if (attendanceGroupEditingId.value === id) {
       const nextGroup = attendanceGroups.value[0]
@@ -28956,8 +29132,30 @@ watch(recordStatusBreakdown, (items) => {
 }, { immediate: true })
 
 watch(
-  () => [props.initialSectionId, props.initialRequestId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => [
+    props.initialSectionId,
+    props.initialRequestId,
+    showAdmin.value,
+    showOverview.value,
+    showReports.value,
+    adminForbidden.value,
+    attendancePluginActive.value,
+  ] as const,
   () => {
+    if (props.routeGroupContext) return
+    void focusInitialAttendanceSection()
+  },
+  { immediate: true },
+)
+
+watch(
+  [
+    () => props.routeGroupContext?.group.id,
+    () => props.routeGroupContext?.step,
+    () => props.routeGroupContext?.surface,
+  ],
+  () => {
+    if (!props.routeGroupContext) return
     void focusInitialAttendanceSection()
   },
   { immediate: true },
@@ -28978,12 +29176,12 @@ watch(
   },
 )
 
-watch(attendanceGroupMemberGroupId, () => {
-  if (attendancePluginActive.value) {
+watch([attendanceGroupMemberGroupId, attendancePluginActive], ([, pluginActive]) => {
+  if (pluginActive) {
     loadAttendanceGroupMembers()
     loadAttendanceGroupManagers()
   }
-})
+}, { immediate: true })
 
 watch(
   () => [

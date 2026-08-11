@@ -435,6 +435,12 @@ module.exports = {
   ReadSourceConfigNotApprovedError,
   createReadSourceConfigStore,
   isFirstPartyReadSourceConfigStore,
+  // PUBLIC (review round 7, P2-5). The C6 B4-binding gate needs the content key on a LIVE path
+  // that runs on both dry-run and apply, and this package already ruled — `read-source-config.cjs`
+  // lines 18-22, review B1a-1 P2 — that a live save path must not depend on another module's
+  // private/test surface. Promoted rather than reached into: `__internals` keeps its alias so
+  // existing test importers are unaffected, but the live consumer binds to a supported name.
+  contentKeyFor,
   __internals: {
     contentKeyFor,
     stableStringify,

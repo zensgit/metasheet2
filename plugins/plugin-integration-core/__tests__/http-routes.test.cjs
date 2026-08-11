@@ -3,6 +3,17 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 
+// MODEL THE PRODUCT, NOT A CONVENIENCE. The real `getExternalSystem` is the PUBLIC accessor and
+// STRIPS credentials; only `getExternalSystemForAdapter` returns them. These fixtures used to hand
+// back the whole object, so every C6 test was green while the product loaded an adapter-backed
+// target with NO credentials — the dry-run died with K3_WISE_CREDENTIALS_MISSING before any wire
+// call, and five review rounds never saw it because the mock was more permissive than production.
+function publicTargetView(system) {
+  if (!system) return null
+  const { credentials, credentialsEncrypted, ...publicView } = system
+  return { ...publicView, hasCredentials: Boolean(credentials || credentialsEncrypted) }
+}
+
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
@@ -609,6 +620,44 @@ async function testUnauthenticatedWriteRequestIsRejected() {
 
   assertErrorResponse(res, [401, 403])
   assert.equal(calls.length, 0, 'unauthenticated write did not reach services')
+}
+
+async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
+  const { services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  const routePath = '/api/integration/internal/k3-wise/call-audit'
+  assert.ok(registered.includes(`GET ${routePath}`), 'K3 values-free call-audit route registered')
+
+  for (const user of [undefined, READ_USER, WRITE_USER]) {
+    const denied = await invoke(routes, 'GET', routePath, { user })
+    assertErrorResponse(denied, user ? [403] : [401])
+  }
+
+  const allowed = await invoke(routes, 'GET', routePath, { user: ADMIN_USER })
+  assertOkResponse(allowed, 200)
+  assert.equal(allowed.body.data.version, '2026.08.v2')
+  assert.equal(allowed.body.data.scope, 'process')
+  assert.match(allowed.body.data.processEpoch, /^[0-9a-f]{32}$/)
+  assert.deepEqual(Object.keys(allowed.body.data.counts), [
+    'materialGetDetail',
+    'materialGetList',
+    'materialSave',
+    'materialSubmit',
+    'materialAudit',
+    'otherRead',
+    'otherLifecycleWrite',
+  ])
+  assert.ok(Object.values(allowed.body.data.counts).every(Number.isSafeInteger))
+  const serialized = JSON.stringify(allowed.body.data)
+  for (const forbidden of ['url', 'path', 'query', 'credential', 'request', 'response', 'tenant']) {
+    assert.equal(serialized.toLowerCase().includes(forbidden), false, `audit response excludes ${forbidden}`)
+  }
+
+  const crossTenant = await invoke(routes, 'GET', routePath, {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenant, [403])
 }
 
 async function testExternalSystemRoutes() {
@@ -1645,7 +1694,7 @@ async function testPipelineExternalWriteDryRunRoute() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -1816,7 +1865,7 @@ async function testPipelineExternalWriteApplyRoute() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -1879,7 +1928,24 @@ async function testPipelineExternalWriteApplyRoute() {
     'external-write apply route registered',
   )
 
-  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = ' true '
+  try {
+    const disabled = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+      user: WRITE_USER,
+      params: { id: pipeline.id },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: 'must-not-be-consumed' } },
+    })
+    assert.equal(disabled.statusCode, 403)
+    assert.equal(disabled.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'deployment read-only gate refuses before loading pipeline/systems/adapters')
+    assert.equal(storage.map.size, 0, 'deployment read-only gate cannot consume a token')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  try {
+    let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
     user: WRITE_USER,
     params: { id: pipeline.id },
     body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: {} },
@@ -1980,7 +2046,11 @@ async function testPipelineExternalWriteApplyRoute() {
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
-  assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+    assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
@@ -2033,7 +2103,7 @@ async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
         return null
       },
       async getExternalSystem(input) {
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -2259,7 +2329,7 @@ async function testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance() {
       },
       async getExternalSystem(input) {
         calls.push(['getExternalSystem', input])
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -2450,7 +2520,7 @@ async function testPipelineExternalWriteApplyDoesNotOverstateProvenancePersisten
         return null
       },
       async getExternalSystem(input) {
-        if (input.id === targetSystem.id) return { ...targetSystem }
+        if (input.id === targetSystem.id) return publicTargetView(targetSystem)
         return null
       },
     },
@@ -5196,7 +5266,7 @@ async function testTableActionConflictPolicyRoutes() {
       conflictPolicyReview: {
         conflictType: 'duplicate_expanded_key',
         scope: 'run_only',
-        policies: [{ fingerprint, policy: 'skip_selected' }],
+        policies: [{ fingerprint, policy: 'source_correction_required' }],
       },
     },
   })
@@ -5204,7 +5274,7 @@ async function testTableActionConflictPolicyRoutes() {
   assert.equal(res.body.data.counts.manual_confirm, 1, 'policy review does not release duplicate rows from manual_confirm')
   const review = res.body.data.evidence.plan.conflictPolicyReview
   assert.equal(review.writeEffect, 'manual_confirm_held')
-  assert.equal(review.selectedPolicies[0].policy, 'skip_selected', 'run-only policy overrides table-scope evidence')
+  assert.equal(review.selectedPolicies[0].policy, 'source_correction_required', 'run-only policy overrides table-scope evidence')
   assert.equal(review.selectedPolicies[0].scope, 'run_only')
   assert.equal(JSON.stringify(review).includes('P-001'), false, 'policy evidence is values-free')
   const token = res.body.data.dryRunToken
@@ -5218,12 +5288,84 @@ async function testTableActionConflictPolicyRoutes() {
       conflictPolicyReview: {
         conflictType: 'duplicate_expanded_key',
         scope: 'run_only',
-        policies: [{ fingerprint, policy: 'skip_selected' }],
+        policies: [{ fingerprint, policy: 'source_correction_required' }],
       },
     },
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply rejects client-supplied conflict policy review')
+
+  // POLICY HONESTY at the route boundary: selecting an unimplemented duplicate policy fails 422 with
+  // a named code, on BOTH the run-only (dry-run body) and table-scope (admin PUT) selection paths.
+  // Previously the API accepted all six tokens and the three inert ones silently held the rows.
+  for (const policy of ['merge_quantity', 'select_representative', 'skip_selected']) {
+    res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: READ_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: {
+        parameters: { projectNo: 'P-001' },
+        conflictPolicyReview: {
+          conflictType: 'duplicate_expanded_key',
+          scope: 'run_only',
+          policies: [{ fingerprint, policy }],
+        },
+      },
+    })
+    assert.equal(res.statusCode, 422, `dry-run must refuse run-only ${policy}`)
+    assert.equal(res.body.error.code, 'CONFLICT_POLICY_NOT_IMPLEMENTED')
+    assert.deepEqual(res.body.error.details.allowedPolicies, ['hold', 'keep_multiple_rows', 'source_correction_required'])
+
+    res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { conflictType: 'duplicate_expanded_key', policies: [{ fingerprint, policy }] },
+    })
+    assert.equal(res.statusCode, 422, `table-scope save must refuse ${policy}`)
+    assert.equal(res.body.error.code, 'CONFLICT_POLICY_NOT_IMPLEMENTED')
+  }
+
+  // POSITIVE CONTROL at the route boundary — the working policies still go through both paths, so
+  // the assertions above are not passing merely because everything is refused.
+  for (const policy of ['hold', 'keep_multiple_rows', 'source_correction_required']) {
+    res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: READ_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: {
+        parameters: { projectNo: 'P-001' },
+        conflictPolicyReview: {
+          conflictType: 'duplicate_expanded_key',
+          scope: 'run_only',
+          policies: [{ fingerprint, policy }],
+        },
+      },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(
+      res.body.data.evidence.plan.conflictPolicyReview.selectedPolicies[0].policy,
+      policy,
+      `run-only ${policy} must still be accepted`,
+    )
+
+    res = await invoke(routes, 'PUT', '/api/integration/table-actions/:actionId/conflict-policies', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { conflictType: 'duplicate_expanded_key', policies: [{ fingerprint, policy }] },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.policies[0].policy, policy, `table-scope ${policy} must still be accepted`)
+  }
+
+  // The dry-run diagnostics stop advertising the three refused tokens as choices, but still name
+  // them so a stored selection can be explained rather than rendered as an unknown value.
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  const honestyDiagnostics = res.body.data.evidence.plan.duplicateExpandedKeyDiagnostics
+  assert.deepEqual(honestyDiagnostics.allowedPolicies, ['hold', 'keep_multiple_rows', 'source_correction_required'])
+  assert.deepEqual(honestyDiagnostics.unimplementedPolicies, ['merge_quantity', 'select_representative', 'skip_selected'])
 
   res = await invoke(routes, 'DELETE', '/api/integration/table-actions/:actionId/conflict-policies', {
     user: ADMIN_USER,
@@ -5526,7 +5668,7 @@ async function testPipelineExternalWriteMultitableRoute() {
   const { services } = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) { calls.push(['getExternalSystemForAdapter', input]); return input.id === sourceSystem.id ? { ...sourceSystem } : null },
-      async getExternalSystem(input) { calls.push(['getExternalSystem', input]); return input.id === targetSystem.id ? { ...targetSystem } : null },
+      async getExternalSystem(input) { calls.push(['getExternalSystem', input]); return input.id === targetSystem.id ? publicTargetView(targetSystem) : null },
     },
     adapterRegistry: {
       createAdapter(system, deps) {
@@ -5894,7 +6036,7 @@ async function testReadSmokeRoute() {
     readMode: 'list',
     readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
     readListBodyKey: 'Data',
-    readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
+    readListFields: ['FItemID', 'FNumber', 'FName', 'FModel', 'FUnitID'],
     readListOrderBy: 'FNumber',
     readListFilterField: 'FNumber',
     readListFilterMode: 'contains_like',
@@ -8301,9 +8443,147 @@ async function testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse() {
   console.log('  testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse OK')
 }
 
+async function testStockPreparationSqlServerSealedSnapshotInternalRoute() {
+  const routePath =
+    '/api/integration/internal/stock-preparation/sqlserver-sealed-snapshot/run'
+  const withoutRuntime = createMockServices()
+  const disabled = mountRoutes(withoutRuntime.services)
+  assert.equal(
+    disabled.routes.has(`POST ${routePath}`),
+    false,
+    'flag-off construction does not register the controlled runtime route',
+  )
+
+  const calls = []
+  const withRuntime = createMockServices({
+    stockPreparationSqlServerRuntime: {
+      async run(input) {
+        calls.push(input)
+        return Object.freeze({
+          externalWrite: false,
+          mode: 'internal_persist',
+          status: 'COMPLETED',
+          valuesFree: true,
+        })
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(withRuntime.services)
+  assert.ok(registered.includes(`POST ${routePath}`))
+  const admin = {
+    id: 'admin-1',
+    permissions: ['integration:admin'],
+    tenantId: 'tenant-1',
+  }
+  const accepted = await invoke(routes, 'POST', routePath, {
+    body: { operationId: 'operation-1' },
+    user: admin,
+  })
+  assertOkResponse(accepted, 200)
+  assert.deepEqual(calls, [{
+    actor: 'admin-1',
+    operationId: 'operation-1',
+    tenantId: 'tenant-1',
+    workspaceId: null,
+  }])
+  assert.equal(accepted.body.data.externalWrite, false)
+
+  for (const invalid of [
+    { body: { operationId: 'operation-2', table: 'dbo.bom' } },
+    { body: { operationId: 'operation-2', sql: 'SELECT 1' } },
+    { body: { operationId: 'operation-2' }, query: { tenantId: 'other' } },
+    { body: { operationId: ' operation-2' } },
+  ]) {
+    const before = calls.length
+    const refused = await invoke(routes, 'POST', routePath, {
+      user: admin,
+      ...invalid,
+    })
+    assert.equal(refused.statusCode, 400)
+    assert.equal(
+      refused.body.error.code,
+      'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_REQUEST_INVALID',
+    )
+    assert.equal(calls.length, before, 'invalid input never reaches runtime')
+  }
+
+  const nonAdmin = await invoke(routes, 'POST', routePath, {
+    body: { operationId: 'operation-3' },
+    user: {
+      id: 'reader-1',
+      permissions: ['integration:read'],
+      tenantId: 'tenant-1',
+    },
+  })
+  assert.equal(nonAdmin.statusCode, 403)
+  assert.equal(calls.length, 1)
+}
+
+async function testC6AdapterBackedTargetLoadsWithCredentials() {
+  // The C6 route loaded the SOURCE via getExternalSystemForAdapter but the TARGET via
+  // getExternalSystem — the PUBLIC accessor, which STRIPS credentials. For targets served by
+  // dataSourceWrites (SQL write-gated, multitable) that is correct and deliberate. For an
+  // ADAPTER-BACKED target it is fatal: the K3 write source builds a real adapter, which then
+  // throws K3_WISE_CREDENTIALS_MISSING before a single wire call.
+  //
+  // No existing test caught it: none used an adapter-backed target, AND the fixtures returned the
+  // whole system from getExternalSystem — a mock more permissive than production. This asserts the
+  // ACCESSOR CHOICE, which is the property, rather than a downstream symptom.
+  const routesSrc = require('node:fs').readFileSync(HTTP_ROUTES_PATH, 'utf8')
+  assert.ok(
+    /ADAPTER_BACKED_C6_TARGET_KINDS\s*=\s*new Set\(\[K3_WISE_C6_WRITE_TARGET_KIND\]\)/.test(routesSrc),
+    'the route must declare which C6 target kinds build an adapter',
+  )
+  assert.ok(
+    /getExternalSystemForAdapter\(targetSystemScope\)/.test(routesSrc),
+    'an adapter-backed C6 target must be re-loaded through the adapter-capable accessor',
+  )
+  // Both C6 handlers (dry-run and apply) must do it — one alone leaves apply broken.
+  const reloads = (routesSrc.match(/getExternalSystemForAdapter\(targetSystemScope\)/g) || []).length
+  assert.equal(reloads, 2, `both C6 handlers must re-load the target (found ${reloads})`)
+
+  // Behavioural half: the selection logic the route performs, against a registry that strips
+  // credentials exactly like production.
+  const targetSystem = {
+    id: 'k3_target', tenantId: 'tenant_1', kind: 'erp:k3-wise-webapi', role: 'target',
+    status: 'active', config: { baseUrl: 'https://k3.example.test' },
+    credentials: { username: 'u', password: 'p', acctId: 'A' },
+  }
+  const seen = []
+  const registry = {
+    async getExternalSystemForAdapter(input) { seen.push(['forAdapter', input.id]); return { ...targetSystem } },
+    async getExternalSystem(input) { seen.push(['public', input.id]); return publicTargetView(targetSystem) },
+  }
+  const ADAPTER_BACKED = new Set(['erp:k3-wise-webapi'])
+  const scope = { id: targetSystem.id, tenantId: 'tenant_1', workspaceId: null }
+  let loaded = await registry.getExternalSystem(scope)
+  assert.equal(loaded.credentials, undefined, 'precondition: the public accessor strips credentials')
+  if (loaded && ADAPTER_BACKED.has(loaded.kind)) loaded = await registry.getExternalSystemForAdapter(scope)
+  assert.ok(loaded.credentials, 'an adapter-backed C6 target MUST end up with credentials')
+
+  // POSITIVE CONTROL — a dataSourceWrites target must NOT reach the credentialed accessor.
+  const sqlTarget = { ...targetSystem, id: 'sql_target', kind: 'data-source:sql-write-gated' }
+  const seen2 = []
+  const registry2 = {
+    async getExternalSystemForAdapter(input) { seen2.push(['forAdapter', input.id]); return { ...sqlTarget } },
+    async getExternalSystem(input) { seen2.push(['public', input.id]); return publicTargetView(sqlTarget) },
+  }
+  let loaded2 = await registry2.getExternalSystem({ id: sqlTarget.id })
+  if (loaded2 && ADAPTER_BACKED.has(loaded2.kind)) loaded2 = await registry2.getExternalSystemForAdapter({ id: sqlTarget.id })
+  assert.equal(loaded2.credentials, undefined, 'a dataSourceWrites target stays config-only')
+  assert.equal(seen2.some(([fn]) => fn === 'forAdapter'), false,
+    'the credentialed accessor must NOT be reached for a non-adapter-backed target')
+  console.log('  PASS  C6 adapter-backed target loads with credentials')
+}
+
 async function main() {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  try {
+  await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
+  await testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testStockPreparationErpMaterialSyncRoute()
@@ -8342,6 +8622,7 @@ async function main() {
   await testStockPreparationPlmSourceRunAutoPersistLineStatus()
   await testStockPreparationPlmSourceRunAutoPersistOffInert()
   await testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse()
+  await testStockPreparationSqlServerSealedSnapshotInternalRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
@@ -8378,6 +8659,10 @@ async function main() {
   await testStagingInstallSteeringHasNoEffect()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 // W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write

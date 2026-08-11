@@ -41,6 +41,14 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      // Sealed-export S3 private ingestion concurrency + transactional recovery golden. It
+      // applies migration 068 in an isolated schema and requires real PostgreSQL behavior;
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
+      'tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts',
+      // Sealed-export S4 generation lease/CAS, inactive apply and visibility golden. It
+      // applies migrations 068+069 in an isolated schema and requires real PostgreSQL;
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
+      'tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -219,6 +227,32 @@ export default defineConfig({
       // wired into the approval real-DB step (both points asserted by
       // scripts/ops/directory-grant-table-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-grant-table.db.test.ts',
+      // OPS-01 superseded creation-effect compensation: full deprovision/OAuth chain,
+      // provenance drift, live-evidence veto, idempotency, and a two-connection user-mutex
+      // barrier. Wired beside the grant-table suite and pinned by the same wiring contract.
+      'tests/integration/directory-deprovision-compensation.db.test.ts',
+      // T3 activation source read serialises against a concurrent integration deactivation
+      // (post-merge review P1, FOR SHARE). Constructed pg_locks race — meaningless without a DB.
+      // DATABASE_URL-gated; excluded so the no-DB job cannot skip-green; whole-file wired into
+      // the approval real-DB step (both points self-asserted inside the suite).
+      'tests/integration/directory-activation-source-lock.db.test.ts',
+      // D3 Rev 4.3 evidence-ledger migration: isolated-schema upgrade, replay with evidence,
+      // fail-before-DDL weak-data guard, FK/trigger invariants, and ownership-safe down.
+      // DATABASE_URL-gated; excluded here and wired as a whole file into the approval real-DB
+      // step, with both points pinned by directory-deprovision-ledger-ci-wiring.test.mjs.
+      'tests/integration/directory-deprovision-ledger-schema.db.test.ts',
+      // D4 access-graph writer + evidence are one transaction: real committed state, cross-org
+      // split, default-off/zero-effect no-write, and fail-last ledger rollback. DATABASE_URL-gated;
+      // excluded here and whole-file wired into the approval real-DB step.
+      'tests/integration/directory-deprovision-writer-ledger.db.test.ts',
+      // D4 two-connection goldens (adversarial-review absorption): the deterministic
+      // lock-wait race that proved the stale globally-clear P1, and the §5.4 supersede
+      // both-legs golden. DATABASE_URL-gated; whole-file wired into the approval real-DB step.
+      'tests/integration/directory-deprovision-race-supersede.db.test.ts',
+      // D5 canonical per-user access-graph mutex: supersede+generation atomicity, rollback,
+      // and a pg_blocking_pids row-lock barrier. DATABASE_URL-gated; excluded here and
+      // whole-file wired into the approval real-DB step.
+      'tests/integration/directory-access-graph-mutex.db.test.ts',
       // DingTalk multi-corp external-key isolation: corp-scoped uniqueness, upgrade migration,
       // real-sync coexistence, and same-corp/cross-corp identity matching controls.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
@@ -462,6 +496,9 @@ export default defineConfig({
       // #4561 W1: database exclusion/concurrency and effective-date transition proof.
       // Kept out of the no-DB run and explicitly wired into plugin-tests.yml.
       'tests/integration/attendance-calculation-group-membership-w1.db.test.ts',
+      // #4710: isolated scratch-database proof for the SELECT-only legacy overlap audit.
+      // Explicitly wired into the attendance real-DB step; exclusion prevents skip-green.
+      'tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts',
       // #4556 W2: shared work-date resolver real-DB matrix (overlap precedence, overnight,
       // multi-shift ambiguity, frozen recompute, overtime anchor, adapter parity).
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
@@ -504,6 +541,196 @@ export default defineConfig({
       // excluded here so the no-DB job cannot skip-green it; wired whole-file into
       // the attendance real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
+      // #4556 W4C-2 (#4607 P3-4): strict IANA timezone WRITE-route guard for
+      // default-rule/shift zones through the host-provided
+      // attendanceW4SegmentCalculation port (lock 12.2 last sentence), boot-level
+      // against the real plugin server. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts',
+      // #4556 W4C-2: outbox dispatcher gates (crash-after-commit-before-emit,
+      // restart, TRUE two-connection concurrent dispatch, emit-failure backoff)
+      // against real Postgres. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts',
+      // #4556 W4C-2: canonical live/scheduled boundary WIRING gates (route-level,
+      // real MetaSheetServer + plugin activate). DATABASE_URL-gated; excluded here
+      // so the no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring; the exclusion was
+      // missed when the suite landed and is backfilled by Stage E).
+      'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
+      // #4556 W4C-2 (#4612 gate4 P3-3): genuine live-punch race + admin_run
+      // authorization (real DB, route-level). DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point of that two-point wiring (gate4 finding:
+      // present in the run-list but absent here, so the no-DB job's
+      // "Run core-backend tests" step collected and skip-greened it every PR).
+      'tests/integration/attendance-w4c2-p2-remediation.db.test.ts',
+      // #4556 W4C-2 (#4612 gate3/gate4 P2-1 remediation): canonical/shadow
+      // live-punch freeze-step anchor correctness (real DB, route-level + real
+      // two-connection races — this is the PR's OWN main-line suite, L1-L7 +
+      // Groups D/D-overnight/E/F/F2/G). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; already wired whole-file into the
+      // `Run attendance integration tests` step in plugin-tests.yml — this exclude
+      // line was the missing SECOND point (gate4 P3-3: the PR's own primary
+      // evidence file was skip-green in the no-DB lane every PR up to this point).
+      'tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts',
+      // #4556 W4C-2: three-posture matrix + V2 freeze + env-gated outbox drain
+      // (route-level, real DB). DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml (two-point wiring; exclusion backfilled by Stage E).
+      'tests/integration/attendance-w4c2-posture-matrix.db.test.ts',
+      // #4556 W4C-2 Stage E: §12.3 residual gate matrix (W2 ambiguity review shape,
+      // V2-cast storage backstop, same-org/cross-org isolation, forged-witness
+      // zero-SQL legs, inactive membership, authoritative fail-closed, posture
+      // no-rebase, outbox-before-seal SQL-order probe, durable scheduled replay,
+      // P02 single-write discriminator). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it; wired whole-file into the attendance
+      // real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+      // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
+      // migration half: scheduled-run identity tables, the outbox discriminated union,
+      // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB
+      // half, 14 full migration matrix, 20 side-table legs). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it; wired whole-file into the
+      // attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts',
+      // W4C-2 P1-2 second half (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // run-creation/resume transaction (section 1.7), the finalization transaction
+      // (section 1.8), the O-3=(a) per-target outcome writer, the `abandoned` transition
+      // (section 1.1.2), the O-4=(a) promotion-block guard, and the recovery-sweep step
+      // function, plus TOCTOU/concurrent-finalization/concurrent-abandon real-DB legs.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it; wired
+      // whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts',
+      // W4C-2 P1-2 third suite (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the
+      // durable delivery / lock-order / atomicity gates: gates 2/3/4 (crash-before-emit
+      // posture + dispatcher-restart exactly-once + payload/wire freeze), gate 5 (legacy
+      // zero-row leg over all four W4 surfaces), gate 6 (restart completes only unfinished
+      // users), gate 7's added abandon-while-finalizer-waits leg, gate 8 injected-failure
+      // atomicity, gate 15 lock-order/no-class-11/no-source-DML witnesses (incl. the gate
+      // 19/23 extensions), gate 17 suspended pause, and gate 22/23 controls. DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it; wired whole-file into
+      // the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts',
+      // #4770 (W4C-2 recovery-sweep fairness/observability; owner ruling 2026-08-05) — the
+      // durable-rotation scan fix (gate 1: >25 persistently-blocked candidates + a healthy
+      // candidate finalizes within a bounded number of ticks; the mutation-red control is the
+      // same test reverted by hand, not automated here), a steady-state parity check, and the
+      // values-free tick/backlog/error observability shape (gate 3). Self-provisioned scratch
+      // DB per test (the scan predicate is deliberately GLOBAL, not org-scoped — a shared DB
+      // would corrupt this file's exact-count assertions). DATABASE_URL-gated; excluded here
+      // so the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-sweep-fairness.db.test.ts',
+      // #4770 — the three named call-through legs (core host sweep/abandon port wiring, the
+      // `attendance-w4-scheduled-run-sweep` scheduled job's real registration + real
+      // execution, and the abandon HTTP route's auth/org/host chain), each proven against a
+      // REAL booted MetaSheetServer + REAL plugin-attendance + REAL PostgreSQL (own freshly-
+      // migrated scratch DB, for the same global-scan isolation reason as the fairness-fix
+      // file above). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
+      // wiring).
+      'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
+      // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
+      // constraints, V1 frozen idempotency, direct-corruption congruence, and
+      // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane
+      // cannot skip-green it. The whole file is wired into the attendance
+      // real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts',
+      // W4C-3a durable plan enqueue: SERIALIZABLE authorization, reservation,
+      // revision freeze, and zero-residue failures. DATABASE_URL-gated; excluded
+      // here and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts',
+      // W4C-3a record-target precondition locks: two-connection present/missing
+      // commit-order and lock-hold proofs. DATABASE_URL-gated; excluded here so
+      // the no-DB lane cannot skip-green it. The whole file is wired into the
+      // attendance real-DB step in plugin-tests.yml.
+      'tests/integration/attendance-w4c3a-record-preconditions.db.test.ts',
+      // W4C-3a fixed record-effect adapter: exact UPDATE/INSERT branches and
+      // revision-trigger observation on migrated PostgreSQL. DATABASE_URL-gated;
+      // excluded here and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-record-effects.db.test.ts',
+      // W4C-3a fixed item-effect adapter: ordered apply/skip projection with
+      // nullable fields and jsonb[] binding. DATABASE_URL-gated; excluded here
+      // and run whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-item-effects.db.test.ts',
+      // W4C-3a P08 child-process restart recovery: process B receives only
+      // DATABASE_URL + jobId. DATABASE_URL-gated; excluded here and run
+      // whole-file by the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-p08-child-process.db.test.ts',
+      // W4C-3a OD-58 group precondition races and SQL order.
+      'tests/integration/attendance-w4c3a-group-preconditions.db.test.ts',
+      // W4C-3a OD-60 group/batch SQL count legs.
+      'tests/integration/attendance-w4c3a-group-effects.db.test.ts',
+      // W4C-3a full-import authorization recovery matrix.
+      'tests/integration/attendance-w4c3a-auth-recovery.db.test.ts',
+      // W4C-3a canonical import execution, sync/legacy/integration route cutover,
+      // append-only rollback, and rollout-control race gates. These suites require
+      // real PostgreSQL and are whole-file wired into the attendance real-DB step.
+      'tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts',
+      'tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts',
+      // W4C-3a M60 commit-token ordering uses real plugin HTTP routes and
+      // PostgreSQL. Keep it out of the no-DB lane and run the whole file in
+      // the attendance real-DB workflow step.
+      'tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts',
+      'tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts',
+      'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
+      'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
+      'tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts',
+      'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
+      'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
+      // OBS-1 (2026-08-07): the two W4C-3b suites below landed in #4716 with NEITHER wiring
+      // point — absent from every real-DB run-list AND from this exclude, so the no-DB job
+      // collected + skip-greened them and no job ever executed them. request-snapshots is the
+      // real-DB proof of the 8-cell request-snapshot precondition (#4780, a soak entry gate);
+      // central-approval is the R0 central-approval action matrix over a fully migrated DB.
+      // DATABASE_URL-gated describeIfDatabase; excluded here so the no-DB job cannot
+      // skip-green them; wired whole-file into the attendance real-DB step in plugin-tests.yml
+      // (two-point wiring).
+      'tests/integration/attendance-w4c3b-request-snapshots.db.test.ts',
+      'tests/integration/attendance-w4c3b-central-approval.db.test.ts',
+      'tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts',
+      'tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts',
+      // #4556 W4C-4 §12.7: dual-host authorization, immutable calculation-detail/
+      // DecisionTrace evidence and strict persisted-schema parsing against real Postgres.
+      // Kept out of the no-DB run and invoked by whole filename in plugin-tests.yml.
+      'tests/integration/attendance-w4c4-calculation-detail.db.test.ts',
+      // #4709 FSER-1 desired-config migration, composite FKs, idempotent writes,
+      // and reference-writer/delete lock protocol against real PostgreSQL.
+      'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
+      // #4709 FSER-2 effectiveness read model requires real PostgreSQL and is run as a
+      // whole file in the attendance real-DB workflow step.
+      'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
+      // #4709 FSER-3 first-config atomicity and true two-connection convergence require
+      // real PostgreSQL; the whole file is explicitly run in plugin-tests.yml.
+      'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
+      // #4709 FSER-4 prerequisite (member-safe self projection, contract amendment §2):
+      // real-DB authorization matrix (liveness/activation/org-membership/group-membership,
+      // cross-org isolation) and admin/self parity require real PostgreSQL; excluded here
+      // so the no-DB job cannot skip-green it, and the whole file is explicitly run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
+      // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
+      // the whole file is explicitly run in plugin-tests.yml.
+      'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
+      // OBS-1 completeness sweep (2026-08-07): the W3 shift-segments migration + writer-matrix
+      // real-DB suites were ALREADY whole-file wired into the attendance real-DB step in
+      // plugin-tests.yml, but these two exclude lines were missing (half-satisfied two-point
+      // wiring) — so the no-DB job collected and skip-greened them every PR in addition to the
+      // real run. Both points now present.
+      'tests/integration/attendance-shift-segments-migration.db.test.ts',
+      'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
+      // OBS-1 owner P1 (2026-08-08): the 加班银行 v1-5a settlement schema lock was the LAST file the
+      // derived corpus still could not see — it was named `attendance-settlement-table-v1-5a.test.ts`
+      // (outside the .db convention), carried by no run-list, and absent from this exclude, so the
+      // no-DB job was the only job that ever collected it and its `if (!dbUrl) return` self-skip
+      // green-passed there. Renamed to the .db convention, added to the attendance real-DB step's
+      // run-list, and excluded here (two-point wiring); the guard's exclusion entry for it is gone,
+      // so the completeness assertion now covers it like every other member.
+      'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
       // #4556 W2 adds route-level work-date attribution legs to this whole-file real-DB
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
@@ -516,6 +743,17 @@ export default defineConfig({
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
+      // OBS-1 completeness sweep (2026-08-07): four more non-.db attendance suites in the same
+      // half-wired state — every describe in each is describeDb-gated (verified: no ungated
+      // describe blocks), each is ALREADY whole-file wired into a real-DB step in
+      // plugin-tests.yml (csv-export-bom in the approval step; the other three in the
+      // attendance step), but these exclude lines were missing, so the no-DB job collected and
+      // skip-greened them every PR. Both points now present; zero coverage moves — the same
+      // required `test` job still runs every one of them, with a database.
+      'tests/integration/attendance-csv-export-bom.test.ts',
+      'tests/integration/attendance-files-acl.test.ts',
+      'tests/integration/attendance-import-template-prefs.test.ts',
+      'tests/integration/attendance-makeup-punch-policy.test.ts',
       // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
       // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the
       // default unit run HERE but wired as a WHOLE FILE into the dedicated
@@ -806,6 +1044,23 @@ export default defineConfig({
       // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
+      // #4783 owner review P1-1/P1-2: proves the BPMN timer poller write-gate (real
+      // bpmn_timer_jobs outcome, not a mocked db) and the WAITING -> LOCKED atomic-claim
+      // fix with a CONSTRUCTED real-Postgres race across two independent
+      // `BPMNWorkflowEngine` instances. DATABASE_URL-gated; excluded here so the no-DB
+      // default job cannot skip-green it, and wired as a WHOLE FILE into the
+      // `Run BPMN timer job write-and-claim safety` step in plugin-tests.yml.
+      'tests/integration/bpmn-timer-job-write-and-claim-safety.db.test.ts',
+      // #4783 owner review batch 2: proves startProcess()'s entry gate leaves FOUR real
+      // zeros (process/activity/incident/timer rows) — not "written then terminated" —
+      // when a timer-bearing process is started with the poller disabled, driven through
+      // the REAL HTTP surface (POST /api/workflow/deploy + POST /api/workflow/start/:key)
+      // against a real booted MetaSheetServer + fresh-migrated scratch PostgreSQL, plus a
+      // positive control that a timer-free process still starts normally. DATABASE_URL-
+      // gated; excluded here so the no-DB default job cannot skip-green it, and wired as a
+      // WHOLE FILE into the `Run BPMN startProcess poller-disabled zero-residue` step in
+      // plugin-tests.yml.
+      'tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

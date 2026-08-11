@@ -185,6 +185,46 @@ export function attendanceZoneOffsetMinutesAtV1(zone: string, epochMs: number): 
   return Math.round((wallAsUtc - wholeSecondEpoch) / 60_000)
 }
 
+export interface AttendanceInstantBoundaryMetadataV1 {
+  offsetMinutes: number
+  fold: 'unique' | 'fold_earlier' | 'fold_later'
+}
+
+/**
+ * Describe an already-resolved instant in an IANA zone. Flex expectations are
+ * derived from explicit instants rather than unresolved wall-clock anchors, but
+ * their persisted offset/fold metadata must still describe that derived instant.
+ */
+export function resolveAttendanceInstantBoundaryMetadataV1(
+  zone: string,
+  epochMs: number,
+): AttendanceInstantBoundaryMetadataV1 {
+  if (!Number.isFinite(epochMs) || !Number.isInteger(epochMs)) {
+    fail('W4C1_INSTANT_INVALID')
+  }
+  validateAttendanceIanaTimezoneV1(zone)
+  const parts = wallPartsAt(zone, epochMs)
+  const dateKey = [parts.year, parts.month, parts.day]
+    .map((part, index) => String(part).padStart(index === 0 ? 4 : 2, '0'))
+    .join('-')
+  const time = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
+  const withinMinuteMs = parts.second * 1000 + ((epochMs % 1000) + 1000) % 1000
+  const resolution = resolveAttendanceLocalWallTimeV1(dateKey, time, 0, zone)
+
+  if (resolution.posture === 'unique' && resolution.epochMs + withinMinuteMs === epochMs) {
+    return { offsetMinutes: resolution.offsetMinutes, fold: 'unique' }
+  }
+  if (resolution.posture === 'fold') {
+    if (resolution.earlier.epochMs + withinMinuteMs === epochMs) {
+      return { offsetMinutes: resolution.earlier.offsetMinutes, fold: 'fold_earlier' }
+    }
+    if (resolution.later.epochMs + withinMinuteMs === epochMs) {
+      return { offsetMinutes: resolution.later.offsetMinutes, fold: 'fold_later' }
+    }
+  }
+  fail('W4C1_INSTANT_INVALID')
+}
+
 export type AttendanceLocalWallResolutionV1 =
   | { posture: 'unique'; epochMs: number; offsetMinutes: number }
   | {

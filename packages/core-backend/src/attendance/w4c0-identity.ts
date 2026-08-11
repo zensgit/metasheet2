@@ -371,6 +371,17 @@ function isOrgExactlyAllowlisted(orgKey: string): boolean {
   return entries.includes(orgKey)
 }
 
+/**
+ * W4C-5 transition-safety amendment section 2.3 / 3: the rollout-control boundary must gate
+ * missing-row creation and every transition attempt on the SAME exact org-only outer allowlist
+ * `resolveSegmentCalculationPosture` uses, rather than a second copied allowlist mechanism. This
+ * is a thin named export of the existing private predicate; it reads no additional env var and
+ * changes no existing caller's behavior.
+ */
+export function isAttendanceCalculationOrgAllowlistedV1(orgKey: string): boolean {
+  return isOrgExactlyAllowlisted(orgKey)
+}
+
 interface PostureRowShape {
   readonly writePosture: AttendanceSegmentWritePostureV1
   readonly authorSegments: 'preview' | 'full' | 'none'
@@ -538,6 +549,27 @@ export function createVerifiedAttendanceOrgIdentityV1(input: unknown): VerifiedA
     fail('W4C0_WRITE_POSTURE_INVALID')
   }
   return mintOrgWitness(orgKey, writePosture)
+}
+
+/**
+ * Public rehydration entry point for a verified org witness from durable proof (`orgId` +
+ * `acceptedWritePosture`), reused by other W4-covered modules that read a frozen posture
+ * off their OWN durable row rather than re-resolving it — the W4C-2 scheduled-run identity
+ * layer's `rehydrateVerifiedAttendanceScheduledRunIdentityV1`/
+ * `mintAttendanceScheduledRunIdentityFromInsertedRowV1` constructors (section 1.4.1) are
+ * the first callers. This exposes exactly the same defensive default/posture door
+ * `mintOrgWitness` already applies inside `rehydrateVerifiedAttendanceOperationIdentityV1`
+ * below, rather than re-implementing it — "no parallel implementation" (this module's own
+ * standing rule).
+ */
+export function rehydrateVerifiedAttendanceOrgIdentityV1(durableRow: unknown): VerifiedAttendanceOrgIdentityV1 {
+  const fields = requireExactKeys(durableRow, ['orgId', 'acceptedWritePosture'], 'W4C0_ORG_DURABLE_ROW_INVALID')
+  const orgId = parseOrgKeyLexical(fields.orgId, 'W4C0_ORG_KEY_INVALID')
+  const posture = fields.acceptedWritePosture
+  if (typeof posture !== 'string' || !(ATTENDANCE_ACCEPTED_WRITE_POSTURES_V1 as readonly string[]).includes(posture)) {
+    fail('W4C0_WRITE_POSTURE_INVALID')
+  }
+  return mintOrgWitness(orgId, posture as AttendanceAcceptedWritePostureV1)
 }
 
 // ---------------------------------------------------------------------------
@@ -869,9 +901,17 @@ export function createVerifiedAttendanceCalculationTargetIdentityV1(input: unkno
 
 const ROLLOUT_KEY_PREFIX = 'metasheet2:attendance:segment-rollout:v1'
 const OPERATION_KEY_PREFIX = 'metasheet2:attendance:result-operation:v1'
+const LEGACY_IDEMPOTENCY_KEY_PREFIX =
+  'metasheet2:attendance:legacy-import-idempotency:v1'
 const TARGET_KEY_PREFIX = 'metasheet2:attendance:calculation-target:v1'
+const OPERATIONAL_BULK_TARGET_KEY_PREFIX =
+  'metasheet2:attendance:operational-bulk-target:v1'
+// W4C-2 amendment section 1.6 (PR #4617, RATIFIED, OD-W4C-49=(a)): the reserved class `01`
+// scheduled-run key.
+const SCHEDULED_RUN_KEY_PREFIX = 'metasheet2:attendance:scheduled-run:v1'
 
 const LOW_62_MASK = 0x3fffffffffffffffn
+const CLASS_01_PREFIX = 0x4000000000000000n
 const CLASS_10_PREFIX = 0x8000000000000000n
 const CLASS_11_PREFIX = 0xc000000000000000n
 
@@ -941,6 +981,50 @@ export function buildAttendanceResultOperationAdvisoryKey(identity: VerifiedAtte
   return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_10_PREFIX)
 }
 
+export type CanonicalAttendanceLegacyIdempotencyKeyV1 = Brand<
+  Readonly<{
+    orgId: CanonicalAttendanceRolloutOrgKeyV1
+    idempotencyKey: string
+  }>,
+  'CanonicalAttendanceLegacyIdempotencyKeyV1'
+>
+
+export function parseCanonicalAttendanceLegacyIdempotencyKeyV1(
+  input: unknown,
+): CanonicalAttendanceLegacyIdempotencyKeyV1 {
+  const fields = requireExactKeys(
+    input,
+    ['orgId', 'idempotencyKey'],
+    'W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID',
+  )
+  const orgId = parseOrgKeyLexical(
+    fields.orgId,
+    'W4C0_ROLLOUT_ORG_KEY_INVALID',
+  ) as CanonicalAttendanceRolloutOrgKeyV1
+  if (typeof fields.idempotencyKey !== 'string') {
+    fail('W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID')
+  }
+  const idempotencyKey = fields.idempotencyKey.trim()
+  if (idempotencyKey.length < 1 || idempotencyKey.length > 128) {
+    fail('W4C3A_LEGACY_IDEMPOTENCY_KEY_INVALID')
+  }
+  return frozenNullProto({
+    orgId,
+    idempotencyKey,
+  }) as CanonicalAttendanceLegacyIdempotencyKeyV1
+}
+
+/** W4C-3a class-`10` key shared by every sync/async writer of one legacy batch key. */
+export function buildAttendanceLegacyIdempotencyAdvisoryKey(
+  input: CanonicalAttendanceLegacyIdempotencyKeyV1,
+): bigint {
+  const key = parseCanonicalAttendanceLegacyIdempotencyKeyV1(input)
+  const u64 = rawDigestU64(
+    nulJoin([LEGACY_IDEMPOTENCY_KEY_PREFIX, key.orgId, key.idempotencyKey]),
+  )
+  return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_10_PREFIX)
+}
+
 function requireTargetWitness(identity: unknown): VerifiedAttendanceCalculationTargetIdentityV1 {
   if (typeof identity !== 'object' || identity === null || !targetWitnesses.has(identity)) {
     fail('W4C0_TARGET_WITNESS_REQUIRED')
@@ -956,6 +1040,78 @@ export function buildAttendanceCalculationTargetAdvisoryKey(identity: VerifiedAt
   const verified = requireTargetWitness(identity)
   const u64 = rawDigestU64(nulJoin([TARGET_KEY_PREFIX, verified.org.orgId, verified.userId, verified.workDate]))
   return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_11_PREFIX)
+}
+
+/** W4C-3a class-`11` sentinel for an above-limit operational import. */
+export function buildAttendanceOperationalBulkTargetAdvisoryKey(
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): bigint {
+  const orgKey = parseOrgKeyLexical(
+    org,
+    'W4C0_ROLLOUT_ORG_KEY_INVALID',
+  ) as CanonicalAttendanceRolloutOrgKeyV1
+  const u64 = rawDigestU64(nulJoin([OPERATIONAL_BULK_TARGET_KEY_PREFIX, orgKey]))
+  return BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_11_PREFIX)
+}
+
+// ---------------------------------------------------------------------------
+// W4C-2 amendment section 1.6 (PR #4617, RATIFIED, OD-W4C-49=(a)): the reserved class `01`
+// scheduled-run advisory key. `OD-W4C-49=(a)` rewrote red line W4C-R42 from "01 is
+// forbidden" to "01 is acquired only by the scheduled-run helper; any other caller
+// acquiring 01, or that helper acquiring 00/10/11, fails independently" — the class-bit
+// range check below is that helper's OWN half of that independence (the other half is
+// gate 16's rewritten disjointness test, which iterates every exported builder rather than
+// naming three by hand).
+// ---------------------------------------------------------------------------
+
+const SCHEDULED_RUN_INITIATORS = Object.freeze(['cron', 'admin_run'] as const)
+export type CanonicalAttendanceScheduledRunInitiatorV1 = (typeof SCHEDULED_RUN_INITIATORS)[number]
+
+/** Section 1.6: the run key tuple `(org, initiator, workDate)` — over the KEY, not `run_id`,
+ * because it must also serialize two concurrent starts that do not yet have an ID. */
+export type CanonicalAttendanceScheduledRunKeyV1 = Brand<
+  Readonly<{
+    orgId: CanonicalAttendanceRolloutOrgKeyV1
+    initiator: CanonicalAttendanceScheduledRunInitiatorV1
+    workDate: CanonicalAttendanceWorkDateV1
+  }>,
+  'CanonicalAttendanceScheduledRunKeyV1'
+>
+
+/** Lexical pre-lock parser — same discipline as `parseCanonicalAttendanceRolloutOrgKeyV1`
+ * (does not require a resolved posture; the class-`01` lock is acquired before class-`00`
+ * ever resolves posture for the scheduled entrypoint's own transaction). */
+export function parseCanonicalAttendanceScheduledRunKeyV1(input: unknown): CanonicalAttendanceScheduledRunKeyV1 {
+  const fields = requireExactKeys(input, ['orgId', 'initiator', 'workDate'], 'W4C0_SCHEDULED_RUN_KEY_INPUT_INVALID')
+  const orgId = parseOrgKeyLexical(fields.orgId, 'W4C0_ROLLOUT_ORG_KEY_INVALID') as CanonicalAttendanceRolloutOrgKeyV1
+  if (
+    typeof fields.initiator !== 'string' ||
+    !(SCHEDULED_RUN_INITIATORS as readonly string[]).includes(fields.initiator)
+  ) {
+    fail('W4C0_SCHEDULED_RUN_INITIATOR_INVALID')
+  }
+  const workDate = parseCanonicalAttendanceWorkDateV1(fields.workDate)
+  return frozenNullProto({
+    orgId,
+    initiator: fields.initiator as CanonicalAttendanceScheduledRunInitiatorV1,
+    workDate,
+  }) as CanonicalAttendanceScheduledRunKeyV1
+}
+
+/**
+ * Class-`01` scheduled-run key over `"metasheet2:attendance:scheduled-run:v1\0" + orgId +
+ * "\0" + initiator + "\0" + workDate` — low 62 digest bits, prefix bits `01`, signed. Same
+ * construction discipline as the three builders above (first eight digest bytes,
+ * big-endian, low 62 bits, two-bit class prefix, signed two's complement). Re-validates its
+ * input (so a raw object cannot bypass the parser) and defensively re-checks the resulting
+ * key's own class range before returning it.
+ */
+export function buildAttendanceScheduledRunAdvisoryKey(key: CanonicalAttendanceScheduledRunKeyV1): bigint {
+  const verified = parseCanonicalAttendanceScheduledRunKeyV1(key)
+  const u64 = rawDigestU64(nulJoin([SCHEDULED_RUN_KEY_PREFIX, verified.orgId, verified.initiator, verified.workDate]))
+  const signed = BigInt.asIntN(64, (u64 & LOW_62_MASK) | CLASS_01_PREFIX)
+  if (signed < 2n ** 62n || signed >= 2n ** 63n) fail('W4C0_SCHEDULED_RUN_KEY_CLASS_INVALID')
+  return signed
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,13 +1161,15 @@ function isLockNotAvailable(error: unknown): boolean {
   )
 }
 
-function busyError(lockClass: 'rollout' | 'operation' | 'target'): AttendanceW4OperationError {
+function busyError(lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run'): AttendanceW4OperationError {
   const code =
     lockClass === 'rollout'
       ? 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY'
       : lockClass === 'operation'
         ? 'ATTENDANCE_OPERATION_IN_PROGRESS'
-        : 'ATTENDANCE_CALCULATION_TARGET_BUSY'
+        : lockClass === 'target'
+          ? 'ATTENDANCE_CALCULATION_TARGET_BUSY'
+          : 'ATTENDANCE_SCHEDULED_RUN_BUSY'
   return new AttendanceW4OperationError(code, lockClass)
 }
 
@@ -1023,11 +1181,11 @@ function busyError(lockClass: 'rollout' | 'operation' | 'target'): AttendanceW4O
  */
 async function acquireKeysWithDeadline(
   trx: AttendanceW4TransactionClientV1,
-  lockClass: 'rollout' | 'operation' | 'target',
+  lockClass: 'rollout' | 'operation' | 'target' | 'scheduled_run',
   acquisitionSql: string,
   keys: readonly bigint[],
+  deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS,
 ): Promise<void> {
-  const deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS
   for (const key of keys) {
     const remaining = Math.ceil(deadline - monotonicNow())
     if (remaining <= 0) throw busyError(lockClass)
@@ -1043,10 +1201,35 @@ async function acquireKeysWithDeadline(
   await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(W4_TRANSACTION_LOCK_TIMEOUT_MS)])
 }
 
+async function acquireLegacyImportCompatibilityLock(
+  trx: AttendanceW4TransactionClientV1,
+  key: CanonicalAttendanceLegacyIdempotencyKeyV1,
+  deadline: number,
+): Promise<void> {
+  const parsed = parseCanonicalAttendanceLegacyIdempotencyKeyV1(key)
+  const remaining = Math.ceil(deadline - monotonicNow())
+  if (remaining <= 0) throw busyError('operation')
+  await trx.query("SELECT set_config('lock_timeout', $1, true)", [String(remaining)])
+  try {
+    await trx.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      [parsed.orgId, parsed.idempotencyKey],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw busyError('operation')
+    throw error
+  }
+  if (monotonicNow() > deadline) throw busyError('operation')
+}
+
 /**
  * The ONLY place allowed to select pg_advisory_xact_lock_shared versus
  * pg_advisory_xact_lock for the org rollout key. Source, rollback, transition, and closure
- * all import this helper (later slices); there is no copied namespace or local hash.
+ * all import this helper (later slices); there is no copied namespace or local hash. The one
+ * deliberate sibling is `acquireAttendanceCalculationRolloutLockSessionExclusiveV1` below —
+ * same key derivation, session-scoped instead of transaction-scoped, for the one caller
+ * (the canonical transition boundary, W4C-5 P1-2) that must not fix its SERIALIZABLE snapshot
+ * before the wait resolves.
  * Its own budget/acquisition timeout maps to values-free
  * `503 ATTENDANCE_CALCULATION_ROLLOUT_BUSY` after the caller rolls back.
  */
@@ -1062,6 +1245,183 @@ export async function acquireAttendanceCalculationRolloutLock(
       ? 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
       : 'SELECT pg_advisory_xact_lock($1::bigint)'
   await acquireKeysWithDeadline(trx, 'rollout', acquisitionSql, [key])
+}
+
+/**
+ * W4C-5 P1-2 fix. PostgreSQL fixes a SERIALIZABLE transaction's snapshot at the START of the
+ * FIRST statement executed inside it — including a statement that itself blocks (e.g. a
+ * transaction-scoped `pg_advisory_xact_lock` wait). So no matter how early
+ * `acquireAttendanceCalculationRolloutLock(trx, org, 'exclusive')` is called inside an
+ * already-BEGUN transaction, a defect committed by a legitimate shared-lock holder WHILE this
+ * caller is waiting is invisible to every predicate this transaction later reads: the snapshot
+ * predates the wait's resolution, not just the transaction's own BEGIN.
+ *
+ * This function closes that window by construction, not by narrowing it: it acquires the SAME
+ * advisory key at SESSION level (`pg_advisory_lock`, not `_xact_`), as its own standalone
+ * (autocommit) statement, on a connection that must not yet be inside a transaction — ENFORCED
+ * (not merely documented — see `assertConnectionIsIdleV1` below, W4C-5 NEW-B hardening; P2-2
+ * (PR #4839 gate, 20260809) generalized that helper's name off of THIS function's own — it is
+ * also now the enforcement for `planAttendanceCalculationRolloutTransitionV1`'s identical
+ * precondition, which takes no lock at all, so a name naming a lock would have been wrong there)
+ * as this function's own first statement, fail-closed. Advisory
+ * locks share one lock table regardless of session-vs-transaction scope (PostgreSQL docs
+ * 9.27.9 / 13.3.5), so this still correctly blocks behind every existing
+ * `pg_advisory_xact_lock_shared` writer and every other exclusive holder on the same key. The
+ * caller then issues `BEGIN ISOLATION LEVEL SERIALIZABLE` as a SEPARATE, LATER statement on the
+ * same connection. This relies on one named premise: the `pg`/`PoolClient` driver this codebase
+ * uses serializes queries per connection (no pipelining) — it does not dispatch the next query
+ * until the previous one's response has been received — so `BEGIN` is not sent until this
+ * function's blocking acquisition has already returned. Given that premise, the new
+ * transaction's snapshot can only be established strictly AFTER this acquisition succeeded,
+ * which is strictly AFTER every previous holder released (committed or rolled back).
+ *
+ * Crash safety: PostgreSQL releases every session-level advisory lock when the backend session
+ * ends (docs 9.27.9 / 13.3.5). A crashed client does not end that session instantly — the
+ * server only observes the dropped TCP connection (and releases the session's locks) once it
+ * notices, bounded by TCP keepalive or `idle_session_timeout` if configured, not by the crash
+ * itself. So a crash does not leak this lock forever, but it is not the same instant as the
+ * crash either. The caller's own `finally` release
+ * (`releaseAttendanceCalculationRolloutLockSessionExclusiveV1`) is what makes the NORMAL
+ * (non-crash) return path immediate, so a pooled connection is never returned to the pool still
+ * holding this lock for an unrelated future checkout.
+ */
+export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  // W4C-5 NEW-B hardening (PR #4773 exact-head independent DELTA gate, 20260805): this used to be
+  // a doc-comment-only precondition ("must not yet be inside a transaction") with no enforcement
+  // or test — a caller that pre-opened a transaction on `connection` before calling this function
+  // silently ran the rest of the transition inside ITS OWN already-fixed snapshot (PostgreSQL
+  // does not error on a nested `BEGIN`, it only WARNs and no-ops), reintroducing the exact P1-2
+  // defect this function exists to close, with no red test anywhere. Enforced now, first
+  // statement, before any lock side effect.
+  await assertConnectionIsIdleV1(connection)
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  // `SET lock_timeout = $1` is not valid SQL (SET does not accept a bind parameter);
+  // `set_config(..., false)` is a normal function call and does, and `false` (not the
+  // transaction-local `true` used everywhere else in this file) is required here because there
+  // is no open transaction yet for a local setting to attach to.
+  await connection.query("SELECT set_config('lock_timeout', $1, false)", [
+    `${W4_ADVISORY_HELPER_WAIT_MS}ms`,
+  ])
+  try {
+    await connection.query('SELECT pg_advisory_lock($1::bigint)', [key.toString()])
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw busyError('rollout')
+    throw error
+  } finally {
+    // `RESET lock_timeout` (not `set_config('lock_timeout', '0', false)`): hardcoding '0' would
+    // permanently stomp any non-default `postgresql.conf`/`ALTER ROLE ... SET lock_timeout` value
+    // for the rest of this pooled connection's session, whereas RESET restores whatever the
+    // session's actual configured default was before this function overrode it.
+    await connection.query('RESET lock_timeout').catch(() => undefined)
+  }
+}
+
+/**
+ * W4C-5 NEW-B hardening, originally added (PR #4773) scoped to ONE caller —
+ * `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`, hence this function's original name
+ * `assertConnectionIsIdleForSessionExclusiveRolloutLockV1`. Generalized (P2-2, PR #4839 gate,
+ * 20260809; exported) to a second caller, `planAttendanceCalculationRolloutTransitionV1`, which
+ * has the IDENTICAL "connection must be idle before this function's first statement" precondition
+ * but takes no advisory lock at all — the old name would have been a lie there, and this repo
+ * treats a lying name as the same defect class as a lying comment. This function proves — does
+ * not merely assume — that `connection` has no open transaction block, BEFORE the caller does
+ * anything else that depends on that. Detection cannot use `pg_current_xact_id_if_assigned()` (or
+ * any other xid-based probe): PostgreSQL assigns a real transaction ID lazily, on first WRITE. A
+ * caller that opened `BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT 1;` — exactly the shape that
+ * fixes a dangerous snapshot — has NO xid yet, so an xid-based probe would read "idle" for both
+ * an autocommit connection and this exact dangerous open-but-unwritten transaction: a false
+ * negative on precisely the case that matters.
+ *
+ * Instead this issues `SAVEPOINT` as the probe (verified empirically against real PostgreSQL
+ * 15, both via `psql` and via this codebase's own `pg` driver, across the full state space a
+ * caller can actually hand this function: fresh autocommit, idle-in-transaction, idle-in-
+ * transaction with a pre-existing nested savepoint, a READ ONLY transaction, a SERIALIZABLE
+ * transaction with no write yet (the dangerous xid-blind case this function exists to catch),
+ * and — the state this function used to get wrong — a transaction ABORTED by an earlier failed
+ * statement, both with and without a pre-existing savepoint). That state space collapses to
+ * exactly three outcomes for a bare `SAVEPOINT <name>`:
+ *
+ * 1. SQLSTATE `25P01` (`no_active_sql_transaction`): no open transaction block at all — the
+ *    ONLY affirmative proof of idle (autocommit). Nothing was created; proceed with no cleanup.
+ * 2. SQLSTATE `25P02` (`in_failed_sql_transaction`): an open transaction block EXISTS but a
+ *    prior statement in it already errored, so PostgreSQL ignores every command — including this
+ *    probe's own `SAVEPOINT` — until the block ends. This is emphatically NOT idle (there IS an
+ *    open transaction block); it is also NOT the "SAVEPOINT succeeded" case below, because the
+ *    savepoint was never actually created (verified empirically: a subsequent `ROLLBACK TO
+ *    SAVEPOINT w4c5_idle_probe` here fails with `3B001 undefined_savepoint`) — there is nothing
+ *    to clean up, only a refusal to raise, and it must be the product code, not this raw driver
+ *    SQLSTATE.
+ * 3. The `SAVEPOINT` succeeds: an open, non-aborted transaction block already existed. This is
+ *    the only case that leaves something to clean up.
+ *
+ * Any error OTHER than `25P01` or `25P02` is rethrown unchanged rather than silently treated as
+ * either idle or not-idle: this function only ever certifies idleness on affirmative proof (the
+ * `25P01`), and only ever certifies NOT-idle on affirmative proof of an open transaction block
+ * (`25P02`, or the SAVEPOINT succeeding) — never on the mere absence of some other error.
+ *
+ * The refusal code `W4C0_CONNECTION_NOT_IDLE` is likewise generic (P2-2 renamed it off its
+ * original `W4C0_ROLLOUT_LOCK_CONNECTION_NOT_IDLE`, which named a lock this function does not
+ * always guard) — grepped clean across `docs/` before renaming: it was never an operator-facing
+ * documented contract, only this module's own `fail()` call and one real-DB test assertion.
+ */
+export async function assertConnectionIsIdleV1(
+  connection: AttendanceW4TransactionClientV1,
+): Promise<void> {
+  try {
+    await connection.query('SAVEPOINT w4c5_idle_probe')
+  } catch (error) {
+    if (isNoActiveTransactionForSavepoint(error)) return // proven idle — proceed
+    if (isFailedTransactionForSavepoint(error)) {
+      // Open transaction block, already aborted by an earlier statement — the probe's own
+      // SAVEPOINT never actually ran (nothing was created, nothing to roll back or release).
+      // Not idle; fail closed with the product code, never the raw 25P02.
+      fail('W4C0_CONNECTION_NOT_IDLE')
+    }
+    throw error // some other failure; never mask it as "idle" (or as "not idle")
+  }
+  // The SAVEPOINT succeeded: `connection` already had an open, non-aborted transaction block on
+  // entry. Clean up the probe savepoint FULLY before failing closed — silently proceeding here
+  // is exactly the P1-2 regression this function exists to prevent. `ROLLBACK TO SAVEPOINT`
+  // alone is not enough: it undoes any (nonexistent) work done under the savepoint but leaves
+  // the savepoint itself DEFINED in the caller's subtransaction stack (verified empirically: a
+  // subsequent `RELEASE SAVEPOINT w4c5_idle_probe` succeeds even after a bare `ROLLBACK TO
+  // SAVEPOINT w4c5_idle_probe`) — `RELEASE SAVEPOINT` afterward removes it, so the caller is
+  // left inside no subtransaction it never created.
+  await connection.query('ROLLBACK TO SAVEPOINT w4c5_idle_probe').catch(() => undefined)
+  await connection.query('RELEASE SAVEPOINT w4c5_idle_probe').catch(() => undefined)
+  fail('W4C0_CONNECTION_NOT_IDLE')
+}
+
+function savepointProbeSqlState(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null
+    ? ((error as { code?: unknown }).code as string | undefined)
+    : undefined
+}
+
+function isNoActiveTransactionForSavepoint(error: unknown): boolean {
+  return savepointProbeSqlState(error) === '25P01'
+}
+
+function isFailedTransactionForSavepoint(error: unknown): boolean {
+  return savepointProbeSqlState(error) === '25P02'
+}
+
+/**
+ * Releases the session-level exclusive rollout lock acquired by
+ * `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`. The caller MUST call this in a
+ * `finally` around every acquisition on a normal return path — see that function's crash-safety
+ * paragraph for why a crash does not need this to still be correct, only a live pooled
+ * connection reused afterward does.
+ */
+export async function releaseAttendanceCalculationRolloutLockSessionExclusiveV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  await connection.query('SELECT pg_advisory_unlock($1::bigint)', [key.toString()])
 }
 
 function toSortedUniqueSignedKeys(keys: readonly bigint[]): bigint[] {
@@ -1095,6 +1455,36 @@ export async function acquireAttendanceResultOperationLocks(
 }
 
 /**
+ * W4C-3a complete reservation set. A normalized legacy key first interlocks
+ * with the shipped two-int synchronous writer; operation and normalized legacy
+ * class-`10` keys are then de-duplicated and numerically sorted together.
+ */
+export async function acquireAttendanceImportReservationLocksV1(
+  trx: AttendanceW4TransactionClientV1,
+  identities: readonly VerifiedAttendanceOperationIdentityV1[],
+  legacyIdempotency: CanonicalAttendanceLegacyIdempotencyKeyV1 | null,
+): Promise<void> {
+  if (!Array.isArray(identities)) fail('W4C0_IDENTITY_LIST_INVALID')
+  const deadline = monotonicNow() + W4_ADVISORY_HELPER_WAIT_MS
+  const keys = identities.map((identity) =>
+    buildAttendanceResultOperationAdvisoryKey(identity),
+  )
+  if (legacyIdempotency !== null) {
+    // The shipped synchronous importer still owns this two-int lock. Take it
+    // first so old and new writers share exclusion during the cutover.
+    await acquireLegacyImportCompatibilityLock(trx, legacyIdempotency, deadline)
+    keys.push(buildAttendanceLegacyIdempotencyAdvisoryKey(legacyIdempotency))
+  }
+  await acquireKeysWithDeadline(
+    trx,
+    'operation',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    toSortedUniqueSignedKeys(keys),
+    deadline,
+  )
+}
+
+/**
  * Same protocol for class-`11` calculation-target keys. Its own budget/acquisition
  * timeout maps to values-free `503 ATTENDANCE_CALCULATION_TARGET_BUSY` after the
  * caller rolls back.
@@ -1111,6 +1501,35 @@ export async function acquireAttendanceCalculationTargetLocks(
     'SELECT pg_advisory_xact_lock($1::bigint)',
     toSortedUniqueSignedKeys(keys),
   )
+}
+
+export async function acquireAttendanceOperationalBulkTargetLockV1(
+  trx: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  await acquireKeysWithDeadline(
+    trx,
+    'target',
+    'SELECT pg_advisory_xact_lock($1::bigint)',
+    [buildAttendanceOperationalBulkTargetAdvisoryKey(org)],
+  )
+}
+
+/**
+ * W4C-2 amendment section 1.6: the ONLY place allowed to acquire the reserved class-`01`
+ * scheduled-run key. Only the scheduled entrypoint's run-creation/resume/finalization/
+ * `abandoned` transactions (a later slice, same defining module as the run identity
+ * constructors — section 1.4.1) call this; live, import, integration, request, and
+ * approval paths acquire it never. Its own budget/acquisition timeout maps to values-free
+ * `503 ATTENDANCE_SCHEDULED_RUN_BUSY` after the caller rolls back — no other `55P03`/
+ * `57014` is relabeled, no retry, no compatibility fallback, no partial DML.
+ */
+export async function acquireAttendanceScheduledRunLock(
+  trx: AttendanceW4TransactionClientV1,
+  key: CanonicalAttendanceScheduledRunKeyV1,
+): Promise<void> {
+  const signedKey = buildAttendanceScheduledRunAdvisoryKey(key)
+  await acquireKeysWithDeadline(trx, 'scheduled_run', 'SELECT pg_advisory_xact_lock($1::bigint)', [signedKey])
 }
 
 // ---------------------------------------------------------------------------

@@ -8,13 +8,21 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
+import { listActiveCurrentOpenRecordsForWorkDateResolverV1 } from '../../src/attendance/w4c3c-active-current'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
 
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 const helpers = attendancePlugin.__attendanceWorkDateResolverForTests as {
-  createPluginAttendanceWorkDateResolver: (db: { query: Function }) => {
+  createPluginAttendanceWorkDateResolver: (
+    db: { query: Function },
+    options?: {
+      activeCurrent?: {
+        listOpenForWorkDateResolver: typeof listActiveCurrentOpenRecordsForWorkDateResolverV1
+      }
+    },
+  ) => {
     resolver: { resolve: (input: Record<string, unknown>) => Promise<Record<string, unknown>> }
     adapters: {
       live: { resolvePunchWorkDate: Function }
@@ -52,6 +60,12 @@ function wrapPool(pool: Pool) {
 describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   const pool = new Pool({ connectionString: dbUrl })
   const db = wrapPool(pool)
+  const createResolver = () =>
+    helpers.createPluginAttendanceWorkDateResolver(db, {
+      activeCurrent: {
+        listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1,
+      },
+    })
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const orgA = `w2-org-a-${suffix}`
   const orgB = `w2-org-b-${suffix}`
@@ -130,7 +144,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   })
 
   it('loads org-scoped published candidates only (cross-org isolation)', async () => {
-    const { resolver } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { resolver } = createResolver()
     const result = await resolver.resolve({
       orgId: orgA,
       userId,
@@ -159,7 +173,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   })
 
   it('previous overnight re-anchors post-midnight punch (#4558 fold via shared resolver)', async () => {
-    const { adapters } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { adapters } = createResolver()
     // 05:55 UTC on 07-16 is inside night shift 07-15 22:00-06:00
     const result = await adapters.live.resolvePunchWorkDate({
       orgId: orgA,
@@ -184,7 +198,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
          SET first_in_at = EXCLUDED.first_in_at, last_out_at = NULL, status = 'partial'`,
       [userId, orgA],
     )
-    const { resolver } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { resolver } = createResolver()
     // Exact boundary 06:00 is in both night (07-15) and morning (07-16)
     const result = await resolver.resolve({
       orgId: orgA,
@@ -220,7 +234,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
       [overlapAsgId, orgA, userId, overlapShiftId],
     )
 
-    const { resolver } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { resolver } = createResolver()
     const result = await resolver.resolve({
       orgId: orgA,
       userId,
@@ -389,7 +403,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
 
   it('schedule mutation after request: frozen recompute attribution survives assignment change', async () => {
     const frozenShift = morningShiftId
-    const { adapters } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { adapters } = createResolver()
     const result = await adapters.recompute.resolveRecomputeWorkDate({
       orgId: orgA,
       userId,
@@ -439,7 +453,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   })
 
   it('overtime freeze + legacy no-anchor paths against real rows', async () => {
-    const { adapters } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { adapters } = createResolver()
     // Single published candidate on 07-16 → freeze ok
     const freeze = await adapters.overtime.freezeRequestCreationAnchor({
       orgId: orgA,
@@ -481,7 +495,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   })
 
   it('six adapters share the same live resolution for a scheduled morning punch', async () => {
-    const { adapters } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { adapters } = createResolver()
     const occurredAt = new Date('2026-07-16T10:00:00.000Z')
     const base = {
       orgId: orgA,
@@ -505,7 +519,7 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
   })
 
   it('boundaries: post-shift tail includes 90min after end; 150min is outside', async () => {
-    const { resolver } = helpers.createPluginAttendanceWorkDateResolver(db)
+    const { resolver } = createResolver()
     const inTail = await resolver.resolve({
       orgId: orgA,
       userId,

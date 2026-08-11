@@ -18,14 +18,55 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.
 const toolDir = path.join(rootDir, 'scripts/attendance/w4c0-dml-inventory')
 
 const { createWorktreeSource, createGitRefSource } = require(path.join(toolDir, 'sources.cjs'))
-const { buildRawCensus, classifyCensus, scanFileForDmlSites, isCanonicalBoundaryPath, contentHashOfKeys } = require(
+const {
+  buildRawCensus,
+  buildP25CallPathCensus,
+  buildAttendanceRecordReadCensus,
+  buildAttendanceCalculationReadCensus,
+  classifyCensus,
+  scanFileForDmlSites,
+  scanFileForP25CallPathSites,
+  scanFileForAttendanceRecordReadSites,
+  scanFileForAttendanceCalculationReadSites,
+  isCanonicalBoundaryPath,
+  contentHashOfKeys,
+  maskCommentsForDmlScan,
+  hasLiveDmlOnTable,
+} = require(
   path.join(toolDir, 'collector.cjs'),
 )
 const { classifyTrackedSites } = require(path.join(toolDir, 'classify-tracked-sites.cjs'))
 const { CURATED_DEBT_ENTRIES } = require(path.join(toolDir, 'curated-debt-entries.cjs'))
+const {
+  PINNED_BASELINE_REF,
+  PINNED_BASELINE_ARTIFACT_RELPATH,
+  provePinnedBaselineObligation,
+} = require(path.join(toolDir, 'pinned-baseline-obligation.cjs'))
+const {
+  P25_CALL_PATH_CLASSIFICATIONS,
+  classifyP25CallPathSites,
+} = require(path.join(toolDir, 'p25-call-path-classification.cjs'))
+const {
+  classifyAttendanceRecordReadSites,
+} = require(path.join(toolDir, 'current-record-read-classification.cjs'))
+const {
+  classifyAttendanceCalculationReadSites,
+} = require(path.join(toolDir, 'calculation-read-classification.cjs'))
+const {
+  assertP26ActionAndFixtureContract,
+  classifyP26ApprovalAssignmentSites,
+} = require(path.join(toolDir, 'p26-approval-assignment-classification.cjs'))
+const {
+  TABLE_BUCKETS,
+  P25_FORBIDDEN_AUTHORITY_ROLES,
+  P25_IMPORT_INTEGRATION_TABLES,
+  P25_OPERATIONAL_TABLE_SPECS,
+  classifyP25Use,
+  assertP25Use,
+} = require(path.join(toolDir, 'table-classification.cjs'))
 
-const PINNED_REF = 'e0defbe26d7f2e1747e74aa908ca710422812bf7'
-const BASELINE_ARTIFACT_RELPATH = 'docs/development/attendance-w4c0-dml-debt-baseline-e0defbe26.json'
+const PINNED_REF = PINNED_BASELINE_REF
+const BASELINE_ARTIFACT_RELPATH = PINNED_BASELINE_ARTIFACT_RELPATH
 const WORKFLOW_PATH = path.join(rootDir, '.github/workflows/plugin-tests.yml')
 const THIS_TEST_FILENAME = 'attendance-w4c0-dml-inventory-collector.test.mjs'
 
@@ -62,48 +103,215 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
   )
 })
 
-// -------------------------------------------------------------------------------------------
-// 2. Reproducibility: regenerating the pinned baseline manifest from the pinned ref must byte-
-//    match the committed docs/data-only artifact. This is what makes the artifact auditable —
-//    a reviewer reruns generate-baseline-manifest.cjs and diffs, rather than trusting hand edits.
-// -------------------------------------------------------------------------------------------
-test('pinned baseline artifact is byte-reproducible from the pinned ref', () => {
-  const gitSource = createGitRefSource(rootDir, PINNED_REF)
-  const { roots, sites } = buildRawCensus(gitSource)
-  const classified = classifyCensus(sites)
-  const { claimsByEntryId, genericAllowlisted, unclaimed } = classifyTrackedSites(classified.trackedSites)
+test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildAttendanceRecordReadCensus(source)
+  const result = classifyAttendanceRecordReadSites(sites)
 
-  assert.deepEqual(unclaimed, [], 'pinned baseline must have zero unclaimed sites (else the committed artifact could not have been generated cleanly)')
+  assert.ok(sites.some((site) => site.table === 'attendance_current_records'))
+  assert.ok(sites.some((site) => site.table === 'attendance_records'))
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol}`),
+    [],
+    'a direct ordinary attendance_records read must be classified or moved to the current view',
+  )
+  assert.deepEqual(result.countDrift, [], 'an added base-table read in a known wrapper needs explicit review')
+  assert.deepEqual(result.stale, [], 'removed base-table reads must retire their historical classification')
+  assert.equal(result.classifiedSites.length, sites.length)
+})
 
-  const entries = CURATED_DEBT_ENTRIES.map((entry) => {
-    const claimed = claimsByEntryId.get(entry.id) || []
-    const keys = claimed.map((s) => s.key).sort()
-    return {
-      id: entry.id,
-      title: entry.title,
-      owningSlice: entry.owningSlice,
-      sharedHook: entry.sharedHook,
-      confidence: entry.confidence || 'direct',
-      siteCount: claimed.length,
-      tables: [...new Set(claimed.map((s) => `${s.table}:${s.verb}`))].sort(),
-      symbols: [...new Set(claimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol}`))].sort(),
-      contentHash: contentHashOfKeys(keys),
-    }
-  })
-  const regenerated = {
-    schemaVersion: 1,
-    generatedFromRef: PINNED_REF,
-    lockAnchor: 'docs/development/attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md#8.4',
-    runtimeRoots: roots,
-    debtEntries: entries,
-    genericSharedAllowlist: genericAllowlisted.map((s) => `${s.relPath} :: ${s.enclosingSymbol}`).sort(),
-    manifestContentHash: contentHashOfKeys(classified.trackedSites.map((s) => s.key)),
+test('W4C-3a SELECT-inventory mutation: a new direct ordinary base read fails while the current view passes', () => {
+  const relPath = 'plugins/plugin-attendance/index.cjs'
+  const direct = scanFileForAttendanceRecordReadSites(
+    relPath,
+    "async function newOrdinarySummary() { return db.query(`SELECT * FROM\n attendance_records`) }\n",
+  )
+  const current = scanFileForAttendanceRecordReadSites(
+    relPath,
+    "async function newOrdinarySummary() { return db.query(`SELECT * FROM\n attendance_current_records`) }\n",
+  )
+
+  assert.equal(classifyAttendanceRecordReadSites(direct).unclassified.length, 1)
+  const currentResult = classifyAttendanceRecordReadSites(current)
+  assert.deepEqual(currentResult.unclassified, [])
+  assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
+})
+
+test('W4C-3a SELECT-inventory mutation: a dynamic base-table member fails while the current view passes', () => {
+  const relPath = 'plugins/plugin-attendance/index.cjs'
+  const scan = (table) => scanFileForAttendanceRecordReadSites(
+    relPath,
+    `async function dynamicSummary() { const tables = ['${table}']; for (const table of tables) await db.query(\`SELECT 1 FROM \${table}\`) }\n`,
+  )
+
+  assert.equal(classifyAttendanceRecordReadSites(scan('attendance_records')).unclassified.length, 1)
+  const currentResult = classifyAttendanceRecordReadSites(scan('attendance_current_records'))
+  assert.deepEqual(currentResult.unclassified, [])
+  assert.equal(currentResult.classifiedSites[0]?.posture, 'current')
+  assert.equal(currentResult.classifiedSites[0]?.dynamic, true)
+
+  const bypassShapes = [
+    "const TABLE = 'attendance_records'\nasync function moduleConstant() { return db.query(`SELECT 1 FROM ${TABLE}`) }\n",
+    'const TABLE = `attendance_records`\nasync function backtickConstant() { return db.query(`SELECT 1 FROM ${TABLE}`) }\n',
+    "const TABLE = 'attendance_records'\nasync function wrappedConstant() { return db.query(`SELECT 1 FROM ${quote(TABLE)}`) }\n",
+  ]
+  for (const source of bypassShapes) {
+    const result = classifyAttendanceRecordReadSites(
+      scanFileForAttendanceRecordReadSites(relPath, source),
+    )
+    assert.equal(result.unclassified.length, 1, source)
+    assert.equal(result.unclassified[0]?.table, 'attendance_records')
+    assert.equal(result.unclassified[0]?.dynamic, true)
   }
+})
 
-  const committedText = fs.readFileSync(path.join(rootDir, BASELINE_ARTIFACT_RELPATH), 'utf8')
-  const committed = JSON.parse(committedText)
-  assert.deepEqual(regenerated, committed, 'committed baseline artifact must byte-match a fresh regeneration from the pinned ref')
-  assert.equal(committedText, `${JSON.stringify(committed, null, 2)}\n`, 'committed artifact must be exactly what the generator writes (no hand edits)')
+test('W4C-4: generated SELECT inventory classifies every calculation and segment read', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildAttendanceCalculationReadCensus(source)
+  const result = classifyAttendanceCalculationReadSites(sites)
+
+  assert.ok(sites.some((site) => site.table === 'attendance_record_calculations'))
+  assert.ok(sites.some((site) => site.table === 'attendance_record_segments'))
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol} :: ${site.table}`),
+    [],
+    'every direct calculation/segment read must have a current or history classification',
+  )
+  assert.deepEqual(result.countDrift, [], 'a new direct read in a known wrapper requires explicit review')
+  assert.deepEqual(result.stale, [], 'a removed direct read must retire its historical classification')
+  assert.deepEqual(result.predicateDrift, [], 'current readers must retain their required active-row predicate')
+  assert.equal(result.classifiedSites.length, sites.length)
+  assert.equal(result.classifiedSites.filter((site) => site.posture === 'current').length, 3)
+  assert.ok(result.classifiedSites.some((site) =>
+    site.enclosingSymbol === 'readAuthoritativeTraceCalculation'
+      && site.table === 'attendance_record_calculations'
+      && site.posture === 'current'))
+  assert.ok(result.classifiedSites.some((site) =>
+    site.enclosingSymbol === 'readShadowTraceCalculation'
+      && site.table === 'attendance_record_calculations'
+      && site.posture === 'history'))
+
+  const baseSource = createWorktreeSource(rootDir)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (relPath) => {
+      const content = baseSource.readFile(relPath)
+      if (relPath !== 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts') return content
+      return content.replace(
+        "AND record.visibility_state = 'active'",
+        "AND record.visibility_state = 'retired'",
+      )
+    },
+  }
+  const mutated = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(mutated.unclassified, [])
+  assert.deepEqual(mutated.countDrift, [])
+  assert.deepEqual(mutated.stale, [])
+  assert.equal(mutated.predicateDrift.length, 1)
+  assert.equal(mutated.predicateDrift[0]?.enclosingSymbol, 'readAuthoritativeTraceCalculation')
+  assert.equal(mutated.predicateDrift[0]?.actual, null)
+})
+
+test('W4C-4 mutation: a SQL-comment marker cannot satisfy the active predicate fingerprint', () => {
+  for (const query of [
+    "`SELECT 1 FROM attendance_record_calculations /* visibility_state = 'active' */`",
+    "'SELECT 1 FROM attendance_record_calculations /* visibility_state = \'active\' */'",
+  ]) {
+    const source = `async function shadowRead() { return db.query(${query}) }\n`
+    const sites = scanFileForAttendanceCalculationReadSites('packages/core-backend/src/attendance/shadow-read.ts', source)
+    assert.equal(sites.length, 1, query)
+    assert.equal(sites[0]?.requiredPredicateFingerprint, null, query)
+  }
+})
+
+test('W4C-4 mutation: removing shadow active predicate is independently detected', () => {
+  const baseSource = createWorktreeSource(rootDir)
+  const relPath = 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts'
+  const original = baseSource.readFile(relPath)
+  const mutatedSource = {
+    ...baseSource,
+    readFile: (candidate) => {
+      if (candidate !== relPath) return baseSource.readFile(candidate)
+      return original.replace(
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        AND record.visibility_state = 'active'",
+        "AND calculation.mode = 'shadow'\n      WHERE record.org_id = $1 AND record.user_id = $2 AND record.work_date = $3\n        /* visibility_state = 'active' */",
+      )
+    },
+  }
+  const result = classifyAttendanceCalculationReadSites(
+    buildAttendanceCalculationReadCensus(mutatedSource).sites,
+  )
+  assert.deepEqual(result.unclassified, [])
+  assert.equal(result.predicateDrift.length, 1)
+  assert.equal(result.predicateDrift[0]?.enclosingSymbol, 'readShadowTraceCalculation')
+  assert.equal(result.predicateDrift[0]?.actual, null)
+})
+
+test('W4C-4 SELECT-inventory mutation: unclassified calculation and segment reads fail closed', () => {
+  for (const table of ['attendance_record_calculations', 'attendance_record_segments']) {
+    const sites = scanFileForAttendanceCalculationReadSites(
+      'packages/core-backend/src/routes/attendance-unclassified-read.ts',
+      `async function unclassifiedRead() { return db.query(\`SELECT * FROM ${table}\`) }\n`,
+    )
+    const result = classifyAttendanceCalculationReadSites(sites)
+    assert.equal(result.unclassified.length, 1, table)
+    assert.equal(result.unclassified[0]?.table, table)
+  }
+})
+
+test('W4C-4 SELECT-inventory mutation: a direct retired-row read fails closed', () => {
+  const sites = scanFileForAttendanceCalculationReadSites(
+    'packages/core-backend/src/routes/attendance-retired-row-leak.ts',
+    `async function exposeRetiredCalculation() {
+      return db.query(\`SELECT calculation.id
+        FROM attendance_record_calculations calculation
+        JOIN attendance_records record ON record.id = calculation.attendance_record_id
+       WHERE record.visibility_state = 'retired'\`)
+    }\n`,
+  )
+  const result = classifyAttendanceCalculationReadSites(sites)
+  assert.equal(result.unclassified.length, 1)
+  assert.equal(result.unclassified[0]?.table, 'attendance_record_calculations')
+})
+
+test('W4C-4 SELECT-inventory mutation: dynamic calculation table reads fail closed', () => {
+  const sites = scanFileForAttendanceCalculationReadSites(
+    'packages/core-backend/src/routes/attendance-dynamic-read.ts',
+    "const TABLE = 'attendance_record_calculations'\nasync function dynamicRead() { return db.query(`SELECT * FROM ${TABLE}`) }\n",
+  )
+  const result = classifyAttendanceCalculationReadSites(sites)
+  assert.equal(result.unclassified.length, 1)
+  assert.equal(result.unclassified[0]?.dynamic, true)
+})
+
+// -------------------------------------------------------------------------------------------
+// 2. Separately named pinned-baseline obligation (W4C-3c).
+//    The frozen e0defbe artifact is proven against the pinned ref WITHOUT consulting live
+//    CURATED_DEBT_ENTRIES.claims. Current-tree claims must not retain removed symbols solely to
+//    keep this green; see pinned-baseline-obligation.cjs.
+// -------------------------------------------------------------------------------------------
+test('pinned baseline obligation: frozen artifact covers the pinned ref without live claim crutches', () => {
+  const result = provePinnedBaselineObligation(rootDir)
+  assert.equal(result.ok, true)
+  assert.equal(result.pinnedRef, PINNED_REF)
+  assert.ok(result.trackedSiteCount > 0)
+  // Discriminate: live P05 claims must NOT include the historical post-write patch symbol.
+  const p05 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P05')
+  assert.ok(p05)
+  const syntheticHistorical = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'attachManualResultEditMarkerToRecord',
+    table: 'attendance_records',
+    verb: 'update',
+    line: 1,
+  }
+  assert.equal(
+    p05.claims(syntheticHistorical),
+    false,
+    'current P05 must not retain a claim for the removed post-write patch symbol',
+  )
 })
 
 // -------------------------------------------------------------------------------------------
@@ -191,8 +399,119 @@ test('positive control: MERGE INTO and runtime staging CREATE TABLE syntax class
 
 test('canonical boundary helper agrees with the classifier on in/out-of-boundary paths', () => {
   assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c0-operation-registry.ts'), true)
+  assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c3a-legacy-plan-enqueue.ts'), true)
+  assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/attendance/w4c3b-request-snapshots.ts'), true)
   assert.equal(isCanonicalBoundaryPath('plugins/plugin-attendance/index.cjs'), false)
   assert.equal(isCanonicalBoundaryPath('packages/core-backend/src/routes/admin-users.ts'), false)
+})
+
+test('W4C-3b snapshot storage accepts only the canonical module path', () => {
+  const sql = "async function appendSnapshot() {\n  await db.query('INSERT INTO attendance_request_calculation_snapshots (org_id) VALUES ($1)', [orgId])\n}\n"
+  const canonical = classifyOneSyntheticSite(
+    'packages/core-backend/src/attendance/w4c3b-request-snapshots.ts',
+    sql,
+  )
+  const plugin = classifyOneSyntheticSite('plugins/plugin-attendance/index.cjs', sql)
+
+  assert.equal(canonical.canonicalSites.length, 1)
+  assert.equal(canonical.outsideBoundarySites.length, 0)
+  assert.equal(plugin.canonicalSites.length, 0)
+  assert.equal(plugin.outsideBoundarySites.length, 1)
+})
+
+test('W4C-3a storage buckets preserve frozen source, result, revision, and cleanup boundaries', () => {
+  for (const table of [
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_terminal_responses',
+    'attendance_import_rollback_commands',
+    'attendance_import_rollback_restore_witnesses',
+    'attendance_record_target_revisions',
+    'attendance_group_effect_revisions',
+  ]) {
+    assert.equal(TABLE_BUCKETS[table], 'w4_canonical', `${table} must stay inside the canonical boundary`)
+  }
+  assert.equal(
+    TABLE_BUCKETS.attendance_import_upload_cleanup_commands,
+    'operational',
+    'upload cleanup commands are P25 operational-only state',
+  )
+})
+
+test('W4C-3a canonical tables reject a plugin-side writer', () => {
+  const classified = classifyOneSyntheticSite(
+    'plugins/plugin-attendance/index.cjs',
+    "async function bypassFrozenPlan() {\n  await db.query('UPDATE attendance_import_legacy_execution_plans SET plan_digest = $1 WHERE job_id = $2', [digest, jobId])\n}\n",
+  )
+  assert.equal(classified.canonicalSites.length, 0)
+  assert.equal(classified.outsideBoundarySites.length, 1)
+  assert.equal(classified.outsideBoundarySites[0].table, 'attendance_import_legacy_execution_plans')
+})
+
+test('W4C-3a canonical tables accept a W4C-3a boundary writer', () => {
+  const classified = classifyOneSyntheticSite(
+    'packages/core-backend/src/attendance/w4c3a-synthetic-positive-control.ts',
+    "async function persistFrozenPlan() {\n  await db.query('INSERT INTO attendance_import_legacy_execution_plans (job_id) VALUES ($1)', [jobId])\n}\n",
+  )
+  assert.equal(classified.canonicalSites.length, 1)
+  assert.equal(classified.outsideBoundarySites.length, 0)
+  assert.equal(classified.canonicalSites[0].table, 'attendance_import_legacy_execution_plans')
+})
+
+test('W4C-3a fixed record-effect DML is classified under the completed P06-P09 cutovers', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+  const adapterPath =
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts'
+  const expectedKeys = classified.trackedSites
+    .filter((site) => site.relPath === adapterPath)
+    .map((site) => site.key)
+    .sort()
+
+  assert.equal(expectedKeys.length, 2, 'the fixed adapter must expose exactly UPDATE + INSERT')
+  for (const id of ['P06', 'P07', 'P08', 'P09']) {
+    const claimedKeys = (claimsByEntryId.get(id) || [])
+      .filter((site) => site.relPath === adapterPath)
+      .map((site) => site.key)
+      .sort()
+    assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify both shared adapter sites`)
+    const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
+    assert.equal(
+      entry?.canonicalizedBy,
+      'W4C-3a',
+      `${id} must remain explicitly canonicalized by its owning slice`,
+    )
+  }
+})
+
+test('W4C-3a fixed item-effect DML is classified under the completed P06-P09 cutovers', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+  const adapterPath =
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts'
+  const expectedKeys = classified.trackedSites
+    .filter((site) => site.relPath === adapterPath)
+    .map((site) => site.key)
+    .sort()
+
+  assert.equal(expectedKeys.length, 1, 'the fixed item adapter must expose exactly one INSERT')
+  for (const id of ['P06', 'P07', 'P08', 'P09']) {
+    const claimedKeys = (claimsByEntryId.get(id) || [])
+      .filter((site) => site.relPath === adapterPath)
+      .map((site) => site.key)
+      .sort()
+    assert.deepEqual(claimedKeys, expectedKeys, `${id} must classify the shared item adapter site`)
+    const entry = CURATED_DEBT_ENTRIES.find((candidate) => candidate.id === id)
+    assert.equal(
+      entry?.canonicalizedBy,
+      'W4C-3a',
+      `${id} must remain explicitly canonicalized by its owning slice`,
+    )
+  }
 })
 
 // -------------------------------------------------------------------------------------------
@@ -200,5 +519,913 @@ test('canonical boundary helper agrees with the classifier on in/out-of-boundary
 //    vitest-discovered nor covered by vitest.config.ts's exclude list — see module header).
 // -------------------------------------------------------------------------------------------
 test('this collector test file has an explicit CI execution step', () => {
-  assert.match(readWorkflow(), new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
+  const workflow = readWorkflow()
+  assert.match(workflow, new RegExp(THIS_TEST_FILENAME.replaceAll('.', '\\.')))
+  assert.match(
+    workflow,
+    /Run attendance W4C-0 Stage D §8\.4 and W4C-4 §12\.7 inventory collectors/,
+    'the required CI step must name the W4C-4 current/history inventory, not only the older DML collector',
+  )
+})
+
+// -------------------------------------------------------------------------------------------
+// 6. W4C-2 cutover markers (lock §12.3: "P01 live, P02 merge second-pass, P03 cron absence,
+//    and P04 administrator-run absence inventory entries are removed independently"). Each of
+//    the four entries must INDEPENDENTLY carry the removed-by-adapter marker; no other entry
+//    may be silently marked; and the claim predicates still cover the adapter-owned sites so
+//    unclaimed=0 detection is not bypassed by the removal.
+// -------------------------------------------------------------------------------------------
+test('W4C-2: P01, P02, P03, P04 each independently carry canonicalizedBy=W4C-2 — and only they do for W4C-2', () => {
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  // Four independent assertions — removing any ONE marker fails on its own line.
+  assert.equal(byId.get('P01')?.canonicalizedBy, 'W4C-2', 'P01 (live punch) must be removed-by-adapter')
+  assert.equal(byId.get('P02')?.canonicalizedBy, 'W4C-2', 'P02 (merge second-pass) must be removed-by-adapter')
+  assert.equal(byId.get('P03')?.canonicalizedBy, 'W4C-2', 'P03 (cron absence) must be removed-by-adapter')
+  assert.equal(byId.get('P04')?.canonicalizedBy, 'W4C-2', 'P04 (administrator absence run) must be removed-by-adapter')
+  const marked = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy === 'W4C-2')
+    .map((entry) => `${entry.id}:${entry.canonicalizedBy}`)
+    .sort()
+  assert.deepEqual(
+    marked,
+    ['P01:W4C-2', 'P02:W4C-2', 'P03:W4C-2', 'P04:W4C-2'],
+    'exactly the four W4C-2 entries carry the W4C-2 marker',
+  )
+})
+
+test('W4C-2: the canonical adapter symbols are claimed by exactly the expected entries', () => {
+  const syntheticLive = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'applyLivePunchProjectionLegacyV1',
+    table: 'attendance_events',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-live',
+    line: 1,
+  }
+  const syntheticAbsence = {
+    relPath: 'plugins/plugin-attendance/index.cjs',
+    enclosingSymbol: 'generateAbsenceRecords',
+    table: 'attendance_records',
+    verb: 'insert',
+    bucket: 'business',
+    key: 'synthetic-absence',
+    line: 2,
+  }
+  const { claimsByEntryId, unclaimed } = classifyTrackedSites([syntheticLive, syntheticAbsence])
+  assert.deepEqual(unclaimed, [], 'the adapter-owned sites must remain claimed (unclaimed=0 not bypassed)')
+  assert.deepEqual(
+    (claimsByEntryId.get('P01') || []).map((site) => site.key),
+    ['synthetic-live'],
+    'P01 claims the live adapter site',
+  )
+  // One function, two initiators, two debt ids (lock section 1.1): P03 AND P04 both claim it.
+  assert.deepEqual((claimsByEntryId.get('P03') || []).map((site) => site.key), ['synthetic-absence'])
+  assert.deepEqual((claimsByEntryId.get('P04') || []).map((site) => site.key), ['synthetic-absence'])
+})
+
+// -------------------------------------------------------------------------------------------
+// 7. W4 canonical wrong-bucket drift guard (origin: W4C-2 P1-2, #4612 final-gate P2-5):
+//    the collector's classification suite covered ABSENCE (an unclassified table fails) but not
+//    WRONG BUCKET — re-classifying `attendance_scheduled_runs` from `w4_canonical` to
+//    `operational` left all prior legs green, silently disarming the canonical-boundary hard
+//    fail (ATTENDANCE_W4C0_DML_OUTSIDE_CANONICAL_BOUNDARY) for that table. Same exact-set shape
+//    as the debt-ID exclusivity assertion in section 6: three per-table legs (each of the three
+//    new tables reddens on its own line) + one exact-set leg over the WHOLE w4_canonical bucket
+//    (so demoting ANY canonical table — the W4C-0/W4C-3a ones included — reddens too, and a table
+//    smuggled INTO the bucket to widen the path-prefix allowlist's reach also reddens).
+// -------------------------------------------------------------------------------------------
+test('the three scheduled-run tables are w4_canonical, and the bucket is the exact known closed set', () => {
+  // Three independent assertions — flipping any ONE table's bucket fails on its own line.
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_runs,
+    'w4_canonical',
+    'attendance_scheduled_runs must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_run_targets,
+    'w4_canonical',
+    'attendance_scheduled_run_targets must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  assert.equal(
+    TABLE_BUCKETS.attendance_scheduled_run_target_outcomes,
+    'w4_canonical',
+    'attendance_scheduled_run_target_outcomes must stay canonical-boundary-only (wrong-bucket drift, not just absence)',
+  )
+  const bucketMembers = Object.keys(TABLE_BUCKETS)
+    .filter((table) => TABLE_BUCKETS[table] === 'w4_canonical')
+    .sort()
+  assert.deepEqual(
+    bucketMembers,
+    [
+      'attendance_calculation_rollout_events',
+      'attendance_calculation_rollout_state',
+      'attendance_group_effect_revisions',
+      'attendance_import_legacy_execution_plan_chunks',
+      'attendance_import_legacy_execution_plans',
+      'attendance_import_legacy_terminal_responses',
+      'attendance_import_rollback_closures',
+      'attendance_import_rollback_commands',
+      'attendance_import_rollback_restore_witnesses',
+      'attendance_record_calculations',
+      'attendance_record_segments',
+      'attendance_record_target_revisions',
+      'attendance_request_calculation_snapshots',
+      'attendance_result_event_outbox',
+      'attendance_result_operation_batches',
+      'attendance_result_operations',
+      'attendance_scheduled_run_target_outcomes',
+      'attendance_scheduled_run_targets',
+      'attendance_scheduled_runs',
+    ],
+    'the w4_canonical bucket is an exact closed set — a demotion OR a smuggled addition both redden here',
+  )
+})
+
+// -------------------------------------------------------------------------------------------
+// 8. P25 import/integration inventory contract (OD-W4C-36 and OD-W4C-56).  A bucket allowlist alone
+// is too weak: it would let a V1 job/plan value be reported as authority while the DML census
+// remains green.  The P25 table spec is the closed family/authority inventory; the synthetic
+// use checks below are deliberately independent from route behavior and do not claim that the
+// completed P06-P11/P23-P25 callers and classifications remain mechanically visible.
+// -------------------------------------------------------------------------------------------
+test('P25: the closed import/integration set has explicit family and non-authority specs', () => {
+  const expectedP25Tables = [
+    'attendance_import_items_stage',
+    'attendance_import_jobs',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_terminal_responses',
+    'attendance_import_records_stage',
+    'attendance_import_template_prefs',
+    'attendance_import_tokens',
+    'attendance_import_upload_cleanup_commands',
+    'attendance_integration_runs',
+    'attendance_integrations',
+  ]
+  assert.deepEqual(
+    P25_IMPORT_INTEGRATION_TABLES,
+    expectedP25Tables,
+    'P25 must remain a closed import/integration set, not every operational attendance feature',
+  )
+
+  for (const [table, spec] of Object.entries(P25_OPERATIONAL_TABLE_SPECS)) {
+    assert.ok(TABLE_BUCKETS[table], `${table} must also exist in the closed table bucket map`)
+    assert.match(spec.family, /^[a-z0-9_]+$/)
+    assert.match(spec.authorityClass, /^[a-z0-9_]+$/)
+    assert.deepEqual(spec.forbiddenAuthorityRoles, P25_FORBIDDEN_AUTHORITY_ROLES)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('calculation_source'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('calculation_result'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('promotion_evidence'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('rollback_authority'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('authorization_evidence'), true)
+    assert.equal(spec.forbiddenAuthorityRoles.includes('operation_claim'), true)
+  }
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const p25Sites = [...classified.bucketAllowlistedSites, ...classified.canonicalSites].filter(
+    (site) => P25_OPERATIONAL_TABLE_SPECS[site.table],
+  )
+  assert.ok(p25Sites.length > 0, 'the generated census must contain P25 operational/canonical sites')
+  for (const site of p25Sites) {
+    assert.deepEqual(site.p25, P25_OPERATIONAL_TABLE_SPECS[site.table], `${site.table} must carry its P25 posture in generated inventory`)
+  }
+
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_jobs.family, 'import_job')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_items_stage.family, 'temporary_staging')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_upload_cleanup_commands.family, 'upload_lifecycle')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_integration_runs.family, 'integration_audit_attempt')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_execution_plans.family, 'durable_legacy_plan')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_execution_plan_chunks.family, 'durable_legacy_plan')
+  assert.equal(P25_OPERATIONAL_TABLE_SPECS.attendance_import_legacy_terminal_responses.family, 'durable_legacy_terminal')
+  for (const table of [
+    'attendance_notification_deliveries',
+    'attendance_unscheduled_reminder_dispatch',
+    'attendance_record_target_revisions',
+    'attendance_group_effect_revisions',
+  ]) {
+    assert.equal(P25_OPERATIONAL_TABLE_SPECS[table], undefined, `${table} must remain outside P25 scope`)
+    assert.equal(classifyP25Use({ table, role: 'business_state' }).classification, 'not_p25_operational')
+  }
+})
+
+test('P25: durable legacy V1 job and plan values cannot become authority evidence', () => {
+  for (const table of [
+    'attendance_import_jobs',
+    'attendance_import_legacy_execution_plans',
+    'attendance_import_legacy_execution_plan_chunks',
+    'attendance_import_legacy_terminal_responses',
+  ]) {
+    assert.throws(
+      () => assertP25Use({ table, role: 'authorization_evidence' }),
+      (error) => error.code === 'ATTENDANCE_P25_OPERATIONAL_AUTHORITY_FORBIDDEN',
+      `${table} must not be promoted into authorization evidence`,
+    )
+    assert.equal(
+      classifyP25Use({ table, role: 'compatibility_transport', adapter: 'private_worker' }).allowed,
+      true,
+      `${table} may remain transport state for the private worker`,
+    )
+  }
+})
+
+test('P25: non-worker adapters cannot claim a retryable V1 job identity', () => {
+  for (const adapter of ['sync', 'legacy_import', 'integration_sync', 'rollback']) {
+    assert.throws(
+      () => assertP25Use({ table: 'attendance_import_jobs', role: 'retryable_job_identity_claim', adapter }),
+      (error) => error.code === 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN',
+      `${adapter} must reject a retryable job identity before source/operation DML`,
+    )
+  }
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_jobs',
+      role: 'retryable_job_identity_claim',
+      adapter: 'private_worker',
+    }).allowed,
+    true,
+    'the private worker is the only adapter allowed to claim a retryable job identity',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_jobs',
+      role: 'identity_transport',
+      adapter: 'legacy_import',
+    }).allowed,
+    false,
+    'a non-worker adapter cannot transport a reserved V1 identity tuple',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_legacy_execution_plans',
+      role: 'compatibility_transport',
+      adapter: 'legacy_import',
+    }).allowed,
+    false,
+    'renaming a reserved identity use as compatibility transport must not bypass the adapter boundary',
+  )
+  assert.equal(
+    classifyP25Use({
+      table: 'attendance_import_legacy_execution_plans',
+      role: 'compatibility_transport',
+      adapter: 'private_worker',
+    }).allowed,
+    true,
+    'the private worker may consume the durable compatibility plan',
+  )
+})
+
+test('P25: integration dryRun audit state cannot be categorized as business state', () => {
+  assert.throws(
+    () => assertP25Use({ table: 'attendance_integration_runs', role: 'business_state', dryRun: true }),
+    (error) => error.code === 'ATTENDANCE_P25_DRY_RUN_AUDIT_NOT_BUSINESS_STATE',
+  )
+  assert.equal(
+    classifyP25Use({ table: 'attendance_integration_runs', role: 'audit_attempt', dryRun: true }).allowed,
+    true,
+    'dryRun may append an audit attempt only',
+  )
+})
+
+test('P25: generated runtime call-path census classifies every closed-table read and write', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildP25CallPathCensus(source)
+  const result = classifyP25CallPathSites(sites)
+
+  assert.equal(sites.length, 109, 'the current generated P25 read/write inventory must remain explicit')
+  assert.deepEqual(result.unclassified, [], 'a new P25 table/site or renamed wrapper must not inherit a broad allowlist')
+  assert.deepEqual(result.countDrift, [], 'an extra P25 access in an existing wrapper must require an explicit classification')
+  assert.deepEqual(result.stale, [], 'removing a P25 access must retire its classification deliberately')
+  assert.equal(result.classifiedSites.length, sites.length, 'every generated P25 site must carry an explicit adapter and role')
+  assert.deepEqual(
+    [...new Set(sites.map((site) => site.table))].sort(),
+    P25_IMPORT_INTEGRATION_TABLES,
+    'the generated call-path census must cover every closed P25 table family',
+  )
+})
+
+test('P25 mutation: removing the private-worker boundary or adding a non-worker reserved-tuple read fails', () => {
+  const workerClassification = P25_CALL_PATH_CLASSIFICATIONS.find(
+    (classification) =>
+      classification.relPath === 'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts' &&
+      classification.table === 'attendance_import_legacy_execution_plans' &&
+      classification.access === 'read',
+  )
+  assert.ok(workerClassification)
+  const withoutPrivateWorker = P25_CALL_PATH_CLASSIFICATIONS.map((classification) =>
+    classification === workerClassification ? { ...classification, adapter: 'sync' } : classification,
+  )
+  assert.throws(
+    () => classifyP25CallPathSites([], withoutPrivateWorker),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN',
+    'the durable plan read cannot survive after its private-worker boundary is removed',
+  )
+
+  const nonWorkerRead = scanFileForP25CallPathSites(
+    'plugins/plugin-attendance/index.cjs',
+    "async function syncAdoptsReservedTuple() {\n  await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [jobId])\n}\n",
+  )
+  assert.equal(nonWorkerRead.length, 1)
+  assert.throws(
+    () =>
+      classifyP25CallPathSites(nonWorkerRead, [
+        {
+          relPath: 'plugins/plugin-attendance/index.cjs',
+          enclosingSymbol: 'syncAdoptsReservedTuple',
+          table: 'attendance_import_jobs',
+          access: 'read',
+          verb: 'select',
+          count: 1,
+          role: 'compatibility_transport',
+          adapter: 'sync',
+        },
+      ]),
+    (error) => error.code === 'ATTENDANCE_P25_IDENTITY_ADAPTER_PATH_FORBIDDEN',
+    'a sync/legacy/integration/rollback wrapper cannot consume a reserved retryable tuple',
+  )
+
+  const hiddenReadShapes = [
+    'async function multilineP25Read() {\n  return db.query(`SELECT * FROM\n attendance_import_jobs`)\n}\n',
+    "const TABLE = 'attendance_import_jobs'\nasync function moduleP25Read() { return db.query(`SELECT * FROM ${TABLE}`) }\n",
+    'const TABLE = `attendance_import_jobs`\nasync function backtickP25Read() { return db.query(`SELECT * FROM ${TABLE}`) }\n',
+    "const TABLE = 'attendance_import_jobs'\nasync function wrappedP25Read() { return db.query(`SELECT * FROM ${quote(TABLE)}`) }\n",
+  ]
+  for (const source of hiddenReadShapes) {
+    const sites = scanFileForP25CallPathSites('plugins/plugin-attendance/index.cjs', source)
+    assert.equal(sites.length, 1, source)
+    assert.equal(sites[0]?.table, 'attendance_import_jobs')
+    assert.equal(classifyP25CallPathSites(sites).unclassified.length, 1, source)
+  }
+
+  const reusedLoopVariable = scanFileForP25CallPathSites(
+    'packages/core-backend/src/db/migrations/example.ts',
+    "async function down() {\n  const checks = ['attendance_import_legacy_execution_plans']\n  for (const table of checks) { await db.query(`SELECT * FROM ${quote(table)}`) }\n  for (const table of ['attendance_import_jobs']) { await drop(table) }\n}\n",
+  )
+  assert.deepEqual(
+    reusedLoopVariable.map((site) => site.table),
+    ['attendance_import_legacy_execution_plans'],
+    'a later same-name loop binding must not contaminate an earlier dynamic SELECT',
+  )
+})
+
+test('P25 mutation: an unclassified wrapper and integration-run authority both fail', () => {
+  const renamedWrapper = scanFileForP25CallPathSites(
+    'packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts',
+    "async function renamedPlanReader() {\n  await db.query('SELECT * FROM attendance_import_legacy_execution_plans WHERE job_id = $1', [jobId])\n}\n",
+  )
+  const unclassified = classifyP25CallPathSites(renamedWrapper)
+  assert.equal(unclassified.unclassified.length, 1, 'renaming a P25 wrapper must require a new explicit classification')
+
+  const addedSite = scanFileForP25CallPathSites(
+    'plugins/plugin-attendance/index.cjs',
+    "function buildImportJobProjectionSql() {\n  return 'SELECT * FROM attendance_import_jobs'\n}\n",
+  )
+  const addedSiteResult = classifyP25CallPathSites(addedSite)
+  assert.equal(addedSiteResult.unclassified.length, 0, 'the single known wrapper site remains classified')
+  const duplicateSiteResult = classifyP25CallPathSites([...addedSite, ...addedSite])
+  assert.equal(duplicateSiteResult.unclassified.length, 1, 'a new P25 site inside an existing wrapper must be unclassified')
+
+  const integrationAudit = P25_CALL_PATH_CLASSIFICATIONS.find(
+    (classification) => classification.table === 'attendance_integration_runs',
+  )
+  assert.ok(integrationAudit)
+  const authorityMutation = P25_CALL_PATH_CLASSIFICATIONS.map((classification) =>
+    classification === integrationAudit ? { ...classification, role: 'business_state' } : classification,
+  )
+  assert.throws(
+    () => classifyP25CallPathSites([], authorityMutation),
+    (error) => error.code === 'ATTENDANCE_P25_AUDIT_NOT_BUSINESS_STATE',
+    'integration_runs, including dry-run audit state, cannot feed calculation or authorization authority',
+  )
+})
+
+test('P06-P11/P23-P25 remain visible and explicitly canonicalized by W4C-3a', () => {
+  const requiredDebtIds = ['P06', 'P07', 'P08', 'P09', 'P10', 'P11', 'P23', 'P24', 'P25']
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const classified = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(classified.trackedSites)
+
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(
+      entry.owningSlice,
+      id === 'P25' ? 'W4C-0' : 'W4C-3a',
+      `${id} must retain its original owning slice`,
+    )
+    assert.equal(entry.canonicalizedBy, 'W4C-3a', `${id} must retain its completed-slice marker`)
+    // P23/P24/P25 are authorization/operational classification debt and intentionally have no
+    // tracked business DML claim; P06-P11 must retain the concrete current census claims.
+    if (!['P23', 'P24', 'P25'].includes(id)) {
+      assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its current canonical writers`)
+    }
+  }
+})
+
+test('W4C-3b P26 generates the action/fixture matrix and classifies every assignment DML site', () => {
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const result = classifyP26ApprovalAssignmentSites(sites)
+
+  assert.deepEqual(
+    result.unclassified.map((site) => `${site.relPath} :: ${site.enclosingSymbol} :: ${site.verb}`),
+    [],
+    'a new approval_assignments DML site must be explicitly classified',
+  )
+  assert.deepEqual(result.countDrift, [], 'a new or removed DML call in a known writer must require review')
+  assert.deepEqual(result.stale, [], 'removed assignment writers must retire their classification')
+  assert.equal(
+    result.classifiedSites.length,
+    sites.filter((site) => site.table === 'approval_assignments').length,
+  )
+
+  const contract = assertP26ActionAndFixtureContract(
+    fs.readFileSync(path.join(rootDir, 'packages/core-backend/src/types/approval-product.ts'), 'utf8'),
+    fs.readFileSync(path.join(rootDir, 'packages/core-backend/tests/integration/attendance-w4c3b-central-approval.db.test.ts'), 'utf8'),
+  )
+  assert.deepEqual(contract.fixtureKinds, ['normal', 'adversary'])
+  assert.deepEqual(contract.timeoutEffects, ['transfer', 'jump'])
+  assert.equal(contract.actions.length, 8)
+})
+
+test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or additions', () => {
+  const typeSource = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/types/approval-product.ts'),
+    'utf8',
+  )
+  const testSource = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/tests/integration/attendance-w4c3b-central-approval.db.test.ts'),
+    'utf8',
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource.replace("  'reduce_sign',\n", ''), testSource),
+    /ATTENDANCE_P26_ACTION_UNION_DRIFT/,
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource, testSource.replace("'normal', ", '')),
+    /ATTENDANCE_P26_FIXTURE_MATRIX_DRIFT/,
+  )
+  assert.throws(
+    () => assertP26ActionAndFixtureContract(typeSource, testSource.replace("'adversary'", "'mutated'")),
+    /ATTENDANCE_P26_FIXTURE_MATRIX_DRIFT/,
+  )
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const target = sites.find((site) =>
+    site.table === 'approval_assignments'
+    && site.relPath === 'packages/core-backend/src/services/ApprovalProductService.ts'
+    && site.enclosingSymbol === 'targetUserIds')
+  assert.ok(target)
+  assert.equal(classifyP26ApprovalAssignmentSites(sites.filter((site) => site !== target)).countDrift.length, 1)
+
+  const added = scanFileForDmlSites(
+    'packages/core-backend/src/services/NewApprovalWriter.ts',
+    "async function mutateAssignments() { await db.query('UPDATE approval_assignments SET is_active = FALSE') }\n",
+  )
+  assert.equal(classifyP26ApprovalAssignmentSites([...sites, ...added]).unclassified.length, 1)
+})
+
+test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by W4C-3b', () => {
+  const requiredDebtIds = ['P12', 'P13', 'P14', 'P17', 'P18', 'P19', 'P22', 'P26', 'P27', 'P28']
+  const concreteDebtIds = requiredDebtIds.filter((id) => !['P19', 'P22'].includes(id))
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { claimsByEntryId } = classifyTrackedSites(trackedSites)
+
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(entry.owningSlice, 'W4C-3b')
+    assert.equal(entry.canonicalizedBy, 'W4C-3b', `${id} must carry its completed-slice marker`)
+  }
+  for (const id of concreteDebtIds) {
+    assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its canonical writers`)
+  }
+
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  assert.match(
+    pluginSource,
+    /acquireAttendanceScheduleAssignmentLocks\(\s*client,\s*orgId,\s*\[requesterSource\.userId, counterpartySource\.userId\],\s*\{ required: true \}\s*\)/,
+    'shift-swap finalization must not silently degrade its schedule-fact lock',
+  )
+  assert.match(
+    pluginSource,
+    /acquireAttendanceScheduleAssignmentLocks\(client, orgId, \[detail\.user_id\], \{ required: true \}\)/,
+    'schedule-dispatch finalization must not silently degrade its schedule-fact lock',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// W4C-3c: hard zero-bypass — current-tree open debt is empty; live side doors fail.
+// Comments/examples are excluded structurally (maskCommentsForDmlScan).
+// ---------------------------------------------------------------------------
+
+function currentOpenDebtEntries(entries = CURATED_DEBT_ENTRIES) {
+  return entries.filter((entry) => !entry.canonicalizedBy)
+}
+
+test('W4C-3c hard zero-bypass: current-tree open-debt set is exactly empty', () => {
+  const open = currentOpenDebtEntries()
+  assert.deepEqual(
+    open.map((entry) => entry.id),
+    [],
+    'current-tree generated open-debt set must be exactly empty',
+  )
+
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { unclaimed } = classifyTrackedSites(trackedSites)
+  assert.deepEqual(unclaimed, [], 'current-tree unclaimed tracked sites must be empty')
+})
+
+test('W4C-3c mutation: removing a canonicalizedBy/current closure reopens debt', () => {
+  const closed = CURATED_DEBT_ENTRIES.filter((entry) => entry.canonicalizedBy)
+  assert.ok(closed.length > 0, 'precondition: at least one closed entry')
+  const mutated = CURATED_DEBT_ENTRIES.map((entry) =>
+    entry.id === 'P05' ? { ...entry, canonicalizedBy: undefined } : entry,
+  )
+  const reopened = currentOpenDebtEntries(mutated)
+  assert.ok(
+    reopened.some((entry) => entry.id === 'P05'),
+    'stripping P05 canonicalizedBy must reopen open debt',
+  )
+  assert.equal(
+    currentOpenDebtEntries().some((entry) => entry.id === 'P05'),
+    false,
+    'live inventory must still keep P05 closed',
+  )
+})
+
+test('W4C-3c: P05/P15/P16/P20 remain visible and explicitly canonicalized', () => {
+  const requiredDebtIds = ['P05', 'P15', 'P16', 'P20']
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const { trackedSites } = classifyCensus(sites)
+  const { claimsByEntryId, unclaimed } = classifyTrackedSites(trackedSites)
+
+  assert.deepEqual(unclaimed, [], 'hard zero-bypass requires unclaimed=0')
+  for (const id of requiredDebtIds) {
+    const entry = byId.get(id)
+    assert.ok(entry, `${id} must remain in the generated debt inventory`)
+    assert.equal(entry.owningSlice, 'W4C-3c')
+    assert.equal(entry.canonicalizedBy, 'W4C-3c', `${id} must carry its completed-slice marker`)
+  }
+  assert.ok((claimsByEntryId.get('P05') || []).length > 0, 'P05 must expose current canonical writers')
+  assert.ok((claimsByEntryId.get('P15') || []).length > 0, 'P15 must expose ops_retirement writers')
+  assert.ok((claimsByEntryId.get('P16') || []).length > 0, 'P16 must expose staging tooling sites')
+  const p16Sites = claimsByEntryId.get('P16') || []
+  const p16ClaimKeys = p16Sites.map((site) =>
+    `${site.relPath}::${site.enclosingSymbol}::${site.table}::${site.verb}`,
+  )
+  assert.equal(
+    new Set(p16ClaimKeys).size,
+    p16ClaimKeys.length,
+    'P16 exact allowlist must reject a second DML site with the same file/symbol/table/verb tuple',
+  )
+  // No historical crutch: removed post-write symbol is not a current claim.
+  const p05Sites = claimsByEntryId.get('P05') || []
+  assert.equal(
+    p05Sites.some((site) => site.enclosingSymbol === 'attachManualResultEditMarkerToRecord'),
+    false,
+    'P05 current claims must not include the removed post-write patch symbol',
+  )
+})
+
+test('W4C-3c structural comment exclusion: comment examples are not live DML sites', () => {
+  const withCommentOnly = [
+    '// DELETE FROM attendance_records WHERE id = 1',
+    '/* UPDATE attendance_records SET status = x */',
+    'const sql = `-- DO NOT: DELETE FROM attendance_records`',
+    'function demo() { return 1 } // UPDATE attendance_records SET x = 1',
+  ].join('\n')
+  const sites = scanFileForDmlSites('probe.cjs', withCommentOnly)
+  assert.deepEqual(
+    sites.filter((site) => site.table === 'attendance_records'),
+    [],
+    'comment/documentation DELETE/UPDATE must not mint DML sites',
+  )
+  assert.equal(hasLiveDmlOnTable(withCommentOnly, 'delete', 'attendance_records'), false)
+  assert.equal(hasLiveDmlOnTable(withCommentOnly, 'update', 'attendance_records'), false)
+
+  const live = "async function evil() { await db.query(`DELETE FROM attendance_records WHERE id = $1`) }\n"
+  assert.equal(hasLiveDmlOnTable(live, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', live).length, 1)
+})
+
+test('W4C-3c string-aware comment mask: live DML after JS string containing -- or http:// is preserved', () => {
+  const afterDashDash = [
+    "const s = '--'",
+    'async function live() { await db.query(`DELETE FROM attendance_records WHERE id = $1`) }',
+  ].join('\n')
+  const maskedDash = maskCommentsForDmlScan(afterDashDash)
+  assert.match(maskedDash, /DELETE FROM attendance_records/)
+  assert.equal(hasLiveDmlOnTable(afterDashDash, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', afterDashDash).length, 1)
+
+  const afterHttp = [
+    "const u = 'http://x'",
+    'async function live() { await db.query(`UPDATE attendance_records SET status = $1 WHERE id = $2`) }',
+  ].join('\n')
+  const maskedHttp = maskCommentsForDmlScan(afterHttp)
+  assert.match(maskedHttp, /UPDATE attendance_records/)
+  assert.equal(hasLiveDmlOnTable(afterHttp, 'update', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', afterHttp).length, 1)
+
+  // Negative control: SQL -- comment inside a template must not mint live DML,
+  // and must not blank later JS outside the template.
+  const sqlCommentInTemplate = [
+    'const q = `SELECT 1 -- DELETE FROM attendance_records`',
+    'const later = 1',
+    'async function live() { await db.query(`DELETE FROM attendance_events WHERE id = $1`) }',
+  ].join('\n')
+  const maskedSql = maskCommentsForDmlScan(sqlCommentInTemplate)
+  assert.equal(hasLiveDmlOnTable(sqlCommentInTemplate, 'delete', 'attendance_records'), false)
+  assert.equal(hasLiveDmlOnTable(sqlCommentInTemplate, 'delete', 'attendance_events'), true)
+  assert.match(maskedSql, /const later = 1/)
+  assert.match(maskedSql, /DELETE FROM attendance_events/)
+})
+
+test('W4C-3c whole-file scanner catches multiline DML verb/table boundaries', () => {
+  const shapes = [
+    'async function insertBypass() { await db.query(`INSERT INTO\n  attendance_records (id) VALUES ($1)`) }',
+    'async function deleteBypass() { await db.query(`DELETE FROM\n  attendance_events WHERE id = $1`) }',
+    'async function updateBypass() { await db.query(`UPDATE\n  attendance_records SET status = $1`) }',
+  ]
+  const expected = [
+    ['insert', 'attendance_records'],
+    ['delete', 'attendance_events'],
+    ['update', 'attendance_records'],
+  ]
+  for (let index = 0; index < shapes.length; index += 1) {
+    const sites = scanFileForDmlSites('probe.cjs', shapes[index])
+    assert.equal(sites.length, 1, shapes[index])
+    assert.deepEqual([sites[0].verb, sites[0].table], expected[index])
+  }
+})
+
+test('W4C-3c comment masker tracks nested braces inside template expressions', () => {
+  const source = [
+    'const sql = `SELECT ${render({ nested: { value: 1 } })}`',
+    'async function live() {',
+    '  await db.query(`DELETE FROM attendance_records WHERE id = $1`)',
+    '}',
+  ].join('\n')
+  const masked = maskCommentsForDmlScan(source)
+  assert.match(masked, /render\(\{ nested: \{ value: 1 \} \}\)/)
+  assert.equal(hasLiveDmlOnTable(source, 'delete', 'attendance_records'), true)
+  assert.equal(scanFileForDmlSites('probe.cjs', source).length, 1)
+})
+
+test('W4C-3c P16 exact allowlist: new DELETE under allowed file/symbol or different table/verb is unclaimed', () => {
+  const p16 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P16')
+  assert.ok(p16)
+
+  // Known allowlisted site still claims.
+  const allowed = {
+    relPath: 'scripts/ops/staging-attendance-tooling-teardown.mjs',
+    enclosingSymbol: 'runStagingAttendanceRecordTeardown',
+    table: 'attendance_records',
+    verb: 'delete',
+    line: 1,
+  }
+  assert.equal(p16.claims(allowed), true)
+
+  // Mutation A: new DELETE on a different table inside an otherwise allowed file/symbol.
+  const differentTable = {
+    ...allowed,
+    table: 'attendance_events',
+  }
+  assert.equal(p16.claims(differentTable), false)
+  const { unclaimed: unclaimedTable } = classifyTrackedSites([differentTable])
+  assert.equal(unclaimedTable.length, 1, 'different table under allowed symbol must be unclaimed')
+
+  // Mutation B: same table but different verb.
+  const differentVerb = {
+    ...allowed,
+    verb: 'update',
+  }
+  assert.equal(p16.claims(differentVerb), false)
+  const { unclaimed: unclaimedVerb } = classifyTrackedSites([differentVerb])
+  assert.equal(unclaimedVerb.length, 1, 'different verb under allowed symbol must be unclaimed')
+
+  // Mutation C: new DELETE inside an allowed staging file but different enclosingSymbol.
+  const differentSymbol = {
+    relPath: 'scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs',
+    enclosingSymbol: 'operatorShortcutDelete',
+    table: 'attendance_records',
+    verb: 'delete',
+    line: 1,
+  }
+  assert.equal(p16.claims(differentSymbol), false)
+  const { unclaimed: unclaimedSymbol } = classifyTrackedSites([differentSymbol])
+  assert.equal(unclaimedSymbol.length, 1, 'new symbol DELETE must not inherit P16 by path prefix')
+})
+
+test('W4C-3c P15: generate-cleanup-sql never emits live DELETE on attendance_records', () => {
+  const genPath = path.join(rootDir, 'scripts/attendance/generate-cleanup-sql.cjs')
+  const gen = require(genPath)
+  assert.throws(
+    () => gen.buildCleanupSql({ source: 'dingtalk_csv_test' }),
+    (error) => error?.code === 'ATTENDANCE_P15_ORG_REQUIRED',
+  )
+  const plan = gen.buildCleanupSql({ orgId: 'org-test', source: 'dingtalk_csv_test' })
+  assert.equal(plan.forbidsRecordDelete, true)
+  assert.equal(plan.requiresOpsRetirement, true)
+  assert.equal(hasLiveDmlOnTable(plan.sql, 'delete', 'attendance_records'), false)
+  assert.equal(
+    scanFileForDmlSites('scripts/attendance/generate-cleanup-sql.cjs', plan.sql)
+      .filter((site) => site.table === 'attendance_records' && site.verb === 'delete')
+      .length,
+    0,
+  )
+  assert.match(plan.sql, /ops_retirement/)
+  assert.match(
+    plan.sql,
+    /EXISTS\s*\(\s*SELECT 1\s+FROM attendance_record_calculations c\s+WHERE c\.attendance_record_id = r\.id\s+AND c\.org_id = r\.org_id\s*\)/,
+    'a calculation child alone must classify the parent as ops_retirement_required',
+  )
+})
+
+test('W4C-3c mutation: inserting a new live DELETE or UPDATE bypass is caught', () => {
+  const deleteBypass = [
+    'async function operatorShortcut() {',
+    '  await db.query(`DELETE FROM attendance_records WHERE org_id = $1`)',
+    '}',
+  ].join('\n')
+  const updateBypass = [
+    'async function sideDoorPatch() {',
+    '  await db.query(`UPDATE attendance_records SET meta = $1 WHERE id = $2`)',
+    '}',
+  ].join('\n')
+
+  const deleteClassified = classifyOneSyntheticSite(
+    'scripts/ops/attendance-unlisted-operator-tool.mjs',
+    deleteBypass,
+  )
+  const updateClassified = classifyOneSyntheticSite(
+    'packages/core-backend/src/routes/attendance-evil-side-door.ts',
+    updateBypass,
+  )
+  assert.equal(deleteClassified.trackedSites.length, 1)
+  assert.equal(deleteClassified.trackedSites[0].verb, 'delete')
+  assert.equal(updateClassified.trackedSites.length, 1)
+  assert.equal(updateClassified.trackedSites[0].verb, 'update')
+
+  const { unclaimed: unclaimedDelete } = classifyTrackedSites(deleteClassified.trackedSites)
+  const { unclaimed: unclaimedUpdate } = classifyTrackedSites(updateClassified.trackedSites)
+  assert.equal(unclaimedDelete.length, 1, 'live DELETE bypass must be unclaimed')
+  assert.equal(unclaimedUpdate.length, 1, 'live UPDATE bypass must be unclaimed')
+
+  // Comment-only reintroduction of the same text must NOT mint live DML sites.
+  const commentOnly = '// DELETE FROM attendance_records\n// UPDATE attendance_records SET x = 1\n'
+  assert.equal(scanFileForDmlSites('probe.cjs', commentOnly).length, 0)
+  assert.equal(maskCommentsForDmlScan(commentOnly).includes('DELETE'), false)
+  assert.equal(hasLiveDmlOnTable(commentOnly, 'delete', 'attendance_records'), false)
+})
+
+test('W4C-3c P05: post-write patch symbol is fully removed and no live second UPDATE exists', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+
+  // 1) Dead throw-only helper must not exist — symbol fully removed (P2).
+  assert.doesNotMatch(
+    pluginSource,
+    /\bfunction attachManualResultEditMarkerToRecord\b|\battachManualResultEditMarkerToRecord\s*\(/,
+    'attachManualResultEditMarkerToRecord must be fully removed, not retained as dead throw-only code',
+  )
+
+  // 2) Route goes through record-operation boundary (manual_edit), not direct apply alone.
+  assert.match(pluginSource, /kind:\s*'manual_edit'/)
+  assert.match(pluginSource, /createRecordOperationBoundary/)
+  assert.match(pluginSource, /appendManualOverrideCalculation/)
+
+  // 3) applyAttendanceResultEdit (legacy path only) must not itself UPDATE attendance_records.
+  const applyMatch = pluginSource.match(
+    /async function applyAttendanceResultEdit[\s\S]*?(?=\nasync function batchUpsertAttendanceRecordsValues)/,
+  )
+  assert.ok(applyMatch, 'applyAttendanceResultEdit must exist for legacy_projection_only')
+  assert.equal(
+    hasLiveDmlOnTable(applyMatch[0], 'update', 'attendance_records'),
+    false,
+    'applyAttendanceResultEdit must not contain a second live UPDATE attendance_records',
+  )
+  assert.match(applyMatch[0], /manual_result_edit:\s*frozenMarker/)
+  assert.match(applyMatch[0], /upsertAttendanceRecord\s*\(/)
+
+  // 4) Collector must not see any attachManual attendance_records DML site on HEAD.
+  const source = createWorktreeSource(rootDir)
+  const { sites } = buildRawCensus(source)
+  const attachSites = sites.filter(
+    (site) =>
+      site.relPath === 'plugins/plugin-attendance/index.cjs'
+      && site.enclosingSymbol === 'attachManualResultEditMarkerToRecord',
+  )
+  assert.deepEqual(attachSites, [], 'HEAD must not still have an attachManual DML site')
+})
+
+test('W4C-3c P20: singular host-port active-current module backs all four surfaces', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  const decisionTrace = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/services/AttendanceDecisionTrace.ts'),
+    'utf8',
+  )
+  const activeCurrent = fs.readFileSync(
+    path.join(rootDir, 'packages/core-backend/src/attendance/w4c3c-active-current.ts'),
+    'utf8',
+  )
+  const hostIndex = fs.readFileSync(path.join(rootDir, 'packages/core-backend/src/index.ts'), 'utf8')
+
+  // Singular module + host port (not a plugin-local relation constant).
+  assert.match(activeCurrent, /ATTENDANCE_ACTIVE_CURRENT_RELATION_V1/)
+  assert.match(hostIndex, /activeCurrent:\s*Object\.freeze/)
+  assert.match(pluginSource, /attendanceW4ActiveCurrentPort\s*=\s*attendanceW4SegmentCalculationPort\?\.activeCurrent/)
+  assert.doesNotMatch(
+    pluginSource,
+    /const ATTENDANCE_ACTIVE_CURRENT_RELATION\s*=\s*'attendance_current_records'/,
+    'plugin must not copy the relation constant; it must use the host port',
+  )
+  assert.match(pluginSource, /port\.listForAnomalyListing/)
+  assert.match(pluginSource, /port\.loadForMakeupAnomalyFacts/)
+  assert.match(pluginSource, /port\.listOpenForWorkDateResolver/)
+  assert.match(decisionTrace, /loadActiveCurrentAttendanceRecordForDecisionTraceV1/)
+})
+
+test('W4C-3c P20 mutation: bypassing the host port on anomaly listing fails only that surface', () => {
+  const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+  const mutated = pluginSource.replace(
+    /async function listActiveCurrentAttendanceRecordsForAnomalyListing\(db, options\) \{\n  const port = requireAttendanceActiveCurrentPort\(\)\n  return port\.listForAnomalyListing\(pluginQueryAdapter\(db\), options\)\n\}/,
+    `async function listActiveCurrentAttendanceRecordsForAnomalyListing(db, options) {
+  return db.query('SELECT * FROM attendance_records WHERE user_id = $1', [options.userId])
+}`,
+  )
+  assert.match(mutated, /FROM attendance_records WHERE user_id/)
+  // Other surfaces still call the host port.
+  assert.match(mutated, /port\.loadForMakeupAnomalyFacts/)
+  assert.match(mutated, /port\.listOpenForWorkDateResolver/)
+})
+
+test('W4C-3c P21/P25 residual classifications closed honestly', () => {
+  const byId = new Map(CURATED_DEBT_ENTRIES.map((entry) => [entry.id, entry]))
+  assert.equal(byId.get('P21')?.canonicalizedBy, 'W4C-1/W4C-2')
+  assert.equal(byId.get('P21')?.residualClassification, 'strict_parse_authority_closed_legacy_byte_preserved')
+  assert.equal(byId.get('P25')?.canonicalizedBy, 'W4C-3a')
+  for (const id of ['X01', 'X02', 'X03', 'X04', 'X05']) {
+    assert.equal(byId.get(id)?.canonicalizedBy, 'W4C-3c-residual-classification')
+    assert.ok(byId.get(id)?.residualClassification, `${id} must name its residual classification`)
+    assert.ok(byId.get(id)?.residualEvidence, `${id} must carry evidence-backed residual classification`)
+  }
+})
+
+test('W4C-3c mutation: new side-door business DML is unclaimed under hard zero-bypass', () => {
+  const synthetic = {
+    relPath: 'packages/core-backend/src/routes/evil-attendance-side-door.ts',
+    enclosingSymbol: 'evilRewrite',
+    table: 'attendance_records',
+    verb: 'update',
+    line: 1,
+  }
+  const { unclaimed } = classifyTrackedSites([synthetic])
+  assert.equal(unclaimed.length, 1, 'a new business write side door must not inherit any P0x claim')
+})
+
+test('W4C-3c operator retirement path exists and forbids live DELETE', () => {
+  const opsPath = path.join(rootDir, 'packages/core-backend/src/attendance/w4c3c-ops-retirement.ts')
+  const source = fs.readFileSync(opsPath, 'utf8')
+  assert.match(source, /appendOperatorRetirementCalculationV1/)
+  assert.match(source, /operator_retirement/)
+  assert.match(source, /ops_retirement/)
+  assert.match(source, /set_retired/)
+  assert.equal(
+    hasLiveDmlOnTable(source, 'delete', 'attendance_records'),
+    false,
+    'ops-retirement module must not contain live DELETE on attendance_records',
+  )
+  assert.match(source, /assertToolingOnlyNonW4FixtureTeardownAllowedV1/)
+  assert.match(source, /ATTENDANCE_RECORD_OPERATOR_RETIRED/)
+})
+
+test('W4C-3c mutation: reintroducing live second UPDATE after result edit is caught by scanner', () => {
+  const reintroduced = [
+    'async function attachManualResultEditMarkerToRecord(trx, record, marker) {',
+    '  await trx.query(`UPDATE attendance_records SET meta = $3 WHERE id = $1 AND org_id = $2`, [record.id, record.org_id, marker])',
+    '}',
+  ].join('\n')
+  const sites = scanFileForDmlSites('plugins/plugin-attendance/index.cjs', reintroduced)
+  assert.equal(sites.length, 1)
+  assert.equal(sites[0].verb, 'update')
+  assert.equal(sites[0].enclosingSymbol, 'attachManualResultEditMarkerToRecord')
+  // Historical-only claim is gone: current P05 must not absorb this reintroduction by symbol name alone
+  // when the site is a brand-new write (it would claim by symbol if we kept the crutch — prove we did not).
+  const p05 = CURATED_DEBT_ENTRIES.find((entry) => entry.id === 'P05')
+  assert.equal(p05.claims(sites[0]), false)
+  const classified = classifyCensus(sites)
+  const { unclaimed } = classifyTrackedSites(classified.trackedSites)
+  assert.equal(unclaimed.length, 1, 'reintroduced post-write UPDATE must be unclaimed open debt')
 })

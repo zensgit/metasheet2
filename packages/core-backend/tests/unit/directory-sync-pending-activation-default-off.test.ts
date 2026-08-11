@@ -9,10 +9,19 @@ const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsFor
  */
 function fakeClient() {
   const queries: Array<{ sql: string; params?: unknown[] }> = []
+  const aliasOwners = new Map<string, string>()
   return {
     queries,
     query: async (sql: string, params?: unknown[]) => {
       queries.push({ sql, params })
+      if (/INSERT INTO user_login_aliases/i.test(sql)) {
+        aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
+        return { rows: [] as Array<Record<string, unknown>> }
+      }
+      if (/SELECT user_id FROM user_login_aliases/i.test(sql)) {
+        const ownerId = aliasOwners.get(String(params?.[0] ?? ''))
+        return { rows: (ownerId ? [{ user_id: ownerId }] : []) as Array<Record<string, unknown>> }
+      }
       if (/FROM directory_accounts account/.test(sql)) {
         return {
           rows: [{
@@ -41,6 +50,9 @@ function fakeClient() {
 
 const ACCOUNT = {
   id: '11111111-1111-1111-1111-111111111111',
+  // #4651: the bind path now re-reads the account authoritatively under lock and refuses an
+  // inactive one — an admissible fixture account must therefore say so explicitly.
+  is_active: true,
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
   corp_id: 'corpA',
@@ -51,6 +63,7 @@ const ACCOUNT = {
   name: '李四',
   email: 'li@example.com',
   mobile: null as string | null,
+  is_active: true,
 }
 
 const baseOptions = {

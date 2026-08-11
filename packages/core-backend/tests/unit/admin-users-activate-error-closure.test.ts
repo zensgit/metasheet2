@@ -260,7 +260,7 @@ describe('activate error closure — LAYER 3: static consistency, NOT a behaviou
       + `site, so their row is unreachable and untested: ${JSON.stringify(tableNotThrown)}`,
     ).toEqual([])
 
-    expect(reasons.size).toBe(11)
+    expect(reasons.size).toBe(14)
   })
 
   it('mapActivateError reads ONLY `.code` off its error parameter — never `.message`', () => {

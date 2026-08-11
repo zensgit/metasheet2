@@ -475,10 +475,25 @@
                 />
               </div>
               <template v-if="versionDiff">
-                <div class="template-detail__version-diff-summary">
+                <div class="template-detail__version-diff-summary" data-testid="template-version-read-summary">
                   <span>表单字段 {{ versionDiff.fieldChanges }}</span>
                   <span>流程节点 {{ versionDiff.nodeChanges }}</span>
                   <span>连线 {{ versionDiff.edgeChanges }}</span>
+                  <p
+                    v-if="versionReadSummary"
+                    class="template-detail__version-read-summary-line"
+                    data-testid="template-version-read-summary-line"
+                  >
+                    {{ versionReadSummary.lines[0] }}
+                  </p>
+                  <p
+                    v-if="versionReadSummary?.overlay"
+                    class="template-detail__version-read-summary-overlay"
+                    data-testid="template-version-read-summary-overlay"
+                  >
+                    画布叠加：节点 +{{ versionReadSummary.overlay.addedNodes }}/−{{ versionReadSummary.overlay.removedNodes }}/~{{ versionReadSummary.overlay.changedNodes }}
+                    · 连线 +{{ versionReadSummary.overlay.addedEdges }}/−{{ versionReadSummary.overlay.removedEdges }}/~{{ versionReadSummary.overlay.changedEdges }}
+                  </p>
                 </div>
                 <el-segmented
                   v-if="versionDiff.totalChanges > 0"
@@ -512,7 +527,138 @@
                   </li>
                 </ul>
                 <div
-                  v-else-if="versionOverlay && versionOverlayLayout"
+                  v-else-if="versionDiffMode === 'dual' && versionDualCanvas"
+                  class="template-detail__version-dual"
+                  data-testid="template-version-dual-canvas"
+                >
+                  <ul
+                    v-if="versionReadSummary && versionReadSummary.lines.length"
+                    class="template-detail__version-dual-summary-lines"
+                    data-testid="template-version-dual-summary-lines"
+                  >
+                    <li
+                      v-for="(line, idx) in versionReadSummary.lines"
+                      :key="`dual-sum-${idx}`"
+                    >
+                      {{ line }}
+                    </li>
+                  </ul>
+                  <p v-if="versionDiff.fieldChanges" class="template-detail__version-overlay-note">
+                    另有 {{ versionDiff.fieldChanges }} 项表单字段变化，请切回列表查看。
+                  </p>
+                  <div class="template-detail__version-dual-row">
+                    <div
+                      class="template-detail__version-dual-side"
+                      data-testid="template-version-dual-left"
+                    >
+                      <h4 class="template-detail__version-dual-title">{{ versionDualCanvas.left.title }}</h4>
+                      <div
+                        class="template-detail__version-overlay-canvas"
+                        :style="{
+                          width: `${versionDualCanvas.left.layout.width}px`,
+                          height: `${versionDualCanvas.left.layout.height}px`,
+                        }"
+                      >
+                        <svg
+                          class="template-detail__version-overlay-edges"
+                          :width="versionDualCanvas.left.layout.width"
+                          :height="versionDualCanvas.left.layout.height"
+                        >
+                          <defs>
+                            <marker id="approval-version-dual-left-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                              <path d="M0,0 L7,3 L0,6 Z" fill="currentColor" />
+                            </marker>
+                          </defs>
+                          <path
+                            v-for="line in versionDualLeftEdgeLines"
+                            :key="line.key"
+                            :d="line.path"
+                            class="template-detail__version-overlay-edge"
+                            :class="line.change ? `is-${line.change}` : ''"
+                            marker-end="url(#approval-version-dual-left-arrow)"
+                          />
+                        </svg>
+                        <div
+                          v-for="pos in versionDualCanvas.left.layout.nodes"
+                          :key="pos.key"
+                          class="template-detail__version-overlay-node"
+                          :class="versionDualCanvas.nodeChange(pos.key) ? `is-${versionDualCanvas.nodeChange(pos.key)}` : ''"
+                          :style="{
+                            left: `${pos.x}px`,
+                            top: `${pos.y}px`,
+                            width: `${VERSION_OVERLAY_NODE_W}px`,
+                            minHeight: `${VERSION_OVERLAY_NODE_H}px`,
+                          }"
+                        >
+                          <strong>{{ versionDualNodeLabel('left', pos.key) }}</strong>
+                          <el-tag
+                            v-if="versionDualCanvas.nodeChange(pos.key)"
+                            size="small"
+                            :type="versionChangeTagType(versionDualCanvas.nodeChange(pos.key)!)"
+                          >
+                            {{ versionChangeKindLabel(versionDualCanvas.nodeChange(pos.key)!) }}
+                          </el-tag>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      class="template-detail__version-dual-side"
+                      data-testid="template-version-dual-right"
+                    >
+                      <h4 class="template-detail__version-dual-title">{{ versionDualCanvas.right.title }}</h4>
+                      <div
+                        class="template-detail__version-overlay-canvas"
+                        :style="{
+                          width: `${versionDualCanvas.right.layout.width}px`,
+                          height: `${versionDualCanvas.right.layout.height}px`,
+                        }"
+                      >
+                        <svg
+                          class="template-detail__version-overlay-edges"
+                          :width="versionDualCanvas.right.layout.width"
+                          :height="versionDualCanvas.right.layout.height"
+                        >
+                          <defs>
+                            <marker id="approval-version-dual-right-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                              <path d="M0,0 L7,3 L0,6 Z" fill="currentColor" />
+                            </marker>
+                          </defs>
+                          <path
+                            v-for="line in versionDualRightEdgeLines"
+                            :key="line.key"
+                            :d="line.path"
+                            class="template-detail__version-overlay-edge"
+                            :class="line.change ? `is-${line.change}` : ''"
+                            marker-end="url(#approval-version-dual-right-arrow)"
+                          />
+                        </svg>
+                        <div
+                          v-for="pos in versionDualCanvas.right.layout.nodes"
+                          :key="pos.key"
+                          class="template-detail__version-overlay-node"
+                          :class="versionDualCanvas.nodeChange(pos.key) ? `is-${versionDualCanvas.nodeChange(pos.key)}` : ''"
+                          :style="{
+                            left: `${pos.x}px`,
+                            top: `${pos.y}px`,
+                            width: `${VERSION_OVERLAY_NODE_W}px`,
+                            minHeight: `${VERSION_OVERLAY_NODE_H}px`,
+                          }"
+                        >
+                          <strong>{{ versionDualNodeLabel('right', pos.key) }}</strong>
+                          <el-tag
+                            v-if="versionDualCanvas.nodeChange(pos.key)"
+                            size="small"
+                            :type="versionChangeTagType(versionDualCanvas.nodeChange(pos.key)!)"
+                          >
+                            {{ versionChangeKindLabel(versionDualCanvas.nodeChange(pos.key)!) }}
+                          </el-tag>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div
+                  v-else-if="versionDiffMode === 'canvas' && versionOverlay && versionOverlayLayout"
                   class="template-detail__version-overlay"
                   data-testid="template-version-graph-overlay"
                 >
@@ -632,6 +778,8 @@ import {
   type TemplateVersionDiff,
 } from '../../approvals/templateVersionDiff'
 import { buildVersionGraphOverlay } from '../../approvals/versionGraphOverlay'
+import { buildApprovalVersionReadSummary } from '../../approvals/approvalVersionReadSummary'
+import { buildApprovalVersionDualCanvas } from '../../approvals/approvalVersionDualCanvas'
 import {
   computeLayout,
   GRAPH_LAYOUT_NODE_HEIGHT,
@@ -976,10 +1124,11 @@ const selectedVersion = ref<ApprovalTemplateVersionDetailDTO | null>(null)
 const selectedBaseline = ref<ApprovalTemplateVersionSummaryDTO | null>(null)
 const selectedBaselineSnapshot = ref<Pick<ApprovalTemplateVersionDetailDTO, 'formSchema' | 'approvalGraph'> | null>(null)
 const versionDiff = ref<TemplateVersionDiff | null>(null)
-const versionDiffMode = ref<'list' | 'canvas'>('list')
+const versionDiffMode = ref<'list' | 'canvas' | 'dual'>('list')
 const versionDiffModeOptions = [
   { label: '变化列表', value: 'list' },
   { label: '流程画布', value: 'canvas' },
+  { label: '双画布', value: 'dual' },
 ]
 const versionDiffLoading = ref(false)
 const versionDiffError = ref('')
@@ -1001,15 +1150,31 @@ const versionOverlay = computed(() => {
     versionDiff.value,
   )
 })
+/** D8-b thin: business-facing summary over the same diff + overlay already on this page. */
+const versionReadSummary = computed(() => {
+  if (!versionDiff.value) return null
+  return buildApprovalVersionReadSummary(versionDiff.value, versionOverlay.value)
+})
 const versionOverlayLayout = computed(() => versionOverlay.value ? computeLayout(versionOverlay.value.graph) : null)
+/** D8-b residual: pure side-by-side before/after layouts (read-only). */
+const versionDualCanvas = computed(() => {
+  if (!selectedVersion.value) return null
+  return buildApprovalVersionDualCanvas(
+    selectedBaselineSnapshot.value?.approvalGraph ?? null,
+    selectedVersion.value.approvalGraph,
+    { overlay: versionOverlay.value },
+  )
+})
 const VERSION_OVERLAY_NODE_W = GRAPH_LAYOUT_NODE_WIDTH
 const VERSION_OVERLAY_NODE_H = GRAPH_LAYOUT_NODE_HEIGHT
-const versionOverlayEdgeLines = computed(() => {
-  const overlay = versionOverlay.value
-  const layout = versionOverlayLayout.value
-  if (!overlay || !layout) return []
+
+function versionCanvasEdgeLines(
+  graph: { edges: { key: string; source: string; target: string }[] },
+  layout: { nodes: { key: string; x: number; y: number }[] },
+  edgeChangeOf: (key: string) => TemplateVersionChangeKind | undefined,
+) {
   const positions = new Map(layout.nodes.map((node) => [node.key, node]))
-  return overlay.graph.edges.map((edge) => {
+  return graph.edges.map((edge) => {
     const source = positions.get(edge.source)
     const target = positions.get(edge.target)
     const x1 = (source?.x ?? 0) + GRAPH_LAYOUT_NODE_WIDTH / 2
@@ -1020,15 +1185,45 @@ const versionOverlayEdgeLines = computed(() => {
     return {
       key: edge.key,
       path: `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`,
-      change: overlay.edgeChanges.get(edge.key),
+      change: edgeChangeOf(edge.key),
     }
   })
+}
+
+const versionOverlayEdgeLines = computed(() => {
+  const overlay = versionOverlay.value
+  const layout = versionOverlayLayout.value
+  if (!overlay || !layout) return []
+  return versionCanvasEdgeLines(overlay.graph, layout, (key) => overlay.edgeChanges.get(key))
 })
+
+const versionDualLeftEdgeLines = computed(() => {
+  const dual = versionDualCanvas.value
+  if (!dual) return []
+  return versionCanvasEdgeLines(dual.left.graph, dual.left.layout, dual.edgeChange)
+})
+
+const versionDualRightEdgeLines = computed(() => {
+  const dual = versionDualCanvas.value
+  if (!dual) return []
+  return versionCanvasEdgeLines(dual.right.graph, dual.right.layout, dual.edgeChange)
+})
+
 function versionOverlayNodeChange(nodeKey: string): TemplateVersionChangeKind | undefined {
   return versionOverlay.value?.nodeChanges.get(nodeKey)
 }
 function versionOverlayNodeLabel(nodeKey: string): string {
   const node = versionOverlay.value?.graph.nodes.find((candidate) => candidate.key === nodeKey)
+  return node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')
+}
+function versionDualNodeLabel(
+  side: 'left' | 'right',
+  nodeKey: string,
+): string {
+  const dual = versionDualCanvas.value
+  if (!dual) return '流程节点'
+  const graph = side === 'left' ? dual.left.graph : dual.right.graph
+  const node = graph.nodes.find((candidate) => candidate.key === nodeKey)
   return node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')
 }
 
@@ -1331,10 +1526,20 @@ onBeforeUnmount(() => {
 }
 
 .template-detail__version-diff-summary {
-  gap: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px 20px;
   margin: 12px 0;
   color: var(--el-text-color-regular);
   font-size: 13px;
+}
+.template-detail__version-read-summary-line,
+.template-detail__version-read-summary-overlay {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .template-detail__version-change-list {
@@ -1372,6 +1577,40 @@ onBeforeUnmount(() => {
   min-width: 0;
   max-height: min(66vh, 720px);
   overflow: auto;
+}
+
+.template-detail__version-dual {
+  min-width: 0;
+  max-height: min(66vh, 720px);
+  overflow: auto;
+}
+
+.template-detail__version-dual-summary-lines {
+  margin: 0 0 10px;
+  padding: 0 0 0 1.1em;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.template-detail__version-dual-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.template-detail__version-dual-side {
+  flex: 1 1 280px;
+  min-width: 0;
+  overflow: auto;
+}
+
+.template-detail__version-dual-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
 }
 
 .template-detail__version-overlay-note {

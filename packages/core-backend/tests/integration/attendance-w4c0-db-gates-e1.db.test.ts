@@ -22,11 +22,13 @@
  *  - lineage strictly-older/cross-record refusal + uq_arc_operation retry backstop;
  *  - request snapshot A->B->A version appends and mutable-substitution refusal;
  *  - outbox identity/payload immutability and closed delivery transitions;
- *  - P07 job gates: frozen identity/posture/vector fields (including the null->1
- *    promotion refusal), closed execution_reason_code pairing, proof-vector CHECK matrix
- *    (reordered/duplicated/missing/extra/tampered entries, wrong namespace), and the
- *    partial unique reservation backstop driven from two live connections in both commit
- *    orders with no raw 23505 escaping the service layer.
+ *  - P07 job gates under the W4C-3a successor rule: planless (proof-vector-only) V1
+ *    inserts are rejected at the job boundary; legacy null->1 promotion and partial
+ *    shape refusals remain; the predecessor reserveAttendanceImportJobW4V1 seam is
+ *    retired fail-closed before SQL because it cannot persist a complete durable plan.
+ *    Complete-plan frozen fields, proof-vector discrimination, enqueue, and races
+ *    are not supplied by these predecessor tests and keep #4688 Draft/HOLD until
+ *    independently proven on the successor path.
  *
  * Shared-DB discipline: every fixture identity is namespaced per run; append-only rows
  * are deliberately left behind (CI provisions a fresh database per run).
@@ -41,16 +43,8 @@ import {
   up,
   down,
 } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
-import {
-  acquireAttendanceCalculationRolloutLock,
-  createVerifiedAttendanceOperationIdentityV1,
-  createVerifiedAttendanceOrgIdentityV1,
-  parseCanonicalAttendanceRolloutOrgKeyV1,
-  resolveSegmentCalculationPosture,
-  type AttendanceW4TransactionClientV1,
-} from '../../src/attendance/w4c0-identity'
-import { createAuthorizedAttendanceWriteContextV1 } from '../../src/attendance/w4c0-authorization'
 import { reserveAttendanceImportJobW4V1 } from '../../src/attendance/w4c0-operation-registry'
+import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -60,7 +54,6 @@ const HEX64_A = 'a'.repeat(64)
 const HEX64_B = 'b'.repeat(64)
 const HEX64_C = 'c'.repeat(64)
 const IMPORT_NS = '6f67fdaa-e2aa-48b3-b76c-c4aab9723173'
-const ENV_KEY = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 
 const W4_TABLES = [
   'attendance_result_operation_batches',
@@ -76,13 +69,6 @@ const W4_TABLES = [
 
 function uuid(): string {
   return crypto.randomUUID()
-}
-
-function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return {
-    query: (sqlText, params) =>
-      client.query(sqlText, params as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
-  }
 }
 
 /**
@@ -141,10 +127,8 @@ async function countTables(pool: Pool): Promise<number> {
 describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', () => {
   const pool = new Pool({ connectionString: dbUrl })
   let mainMigrationDb: Kysely<unknown> | undefined
-  let priorEnv: string | undefined
 
   beforeAll(async () => {
-    priorEnv = process.env[ENV_KEY]
     // Replay-with-data leg happens implicitly on every local rerun of this suite: the
     // main database is already migrated AND populated, and up() must still succeed.
     mainMigrationDb = new Kysely<unknown>({
@@ -154,8 +138,6 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
   }, 60000)
 
   afterAll(async () => {
-    if (priorEnv === undefined) delete process.env[ENV_KEY]
-    else process.env[ENV_KEY] = priorEnv
     await mainMigrationDb?.destroy()
     await pool.end()
   })
@@ -636,7 +618,15 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
         params: [org, batchId],
         pattern: /W4C0_IMMUTABLE/,
       },
-      { sql: 'TRUNCATE attendance_result_operations', params: [], pattern: /W4C0_IMMUTABLE/ },
+      {
+        // W4C-2 amendment section 1.4's new `fk_areo_operation` (attendance_result_event_outbox
+        // -> attendance_result_operations) means Postgres's own FK-safety check now refuses a
+        // bare (non-CASCADE) TRUNCATE of this table BEFORE our trigger ever runs — TRUNCATE is
+        // still refused, just by a different, earlier mechanism than the W4C0_IMMUTABLE trigger.
+        sql: 'TRUNCATE attendance_result_operations',
+        params: [],
+        pattern: /W4C0_IMMUTABLE|cannot truncate a table referenced in a foreign key constraint/,
+      },
       { sql: 'TRUNCATE attendance_result_operation_batches CASCADE', params: [], pattern: /W4C0_IMMUTABLE/ },
     ]
     for (const leg of refusals) {
@@ -1232,18 +1222,27 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
   it('outbox: invalid event kind/duplicate identity/illegal transitions/immutability; delivered rows are terminal', async () => {
     const org = uuid()
     const opId = uuid()
+    // W4C-2 amendment section 1.4's `fk_areo_operation` (new — W4C-0 deliberately omitted
+    // it) requires a real (org_id, entrypoint, operation_id) row to exist first.
+    await pool.query(
+      `INSERT INTO attendance_result_operations (
+          org_id, entrypoint, operation_id, identity_source_kind, source_ref, actor_id, actor_posture,
+          capability, subject_scope, command_fingerprint, accepted_write_posture, state, response_snapshot
+        ) VALUES ($1,'live_punch',$2::uuid,'direct_live_punch','ref:e1','actor-e1','self','punch','{}'::jsonb,$3,'shadow','completed','{}'::jsonb)`,
+      [org, opId, HEX64_B],
+    )
     const insertEvent = (eventKind: string, operationId = opId) =>
       pool.query(
         `INSERT INTO attendance_result_event_outbox
-           (org_id, entrypoint, operation_id, event_kind, payload, payload_schema_version, business_key_fingerprint)
-         VALUES ($1, 'live_punch', $2::uuid, $3, '{"v":1}'::jsonb, 1, $4) RETURNING id::text AS id`,
+           (org_id, entrypoint, operation_id, identity_kind, event_kind, payload, payload_schema_version, business_key_fingerprint)
+         VALUES ($1, 'live_punch', $2::uuid, 'operation', $3, '{"v":1}'::jsonb, 1, $4) RETURNING id::text AS id`,
         [org, operationId, eventKind, HEX64_A],
       )
     const { rows } = await insertEvent('attendance.punched')
     const outboxId = rows[0].id as string
 
-    await expect(insertEvent('attendance.not-a-kind', uuid())).rejects.toThrow(/chk_areo_event_kind/)
-    await expect(insertEvent('attendance.punched')).rejects.toThrow(/uq_areo_identity|duplicate key/)
+    await expect(insertEvent('attendance.not-a-kind')).rejects.toThrow(/chk_areo_event_kind/)
+    await expect(insertEvent('attendance.punched')).rejects.toThrow(/uq_areo_operation_identity/)
 
     const refusals: Array<{ sql: string; params: unknown[]; pattern: RegExp }> = [
       {
@@ -1308,14 +1307,17 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
   })
 
   // =========================================================================
-  // E. P07 job gates.
+  // E. P07 job gates (planless V1 retired; complete-plan coverage is a W4C-3a gate).
   // =========================================================================
 
-  it('P07 frozen fields: every identity/posture/vector field refuses UPDATE including null->1 promotion; closed execution_reason_code pairing', async () => {
+  it('P07 planless V1 rows are rejected at the job boundary; legacy null→1 promotion and partial shape still refuse', async () => {
     const org = uuid()
     const batch = uuid()
-    const insertV1 = async (): Promise<string> => {
-      const { rows } = await pool.query(
+
+    // The successor enqueue guard rejects proof-vector-only V1 rows before shape
+    // constraints run — no raw or planless V1 job can persist.
+    const planlessCaught = await catchInTxn(pool, async (client) => {
+      await client.query(
         `INSERT INTO attendance_import_jobs
            (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
             w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
@@ -1326,33 +1328,14 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
                 jsonb_build_array(jsonb_build_object(
                   'ordinal', 0, 'semanticFingerprint', $4::text,
                   'derivedOperationId', attendance_w4_uuidv5($5::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $4))::text,
-                  'commandFingerprint', $3::text))
-         RETURNING id::text AS id`,
+                  'commandFingerprint', $3::text))`,
         [org, batch, HEX64_B, HEX64_A, IMPORT_NS],
       )
-      return rows[0].id as string
-    }
-    const jobId = await insertV1()
+    })
+    expect(String((planlessCaught as Error).message)).toMatch(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
 
-    const frozenLegs = [
-      `SET w4_command_fingerprint = '${HEX64_C}'`,
-      `SET w4_batch_command_id = '${uuid()}'::uuid`,
-      `SET w4_accepted_write_posture = 'authoritative'`,
-      `SET w4_item_count = 2`,
-      `SET w4_identity_proof_vector = '[]'::jsonb`,
-      `SET w4_actor_id = 'someone-else'`,
-      `SET w4_contract_version = NULL`,
-    ]
-    for (const setClause of frozenLegs) {
-      const caught = await catchInTxn(pool, async (client) => {
-        await client.query(`UPDATE attendance_import_jobs ${setClause} WHERE id = $1::uuid`, [jobId])
-      })
-      expect(String((caught as Error | undefined)?.message ?? `NO ERROR for ${setClause}`)).toMatch(
-        /W4C0_JOB_FROZEN|chk_aij_w4/,
-      )
-    }
-
-    // null->1 promotion refusal: a legacy job can never be backfilled into the V1 shape.
+    // null->1 promotion refusal: a legacy job can never be backfilled into the V1 shape
+    // (the successor frozen-field guard owns this boundary).
     const legacyId = (
       await pool.query(
         `INSERT INTO attendance_import_jobs (org_id, batch_id, created_by, status, payload)
@@ -1371,338 +1354,113 @@ describeIfDatabase('W4C-0 Stage E1 — section 12.1 database gates (real DB)', (
         [legacyId, uuid(), HEX64_B],
       )
     })
-    expect(String((promoteCaught as Error).message)).toMatch(/W4C0_JOB_FROZEN/)
-
-    // execution_reason_code closed pairing.
-    await pool.query(`UPDATE attendance_import_jobs SET w4_execution_reason_code = 'SEGMENT_CALCULATION_SUSPENDED' WHERE id = $1::uuid`, [jobId])
-    const pairingLegs: Array<{ sql: string; pattern: RegExp }> = [
-      // suspension pairs ONLY with queued.
-      { sql: `UPDATE attendance_import_jobs SET status = 'failed' WHERE id = $1::uuid`, pattern: /chk_aij_w4_exec_reason/ },
-      // unknown code.
-      { sql: `UPDATE attendance_import_jobs SET w4_execution_reason_code = 'SOME_OTHER_CODE' WHERE id = $1::uuid`, pattern: /chk_aij_w4_exec_reason/ },
-      // rollout-state value such as `eligible` is not an execution reason either.
-      { sql: `UPDATE attendance_import_jobs SET w4_execution_reason_code = 'eligible' WHERE id = $1::uuid`, pattern: /chk_aij_w4_exec_reason/ },
-    ]
-    for (const leg of pairingLegs) {
-      const caught = await catchInTxn(pool, async (client) => {
-        await client.query(leg.sql, [jobId])
-      })
-      expect(String((caught as Error | undefined)?.message ?? 'NO ERROR')).toMatch(leg.pattern)
-    }
-    // posture conflict pairs ONLY with failed (transition through clearing the reason).
-    await pool.query(`UPDATE attendance_import_jobs SET w4_execution_reason_code = NULL, status = 'failed' WHERE id = $1::uuid`, [jobId])
-    await pool.query(`UPDATE attendance_import_jobs SET w4_execution_reason_code = 'ATTENDANCE_ASYNC_JOB_POSTURE_CONFLICT' WHERE id = $1::uuid`, [jobId])
-    const completedCaught = await catchInTxn(pool, async (client) => {
-      await client.query(`UPDATE attendance_import_jobs SET status = 'completed' WHERE id = $1::uuid`, [jobId])
-    })
-    expect(String((completedCaught as Error).message)).toMatch(/chk_aij_w4_exec_reason/)
+    expect(String((promoteCaught as Error).message)).toMatch(/W4C3A_V1_JOB_FROZEN/)
 
     // A legacy (all-null) job cannot carry an execution reason at all.
     const legacyReasonCaught = await catchInTxn(pool, async (client) => {
-      await client.query(`UPDATE attendance_import_jobs SET w4_execution_reason_code = 'SEGMENT_CALCULATION_SUSPENDED' WHERE id = $1::uuid`, [legacyId])
+      await client.query(
+        `UPDATE attendance_import_jobs SET w4_execution_reason_code = 'SEGMENT_CALCULATION_SUSPENDED' WHERE id = $1::uuid`,
+        [legacyId],
+      )
     })
     expect(String((legacyReasonCaught as Error).message)).toMatch(/chk_aij_w4_shape/)
 
     // Partial shape combos (beyond the smoke leg): missing proof vector; missing posture.
     for (const missing of ['w4_identity_proof_vector', 'w4_accepted_write_posture']) {
+      const jobId = uuid()
+      const partialBatchId = uuid()
       const caught = await catchInTxn(pool, async (client) => {
         await client.query(
-          `INSERT INTO attendance_import_jobs
-             (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
-              w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
-              w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
-              w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-           SELECT $1, $2::uuid, 'actor-e1', 'queued', '{}'::jsonb, 1, 'import_batch', $2::uuid, 'import_batch',
-                  'batch:e1', 'actor-e1', 'delegated_import', $3,
-                  CASE WHEN $4 = 'w4_accepted_write_posture' THEN NULL ELSE 'shadow' END, 1, $3, $3,
-                  CASE WHEN $4 = 'w4_identity_proof_vector' THEN NULL
-                       ELSE jsonb_build_array(jsonb_build_object(
-                         'ordinal', 0, 'semanticFingerprint', $5::text,
-                         'derivedOperationId', attendance_w4_uuidv5($6::uuid, attendance_w4_item_name_bytes($2::uuid, 0, $5))::text,
-                         'commandFingerprint', $3::text)) END`,
-          [org, uuid(), HEX64_B, missing, HEX64_A, IMPORT_NS],
+          `SELECT set_config('attendance.w4c3a_enqueue_job_id', $1, true)`,
+          [jobId],
         )
-      })
-      expect(String((caught as Error | undefined)?.message ?? `NO ERROR for missing ${missing}`)).toMatch(/chk_aij_w4_shape/)
-    }
-  })
-
-  it('P07 proof-vector CHECK matrix: reordered/duplicated/short/long/tampered/wrong-namespace vectors are rejected', async () => {
-    const org = uuid()
-    const insertWithVector = async (batch: string, vectorSql: string, params: unknown[]): Promise<unknown> =>
-      catchInTxn(pool, async (client) => {
         await client.query(
           `INSERT INTO attendance_import_jobs
-             (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
+             (id, org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
               w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
               w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
               w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-           SELECT $1, $2::uuid, 'actor-e1', 'queued', '{}'::jsonb, 1, 'import_batch', $2::uuid, 'import_batch',
-                  'batch:e1', 'actor-e1', 'delegated_import', $3, 'shadow', 2, $3, $3, (${vectorSql})`,
-          [org, batch, HEX64_B, ...params],
+           SELECT $1::uuid, $2, $3::uuid, 'actor-e1', 'queued', '{}'::jsonb, 1, 'import_batch', $3::uuid, 'import_batch',
+                  'batch:e1', 'actor-e1', 'delegated_import', $4,
+                  CASE WHEN $5 = 'w4_accepted_write_posture' THEN NULL ELSE 'shadow' END, 1, $4, $4,
+                  CASE WHEN $5 = 'w4_identity_proof_vector' THEN NULL
+                       ELSE jsonb_build_array(jsonb_build_object(
+                         'ordinal', 0, 'semanticFingerprint', $6::text,
+                         'derivedOperationId', attendance_w4_uuidv5($7::uuid, attendance_w4_item_name_bytes($3::uuid, 0, $6))::text,
+                         'commandFingerprint', $4::text)) END`,
+          [jobId, org, partialBatchId, HEX64_B, missing, HEX64_A, IMPORT_NS],
         )
       })
+      expect(String((caught as Error | undefined)?.message ?? `NO ERROR for missing ${missing}`)).toMatch(
+        /chk_aij_w4_shape|chk_aij_w4_item_count/,
+      )
+    }
 
-    const entry = (batchParam: string, ordinal: number, fp: string, ns = IMPORT_NS) =>
-      `jsonb_build_object('ordinal', ${ordinal}, 'semanticFingerprint', '${fp}',
-        'derivedOperationId', attendance_w4_uuidv5('${ns}'::uuid, attendance_w4_item_name_bytes(${batchParam}::uuid, ${ordinal}, '${fp}'))::text,
-        'commandFingerprint', '${HEX64_B}')`
-
-    const batch = uuid()
-    // Reordered: entries [1,0] — ordinal must equal position.
-    let caught = await insertWithVector(batch, `jsonb_build_array(${entry('$2', 1, HEX64_B)}, ${entry('$2', 0, HEX64_A)})`, [])
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Duplicated ordinal.
-    caught = await insertWithVector(batch, `jsonb_build_array(${entry('$2', 0, HEX64_A)}, ${entry('$2', 0, HEX64_A)})`, [])
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Short (count 1 vs item_count 2).
-    caught = await insertWithVector(batch, `jsonb_build_array(${entry('$2', 0, HEX64_A)})`, [])
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Long (count 3 vs item_count 2).
-    caught = await insertWithVector(
-      batch,
-      `jsonb_build_array(${entry('$2', 0, HEX64_A)}, ${entry('$2', 1, HEX64_B)}, ${entry('$2', 2, HEX64_C)})`,
-      [],
-    )
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Tampered derived ID: entry 1 derived under a DIFFERENT root.
-    caught = await insertWithVector(
-      batch,
-      `jsonb_build_array(${entry('$2', 0, HEX64_A)}, ${entry(`'${uuid()}'`, 1, HEX64_B)})`,
-      [],
-    )
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Wrong namespace: derived under the INTEGRATION namespace for an import_batch job.
-    caught = await insertWithVector(
-      batch,
-      `jsonb_build_array(${entry('$2', 0, HEX64_A)}, ${entry('$2', 1, HEX64_B, '46501375-c273-459f-a5af-f926859f6411')})`,
-      [],
-    )
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Extra key inside an entry.
-    caught = await insertWithVector(
-      batch,
-      `jsonb_build_array(${entry('$2', 0, HEX64_A)}, (${entry('$2', 1, HEX64_B)}) || jsonb_build_object('extra', 1))`,
-      [],
-    )
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Missing commandFingerprint key.
-    caught = await insertWithVector(
-      batch,
-      `jsonb_build_array(${entry('$2', 0, HEX64_A)}, (${entry('$2', 1, HEX64_B)}) - 'commandFingerprint')`,
-      [],
-    )
-    expect(String((caught as Error).message)).toMatch(/chk_aij_w4_proof_vector/)
-    // Zero rows made it through.
-    const rows = await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1', [org])
-    expect(rows.rows[0].n).toBe(0)
-  })
-
-  it('P07 reservation backstop: two live connections in both commit orders converge on ONE durable job; 23505 never escapes the service; the raw unique index is load-bearing', async () => {
-    const org = uuid()
-    process.env[ENV_KEY] = org
-    await pool.query(
-      `INSERT INTO attendance_calculation_rollout_state
-         (org_id, state, engine_version, reason_code, actor_id, version, prior_state, scope)
-       VALUES ($1, 'shadow', 'w4c0-e1', 'TEST_FIXTURE', 'actor-e1', 1, 'legacy', 'synthetic_staging')`,
+    // Zero planless V1 rows for this org (only the legacy fixture remains).
+    const v1Rows = await pool.query(
+      `SELECT count(*)::int AS n FROM attendance_import_jobs
+        WHERE org_id = $1 AND w4_contract_version IS NOT NULL`,
       [org],
     )
-    const actor = `w4c0-e1-actor-${RUN}`
-    const auth = () =>
-      createAuthorizedAttendanceWriteContextV1({
-        actorId: actor,
-        actorPosture: 'delegated_import',
-        tokenSubjectUserId: null,
-        orgId: org,
-        subjectScope: { kind: 'explicit_users', userIds: [actor] },
-        capability: 'import',
-        sourceRef: 'test:w4c0-e1',
-      })
-    const batchRoot = uuid()
-    const legacyBatchId = uuid()
+    expect(v1Rows.rows[0].n).toBe(0)
+    // This predecessor suite does not mint complete plans. The successor
+    // W4C-3a migration suite replays every frozen-field UPDATE and the closed
+    // execution-reason/status matrix on persisted complete plans.
+  })
 
-    const buildIdentities = async (client: PoolClient) => {
-      const t = trx(client)
-      const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(org)
-      await acquireAttendanceCalculationRolloutLock(t, orgKey, 'shared')
-      const posture = await resolveSegmentCalculationPosture(t, org)
-      const orgIdentity = createVerifiedAttendanceOrgIdentityV1({ orgKey: org, posture })
-      const batchIdentity = createVerifiedAttendanceOperationIdentityV1({
-        org: orgIdentity,
-        kind: 'batch',
-        entrypoint: 'import_batch',
-        source: { sourceKind: 'import_batch', batchCommandId: batchRoot },
-      })
-      const items = [HEX64_A, HEX64_B].map((semanticFingerprint, index) => ({
-        identity: createVerifiedAttendanceOperationIdentityV1({
-          org: orgIdentity,
-          kind: 'item',
-          entrypoint: 'import_batch',
-          source: { sourceKind: 'import_item', batchCommandId: batchRoot, ordinal: String(index), semanticFingerprint },
-        }),
-        commandFingerprint: semanticFingerprint,
-      }))
-      return { batchIdentity, items }
-    }
-    const reserveOn = async (client: PoolClient) => {
-      const built = await buildIdentities(client)
-      return reserveAttendanceImportJobW4V1(trx(client), auth(), {
-        batchIdentity: built.batchIdentity,
-        items: built.items,
-        batchCommandFingerprint: HEX64_C,
-        legacyJob: { batchId: legacyBatchId, createdBy: actor, payload: { rows: 2 }, total: 2 },
-      })
-    }
-
-    const holder = await pool.connect()
-    const waiter = await pool.connect()
-    const surfaced: unknown[] = []
-    try {
-      // ORDER 1 — holder inserts but ROLLS BACK while the waiter is already blocked on
-      // the class-10 locks: the waiter must then insert (kind 'created'), proving its
-      // reservation re-read happens under the lock, not before it.
-      await holder.query('BEGIN')
-      const held = await reserveOn(holder)
-      expect(held.kind).toBe('created')
-      await waiter.query('BEGIN')
-      const waiterPromise = reserveOn(waiter).catch((error) => {
-        surfaced.push(error)
-        throw error
-      })
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      await holder.query('ROLLBACK')
-      const afterRollback = await waiterPromise
-      expect(afterRollback.kind).toBe('created')
-      await waiter.query('COMMIT')
-
-      // ORDER 2 — holder-side transaction COMMITTED first: the second concurrent
-      // byte-congruent enqueue returns the SAME durable job.
-      await holder.query('BEGIN')
-      const replayPromise = reserveOn(holder)
-      const replay = await replayPromise
-      expect(replay).toEqual({
-        kind: 'existing',
-        jobId: (afterRollback as { jobId: string }).jobId,
-        status: 'queued',
-      })
-      await holder.query('COMMIT')
-    } finally {
-      holder.release()
-      waiter.release()
-    }
-    expect(surfaced).toEqual([])
-
-    // Exactly ONE durable job for the tuple.
-    const jobs = await pool.query(
-      'SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1 AND w4_batch_command_id = $2::uuid',
-      [org, batchRoot],
-    )
-    expect(jobs.rows[0].n).toBe(1)
-
-    // The raw unique backstop is load-bearing: bypassing the service (no advisory
-    // lock, no re-read) hits uq_attendance_import_jobs_w4_reservation as 23505 —
-    // proof the index exists and that ONLY the service layer keeps 23505 from callers.
-    const rawCaught = await catchInTxn(pool, async (client) => {
+  it('P07 successor enqueue seam rejects planless V1 rows before proof-vector validation', async () => {
+    const org = uuid()
+    const batch = uuid()
+    const caught = await catchInTxn(pool, async (client) => {
       await client.query(
         `INSERT INTO attendance_import_jobs
            (org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
             w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
             w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
             w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
-         SELECT $1, $2::uuid, 'actor-e1', 'queued', '{}'::jsonb, 1, 'import_batch', $3::uuid, 'import_batch',
-                'batch:e1', 'actor-e1', 'delegated_import', $4, 'shadow', 1, $4, $4,
-                jsonb_build_array(jsonb_build_object(
-                  'ordinal', 0, 'semanticFingerprint', $5::text,
-                  'derivedOperationId', attendance_w4_uuidv5($6::uuid, attendance_w4_item_name_bytes($3::uuid, 0, $5))::text,
-                  'commandFingerprint', $4::text))`,
-        [org, uuid(), batchRoot, HEX64_B, HEX64_A, IMPORT_NS],
+         VALUES ($1, $2::uuid, 'actor-e1', 'queued', '{}'::jsonb, 1, 'import_batch', $2::uuid,
+                 'import_batch', 'batch:e1', 'actor-e1', 'delegated_import', $3, 'shadow',
+                 1, $3, $3, '[]'::jsonb)`,
+        [org, batch, HEX64_B],
       )
     })
-    expect((rawCaught as { code?: string }).code).toBe('23505')
-    expect(String((rawCaught as Error).message)).toMatch(/uq_attendance_import_jobs_w4_reservation/)
+    expect(String((caught as Error).message)).toMatch(/W4C3A_V1_PLAN_ENQUEUE_SEAM_REQUIRED/)
+    const rows = await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs WHERE org_id = $1', [org])
+    expect(rows.rows[0].n).toBe(0)
+    // Complete-plan proof-vector discrimination is reloaded by the W4C-3a
+    // enqueue suite against the successor six-argument validator.
+  })
 
-    // Changed actor on the same reservation: 409, no second job, still no raw 23505.
-    const changedActorCaught = await catchInTxn(pool, async (client) => {
-      const built = await buildIdentities(client)
-      await reserveAttendanceImportJobW4V1(
-        trx(client),
-        createAuthorizedAttendanceWriteContextV1({
-          actorId: `${actor}-other`,
-          actorPosture: 'delegated_import',
-          tokenSubjectUserId: null,
-          orgId: org,
-          subjectScope: { kind: 'explicit_users', userIds: [actor] },
-          capability: 'import',
-          sourceRef: 'test:w4c0-e1',
-        }),
-        {
-          batchIdentity: built.batchIdentity,
-          items: built.items,
-          batchCommandFingerprint: HEX64_C,
-          legacyJob: { batchId: legacyBatchId, createdBy: actor, payload: { rows: 2 }, total: 2 },
+  it('retires the predecessor P07 reservation before SQL because it cannot persist a complete W4C-3a plan', async () => {
+    // Discriminating fail-closed retirement: the shim throws before any SQL or job
+    // DML. Complete-plan enqueue, reservation races, and unique-index backstops
+    // remain explicit #4688 Draft/HOLD work.
+    let sqlCalls = 0
+    const noSql = {
+      query: async () => {
+        sqlCalls += 1
+        return { rows: [] }
+      },
+    } as AttendanceW4TransactionClientV1
+
+    await expect(
+      reserveAttendanceImportJobW4V1(noSql, {}, {
+        batchIdentity: {},
+        items: [],
+        batchCommandFingerprint: HEX64_A,
+        legacyJob: {
+          batchId: uuid(),
+          createdBy: `actor-e1-${RUN}`,
+          payload: {},
+          total: 0,
         },
-      )
+      }),
+    ).rejects.toMatchObject({
+      name: 'AttendanceW4RegistryError',
+      code: 'W4C3A_DURABLE_PLAN_REQUIRED',
     })
-    expect((changedActorCaught as { code?: string }).code).toBe('ATTENDANCE_OPERATION_CONFLICT')
-
-    // A null-version legacy job can NEVER satisfy W4 replay: for a FRESH batch root
-    // that only has a legacy job row, the reservation must still insert a V1 job
-    // (kind 'created'), not return the legacy row as 'existing'.
-    const legacyOnlyRoot = uuid()
-    await pool.query(
-      `INSERT INTO attendance_import_jobs (org_id, batch_id, created_by, status, payload)
-       VALUES ($1, $2::uuid, 'actor-e1', 'completed', '{"legacy":true}'::jsonb)`,
-      [org, legacyOnlyRoot],
-    )
-    const legacyOnlyResult = await (async () => {
-      const client = await pool.connect()
-      try {
-        await client.query('BEGIN')
-        const t = trx(client)
-        const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(org)
-        await acquireAttendanceCalculationRolloutLock(t, orgKey, 'shared')
-        const posture = await resolveSegmentCalculationPosture(t, org)
-        const orgIdentity = createVerifiedAttendanceOrgIdentityV1({ orgKey: org, posture })
-        const result = await reserveAttendanceImportJobW4V1(t, auth(), {
-          batchIdentity: createVerifiedAttendanceOperationIdentityV1({
-            org: orgIdentity,
-            kind: 'batch',
-            entrypoint: 'import_batch',
-            source: { sourceKind: 'import_batch', batchCommandId: legacyOnlyRoot },
-          }),
-          items: [
-            {
-              identity: createVerifiedAttendanceOperationIdentityV1({
-                org: orgIdentity,
-                kind: 'item',
-                entrypoint: 'import_batch',
-                source: {
-                  sourceKind: 'import_item',
-                  batchCommandId: legacyOnlyRoot,
-                  ordinal: '0',
-                  semanticFingerprint: HEX64_A,
-                },
-              }),
-              commandFingerprint: HEX64_A,
-            },
-          ],
-          batchCommandFingerprint: HEX64_C,
-          legacyJob: { batchId: legacyOnlyRoot, createdBy: actor, payload: { rows: 1 }, total: 1 },
-        })
-        await client.query('COMMIT')
-        return result
-      } finally {
-        client.release()
-      }
-    })()
-    expect(legacyOnlyResult.kind).toBe('created')
-    const legacyUntouched = await pool.query(
-      `SELECT status, payload::text AS p FROM attendance_import_jobs
-        WHERE org_id = $1 AND batch_id = $2::uuid AND w4_contract_version IS NULL`,
-      [org, legacyOnlyRoot],
-    )
-    expect(legacyUntouched.rows).toEqual([{ status: 'completed', p: '{"legacy": true}' }])
-  }, 30000)
+    expect(sqlCalls).toBe(0)
+  })
 
   // =========================================================================
   // F. Trigger posture + CI wiring self-checks.

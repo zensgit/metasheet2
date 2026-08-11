@@ -496,6 +496,365 @@ components:
         updated_at:
           type: string
           format: date-time
+    AttendanceW4ShadowDiff:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - code
+        - changedFields
+        - absoluteMinuteDelta
+        - segmentCount
+      properties:
+        schemaVersion:
+          type: integer
+          enum:
+            - 1
+        code:
+          type: string
+          enum:
+            - equal
+            - expected_break_exclusion
+            - status_changed
+            - work_minutes_mismatch
+            - late_minutes_mismatch
+            - early_leave_minutes_mismatch
+            - missing_boundary_mismatch
+            - work_date_mismatch
+            - context_mismatch
+            - input_mismatch
+            - review_required
+            - legacy_uncomparable
+        changedFields:
+          type: array
+          uniqueItems: true
+          maxItems: 9
+          items:
+            type: string
+            enum:
+              - workDate
+              - status
+              - firstInAt
+              - lastOutAt
+              - workMinutes
+              - lateMinutes
+              - earlyLeaveMinutes
+              - context
+              - input
+        absoluteMinuteDelta:
+          type: integer
+          minimum: 0
+        segmentCount:
+          type: integer
+          minimum: 0
+          maximum: 3
+    AttendanceW4CalculationSegment:
+      type: object
+      additionalProperties: false
+      required:
+        - index
+        - expectedStartAt
+        - expectedEndAt
+        - actualInAt
+        - actualOutAt
+        - workMinutes
+        - lateMinutes
+        - earlyLeaveMinutes
+        - status
+        - statusReasons
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          maximum: 2
+        expectedStartAt:
+          type: string
+          format: date-time
+        expectedEndAt:
+          type: string
+          format: date-time
+        actualInAt:
+          type: string
+          format: date-time
+          nullable: true
+        actualOutAt:
+          type: string
+          format: date-time
+          nullable: true
+        workMinutes:
+          type: integer
+          minimum: 0
+        lateMinutes:
+          type: integer
+          minimum: 0
+        earlyLeaveMinutes:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          enum:
+            - normal
+            - late
+            - early_leave
+            - late_early
+            - missing_check_in
+            - missing_check_out
+            - missing_both
+        statusReasons:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+              - within_window
+              - late_check_in
+              - early_check_out
+              - missing_check_in
+              - missing_check_out
+              - missing_both
+              - approved_correction_applied
+              - approved_leave_overlay
+              - approved_overtime_overlay
+              - dst_fold_start_earlier
+              - dst_fold_end_later
+    AttendanceW4Calculation:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - version
+        - kind
+        - mode
+        - entrypoint
+        - engineVersion
+        - snapshotSchemaVersion
+        - outcome
+        - outcomeReasonCode
+        - projectionEffect
+        - expectedSegmentCount
+        - projectedStatus
+        - projectedWorkMinutes
+        - projectedLateMinutes
+        - projectedEarlyLeaveMinutes
+        - shadowDiff
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        kind:
+          type: string
+          enum:
+            - legacy_baseline
+            - calculation
+            - reversal
+        mode:
+          type: string
+          enum:
+            - shadow
+            - authoritative
+        entrypoint:
+          type: string
+          enum:
+            - live
+            - legacy_import
+            - integration_sync
+            - correction
+            - approved_leave
+            - approved_overtime
+            - outdoor_approval
+            - manual_override
+            - recompute
+            - scheduled
+            - approval_reversal
+            - import_rollback
+            - ops_retirement
+        engineVersion:
+          type: string
+        snapshotSchemaVersion:
+          type: integer
+          enum:
+            - 1
+        outcome:
+          type: string
+          enum:
+            - baseline
+            - completed
+            - review_required
+            - reversed
+        outcomeReasonCode:
+          type: string
+          enum:
+            - calculated
+            - shadow_only
+            - legacy_projection_baseline
+            - ambiguous_segment_match
+            - duplicate_check_in
+            - duplicate_check_out
+            - dst_gap_local_time
+            - dst_fold_shared_boundary_ambiguous
+            - invalid_timezone
+            - invalid_segment_order
+            - invalid_evidence_order
+            - overlapping_actual_intervals
+            - evidence_outside_attribution_window
+            - missing_frozen_context
+            - legacy_attribution_not_upgradeable
+            - frozen_evidence_unavailable
+            - context_resolution_ambiguous
+            - context_mismatch
+            - input_schema_invalid
+            - legacy_time_ingress_not_authoritative
+            - approved_fact_conflict
+            - manual_override_invalid
+            - import_metric_conflict
+            - import_rollback_reversal
+            - operator_retirement
+        projectionEffect:
+          type: string
+          enum:
+            - none
+            - set_active
+            - set_retired
+        expectedSegmentCount:
+          type: integer
+          minimum: 0
+          maximum: 3
+        projectedStatus:
+          type: string
+          nullable: true
+          enum:
+            - normal
+            - late
+            - early_leave
+            - late_early
+            - partial
+            - absent
+            - adjusted
+            - 'off'
+        projectedWorkMinutes:
+          type: integer
+          minimum: 0
+          nullable: true
+        projectedLateMinutes:
+          type: integer
+          minimum: 0
+          nullable: true
+        projectedEarlyLeaveMinutes:
+          type: integer
+          minimum: 0
+          nullable: true
+        shadowDiff:
+          allOf:
+            - $ref: '#/components/schemas/AttendanceW4ShadowDiff'
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+    AttendanceW4CalculationDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - recordId
+        - calculation
+        - segments
+        - current
+      properties:
+        recordId:
+          type: string
+          format: uuid
+        calculation:
+          allOf:
+            - $ref: '#/components/schemas/AttendanceW4Calculation'
+          nullable: true
+        segments:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/AttendanceW4CalculationSegment'
+        current:
+          type: object
+          additionalProperties: false
+          required:
+            - projectionOwner
+            - visibilityState
+            - visibilityReason
+            - posture
+          properties:
+            projectionOwner:
+              type: string
+              enum:
+                - legacy_untracked
+                - w4
+            visibilityState:
+              type: string
+              enum:
+                - active
+                - retired
+            visibilityReason:
+              type: string
+              enum:
+                - active
+                - review_placeholder
+                - import_rollback
+                - operator_retirement
+            posture:
+              type: string
+              enum:
+                - shadow
+                - authoritative
+                - undeterminable
+    AttendanceW4ShadowBacklogItem:
+      type: object
+      additionalProperties: false
+      required:
+        - entrypoint
+        - code
+        - label
+        - critical
+        - count
+      properties:
+        entrypoint:
+          type: string
+          enum:
+            - live
+            - legacy_import
+            - integration_sync
+            - correction
+            - approved_leave
+            - approved_overtime
+            - outdoor_approval
+            - manual_override
+            - recompute
+            - scheduled
+            - approval_reversal
+            - import_rollback
+            - ops_retirement
+        code:
+          type: string
+          enum:
+            - expected_break_exclusion
+            - status_changed
+            - work_minutes_mismatch
+            - late_minutes_mismatch
+            - early_leave_minutes_mismatch
+            - missing_boundary_mismatch
+            - work_date_mismatch
+            - context_mismatch
+            - input_mismatch
+            - review_required
+            - legacy_uncomparable
+        label:
+          type: string
+        critical:
+          type: boolean
+        count:
+          type: integer
+          minimum: 1
     AttendanceRequest:
       type: object
       properties:
@@ -1961,10 +2320,68 @@ components:
         plannedMinutes:
           type: integer
           description: >-
-            Sum of per-segment planned minutes; breaks between segments are
-            never counted.
+            Sum of per-segment planned minutes for strict shifts (breaks between
+            segments are never counted). For flex_required_duration this is the
+            required duration in minutes.
+        flexPolicy:
+          $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
+        flexEligible:
+          type: boolean
+          description: >-
+            True only when the shift has exactly one segment. Multi-segment flex
+            is rejected in v1 (OD-4556-3).
         capabilities:
           $ref: '#/components/schemas/AttendanceShiftCapabilities'
+    AttendanceShiftFlexPolicy:
+      description: >-
+        W5 flexible attendance policy (design lock §3.3). Discriminated by mode.
+        flex_required_duration is valid only for a one-segment shift;
+        multi-segment flex is rejected with a typed 422 and zero writes. Absent
+        flexPolicy on create defaults to strict.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - mode
+          properties:
+            mode:
+              type: string
+              enum:
+                - strict
+        - type: object
+          additionalProperties: false
+          required:
+            - mode
+            - requiredMinutes
+            - arrivalWindowBeforeMinutes
+            - arrivalWindowAfterMinutes
+          properties:
+            mode:
+              type: string
+              enum:
+                - flex_required_duration
+            requiredMinutes:
+              type: integer
+              minimum: 1
+              maximum: 1440
+            arrivalWindowBeforeMinutes:
+              type: integer
+              minimum: 0
+            arrivalWindowAfterMinutes:
+              type: integer
+              minimum: 0
+            coreStartTime:
+              type: string
+              nullable: true
+              description: >-
+                Optional same-day core-hours start (HH:MM) in the shift
+                timezone.
+              pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
+            coreEndTime:
+              type: string
+              nullable: true
+              description: Optional same-day core-hours end (HH:MM) in the shift timezone.
+              pattern: ^(?:[01]\d|2[0-3]):[0-5]\d$
     AttendanceShiftSegment:
       type: object
       properties:
@@ -8127,6 +8544,8 @@ paths:
                   deprecated: true
                   items:
                     type: integer
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId:
                   type: string
               required:
@@ -8151,10 +8570,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           description: >-
-            Typed segment rejection with zero writes:
-            ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or
-            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with
-            legacy start/end fields).
+            Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields), or
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex
+            rejection after request-shape validation, including multi-segment
+            flex or core-hours coverage failure).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -8237,6 +8658,8 @@ paths:
                   type: array
                   items:
                     type: integer
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId:
                   type: string
       responses:
@@ -8272,7 +8695,10 @@ paths:
             ATTENDANCE_SHIFT_SEGMENTS_INVALID,
             ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
             ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update
-            on a multi-segment shift).
+            on a multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID
+            for a canonical semantic flex rejection after request-shape
+            validation, including multi-segment flex or core-hours coverage
+            failure.
     delete:
       summary: Delete attendance shift
       security:
@@ -12434,6 +12860,148 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance-admin/records/{recordId}/calculation-detail:
+    get:
+      summary: Read immutable attendance calculation detail as an administrator
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: orgId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: calculationId
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceW4CalculationDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/attendance/records/{recordId}/calculation-detail:
+    get:
+      summary: Read the signed-in user's immutable attendance calculation detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: calculationId
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceW4CalculationDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/attendance-admin/calculation-shadow-backlog:
+    get:
+      summary: Read values-free attendance shadow difference backlog counts
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Values-free shadow difference aggregates
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - items
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceW4ShadowBacklogItem'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/audit-logs:
     get:
       summary: Admin-only audit log query

@@ -58,21 +58,53 @@ function stubClient(
         // evaluate the predicate — see the scope note.
         return { rows: candidates }
       }
-      if (/INSERT INTO user_external_auth_grants/i.test(sql) || /UPDATE users SET is_active = FALSE/i.test(sql)) {
+      if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
         return { rows: [] }
+      }
+      // Rev 4.4: the grant flip is now a plain effect-driven UPDATE (RETURNING is its
+      // fail-closed "row was still enabled" witness — answer it, don't just silence it).
+      if (/UPDATE user_external_auth_grants/i.test(sql)) {
+        return { rows: [{ local_user_id: String(params?.[0] ?? '') }] }
       }
       if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
         return { rows: [{ org_id: STUB_ORG_ID }] }
       }
-      if (/FROM user_orgs WHERE user_id = \$1::text AND org_id = \$2::text\s+FOR UPDATE/i.test(sql)) {
-        return { rows: [] }
+      // Delta re-review P1-D: the write-mode mutex is its own statement now (lock FIRST, then
+      // the candidacy read as a separate post-lock snapshot). The stub answers the lock with the
+      // row's existence; the ordering itself is asserted by the write-mode tests below.
+      if (/SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/i.test(sql)) {
+        return { rows: [{ id: String(params?.[0] ?? '') }] }
+      }
+      if (/FROM users candidate_user/i.test(sql)) {
+        const userId = String(params?.[0] ?? '')
+        return {
+          rows: [{
+            activation_status: 'activated',
+            is_active: true,
+            access_generation: 0,
+            linked_at_apply: true,
+            org_membership_active: true,
+            org_candidacy_clear: true,
+            globally_clear: !notGloballyClear.has(userId),
+            dingtalk_grant_enabled: true,
+            dingtalk_grant_row_exists: true,
+          }],
+        }
       }
       if (/UPDATE user_orgs\s+SET is_active = FALSE/i.test(sql)) {
-        return { rows: [] }
+        return { rows: [{ user_id: String(params?.[0] ?? '') }] }
       }
-      if (/FROM UNNEST\(\$1::text\[\]\) AS candidate_user/i.test(sql)) {
-        const requested = (params?.[0] as string[] | undefined) ?? []
-        return { rows: requested.filter((id) => !notGloballyClear.has(id)).map((id) => ({ local_user_id: id })) }
+      if (/UPDATE users\s+SET access_generation/i.test(sql)) {
+        return { rows: [{ access_generation: 1 }] }
+      }
+      if (/INSERT INTO directory_deprovision_events/i.test(sql)) {
+        return { rows: [{ id: 'event-1' }] }
+      }
+      if (
+        /directory_deprovision_(?:events|effects)/i.test(sql)
+        || /INSERT INTO directory_deprovision_effects/i.test(sql)
+      ) {
+        return { rows: [] }
       }
       // Anything else is drift: a new query appeared that no test has reasoned about.
       throw new Error(`Unhandled SQL in deprovision stub:\n${sql}`)
@@ -81,15 +113,20 @@ function stubClient(
 }
 
 const wrote = (queries: string[], pattern: RegExp) => queries.some((sql) => pattern.test(sql))
-const DEACTIVATES_USER = /UPDATE users SET is_active = FALSE/i
+const DEACTIVATES_USER = /UPDATE users[\s\S]*is_active = FALSE/i
 const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
-const DISABLES_GRANT = /INSERT INTO user_external_auth_grants/i
+// Rev 4.4: an ENABLED grant is closed by an effect-driven UPDATE … SET enabled = FALSE; the
+// INSERT shape is the deny-row CREATION for a person with no row (also matched so the
+// default-off test proves NEITHER write happens in preview).
+const DISABLES_GRANT = /(?:UPDATE user_external_auth_grants[\s\S]*SET enabled = FALSE|INSERT INTO user_external_auth_grants)/i
 
 const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null }
 
 describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', () => {
   const baseOptions = {
     integrationId: 'dir-1',
+    runId: 'run-1',
+    triggeredBy: 'unit-test',
     deactivatedAccountIds: ['acct-1'],
     syncedAccountCount: 100,
     integrationDefaultPolicy: 'mark_inactive',
@@ -102,6 +139,8 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     // The load-bearing safety property: merging this cannot deactivate anyone.
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    // P1-D: preview writes nothing, so it must lock nothing.
+    expect(wrote(client.queries, /FOR UPDATE/i)).toBe(false)
     // W4-PRE-1c (owner 裁决②): disabled must ALSO never attempt the user_orgs deactivation —
     // this is the unit-level half of mutation ①/② (moving the write before the enabled gate,
     // or dropping the gate); the real-DB half lives in the W4-PRE-1c real-DB suite.
@@ -124,6 +163,15 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
   it('enabled + mark_inactive: disables the grant, deactivates the local user, AND attempts the user_orgs deactivation', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, { ...baseOptions, enabled: true })
+
+    // P1-D ordering guard (answers the stub, not just silences it): write mode must take the
+    // users FOR UPDATE mutex BEFORE the candidacy read — the two sharing a statement (or the
+    // read coming first) is the exact stale-snapshot P1 the race golden kills on real PG.
+    const lockIndex = client.queries.findIndex((sql) => /FOR UPDATE/i.test(sql))
+    const stateIndex = client.queries.findIndex((sql) => /FROM users candidate_user/i.test(sql))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(stateIndex).toBeGreaterThan(lockIndex)
+    expect(client.queries[stateIndex]).not.toMatch(/FOR UPDATE/i)
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(true)

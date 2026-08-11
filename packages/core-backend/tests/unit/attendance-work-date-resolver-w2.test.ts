@@ -706,34 +706,60 @@ describe('W2 resolver source failures', () => {
 })
 
 describe('W2 production write-path wiring', () => {
-  it('routes all four import writers through the shared guard and freezes its result', () => {
+  it('routes every import producer through one shared guard and freezes its result', () => {
+    const sharedImportBody = pluginSource.slice(
+      pluginSource.indexOf('const commitAttendanceImportPayload = async'),
+      pluginSource.indexOf('const integrationCreateSchema = z.object'),
+    )
     expect(
-      pluginSource.match(/const importAttribution = await resolveImportRowWorkDateAttribution\(\{/g),
-    ).toHaveLength(4)
+      sharedImportBody.match(/const importAttribution = await resolveImportRowWorkDateAttribution\(\{/g),
+    ).toHaveLength(1)
     expect(
-      pluginSource.match(/meta\[FROZEN_ATTRIBUTION_KEY\] = importAttribution\.frozenAttribution/g),
-    ).toHaveLength(4)
+      sharedImportBody.match(/meta\[FROZEN_ATTRIBUTION_KEY\] = importAttribution\.frozenAttribution/g),
+    ).toHaveLength(1)
 
-    const routeSlices = [
-      pluginSource.slice(
-        pluginSource.indexOf("'/api/attendance/import/commit'"),
-        pluginSource.indexOf("'/api/attendance/import'"),
-      ),
-      pluginSource.slice(
-        pluginSource.indexOf("'/api/attendance/import'"),
-        pluginSource.indexOf("'/api/attendance/integrations'"),
-      ),
-      pluginSource.slice(
-        pluginSource.indexOf("'/api/attendance/integrations/:id/sync'"),
-      ),
+    const syncCommitStart = pluginSource.indexOf("'/api/attendance/import/commit'")
+    const previewAsyncStart = pluginSource.indexOf(
+      "'/api/attendance/import/preview-async'",
+      syncCommitStart,
+    )
+    const asyncCommitStart = pluginSource.indexOf(
+      "'/api/attendance/import/commit-async'",
+      previewAsyncStart,
+    )
+    const legacyImportStart = pluginSource.indexOf(
+      "'/api/attendance/import'",
+      asyncCommitStart,
+    )
+    const integrationSyncStart = pluginSource.indexOf(
+      "'/api/attendance/integrations/:id/sync'",
+      legacyImportStart,
+    )
+    const producerRouteStarts = [
+      syncCommitStart,
+      previewAsyncStart,
+      asyncCommitStart,
+      legacyImportStart,
+      integrationSyncStart,
+    ]
+    expect(producerRouteStarts.every((offset) => offset >= 0)).toBe(true)
+    expect(producerRouteStarts).toEqual(
+      [...producerRouteStarts].sort((left, right) => left - right),
+    )
+
+    const producerSlices = [
       pluginSource.slice(
         pluginSource.indexOf('const processAsyncImportCommitJob = async'),
-        pluginSource.indexOf("'/api/attendance/import/commit'"),
+        pluginSource.indexOf('const commitAttendanceImportPayload = async'),
       ),
+      pluginSource.slice(syncCommitStart, previewAsyncStart),
+      pluginSource.slice(asyncCommitStart, legacyImportStart),
+      pluginSource.slice(legacyImportStart, integrationSyncStart),
+      pluginSource.slice(integrationSyncStart),
     ]
-    for (const slice of routeSlices) {
-      expect(slice).toContain('resolveImportRowWorkDateAttribution({')
-      expect(slice).toContain('meta[FROZEN_ATTRIBUTION_KEY] = importAttribution.frozenAttribution')
+    expect(producerSlices).toHaveLength(5)
+    for (const slice of producerSlices) {
+      expect(slice).toContain('commitAttendanceImportPayload({')
     }
   })
 })

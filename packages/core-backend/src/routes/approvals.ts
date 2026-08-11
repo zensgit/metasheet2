@@ -16,6 +16,10 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
+  assertAttendanceCentralMutationFailClosed,
+  attendanceCentralApprovalErrorToServiceFields,
+} from '../attendance/w4c3b-central-approval-hooks'
+import {
   executeApprovalActionFromCardDelivery,
   getApprovalCardDeliverySummary,
 } from '../services/ApprovalCardDeliveryAction'
@@ -44,7 +48,11 @@ import {
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
-import type { FormSchema } from '../types/approval-product'
+import {
+  APPROVAL_ACTION_TYPES,
+  type ApprovalActionType,
+  type FormSchema,
+} from '../types/approval-product'
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
@@ -1954,8 +1962,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         )
       }
 
-      const action = req.body?.action
-      if (!['approve', 'reject', 'transfer', 'revoke', 'comment', 'return', 'add_sign', 'reduce_sign'].includes(String(action))) {
+      const rawAction = String(req.body?.action)
+      if (!(APPROVAL_ACTION_TYPES as readonly string[]).includes(rawAction)) {
         return res.status(400).json({
           error: {
             code: 'VALIDATION_ERROR',
@@ -1963,6 +1971,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         })
       }
+      const action = rawAction as ApprovalActionType
 
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
@@ -2151,6 +2160,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           )
         }
 
+        // P17/P22: attendance instances fail closed before legacy terminal DML.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          await client.query('ROLLBACK')
+          const fields = attendanceCentralApprovalErrorToServiceFields(error)
+          if (fields) {
+            return res.status(fields.statusCode).json(
+              approvalErrorResponse(fields.code, fields.message),
+            )
+          }
+          throw error
+        }
+
         const newVersion = instance.version + 1
 
         await client.query(
@@ -2292,6 +2315,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               `Cannot reject: current status is ${instance.status}`,
             ),
           )
+        }
+
+        // P17/P22: attendance instances fail closed before legacy terminal DML.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          await client.query('ROLLBACK')
+          const fields = attendanceCentralApprovalErrorToServiceFields(error)
+          if (fields) {
+            return res.status(fields.statusCode).json(
+              approvalErrorResponse(fields.code, fields.message),
+            )
+          }
+          throw error
         }
 
         const newVersion = instance.version + 1

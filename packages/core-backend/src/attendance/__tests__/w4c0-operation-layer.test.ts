@@ -70,6 +70,15 @@ describe('W4C-0 Stage C — exported operation contract', () => {
       W4_BATCH_LIMIT_EXCEEDED: 422,
       ATTENDANCE_WRITE_NOT_AUTHORIZED: 403,
       W4_ATTRIBUTION_UNSUPPORTED: 422,
+      // W4C-2 amendment section 1.6 (PR #4617, RATIFIED): the scheduled-run (class-01)
+      // advisory-helper busy code.
+      ATTENDANCE_SCHEDULED_RUN_BUSY: 503,
+      // W4C-2 amendment sections 1.1.2/1.7/1.8 (PR #4617, RATIFIED) — the run-creation/
+      // resume/finalization/abandoned transactional half's own closed codes.
+      ATTENDANCE_SCHEDULED_RUN_NOT_FOUND: 404,
+      ATTENDANCE_SCHEDULED_RUN_RESUME_POSTURE_MISMATCH: 409,
+      ATTENDANCE_SCHEDULED_RUN_RESUME_TARGET_SET_DRIFT: 409,
+      ATTENDANCE_SCHEDULED_RUN_FINALIZATION_POSTURE_MISMATCH: 409,
     })
     const error = new AttendanceW4OperationError('ATTENDANCE_OPERATION_IN_PROGRESS', 'operation')
     expect(error.message).toBe('ATTENDANCE_OPERATION_IN_PROGRESS') // message IS the code
@@ -469,6 +478,38 @@ describe('W4C-0 Stage C — strict source-command validators (lock 4.1 matrix)',
     })
     // Reusing one delivery ID for a different action conflicts via the fingerprint.
     expect(approve.commands[0].commandFingerprint).not.toBe(reject.commands[0].commandFingerprint)
+  })
+
+  it('accepts only the exact zero-version/zero-hash legacy cancellation marker', () => {
+    const cancellation = (expectedSnapshotVersion: number, expectedSnapshotHash: string) => ({
+      schemaVersion: 1,
+      orgId: ORG,
+      correlationId: 'corr-cancel',
+      command: {
+        schemaVersion: 1,
+        kind: 'request_cancel',
+        subjectUserId: 'user-2',
+        operationId: UUID_1,
+        payload: {
+          requestId: UUID_2,
+          approvalRef: null,
+          expectedSnapshotVersion,
+          expectedSnapshotHash,
+          reason: null,
+          meta: null,
+        },
+      },
+      batch: null,
+    })
+
+    expect(normalizeAttendanceSourceOperationEnvelopeV1(cancellation(0, '0'.repeat(64))))
+      .toMatchObject({ commands: [{ payload: { expectedSnapshotVersion: 0, expectedSnapshotHash: '0'.repeat(64) } }] })
+    expect(normalizeAttendanceSourceOperationEnvelopeV1(cancellation(1, HEX64_A)))
+      .toMatchObject({ commands: [{ payload: { expectedSnapshotVersion: 1, expectedSnapshotHash: HEX64_A } }] })
+    expect(() => normalizeAttendanceSourceOperationEnvelopeV1(cancellation(0, HEX64_A)))
+      .toThrow(AttendanceW4CommandError)
+    expect(() => normalizeAttendanceSourceOperationEnvelopeV1(cancellation(1, '0'.repeat(64))))
+      .toThrow(AttendanceW4CommandError)
   })
 
   it('scheduled command derives its identity and rejects a caller-supplied operation ID', () => {

@@ -10,6 +10,7 @@
 
 const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
+  ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
@@ -139,6 +140,11 @@ const ROUTES = [
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
+const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
+  'POST',
+  '/api/integration/internal/stock-preparation/sqlserver-sealed-snapshot/run',
+  'stockPreparationSqlServerSealedSnapshotRun',
+])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { createRunLogger } = require('./run-log.cjs')
@@ -149,6 +155,7 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+const { getK3WiseCallAuditSnapshot } = require('./adapters/k3-wise-call-audit.cjs')
 // DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
 // SAME decision both the preview and the record materializer use, so they cannot diverge).
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
@@ -227,6 +234,13 @@ const {
   createMetaSheetMultitableWriteSource,
   deriveMultitablePlannerTargetConfig,
 } = require('./adapters/metasheet-multitable-target-adapter.cjs')
+const {
+  K3_WISE_C6_WRITE_TARGET_KIND,
+  K3_WISE_C6_MAX_APPLY_ROWS,
+  K3_WISE_C6_WRITE_PROFILE,
+  createK3WiseC6WriteSource,
+  deriveK3WiseC6PlannerTargetConfig,
+} = require('./adapters/k3-wise-c6-write-profile.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -605,6 +619,14 @@ function assertStockPreparationErpAutoPersistNoSteering(req) {
 // source-run read-only byte-for-byte.
 function stockPreparationPlmAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// Entity-level delivery containment. This negative gate is intentionally
+// independent from the dry-run route: an internal evaluation environment can
+// keep previews usable while refusing every C6 Apply before request parsing,
+// token consumption, pipeline loading, or adapter/network activity.
+function c6WriteApplyDisabled() {
+  return String(process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED ?? '').trim().toLowerCase() === 'true'
 }
 
 // T3b OD-2 (layered semantics — deliberately NOT a copy of the ERP guard): with auto-persist ON the
@@ -1036,7 +1058,116 @@ function normalizeC6WriteApplyBody(body = {}) {
 // write-source (zero external write); any other (default) target uses the host SQL write
 // facade unchanged. Used by BOTH the dry-run and apply handlers with identical inputs so the
 // apply recompute reproduces the same dry-run revision (the revision fence).
-function resolveC6WritePlanInputs({ targetSystem, pipeline, context }) {
+// C6 targets whose write source builds a TARGET ADAPTER, and therefore need credentials on the
+// loaded system. Everything else (SQL write-gated, multitable) is served by dataSourceWrites and
+// is deliberately loaded config-only.
+const ADAPTER_BACKED_C6_TARGET_KINDS = new Set([K3_WISE_C6_WRITE_TARGET_KIND])
+
+function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {
+  // K3WriteDecision (owner, 20260805): the K3 connector rides the same C6 dry-run->apply
+  // lifecycle via its own profile + adapter-backed write source. `enforcedMaxRows` pins the
+  // plan-level source read to the profile's frozen cap — a caller-supplied maxRows is
+  // OVERRIDDEN for K3 targets (a >cap source read would only ever produce not_applyable).
+  if (targetSystem && targetSystem.kind === K3_WISE_C6_WRITE_TARGET_KIND) {
+    const flatConfig = deriveK3WiseC6PlannerTargetConfig({
+      system: targetSystem,
+      object: pipeline.targetObject,
+      fieldMappings: pipeline.fieldMappings,
+    })
+    return {
+      planTargetSystem: { ...targetSystem, config: flatConfig },
+      dataSourceWrites: createK3WiseC6WriteSource({
+        system: targetSystem,
+        createAdapter: (system) => adapterRegistry.createAdapter(system, { role: 'target', principal: ownerPrincipal }),
+        // B4 consumption scope (owner review 20260805): the approved read binding must belong to
+        // one of THIS pipeline's endpoints — source OR target, since the K3 system may
+        // legitimately be either or both. (This comment said "source system" through round 9;
+        // the code has accepted both since the round-3 relation fix. Corrected — a comment that
+        // disagrees with its code is how three earlier defects on this PR hid.)
+        //
+        // Server-side wiring only, never request-sourced: the values come from the PIPELINE
+        // record, and the pipeline is resolved by an exact scope match upstream, so a request
+        // claiming a different tenant/workspace does not reach this branch.
+        //
+        // COVERAGE, STATED EXACTLY (round 11 caught the previous wording overclaiming). The
+        // round-10 comment said this property "is asserted in http-routes-plm-k3wise-poc" — it
+        // is not, or not fully:
+        //   * the test covers the WORKSPACE half only; the tenant half exits earlier through a
+        //     different door (403 TENANT_MISMATCH) and is uncovered;
+        //   * the test drives its own fake pipeline registry, so the real upstream guard in
+        //     `lib/pipelines.cjs` does not execute in it;
+        //   * it is not gate-exclusive — neutering the harness's own workspace comparison still
+        //     leaves a 404 door standing.
+        // What the test DOES prove, and all it proves, is the property that matters here: a
+        // spoofed-workspace request reaches ZERO B4 lookups. The upstream guard's own negative
+        // case belongs to `pipelines.test.cjs`, whose fixtures are all single-workspace today —
+        // filed as follow-up rather than claimed.
+        b4: {
+          readSourceConfigs,
+          tenantId: pipeline.tenantId,
+          workspaceId: pipeline.workspaceId ?? null,
+          // The binding must belong to one of THIS pipeline's endpoints (review P2-B1): the K3
+          // system may legitimately be the source, the target, or both.
+          // OWNER REVIEW 20260806 [P1]: with only the two pipeline endpoints here, the customer's
+          // real K3 READ record is neither, so B4 could only ever bind to the TARGET — and the
+          // same-instance check then compared the target against ITSELF. The check was structurally
+          // incapable of detecting a read/write mismatch no matter how good the comparator was.
+          //
+          // The write target now DECLARES its paired read record (`config.pairedReadSystemId`), and
+          // that one id joins the relation set. This is deliberately narrow: it admits exactly the
+          // record the target itself names — not an arbitrary third system — and the binding must
+          // still clear the ratified-contract match, the kind gate, and the same-instance check.
+          //
+          // NOTE this WIDENS #4769's relation check by one target-declared id. That is a change to
+          // a ratified gate, made on the owner's explicit instruction to "让 B4 绑定真实
+          // read-system，并比较 read/write 两条记录的规范实例身份".
+          pipelineSystemIds: [
+            pipeline.sourceSystemId,
+            pipeline.targetSystemId,
+            (targetSystem.config && targetSystem.config.pairedReadSystemId) || null,
+          ].filter(Boolean),
+          // SAME-INSTANCE CHECK (owner ruling 20260805: "A, bind B4 to the K3-write record").
+          // The B4 contract is the material-LIST read contract, and a PROFILE-ARMED record
+          // cannot hold list-read config — #4769 makes every readList* key a forbidden overlay,
+          // and strips it even when it arrives from the frozen first-party read-smoke preset.
+          // So the customer needs TWO K3 records (see delivery MD step 0-b), and with a non-K3
+          // pipeline source the read record is neither endpoint. Binding to the TARGET record is
+          // therefore the only option that satisfies the relation check.
+          //
+          // That is only honest while both records address the SAME physical K3. Without this
+          // check, "bind to the target" would let one K3's read contract vouch for a DIFFERENT
+          // K3's write — exactly the round-3 defect the relation check exists to stop, reopened
+          // one level down. The check is fail-closed: it can only refuse bindings the relation
+          // check already accepted, never admit new ones.
+          targetBaseUrl: (targetSystem.config && targetSystem.config.baseUrl) || '',
+          // Scope derived from the PIPELINE record, same as tenantId/workspaceId above — NOT
+          // from the request. `scopedInput(req, …)` reads workspaceId from query/params but not
+          // the body, so a workspace-scoped pipeline fell out of scope and the lookup returned
+          // null, which the fail-closed comparator then read as "different instance".
+          // OWNER RULING 20260806 [P1]: identity is (kind, origin, acctId), not origin alone.
+          // The digest is computed inside external-systems — the only module holding decrypted
+          // credentials — and ONLY the digest crosses this boundary, so the profile never sees
+          // acctId. Both legs go through the SAME function, so a digest difference is a difference
+          // in (kind, origin, account set) and nothing else.
+          //
+          // This REPLACES loadSystemById + targetBaseUrl: comparing baseUrls could not see the
+          // account set at all, which is what made same-server/different-账套 compare equal.
+          // `externalSystems` is NOT in this function's scope — only what the call sites inject is.
+          // The first version referenced it here and every C6 dry-run died with a ReferenceError
+          // that surfaced as "the route never consulted the read-source store", i.e. the gate
+          // vanished rather than failing loudly. Injected like getExternalSystem is.
+          instanceDigestOf: typeof instanceDigestOf === 'function'
+            ? (id) => instanceDigestOf({
+              id, tenantId: pipeline.tenantId, workspaceId: pipeline.workspaceId ?? null,
+            })
+            : undefined,
+          targetSystemId: pipeline.targetSystemId,
+        },
+      }),
+      targetWriteProfile: K3_WISE_C6_WRITE_PROFILE,
+      enforcedMaxRows: K3_WISE_C6_MAX_APPLY_ROWS,
+    }
+  }
   if (targetSystem && targetSystem.kind === MULTITABLE_WRITE_TARGET_KIND) {
     const flatConfig = deriveMultitablePlannerTargetConfig({
       system: targetSystem,
@@ -2408,6 +2539,8 @@ function createHandlers(services, options = {}) {
   // BA-APPLY-2a: only the methods the 4 routes below actually call are required — save/approve/retire
   // (write-tier) + getForApply (the fail-closed approval gate for the GET route).
   const bridgeAgentChecklists = requireService('bridgeAgentChecklistStore', ['saveVersion', 'approve', 'retire', 'getForApply'])
+  const stockPreparationSqlServerRuntime =
+    services && services.stockPreparationSqlServerRuntime
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -2435,6 +2568,31 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  function stockPreparationSqlServerRunInput(req) {
+    const body = requestBody(req)
+    const query = requestQuery(req)
+    const params = requestParams(req)
+    if (
+      !isPlainObject(body)
+      || Object.keys(body).length !== 1
+      || !Object.prototype.hasOwnProperty.call(body, 'operationId')
+      || Object.keys(query).length !== 0
+      || Object.keys(params).length !== 0
+      || typeof body.operationId !== 'string'
+      || body.operationId.length < 1
+      || body.operationId.length > 128
+      || body.operationId.trim() !== body.operationId
+      || /[\u0000-\u001F\u007F]/.test(body.operationId)
+    ) {
+      throw new HttpRouteError(
+        400,
+        'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_REQUEST_INVALID',
+        'request must contain only a valid operationId',
+      )
+    }
+    return Object.freeze({ operationId: body.operationId })
   }
 
   async function loadStockPreparationReadonlySource(req, input, errorCode) {
@@ -2576,6 +2734,15 @@ function createHandlers(services, options = {}) {
         adapters: adapterRegistry.listAdapterKinds(),
         routes: ROUTES.map(([method, path]) => ({ method, path })),
       })
+    },
+
+    async k3WiseCallAudit(req, res) {
+      // Internal operational evidence only. The snapshot is process-local and
+      // values-free, but still reveals connector activity, so keep it admin-only
+      // and reuse the existing tenant boundary before selecting its partition.
+      requireAccess(req, 'admin')
+      const tenantId = resolveTenantId(req, requestQuery(req))
+      return sendOk(res, getK3WiseCallAuditSnapshot({ tenantId }))
     },
 
     async adaptersList(req, res) {
@@ -3282,11 +3449,28 @@ function createHandlers(services, options = {}) {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
       }))
-      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
+      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
+      // target (K3) arrived with NO credentials and the C6 dry-run died with
+      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
+      // registry: flipping this one accessor makes the whole lifecycle pass.
+      //
+      // Peek first, then re-load WITH credentials only for kinds that actually build a target
+      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
+      // for, so this does not widen credential exposure for them.
+      const targetSystemScope = scopedInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      })
+      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      if (
+        targetSystem
+        && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
+        && typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ) {
+        targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
+      }
       if (!sourceSystem) {
         throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
       }
@@ -3309,7 +3493,11 @@ function createHandlers(services, options = {}) {
         role: 'source',
         principal: ownerPrincipal,
       })
-      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
+      const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input),
+        instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
+          ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
+          : undefined })
       return sendOk(res, await dryRunExternalWrite({
         pipeline,
         sourceSystem,
@@ -3320,13 +3508,23 @@ function createHandlers(services, options = {}) {
         tokenStore: context.storage,
         dryRunUser: requestPrincipal(req),
         dataSourceOwnerPrincipal: ownerPrincipal,
-        maxRows: body.maxRows,
+        // K3 targets (review #4761 P3): the profile's frozen cap is a CEILING — a caller may
+        // narrow below it, never widen above it. The token stores the effective maxRows, and
+        // the apply recompute reads it from the token, so the fence stays symmetric.
+        maxRows: c6.enforcedMaxRows !== undefined
+          ? (typeof body.maxRows === 'number' && body.maxRows >= 1 && body.maxRows < c6.enforcedMaxRows
+            ? body.maxRows
+            : c6.enforcedMaxRows)
+          : body.maxRows,
         testFailureInjection: context && context.config && context.config.c6TestFailureInjection,
       }))
     },
 
     async pipelinesExternalWriteApply(req, res) {
       requireAccess(req, 'write')
+      if (c6WriteApplyDisabled()) {
+        throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
+      }
       const body = normalizeC6WriteApplyBody(requestBody(req))
       const scope = scopedInput(req, {
         id: requestParams(req).id,
@@ -3355,11 +3553,28 @@ function createHandlers(services, options = {}) {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
       }))
-      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, {
+      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
+      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
+      // target (K3) arrived with NO credentials and the C6 dry-run died with
+      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
+      // registry: flipping this one accessor makes the whole lifecycle pass.
+      //
+      // Peek first, then re-load WITH credentials only for kinds that actually build a target
+      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
+      // for, so this does not widen credential exposure for them.
+      const targetSystemScope = scopedInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      })
+      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      if (
+        targetSystem
+        && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
+        && typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ) {
+        targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
+      }
       if (!sourceSystem) {
         throw new HttpRouteError(404, 'SOURCE_SYSTEM_NOT_FOUND', 'source external system not found')
       }
@@ -3400,7 +3615,11 @@ function createHandlers(services, options = {}) {
       try {
         // SAME resolution as dry-run (server-side, by target kind) so the apply recompute
         // reproduces the dry-run revision; the multitable write-source writes own sheets only.
-        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context })
+        const c6 = resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs,
+        getExternalSystem: (input) => externalSystems.getExternalSystem(input),
+        instanceDigestOf: typeof externalSystems.getExternalSystemInstanceDigest === 'function'
+          ? (input) => externalSystems.getExternalSystemInstanceDigest(input)
+          : undefined })
         const result = await applyExternalWrite({
           pipeline,
           sourceSystem,
@@ -4865,6 +5084,35 @@ function createHandlers(services, options = {}) {
       })), 201)
     },
 
+    async stockPreparationSqlServerSealedSnapshotRun(req, res) {
+      const user = requireAccess(req, 'admin')
+      if (
+        !stockPreparationSqlServerRuntime
+        || typeof stockPreparationSqlServerRuntime.run !== 'function'
+      ) {
+        throw new HttpRouteError(
+          404,
+          'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_DISABLED',
+          'stock-preparation sealed-snapshot runtime is not enabled',
+        )
+      }
+      const input = stockPreparationSqlServerRunInput(req)
+      const actor = firstString(user.id, user.email)
+      if (!actor) {
+        throw new HttpRouteError(
+          403,
+          'STOCK_PREPARATION_SQLSERVER_SEALED_SNAPSHOT_ACTOR_REQUIRED',
+          'an authenticated actor identity is required',
+        )
+      }
+      return sendOk(res, await stockPreparationSqlServerRuntime.run({
+        actor,
+        operationId: input.operationId,
+        tenantId: resolveAuthUserTenantId(req),
+        workspaceId: null,
+      }))
+    },
+
     async runsList(req, res) {
       requireAccess(req, 'read')
       const query = requestQuery(req)
@@ -4939,7 +5187,11 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
   }
   const handlers = createHandlers(services || {}, { context })
   const registered = []
-  for (const [method, path, handlerName] of ROUTES) {
+  const routeDefinitions = services
+    && services.stockPreparationSqlServerRuntime
+    ? [...ROUTES, STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE]
+    : ROUTES
+  for (const [method, path, handlerName] of routeDefinitions) {
     const handler = handlers[handlerName]
     context.api.http.addRoute(method, path, async (req, res) => {
       try {
@@ -4958,6 +5210,7 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
 
 module.exports = {
   ROUTES,
+  STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE,
   HttpRouteError,
   MAX_LIST_LIMIT,
   MAX_LIST_OFFSET,

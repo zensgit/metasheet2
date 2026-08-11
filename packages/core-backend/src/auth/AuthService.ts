@@ -16,6 +16,7 @@ import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
   assertAliasCutoverAllowed,
+  claimNonEmptyLoginAliasesOrThrow,
   findUserIdByLoginAlias,
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
@@ -221,7 +222,11 @@ export class AuthService {
         }
       }
 
-      return this.sanitizeUser(user)
+      const tenantClaim = this.normalizeClaimString(payload.tenantId)
+      const tenantId = tenantClaim
+        ? await this.resolveSessionTenantId(user.id, tenantClaim)
+        : undefined
+      return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
@@ -286,9 +291,7 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
-      const tenantId = typeof options.tenantId === 'string' && options.tenantId.trim().length > 0
-        ? options.tenantId.trim()
-        : undefined
+      const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
       const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
@@ -313,6 +316,47 @@ export class AuthService {
       }
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
+    }
+  }
+
+  async resolveSessionTenantId(userId: string, requestedTenantId?: string): Promise<string | undefined> {
+    const requested = typeof requestedTenantId === 'string' && requestedTenantId.trim().length > 0
+      ? requestedTenantId.trim()
+      : undefined
+    try {
+      const pool = poolManager.get()
+      if (requested) {
+        const result = await pool.query(
+          `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+           WHERE uo.user_id = $1
+             AND uo.org_id = $2
+             AND uo.is_active = true
+             AND u.is_active = true
+           LIMIT 1`,
+          [userId, requested],
+        )
+        return result.rows[0]?.org_id === requested ? requested : undefined
+      }
+
+      const result = await pool.query(
+        `SELECT uo.org_id
+         FROM user_orgs uo
+         JOIN users u ON u.id = uo.user_id
+         WHERE uo.user_id = $1
+           AND uo.is_active = true
+           AND u.is_active = true
+         ORDER BY uo.org_id ASC
+         LIMIT 2`,
+        [userId],
+      )
+      return result.rows.length === 1 && typeof result.rows[0]?.org_id === 'string'
+        ? result.rows[0].org_id
+        : undefined
+    } catch (error) {
+      this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
+      return undefined
     }
   }
 
@@ -582,6 +626,11 @@ export class AuthService {
 
   /**
    * 创建新用户
+   *
+   * Load-bearing alias writer hook: activated self-registration must claim the email
+   * login alias in the same transaction as the users row. Removing
+   * claimNonEmptyLoginAliasesOrThrow here must fail tests/unit/login-alias-writers.test.ts
+   * and tests/integration/login-alias-writers.db.test.ts (auth_register class).
    */
   private async createUser(userData: {
     id: string
@@ -595,29 +644,41 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const permissionsJson = JSON.stringify(userData.permissions)
-        const result = await pool.query(
-          `INSERT INTO users (
-             id, email, name, password_hash, role, permissions,
-             activation_status, local_password_set, is_active,
-             created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
-           RETURNING id, email, name, role, permissions, must_change_password,
-                     activation_status, local_password_set, is_active, created_at, updated_at`,
-          [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
-        )
+        // Transaction required: alias conflict must roll back the users insert (fail-closed).
+        const created = await pool.transaction(async (client) => {
+          const result = await client.query(
+            `INSERT INTO users (
+               id, email, name, password_hash, role, permissions,
+               activation_status, local_password_set, is_active,
+               created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
+             RETURNING id, email, name, role, permissions, must_change_password,
+                       activation_status, local_password_set, is_active, created_at, updated_at`,
+            [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson],
+          )
 
-        if (result.rows.length > 0) {
-          const row = result.rows[0] as User
+          if (result.rows.length === 0) return null
+
+          // Alias full-writer: claim non-empty identifiers (email for self-registration).
+          await claimNonEmptyLoginAliasesOrThrow({
+            userId: userData.id,
+            email: userData.email,
+            source: 'auth_register',
+            client,
+          })
+
           if (userData.permissions.length > 0) {
             const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-            await pool.query(
+            await client.query(
               `INSERT INTO user_permissions (user_id, permission_code)
                VALUES ${values}
                ON CONFLICT DO NOTHING`,
-              [userData.id, ...userData.permissions]
+              [userData.id, ...userData.permissions],
             )
           }
+
+          const row = result.rows[0] as User
           return {
             id: row.id,
             email: row.email,
@@ -626,9 +687,10 @@ export class AuthService {
             permissions: Array.isArray(row.permissions) ? row.permissions : [],
             must_change_password: row.must_change_password,
             created_at: row.created_at,
-            updated_at: row.updated_at
+            updated_at: row.updated_at,
           }
-        }
+        })
+        return created
       } catch (dbError) {
         this.logger.warn('Database insert failed', dbError instanceof Error ? dbError : undefined)
       }
@@ -714,8 +776,9 @@ export class AuthService {
         }
       }
 
-      const refreshedUser = this.normalizeClaimString(payload.tenantId)
-        ? { ...user, tenantId: this.normalizeClaimString(payload.tenantId) }
+      const tenantId = await this.resolveSessionTenantId(user.id, this.normalizeClaimString(payload.tenantId))
+      const refreshedUser = tenantId
+        ? { ...user, tenantId }
         : user
       const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
       const refreshedPayload = this.readTokenPayload(refreshedToken)

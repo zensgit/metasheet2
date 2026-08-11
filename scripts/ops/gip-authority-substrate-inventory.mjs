@@ -9,10 +9,8 @@
  * nothing about a carrier for this script), scripts/ops/data-source-exposure-inventory.mjs (#4594)
  * must NOT be expanded or reused as the carrier for this work, so nothing here imports from or
  * depends on that script; the schema-probe-first / values-free QUERY_ALLOWLIST pattern is
- * independently re-implemented, because that is the pattern being reused, not the file. Also note:
- * #4594's script/test/workflow files live only on branch `claude/data-source-exposure-inventory-
- * 20260724` (PR #4594) — they are NOT in this tree, NOT on main, and this file makes no claim that
- * they are.
+ * independently re-implemented, because that is the pattern being reused, not the file. #4594's
+ * inventory is a separate carrier: neither inventory imports or depends on the other.
  *
  * ---------------------------------------------------------------------------------------------
  * (β) CONNECTOR-KIND PROBE — integration_external_systems.kind

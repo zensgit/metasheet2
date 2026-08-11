@@ -40,6 +40,8 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
+  // #4662's OAuth activation intent imports pool from db/pg; this suite never touches it.
+  pool: { query: pgMocks.query },
 }))
 
 vi.mock('bcryptjs', () => bcryptMocks)
@@ -206,6 +208,18 @@ describe('auth invite routes', () => {
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
+      // canonical users FOR UPDATE mutex
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: null,
+          is_active: false,
+          activation_status: 'activated',
+          access_generation: 0,
+        }],
+      })
       // markInviteAccepted FIRST (ledger-first) — must RETURNING non-empty
       .mockResolvedValueOnce({
         rows: [{
@@ -227,6 +241,9 @@ describe('auth invite routes', () => {
       })
       // UPDATE users ... RETURNING id (must be non-empty)
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({ rows: [] }) // supersede effects
+      .mockResolvedValueOnce({ rows: [] }) // supersede events
+      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
     bcryptMocks.hash.mockResolvedValue('hashed-password')
     sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:05:00.000Z' })
     authServiceMocks.login.mockResolvedValue({
@@ -253,17 +270,22 @@ describe('auth invite routes', () => {
     expect(response.statusCode).toBe(200)
     expect(bcryptMocks.hash).toHaveBeenCalledWith('WelcomePass9A', 10)
     expect(pgMocks.transaction).toHaveBeenCalled()
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('FOR UPDATE')
+    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('user_invites')
     expect(pgMocks.query).toHaveBeenNthCalledWith(
-      3,
+      4,
       expect.stringContaining('UPDATE users'),
       ['hashed-password', 'Alpha User', 'user-1', 'alpha@example.com'],
     )
-    const updateSql = String(pgMocks.query.mock.calls[2]?.[0] || '')
+    const updateSql = String(pgMocks.query.mock.calls[3]?.[0] || '')
     expect(updateSql).toContain('must_change_password = FALSE')
     expect(updateSql).toContain('local_password_set = TRUE')
     expect(updateSql).toContain('RETURNING id')
     expect(updateSql).toContain("activation_status = 'activated'")
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
     expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
       updatedBy: 'user-1',
       reason: 'invite-accepted',
@@ -312,6 +334,8 @@ describe('auth invite routes', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
     expect(authServiceMocks.login).not.toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) =>
+      String(call[0]).includes('directory_deprovision_effects'))).toBe(false)
   })
 
   it('stops with 409 when user UPDATE returns zero rows (ledger already claimed → txn rolls back)', async () => {
@@ -331,6 +355,17 @@ describe('auth invite routes', () => {
           is_active: true,
           activation_status: 'activated',
           updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: null,
+          is_active: true,
+          activation_status: 'activated',
+          access_generation: 0,
         }],
       })
       // Ledger consume succeeds
@@ -365,8 +400,8 @@ describe('auth invite routes', () => {
 
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).code).toBe('INVITE_TARGET_UPDATE_MISMATCH')
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
-    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('UPDATE users')
+    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('user_invites')
+    expect(String(pgMocks.query.mock.calls[3]?.[0] || '')).toContain('UPDATE users')
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
     expect(authServiceMocks.login).not.toHaveBeenCalled()
   })
@@ -390,6 +425,17 @@ describe('auth invite routes', () => {
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: null,
+          is_active: true,
+          activation_status: 'activated',
+          access_generation: 0,
+        }],
+      })
       // Ledger consume zero rows (missing or already accepted)
       .mockResolvedValueOnce({ rows: [] })
     bcryptMocks.hash.mockResolvedValue('hashed-password')
@@ -403,9 +449,9 @@ describe('auth invite routes', () => {
 
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).code).toBe('INVITE_LEDGER_CONSUME_FAILED')
-    // getInviteTarget + ledger UPDATE only; users password write must not run
-    expect(pgMocks.query).toHaveBeenCalledTimes(2)
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('user_invites')
+    // getInviteTarget + user mutex + ledger UPDATE only; password write must not run
+    expect(pgMocks.query).toHaveBeenCalledTimes(3)
+    expect(String(pgMocks.query.mock.calls[2]?.[0] || '')).toContain('user_invites')
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
     expect(authServiceMocks.login).not.toHaveBeenCalled()
   })
@@ -427,6 +473,17 @@ describe('auth invite routes', () => {
           is_active: true,
           activation_status: 'activated',
           updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          username: null,
+          mobile: null,
+          is_active: true,
+          activation_status: 'activated',
+          access_generation: 0,
         }],
       })
       // UPDATE ... WHERE status='pending' matches nothing for revoked rows

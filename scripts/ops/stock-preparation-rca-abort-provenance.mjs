@@ -57,13 +57,13 @@ export const HELPER_BASENAME_ALLOWLIST = Object.freeze([
 // A basename allowlist alone does not bind the probe to the exact-SHA helper: any file renamed to
 // an allowlisted basename would be dynamically imported and executed. Before ANY import, the
 // target file — and, because the extended smoke statically imports its sanitizing layer from the
-// W6 smoke, that sibling too — must byte-match the release-pinned SHA-256 digests below, computed
-// from the RC-A exact package SHA d87e086fd1218b4cfb150177d43f2c52904b1d6d. Any mismatch blocks
-// the diagnostic (HELPER_MISMATCH) with zero imports and zero network requests. Editing the
-// frozen smoke harnesses requires cutting a new pinned diagnostic release (a repo-parity test
-// fails loudly otherwise).
+// W6 smoke, that sibling too — must byte-match the release-pinned SHA-256 digests below. Any
+// mismatch blocks the diagnostic (HELPER_MISMATCH) with zero imports and zero network requests.
+// Editing the frozen smoke harnesses requires cutting a new pinned diagnostic release (a
+// repo-parity test fails loudly otherwise) — R5 (route-coverage 22/33 -> 33/33) re-pinned the
+// extended smoke's digest below; the W6 sibling is untouched by R5 and keeps its prior digest.
 export const HELPER_CONTENT_SHA256 = Object.freeze({
-  'stock-preparation-prep-line-extended-smoke.mjs': '912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049',
+  'stock-preparation-prep-line-extended-smoke.mjs': '96fcf2b4df530ddfeac08b6caed476341d6e6f4779cc3c6de6a92ac47b1097a7',
   'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
 })
 export const HELPER_SIBLING_REQUIREMENTS = Object.freeze({

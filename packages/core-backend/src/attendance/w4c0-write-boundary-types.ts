@@ -106,6 +106,21 @@ export type AttendanceAttributionSnapshotV1 =
       sourceFingerprint: string | null
     }
 
+/**
+ * W5 flex policy on the frozen context. Absent means strict (legacy W4 shape /
+ * bytes). Present `flex_required_duration` is single-segment only.
+ */
+export type FrozenAttendanceFlexPolicyV1 =
+  | { mode: 'strict' }
+  | {
+      mode: 'flex_required_duration'
+      requiredMinutes: number
+      arrivalWindowBeforeMinutes: number
+      arrivalWindowAfterMinutes: number
+      coreStartTime: string | null
+      coreEndTime: string | null
+    }
+
 export interface FrozenAttendanceContextV1 {
   schemaVersion: 1
   selector: 'legacy'
@@ -129,6 +144,11 @@ export interface FrozenAttendanceContextV1 {
     lateGraceMinutes: number
     earlyLeaveGraceMinutes: number
   }>
+  /**
+   * Optional W5 field. Omitted on legacy frozen contexts (treated as strict).
+   * When present it must pass W5 discriminated validation.
+   */
+  flexPolicy?: FrozenAttendanceFlexPolicyV1
 }
 
 // ---------------------------------------------------------------------------

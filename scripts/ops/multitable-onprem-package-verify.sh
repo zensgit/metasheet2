@@ -372,11 +372,16 @@ function verify_migration_bridge_contract() {
 function verify_stock_preparation_mvp_contract() {
   local root="$1"
   local migration="${root}/packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
+  local sealed_runtime_migration="${root}/packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql"
   local smoke="${root}/scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   local acceptance="${root}/scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  local sealed_acceptance="${root}/scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
+  local sealed_runbook="${root}/docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   local pm2_sample="${root}/scripts/ops/stock-preparation-pm2-sample.mjs"
 
   search_fixed_string 'integration_stock_prep_audit' "$migration" || die "migration 066 must create the stock-preparation audit surface"
+  search_fixed_string 'integration_sealed_export_stock_prep_bindings' "$sealed_runtime_migration" || die "migration 073 must create the sealed-export stock-preparation binding authority"
+  search_fixed_string 'integration_sealed_export_stock_prep_runs' "$sealed_runtime_migration" || die "migration 073 must create the resumable sealed-export stock-preparation run store"
   search_fixed_string 'auditActionsCovered' "$smoke" || die "stock-preparation MVP postdeploy smoke must report audit action coverage"
   search_fixed_string 'selfScanClean' "$smoke" || die "stock-preparation MVP postdeploy smoke must report its values-free self scan"
   search_fixed_string 'S.pass =' "$smoke" || die "stock-preparation MVP postdeploy smoke must emit the final pass flag"
@@ -386,7 +391,62 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'selfScanClean' "$acceptance" || die "stock-preparation one-click acceptance must require its values-free self scan"
   search_fixed_string 'externalPlmK3ErpWrite' "$acceptance" || die "stock-preparation one-click acceptance must report the external-write invariant"
   search_fixed_string 'stock-preparation-pm2-sample.mjs' "$acceptance" || die "stock-preparation one-click acceptance must use the PM2 safe projection helper"
+  search_fixed_string 'stock-preparation/sqlserver-sealed-snapshot/acceptance/v2' "$sealed_acceptance" || die "S6-A acceptance must emit the frozen values-free evidence schema"
+  search_fixed_string 'internal/stock-preparation/sqlserver-sealed-snapshot/run' "$sealed_acceptance" || die "S6-A acceptance must call only the controlled runtime route"
+  search_fixed_string 'internal_noop' "$sealed_acceptance" || die "S6-A acceptance must prove idempotent replay"
+  search_fixed_string '24999' "$sealed_acceptance" || die "S6-A acceptance must require the server-reported line count to remain within the certified cap"
+  search_fixed_string 'machineBindingDigest' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the executing machine"
+  search_fixed_string 'operationBindingDigest' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the controlled operation"
+  search_fixed_string 'ExpectedServiceRuntimeSha' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the service runtime SHA"
+  search_fixed_string 'ExpectedPackageSha256' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the package SHA256"
+  search_fixed_string 'BUILD_PROVENANCE.json' "$sealed_acceptance" || die "S6-A acceptance must verify in-package build provenance"
+  search_fixed_string 'Get-S6FileSha256' "$sealed_acceptance" || die "S6-A acceptance must hash the original package archive"
+  # CLOSED SET OF TWO exact headings, each bound to a known package generation — NOT a loosened
+  # match. The frozen S6-A package ships the pre-R12 runbook ('... Before Migration 073'); any
+  # package built from main >= R12/#4742 ships the corrected heading ('... Before Migrations
+  # 073, 074 And 075' — 074/075 need the same roles). The first main-built verification run
+  # (stock-prep-main-package-verify shakedown, run 30972892447) caught the single-string pin
+  # failing every main-built package while the frozen lane stayed green — verifier-vs-runbook
+  # drift, two record points. A third heading variant is still a hard failure.
+  if ! search_fixed_string 'Create PostgreSQL Roles Before Migrations 073, 074 And 075' "$sealed_runbook"; then
+    search_fixed_string 'Create PostgreSQL Roles Before Migration 073' "$sealed_runbook" || die "S6-A runbook must require role creation before migration 073 (074/075 wording for main-built packages)"
+  fi
+  search_fixed_string 'Unconditional Flag-Off Restoration' "$sealed_runbook" || die "S6-A runbook must require flag-off restoration"
+  search_fixed_string 'nextTestMachineAction=STOP_AND_WAIT' "$sealed_runbook" || die "S6-A runbook must retain the separate S6-B execution gate"
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
+}
+
+function verify_sealed_export_package_provenance() {
+  local root="$1"
+
+  if ! node - "$root" <<'NODE'
+const path = require('node:path')
+
+const root = process.argv[2]
+try {
+  const verifier = require(path.join(
+    root,
+    'plugins/plugin-integration-core/lib/sealed-export/' +
+      'sealed-export-package-provenance.cjs',
+  ))
+  const result = verifier.verifySealedExportRuntimePackageProvenance({
+    repoRoot: root,
+  })
+  if (
+    result?.verified !== true
+    || result?.runtimePackageVerified !== true
+    || result?.repositoryEvidenceRequired !== true
+    || result?.externalPackagePinRequired !== true
+  ) {
+    process.exit(1)
+  }
+} catch {
+  process.exit(1)
+}
+NODE
+  then
+    die "S6-A sealed-export package provenance pins did not verify"
+  fi
 }
 
 function verify_generic_integration_workbench_contract() {
@@ -930,6 +990,7 @@ required=(
   "packages/core-backend/migrations/058_integration_runs_running_unique.sql"
   "packages/core-backend/migrations/059_integration_runs_history_index.sql"
   "packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
+  "packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql"
   "bootstrap-admin.bat"
   "deploy.bat"
   "deploy-remote.bat"
@@ -938,6 +999,7 @@ required=(
   "plugins/plugin-integration-core/plugin.json"
   "plugins/plugin-integration-core/index.cjs"
   "plugins/plugin-integration-core/lib/http-routes.cjs"
+  "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs"
@@ -953,6 +1015,7 @@ required=(
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
@@ -986,6 +1049,7 @@ required=(
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
+  "docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   "docs/development/data-factory-workbench-todo-20260514.md"
   "docs/development/data-factory-workbench-development-20260514.md"
   "docs/development/data-factory-workbench-verification-20260514.md"
@@ -1057,6 +1121,7 @@ verify_build_provenance "$pkg_root"
 verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
+verify_sealed_export_package_provenance "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
 verify_no_loopback_frontend_config "$pkg_root"

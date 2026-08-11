@@ -22,6 +22,9 @@ const C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET = 'C6_TEST_FAILURE_INJECTION_UNSAF
 const CONSUMING_TOKEN_KEYS = new Set()
 const SAFE_WRITE_ERROR_CODES = new Set([
   'AdapterValidationError',
+  // K3 C6 write (K3WriteDecision): row-scoped Save failures surface as this closed token so a
+  // dead-lettered K3 row is diagnosable instead of collapsing to WRITE_FAILED.
+  'K3_WISE_SAVE_FAILED',
   C6_TEST_INJECTED_ROW_FAILURE,
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',

@@ -31,10 +31,9 @@
 //   - "reference":      org configuration/reference data (shift/rule/holiday/payroll definitions,
 //                       group membership *definitions* as opposed to calculation truth). Not part
 //                       of the source/effect/result chain at all; allowlisted at the bucket level.
-//   - "w4_canonical":   the nine new W4C-0 durable-storage tables (Stage A). DML against these is
-//                       allowed ONLY from inside the canonical adapter path prefix
-//                       (packages/core-backend/src/attendance/w4c0-*.ts or the W4C-0 migration
-//                       file itself); a hit from any other path is a hard failure
+//   - "w4_canonical":   W4 durable source/effect/result and concurrency-authority tables. DML
+//                       against these is allowed ONLY from inside the canonical adapter path
+//                       prefixes named below; a hit from any other path is a hard failure
 //                       (ATTENDANCE_W4C0_DML_OUTSIDE_CANONICAL_BOUNDARY), never silently allowed
 //                       by table membership alone.
 //
@@ -78,11 +77,13 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_integrations: 'operational',
   attendance_integration_runs: 'operational',
   attendance_unscheduled_reminder_dispatch: 'operational',
+  attendance_import_upload_cleanup_commands: 'operational',
 
   // --- reference: org configuration/reference data, not calculation truth ------------------
   attendance_groups: 'reference',
   attendance_group_members: 'reference',
   attendance_group_managers: 'reference',
+  attendance_group_fixed_schedule_configs: 'reference',
   attendance_schedule_groups: 'reference',
   attendance_schedule_group_members: 'reference',
   attendance_holidays: 'reference',
@@ -113,7 +114,167 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_rollback_closures: 'w4_canonical',
   attendance_calculation_rollout_state: 'w4_canonical',
   attendance_calculation_rollout_events: 'w4_canonical',
+
+  // --- w4_canonical: W4C-2 P1-2 scheduled-run tables (#4556, PR #4617 amendment §1.1/§1.1.1,
+  // RATIFIED bundle A). Written only by the canonical scheduled-run module
+  // (packages/core-backend/src/attendance/w4c2-scheduled-run.ts) and the P1-2 migration —
+  // both already covered by W4_CANONICAL_PATH_PREFIXES below; adding the tables here closes
+  // the classification set the Stage D collector enforces fail-closed. -----------------------
+  attendance_scheduled_runs: 'w4_canonical',
+  attendance_scheduled_run_targets: 'w4_canonical',
+  attendance_scheduled_run_target_outcomes: 'w4_canonical',
+
+  // --- w4_canonical: W4C-3a durable frozen plan, result, and revision authorities ---------
+  attendance_import_legacy_execution_plans: 'w4_canonical',
+  attendance_import_legacy_execution_plan_chunks: 'w4_canonical',
+  attendance_import_legacy_terminal_responses: 'w4_canonical',
+  attendance_import_rollback_commands: 'w4_canonical',
+  attendance_import_rollback_restore_witnesses: 'w4_canonical',
+  attendance_record_target_revisions: 'w4_canonical',
+  attendance_group_effect_revisions: 'w4_canonical',
 })
+
+// P25 is a classification contract in addition to a table bucket.  In particular, the
+// durable legacy plan tables remain inside the canonical path boundary for storage integrity,
+// but their values are still transport/compatibility state.  They cannot become calculation,
+// source, result, promotion, rollback, authorization, or operation-claim evidence.
+const P25_FORBIDDEN_AUTHORITY_ROLES = Object.freeze([
+  'calculation_source',
+  'calculation_result',
+  'business_evidence',
+  'business_state',
+  'promotion_evidence',
+  'rollback_authority',
+  'authorization_evidence',
+  'operation_claim',
+])
+
+const P25_ALLOWED_NON_AUTHORITY_ROLES = Object.freeze([
+  'transport',
+  'compatibility_transport',
+  'audit_attempt',
+  'concurrency_control',
+  'retryable_job_identity_claim',
+  'identity_transport',
+  'operational_status',
+  'configuration_maintenance',
+  'schema_migration',
+  'tooling_cleanup',
+])
+
+function p25Spec(family, authorityClass, options = {}) {
+  return Object.freeze({
+    family,
+    authorityClass,
+    forbiddenAuthorityRoles: P25_FORBIDDEN_AUTHORITY_ROLES,
+    reservedIdentityTransport: options.reservedIdentityTransport === true,
+    allowedIdentityAdapters: Object.freeze(options.allowedIdentityAdapters || []),
+  })
+}
+
+// This is the closed P25 import/integration inventory.  A newly in-scope table must be added here
+// with a family and authority posture; adding it only to TABLE_BUCKETS would make the generated
+// census green while leaving the correctness contract implicit. Notification delivery and W4
+// concurrency-revision tables are intentionally outside this set.
+const P25_OPERATIONAL_TABLE_SPECS = Object.freeze({
+  attendance_import_tokens: p25Spec('import_token', 'operational_transport'),
+  attendance_import_jobs: p25Spec('import_job', 'operational_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_template_prefs: p25Spec('template_preference', 'operational_configuration'),
+  attendance_import_items_stage: p25Spec('temporary_staging', 'operational_transport'),
+  attendance_import_records_stage: p25Spec('temporary_staging', 'operational_transport'),
+  attendance_import_upload_cleanup_commands: p25Spec('upload_lifecycle', 'operational_transport'),
+  attendance_integrations: p25Spec('integration_configuration_watermark', 'operational_transport'),
+  attendance_integration_runs: p25Spec('integration_audit_attempt', 'audit_only'),
+
+  // These tables are stored inside the canonical boundary, but OD-W4C-56 explicitly keeps the
+  // plan/manifest/chunk/terminal values out of W4 authority.  The classification therefore
+  // distinguishes storage boundary from semantic authority.
+  attendance_import_legacy_execution_plans: p25Spec('durable_legacy_plan', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_legacy_execution_plan_chunks: p25Spec('durable_legacy_plan', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['enqueue', 'private_worker'],
+  }),
+  attendance_import_legacy_terminal_responses: p25Spec('durable_legacy_terminal', 'compatibility_transport', {
+    reservedIdentityTransport: true,
+    allowedIdentityAdapters: ['private_worker'],
+  }),
+})
+
+const P25_IMPORT_INTEGRATION_TABLES = Object.freeze(Object.keys(P25_OPERATIONAL_TABLE_SPECS).sort())
+
+function classifyP25Use({ table, role, adapter = null, dryRun = false }) {
+  const spec = P25_OPERATIONAL_TABLE_SPECS[table]
+  if (!spec) return { allowed: true, table, role, classification: 'not_p25_operational' }
+
+  if (table === 'attendance_integration_runs' && role === 'business_state') {
+    return {
+      allowed: false,
+      code: dryRun ? 'ATTENDANCE_P25_DRY_RUN_AUDIT_NOT_BUSINESS_STATE' : 'ATTENDANCE_P25_AUDIT_NOT_BUSINESS_STATE',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  if (spec.forbiddenAuthorityRoles.includes(role)) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_OPERATIONAL_AUTHORITY_FORBIDDEN',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  if (
+    spec.reservedIdentityTransport &&
+    ['transport', 'compatibility_transport', 'retryable_job_identity_claim', 'identity_transport'].includes(role) &&
+    (typeof adapter !== 'string' || !spec.allowedIdentityAdapters.includes(adapter))
+  ) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_NON_WORKER_JOB_IDENTITY_FORBIDDEN',
+      table,
+      role,
+      adapter,
+      family: spec.family,
+    }
+  }
+
+  if (!P25_ALLOWED_NON_AUTHORITY_ROLES.includes(role)) {
+    return {
+      allowed: false,
+      code: 'ATTENDANCE_P25_UNKNOWN_USAGE_ROLE',
+      table,
+      role,
+      family: spec.family,
+    }
+  }
+
+  return {
+    allowed: true,
+    table,
+    role,
+    family: spec.family,
+    authorityClass: spec.authorityClass,
+  }
+}
+
+function assertP25Use(input) {
+  const result = classifyP25Use(input)
+  if (!result.allowed) {
+    const error = new Error(`${result.code}: ${result.table} cannot be used as ${result.role}`)
+    error.code = result.code
+    throw error
+  }
+  return result
+}
 
 // Buckets whose DML sites require an individual curated P0x (or later-slice) debt-ID match.
 const TRACKED_BUCKETS = Object.freeze(['business', 'schedule_fact', 'shared_hook'])
@@ -125,7 +286,23 @@ const BUCKET_ALLOWLISTED_BUCKETS = Object.freeze(['operational', 'reference'])
 // the scanned file's repo-relative path starts with one of these. Anything else is a hard fail.
 const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/attendance/w4c0-',
+  // W4C-2 (#4556 lock §8.1): the canonical live/scheduled write boundary and the durable
+  // outbox dispatcher are canonical-boundary modules — they are the ONLY non-w4c0 writers of
+  // the w4_canonical tables (shadow calculations/segments, outbox claim/deliver flips).
+  'packages/core-backend/src/attendance/w4c2-',
+  'packages/core-backend/src/attendance/w4c3a-',
+  // W4C-3b owns the frozen request-snapshot and request mutation boundaries. Its modules are
+  // canonical writers; callers remain outside this prefix and therefore cannot inherit access.
+  'packages/core-backend/src/attendance/w4c3b-',
+  // W4C-3c owns manual_edit / recompute / ops_retirement calculation writers.
+  'packages/core-backend/src/attendance/w4c3c-',
   'packages/core-backend/src/db/migrations/zzzz20260725120000_w4c0_',
+  // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED): the scheduled-run identity + outbox
+  // discriminated-union migration's own backfill DML (UPDATE attendance_result_event_outbox
+  // SET identity_kind = 'operation' ...), same precedent as the W4C-0 migration file above.
+  'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
+  'packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts',
+  'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts',
 ])
 
 function classifyTable(tableName) {
@@ -134,8 +311,13 @@ function classifyTable(tableName) {
 
 module.exports = {
   TABLE_BUCKETS,
+  P25_FORBIDDEN_AUTHORITY_ROLES,
+  P25_IMPORT_INTEGRATION_TABLES,
+  P25_OPERATIONAL_TABLE_SPECS,
   TRACKED_BUCKETS,
   BUCKET_ALLOWLISTED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
   classifyTable,
+  classifyP25Use,
+  assertP25Use,
 }

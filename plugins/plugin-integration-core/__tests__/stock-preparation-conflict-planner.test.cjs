@@ -391,13 +391,19 @@ function testDuplicateExpandedKeyDiagnosticsValuesFree() {
   assert.equal(diagnostics.stableDiscriminatorCounts.pathParent, 1)
   assert.equal(diagnostics.stableDiscriminatorCounts.sourceDetail, 1)
   assert.equal(diagnostics.stableDiscriminatorCounts.sortLine, 1)
+  // POLICY HONESTY: allowedPolicies advertises only the policies the planner actually honours.
+  // merge_quantity / select_representative / skip_selected stay in the frozen persisted vocabulary
+  // (see the POLICY HONESTY section of stock-preparation-conflict-policies.test.cjs) but are never
+  // offered as choices.
   assert.deepEqual(diagnostics.allowedPolicies, [
     'hold',
     'keep_multiple_rows',
+    'source_correction_required',
+  ])
+  assert.deepEqual(diagnostics.unimplementedPolicies, [
     'merge_quantity',
     'select_representative',
     'skip_selected',
-    'source_correction_required',
   ])
   assert.equal(diagnostics.defaultPolicy, 'hold')
   assert.equal(diagnostics.groups.length, 2)

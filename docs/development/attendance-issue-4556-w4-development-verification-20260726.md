@@ -178,3 +178,205 @@ WIP checkpoint 在实现车道遗留的共享库 `ms2_w4c2` 上跑出 1 条红�
 - identity 修订：`attendance-issue-4556-w4c0-identity-proof-amendment-20260725.md`
 - 授权 provenance 勘误：`attendance-issue-4556-w4-authorization-provenance-erratum-20260726.md`（PR #4613）
 - PR：#4588 / #4592 / #4595 / #4600（治理）· #4606 W4C-0 · #4607 W4C-1 · #4608 test-infra · #4612 W4C-2（held）· #4613 erratum
+
+## 10. 2026-07-29 W4C-2 恢复轮（`OD-W4C-54=(a)`）
+
+本节是 §4 门审之后发生的**增量记录**，不回写或覆盖 §4 的历史判定。
+
+### 10.1 授权与候选血缘
+
+- owner 在 PR #4669 `c-5110505124` 对合并 SHA
+  `548d9f35974cfd50a5cc4c54a76d4a3df01a198e` 作 exact-SHA RATIFY，并选择
+  `OD-W4C-54=(a)`：生产永久拒绝 allowlist 为空。
+- 该授权只覆盖 W4C-2 option-A 实现、验证和 exact-head 独立门；**不授权**
+  #4612 合并、W4C-3+、flag、部署、staging soak、客户数据或关闭 #4556。
+- fresh candidate 从上述 exact main 重建：重放 #4612 的 72 个非 merge 片内提交
+  （原分支另有 1 个 main merge commit，由 fresh rebase 取代），
+  再叠加 #4668 recovery 修复；recovery 在重放后的 commit 为
+  `50940b767f97ab59ff5ff7dfcea3e0d7cb130f4c`。
+- option-A 测试提交为
+  `f8f466e0372fbfa0b6e8d9ac44e7e092495e969d`。本次 option-A 增量不改生产代码。
+
+### 10.2 option-A 合同落点
+
+1. no-DB 单测以 TypeScript AST 扫描 core `src` 与
+   `plugins/plugin-attendance` 的生产 `.ts` / `.cjs`：任何 outcome writer
+   间接引用、非对象字面量、缺失 `terminalOutcome` 或值不等于字面量
+   `completed` 的调用都使门失败；直接 outcome-table DML 只能保留 canonical
+   writer 内唯一一处。当前生产 `failed` writer callsite = **0**。
+2. failed outcome 只由真库合同 fixture 构造。fixture 必须调用具名
+   `cancelAttendanceResultOperationV1`，并在同一事务写闭集 reason code
+   `ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED`；不以 raw SQL 伪造取消。
+3. scratch DB 对所有在场 attendance source tables 安装
+   `BEFORE INSERT OR UPDATE OR DELETE` statement trigger sentinel；正控 source
+   INSERT 必须被拒绝，而 failed fixture 成功提交且 source-table residue = **0**。
+4. integrity gate 双向覆盖：
+   `canceled operation + completed outcome` 与
+   `completed operation + failed outcome` 均须在事务提交时因
+   `W4C2_RUN_COMPLETION` 失败。
+5. 既有非法 reason-code 真库腿保留：未知码与空码均拒绝。
+6. mixed run 合同 fixture 可表达 `completed + failed`，计数与 run-level event
+   正确；这证明 schema/transaction contract 可表达失败，不代表生产存在永久拒绝
+   分类器。
+
+### 10.3 实跑结果
+
+| 门 | 结果 |
+| --- | --- |
+| option-A no-DB allowlist guard | **2/2 PASS** |
+| option-A 三个聚焦真库文件 | **78/78 PASS** |
+| W4C-2 CI 明列十个真库文件 | **154/154 PASS** |
+| #4668 recovery wiring 单测 | **3/3 PASS** |
+| W4C-2 CI wiring guard | **32/32 PASS** |
+| core-backend no-DB 全量 Vitest | **564 files / 7,844 passed / 1,651 skipped，exit 0** |
+| core-backend TypeScript type-check | **PASS** |
+| `git diff --check origin/main...HEAD` | **PASS** |
+
+真库全量运行中出现过 node-cron 在 suite teardown 后访问已关闭 pool 的 stderr
+噪声，但十个文件仍为 154/154、进程 exit 0；本记录不把该噪声宣称为已修。
+
+### 10.4 判别力 mutation
+
+| mutation | 预期且实得 |
+| --- | --- |
+| 将生产 outcome writer 的 `completed` 改为 `failed` | AST allowlist 门精确翻红 |
+| 将 fixture 的具名 cancel helper 换回 raw `UPDATE ... state='canceled'` | named-cancel 门精确翻红；生命周期腿仍绿，证明该门关闭真实 false-green |
+| 在 failed fixture 注入 `attendance_records` source DML | DB trigger sentinel 精确翻红 |
+
+三刀均在正控后还原，最终工作树不含 mutation。
+
+### 10.5 诚实边界与停点
+
+- 生产永久拒绝 allowlist 为空，生产 scheduled outcome writer 仍全部只写
+  `completed`。`failed` 路径是 **contract-tested, not live**。
+- 在没有可重试/永久拒绝分类器时，某 target 的确定性拒绝仍可能令 run、run-level
+  event 与 promotion 保持 pinned，直到条件变化后成功，或 operator 执行 abandon。
+- 本轮不含 deploy、flag、staging soak、客户数据或客户 UAT。
+- candidate 通过 exact-head 独立门且为 0 P1/P2 后，仍必须停在 #4612 的 owner
+  合并裁点；门审结论不能替代合并授权。
+
+## 11. 2026-08-03 W4C-4 shadow ledger and detail 候选验证
+
+本节只追加 W4C-4 的候选证据，不改写前述历史判定。实现基线为
+`8806e9679e3e7a19ba57d310f799c2962dd01680`，产品代码与测试检查点为
+`9a0ace06077bc99604affa7f414e14e21202452a`。本节入仓后，最终 PR head
+将由 fresh exact-head CI 与独立对抗审另行绑定；当前记录本身不构成合并授权。
+
+### 11.1 交付范围
+
+- 双宿主只读详情：管理员宿主要求 org 成员或平台管理员，员工宿主从 token
+  subject 派生用户并在任何详情 SQL 前验证 active `user_orgs`；显式历史
+  `calculationId` 仍同时约束 record、org 与 subject。
+- append-only shadow diff：12 个闭集 code、闭集 changed-field、neutral label、
+  critical posture 与 values-free backlog 聚合；五类 canonical writer 在同一
+  calculation INSERT 中持久化 code + payload。
+- DecisionTrace：authoritative 只读当前指针所指的冻结 calculation/segments；
+  shadow 只提供明确标注的非权威 basis；schema、enum、segment 数量或冻结上下文
+  不可解释时 fail closed，不回退重算当前规则。
+- OpenAPI 与生成 SDK 覆盖 admin/self detail 和 admin backlog；响应 schema
+  `additionalProperties: false`，不输出 raw user/shift/group/request ID 或 snapshot。
+- 生成式 SELECT inventory 对 calculation/segment 读点逐一归类；新增未分类、
+  动态表名或 retired-row ordinary read 均使 CI 失败。
+
+### 11.2 exact-base 本地实跑
+
+| 门 | 结果 |
+| --- | --- |
+| W4C-4 unit + route contracts | **2 files / 40 passed** |
+| core-backend TypeScript type-check | **PASS** |
+| workspace lint | **PASS** |
+| generated DML/SELECT inventory + positive-control mutations | **56/56 PASS** |
+| OpenAPI build / security validate / SDK generation / generated diff | **PASS / clean** |
+| OpenAPI closed-schema contract | **3/3 PASS** |
+| fresh PostgreSQL migrations | **PASS**（native PostgreSQL 15，独立数据库） |
+| W5 DecisionTrace + W4C-4 real DB | **52/52 PASS**（44 + 8） |
+| W4C-2/3a/3b/3c canonical writer regression | **32/32 PASS**（8 + 7 + 4 + 13） |
+| W4C-2 posture + W4C-4 diff persistence | **13/13 PASS**（5 + 8） |
+| `git diff --check` | **PASS** |
+
+W4C-4 真库套件使用 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 执行四类代表查询：
+当前指针详情、显式历史详情、source-batch reversal target、shadow backlog；每类都
+断言预期表实际进入执行计划。该证据证明查询可执行并保持作用域谓词，不把小型
+synthetic fixture 的耗时外推为生产容量结论。
+
+### 11.3 判别力 mutation
+
+| mutation | 预期且实得 |
+| --- | --- |
+| live shadow writer 强制把持久化 diff code 改为 `equal` | posture 真库套件精确 **1/5 failed**，命中 `review_required` 持久化腿 |
+| DecisionTrace 禁用 authoritative 冻结投影分支 | W4C-4 真库套件精确 **1/8 failed**，`grounded` 变为 `undeterminable` |
+| inventory 注入未分类 calculation/segment read、动态表名或 retired-row ordinary read | 对应 collector 正控逐项失败；最终正控 **56/56 PASS** |
+| self detail 去除首查询或后续 calculation/segment 的 subject/org 谓词 | 既有 real-DB mutation seam 暴露同 org 他人 fixture，负例失败 |
+
+所有手工 mutation 均已还原；代码生成重跑后工作树无生成漂移。
+
+### 11.4 首轮独立门审修复
+
+首轮 exact-head 独立审阅在 `8d9bd1fc9c5717c7e19dcc692d990c29f771a2c2`
+给出两条 P2。修复只补强 inventory 与既有 writer 真库套件，不扩大 W4C-4
+产品运行时范围：
+
+1. calculation SELECT inventory 新增 required predicate fingerprint。当前投影必须
+   继续指向 `attendance_current_records`，authoritative trace 必须继续携带
+   `visibility_state = 'active'`；把后者改为 `retired` 时，unclassified、count 与
+   stale 三门保持绿色，而 predicate 门**精确产生 1 条 drift**。
+2. import、审批撤销、手工编辑与重算四个非 live canonical writer 均通过真实
+   入口创建 shadow calculation，再读取实际持久化行，要求 diff code 非空且
+   code/payload 能被生产 parser 成对解析。四个 writer 分别把入库参数改为
+   `NULL, NULL` 时，各自命名腿均**精确 1/1 failed**；mutation 后产品代码全部还原。
+
+补门后的本机 fresh PostgreSQL 结果：四个 writer + W4C-4 详情 **52/52 PASS**，
+W4C-4 unit/route **40/40 PASS**，inventory **56/56 PASS**，workspace type-check、
+lint、OpenAPI build/validate/generate/closed-schema contract 与 sealed-export S5
+provenance 套件全部通过，第二次 migration 为 no-op。
+
+首轮审阅另记一条非阻断 residual：values-free backlog 当前按闭集 diff code
+聚合，不读取配对 JSON payload；详情与 DecisionTrace 会对 code/payload 成对
+fail closed，但 backlog 本身不证明 payload 完整性。本片不为此扩大查询或迁移
+范围，后续若 backlog 要承担数据完整性告警，应另加显式 invalid-payload posture
+与对应合同。
+
+### 11.5 后续精确性加固
+
+后续复核没有扩大 W4C-4 运行时范围，收紧了三处原证据只能证明“非空”或可被
+相邻守卫代挡的断言：
+
+1. import、审批撤销、手工编辑与重算 writer 的真实库用例不再只验证 diff
+   可解析，而是逐项断言闭集 `code`、排序后的 `changedFields`、
+   `absoluteMinuteDelta` 与 `segmentCount`。把三条可变 writer 的持久化结果统一
+   替换为结构合法但语义错误的 `equal` payload 时，三条命名腿精确 **3/3
+   failed**；恢复后本节六个真实库文件合跑 **101/101 PASS**。
+2. DecisionTrace 对持久化 record status、tier 数值及 overtime snapshot 数值与
+   `perDate.dayType` 做闭集解析。未知 status 不再回显或参与推导，畸形数值不再
+   被伪造为零，未知 day type 不再被默认为 restday；对应 unit/route 合跑
+   **109/109 PASS**。把 status validator 变异为“任意字符串通过”时，today、
+   late/early、missing-punch 三条未知状态腿精确 **3/3 failed**，恢复后 **3/3
+   PASS**。
+3. calculation SELECT inventory 现在也钉住 shadow trace 的 active-row 谓词，
+   并在计算 fingerprint 前遮蔽 SQL 行注释与块注释。删除 shadow active 谓词或
+   只把同文谓词塞进注释时均 fail closed；collector 全套 **58/58 PASS**。
+4. exact-head 独立复核发现 W4 持久化 schema/闭集异常会从 DecisionTrace 透传为
+   500，与 §12.7 的 “unsupported trace is undeterminable” 冲突。现在只捕获具名
+   `AttendanceCalculationSchemaUnsupportedError`，让 today/late/missing 三类均返回
+   values-free `frozen_evidence_unavailable`；普通查询异常继续抛出。重新变异为透传
+   schema 异常时两条命名合同腿精确 **2/2 failed**，恢复后 W4C-4/DecisionTrace
+   unit **106/106 PASS**。
+5. authoritative projection 的 status 在进入 DecisionTrace 前重新经过本模块闭集
+   validator，不再依赖 W4 与 W5 两份枚举当前恰好同值的类型强转。
+
+以上结果使用重新创建并完整迁移的本机 PostgreSQL 15 数据库
+`ms2_w4c4_final_20260803`；core-backend TypeScript type-check 通过。最终
+GitHub required checks 与独立 exact-head 对抗审仍绑定后续推送 SHA，本段不把
+本机结果替代为合并授权。
+
+### 11.6 诚实边界与停点
+
+- 本轮只使用本机 fresh synthetic PostgreSQL；未使用客户或生产数据，未部署，
+  未启用 flag，未发送外部通知，也未运行 staging soak。
+- real-DB 路由测试使用与生产顺序等价的认证/RBAC middleware 加真实
+  `user_orgs` 数据；生产完整认证栈由 route/unit 与现有 RBAC 回归共同覆盖，
+  本节不把该 harness 宣称为端到端登录验证。
+- W4C-4 当前仍是 Draft/HOLD 候选。fresh exact-head required checks 与独立
+  对抗审 `0 P1 / 0 P2` 均未在本节写作时完成；二者完成后仍须停在 owner 合并闸。
+- W4C-5 具名 synthetic staging 的七日 soak 继续受独立 owner 授权约束；本片
+  不授权 flag、部署、soak、生产/客户数据或关闭 #4556。

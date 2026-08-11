@@ -1,3 +1,4 @@
+import { cleanupStagingAttendanceScope } from './staging-attendance-tooling-teardown.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -179,22 +180,28 @@ test('HMR-5 helper cleanup is org-scoped, LIKE-free, and ordered children-before
   const idx = (needle) => script.indexOf(needle)
   const deliveries = idx('DELETE FROM attendance_notification_deliveries')
   const requests = idx('DELETE FROM attendance_requests')
-  const records = idx('DELETE FROM attendance_records')
+  // W4C-3c: records cleaned via cleanupStagingAttendanceScope, not bare DELETE.
+  const records = idx('await cleanupStagingAttendanceScope')
   const scopes = idx('DELETE FROM attendance_scheduler_scopes')
   const userRoles = idx('DELETE FROM user_roles')
   const userOrgs = idx('DELETE FROM user_orgs')
   const users = idx('DELETE FROM users')
   for (const [name, value] of Object.entries({ deliveries, requests, records, scopes, userRoles, userOrgs, users })) {
-    assert.ok(value !== -1, `${name} delete exists`)
+    assert.ok(value !== -1, `${name} cleanup exists`)
   }
   assert.ok(deliveries < requests && requests < records && records < scopes, 'deliveries -> requests -> records -> scopes')
   assert.ok(scopes < userRoles && userRoles < userOrgs && userOrgs < users, 'scopes -> user_roles -> user_orgs -> users')
+  assert.doesNotMatch(script, /^\s*await\s+.*DELETE FROM attendance_records/m, 'no bare live DELETE of attendance_records')
 })
 
 test('HMR-5 residue categories cover every table the smoke can dirty', () => {
   for (const table of ['attendance_requests', 'attendance_records', 'attendance_scheduler_scopes', 'user_orgs', 'users']) {
     assert.match(script, new RegExp(`to_regclass\\('public\\.${table}'\\)`), `${table} is preflighted`)
     assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted`)
+    if (table === 'attendance_records') {
+      assert.match(script, /cleanupStagingAttendanceScope/, 'attendance_records cleaned via guarded helper')
+      continue
+    }
     assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
   }
   assert.match(script, /to_regclass\('public\.attendance_notification_deliveries'\)/, 'deliveries preflighted')

@@ -8,6 +8,7 @@ const authServiceMocks = vi.hoisted(() => ({
   verifyToken: vi.fn(),
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
+  resolveSessionTenantId: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -25,6 +26,14 @@ const bcryptMocks = vi.hoisted(() => ({
 
 const sessionMocks = vi.hoisted(() => ({
   revokeUserSessions: vi.fn(),
+}))
+
+const activationMocks = vi.hoisted(() => ({
+  activatePendingUser: vi.fn(),
+}))
+
+const auditMocks = vi.hoisted(() => ({
+  auditLog: vi.fn(),
 }))
 
 const sessionRegistryMocks = vi.hoisted(() => ({
@@ -45,6 +54,7 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   exchangeEnterpriseAuthCodeForUser: vi.fn(),
   exchangeCodeForDingTalkProfile: vi.fn(),
   bindDingTalkIdentityToUser: vi.fn(),
+  unbindSelfManagedDingTalkIdentity: vi.fn(),
   DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
     statusCode: number
     code: string
@@ -82,6 +92,7 @@ const dingtalkClientMocks = vi.hoisted(() => ({
 
 const rbacMocks = vi.hoisted(() => ({
   listUserPermissions: vi.fn(),
+  isAdmin: vi.fn(),
 }))
 
 vi.mock('../../src/auth/AuthService', () => ({
@@ -102,6 +113,14 @@ vi.mock('../../src/auth/session-revocation', () => ({
   revokeUserSessions: sessionMocks.revokeUserSessions,
 }))
 
+vi.mock('../../src/auth/user-activate', () => ({
+  activatePendingUser: activationMocks.activatePendingUser,
+}))
+
+vi.mock('../../src/audit/audit', () => ({
+  auditLog: auditMocks.auditLog,
+}))
+
 vi.mock('../../src/auth/session-registry', () => ({
   createUserSession: sessionRegistryMocks.createUserSession,
   listUserSessions: sessionRegistryMocks.listUserSessions,
@@ -120,11 +139,13 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
   exchangeEnterpriseAuthCodeForUser: dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser,
   exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
   bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,
+  unbindSelfManagedDingTalkIdentity: dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity,
   DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
 }))
 
 vi.mock('../../src/rbac/service', () => ({
   listUserPermissions: rbacMocks.listUserPermissions,
+  isAdmin: rbacMocks.isAdmin,
 }))
 
 vi.mock('../../src/integrations/dingtalk/client', () => ({
@@ -217,11 +238,15 @@ describe('auth login routes', () => {
     authServiceMocks.verifyToken.mockReset()
     authServiceMocks.createToken.mockReset()
     authServiceMocks.readTokenPayload.mockReset()
+    authServiceMocks.resolveSessionTenantId.mockReset()
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
     inviteTokenMocks.verifyInviteToken.mockReset()
     pgMocks.query.mockReset()
     bcryptMocks.hash.mockReset()
     bcryptMocks.compare.mockReset()
     sessionMocks.revokeUserSessions.mockReset()
+    activationMocks.activatePendingUser.mockReset()
+    auditMocks.auditLog.mockReset()
     sessionRegistryMocks.createUserSession.mockReset()
     sessionRegistryMocks.listUserSessions.mockReset()
     sessionRegistryMocks.getUserSession.mockReset()
@@ -235,7 +260,10 @@ describe('auth login routes', () => {
     dingtalkOauthMocks.exchangeCodeForUser.mockReset()
     dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockReset()
     dingtalkOauthMocks.bindDingTalkIdentityToUser.mockReset()
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockReset()
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockResolvedValue(true)
     rbacMocks.listUserPermissions.mockReset()
+    rbacMocks.isAdmin.mockReset()
     dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
       configured: true,
       available: true,
@@ -859,11 +887,10 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenNthCalledWith(
-      4,
-      expect.stringContaining('DELETE FROM user_external_identities'),
-      ['dingtalk', 'user-1'],
-    )
+    expect(dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity).toHaveBeenCalledWith({
+      localUserId: 'user-1',
+      actorId: 'user-1',
+    })
     expect((response.body as Record<string, any>).data.identity.exists).toBe(false)
     expect((response.body as Record<string, any>).data.directory.linked).toBe(false)
   })
@@ -897,6 +924,48 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).error).toContain('directory-managed')
     expect(pgMocks.query).toHaveBeenCalledTimes(3)
+  })
+
+  it('maps the transactional directory-managed recheck to 409', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          corp_id: 'dingcorp',
+          last_login_at: '2026-04-11T12:00:00.000Z',
+          created_at: '2026-04-11T12:00:00.000Z',
+          updated_at: '2026-04-11T12:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ linked_count: 0 }] })
+    dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockRejectedValue(
+      new dingtalkOauthMocks.DingTalkLoginPolicyError(
+        'Current DingTalk identity is directory-managed. Please contact an administrator.',
+        {
+          statusCode: 409,
+          code: 'directory_managed_identity',
+        },
+      ),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/unbind', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      success: false,
+      code: 'directory_managed_identity',
+    })
   })
 
   it('requires authentication before issuing a DingTalk bind auth URL', async () => {
@@ -949,6 +1018,299 @@ describe('auth login routes', () => {
       state: 'state-bind-1',
       mode: 'bind',
     })
+  })
+
+  it('rejects unknown DingTalk launch intents instead of falling back to login', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: { intent: 'future-mode' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).code).toBe('invalid_dingtalk_intent')
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+  })
+
+  it('requires an authoritative platform admin to launch activate intent', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'role-text-admin',
+      email: 'operator@example.com',
+      name: 'Operator',
+      role: 'admin',
+      permissions: [],
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        intent: 'activate',
+        targetUserId: 'pending-user',
+      },
+      headers: { authorization: 'Bearer live-token' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).code).toBe('activate_admin_required')
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+  })
+
+  it('rejects activate launch without a target before querying the target', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'platform-admin',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'user',
+      permissions: [],
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: { intent: 'activate' },
+      headers: { authorization: 'Bearer live-token' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).code).toBe('activate_target_required')
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+  })
+
+  it('binds activate state to the pending target and authoritative admin', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.generateState.mockResolvedValue('state-activate-1')
+    dingtalkOauthMocks.buildAuthUrl.mockReturnValue('https://login.dingtalk.test/oauth-activate')
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'platform-admin',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'user',
+      permissions: [],
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [{ id: 'pending-user' }] })
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        intent: 'activate',
+        targetUserId: 'pending-user',
+        redirect: '/admin/users',
+      },
+      headers: { authorization: 'Bearer live-token' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).toHaveBeenCalledWith({
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    expect((response.body as Record<string, any>).data.mode).toBe('activate')
+  })
+
+  it('rechecks that the state-bound administrator is still active before an activate callback', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'former-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        is_active: false,
+        activation_status: 'activated',
+      }],
+    })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).code).toBe('activate_admin_required')
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.exchangeCodeForDingTalkProfile).not.toHaveBeenCalled()
+    expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
+  })
+
+  it('activates the exact DingTalk source before issuing a session', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'open-1',
+      unionId: 'union-1',
+      nick: 'Pending Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    let resolveActivation!: (result: {
+      userId: string
+      activationStatus: 'activated'
+      isActive: true
+      localPasswordSet: boolean
+    }) => void
+    activationMocks.activatePendingUser.mockReturnValue(new Promise((resolve) => {
+      resolveActivation = resolve
+    }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ directory_account_id: 'account-1' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'pending-user',
+          email: null,
+          name: 'Pending Person',
+          role: 'user',
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+    authServiceMocks.createToken.mockReturnValue('activated-session-token')
+    authServiceMocks.readTokenPayload.mockReturnValue(null)
+
+    const responsePromise = invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+    await vi.waitFor(() => {
+      expect(activationMocks.activatePendingUser).toHaveBeenCalledTimes(1)
+    })
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    resolveActivation({
+      userId: 'pending-user',
+      activationStatus: 'activated',
+      isActive: true,
+      localPasswordSet: false,
+    })
+    const response = await responsePromise
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.exchangeCodeForUser).not.toHaveBeenCalled()
+    expect(activationMocks.activatePendingUser).toHaveBeenCalledWith({
+      userId: 'pending-user',
+      mode: 'sso',
+      adminUserId: 'platform-admin',
+      directoryAccountId: 'account-1',
+      enableDingTalkGrant: true,
+      expectedDingTalkIdentity: {
+        corpId: 'ding-corp',
+        openId: 'open-1',
+        unionId: 'union-1',
+      },
+    })
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      mode: 'activate',
+      token: 'activated-session-token',
+      redirectPath: '/admin/users',
+      user: {
+        id: 'pending-user',
+        email: '',
+      },
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: 'platform-admin',
+      resourceId: 'pending-user',
+      meta: {
+        mode: 'sso',
+        source: 'dingtalk_oauth',
+      },
+    }))
+  })
+
+  it('issues no session when the activate callback source is not an exact match', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'wrong-open',
+      unionId: 'wrong-union',
+      nick: 'Wrong Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('activate_source_ineligible')
+    expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('issues no session and hides internal details when activate commit fails', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'open-1',
+      unionId: 'union-1',
+      nick: 'Pending Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ directory_account_id: 'account-1' }],
+      })
+    activationMocks.activatePendingUser.mockRejectedValue(
+      new Error('duplicate key value violates constraint secret_alias_idx'),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      success: false,
+      error: 'DingTalk activation failed',
+      code: 'activate_failed',
+    })
+    expect(JSON.stringify(response.body)).not.toContain('duplicate key')
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('rejects a bind callback when no session token is provided', async () => {
@@ -1274,6 +1636,7 @@ describe('auth login routes', () => {
       isNewUser: false,
     })
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin', 'workflow:read'])
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('tenant_42')
     authServiceMocks.createToken.mockReturnValue('jwt-dingtalk-token')
     authServiceMocks.readTokenPayload.mockReturnValue({
       exp: expSeconds,

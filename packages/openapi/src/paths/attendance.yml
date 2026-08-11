@@ -1280,6 +1280,8 @@ paths:
                   type: array
                   deprecated: true
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
               required: [name]
       responses:
@@ -1297,9 +1299,12 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '422':
           description: >-
-            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
-            (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
-            (segments combined with legacy start/end fields).
+            Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields), or
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex
+            rejection after request-shape validation, including multi-segment
+            flex or core-hours coverage failure).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1364,6 +1369,8 @@ paths:
                 workingDays:
                   type: array
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
       responses:
         '200':
@@ -1391,7 +1398,9 @@ paths:
             Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID,
             ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
             ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a
-            multi-segment shift).
+            multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID for a
+            canonical semantic flex rejection after request-shape validation,
+            including multi-segment flex or core-hours coverage failure.
     delete:
       summary: Delete attendance shift
       security: [ { bearerAuth: [] } ]
@@ -4508,3 +4517,103 @@ paths:
                 type: string
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance-admin/records/{recordId}/calculation-detail:
+    get:
+      summary: Read immutable attendance calculation detail as an administrator
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance/records/{recordId}/calculation-detail:
+    get:
+      summary: Read the signed-in user's immutable attendance calculation detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance-admin/calculation-shadow-backlog:
+    get:
+      summary: Read values-free attendance shadow difference backlog counts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Values-free shadow difference aggregates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceW4ShadowBacklogItem' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }

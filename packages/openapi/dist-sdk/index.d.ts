@@ -2469,6 +2469,7 @@ export interface paths {
                         workingDays?: number[];
                         /** @deprecated */
                         working_days?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2489,7 +2490,7 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array) or ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields). */
+                /** @description Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields), or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure). */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -2564,6 +2565,7 @@ export interface paths {
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
                         workingDays?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2598,7 +2600,7 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift). */
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID for a canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure. */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -6650,6 +6652,152 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read immutable attendance calculation detail as an administrator */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the signed-in user's immutable attendance calculation detail */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-shadow-backlog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read values-free attendance shadow difference backlog counts */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Values-free shadow difference aggregates */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceW4ShadowBacklogItem"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
             };
         };
         put?: never;
@@ -14789,6 +14937,86 @@ export interface components {
             /** Format: date-time */
             updated_at?: string;
         };
+        AttendanceW4ShadowDiff: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {string} */
+            code: "equal" | "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            changedFields: ("workDate" | "status" | "firstInAt" | "lastOutAt" | "workMinutes" | "lateMinutes" | "earlyLeaveMinutes" | "context" | "input")[];
+            absoluteMinuteDelta: number;
+            segmentCount: number;
+        };
+        AttendanceW4CalculationSegment: {
+            index: number;
+            /** Format: date-time */
+            expectedStartAt: string;
+            /** Format: date-time */
+            expectedEndAt: string;
+            /** Format: date-time */
+            actualInAt: string | null;
+            /** Format: date-time */
+            actualOutAt: string | null;
+            workMinutes: number;
+            lateMinutes: number;
+            earlyLeaveMinutes: number;
+            /** @enum {string} */
+            status: "normal" | "late" | "early_leave" | "late_early" | "missing_check_in" | "missing_check_out" | "missing_both";
+            statusReasons: ("within_window" | "late_check_in" | "early_check_out" | "missing_check_in" | "missing_check_out" | "missing_both" | "approved_correction_applied" | "approved_leave_overlay" | "approved_overtime_overlay" | "dst_fold_start_earlier" | "dst_fold_end_later")[];
+        };
+        AttendanceW4Calculation: {
+            /** Format: uuid */
+            id: string;
+            version: number;
+            /** @enum {string} */
+            kind: "legacy_baseline" | "calculation" | "reversal";
+            /** @enum {string} */
+            mode: "shadow" | "authoritative";
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            engineVersion: string;
+            /** @enum {integer} */
+            snapshotSchemaVersion: 1;
+            /** @enum {string} */
+            outcome: "baseline" | "completed" | "review_required" | "reversed";
+            /** @enum {string} */
+            outcomeReasonCode: "calculated" | "shadow_only" | "legacy_projection_baseline" | "ambiguous_segment_match" | "duplicate_check_in" | "duplicate_check_out" | "dst_gap_local_time" | "dst_fold_shared_boundary_ambiguous" | "invalid_timezone" | "invalid_segment_order" | "invalid_evidence_order" | "overlapping_actual_intervals" | "evidence_outside_attribution_window" | "missing_frozen_context" | "legacy_attribution_not_upgradeable" | "frozen_evidence_unavailable" | "context_resolution_ambiguous" | "context_mismatch" | "input_schema_invalid" | "legacy_time_ingress_not_authoritative" | "approved_fact_conflict" | "manual_override_invalid" | "import_metric_conflict" | "import_rollback_reversal" | "operator_retirement";
+            /** @enum {string} */
+            projectionEffect: "none" | "set_active" | "set_retired";
+            expectedSegmentCount: number;
+            /** @enum {string|null} */
+            projectedStatus: "normal" | "late" | "early_leave" | "late_early" | "partial" | "absent" | "adjusted" | "off" | null;
+            projectedWorkMinutes: number | null;
+            projectedLateMinutes: number | null;
+            projectedEarlyLeaveMinutes: number | null;
+            shadowDiff: components["schemas"]["AttendanceW4ShadowDiff"] | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AttendanceW4CalculationDetail: {
+            /** Format: uuid */
+            recordId: string;
+            calculation: components["schemas"]["AttendanceW4Calculation"] | null;
+            segments: components["schemas"]["AttendanceW4CalculationSegment"][];
+            current: {
+                /** @enum {string} */
+                projectionOwner: "legacy_untracked" | "w4";
+                /** @enum {string} */
+                visibilityState: "active" | "retired";
+                /** @enum {string} */
+                visibilityReason: "active" | "review_placeholder" | "import_rollback" | "operator_retirement";
+                /** @enum {string} */
+                posture: "shadow" | "authoritative" | "undeterminable";
+            };
+        };
+        AttendanceW4ShadowBacklogItem: {
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            /** @enum {string} */
+            code: "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            label: string;
+            critical: boolean;
+            count: number;
+        };
         AttendanceRequest: {
             id?: string;
             user_id?: string;
@@ -15457,9 +15685,27 @@ export interface components {
             segments?: components["schemas"]["AttendanceShiftSegment"][];
             /** @enum {string} */
             calculationMode?: "envelope" | "segments";
-            /** @description Sum of per-segment planned minutes; breaks between segments are never counted. */
+            /** @description Sum of per-segment planned minutes for strict shifts (breaks between segments are never counted). For flex_required_duration this is the required duration in minutes. */
             plannedMinutes?: number;
+            flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
+            /** @description True only when the shift has exactly one segment. Multi-segment flex is rejected in v1 (OD-4556-3). */
+            flexEligible?: boolean;
             capabilities?: components["schemas"]["AttendanceShiftCapabilities"];
+        };
+        /** @description W5 flexible attendance policy (design lock §3.3). Discriminated by mode. flex_required_duration is valid only for a one-segment shift; multi-segment flex is rejected with a typed 422 and zero writes. Absent flexPolicy on create defaults to strict. */
+        AttendanceShiftFlexPolicy: {
+            /** @enum {string} */
+            mode: "strict";
+        } | {
+            /** @enum {string} */
+            mode: "flex_required_duration";
+            requiredMinutes: number;
+            arrivalWindowBeforeMinutes: number;
+            arrivalWindowAfterMinutes: number;
+            /** @description Optional same-day core-hours start (HH:MM) in the shift timezone. */
+            coreStartTime?: string | null;
+            /** @description Optional same-day core-hours end (HH:MM) in the shift timezone. */
+            coreEndTime?: string | null;
         };
         AttendanceShiftSegment: {
             /** @description Persisted segment row id; null when synthesized from the legacy envelope. */

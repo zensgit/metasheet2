@@ -8,10 +8,15 @@ const jwtMocks = vi.hoisted(() => ({
 
 const poolMocks = vi.hoisted(() => {
   const query = vi.fn()
+  // AuthService.createUser uses pool.transaction so alias claim + users insert roll back together.
+  const transaction = vi.fn(async (handler: (client: { query: typeof query }) => Promise<unknown>) =>
+    handler({ query }),
+  )
   return {
     query,
+    transaction,
     poolManager: {
-      get: () => ({ query, getInternalPool: () => null })
+      get: () => ({ query, transaction, getInternalPool: () => null })
     }
   }
 })
@@ -99,6 +104,83 @@ describe('AuthService.verifyToken', () => {
     expect(user?.role).toBe('admin')
     expect(user?.permissions).toContain('attendance:admin')
     expect((user as any).password_hash).toBeUndefined()
+  })
+
+  it('preserves a verified token tenant only while active membership proves it', async () => {
+    jwtMocks.verify.mockReturnValue({
+      userId: 'u-tenant',
+      email: 'tenant@x',
+      role: 'user',
+      tenantId: 'tenant_42',
+      iat: 0,
+      exp: 0,
+    })
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u-tenant',
+          email: 'tenant@x',
+          name: 'Tenant User',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: 'hash',
+          is_active: true,
+          activation_status: 'activated',
+          local_password_set: true,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ org_id: 'tenant_42' }] })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('tenant-token')
+
+    expect(user?.tenantId).toBe('tenant_42')
+    expect((user as any).password_hash).toBeUndefined()
+  })
+
+  it('drops a signed legacy tenant claim when active membership does not prove it', async () => {
+    jwtMocks.verify.mockReturnValue({
+      userId: 'u-legacy',
+      email: 'legacy@x',
+      role: 'user',
+      tenantId: 'forged-tenant',
+      iat: 0,
+      exp: 0,
+    })
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u-legacy',
+          email: 'legacy@x',
+          name: 'Legacy User',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: 'hash',
+          is_active: true,
+          activation_status: 'activated',
+          local_password_set: true,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('legacy-forged-tenant-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.tenantId).toBeUndefined()
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('uo.org_id = $2'),
+      ['u-legacy', 'forged-tenant'],
+    )
   })
 
   it('falls back to stored role/permissions when RBAC lookup fails', async () => {
@@ -328,6 +410,11 @@ describe('AuthService.register', () => {
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()
     poolMocks.query.mockResolvedValue({ rows: [] })
+    poolMocks.transaction.mockReset()
+    poolMocks.transaction.mockImplementation(
+      async (handler: (client: { query: typeof poolMocks.query }) => Promise<unknown>) =>
+        handler({ query: poolMocks.query }),
+    )
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
     secretManagerMocks.get.mockReset()
@@ -337,77 +424,92 @@ describe('AuthService.register', () => {
     sessionMocks.isUserSessionActive.mockReset()
   })
 
+  function mockRegisterQueries(opts: {
+    id: string
+    email: string
+    name: string
+    permissions: string[]
+  }) {
+    let createdId = opts.id
+    poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FROM users') && text.includes('lower(email)')) {
+        return { rows: [] }
+      }
+      if (text.includes('INSERT INTO users')) {
+        createdId = String(params?.[0] ?? opts.id)
+        return {
+          rows: [{
+            id: createdId,
+            email: opts.email,
+            name: opts.name,
+            role: 'user',
+            permissions: opts.permissions,
+            created_at: new Date('2026-04-03T00:00:00.000Z'),
+            updated_at: new Date('2026-04-03T00:00:00.000Z'),
+          }],
+        }
+      }
+      // claimLoginAlias: INSERT alias then SELECT owner
+      if (text.includes('INSERT INTO user_login_aliases')) return { rows: [] }
+      if (text.includes('SELECT user_id FROM user_login_aliases')) {
+        return { rows: [{ user_id: createdId }] }
+      }
+      if (text.includes('INSERT INTO user_permissions')) return { rows: [] }
+      if (text.includes('INSERT INTO user_roles')) return { rows: [] }
+      return { rows: [] }
+    })
+  }
+
   it('assigns attendance self-service permissions and role on attendance-mode registration', async () => {
     process.env.PRODUCT_MODE = 'attendance'
-    poolMocks.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-1',
-          email: 'employee@example.com',
-          name: 'Employee',
-          role: 'user',
-          permissions: [
-            'spreadsheet:read',
-            'spreadsheet:write',
-            'spreadsheets:read',
-            'spreadsheets:write',
-            'attendance:read',
-            'attendance:write',
-          ],
-          created_at: new Date('2026-04-03T00:00:00.000Z'),
-          updated_at: new Date('2026-04-03T00:00:00.000Z'),
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
+    mockRegisterQueries({
+      id: 'user-1',
+      email: 'employee@example.com',
+      name: 'Employee',
+      permissions: [
+        'spreadsheet:read',
+        'spreadsheet:write',
+        'spreadsheets:read',
+        'spreadsheets:write',
+        'attendance:read',
+        'attendance:write',
+      ],
+    })
     const auth = new AuthService()
     const user = await auth.register('employee@example.com', 'WelcomePass9A', 'Employee')
 
     expect(user).toBeTruthy()
     expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
-    expect(poolMocks.query).toHaveBeenNthCalledWith(
-      4,
-      expect.stringContaining('INSERT INTO user_roles'),
-      [expect.any(String), 'attendance_employee'],
-    )
+    expect(poolMocks.transaction).toHaveBeenCalled()
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_login_aliases'))).toBe(true)
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(true)
   })
 
   it('assigns attendance self-service permissions and role on platform registration', async () => {
     process.env.PRODUCT_MODE = 'platform'
-    poolMocks.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-2',
-          email: 'platform@example.com',
-          name: 'Platform User',
-          role: 'user',
-          permissions: [
-            'spreadsheet:read',
-            'spreadsheet:write',
-            'spreadsheets:read',
-            'spreadsheets:write',
-            'attendance:read',
-            'attendance:write',
-          ],
-          created_at: new Date('2026-04-03T00:00:00.000Z'),
-          updated_at: new Date('2026-04-03T00:00:00.000Z'),
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
+    mockRegisterQueries({
+      id: 'user-2',
+      email: 'platform@example.com',
+      name: 'Platform User',
+      permissions: [
+        'spreadsheet:read',
+        'spreadsheet:write',
+        'spreadsheets:read',
+        'spreadsheets:write',
+        'attendance:read',
+        'attendance:write',
+      ],
+    })
 
     const auth = new AuthService()
     const user = await auth.register('platform@example.com', 'WelcomePass9A', 'Platform User')
 
     expect(user).toBeTruthy()
     expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
-    expect(poolMocks.query).toHaveBeenNthCalledWith(
-      4,
-      expect.stringContaining('INSERT INTO user_roles'),
-      [expect.any(String), 'attendance_employee'],
-    )
+    expect(poolMocks.transaction).toHaveBeenCalled()
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_login_aliases'))).toBe(true)
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(true)
   })
 })
 
@@ -578,6 +680,40 @@ describe('AuthService.login', () => {
 
     expect(result).toBeNull()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('AuthService.resolveSessionTenantId', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    poolMocks.query.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('uses one active organization when the login request has no tenant hint', async () => {
+    poolMocks.query.mockResolvedValue({ rows: [{ org_id: 'tenant_42' }] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1')).resolves.toBe('tenant_42')
+    expect(poolMocks.query).toHaveBeenCalledWith(expect.stringContaining('LIMIT 2'), ['user-1'])
+  })
+
+  it('fails closed when a user has multiple active organizations and no tenant hint', async () => {
+    poolMocks.query.mockResolvedValue({ rows: [{ org_id: 'tenant_a' }, { org_id: 'tenant_b' }] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1')).resolves.toBeUndefined()
+  })
+
+  it('accepts a requested organization only when active membership proves it', async () => {
+    poolMocks.query
+      .mockResolvedValueOnce({ rows: [{ org_id: 'tenant_42' }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1', 'tenant_42')).resolves.toBe('tenant_42')
+    await expect(auth.resolveSessionTenantId('user-1', 'tenant_other')).resolves.toBeUndefined()
   })
 })
 

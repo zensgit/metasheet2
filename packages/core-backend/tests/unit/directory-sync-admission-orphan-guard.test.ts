@@ -18,10 +18,19 @@ const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsFor
  */
 function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
   const queries: string[] = []
+  const aliasOwners = new Map<string, string>()
   return {
     queries,
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
+      if (/INSERT INTO user_login_aliases/i.test(sql)) {
+        aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
+        return { rows: [] as Array<Record<string, unknown>> }
+      }
+      if (/SELECT user_id FROM user_login_aliases/i.test(sql)) {
+        const ownerId = aliasOwners.get(String(params?.[0] ?? ''))
+        return { rows: (ownerId ? [{ user_id: ownerId }] : []) as Array<Record<string, unknown>> }
+      }
       if (/FROM directory_accounts account/.test(sql)) {
         return {
           rows: [{
@@ -45,6 +54,8 @@ function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
 }
 
 const CORP_ACCOUNT_WITHOUT_OPENID = {
+  // #4651: the bind path re-reads the account under lock and refuses an inactive one.
+  is_active: true,
   id: '11111111-1111-1111-1111-111111111111',
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
@@ -56,6 +67,7 @@ const CORP_ACCOUNT_WITHOUT_OPENID = {
   name: '张三',
   email: null,
   mobile: null,
+  is_active: true,
 }
 
 const baseOptions = {

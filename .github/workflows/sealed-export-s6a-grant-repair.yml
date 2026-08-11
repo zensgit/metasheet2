@@ -1,0 +1,105 @@
+name: Sealed-export S6-A grant repair (migration 074) gate
+
+# EVIDENCE ONLY. Ephemeral first-party PostgreSQL container. This workflow
+# proves that migration 074 grants exactly the privileges migration 073 omitted
+# and nothing more. It does not connect a customer source, deploy a package,
+# enable a flag, or authorize rollout.
+#
+# This gate deliberately lives in its own workflow file:
+# .github/workflows/sealed-export-s5-sqlserver.yml is a PINNED evidence input
+# of the frozen S6-A package (sealed-export-package-provenance.cjs
+# PINNED_EVIDENCE_FILES 's5EvidenceWorkflow'), so editing it would change frozen
+# package-provenance evidence. It is left byte-identical.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
+      - 'packages/core-backend/tests/integration/sealed-export-s6a-grant-repair.db.test.ts'
+      - 'plugins/plugin-integration-core/lib/db.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/sealed-export-lifecycle-provisioning.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-database.cjs'
+      - '.github/workflows/sealed-export-s6a-grant-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  grant-repair-gate:
+    name: Sealed-export S6-A grant repair gate (pg${{ matrix.pg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 074/075 had ZERO PostgreSQL 17 coverage: the only pg17 lane in the repo validates the
+        # FROZEN package, whose migration tree stops at 073. Column-level GRANT semantics are
+        # exactly the kind of thing that can differ across majors, so the gate must run on both.
+        pg: ['16', '17']
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s6a_grant_repair
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s6a_grant_repair"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_grant_repair
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run real-Postgres S6-A grant-repair gate (migration 074)
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/sealed-export-s6a-grant-repair.db.test.ts
+          --reporter=dot
+
+      - name: Confirm the pinned S5 evidence workflow was not modified
+        run: |
+          pinned="$(node -e "
+            const pins = require('./plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json');
+            process.stdout.write(pins.evidenceFiles.s5EvidenceWorkflow);
+          ")"
+          actual="$(sha256sum .github/workflows/sealed-export-s5-sqlserver.yml | cut -d' ' -f1)"
+          if [ "$pinned" != "$actual" ]; then
+            echo "pinned S5 evidence workflow digest drifted"
+            exit 1
+          fi
+          echo "pinned S5 evidence workflow digest unchanged"

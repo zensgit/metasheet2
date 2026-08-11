@@ -533,8 +533,9 @@ async function probeFromTrustedResolution(executor, input) {
   const evidence = Object.freeze({
     probeKind: 'ordering_key_total_order_negative',
     // FIRST-PARTY action identity only. Deliberately ABSENT: probeDialect,
-    // snapshotSemantics, and every other guarantee token — §4 step 2 has not run,
-    // so no such claim is establishable, and an HTTP action has none to make.
+    // snapshotSemantics, and every other guarantee token. §4 step 2 has since
+    // produced SQL-engine evidence, but this remains an HTTP action under δ=(c)
+    // and has no SQL snapshot claim to make.
     probeTransport: requiredIdentityToken(observation.probeTransport, 'probeTransport'),
     probeActionId: requiredIdentityToken(observation.probeActionId, 'probeActionId'),
     probeActionVersion: requiredIdentityToken(observation.probeActionVersion, 'probeActionVersion'),

@@ -75,6 +75,17 @@ jobs:
         run: |
           pnpm run verify:integration-k3wise:poc
 
+      # REVIEW P2-1: the rehearsal harness asserts the two guards the owner's HOLD points 3 and 4
+      # depend on (the mock's session gate, and the call logger the workflow's Submit/Audit
+      # absence-check reads). It shipped in ZERO workflows, so those guards' only behavioural
+      # evidence was ungated — a coverage regression, not a coverage gap. Gated here alongside
+      # its sibling mock-server test.
+      - name: Run K3 WISE rehearsal harness contract tests
+        run: |
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
       - name: Run on-prem package apply and archive contract tests
         run: |
           node --test \
@@ -88,7 +99,12 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
           node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
+          node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
+          node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
+          node --test scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs
+          node --test scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
         run: |
@@ -130,6 +146,9 @@ jobs:
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
             scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
@@ -163,6 +182,97 @@ jobs:
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
       - name: W0 exact-anchor L6/L7 CI wiring contract
         run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
+
+      # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
+      # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
+      - name: Production maintenance SSH host-identity contract (required lane)
+        id: production-maintenance-ssh-host-identity-contract
+        if: matrix.node-version == '20.x'
+        run: node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
+
+      # DingTalk production-readiness inventory (manual-only, values-free, read-only) + OAuth
+      # stability SSH host-identity hardening. Wired into required test (20.x) so host-key
+      # pinning and values-free/read-only rails cannot regress behind a green PR.
+      - name: DingTalk production-readiness inventory contract (required lane)
+        id: dingtalk-production-readiness-inventory-contract
+        if: matrix.node-version == '20.x'
+        run: |
+          node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
+
+      # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
+      # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
+      # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the
+      # rehearsal driver's step predicates, including the one that discriminates the owner's
+      # reported P1. A guard that cannot block is documentation, not a gate.
+      #
+      # Invoked here as well, in the REQUIRED `test` job (test (20.x) is a required context), so
+      # the guard actually gates. The duplicate run costs ~1s and is deliberate: leaving the
+      # original in place keeps the offline-PoC job self-contained.
+      - name: K3 WISE rehearsal driver contract (required lane)
+        run: |
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
+      # #4802 — SEVEN K3/stock-prep-line `scripts/ops` suites executed by NOTHING. A repo-wide sweep
+      # (not just this workflow's own list) found these seven `*.test.mjs` files referenced by no
+      # workflow, no package.json script, and no shell script. The single non-docs hit,
+      # scripts/ops/multitable-onprem-package-verify.sh:532, is a `search_fixed_string` assertion
+      # that a COMMAND STRING appears in a document — it does not execute the suite.
+      #
+      # All seven pass. Inert, not broken — which is worse, because the directory listing reads like
+      # coverage. The one that makes this urgent is
+      # `multitable-onprem-package-verify-k3-helper-contract.test.mjs`: it guards the CONTENT
+      # CONTRACT of the on-prem deployment package (the thing the physical-machine window installs).
+      # Measured on #4802: dropping `packages/mssql-readonly-utils` — the shared helper package the
+      # K3 SQL Server executor seam resolves against — from
+      # `multitable-onprem-package-build.sh`'s payload list and then re-pinning the provenance
+      # manifest as usual REDS that suite and NOTHING ELSE (161 chained suites RED = 0). i.e. an
+      # on-prem package missing that helper shipped GREEN through every executed check.
+      #
+      # Wired into the REQUIRED `test (20.x)` context, not `k3wise-offline-poc` (whose check name
+      # "K3 WISE offline PoC" is not one of main's required contexts, so a red there does not block
+      # a merge — the owner's standard: "写进 workflow 但未进入 required context 不算完成").
+      #
+      # `if: matrix.node-version == '20.x'` is deliberate and is itself byte-pinned by the contract
+      # (see below): 20.x IS the required leg, and flipping this string to '18.x' is mutation class
+      # #1 in scripts/ops/ci-realdb-step-contract.mjs's header — the step disappears from the
+      # required leg while every membership assertion stays green.
+      #
+      # All seven are pure node:test over node: builtins + sibling .mjs modules (the SSH-fallback
+      # legs shim a fake `ssh` onto PATH), so this runs before the pnpm install, like the steps
+      # above it. This step's `id`, its `if`, the absence of `continue-on-error`, and the presence
+      # of ALL SEVEN paths as whole-file args of a real `node --test` invocation are pinned by
+      # scripts/ops/integration-guard-required-wiring-contract.test.mjs (Pin 18), which runs in this
+      # same required context and in `integration-guard`.
+      - name: Run K3-line ops suites (required lane, #4802)
+        id: k3-line-ops-suites
+        if: matrix.node-version == '20.x'
+        run: |
+          node --test \
+            scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \
+            scripts/ops/integration-k3wise-signoff-gate.test.mjs \
+            scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \
+            scripts/ops/resolve-k3wise-smoke-token.test.mjs
+
+      # Same promotion, same reason (adversarial review of #4646, P3): the D3 deprovision-ledger
+      # CI-wiring contract is the ONLY mechanical guard proving the ledger real-DB suites stay in
+      # the required run-list and excluded from the no-DB job. Its original home is the
+      # k3wise-offline-poc job, whose check cannot block a merge — invoked here as well so it
+      # actually gates. Duplicate run costs <1s; the original stays for job self-containment.
+      - name: Directory deprovision ledger CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
+
+      # Same promotion (post-merge review of #4846, P2): the activation-source-lock wiring
+      # contract's original home is the k3wise-offline-poc job, whose check cannot block a merge,
+      # so de-listing the suite + repinning would pass all 9 required checks while the real-DB
+      # golden silently stops running. Invoked here in the required test lane so it actually gates.
+      - name: Directory activation source-lock CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
 
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
@@ -211,7 +321,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MIN_CONTRACT_TESTS=59
+          MIN_CONTRACT_TESTS=62
           if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
             printf '%s\n' "$contract_out"
             echo "integration-guard contract: node --test exited non-zero (output above)" >&2
@@ -341,6 +451,48 @@ jobs:
       - name: DingTalk staging immutable worker-drain gate
         run: node --test scripts/ops/dingtalk-staging-deploy-identity.test.mjs
 
+      # #4612 gate4 round 4 (P3-4): the seven W4C-2 real-DB attendance suites (including this
+      # PR's own primary evidence file) had no source-level two-point wiring guard of their own.
+      # #4612 gate4 round 5 correction: this is NOT "every other real-DB family already had one" —
+      # multitable (216 multitable-* files across this workflow's three real-DB steps' file lists)
+      # has no suite-level *-ci-wiring.test.mjs guard of its own: none of the 17 guard files in
+      # scripts/ops/ is multitable-owned, and only 2 of the 216 files are incidentally named by a
+      # DIFFERENT family's guard (approval-data-closure-ci-wiring.test.mjs, which lists two
+      # multitable fixtures its own suites share DML with). The accurate scope, counted directly
+      # from the three real-DB steps' de-duplicated 365-file union: the 16 PRE-EXISTING guards
+      # together name 23 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's
+      # 7 W4C-2 files were not among those 23 (#4612 gate-confirm P3-1: an earlier draft of this
+      # comment miscounted this as "30", which double-counts this PR's own 7 as if a pre-existing
+      # guard already named them). This 17th guard adds those 7, bringing the ALL-17-guards total to
+      # 30 (23 + 7); the other 335 — multitable's 216 included — remain outside every guard's
+      # (all 17) file list. This closes attendance's own gap, not "the last" gap.
+      # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
+      # invocation. OBS-1 (2026-08-07) converted the per-file assertions from a hardcoded FILES
+      # allowlist (33 entries at conversion time) to a DERIVED completeness check. An allowlist
+      # cannot notice a file it was never told about — the two W4C-3b suites that conversion wires
+      # (request-snapshots, central-approval) executed NOWHERE while the 33-entry guard was green.
+      # The corpus is every attendance-prefixed SUITE under tests/integration, found recursively,
+      # where "is a suite" is the union of "matches an include glob of a vitest config in the
+      # package" and "calls a vitest suite API" — no suffix or directory depth is hardcoded, after
+      # a .spec.ts probe and a subdirectory probe were both collected and skip-greened by the no-DB
+      # job while sitting in no corpus (2026-08-08). Every member must be excluded from the no-DB
+      # job's vitest.config.ts AND carried EXACTLY ONCE by a provably-executed real-DB invocation,
+      # and must exist on disk. NEITHER is REFUSED: the exit that let a suite submit a "positive
+      # proof" of DB-independence is DELETED (4828, 2026-08-09). Placed BEFORE the install: a break reds
+      # this required check in seconds. That is also why the corpus is derived statically rather
+      # than from vitest's own collection, which does not exist yet at this point in the job.
+      - name: Attendance W4C-2 CI wiring contract
+        run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
+
+      # #4556 W4C-3c P15/P16: node:test behavior contracts are not discovered
+      # by Vitest. Keep cleanup classification, authenticated ops-retirement,
+      # immutable-row guards, and residue failure in the required test matrix.
+      - name: Attendance W4C-3c tooling cleanup contracts
+        id: attendance-w4c3c-tooling-contracts
+        run: |
+          node --test \
+            scripts/ops/staging-attendance-tooling-teardown.test.mjs \
+            scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
 
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
@@ -418,13 +570,61 @@ jobs:
         run: |
           node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
 
+      - name: Run attendance legacy membership audit contract
+        run: |
+          node --test scripts/ops/attendance-legacy-membership-overlap-audit-contract.test.mjs
+
+      # W4C-5 operator transition tooling — pure module (no DB): manifest validator, plan digest,
+      # apply orchestration sequencing (idempotency-first, then digest match, then the boundary
+      # call). Uses `tsx --test` rather than plain `node --test` because the module is
+      # TypeScript — this is the first `tsx --test` invocation in this workflow (every other
+      # `.test.ts` suite in scripts/ops runs its own logic through a plain `node --test`
+      # `.test.mjs` file that spawns the tsx CLI as a child process, per
+      # attendance-legacy-membership-overlap-audit-contract.test.mjs's shape). `if:
+      # matrix.node-version == '20.x'` (same pin as the "Run K3-line ops suites" step above,
+      # same reason: 20.x is the required leg; this is unproven on 18.x and narrows nothing that
+      # was ever proven there). An EXACT SUBTEST COUNT (stronger than the former floor; same shape as "Integration Guard
+      # required-wiring contract" below, same reason: `node --test` — and `tsx --test`, which
+      # delegates to the identical runner — treats a child process that exits 0 as a PASSING
+      # FILE, so a collection-time abort before any subtest body runs would silently collapse
+      # this into a green zero-test file) refuses both missing and silently deleted test cases.
+      #
+      # The real-PostgreSQL half (zero-write proof, full legacy -> shadow cycle, idempotent
+      # re-apply, and the refusal matrix) is
+      # tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts, wired into the
+      # "Run attendance integration tests" step below and excluded from this job's default
+      # vitest.config.ts run.
+      - name: Run W4C-5 operator transition tooling unit tests
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_LIB_TESTS=67
+          if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
+            printf '%s\n' "$lib_out"
+            echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$lib_out"
+          lib_tests="$(printf '%s\n' "$lib_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$lib_tests" ]; then
+            echo "W4C-5 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$lib_tests" -ne "$EXPECTED_LIB_TESTS" ]; then
+            echo "W4C-5 tooling unit tests: $lib_tests subtests ran, expected exactly $EXPECTED_LIB_TESTS" >&2
+            exit 1
+          fi
+          echo "W4C-5 tooling unit tests: exactly $lib_tests subtests ran."
+
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
       # independently load-bearing. Keep whole-file execution explicit.
-      - name: Run attendance calculation-group W1 timeline-integrity unit
+      - name: Run attendance calculation-group timeline and legacy audit units
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts \
+            tests/unit/attendance-legacy-membership-overlap-audit.test.ts \
             --reporter=dot
 
       # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
@@ -447,13 +647,30 @@ jobs:
             tests/unit/attendance-shift-segments-service.test.ts \
             --reporter=dot
 
-      # #4556 W4C-0 Stage D: section 8.4 source/effect/result mechanical bypass guard. A
+      # #4556 W4C-4 §12.7/§12.9: immutable detail/trace, auth-order and
+      # comparator mutation legs plus generated OpenAPI/SDK parity. Whole-file
+      # names are explicit so a path-filter or default-suite exclusion cannot
+      # turn this contract into skip-shaped green.
+      - name: Run attendance W4C-4 calculation detail and diff contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-w4c4-calculation-detail.test.ts \
+            tests/unit/attendance-w4c4-calculation-detail-routes.test.ts \
+            --reporter=dot
+          pnpm --filter @metasheet/openapi build
+          pnpm --filter @metasheet/openapi validate
+          pnpm --filter @metasheet/openapi generate:sdk
+          git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts
+          node --test scripts/ops/attendance-w4c4-openapi-contract.test.mjs
+
+      # #4556 W4C-0 Stage D / W4C-4 §12.7: source/effect/result mechanical bypass guard plus
+      # generated calculation/segment current-history SELECT inventory. A
       # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
       # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
       # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
       # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
       # re-proves the pinned baseline artifact is byte-reproducible from that ref.
-      - name: Run attendance W4C-0 Stage D §8.4 DML inventory collector
+      - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors
         run: |
           # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
           # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
@@ -567,6 +784,28 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
+      - name: Run sealed-export S3 private-ingestion real-DB proof
+        id: sealed-export-s3-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for sealed-export S3 real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts \
+            --reporter=verbose
+
+      - name: Run sealed-export S4 generation-kernel real-DB proof
+        id: sealed-export-s4-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for sealed-export S4 real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
+            --reporter=verbose
+
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'
         env:
@@ -574,6 +813,44 @@ jobs:
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
+
+      # #4783 owner review P1-1/P1-2: real-Postgres proof that (a) the timer poller's
+      # write gate leaves ZERO bpmn_timer_jobs rows when disabled (not just "the mock
+      # wasn't called") and a positive control that it still writes when enabled, and
+      # (b) the WAITING -> LOCKED claim is race-safe across two independent
+      # `BPMNWorkflowEngine` instances (the real `routes/workflow.ts` +
+      # `routes/workflow-designer.ts` topology) via a CONSTRUCTED concurrent claim, not
+      # sequential reasoning. Excluded from the no-DB default job (vitest.config.ts) so
+      # describeIfDatabase cannot skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN timer job write-and-claim safety
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN timer job write-and-claim safety}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-timer-job-write-and-claim-safety.db.test.ts \
+            --reporter=verbose
+
+      # #4783 owner review batch 2: batch 1's write gate (createTimerJob throwing before its
+      # own INSERT) was too late — startProcess() had already persisted the
+      # bpmn_process_instances (ACTIVE) + activity rows by the time that throw fired, leaving
+      # permanent ACTIVE residue with an OPEN incident (owner-reproduced at 243db11f1). This
+      # proves startProcess()'s entry gate leaves FOUR real zeros (process/activity/incident/
+      # timer rows) via the REAL HTTP surface (POST /api/workflow/deploy + POST
+      # /api/workflow/start/:key) against a real booted MetaSheetServer, plus a positive
+      # control that a timer-free process still starts normally with the poller off.
+      # Excluded from the no-DB default job (vitest.config.ts) so describeIfDatabase cannot
+      # skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN startProcess poller-disabled zero-residue
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN startProcess poller-disabled zero-residue}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts \
+            --reporter=verbose
 
       # Real-APP-ASSEMBLY guard. Route-level unit tests mount ONE router in isolation, so every path they
       # exercise belongs to that router — mount order and the SCOPE of middleware added inside a router are
@@ -913,6 +1190,13 @@ jobs:
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
             tests/integration/directory-deprovision-grant-table.db.test.ts \
+            tests/integration/directory-deprovision-compensation.db.test.ts \
+            tests/integration/directory-activation-source-lock.db.test.ts \
+            tests/integration/login-alias-writers.db.test.ts \
+            tests/integration/directory-deprovision-ledger-schema.db.test.ts \
+            tests/integration/directory-deprovision-writer-ledger.db.test.ts \
+            tests/integration/directory-deprovision-race-supersede.db.test.ts \
+            tests/integration/directory-access-graph-mutex.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
@@ -1005,6 +1289,15 @@ jobs:
           pnpm --filter @metasheet/web build
 
       - name: Run attendance integration tests
+        # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
+        # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
+        # title-prefix anchoring. Deliberately NO `if:` pin added here — this
+        # step already runs UNCONDITIONALLY on both matrix legs (18.x/20.x);
+        # copying the `if: matrix.node-version == '20.x'` pin from the
+        # approval/multitable siblings would NARROW coverage to one leg, a
+        # real behaviour change this round does not make. The wiring guard's
+        # own pin is loosened to match (see that file's comment).
+        id: attendance-real-db-integration
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -1034,6 +1327,7 @@ jobs:
             tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
             tests/integration/attendance-decision-trace-w5-0.db.test.ts \
             tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
+            tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts \
             tests/integration/attendance-work-date-resolver-w2.db.test.ts \
             tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
             tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \
@@ -1041,6 +1335,47 @@ jobs:
             tests/integration/attendance-w4c0-db-gates-e1.db.test.ts \
             tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts \
             tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts \
+            tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts \
+            tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts \
+            tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts \
+            tests/integration/attendance-w4c2-posture-matrix.db.test.ts \
+            tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts \
+            tests/integration/attendance-w4c2-p2-remediation.db.test.ts \
+            tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts \
+            tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts \
+            tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts \
+            tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts \
+            tests/integration/attendance-w4c2-sweep-fairness.db.test.ts \
+            tests/integration/attendance-w4c2-sweep-call-through.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
+            tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts \
+            tests/integration/attendance-w4c3a-record-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-record-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-item-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-p08-child-process.db.test.ts \
+            tests/integration/attendance-w4c3a-group-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-group-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
+            tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts \
+            tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts \
+            tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts \
+            tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
+            tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
+            tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
+            tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+            tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+            tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
+            tests/integration/attendance-w4c3b-central-approval.db.test.ts \
+            tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
+            tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
+            tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts \
+            tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
+            tests/integration/attendance-settlement-table-v1-5a.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
@@ -1070,6 +1405,7 @@ jobs:
             tests/integration/attendance-result-edit.test.ts \
             tests/integration/attendance-shift-segments-migration.db.test.ts \
             tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
+            tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 
       - name: Upload test results

@@ -586,6 +586,8 @@ async function main() {
   }
   assert.ok(deleteMissing instanceof ExternalSystemNotFoundError, 'deleting missing external system reports not found')
 
+  await testInstanceDigestIsProductionBehaviour()
+
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
 
@@ -594,3 +596,185 @@ main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
+// ---------------------------------------------------------------------------------------------
+// REVIEW P1-1 — the PRODUCTION digest function had ZERO executing coverage.
+//
+// Replacing getExternalSystemInstanceDigest with a constant — which reinstates the owner's exact
+// defect, every record certifying every other — left the full 157-file chain at exit 0. So did
+// deleting acctId from the material, i.e. reverting to origin-only identity. Both "covering"
+// suites re-implement the digest in their own fixtures with their own keys: the very
+// fixture-vs-production divergence this fix's comments blame for the original defect.
+//
+// These tests call the REAL function through a REAL registry.
+// ---------------------------------------------------------------------------------------------
+async function testInstanceDigestIsProductionBehaviour() {
+  const { createExternalSystemRegistry } = require('../lib/external-systems.cjs')
+
+  // The SAME fixtures the rest of this file uses, so the registry is constructed exactly as the
+  // other tests construct it — a bespoke stub here would be one more fixture that diverges.
+  const db = createMockDb()
+  const credentialStore = createMockCredentialStore()
+  const registry = createExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'unused' })
+
+  const put = async (id, kind, baseUrl, credentials, extraConfig = {}) => {
+    await registry.upsertExternalSystem({
+      tenantId: 't1', workspaceId: null, id, kind, name: id, role: 'target', status: 'active',
+      config: { baseUrl, ...extraConfig }, credentials,
+    })
+  }
+  const digest = (id) => registry.getExternalSystemInstanceDigest({ id, tenantId: 't1', workspaceId: null })
+
+  const K3 = 'erp:k3-wise-webapi'
+  await put('a', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('b', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '002' })
+  await put('a2', K3, 'https://k3.example.test/OTHER-PATH', { username: 'u', password: 'ROTATED', acctId: '001' })
+  await put('c', K3, 'https://k3-other.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('d', 'plm:yuantus-wrapper', 'https://k3.example.test', { username: 'u', password: 'p', acctId: '001' })
+  await put('e', K3, 'https://k3.example.test', { username: 'u', password: 'p' })
+  await put('f', K3, 'not-a-url', { username: 'u', password: 'p', acctId: '001' })
+
+  const [dA, dB, dA2, dC, dD, dE, dF] = await Promise.all(
+    ['a', 'b', 'a2', 'c', 'd', 'e', 'f'].map(digest))
+
+  // THE OWNER'S DEFECT: same host, different account set.
+  assert.notEqual(dA, dB, 'same origin + DIFFERENT acctId must NOT digest equal — this is the ruling')
+  // Same account set, different path, PASSWORD ROTATED — a real rotation, not a reused object.
+  assert.equal(dA, dA2, 'same host + same account set must survive a password rotation and a path change')
+  assert.notEqual(dA, dC, 'different origin must not digest equal')
+  assert.notEqual(dA, dD, 'kind participates: a non-K3 record must not digest equal')
+  // FAIL-CLOSED.
+  assert.equal(dE, null, 'no authenticatable acctId must yield null, not a digest')
+  assert.equal(dF, null, 'an unparseable baseUrl must yield null, not a digest')
+  assert.equal(await digest('missing'), null, 'an unknown system must yield null')
+
+  // The digest must not carry the account set in recoverable form: an unkeyed hash of the
+  // material would be trivially brute-forced (the review recovered "001" in milliseconds).
+  const naive = require('node:crypto').createHash('sha256')
+    .update([K3, 'https://k3.example.test', '001'].map((p) => `${p.length}:${p}`).join('|')).digest('hex')
+  assert.notEqual(dA, naive, 'the digest must be KEYED — an unkeyed hash of the material is reversible')
+
+  // P2-1: selection order must match the adapter's firstDefined (first DEFINED, not first STRING).
+  await put('g', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: 1001, accountSet: '002' })
+  await put('h', K3, 'https://k3.example.test', { username: 'u', password: 'p', acctId: '002' })
+  assert.notEqual(await digest('g'), await digest('h'),
+    'a numeric acctId must select as 1001 (what login uses), not fall through to accountSet 002')
+
+  // REVIEW P1-2 — AUTHORITY-CODE MODE. The adapter authenticates with authorityCode and NEVER
+  // sends acctId in that mode. Digesting acctId unconditionally had two failures, both pinned here.
+  const AC = 'erp:k3-wise-webapi'
+  await put('ac1', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE' })
+  await put('ac2', AC, 'https://k3.example.test', { authorityCode: 'AC-TWO' })
+  // (a) the owner's defect, in this mode: different authority codes, SAME stale acctId.
+  await put('ac3', AC, 'https://k3.example.test', { authorityCode: 'AC-ONE', acctId: 'STALE' })
+  await put('ac4', AC, 'https://k3.example.test', { authorityCode: 'AC-TWO', acctId: 'STALE' })
+  const [dAc1, dAc2, dAc3, dAc4] = await Promise.all(['ac1', 'ac2', 'ac3', 'ac4'].map(digest))
+
+  // (b) a clean authority-code record must be DIGESTIBLE. It used to be null, which made the C6
+  // write gate UNSATISFIABLE — a block main did not have, and one that would have surfaced inside
+  // the non-retryable customer window.
+  assert.ok(dAc1, 'an authority-code record must yield a digest, not null')
+  assert.notEqual(dAc1, dAc2, 'different authority codes are different instances')
+  assert.notEqual(dAc3, dAc4,
+    'different authority codes must differ even when a STALE acctId is identical — digesting acctId '
+    + 'in this mode named a field login never sends')
+  // The mode determines which identity is digested, so acctId must not leak into it.
+  assert.equal(dAc1, dAc3, 'a stale acctId must not change the identity in authority-code mode')
+
+  // REVIEW P2-1 (third round) — sessionId is the adapter's FIRST auth branch and the digest
+  // started at its second, so both of P1-2's failure directions were alive one mode over.
+  await put('s1', AC, 'https://k3.example.test', { sessionId: 'SESS-ONE', acctId: 'STALE' })
+  await put('s2', AC, 'https://k3.example.test', { sessionId: 'SESS-TWO', acctId: 'STALE' })
+  await put('s3', AC, 'https://k3.example.test', { sessionId: 'SESS-ONE' })
+  const [dS1, dS2, dS3] = await Promise.all(['s1', 's2', 's3'].map(digest))
+  assert.notEqual(dS1, dS2,
+    'different sessionId must differ EVEN WITH an identical stale acctId — session auth never '
+    + 'sends acctId, so digesting it named a field login does not use')
+  assert.ok(dS3, 'a session-only record must be digestible, not null — null makes the write gate unsatisfiable')
+  assert.equal(dS1, dS3, 'a stale acctId must not change the identity in session mode')
+
+  // P1-2 (review r3): the three cases above all use a STRING sessionId, so they prove the branch
+  // EXISTS but constrain its boundary in neither direction — replacing the guard with the correct
+  // one left them green. These pin the boundary, which is where the regression lived.
+  await put('sf1', AC, 'https://k3.example.test', { sessionId: 0, acctId: '001' })
+  await put('sf2', AC, 'https://k3.example.test', { sessionId: 0, acctId: '002' })
+  await put('sf3', AC, 'https://k3.example.test', { sessionId: false })
+  const [dSf1, dSf2, dSf3] = await Promise.all(['sf1', 'sf2', 'sf3'].map(digest))
+  // Shape first: notEqual alone passes when one side is null and the other is not, which would be
+  // a different failure wearing this assertion's clothes.
+  assert.match(String(dSf1), /^[0-9a-f]{64}$/, 'falsy sessionId + acctId must still digest')
+  assert.match(String(dSf2), /^[0-9a-f]{64}$/, 'falsy sessionId + acctId must still digest')
+  assert.notEqual(dSf1, dSf2,
+    'a FALSY sessionId is not a session: the adapter falls through to acctId, so 001 and 002 are '
+    + 'different instances — a superset guard made them EQUAL, reinstating the wrong-账套 defect')
+  assert.equal(dSf3, null,
+    'falsy sessionId with no acctId must be UNVERIFIABLE — the adapter throws CREDENTIALS_MISSING, '
+    + 'so a satisfiable gate here would certify a write that cannot authenticate')
+
+  // P3-1: config.authMode is load-bearing (same wrong-账套 class) and had zero coverage — the
+  // assertion-less case removed earlier should have been REPLACED, not just deleted.
+  await put('am1', AC, 'https://k3.example.test', { authorityCode: 'AC-X', acctId: '111' }, { authMode: 'login' })
+  await put('am2', AC, 'https://k3.example.test', { authorityCode: 'AC-X', acctId: '222' }, { authMode: 'login' })
+  assert.notEqual(await digest('am1'), await digest('am2'),
+    'an explicit config.authMode=login must select acctId even when an authorityCode is present — '
+    + 'dropping cfg.authMode from the resolution digests the wrong identity')
+
+  // P2-1 (review r4): the adapter accepts THREE mode strings — 'authority-code', 'authorityCode'
+  // and 'token'. Only the first was exercised, and narrowing the guard to just it left the suite
+  // green. The untested branch carries THIS PR's own defect: under authMode:'token' both records
+  // fall to the else branch and digest acctId=001, so two different authority codes certify as the
+  // same instance — the wrong-账套 defect, one authMode value over.
+  for (const mode of ['authorityCode', 'token']) {
+    await put(`tk1_${mode}`, AC, 'https://k3.example.test', { authorityCode: 'AC-1', acctId: '001' }, { authMode: mode })
+    await put(`tk2_${mode}`, AC, 'https://k3.example.test', { authorityCode: 'AC-2', acctId: '001' }, { authMode: mode })
+    const [t1, t2] = await Promise.all([digest(`tk1_${mode}`), digest(`tk2_${mode}`)])
+    assert.match(String(t1), /^[0-9a-f]{64}$/, `authMode '${mode}' must digest, not fail closed`)
+    assert.notEqual(t1, t2,
+      `authMode '${mode}' authenticates with authorityCode, so different codes are different `
+      + 'instances even when acctId is identical')
+  }
+
+  // P3-1: every session case above is FALSY, so narrowing the guard to `typeof === 'string'` left
+  // the suite green. A truthy NON-STRING sessionId must still be a session (the adapter's guard is
+  // bare truthiness), which means acctId must NOT decide.
+  await put('sn1', AC, 'https://k3.example.test', { sessionId: 12345, acctId: '001' })
+  await put('sn2', AC, 'https://k3.example.test', { sessionId: 12345, acctId: '002' })
+  assert.equal(await digest('sn1'), await digest('sn2'),
+    'a truthy non-string sessionId is still a session: acctId must not change the identity')
+
+  // NIT (review r2): the per-process key had NO coverage — replacing randomBytes with a constant
+  // left the suite green. Two registries in one process must agree; a digest must not be
+  // reproducible from the material alone by anyone who knows the scheme.
+  const otherRegistry = createExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'unused2' })
+  assert.equal(
+    await otherRegistry.getExternalSystemInstanceDigest({ id: 'a', tenantId: 't1', workspaceId: null }),
+    dA, 'two registries in ONE process must produce the same digest (the key is per-process)')
+
+  // ...but same-process agreement does NOT discriminate: a HARDCODED key satisfies it too, and the
+  // first version of this check passed against exactly that mutation. The property that separates
+  // "per-process random" from "constant in source" is that a DIFFERENT PROCESS must disagree.
+  // Measured, not argued.
+  const child = require('node:child_process').spawnSync(process.execPath, ['-e', `
+    const { createExternalSystemRegistry } = require(${JSON.stringify(require.resolve('../lib/external-systems.cjs'))})
+    const row = { id: 'a', tenant_id: 't1', workspace_id: null, kind: 'erp:k3-wise-webapi', name: 'a',
+      role: 'target', status: 'active', config: { baseUrl: 'https://k3.example.test' },
+      credentials_encrypted: JSON.stringify({ username: 'u', password: 'p', acctId: '001' }) }
+    const db = { async selectOne() { return row }, async insertRow() {}, async updateRow() {},
+      async insertOne() {}, async select() { return [] },
+      async deleteRows() {}, async countRows() { return 0 } }
+    const cs = { async encrypt(v) { return v }, async decrypt(v) { return v }, async fingerprint() { return 'x' } }
+    createExternalSystemRegistry({ db, credentialStore: cs })
+      .getExternalSystemInstanceDigest({ id: 'a', tenantId: 't1', workspaceId: null })
+      .then((d) => process.stdout.write(String(d)))
+  `], { encoding: 'utf8' })
+  assert.equal(child.status, 0, `child probe must run: ${child.stderr}`)
+  // NIT: a drifted stub makes the child print "null" and exit 0 — status===0, length>0 and
+  // notEqual("null", dA) would ALL pass, and the probe would prove nothing.
+  assert.match(child.stdout, /^[0-9a-f]{64}$/,
+    `child probe must emit a real digest, got: ${JSON.stringify(child.stdout)}`)
+  assert.notEqual(child.stdout, dA,
+    'a DIFFERENT PROCESS must produce a different digest — otherwise the key is a constant in '
+    + 'source and the digest is reproducible by anyone who reads the repo')
+
+  console.log('  external-systems: instance digest (production function) OK')
+}

@@ -1,19 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, nextTick, reactive, ref, type App } from 'vue'
 import AttendanceExperienceView from '../src/views/attendance/AttendanceExperienceView.vue'
+import { apiFetch } from '../src/utils/api'
 
-const routeState = reactive<{ query: Record<string, unknown> }>({
+vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
+
+const routeState = reactive<{
+  query: Record<string, unknown>
+  path: string
+  fullPath: string
+  name: string | undefined
+  params: Record<string, unknown>
+}>({
   query: {},
+  path: '/attendance',
+  fullPath: '/attendance',
+  name: undefined,
+  params: {},
 })
 
-const replaceSpy = vi.fn(async ({ query }: { query?: Record<string, unknown> }) => {
-  routeState.query = query ?? {}
+const replaceSpy = vi.fn(async (location: { query?: Record<string, unknown> }) => {
+  if (Object.prototype.hasOwnProperty.call(location, 'query')) {
+    routeState.query = location.query ?? {}
+  }
 })
+const pushSpy = vi.fn()
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeState,
   useRouter: () => ({
     replace: replaceSpy,
+    push: pushSpy,
   }),
   // W4-2 OD-W4-7②: AttendanceExperienceView registers a route-leave confirm for
   // applied-but-unsaved template prefill. This suite mocks the router entirely, so the guard
@@ -71,9 +88,13 @@ vi.mock('../src/views/attendance/AttendanceAdminCenter.vue', () => ({
         type: String,
         default: '',
       },
+      routeGroupContext: {
+        type: Object,
+        default: null,
+      },
     },
-    emits: ['clear-section'],
-    template: '<div data-view="admin" :data-section="initialSectionId"><button data-return-admin-home @click="$emit(\'clear-section\')">Home</button></div>',
+    emits: ['clear-section', 'open-group-route'],
+    template: '<div data-view="admin" :data-section="initialSectionId" :data-route-group="routeGroupContext?.group.id || \'\'"><button data-return-admin-home @click="$emit(\'clear-section\')">Home</button><button data-open-group-assignments @click="$emit(\'open-group-route\', { groupId: \'2f6b1d2c-9a3e-4c5b-8d7e-1a2b3c4d5e6f\', step: \'schedule\', surface: \'assignments\' })">Assignments</button></div>',
   }),
 }))
 
@@ -103,7 +124,13 @@ describe('Attendance experience entrypoints', () => {
 
   beforeEach(() => {
     replaceSpy.mockClear()
+    pushSpy.mockClear()
+    vi.mocked(apiFetch).mockReset()
     routeState.query = {}
+    routeState.path = '/attendance'
+    routeState.fullPath = '/attendance'
+    routeState.name = undefined
+    routeState.params = {}
     adminFeatureEnabled.value = true
     workflowFeatureEnabled.value = true
     container = document.createElement('div')
@@ -153,6 +180,23 @@ describe('Attendance experience entrypoints', () => {
     const adminView = container!.querySelector<HTMLElement>('[data-view="admin"]')
     expect(adminView).toBeTruthy()
     expect(adminView?.dataset.section).toBe('attendance-admin-assignments')
+  })
+
+  it('pushes a canonical group-context URL for an R2 admin entry point', async () => {
+    routeState.query = { tab: 'admin', section: 'attendance-admin-groups' }
+    routeState.fullPath = '/attendance?tab=admin&section=attendance-admin-groups'
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-group-assignments]')!.click()
+    await flushUi(2)
+
+    expect(pushSpy).toHaveBeenCalledWith(
+      '/attendance/admin/groups/2f6b1d2c-9a3e-4c5b-8d7e-1a2b3c4d5e6f/schedule'
+      + '?surface=assignments&returnTo=%2Fattendance%3Ftab%3Dadmin%26section%3Dattendance-admin-groups',
+    )
   })
 
   it('clears a deep-linked section through the router when returning to management home', async () => {
@@ -261,5 +305,89 @@ describe('Attendance experience entrypoints', () => {
 
     expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
     expect(container!.textContent).not.toContain('Desktop recommended')
+  })
+
+  it('returns a mobile-blocked group route to its normalized returnTo', async () => {
+    const groupId = '11111111-2222-4333-8444-555555555555'
+    const returnTo = '/attendance?tab=admin&section=attendance-admin-groups'
+    routeState.path = `/attendance/admin/groups/${groupId}/schedule`
+    routeState.fullPath = `${routeState.path}?surface=assignments&returnTo=${encodeURIComponent(returnTo)}`
+    routeState.name = 'attendance-admin-group-schedule'
+    routeState.params = { groupId }
+    routeState.query = { surface: 'assignments', returnTo }
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('max-width: 899px') || query.includes('pointer: coarse'),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const back = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Back to Overview')
+    expect(back).toBeTruthy()
+    back!.click()
+    await flushUi(2)
+
+    expect(pushSpy).toHaveBeenCalledWith(returnTo)
+    expect(apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('uses group route params as authority across direct load and route history changes', async () => {
+    const groupA = '11111111-2222-4333-8444-555555555555'
+    const groupB = '66666666-7777-4888-8999-000000000000'
+    routeState.path = `/attendance/admin/groups/${groupA}/schedule`
+    routeState.name = 'attendance-admin-group-schedule'
+    routeState.params = { groupId: groupA }
+    routeState.query = { tab: 'overview', surface: 'assignments' }
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true, data: { id: groupA, name: 'A', timezone: 'UTC' } }) } as Response)
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true, data: { id: groupB, name: 'B', timezone: 'UTC' } }) } as Response)
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, `/api/attendance/groups/${groupA}`)
+    expect(container!.querySelector<HTMLElement>('[data-view="admin"]')?.dataset.routeGroup).toBe(groupA)
+
+    routeState.path = `/attendance/admin/groups/${groupB}/rules`
+    routeState.name = 'attendance-admin-group-rules'
+    routeState.params = { groupId: groupB }
+    routeState.query = {}
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(2, `/api/attendance/groups/${groupB}`)
+    expect(container!.querySelector<HTMLElement>('[data-view="admin"]')?.dataset.routeGroup).toBe(groupB)
+  })
+
+  it('routes duplicate group query values to the route-level not-found posture', async () => {
+    const groupId = '11111111-2222-4333-8444-555555555555'
+    routeState.path = `/attendance/admin/groups/${groupId}/schedule`
+    routeState.name = 'attendance-admin-group-schedule'
+    routeState.params = { groupId }
+    routeState.query = { surface: ['assignments', 'shifts'] }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(replaceSpy).toHaveBeenCalledWith({
+      name: 'not-found',
+      params: { pathMatch: ['attendance', 'admin', 'groups', groupId, 'schedule'] },
+    })
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-attendance-group-context="unavailable"]')).toBeNull()
   })
 })

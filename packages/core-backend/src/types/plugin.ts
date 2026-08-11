@@ -12,6 +12,26 @@ import type {
   MultitableProvisioningViewDescriptor,
 } from '../multitable/contracts'
 import type { CollectionDefinition } from './collection'
+import type {
+  ReserveAttendanceLegacyImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-legacy-plan-reservation-host'
+import type {
+  ReserveAttendanceLegacyImportPlanJobResultV1,
+} from '../attendance/w4c3a-legacy-plan-enqueue'
+import type {
+  CommitAttendanceSyncImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-sync-import-host'
+import type {
+  AttendanceSyncImportResponseV1,
+} from '../attendance/w4c3a-sync-import-kernel'
+import type {
+  AttendanceImportAttributionFreezeBuildResultV1,
+  AttendanceImportPolicySourceProjectionInputV1,
+  AttendanceImportPolicySourceProofV1,
+} from '../attendance/w4c3a-import-proof'
+import type {
+  AttendanceImportFrozenAttributionBuildInputV1,
+} from '../attendance/w4c2-frozen-attribution'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -1100,6 +1120,267 @@ export interface PluginServices {
       | { status: 'resolved'; assignees: Array<{ assignmentType: 'user'; assigneeId: string }> }
       | { status: 'unresolved'; reason: string }
       | { status: 'unimplemented' }
+    >
+  }
+  /**
+   * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
+   * least-privilege W4 segment-calculation port. Same posture as
+   * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
+   * plugin-attendance receives it; every other plugin gets undefined and the
+   * consumer fail-closes. `validateIanaTimezone` is the single strict W4 IANA
+   * validator (`w4c1-strict-time.validateAttendanceIanaTimezoneV1`) — it
+   * throws on non-IANA input (offset forms, whitespace, unknown zones) and
+   * returns the zone unchanged otherwise. Default-rule and shift timezone
+   * WRITE routes must consult it so a persisted invalid zone can never become
+   * a future W4 calculation input; the plugin never copies the validator.
+   */
+  attendanceW4SegmentCalculation?: {
+    validateIanaTimezone(zone: unknown): string
+    /**
+     * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
+     * removes only the second mutable post-upsert pass"). The canonical live
+     * adapter computes the decision BEFORE its single record write; the plugin
+     * never re-implements the branch logic.
+     */
+    applyMergePolicyPure(input: unknown): {
+      readonly changed: boolean
+      readonly nextFirstInAtMs: number | null
+      readonly nextLastOutAtMs: number | null
+    }
+    /**
+     * W4C-2 — canonical live/scheduled write boundary factory (lock 8.1). The
+     * plugin calls this ONCE at activate, injecting its legacy execution
+     * closures (event insert + record upsert + merge lift, absence
+     * INSERT..SELECT, in-transaction W2 resolvers, frozen-context loader).
+     * Routes then submit pure data envelopes; no per-request callback exists.
+     */
+    createLiveScheduledBoundary(config: {
+      legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+    }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
+    /** W4C-3b P13: fixed request adapters captured once; routes submit closed data only. */
+    createRequestOperationBoundary(config: {
+      adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+    }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
+    createRecordOperationBoundary(config: {
+      adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+    }): import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationBoundaryV1
+    /** W4C-3c: transaction-bound operator retirement calculation (adapter-only). */
+    appendOperatorRetirementCalculation(
+      input: import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationResultV1>
+    /** W4C-3c: transaction-bound recompute calculation (adapter-only). */
+    appendRecomputeCalculation(
+      input: import('../attendance/w4c3c-recompute').AppendRecomputeCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-recompute').AppendRecomputeCalculationResultV1>
+    /** W4C-3c: transaction-bound manual override calculation (adapter-only). */
+    appendManualOverrideCalculation(
+      input: import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationResultV1>
+    /**
+     * W4C-3c P20: singular canonical active-current helper namespace. Ordinary
+     * readers (anomaly, makeup facts, open-record, DecisionTrace) must call
+     * these — never re-implement the relation/predicate.
+     */
+    activeCurrent: {
+      relation: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_RELATION_V1
+      visibilityPredicate: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1
+      loadForDecisionTrace: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForDecisionTraceV1
+      listForAnomalyListing: typeof import('../attendance/w4c3c-active-current').listActiveCurrentAttendanceRecordsForAnomalyListingV1
+      loadForMakeupAnomalyFacts: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1
+      listOpenForWorkDateResolver: typeof import('../attendance/w4c3c-active-current').listActiveCurrentOpenRecordsForWorkDateResolverV1
+    }
+    /** W4C-3b P14: transaction-bound frozen approved-leave cancellation calculation. */
+    appendApprovedLeaveCancellationCalculation(
+      input: import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationInputV1,
+    ): Promise<import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationResultV1>
+    /**
+     * W4C-3b P27: transaction-bound, values-free schedule-reference posture.
+     * The host acquires the canonical shared rollout lock and resolves the one
+     * posture seam on the caller's existing transaction/connection.
+     */
+    resolveOrgSegmentCalculationPosture(
+      trx: DatabaseTransaction,
+      orgId: string,
+    ): Promise<{
+      readonly effectiveState: string
+      readonly referenceSegments: boolean
+    }>
+    /**
+     * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
+     * §8.2 step 7 second clause ("source-definition fingerprint equality").
+     * Pure; no DB access. The route calls this with its OWN pre-transaction
+     * W2 resolution (same shape `resolveLiveCandidate`/`resolveScheduledCandidate`
+     * return) and frozen context (same shape `buildShadowFrozenContext`
+     * returns, built by the route over its own non-transactional
+     * connection) to obtain a fingerprint comparable to the freeze step's
+     * own in-transaction one. This is the ONLY way the plugin can reach the
+     * source-definition fingerprint domain — it cannot compute one for
+     * arbitrary data, only for a resolution+context shape it already
+     * produces via its own adapters.
+     */
+    computeOuterSourceDefinitionFingerprintV1(input: {
+      readonly orgId: string
+      readonly userId: string
+      readonly source: 'live_resolution' | 'scheduled_resolution'
+      readonly nowIso: string
+      readonly resolution: unknown
+      readonly context: unknown
+    }): string | null
+    /**
+     * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
+     * The plugin schedules this ONLY under the same env gate as the posture
+     * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no
+     * env => no worker => byte-identical runtime.
+     */
+    drainResultEventOutbox(options: {
+      emit: (delivery: { eventKind: string; payload: unknown; payloadSchemaVersion: number }) => void | Promise<void>
+      batchLimit?: number
+    }): Promise<{ claimed: number; delivered: number; failed: number }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+     * ONE sweep tick over `state='running'` scheduled-run rows, cross-`workDate`, bounded by
+     * `limit`. `recoverCandidate` must rebuild plugin-owned scheduling context and resume the
+     * exact scanned run; the host never silently treats `not_ready` as completed work.
+     */
+    sweepScheduledRuns(options: {
+      limit?: number
+      recoverCandidate(candidate: {
+        orgId: string
+        initiator: 'cron' | 'admin_run'
+        workDate: string
+        runId: string
+      }): Promise<void>
+    }): Promise<{
+      scanned: number
+      finalized: number
+      notReady: number
+      skipped: number
+      errored: number
+      /** #4770: total `state='running'` rows at scan time — the starvation signal. */
+      backlogRemaining: number
+      /** #4770 follow-up: `state='running'` rows never yet claimed by a scan
+       *  (`last_attempt_at IS NULL`) — a stuck-vs-churn signal, see
+       *  `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full trend semantics. */
+      neverAttemptedRunning: number
+      /** Owner-review P2 on #4779: age (seconds) of the STALEST `last_attempt_at` among
+       *  `state='running'` rows — closes `neverAttemptedRunning`'s own blind spot for a row
+       *  scanned once then PERMANENTLY EXCLUDED from later scans (non-NULL, so invisible to
+       *  `MIN()`-ignores-NULL above). Read as BOUNDED-PLATEAU (healthy, even a congested backlog)
+       *  vs. UNBOUNDED-GROWTH — never merely "zero vs. nonzero": a congested-but-healthy backlog
+       *  legitimately reads nonzero on most ticks without anything being stuck.
+       *  UNBOUNDED-GROWTH does NOT mean "locked" specifically: a held row lock is one known
+       *  mechanism, sustained `NULLS FIRST` arrival starvation (a stream of brand-new `running`
+       *  rows preempting an already-stamped one for every scan slot, indefinitely — NO LOCK AT
+       *  ALL) is another, empirically reproduced at the production default `limit=25`; this field
+       *  cannot tell them apart, and the mechanism list is not claimed closed. (A prior version of
+       *  this comment attributed UNBOUNDED-GROWTH solely to "a row permanently locked after its
+       *  first scan" — RETRACTED, fresh-gate pass 2026-08-05: false, and it was the SAME
+       *  overclaim as the worker-doc mirror this field's own doc comment already corrects; see
+       *  below.) See `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full three-regime breakdown, the
+       *  arrival-starvation mechanism and its owner-deferred #4770 follow-up, and the two
+       *  counters' actual (narrower-than-"permanently stuck") coverage. */
+      oldestRunningAttemptAgeSeconds: number
+    }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+     * transition). `adminActorId` MUST be the route's own authenticated actor id — never a
+     * request-body-supplied value.
+     */
+    abandonScheduledRun(input: {
+      orgId: string
+      runId: string
+      adminActorId: string
+      reasonCode: string
+    }): Promise<
+      | { kind: 'deferred'; code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+      | { kind: 'not_running'; state: 'completed' | 'abandoned' }
+      | { kind: 'abandoned'; runId: string; completedUserCount: number }
+    >
+    /**
+     * W4C-3a — values-free V1 legacy-plan processor. Accepts only `{ jobId }`.
+     * Core assembles repository, SERIALIZABLE transaction, locks, preconditions,
+     * and fixed effects internally. Plugin must not pass payload/orgId/rules/
+     * settings/profile/source/effect callbacks. Fail closed when absent for a
+     * V1 job.
+     */
+    processLegacyImportPlan(input: { jobId: string }): Promise<
+      | { kind: 'not_found' }
+      | { kind: 'suspended' }
+      | { kind: 'failed'; reason: string }
+      | { kind: 'completed'; response: unknown }
+    >
+    /**
+     * W4C-3a P07 — core-owned V1 reservation. The plugin supplies one closed
+     * prepared plan; core owns posture, verified identities, authorization,
+     * SERIALIZABLE transaction, and class-00/10/11 locking.
+     */
+    reserveLegacyImportPlan(
+      input: ReserveAttendanceLegacyImportPlanFromHostInputV1,
+    ): Promise<ReserveAttendanceLegacyImportPlanJobResultV1>
+    /**
+     * W4C-3a P06 — core-owned modern synchronous import commit. The plugin
+     * supplies one closed prepareOnly plan; core opens one independent
+     * SERIALIZABLE source/effect transaction and owns class-00/10/11, claim,
+     * calculation, compatibility effects, and seals. Never creates V1
+     * job/plan/chunk/terminal rows and never calls processLegacyImportPlan.
+     */
+    commitSyncImportPlan(
+      input: CommitAttendanceSyncImportPlanFromHostInputV1,
+    ): Promise<AttendanceSyncImportResponseV1>
+    buildImportAttributionFreeze(
+      input: AttendanceImportFrozenAttributionBuildInputV1,
+    ): AttendanceImportAttributionFreezeBuildResultV1
+    buildImportPolicySourceProof(
+      input: AttendanceImportPolicySourceProjectionInputV1,
+    ): AttendanceImportPolicySourceProofV1
+    /**
+     * W4C-3a — canonical lock witnesses for the synchronous import compatibility
+     * bridge. Core owns key derivation; plugin-attendance only acquires these
+     * exact signed keys inside its existing source/effect transaction.
+     */
+    buildLegacyImportReservationLockWitness(input: {
+      orgId: string
+      idempotencyKey: string
+    }):
+      | {
+          rolloutKey: string
+          legacyIdempotencyKey: string
+          helperWaitMs: number
+          transactionLockTimeoutMs: number
+        }
+      | null
+  }
+  /**
+   * W4C-3a P11/P23 — core-owned import rollback boundary. The plugin may pass
+   * only authenticated request identity plus the durable batch id. Core owns
+   * posture resolution, target enumeration, server ids, authorization
+   * rechecks, transaction/locks, and append-only reversal DML. No target list,
+   * SQL, transaction, resolver, or callback crosses this port.
+   */
+  attendanceImportRollback?: {
+    rollbackImportBatchV1(input: {
+      orgId: string
+      batchId: string
+      actorId: string
+      tokenSubjectUserId: string
+    }): Promise<
+      | {
+          kind: 'legacy'
+          id: string
+          deleted: number
+          status: 'rolled_back'
+        }
+      | {
+          kind: 'w4'
+          id: string
+          affected: number
+          restored: number
+          retired: number
+          status: 'rolled_back'
+        }
     >
   }
   notification: NotificationService // Notification service instance

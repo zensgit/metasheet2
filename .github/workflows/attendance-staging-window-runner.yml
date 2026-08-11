@@ -141,20 +141,33 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
           runner_dir="/tmp/attendance-window-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
           tar -czf - \
             scripts/ops/attendance-staging-window-runner-remote.sh \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
             scripts/ops/attendance-window-runner-mint-token.mjs \
-          | ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
+          | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
+          scp -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
+            docker-compose.app.staging.yml \
+            "$DEPLOY_USER@$DEPLOY_HOST:${runner_dir}/docker-compose.app.staging.yml"
 
       - name: Run remote action
         id: remote
@@ -174,7 +187,7 @@ jobs:
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
         run: |
           set -euo pipefail
-          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH" "SKIP_HOST_SYNC=$SKIP_HOST_SYNC"; do
             value="${pair#*=}"

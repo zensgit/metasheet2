@@ -39,6 +39,7 @@ const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
 // Save path below owns the throw disposition, the preview owns the valid:false disposition.
 const { composeSchemaBody, findUnfilledPlaceholders, projectRecordForBody } = require('./k3-save-body-composer.cjs')
+const { recordK3WiseCall } = require('./k3-wise-call-audit.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -48,6 +49,133 @@ class K3WiseWebApiAdapterError extends Error {
     this.status = details.status
   }
 }
+
+// RATIFIED (owner, 20260805): K3 material upsert REQUIRES the named customer profile —
+// one guard closing every unarmed write entry at once (legacy stored configs with no
+// profile, replay, any future route). A Symbol marker set only by the post-merge profile
+// pin: a JSON-carried config can never forge a Symbol key, so a smuggled
+// `profileArmed: true` in operator config is inert by construction.
+const K3_PROFILE_ARMED = Symbol('k3CustomerProfileArmed')
+
+// Request-shape keys a named profile OWNS: which endpoint is called, with which verb, and how
+// the key/body are addressed. Re-pinned from the profile literal after the operator merge; a
+// key absent from the literal is DELETED rather than left to the overlay (review P1-1: an
+// overlay-supplied readPath/readMethod is a wider hole than the savePath one that was fixed).
+// MECHANICAL SWEEP (self-check after the round-2 fix claimed the CLASS was closed): every
+// `objectConfig.<field>` read site in this file was enumerated — 35 fields, of which 15 fell
+// outside the first two lists. The claim "class-wide" was FALSE as first written. The lists
+// below are the swept result; the sweep is reproducible:
+//   node -e 'const s=require("fs").readFileSync(FILE,"utf8");
+//            new Set([...s.matchAll(/objectConfig\.([A-Za-z_][A-Za-z0-9_]*)/g)].map(m=>m[1]))'
+// Anything added to this adapter that reads a NEW objectConfig field must be triaged into one
+// of: pinned (profile owns it), forbidden (profile does not declare it), or documented-safe.
+const K3_PROFILE_PINNED_REQUEST_KEYS = Object.freeze([
+  'savePath', 'readPath', 'readMethod', 'bodyKey', 'keyParam', 'path', 'endpointPath',
+  // Swept in: the Save VERB is as much a request-shape choice as the Save PATH
+  // (`method: objectConfig.saveMethod || 'POST'`), and keyField selects which record field
+  // becomes the K3 key — both profile-owned.
+  'saveMethod', 'keyField',
+])
+// Body/endpoint-shaping keys the customer profile deliberately does not declare. An overlay
+// carrying one of these authors a request the profile never sanctioned.
+const K3_PROFILE_FORBIDDEN_OVERLAY_KEYS = Object.freeze([
+  'submitPath', 'auditPath', 'deletePath', 'writePath',
+  'readBodyTemplate', 'readListBodyTemplate', 'readListBodyKey', 'readMode',
+  'readListFields', 'readListOrderBy', 'readListFilterField', 'readListFilterMode',
+  'readListFilterEscape', 'topField', 'pageIndexField', 'pageSizeField', 'maxListLimit',
+  // Swept in: lifecycle VERBS (their paths are already deleted, but a surviving verb key is
+  // dead weight that a future path re-introduction would silently re-arm).
+  'submitMethod', 'auditMethod',
+  // Swept in: the BOM read body channel — a second `readBodyTemplate` under a different name.
+  // The customer profile is material-only and declares none of these.
+  'readBomBodyTemplate', 'readBomBodyKey', 'readBomParentKeyField',
+  // Swept in: builder hooks and the raw template escape hatch. JSON config cannot carry a
+  // function, so these are not reachable from an operator payload today — deleted anyway so
+  // the guarantee does not depend on that remaining true.
+  'buildBody', 'buildLifecycleBody', 'k3Template',
+  // ADVERSARIAL P1-A1 (round 3): the first sweep scanned ONE FILE and therefore missed these.
+  // k3-save-body-composer.cjs reads them from the SAME merged objectConfig:
+  //   passThroughBody:true  — disables the schema projection entirely (the very bound the
+  //                           "schema is operator-safe" triage rested on)
+  //   bodyTemplate          — merges operator-authored keys into the real Save body
+  // A reviewer ran it on the live C6 chain: clean dry-run -> token -> mutate the stored config
+  // -> apply with the ORIGINAL token. The revision was byte-identical (config is not part of
+  // it), so the content-binding did NOT fire and K3 received an operator-authored body.
+  'passThroughBody', 'bodyTemplate',
+])
+
+// Files that consume the merged objectConfig. The sweep contract scans ALL of them — the
+// round-2 sweep scanned only this file, which is exactly how the two composer keys above
+// escaped. Any new module that reads objectConfig must be added here, and the contract test
+// asserts this list against a repo-wide grep so forgetting is a RED, not a silent hole.
+const K3_PROFILE_OBJECT_CONFIG_CONSUMERS = Object.freeze([
+  'lib/adapters/k3-wise-webapi-adapter.cjs',
+  'lib/adapters/k3-save-body-composer.cjs',
+])
+// Modules that read an objectConfig which is NOT this profile's — declared out of scope WITH a
+// reason, so the sweep's "a new module is a RED" property survives without forcing a category
+// error. Widening the family filter (review P2-D3) surfaced the SQL channel immediately, which
+// is the point: I did not know it was there.
+//
+// REVIEW P2-F4 (round 6): the sweep additionally post-filtered to `k3-*.cjs`, so the family was
+// a FILENAME CONVENTION. A byte-identical consumer named `kingdee-save-helper.cjs` swept GREEN —
+// the escape was re-armed for the next file that did not happen to start with `k3-`. The filter
+// is gone; the sweep is now purely content-based (does this file read objectConfig at all?), and
+// the three non-K3 adapters it consequently surfaces are declared here rather than hidden by a
+// naming coincidence.
+//
+// RETRACTED (round 8). This comment used to end: "A new reader under ANY name is now a RED until
+// it is triaged." That is FALSE and is withdrawn here, in the adapter, where it was asserted —
+// round 7 retracted it only in the commit message and in the test file's prose, so at that SHA
+// two files in this package asserted opposite things and the false one was the live invariant.
+// Third round of claim-vs-code drift on this one guard; a retraction that is not in the tree is
+// not a retraction.
+//
+// What is actually true: DISCOVERY is now the bare identifier, which cannot be narrower than a
+// property about that identifier. But discovery is only half of it — the FIELD extraction is a
+// regex, and a read it cannot resolve to a literal name (destructuring, computed key, or an
+// ALIAS hop such as `const c = objectConfig; c.x`) smuggles an untriaged field through a file
+// that is itself correctly discovered. Those forms are asserted RED individually in the sweep
+// contract; they are enumerated, so treat the list as a bound, not a closure.
+const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
+  // Non-K3 adapters with their own objectConfig vocabularies and their own targets. They share
+  // the identifier `objectConfig`, not this profile's field semantics, so K3 field triage does
+  // not apply to them.
+  'lib/adapters/http-adapter.cjs',
+  'lib/adapters/metasheet-multitable-target-adapter.cjs',
+  'lib/adapters/metasheet-staging-source-adapter.cjs',
+  // erp:k3-wise-sqlserver is a different TRANSPORT with a disjoint vocabulary (table/columns/
+  // writeMode/allowDirectTableWrite/orderBy) and no profile system at all. It issues no HTTP,
+  // so the endpoint/verb/body class this file pins does not exist there; its own write safety
+  // is the middle-table + core-table guards proven in k3-wise-adapters/the mock chain. Pinning
+  // WebAPI keys onto it would assert a contract it does not have.
+  'lib/adapters/k3-wise-sqlserver-channel.cjs',
+])
+// Files that MENTION the identifier without reading it — prose only. Kept as a separate list from
+// the out-of-scope one on purpose (review P2-3): declaring a prose mention "out of scope" would
+// pre-authorise a future REAL read in the same file to pass unnoticed. The sweep asserts these
+// carry zero reads in any syntax, so adding one turns this list RED instead.
+const K3_OBJECT_CONFIG_PROSE_ONLY_MODULES = Object.freeze([
+  'lib/http-routes.cjs',
+])
+// Fields the sweep found that are deliberately NOT in either list, each with its reason. The
+// contract test asserts pinned + forbidden + this set covers EVERY objectConfig read, so a new
+// field cannot enter the adapter untriaged.
+const K3_PROFILE_TRIAGED_SAFE_KEYS = Object.freeze([
+  // Pinned by the save-only block itself, above — not via the generic loop.
+  'lifecycle', 'maxApplyRows',
+  // Operator-owned by design: the FE sends the per-field reference schema. It cannot choose an
+  // endpoint or a verb; its influence on the Save body is bounded by the projection, which the
+  // byte-exact body test pins.
+  'schema',
+  // Cosmetic.
+  'label',
+  // Gates which operations are reachable; the profile's own value is re-pinned below so an
+  // overlay cannot widen it.
+  'operations',
+])
+
+const { isSafeRelativeReadPath } = require('../read-source-config.cjs')
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
@@ -82,7 +210,196 @@ function normalizeBaseUrl(value) {
       field: 'config.baseUrl',
     })
   }
+  // REVIEW P3-1 (round 9): this validated the SCHEME ONLY, while every sibling path field
+  // (readPath / loginPath / tokenPath / healthPath) goes through the repo allowlist. baseUrl's
+  // path is merged into the produced pathname by buildEndpointUrl, so it is a path like the
+  // others and it was the one exempt from the rule. Concretely,
+  // `baseUrl=https://k3/K3API/Material/Submit%2Fx` survived: `%2F` is never decoded, so the
+  // segment reads `Submit%2Fx` and the vocabulary check does not match it.
+  if (url.pathname && url.pathname !== '/' && !isSafeRelativeReadPath(url.pathname.replace(/\/+$/, '') || '/')) {
+    throw new AdapterValidationError('K3 WISE WebAPI baseUrl path must be a safe relative path', {
+      code: 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+      field: 'config.baseUrl',
+    })
+  }
   return url.toString()
+}
+
+// ADVERSARIAL P1-C1 / P1-D1 / P1-E1 (rounds 3, 4, 5). One class, five axes:
+//   3) the pin lived inside `if (saveOnlyProfile)` — opt-in by the actor it defends against
+//   4) the check read the RAW string while buildEndpointUrl's `pathname` SETTER rewrote it
+//      (`/GetDetail/../Submit/` cleared the guard and went out as `/Submit/`)
+//   5) my round-4 answer normalized via `new URL(v, base)`, which SPLITS `?`/`#` off the
+//      pathname — but the setter does NOT treat them as terminators: it percent-encodes them
+//      into the path and keeps removing dot-segments. `/GetDetail?/../Submit` was therefore
+//      invisible to the guard and load-bearing on the wire. Two normalizations that disagree,
+//      for the third time.
+//
+// I stopped writing my own normalizer. `isSafeRelativeReadPath` (read-source-config.cjs) is the
+// repo's existing crown-jewel guard for exactly this problem, and its own header says it is
+// "stricter than the adapter's assertRelativePath": a POSITIVE character allowlist plus blanket
+// rejection of schemes, protocol-relative, backslash, ALL percent-encoding, control chars and
+// literal `..`.
+//
+// RETRACTION (review round 7). Two claims previously stated here and in the round-5/6 commit
+// messages are WITHDRAWN, not softened:
+//   * "A positive allowlist cannot be out-normalized — there is no spelling left to find."
+//   * "the class is closed at the choke point".
+// Both are false. The allowlist is not what stops write endpoints — this denylist is — and the
+// choke-point move fixed WHERE the check runs and WHAT IT IS HANDED, not WHAT IT KNOWS. Three
+// separate properties, and only two are closed:
+//   AGREEMENT  (checked string == used string) ...... CLOSED at the wire choke point
+//   COVERAGE   (every request path is checked) ...... CLOSED by the required `intent`
+//   VOCABULARY (which endpoints count as writes) .... NOT CLOSED — bounded by the list below
+// Turning readPath into a positive catalogue is the only thing that would close VOCABULARY, and
+// the design lock defers that to P2/P3. Until then this list is a bound, and saying otherwise
+// has now cost three review rounds.
+//
+// The words below cover the K3 WISE lifecycle vocabulary observed in this repo (Save, Submit,
+// Audit, Delete) plus vendor siblings a reviewer enumerated as reachable (BatchSave, UnAudit,
+// Draft, Push, GroupSave, Disable, Allocate, SetStatus). Anchored per-segment, case-insensitive.
+const K3_WRITE_ENDPOINT_WORDS = Object.freeze([
+  'submit', 'audit', 'unaudit', 'delete', 'save', 'batchsave', 'groupsave',
+  'draft', 'push', 'disable', 'allocate', 'setstatus',
+])
+const K3_WRITE_ENDPOINT_WORD_SET = new Set(K3_WRITE_ENDPOINT_WORDS)
+
+// AXIS 8 (review round 8): the previous matcher was `/(word)$/` — the word had to be the ENTIRE
+// FINAL segment. Everything below therefore reached the wire on a read, with `submit`/`save`
+// already in the list: the anchor was the defect, not the vocabulary.
+//   /K3API/Material/Submit.aspx      (extension)
+//   /K3API/Material/Save.ashx
+//   /K3API/Material/Submit/x         (verb no longer last)
+//   /K3API/Material/Submit/GetDetail (verb carried by baseUrl, then a read path appended)
+// Now EVERY segment is tested, on its pre-first-dot portion, so an extension, a trailing
+// segment, or a verb sitting in baseUrl's path all match. `buildEndpointUrl` merges baseUrl's
+// path into the produced pathname, so checking every segment reaches baseUrl without a second
+// code path — the thing this line has repeatedly got wrong is having two.
+//
+// CORRECTED (round 9): the sentence above used to claim this "covers baseUrl", full stop. It
+// does not on its own — the segment comparison is literal, so a percent-encoded verb in baseUrl
+// (`Submit%2Fx`) never matches. baseUrl's PATH SHAPE is now validated in `normalizeBaseUrl` by
+// the same allowlist every sibling path field uses; the two together are what cover it.
+//
+// This widens the MATCH SHAPE. It does not close VOCABULARY: an unlisted verb still passes, and
+// only a positive readPath catalogue (deferred by the lock) would change that.
+function pathnameTargetsWriteEndpoint(wirePathname) {
+  return wirePathname
+    .split('/')
+    .some((segment) => K3_WRITE_ENDPOINT_WORD_SET.has(segment.split('.')[0].toLowerCase()))
+}
+
+// AXIS 6 (review round 6, CONFIRMED): `/K3API/Material/Submit/.` cleared BOTH guards and still
+// POSTed to `/K3API/Material/Submit/`. The allowlist admits it (a bare `.` segment is not `..`,
+// and `.` is inside the character class); the suffix denylist missed it because the RAW string
+// ends in `/.`, not `/submit` — while `buildEndpointUrl`'s `pathname` SETTER removed the dot
+// segment on the way out. Identical in shape to axes 4 and 5: THE CHECK READ A STRING THAT WAS
+// NOT THE STRING BEING USED.
+//
+// Re-deriving the normalization would be a sixth patch to the same soft spot, and a copy can
+// drift: `new URL(p, base)` and `url.pathname = p` provably DISAGREE (given `//a/x` the
+// constructor reads `a` as an authority and yields `/x`, the setter yields `//a/x`). So this
+// helper runs the SETTER ITSELF — the checked value is the produced value by construction, not
+// by argument. The load-bearing guard now lives at the single wire choke point
+// (`assertWireEndpointIntent`, applied inside `requestJson` to the pathname `buildEndpointUrl`
+// actually produced); this config-time check is kept as an EARLY, better-located error, and the
+// two are proven independent by separately neutering each (see the exclusivity tests).
+// AXIS 7 (review round 7): `/K3API/Material/Submit.` — the SAME denied word with a trailing dot.
+// It cleared all three layers: `.` is inside the allowlist's character class; the `pathname`
+// setter removes dot SEGMENTS (`/./`, `/../`) but not a trailing dot INSIDE a segment; and the
+// denylist requires the word at the very end. K3 WISE is IIS/Windows-hosted, and the Windows path
+// canonicalizer strips trailing dots and spaces from the final segment — the classic trailing-dot
+// bypass — so the server may well route `/Submit.` to the Submit handler.
+//
+// The lesson from axes 4-6 generalises: normalize the way the CONSUMER of the string will, then
+// check. Previously "the consumer" meant our own URL builder; it also means the SERVER. So the
+// trailing `.`/space strip below is not another denylist patch — it is the same normalize-then-
+// check rule applied to the server's canonicalization. `assertSafeK3ReadEndpoint` additionally
+// REJECTS such spellings outright (no legitimate K3 endpoint ends in `.`, `~` or a space), so the
+// two stops are independent: one canonicalizes, the other refuses.
+function toWireEndpointPathname(rawPath) {
+  const url = new URL('http://k3-endpoint-normalization.invalid')
+  url.pathname = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
+  // Strip trailing dots/tildes/whitespace from EVERY segment, as the Windows canonicalizer does,
+  // before the vocabulary check sees the path. The `pathname` setter percent-encodes a literal
+  // space to `%20`, so the encoded forms are stripped alongside the literal ones — decoding the
+  // whole segment instead would risk a `%2F` inventing a new segment boundary, which is precisely
+  // the kind of normalization surprise this whole line of defects came from.
+  return url.pathname
+    .split('/')
+    .map((segment) => segment.replace(/(?:[.~\s]|%2[eE]|%7[eE]|%09|%0[aAbBcCdD]|%20)+$/g, ''))
+    .join('/')
+    .replace(/\/+$/, '')
+}
+
+// No legitimate K3 endpoint segment ends in `.`, `~`, or whitespace; a spelling that does is
+// either a Windows-canonicalizer bypass attempt or a typo. Refusing outright is narrower than
+// trying to enumerate what each such spelling would resolve to.
+const K3_SUSPICIOUS_SEGMENT_TAIL = /[.~\s]$/
+
+function assertSafeK3ReadEndpoint(value, field) {
+  if (value === undefined || value === null) return
+  // P2 (round 6): a non-string silently returned, so the guard was a no-op on any shape the
+  // caller had not already string-checked. Absent is fine; wrong-typed is not.
+  if (typeof value !== 'string') {
+    throw new AdapterValidationError('a K3 endpoint must be a string', {
+      code: 'K3_WISE_ENDPOINT_NOT_A_STRING',
+      field,
+    })
+  }
+  if (value.trim().length === 0) return
+  const raw = value.trim()
+  if (!isSafeRelativeReadPath(raw)) {
+    throw new AdapterValidationError('a K3 endpoint must be a safe relative path', {
+      code: 'K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE',
+      field,
+    })
+  }
+  // AXIS 7: refuse the Windows-canonicalizer spellings. Applied AFTER the allowlist and skipping
+  // pure `.`/`..` segments, so the established vectors keep refusing by their original route
+  // (a `..` path is still NOT_SAFE_RELATIVE, `/Submit/.` is still a write-endpoint refusal) and
+  // this code fires only for what genuinely needs it: an allowlist-clean segment ending in a dot,
+  // tilde or space, which no legitimate K3 endpoint spells.
+  if (raw.split('/').some((segment) => segment !== '.' && segment !== '..'
+    && segment.length > 0 && K3_SUSPICIOUS_SEGMENT_TAIL.test(segment))) {
+    throw new AdapterValidationError('a K3 endpoint segment may not end in a dot, tilde or space', {
+      code: 'K3_WISE_ENDPOINT_SUSPICIOUS_SEGMENT',
+      field,
+    })
+  }
+  if (pathnameTargetsWriteEndpoint(toWireEndpointPathname(raw))) {
+    throw new AdapterValidationError('a K3 read path may not target a lifecycle write endpoint', {
+      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      field,
+    })
+  }
+}
+
+// THE WIRE CHOKE POINT. Every K3 request — token, login, health, read, save, submit, audit —
+// goes through `requestJson`, which is the sole caller of `buildEndpointUrl`. Guarding here
+// closes both halves of the class that produced six escapes:
+//   * AGREEMENT: the gate is handed the pathname `buildEndpointUrl` produced, so there is no
+//     second string to disagree with.
+//   * COVERAGE: `intent` is REQUIRED and unrecognised values THROW, so a newly added config
+//     field (this round it was `config.healthPath`, which had no guard at all) cannot reach the
+//     wire by quietly omitting it — the omission is the failure.
+const K3_READ_INTENT = 'read'
+const K3_LIFECYCLE_WRITE_INTENT = 'lifecycle-write'
+const K3_ENDPOINT_INTENTS = new Set([K3_READ_INTENT, K3_LIFECYCLE_WRITE_INTENT])
+
+function assertWireEndpointIntent(wirePathname, intent) {
+  if (!K3_ENDPOINT_INTENTS.has(intent)) {
+    throw new AdapterValidationError('every K3 request must declare a wire endpoint intent', {
+      code: 'K3_WISE_ENDPOINT_INTENT_UNDECLARED',
+      field: 'intent',
+    })
+  }
+  if (intent === K3_READ_INTENT && pathnameTargetsWriteEndpoint(wirePathname)) {
+    throw new AdapterValidationError('a K3 read request may not reach a lifecycle write endpoint', {
+      code: 'K3_WISE_READ_PATH_IS_WRITE_ENDPOINT',
+      field: 'path',
+    })
+  }
 }
 
 function assertRelativePath(path, field) {
@@ -419,8 +736,34 @@ function normalizeObjects(config) {
     // `lifecycle === 'save-only'` to force autoSubmit/autoAudit off regardless of request/config.
     if (saveOnlyProfile) {
       normalized[name].lifecycle = 'save-only'
-      delete normalized[name].submitPath
-      delete normalized[name].auditPath
+      normalized[name][K3_PROFILE_ARMED] = true
+      // ADVERSARIAL REVIEW P1-1 (20260805): pinning savePath alone closed ONE channel, not the
+      // CLASS. `readPath` is wider than savePath ever was — lookupByKey drives it during the
+      // DRY-RUN (before any approval token exists), with `readMethod` choosing the verb and
+      // `readBodyTemplate` supplying an OPERATOR-AUTHORED body. A reviewer built the exploit:
+      // overlay readPath=/K3API/Material/Submit + a Submit-shaped readBodyTemplate, and a
+      // dry-run POSTed to Submit. That falsifies both "0 Submit/0 Audit is a runtime
+      // invariant" and "dry-run performs no write".
+      //
+      // The fix is class-shaped, not field-shaped: EVERY request-shape key the profile owns is
+      // re-pinned from the literal, and every request-shape key the profile deliberately does
+      // NOT declare is deleted. Operator overlays keep the fields that are legitimately theirs
+      // (schema, reference shapes, credentials-adjacent config) — those cannot choose an
+      // endpoint or author a body.
+      for (const key of K3_PROFILE_PINNED_REQUEST_KEYS) {
+        if (base[key] === undefined) delete normalized[name][key]
+        else normalized[name][key] = base[key]
+      }
+      for (const key of K3_PROFILE_FORBIDDEN_OVERLAY_KEYS) {
+        delete normalized[name][key]
+      }
+      // Operations are profile-owned too: an overlay must not widen what is reachable.
+      if (Array.isArray(base.operations)) normalized[name].operations = [...base.operations]
+      // HARD LOCK (K3WriteDecision): the profile's apply row cap is pinned AFTER the merge,
+      // from the profile literal — an operator overlay can neither raise nor remove it.
+      if (Number.isInteger(base.maxApplyRows) && base.maxApplyRows > 0) {
+        normalized[name].maxApplyRows = base.maxApplyRows
+      }
     }
   }
   for (const [name, value] of Object.entries(configured)) {
@@ -437,6 +780,11 @@ function normalizeObjects(config) {
         field: `config.objects.${name}`,
       })
     }
+  }
+  // UNCONDITIONAL (review P1-C1): every object, profile-selected or not, from EITHER fill loop.
+  // The class pin above is opt-in by whoever selects a profile — this is not.
+  for (const [name, objectConfig] of Object.entries(normalized)) {
+    assertSafeK3ReadEndpoint(objectConfig.readPath, `config.objects.${name}.readPath`)
   }
   return normalized
 }
@@ -1427,6 +1775,15 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   const baseUrl = normalizeBaseUrl(config.baseUrl || config.url)
   const objects = normalizeObjects(config)
   const timeoutMs = Number.isInteger(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 30000
+  // REVIEW P1-E1 sibling: loginPath had NO endpoint guard at all — `loginPath:
+  // '/K3API/Material/Submit'` POSTs the credential envelope to Submit, no trick required.
+  // P1 (round 6): `config.healthPath` — the third sibling, one line below — had NO endpoint
+  // guard, and `testConnection` takes its verb from the request body, so
+  // `healthPath: '/K3API/Material/Submit'` + `{method:'POST'}` POSTed to Submit after login.
+  // Guarded here for an early, well-located error; the load-bearing stop is the wire intent gate.
+  assertSafeK3ReadEndpoint(config.loginPath, 'config.loginPath')
+  assertSafeK3ReadEndpoint(config.tokenPath, 'config.tokenPath')
+  assertSafeK3ReadEndpoint(config.healthPath, 'config.healthPath')
   const loginPath = assertRelativePath(config.loginPath || '/K3API/Login', 'config.loginPath')
   const tokenPath = assertRelativePath(config.tokenPath || '/K3API/Token/Create', 'config.tokenPath')
   const tokenQueryParam = typeof config.tokenQueryParam === 'string' && config.tokenQueryParam.trim()
@@ -1450,8 +1807,17 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     return url.toString()
   }
 
-  async function requestJson(path, { method = 'GET', query, headers, body } = {}) {
-    const url = buildUrl(path, query)
+  async function requestJson(path, { method = 'GET', query, headers, body, intent } = {}) {
+    // Build ONCE, then gate the pathname that was actually produced. Re-deriving it here would
+    // reintroduce exactly the check-vs-use gap that axes 4, 5 and 6 all exploited.
+    const endpointUrl = buildEndpointUrl(baseUrl, path)
+    const wirePathname = toWireEndpointPathname(endpointUrl.pathname)
+    assertWireEndpointIntent(wirePathname, intent)
+    for (const [key, value] of Object.entries(query || {})) {
+      if (value === undefined || value === null || value === '') continue
+      endpointUrl.searchParams.set(key, String(value))
+    }
+    const url = endpointUrl.toString()
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
     const requestHeaders = mergeHeaders(
@@ -1462,6 +1828,9 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     )
 
     try {
+      // The counter receives the canonical wire pathname only long enough to map it
+      // into a closed operation vocabulary. It retains no URL or request value.
+      recordK3WiseCall(wirePathname, intent, normalizedSystem.tenantId)
       const response = await fetchImpl(url, {
         method,
         headers: requestHeaders,
@@ -1503,6 +1872,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
 
   async function loginWithAuthorityCode(authorityCode) {
     const { data } = await requestJson(tokenPath, {
+      intent: K3_READ_INTENT,
       method: config.tokenMethod || 'GET',
       query: { authorityCode },
     })
@@ -1568,6 +1938,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       lcid: firstDefined(config.lcid, credentials.lcid, 2052),
     }
     const { response, data } = await requestJson(loginPath, {
+      intent: K3_READ_INTENT,
       method: config.loginMethod || 'POST',
       body,
     })
@@ -1612,6 +1983,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         }
       }
       const { response } = await requestJson(healthPath, {
+        intent: K3_READ_INTENT,
         method: input.method || 'GET',
         query: authContext.query,
         headers: authContext.headers,
@@ -1660,9 +2032,24 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
+    // REVIEW P2-D1: previewUpsert had no profile guard, so the same config that upsert REFUSES
+    // rendered a sanctioned-looking plan naming an operator-substituted endpoint. No egress,
+    // but a preview is exactly what a human approves — it must refuse identically.
+    if (request.object === 'material' && objectConfig[K3_PROFILE_ARMED] !== true) {
+      throw new AdapterValidationError('K3 WISE material upsert requires the named customer profile', {
+        code: 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+        object: request.object,
+      })
+    }
     const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
-    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
-    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    // Mirror upsert's save-only HARD LOCK. Found while adapting this suite: previewUpsert
+    // resolved the auto-flags freely, so with a save-only profile armed AND config.autoSubmit
+    // true, the preview reported "Submit will fire" while the real write forces it false. The
+    // divergence is in the safe direction, but a preview that does not equal the write is
+    // exactly what the approval gate exists to prevent — the human must approve what happens.
+    const previewSaveOnly = objectConfig.lifecycle === 'save-only'
+    const autoSubmit = previewSaveOnly ? false : resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    const autoAudit = previewSaveOnly ? false : resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
     return {
       object: request.object,
       records: request.records.map((record, index) => ({
@@ -1707,6 +2094,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -1786,6 +2174,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -1863,6 +2252,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       let readResponse
       try {
         readResponse = await requestJson(readPath, {
+          intent: K3_READ_INTENT,
           method: objectConfig.readMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -1934,6 +2324,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     let readResponse
     try {
       readResponse = await requestJson(readPath, {
+        intent: K3_READ_INTENT,
         method: objectConfig.readMethod || 'POST',
         query: authContext.query,
         headers: authContext.headers,
@@ -1987,6 +2378,17 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
 
+    // RATIFIED GUARD (owner, 20260805): a material write with NO named profile means the
+    // save-only lifecycle lock and the frozen row cap are simply not armed — refuse before
+    // anything else (before login: zero external side effects). Legacy stored configs
+    // provisioned before the profile era hit this the first time they try to write.
+    if (request.object === 'material' && objectConfig[K3_PROFILE_ARMED] !== true) {
+      throw new AdapterValidationError('K3 WISE material upsert requires the named customer profile', {
+        code: 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+        object: request.object,
+      })
+    }
+
     // HARD LOCK (M1): a save-only profile forces autoSubmit/autoAudit OFF and drops any
     // submit/audit endpoint, regardless of what request or config set. This is the lock the
     // M1 design requires (not merely a default false). `autoFlagsRefused` records that a
@@ -2000,6 +2402,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const autoSubmit = saveOnly ? false : requestedAutoSubmit
     const autoAudit = saveOnly ? false : requestedAutoAudit
     const autoFlagsRefused = saveOnly && (requestedAutoSubmit === true || requestedAutoAudit === true)
+    // APPLY ROW CAP (K3WriteDecision): refuse an over-limit batch BEFORE login — a refused
+    // call must have ZERO external side effects (K3 never even sees a login attempt). The cap
+    // reaches here only via the named-profile pin above; counts are values-free.
+    const maxApplyRows = Number.isInteger(objectConfig.maxApplyRows) && objectConfig.maxApplyRows > 0
+      ? objectConfig.maxApplyRows
+      : null
+    if (maxApplyRows !== null && request.records.length > maxApplyRows) {
+      throw new AdapterValidationError(
+        `K3 WISE upsert refused: batch of ${request.records.length} exceeds the profile apply row limit of ${maxApplyRows}`,
+        { code: 'K3_WISE_APPLY_ROW_LIMIT_EXCEEDED', object: request.object, recordCount: request.records.length, maxApplyRows },
+      )
+    }
     const authContext = await login()
     const results = []
     const errors = []
@@ -2011,6 +2425,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const key = extractRecordKey(record, request, objectConfig)
       try {
         const save = await requestJson(savePath, {
+          intent: K3_LIFECYCLE_WRITE_INTENT,
           method: objectConfig.saveMethod || 'POST',
           query: authContext.query,
           headers: authContext.headers,
@@ -2042,6 +2457,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             })
           }
           const submit = await requestJson(submitPath, {
+            intent: K3_LIFECYCLE_WRITE_INTENT,
             method: objectConfig.submitMethod || 'POST',
             query: authContext.query,
             headers: authContext.headers,
@@ -2074,6 +2490,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             })
           }
           const audit = await requestJson(auditPath, {
+            intent: K3_LIFECYCLE_WRITE_INTENT,
             method: objectConfig.auditMethod || 'POST',
             query: authContext.query,
             headers: authContext.headers,
@@ -2168,13 +2585,32 @@ const K3_WISE_WEBAPI_ADAPTER_METADATA = {
   advanced: false,
 }
 
+// C6 planner support (K3WriteDecision): the EFFECTIVE object config — profile merge + operator
+// overlay + hard-lock pins — is the single source of truth for what a Save body can carry. The
+// C6 deriver must use THIS, not the profile literal alone (review #4761 P1: an FE overlay
+// replaces the schema wholly, so literal-only allowlisting previews fields the Save drops).
+function resolveEffectiveK3WiseObjects(config) {
+  return normalizeObjects(config)
+}
+
 module.exports = {
   K3_WISE_WEBAPI_ADAPTER_METADATA,
+  isMeaningfulK3Identifier: isMeaningfulIdentifier,
+  resolveEffectiveK3WiseObjects,
+  K3_PROFILE_PINNED_REQUEST_KEYS,
+  K3_PROFILE_FORBIDDEN_OVERLAY_KEYS,
+  K3_PROFILE_TRIAGED_SAFE_KEYS,
+  K3_PROFILE_OBJECT_CONFIG_CONSUMERS,
+  K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
+  K3_OBJECT_CONFIG_PROSE_ONLY_MODULES,
   K3WiseWebApiAdapterError,
   createK3WiseWebApiAdapter,
   createK3WiseWebApiAdapterFactory,
   __internals: {
     DEFAULT_OBJECTS,
+    assertSafeK3ReadEndpoint,
+    assertWireEndpointIntent,
+    toWireEndpointPathname,
     businessSuccess,
     buildRowSaveDiagnostic,
     extractRecordKey,

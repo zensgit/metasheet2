@@ -133,10 +133,10 @@ function createPipelineRegistry(pipeline, db) {
   }
 }
 
-function createExternalSystemRegistry({ sourceSystemKind = 'mock-source' } = {}) {
+function createExternalSystemRegistry({ sourceSystemKind = 'mock-source', targetSystemKind = 'mock-target' } = {}) {
   const systems = new Map([
     ['source_1', { id: 'source_1', name: 'PLM mock', kind: sourceSystemKind, role: 'source', config: {} }],
-    ['target_1', { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
+    ['target_1', { id: 'target_1', name: 'ERP mock', kind: targetSystemKind, role: 'target', config: {} }],
   ])
   return {
     async getExternalSystem(input) {
@@ -149,7 +149,7 @@ function createExternalSystemRegistry({ sourceSystemKind = 'mock-source' } = {})
   }
 }
 
-function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, sourceSystemKind = 'mock-source', targetUpsert, erpFeedbackWriter } = {}) {
+function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, sourceSystemKind = 'mock-source', targetSystemKind = 'mock-target', targetUpsert, erpFeedbackWriter } = {}) {
   const db = createMockDb()
   const targetRows = new Map()
   const adapterSystems = []
@@ -231,7 +231,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
   const pipelineRegistry = createPipelineRegistry(pipeline, db)
   const runner = createPipelineRunner({
     pipelineRegistry,
-    externalSystemRegistry: createExternalSystemRegistry({ sourceSystemKind }),
+    externalSystemRegistry: createExternalSystemRegistry({ sourceSystemKind, targetSystemKind }),
     adapterRegistry,
     deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
     watermarkStore: createWatermarkStore({ db }),
@@ -1211,6 +1211,56 @@ async function main() {
   // --- 6. Dead-letter status guard — already-replayed letter is rejected --
   // The first replay in scenario 5 left dl_1 in status='replayed'. A second
   // replay attempt must throw before any ERP call happens.
+  // --- OWNER REVIEW P1 (20260805): K3 live writes are C6-ONLY at the runner layer ---
+  {
+    const k3Run = createRunnerHarness({ sourceRecords: [{ code: 'c-run', revision: 'r1', qty: '1', name: 'X', updatedAt: '2026-08-05T00:00:00.000Z' }], targetSystemKind: 'erp:k3-wise-webapi' })
+    const runRefusal = await k3Run.runner.runPipeline({
+      tenantId: 'tenant_1', workspaceId: null, pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'test',
+    }).catch((error) => error)
+    assert.ok(runRefusal instanceof Error, 'K3-target live run must refuse')
+    assert.equal(runRefusal.details && runRefusal.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED')
+    assert.equal(k3Run.targetRows.size, 0, 'nothing may be written')
+    // Discriminating control: with dryRun the guard must NOT fire — the next failure is the
+    // harness registry not knowing the K3 kind (adapter creation), proving the guard keys on
+    // dryRun, not on the kind alone.
+    const dryProbe = await k3Run.runner.runPipeline({
+      tenantId: 'tenant_1', workspaceId: null, pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'test', dryRun: true,
+    }).catch((error) => error)
+    assert.ok(dryProbe instanceof Error)
+    assert.notEqual(dryProbe.details && dryProbe.details.code, 'K3_WISE_PIPELINE_RUN_DISABLED',
+      'dry-run must pass the guard (its failure here is the harness registry, by design)')
+  }
+
+  // --- RATIFIED (owner, 20260805): replay is DISABLED for K3 WISE targets ---
+  // The guard fires in replayDeadLetter BEFORE runPipeline — before any read, any run
+  // record, any adapter creation — so the unregistered K3 kind never reaches the registry.
+  // The successful replay above (mock-target) is the POSITIVE CONTROL: the refusal below is
+  // attributable to the KIND, not to replay being broken.
+  {
+    const k3Replay = createRunnerHarness({ sourceRecords: [], targetSystemKind: 'erp:k3-wise-webapi' })
+    const k3Letters = createDeadLetterStore({ db: k3Replay.db, idGenerator: () => 'dl_k3' })
+    await k3Letters.createDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      runId: 'run_k3',
+      pipelineId: 'pipe_1',
+      sourcePayload: { code: 'c-k3', revision: 'r1', qty: '1', name: 'K3 row', updatedAt: '2026-08-05T00:00:00.000Z' },
+      transformedPayload: null,
+      errorCode: 'VALIDATION_FAILED',
+      errorMessage: 'k3 row failed',
+    })
+    const k3Refusal = await k3Replay.runner.replayDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'dl_k3',
+    }).catch((error) => error)
+    assert.ok(k3Refusal instanceof Error, 'K3-target replay must refuse')
+    assert.equal(k3Refusal.details && k3Refusal.details.code, 'K3_WISE_REPLAY_DISABLED')
+    assert.equal(k3Replay.targetRows.size, 0, 'nothing may be written by a refused replay')
+    const k3LetterAfter = await k3Letters.getDeadLetter({ tenantId: 'tenant_1', workspaceId: null, id: 'dl_k3' })
+    assert.equal(k3LetterAfter.status, 'open', 'the letter stays open — refusal is not consumption')
+  }
+
   const doubleReplay = await replay.runner.replayDeadLetter({
     tenantId: 'tenant_1',
     workspaceId: null,

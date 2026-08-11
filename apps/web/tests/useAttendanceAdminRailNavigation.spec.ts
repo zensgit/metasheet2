@@ -84,7 +84,7 @@ describe('useAttendanceAdminRailNavigation', () => {
     }
   }
 
-  function mountHost(options?: { focused?: boolean; navigationEnabled?: boolean }) {
+  function mountHost(options?: { focused?: boolean; navigationEnabled?: boolean; routeOwned?: boolean }) {
     const items: AdminSectionNavItem[] = [
       { id: 'attendance-admin-settings', label: 'Settings' },
       { id: 'attendance-admin-approval-flows', label: 'Approval Flows' },
@@ -94,6 +94,7 @@ describe('useAttendanceAdminRailNavigation', () => {
         const showAdmin = ref(true)
         const adminForbidden = ref(false)
         const adminNavigationEnabled = ref(options?.navigationEnabled ?? true)
+        const adminRouteOwned = ref(options?.routeOwned ?? false)
         const adminFocusCurrentSectionOnly = ref(options?.focused ?? false)
         const adminNavStorageScope = ref('default')
         const adminActiveSectionId = ref(items[0].id)
@@ -113,6 +114,7 @@ describe('useAttendanceAdminRailNavigation', () => {
           showAdmin,
           adminForbidden,
           adminNavigationEnabled,
+          adminRouteOwned,
           adminFocusCurrentSectionOnly,
           previousAdminSectionId,
           nextAdminSectionId,
@@ -129,6 +131,7 @@ describe('useAttendanceAdminRailNavigation', () => {
           adminCompactNavOpen,
           adminNavStorageScope,
           adminNavigationEnabled,
+          adminRouteOwned,
           adminSectionBinding,
           isCompactAdminNav,
           scrollToAdminSection,
@@ -305,6 +308,31 @@ describe('useAttendanceAdminRailNavigation', () => {
 
       expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
       expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('ignores a stale valid hash and keyboard navigation while a group route owns the selection', async () => {
+      window.history.replaceState({}, '', '/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule#attendance-admin-approval-flows')
+      const vm = mountHost({ routeOwned: true })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('changes the route-owned section without writing it into the hash', async () => {
+      window.history.replaceState({}, '', '/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule#attendance-admin-settings')
+      const vm = mountHost({ routeOwned: true })
+      await flushUi()
+
+      vm.scrollToAdminSection('attendance-admin-approval-flows')
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      expect(window.location.hash).toBe('#attendance-admin-settings')
     })
 
     it('ignores Alt+ArrowDown/ArrowUp keyboard navigation while navigation is disabled', async () => {

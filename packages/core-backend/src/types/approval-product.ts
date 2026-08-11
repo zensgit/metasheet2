@@ -16,15 +16,17 @@ export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'reques
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
-export type ApprovalActionType =
-  | 'approve'
-  | 'reject'
-  | 'transfer'
-  | 'revoke'
-  | 'comment'
-  | 'return'
-  | 'add_sign'
-  | 'reduce_sign'
+export const APPROVAL_ACTION_TYPES = [
+  'approve',
+  'reject',
+  'transfer',
+  'revoke',
+  'comment',
+  'return',
+  'add_sign',
+  'reduce_sign',
+] as const
+export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]

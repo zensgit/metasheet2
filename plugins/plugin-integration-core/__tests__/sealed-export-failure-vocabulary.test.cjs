@@ -1,11 +1,13 @@
 'use strict'
 
-// Sealed-export S1 — closed failure vocabulary battery. Plain node test, hermetic.
+// Sealed-export controlled surface — closed failure vocabulary battery. Plain
+// node test, hermetic.
 //
 // §10 of the ratified S0 baseline requires three pins, and this file carries all
 // three:
 //   1. an exact vocabulary pin              -> vocabularyExactPin()
-//   2. a runtime consumer pin               -> latentSurfacePin() + zeroConsumerSweep()
+//   2. a runtime consumer pin               -> latentSurfacePin()
+//                                            + controlledConsumerSweep()
 //   3. a source-level throw-site invariant  -> throwSiteInvariant()
 //                                            + astThrowSiteScanHasNoBlindWindow()
 //
@@ -111,12 +113,37 @@ function vocabularyExactPin() {
   assert.equal(vocabulary.isDeclaredFailureReason(null), false)
 }
 
+function trustedErrorIdentityPin() {
+  const genuine = throws(
+    () => vocabulary.failSealedExport('SEALED_EXPORT_INTERNAL_ERROR'),
+    'genuine branded error',
+  )
+  assert.equal(vocabulary.isTrustedSealedExportError(genuine), true)
+  assert.equal(
+    vocabulary.isTrustedSealedExportError(
+      new vocabulary.SealedExportError(
+        'SEALED_EXPORT_INTERNAL_ERROR',
+        Object.freeze({}),
+      ),
+    ),
+    false,
+    'the public error constructor cannot mint transaction-pass-through authority',
+  )
+  assert.equal(
+    vocabulary.isTrustedSealedExportError(
+      Object.create(vocabulary.SealedExportError.prototype),
+    ),
+    false,
+    'prototype spoofing cannot mint transaction-pass-through authority',
+  )
+}
+
 // ---------------------------------------------------------------------------
 // PIN 2 — latent-surface partition, and it must be DERIVED, not hand-matched.
 // ---------------------------------------------------------------------------
 function latentSurfacePin() {
-  const reached = new Set(vocabulary.SEALED_EXPORT_S1_REACHED_REASONS)
-  const unreached = new Set(vocabulary.SEALED_EXPORT_S1_UNREACHED_REASONS)
+  const reached = new Set(vocabulary.SEALED_EXPORT_LATENT_REACHED_REASONS)
+  const unreached = new Set(vocabulary.SEALED_EXPORT_LATENT_UNREACHED_REASONS)
 
   // Disjoint, and together exactly the vocabulary.
   for (const reason of reached) assert.equal(unreached.has(reason), false, 'partition overlap: ' + reason)
@@ -154,7 +181,7 @@ function latentSurfacePin() {
   assert.deepEqual(
     Array.from(observed).sort(),
     Array.from(reached).sort(),
-    'declared S1-reached set must equal the set the surface actually raises',
+    'declared latent-reached set must equal the set the surface actually raises',
   )
 }
 
@@ -492,8 +519,9 @@ function astScanMatchesBindingsNotNames() {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-consumer pin, second half: S1 is LATENT, so nothing in the repository's runtime
-// code may import these modules — not just nothing inside this package.
+// Runtime-consumer pin, second half: S6-A authorizes exactly three controlled
+// consumers outside the sealed-export implementation directory. Any additional
+// runtime import remains outside the approved single-customer surface.
 //
 // Both roots and the filesystem are PARAMETERS, so the sweep can be aimed at a synthetic
 // tree whose offender is known. Without that, "zero offenders" is a traversal result, not
@@ -576,7 +604,7 @@ function inMemoryFilesystem(files) {
   }
 }
 
-function zeroConsumerSweep() {
+function controlledConsumerSweep() {
   const repoRoot = path.join(__dirname, '..', '..', '..')
   const roots = [
     { label: 'apps', path: path.join(repoRoot, 'apps') },
@@ -594,8 +622,15 @@ function zeroConsumerSweep() {
     assert.ok((real.scannedByRoot[label] || 0) > 50,
       'sweep must traverse ' + label + ', scanned=' + (real.scannedByRoot[label] || 0))
   }
-  assert.deepEqual(real.offenders.map((f) => path.relative(repoRoot, f)), [],
-    'S1 must have no runtime consumer anywhere in apps/, packages/ or plugins/')
+  assert.deepEqual(
+    real.offenders.map((f) => path.relative(repoRoot, f)),
+    [
+      'plugins/plugin-integration-core/index.cjs',
+      'plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs',
+      'plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs',
+    ],
+    'only the three S6-A controlled consumers may import sealed-export modules',
+  )
 
   // POSITIVE CONTROL — CROSS-PACKAGE DETECTION. A synthetic consumer in a DIFFERENT
   // package must make the sweep RED and must be NAMED. Without this the assertion above
@@ -818,11 +853,12 @@ function safeTokenMirrorIsComplete() {
 
 function main() {
   vocabularyExactPin()
+  trustedErrorIdentityPin()
   latentSurfacePin()
   throwSiteInvariant()
   astThrowSiteScanHasNoBlindWindow()
   astScanMatchesBindingsNotNames()
-  zeroConsumerSweep()
+  controlledConsumerSweep()
   undeclaredReasonIsNeverEchoed()
   detailsCarryNoCallerValues()
   safeTokenMirrorIsComplete()

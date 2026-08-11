@@ -164,6 +164,10 @@ export interface K3WiseSetupForm {
   autoSubmit: boolean
   autoAudit: boolean
   materialSavePath: string
+  // P3 read-back: the server template has declared Material readPath
+  // (/K3API/Material/GetDetail) all along; the client form had no counterpart, so the post-save
+  // verification had nothing to call. Recorded as a KNOWN GAP by the P1 endpoint mirror and closed here.
+  materialReadPath: string
   materialSubmitPath: string
   materialAuditPath: string
   // A4: per-reference-field Save shape for Material (field name → shape); empty/unset ⇒ {FNumber}.
@@ -973,6 +977,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     autoSubmit: false,
     autoAudit: false,
     materialSavePath: '/K3API/Material/Save',
+    materialReadPath: '/K3API/Material/GetDetail',
     materialSubmitPath: '/K3API/Material/Submit',
     materialAuditPath: '/K3API/Material/Audit',
     materialReferenceShapes: defaultMaterialReferenceShapes(),
@@ -1048,6 +1053,9 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
   if (trim(form.healthPath)) assertRelativePath(form.healthPath, 'healthPath', issues)
   assertRelativePath(form.materialSavePath, 'materialSavePath', issues)
   assertRelativePath(form.bomSavePath, 'bomSavePath', issues)
+  // Optional like Submit, not required like Save: read-back is a verification step, and a deployment that
+  // has not enabled it must not be blocked from saving. Filled in, it must still be a relative path.
+  if (trim(form.materialReadPath)) assertRelativePath(form.materialReadPath, 'materialReadPath', issues)
   if (trim(form.materialSubmitPath)) assertRelativePath(form.materialSubmitPath, 'materialSubmitPath', issues)
   if (trim(form.materialAuditPath)) assertRelativePath(form.materialAuditPath, 'materialAuditPath', issues)
   if (trim(form.bomSubmitPath)) assertRelativePath(form.bomSubmitPath, 'bomSubmitPath', issues)
@@ -1932,6 +1940,13 @@ export function parseMaterialReferenceShapesFromSchema(schema: unknown): Record<
   return shapes
 }
 
+// K3WriteDecision (owner, 20260805): the customer material profile is selected UNCONDITIONALLY
+// by the setup payload — not a form option. Making it optional would put the Save-only hard lock
+// and the frozen maxApplyRows cap back under operator-form control, which is exactly the posture
+// the decision closes. The id must equal the server's MATERIAL_CUSTOMER_PROFILE_ID — the endpoint
+// vocabulary mirror asserts that equality by require, so a drift is a required-check RED.
+export const K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
+
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
   const workspaceId = optionalString(form.workspaceId) ?? null
   const baseSystem = {
@@ -1967,7 +1982,11 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       autoAudit: form.autoAudit,
       objects: {
         material: {
+          // Unconditional named-profile selection (K3WriteDecision) — arms the adapter's
+          // save-only lifecycle lock AND the frozen maxApplyRows=3 cap, non-overridable.
+          profile: K3_WISE_MATERIAL_CUSTOMER_PROFILE_ID,
           savePath: trim(form.materialSavePath),
+          ...(optionalString(form.materialReadPath) ? { readPath: trim(form.materialReadPath) } : {}),
           ...(optionalString(form.materialSubmitPath) ? { submitPath: trim(form.materialSubmitPath) } : {}),
           ...(optionalString(form.materialAuditPath) ? { auditPath: trim(form.materialAuditPath) } : {}),
           keyField: 'FNumber',

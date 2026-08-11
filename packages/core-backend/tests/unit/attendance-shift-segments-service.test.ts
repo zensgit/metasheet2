@@ -161,6 +161,109 @@ describe('validateShiftSegments', () => {
   })
 })
 
+describe('validateFlexPolicy (W5)', () => {
+  function expectFlexInvalid(
+    input: unknown,
+    segmentCount: number,
+    fieldFragment: string,
+    segmentStartTime: string | null = '09:00',
+  ) {
+    try {
+      service.validateFlexPolicy(input, segmentCount, segmentStartTime)
+    } catch (error) {
+      const typed = error as FakeHttpError
+      expect(typed).toBeInstanceOf(FakeHttpError)
+      expect(typed.status).toBe(422)
+      expect(typed.code).toBe(ERR.FLEX_POLICY_INVALID)
+      expect((typed.details ?? []).some((detail) => detail.field.includes(fieldFragment))).toBe(true)
+      return
+    }
+    expect.unreachable(`expected validateFlexPolicy to reject: ${JSON.stringify(input)}`)
+  }
+
+  it('defaults absent policy to strict', () => {
+    expect(service.validateFlexPolicy(undefined, 1)).toEqual({
+      mode: 'strict',
+      requiredMinutes: null,
+      arrivalWindowBeforeMinutes: null,
+      arrivalWindowAfterMinutes: null,
+      coreStartTime: null,
+      coreEndTime: null,
+    })
+  })
+
+  it('rejects explicit null instead of silently resetting to strict', () => {
+    expectFlexInvalid(null, 1, 'flexPolicy')
+  })
+
+  it('accepts single-segment flex whose every clamped arrival covers core', () => {
+    // 09:00 ±60 => [08:00,10:00]; required 480 covers core 10:00-15:00.
+    expect(service.validateFlexPolicy({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, '09:00')).toEqual({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    })
+  })
+
+  it('rejects multi-segment flex (OD-4556-3)', () => {
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+    }, 2, 'flexPolicy.mode')
+  })
+
+  it('rejects unknown keys in both discriminated branches', () => {
+    expectFlexInvalid({ mode: 'strict', requiredMinutes: 480 }, 1, 'flexPolicy')
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+      unexpected: true,
+    }, 1, 'flexPolicy')
+  })
+
+  it('rejects incomplete core hours and both core-coverage inequalities independently', () => {
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 0,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: '10:00',
+    }, 1, 'flexPolicy.coreStartTime')
+    // P1: latest > coreStart even though requiredMinutes >= core duration
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60,
+      arrivalWindowAfterMinutes: 120,
+      coreStartTime: '10:00',
+      coreEndTime: '15:00',
+    }, 1, 'flexPolicy.coreStartTime', '09:00')
+    // P1: earliest + required < coreEnd even though latest <= coreStart and duration-only holds
+    expectFlexInvalid({
+      mode: 'flex_required_duration',
+      requiredMinutes: 360,
+      arrivalWindowBeforeMinutes: 120,
+      arrivalWindowAfterMinutes: 0,
+      coreStartTime: '09:00',
+      coreEndTime: '15:00',
+    }, 1, 'flexPolicy.coreStartTime', '09:00')
+  })
+})
+
 describe('deriveEnvelopeFromSegments', () => {
   it('sums per-segment minutes and never counts the break (480, not 540)', () => {
     const envelope = service.deriveEnvelopeFromSegments([
@@ -354,6 +457,27 @@ describe('assertShiftReferenceAllowed (canonical assignability guard)', () => {
       .rejects.toMatchObject({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED })
   })
 
+  it('admits a multi-segment reference only when the caller supplies the canonical posture capability', async () => {
+    const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 2 })
+    await expect(service.assertShiftReferenceAllowed(trx, {
+      orgId: 'org-a',
+      shiftId: SHIFT_ID,
+      producer: 'schedule_publication',
+      referenceSegments: true,
+    })).resolves.toBeUndefined()
+  })
+
+  it('an explicit closed posture cannot be widened by the private environment predicate', async () => {
+    process.env[FLAG] = 'org-a'
+    const trx = fakeTrx({ shiftRows: [{ id: SHIFT_ID }], segmentCount: 2 })
+    await expect(service.assertShiftReferenceAllowed(trx, {
+      orgId: 'org-a',
+      shiftId: SHIFT_ID,
+      producer: 'schedule_publication',
+      referenceSegments: false,
+    })).rejects.toMatchObject({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED })
+  })
+
   it('fails closed when a calculation caller cannot prove the persisted segment count', () => {
     expect(() => service.assertSegmentCalculationAllowed({
       orgId: 'org-a',
@@ -387,5 +511,31 @@ describe('applyShiftReferenceLabels (historical evidence reads)', () => {
     })
     expect(JSON.stringify(rows)).not.toContain(deletedId)
     expect(rows[1]).toEqual({ requesterShiftId: 'kept', requesterShiftLabel: 'Day Shift', requesterShiftStatus: 'available' })
+  })
+})
+
+describe('deleteShift fixed-schedule config blocker', () => {
+  it('returns the canonical typed 409 before deleting a referenced shift', async () => {
+    const shiftId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const statements: string[] = []
+    const trx = {
+      query: async (sql: string) => {
+        statements.push(sql)
+        if (sql.includes('SELECT id, name FROM attendance_shifts')) return [{ id: shiftId, name: 'Day' }]
+        if (sql.includes('attendance_group_fixed_schedule_configs')) return [{ total: 1 }]
+        if (sql.includes('COUNT(*)::int AS total')) return [{ total: 0 }]
+        throw new Error(`unexpected SQL: ${sql}`)
+      },
+    }
+    const db = {
+      transaction: async (callback: (client: typeof trx) => Promise<unknown>) => callback(trx),
+    }
+
+    await expect(service.deleteShift(db, { orgId: 'org-a', shiftId })).rejects.toMatchObject({
+      status: 409,
+      code: ERR.DELETE_BLOCKED,
+      details: [{ field: 'fixed_schedule_configs', message: 'fixed_schedule_configs: 1 reference(s)' }],
+    })
+    expect(statements.some(statement => statement.startsWith('DELETE FROM'))).toBe(false)
   })
 })

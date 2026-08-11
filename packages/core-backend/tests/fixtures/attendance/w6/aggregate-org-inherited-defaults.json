@@ -1,0 +1,60 @@
+{
+  "ok": true,
+  "data": {
+    "groupId": "a4556006-0002-4000-8000-000000000001",
+    "groupType": "free_time",
+    "timezone": "Asia/Shanghai",
+    "activeMemberCount": 3,
+    "managerPosture": { "ownerCount": 1, "subOwnerCount": 0 },
+    "calculationPosture": "legacy",
+    "domains": {
+      "membership": {
+        "label": "effective",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "people" }
+      },
+      "schedule": {
+        "label": "effective",
+        "strategy": "free_time",
+        "reasonCodes": [],
+        "sourceRefs": [],
+        "fixedSchedule": null,
+        "editorRef": { "kind": "group_context_route", "step": "schedule" }
+      },
+      "segments": {
+        "label": "effective",
+        "reasonCodes": [],
+        "sourceRefs": [],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "flex": {
+        "label": "effective",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "rules": {
+        "label": "org_inherited",
+        "source": "org_default",
+        "sourceRefs": [],
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_context_route", "step": "rules", "surface": "rule-sets" }
+      },
+      "punchMethod": {
+        "label": "org_inherited",
+        "source": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      },
+      "requestPosture": {
+        "label": "org_inherited",
+        "overtime": "org_inherited",
+        "makeupPunch": "org_inherited",
+        "outdoor": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      }
+    },
+    "conflicts": [],
+    "evaluatedAt": "2026-08-05T00:00:00.000Z"
+  }
+}
