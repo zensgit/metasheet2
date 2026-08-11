@@ -1352,7 +1352,36 @@ export function adminDirectoryRouter(): Router {
       )
       return
     }
-    const rawIntegrationId = integrationId ?? req.query.integrationId
+    const queryIntegrationId = req.query.integrationId
+    if (
+      queryIntegrationId !== undefined
+      && (
+        typeof queryIntegrationId !== 'string'
+        || !UUID_SHAPE_RE.test(queryIntegrationId)
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_INVALID',
+        'integrationId must be a UUID',
+      )
+      return
+    }
+    if (
+      integrationId !== undefined
+      && queryIntegrationId !== undefined
+      && queryIntegrationId !== integrationId
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_MISMATCH',
+        'integrationId query must match the route integrationId',
+      )
+      return
+    }
+    const rawIntegrationId = integrationId ?? queryIntegrationId
     if (
       rawIntegrationId !== undefined
       && (
@@ -1409,6 +1438,22 @@ export function adminDirectoryRouter(): Router {
   ): Promise<void> {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    const requestedMode = req.body?.mode
+    if (
+      requestedMode !== undefined
+      && (
+        typeof requestedMode !== 'string'
+        || requestedMode.trim() !== mode
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'RESTORE_MODE_INVALID',
+        `mode must match the ${mode} route`,
+      )
+      return
+    }
     if (!validateDeprovisionEventId(req, res)) return
     try {
       const result = await restoreDeprovisionEvent({

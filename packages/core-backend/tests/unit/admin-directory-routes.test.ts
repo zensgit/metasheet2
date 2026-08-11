@@ -391,6 +391,25 @@ describe('adminDirectoryRouter', () => {
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
   })
 
+  it('rejects a body mode that contradicts a fixed restore route', async () => {
+    const response = await invokeRoute(
+      'post',
+      '/deprovision-events/:eventId/reactivate',
+      {
+        params: { eventId: DEPROVISION_EVENT_ID },
+        body: { mode: 'admin_force' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'RESTORE_MODE_INVALID' },
+    })
+    expect(deprovisionMocks.restoreDeprovisionEvent).not.toHaveBeenCalled()
+  })
+
   it('maps orphan deny compensation drift to 409 without auditing success', async () => {
     deprovisionMocks.compensateSupersededDenyGrant.mockRejectedValue(
       Object.assign(new Error('grant provenance changed'), {
@@ -658,6 +677,25 @@ describe('adminDirectoryRouter', () => {
       error: { code: 'DEPROVISION_EVENT_ID_INVALID' },
     })
     expect(deprovisionMocks.restoreDeprovisionEvent).not.toHaveBeenCalled()
+  })
+
+  it('rejects a query integration id that contradicts the resource-scoped route', async () => {
+    const response = await invokeRoute(
+      'get',
+      '/integrations/:integrationId/deprovision-events',
+      {
+        params: { integrationId: DEPROVISION_INTEGRATION_ID },
+        query: { integrationId: '55555555-5555-4555-8555-555555555555' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_INTEGRATION_ID_MISMATCH' },
+    })
+    expect(deprovisionMocks.listDeprovisionEvents).not.toHaveBeenCalled()
   })
 
   it.each(['', 'abc', '10.5', '0', '201'])(
