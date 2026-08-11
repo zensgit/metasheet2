@@ -38,6 +38,8 @@ import {
   type ExactAnchorPlanAuthContext,
   type ExactAnchorRevertWriteIntent,
   type EvaluatePlanAuthorization,
+  type PreliminaryFullRead,
+  type FinalLockedFullRead,
 } from './exact-anchor-recovery-execute'
 import {
   classifyExactAnchorRecoveryPlan,
@@ -548,8 +550,11 @@ export async function executeExactAnchorRecoveryApply(
     token: string
     sheetId: string
     actorId: string
-    evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
+    /** PRELIMINARY full-read (P25 structural split) — see {@link PreliminaryFullRead}. */
+    preliminaryFullRead: PreliminaryFullRead
     stabilizeAuthorization: ExactAnchorApplyInput['stabilizeAuthorization']
+    /** FINAL, post-lock full-read (P25 structural split) — see {@link FinalLockedFullRead}. */
+    finalLockedFullRead: FinalLockedFullRead
     evaluatePlanAuthorization: EvaluatePlanAuthorization
     /** optional same-transaction mutation seam (durable event enqueue) — see the L8 module. */
     onMutationApplied?: ExactAnchorMutationTxnHook

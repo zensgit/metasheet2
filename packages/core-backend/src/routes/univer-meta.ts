@@ -10790,8 +10790,14 @@ export function univerMetaRouter(): Router {
           token: previewIdentity,
           sheetId,
           actorId,
-          evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+          // P25 structural split: preliminary (pre-lock) and final (post-lock/lease) are now two distinct
+          // fields/interfaces (`PreliminaryFullRead` / `FinalLockedFullRead`) so the kernel cannot conflate
+          // the two calls. Both are wired from the SAME `makeFullReadEvaluator` adapter (DB-fresh, re-resolved
+          // from the in-fence query — never a pre-fence closure) — behavior is unchanged from before the
+          // split; only the shape each call site is allowed to take is now structurally distinct.
+          preliminaryFullRead: makeFullReadEvaluator(req, sheetId),
           stabilizeAuthorization: makeAuthorizationStabilizer(),
+          finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
           evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
           onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
             appliedLinkInvalidations.push(...mutation.linkInvalidations)

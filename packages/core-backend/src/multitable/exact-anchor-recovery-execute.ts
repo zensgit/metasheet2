@@ -478,7 +478,7 @@ const requireLiveVersion = (v: unknown): number => {
   return v
 }
 
-type LockedRecoveryLiveRow = {
+export type LockedRecoveryLiveRow = {
   id: unknown
   sheet_id?: unknown
   data: unknown
@@ -488,6 +488,18 @@ type LockedRecoveryLiveRow = {
   created_by?: unknown
   created_at?: unknown
   updated_at?: unknown
+}
+
+/**
+ * The proof-of-lock evidence produced by {@link lockExactAnchorRecoveryAuthorityScope}: the complete,
+ * deterministically-ordered sheet + record lock scope actually held for this apply. Named (rather than
+ * left as an inline return type) so it can be threaded into {@link FinalLockedFullRead} as a REQUIRED
+ * second argument (P25 structural split — see that type's doc comment).
+ */
+export interface ExactAnchorLockedAuthorityScope {
+  authoritySheetIds: string[]
+  liveRows: LockedRecoveryLiveRow[]
+  lockedRecordKeys: ReadonlySet<string>
 }
 
 const recoveryRecordKey = (sheetId: string, recordId: string): string => `${sheetId}\u0000${recordId}`
@@ -505,11 +517,7 @@ export async function lockExactAnchorRecoveryAuthorityScope(
   query: QueryFn,
   sourceSheetId: string,
   composed?: ReadonlyMap<string, RecordStateAtT>,
-): Promise<{
-  authoritySheetIds: string[]
-  liveRows: LockedRecoveryLiveRow[]
-  lockedRecordKeys: ReadonlySet<string>
-}> {
+): Promise<ExactAnchorLockedAuthorityScope> {
   const linkFields = await query(
     `SELECT id, property
        FROM meta_fields
@@ -629,12 +637,52 @@ export async function lockExactAnchorRecoveryAuthorityScope(
   return { authoritySheetIds: orderedAuthoritySheetIds, liveRows, lockedRecordKeys }
 }
 
+/**
+ * P25 STRUCTURAL SPLIT (owner-ratified): the apply used to take a SINGLE `evaluateFullReadAccess` field
+ * and call it twice — once before any lock, once after every lock/lease — so a future refactor could
+ * silently let the pre-lock call start taking locks, or let the post-lock call skip re-adjudicating under
+ * the lease. The two roles are now two NAMED, non-interchangeable interfaces.
+ *
+ * PRELIMINARY (this type): DB-fresh, invoked BEFORE any authority row lock or lease exists. It is exactly
+ * {@link EvaluateRecoveryFullReadAccess} — the same bare `(query) => Promise<boolean>` shape the preview
+ * kernel (`resolveExactAnchor`) uses, because the preview never locks anything either. An unauthorized
+ * actor exits here, before any history/checkpoint/anchor query or authority row lock.
+ */
+export type PreliminaryFullRead = EvaluateRecoveryFullReadAccess
+
+/**
+ * P25 STRUCTURAL SPLIT (owner-ratified) — the FINAL half of the split described on {@link PreliminaryFullRead}.
+ * Invoked ONLY once every relevant sheet/record row lock (`lockExactAnchorRecoveryAuthorityScope`) AND the
+ * authority lease (`stabilizeAuthorization`) are held through COMMIT. The caller MUST supply that
+ * {@link ExactAnchorLockedAuthorityScope} lock evidence as a REQUIRED second argument.
+ *
+ * The compile-time protection this buys is ASYMMETRIC, not a hard guarantee either direction — say so
+ * plainly rather than implying more than the types deliver:
+ *   - pre-lock site → `finalLockedFullRead`: referencing the REAL `lockedScope` local before its `const`
+ *     declaration is a genuine `tsc` error (TS2448, "used before its declaration"); a lazy `undefined as
+ *     unknown as ExactAnchorLockedAuthorityScope` cast defeats it and compiles clean.
+ *   - post-lock site → `preliminaryFullRead`: this direction is UNGUARDED by the type system — a 1-arg
+ *     call to a 1-arg function typechecks with zero errors (verified: `tsc --noEmit` exit 0 under this
+ *     swap).
+ * The authoritative guard against either swap is therefore the real-DB drift test
+ * (`multitable-exact-anchor-apply-realdb.test.ts`, `P25 preliminaryFullRead / finalLockedFullRead
+ * structural split` — P25-A/B/C), which reds under both swaps by construction (order-of-calls + SQL
+ * sniffer + lock-evidence assertions), not the arity difference between these two types.
+ */
+export type FinalLockedFullRead = (
+  query: QueryFn,
+  lockedScope: ExactAnchorLockedAuthorityScope,
+) => Promise<boolean>
+
 export interface ExactAnchorApplyInput {
   token: string
   sheetId: string
   actorId: string
-  /** REQUIRED in-fence full-read adjudication (P1-2) — same contract as the preview. */
-  evaluateFullReadAccess: EvaluateRecoveryFullReadAccess
+  /**
+   * REQUIRED PRELIMINARY full-read adjudication (P1-2) — see {@link PreliminaryFullRead}. Called FIRST
+   * among sheet-state checks, before any lock is taken.
+   */
+  preliminaryFullRead: PreliminaryFullRead
   /**
    * REQUIRED execute-only authority stabilizer. Called after the complete sheet/record lock scope and
    * true restorable delta are known, but before the final authorization read. It leases only the actor
@@ -644,6 +692,12 @@ export interface ExactAnchorApplyInput {
     query: QueryFn,
     context: ExactAnchorPlanAuthContext,
   ) => Promise<'ready' | 'busy' | 'unavailable'>
+  /**
+   * REQUIRED FINAL full-read adjudication (P1-2) — see {@link FinalLockedFullRead}. Re-run only after
+   * every sheet/record row lock and the authority lease are held through COMMIT (closes a
+   * revoke-after-check race without exposing history/checkpoint state to a denied actor).
+   */
+  finalLockedFullRead: FinalLockedFullRead
   /**
    * REQUIRED in-fence WRITE authorization over the true restorable projection delta (v3.7 §5).
    * Invoked AFTER projection and BEFORE scalar/link validation + mintOperation/any write (no-oracle).
@@ -703,7 +757,7 @@ export async function applyExactAnchorRecovery(
       //    This preserves the no-oracle ordering while the plan is assembled. The authoritative full-read
       //    and plan checks run again below while holding every relevant permission-authority lock through
       //    COMMIT, closing a revoke-after-check race without exposing history/checkpoint state.
-      if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
+      if (!(await input.preliminaryFullRead(query))) throw new ApplyRefusalError('forbidden')
       if (authorizedScopeHash !== hashRecoveryAuthorizationScope({ sheetId: input.sheetId, actorId: input.actorId })) {
         throw new ApplyRefusalError('forbidden')
       }
@@ -931,7 +985,7 @@ export async function applyExactAnchorRecovery(
       // Full-read is repeated under the authority locks; the route adapter then covers source row/field,
       // person membership, and foreign target read/edit authority. Every denial is the same `forbidden`,
       // so value-invalid / missing-target cannot become an authorization oracle.
-      if (!(await input.evaluateFullReadAccess(query))) throw new ApplyRefusalError('forbidden')
+      if (!(await input.finalLockedFullRead(query, lockedScope))) throw new ApplyRefusalError('forbidden')
       if (!(await input.evaluatePlanAuthorization(query, authorizationContext))) {
         throw new ApplyRefusalError('forbidden')
       }

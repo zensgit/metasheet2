@@ -31,6 +31,7 @@ import {
   lockExactAnchorRecoveryAuthorityScope,
   pruneExpiredRecoveryTokenBurns,
   type ExactAnchorApplyMode,
+  type ExactAnchorLockedAuthorityScope,
 } from '../../src/multitable/exact-anchor-recovery-execute'
 import { countInboundLinkCaptureRows, isTombstoneCaptureEnabled } from '../../src/multitable/tombstone-capture'
 import {
@@ -57,18 +58,51 @@ const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, 
 const txn = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> =>
   poolManager.get().transaction(async ({ query }) => fn(query as unknown as QueryFn)) as Promise<T>
 
+/**
+ * A `txn` variant that also records every SQL statement text issued through the kernel's `query`, for the
+ * P25 structural-split guard: proving the PRELIMINARY gate never reaches a row-lock/burn statement, and the
+ * FINAL gate is only ever reached AFTER the real lock statements ran.
+ */
+const spyTxn = () => {
+  const sql: string[] = []
+  const run = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> =>
+    poolManager.get().transaction(async ({ query }) => {
+      const wrapped = (async (text: string, params?: unknown[]) => {
+        sql.push(text)
+        return (query as unknown as QueryFn)(text, params)
+      }) as unknown as QueryFn
+      return fn(wrapped)
+    }) as Promise<T>
+  return { run, sql }
+}
+const issuesRowLockSql = (sql: string[]) => sql.some((s) => /FOR (UPDATE|NO KEY UPDATE)/i.test(s))
+const issuesBurnInsertSql = (sql: string[]) => sql.some((s) => /INSERT INTO meta_recovery_token_burns/i.test(s))
+
 // Kernel adjudication stubs (route injects real evaluators).
 const ALLOW_FULL_READ = async () => true
 const DENY_FULL_READ = async () => false
 const ALLOW_PLAN = async () => true
 const DENY_PLAN = async () => false
 
-const applyArgs = (token: string, opts?: { fullRead?: typeof ALLOW_FULL_READ; planAuth?: typeof ALLOW_PLAN }) => ({
+// P25: the kernel now takes two structurally distinct full-read fields (preliminary / final-locked). Most
+// existing callers only care that "full read is denied" refuses the whole apply, so `fullRead` still feeds
+// BOTH fields unchanged; `preliminaryFullRead` / `finalLockedFullRead` let a test differentiate the two
+// phases (see the P25 structural-split guard tests below).
+const applyArgs = (
+  token: string,
+  opts?: {
+    fullRead?: typeof ALLOW_FULL_READ
+    planAuth?: typeof ALLOW_PLAN
+    preliminaryFullRead?: typeof ALLOW_FULL_READ
+    finalLockedFullRead?: typeof ALLOW_FULL_READ
+  },
+) => ({
   token,
   sheetId: SHEET,
   actorId: ACTOR,
-  evaluateFullReadAccess: opts?.fullRead ?? ALLOW_FULL_READ,
+  preliminaryFullRead: opts?.preliminaryFullRead ?? opts?.fullRead ?? ALLOW_FULL_READ,
   stabilizeAuthorization: async () => 'ready' as const,
+  finalLockedFullRead: opts?.finalLockedFullRead ?? opts?.fullRead ?? ALLOW_FULL_READ,
   evaluatePlanAuthorization: opts?.planAuth ?? ALLOW_PLAN,
 })
 
@@ -1804,5 +1838,122 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       burnedAtLeading.map((r) => r.indexname),
       `expected a burned_at-leading index on meta_recovery_token_burns; got:\n${idxs.map((r) => `  ${r.indexname}: ${r.indexdef}`).join('\n')}`,
     ).not.toEqual([])
+  })
+
+  // ── P25 STRUCTURAL SPLIT: preliminaryFullRead / finalLockedFullRead are now distinct interfaces ─────────
+  // Drift guard: the owner-ratified split replaces the SINGLE `evaluateFullReadAccess` field (previously
+  // read twice — once pre-lock, once post-lock/lease — by identical code) with two independently-typed,
+  // independently-wired callbacks. These goldens prove the STRUCTURE, not just the verdict:
+  //   (a) preliminaryFullRead denies BEFORE any authority row lock, burn insert, or authority lease;
+  //   (b) finalLockedFullRead is only ever reached AFTER the real row locks + lease, and receives the REAL
+  //       lock evidence (not a stand-in) — see the P25-C positive control.
+  // Mutation self-proof performed manually (see PR/task notes): swapping either call site in
+  // `applyExactAnchorRecovery` (exact-anchor-recovery-execute.ts) to call the OTHER field turns every one
+  // of the three tests below RED — P25-A and P25-B via `events` ordering + the SQL sniffer, P25-C via the
+  // captured lock evidence going undefined/wrong-shaped.
+  describe('P25 preliminaryFullRead / finalLockedFullRead structural split', () => {
+    test('P25-A PRELIMINARY GATE: a deny here exits BEFORE any authority row lock, the burn insert, or the authority lease — finalLockedFullRead and stabilizeAuthorization are never reached', async () => {
+      const { R_REV, anchorOp } = await seedWorld()
+      const pv = await preview(anchorOp)
+      const before = await liveRow(R_REV)
+      const events: string[] = []
+      const spy = spyTxn()
+      const out = await applyExactAnchorRecovery(spy.run, {
+        token: pv.token,
+        sheetId: SHEET,
+        actorId: ACTOR,
+        preliminaryFullRead: async () => {
+          events.push('preliminary')
+          return false
+        },
+        stabilizeAuthorization: async () => {
+          events.push('lease')
+          return 'ready' as const
+        },
+        finalLockedFullRead: async () => {
+          events.push('final')
+          return true
+        },
+        evaluatePlanAuthorization: ALLOW_PLAN,
+      })
+      expect(out).toEqual({ ok: false, reason: 'forbidden' })
+      // Structural: final/lease are NEVER reached — a swap that routed the final check onto the
+      // preliminary interface (or vice-versa) would push 'final' or 'lease' here too.
+      expect(events).toEqual(['preliminary'])
+      expect(issuesRowLockSql(spy.sql)).toBe(false) // no authority row lock was ever attempted
+      expect(issuesBurnInsertSql(spy.sql)).toBe(false) // no burn attempted either
+      expect(await liveRow(R_REV)).toEqual(before) // zero writes
+      expect(await burnCount()).toBe(0)
+    })
+
+    test('P25-B FINAL GATE: a deny here only happens AFTER the authority row locks and the authority lease were both taken — preliminaryFullRead and stabilizeAuthorization DID run first, and the burn (rolled back) proves the transaction got that far', async () => {
+      const { R_REV, anchorOp } = await seedWorld()
+      const pv = await preview(anchorOp)
+      const before = await liveRow(R_REV)
+      const events: string[] = []
+      const spy = spyTxn()
+      const out = await applyExactAnchorRecovery(spy.run, {
+        token: pv.token,
+        sheetId: SHEET,
+        actorId: ACTOR,
+        preliminaryFullRead: async () => {
+          events.push('preliminary')
+          return true
+        },
+        stabilizeAuthorization: async () => {
+          events.push('lease')
+          return 'ready' as const
+        },
+        finalLockedFullRead: async () => {
+          events.push('final')
+          return false
+        },
+        evaluatePlanAuthorization: ALLOW_PLAN,
+      })
+      expect(out).toEqual({ ok: false, reason: 'forbidden' })
+      // Structural: preliminary and lease run BEFORE final, in that exact order — the same order the
+      // real kernel enforces by lexical position, not merely by verdict.
+      expect(events).toEqual(['preliminary', 'lease', 'final'])
+      // POSITIVE controls (anti-vacuous): the row locks and the burn genuinely ran before final denied —
+      // a sniffer that never observes lock/burn SQL at all (e.g. a broken wrapper) would false-green P25-A.
+      expect(issuesRowLockSql(spy.sql)).toBe(true)
+      expect(issuesBurnInsertSql(spy.sql)).toBe(true)
+      expect(await liveRow(R_REV)).toEqual(before) // whole-apply refusal ⇒ zero net writes (burn rolled back)
+      expect(await burnCount()).toBe(0) // rolled back, not half-dead
+    })
+
+    test('P25-C HAPPY PATH (positive control): finalLockedFullRead receives the REAL lock evidence, proving it ran under the actual locks rather than a swapped-in stand-in', async () => {
+      const { R_REV, anchorOp } = await seedWorld()
+      const pv = await preview(anchorOp)
+      const events: string[] = []
+      let capturedScope: ExactAnchorLockedAuthorityScope | undefined
+      const out = await applyExactAnchorRecovery(txn, {
+        token: pv.token,
+        sheetId: SHEET,
+        actorId: ACTOR,
+        preliminaryFullRead: async () => {
+          events.push('preliminary')
+          return true
+        },
+        stabilizeAuthorization: async () => {
+          events.push('lease')
+          return 'ready' as const
+        },
+        finalLockedFullRead: async (_query, lockedScope) => {
+          events.push('final')
+          capturedScope = lockedScope
+          return true
+        },
+        evaluatePlanAuthorization: ALLOW_PLAN,
+      })
+      expect(out.ok).toBe(true)
+      expect(events).toEqual(['preliminary', 'lease', 'final'])
+      expect(capturedScope).toBeDefined()
+      expect(capturedScope!.authoritySheetIds).toContain(SHEET)
+      expect(capturedScope!.liveRows.length).toBeGreaterThan(0)
+      const nulKey = `${SHEET}${String.fromCharCode(0)}${R_REV}`
+      // Mirrors recoveryRecordKey() in exact-anchor-recovery-execute.ts (NUL-joined sheetId/recordId).
+      expect(capturedScope!.lockedRecordKeys.has(nulKey)).toBe(true)
+    })
   })
 })
