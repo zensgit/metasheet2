@@ -68,6 +68,9 @@ vi.mock('../../src/services/ApprovalDirectoryOrg', async (importOriginal) => {
 
 const { attendanceAdminRouter } = await import('../../src/routes/attendance-admin')
 const { isAdmin, userHasPermission } = await import('../../src/rbac/service')
+const actualRbacService = await vi.importActual<typeof import('../../src/rbac/service')>(
+  '../../src/rbac/service',
+)
 const pinned = usePinnedServer()
 
 const ORG = '44444444-4444-4444-8444-444444444444'
@@ -138,14 +141,9 @@ function makeApp(user: Record<string, unknown> | undefined) {
 beforeEach(() => {
   queryMock.mockReset()
   transactionMock.mockReset()
-  vi.mocked(isAdmin).mockReset().mockImplementation(async (userId, runQuery) => {
-    if (!runQuery) return false
-    const { rows } = await runQuery(
-      'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1',
-      [userId, 'admin'],
-    )
-    return rows.length > 0
-  })
+  vi.mocked(isAdmin).mockReset().mockImplementation(
+    async (userId, runQuery) => (runQuery ? actualRbacService.isAdmin(userId, runQuery) : false),
+  )
   vi.mocked(userHasPermission).mockReset().mockResolvedValue(true)
 })
 
