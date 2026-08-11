@@ -333,6 +333,30 @@ async function evidenceRunnerMutationFails() {
   }
 }
 
+async function packageBuildNoDepsControlMutationFails() {
+  const root = await clonePinnedTree()
+  try {
+    const target = path.join(
+      root,
+      'scripts/ops/multitable-onprem-package-build.sh',
+    )
+    const original = fs.readFileSync(target, 'utf8')
+    const mutated = original.replace(
+      'install-deps:0^|1',
+      'install-deps:1^|1',
+    )
+    assert.equal(mutated.length, original.length)
+    assert.notEqual(mutated, original)
+    fs.writeFileSync(target, mutated)
+    expectReason(
+      () => verifySealedExportPackageProvenance({ repoRoot: root }),
+      'SEALED_EXPORT_INTERNAL_ERROR',
+    )
+  } finally {
+    await fsPromises.rm(root, { force: true, recursive: true })
+  }
+}
+
 async function isolatedDependencyMutationFails() {
   const root = await clonePinnedTree()
   try {
@@ -487,6 +511,7 @@ async function main() {
   await profileCertificationDependencyMutationFails()
   await canonicalJsonDependencyMutationFails()
   await evidenceRunnerMutationFails()
+  await packageBuildNoDepsControlMutationFails()
   await isolatedDependencyMutationFails()
   await isolatedLockfileMutationFails()
   await packageShellVerifierRejectsPinnedMutation()
