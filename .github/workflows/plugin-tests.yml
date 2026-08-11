@@ -185,6 +185,16 @@ jobs:
         if: matrix.node-version == '20.x'
         run: node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
 
+      # DingTalk production-readiness inventory (manual-only, values-free, read-only) + OAuth
+      # stability SSH host-identity hardening. Wired into required test (20.x) so host-key
+      # pinning and values-free/read-only rails cannot regress behind a green PR.
+      - name: DingTalk production-readiness inventory contract (required lane)
+        id: dingtalk-production-readiness-inventory-contract
+        if: matrix.node-version == '20.x'
+        run: |
+          node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
+
       # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
       # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
       # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the
