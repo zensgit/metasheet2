@@ -59,7 +59,7 @@ remaining dependence on a W6 outcome explicitly.
 
 **Re-verified 2026-08-11 against `origin/main@60afbffe07bfddc7f32ff08549e36e995662b228`
 — the decision state has moved three times since this document's pinned baseline,
-and both moves are recorded here rather than silently carried forward or left
+and all three moves are recorded here rather than silently carried forward or left
 at their earlier "OPEN/unmerged" wording.**
 
 - **2026-08-08:** PR **4821** (the durable W6 RATIFY record) **MERGED** as
@@ -413,7 +413,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 
 1. **Precondition (hard)**: owner signs off the W6 lock at its exact merged
    SHA and answers OD-W6-1..9; W6 runtime slices complete their own gates.
-   (**Status as of 2026-08-10** — see the §0 update: the first clause is now
+   (**Status as of 2026-08-11** — see the §0 update: the first clause is now
    MET — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, ratifying
    merged SHA `2967da018ceea41b91098e14d4c15a57236eb5f8` and answering
    OD-W6-1..9 option (a); the authorization it carries reaches only the W6-1
