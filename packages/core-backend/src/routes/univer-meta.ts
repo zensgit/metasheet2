@@ -99,10 +99,7 @@ import {
   type ExactAnchorLinkInvalidation,
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
-import {
-  isLiveLinkTargetForeignKeyViolation,
-  isRetryableLiveLinkDatabaseConflict,
-} from '../multitable/live-link-projection-integrity'
+import { isRetryableLiveLinkDatabaseConflict } from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -9080,7 +9077,7 @@ export function univerMetaRouter(): Router {
             return null
           })
         } catch (e) {
-          if (isLiveLinkTargetForeignKeyViolation(e) || isRetryableLiveLinkDatabaseConflict(e)) {
+          if (isRetryableLiveLinkDatabaseConflict(e)) {
             return res.status(409).json({
               ok: false,
               error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the undelete.' },
@@ -15184,12 +15181,6 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
-      }
-      if (isLiveLinkTargetForeignKeyViolation(err)) {
-        return res.status(409).json({
-          ok: false,
-          error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the form submission.' },
-        })
       }
       if (isRetryableLiveLinkDatabaseConflict(err)) {
         return res.status(409).json({

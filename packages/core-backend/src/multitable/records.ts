@@ -30,10 +30,7 @@ import {
   resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
-import {
-  isLiveLinkTargetForeignKeyViolation,
-  isRetryableLiveLinkDatabaseConflict,
-} from './live-link-projection-integrity'
+import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -414,9 +411,6 @@ async function replaceRecordLinks(
           [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
         )
       } catch (error) {
-        if (isLiveLinkTargetForeignKeyViolation(error)) {
-          throw new MultitableRecordValidationError(`Linked record no longer exists: ${foreignId}`)
-        }
         if (isRetryableLiveLinkDatabaseConflict(error)) {
           throw new MultitableRecordValidationError('Linked records changed concurrently; retry the write')
         }

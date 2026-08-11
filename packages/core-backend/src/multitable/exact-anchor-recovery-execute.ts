@@ -55,7 +55,6 @@ import {
 } from './hierarchy-cycle-guard'
 import {
   hydrateLiveLinkProjection,
-  isLiveLinkTargetForeignKeyViolation,
   LiveLinkProjectionDataError,
   loadAuthoritativeLiveLinkEdgesForSheet,
 } from './live-link-projection-integrity'
@@ -458,9 +457,6 @@ export function classifyExactAnchorDatabaseConflict(e: unknown): ExactAnchorAppl
   if (typeof e !== 'object' || e === null) return null
   const pg = e as { code?: unknown; constraint?: unknown }
   if (pg.code === '40P01' || pg.code === '40001' || pg.code === '55P03') return 'preview-drift'
-  if (isLiveLinkTargetForeignKeyViolation(e)) {
-    return 'link-integrity'
-  }
   return null
 }
 

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'vitest'
 
 import {
   hydrateLiveLinkProjection,
-  isLiveLinkTargetForeignKeyViolation,
   isRetryableLiveLinkDatabaseConflict,
   LiveLinkProjectionDataError,
 } from '../../src/multitable/live-link-projection-integrity'
@@ -17,9 +16,7 @@ const queryWithEdges = (
 ): QueryFn => async () => ({ rows, rowCount: rows.length })
 
 describe('live link projection integrity', () => {
-  test('classifies only the owned FK and retryable transaction conflicts', () => {
-    expect(isLiveLinkTargetForeignKeyViolation({ code: '23503', constraint: 'meta_links_foreign_record_id_fkey' })).toBe(true)
-    expect(isLiveLinkTargetForeignKeyViolation({ code: '23503', constraint: 'some_other_fkey' })).toBe(false)
+  test('classifies retryable transaction conflicts', () => {
     expect(isRetryableLiveLinkDatabaseConflict({ code: '40P01' })).toBe(true)
     expect(isRetryableLiveLinkDatabaseConflict({ code: '40001' })).toBe(true)
     expect(isRetryableLiveLinkDatabaseConflict({ code: '23503' })).toBe(false)

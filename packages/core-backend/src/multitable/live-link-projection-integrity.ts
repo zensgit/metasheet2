@@ -2,14 +2,6 @@ import type { QueryFn } from './permission-service'
 
 type LiveLinkRecord = { data: Record<string, unknown> }
 
-export const LIVE_LINK_TARGET_CONSTRAINT = 'meta_links_foreign_record_id_fkey'
-
-export function isLiveLinkTargetForeignKeyViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null
-    && (error as { code?: unknown }).code === '23503'
-    && (error as { constraint?: unknown }).constraint === LIVE_LINK_TARGET_CONSTRAINT
-}
-
 export function isRetryableLiveLinkDatabaseConflict(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
   const code = (error as { code?: unknown }).code

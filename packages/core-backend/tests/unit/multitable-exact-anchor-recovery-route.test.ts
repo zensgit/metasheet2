@@ -619,13 +619,9 @@ describe('HTTP mapping — every current ExactAnchorApplyRefusal is values-free'
     expect(mapApplyRefusal('history-incomplete')).toEqual(mapHistoryIncompleteRefusal())
   })
 
-  test('database deadlock/serialization and live-target FK failures become retryable typed refusals', () => {
+  test('database deadlock/serialization failures become retryable typed refusals; FK-shaped errors are not classified', () => {
     expect(classifyExactAnchorDatabaseConflict({ code: '40P01' })).toBe('preview-drift')
     expect(classifyExactAnchorDatabaseConflict({ code: '40001' })).toBe('preview-drift')
-    expect(classifyExactAnchorDatabaseConflict({
-      code: '23503',
-      constraint: 'meta_links_foreign_record_id_fkey',
-    })).toBe('link-integrity')
     expect(classifyExactAnchorDatabaseConflict({ code: '23503', constraint: 'some_other_fk' })).toBeNull()
     expect(classifyExactAnchorDatabaseConflict(new Error('not postgres'))).toBeNull()
   })

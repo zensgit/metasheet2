@@ -52,10 +52,7 @@ import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-der
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
-import {
-  isLiveLinkTargetForeignKeyViolation,
-  isRetryableLiveLinkDatabaseConflict,
-} from './live-link-projection-integrity'
+import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
@@ -743,9 +740,6 @@ export class RecordService {
                 [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
               )
             } catch (error) {
-              if (isLiveLinkTargetForeignKeyViolation(error)) {
-                throw new RecordValidationError(`Linked record no longer exists: ${foreignId}`)
-              }
               if (isRetryableLiveLinkDatabaseConflict(error)) {
                 throw new RecordValidationError('Linked records changed concurrently; retry the write')
               }
@@ -1192,9 +1186,6 @@ export class RecordService {
               [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
             )
           } catch (error) {
-            if (isLiveLinkTargetForeignKeyViolation(error)) {
-              throw new RecordRestoreConflictError(`Cannot restore: linked record no longer exists: ${foreignId}`)
-            }
             if (isRetryableLiveLinkDatabaseConflict(error)) {
               throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
             }
@@ -1214,7 +1205,7 @@ export class RecordService {
             const replay = await replayInboundLinks(query, deleteRevisionId)
             inboundOut = { ...replay, recoverable: replay.total > 0 }
           } catch (error) {
-            if (isLiveLinkTargetForeignKeyViolation(error) || isRetryableLiveLinkDatabaseConflict(error)) {
+            if (isRetryableLiveLinkDatabaseConflict(error)) {
               throw new RecordRestoreConflictError('Cannot restore: an inbound linked record was deleted concurrently')
             }
             throw error
@@ -1568,9 +1559,6 @@ export class RecordService {
               [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
             )
           } catch (error) {
-            if (isLiveLinkTargetForeignKeyViolation(error)) {
-              throw new RecordValidationError(`Linked record no longer exists: ${foreignId}`)
-            }
             if (isRetryableLiveLinkDatabaseConflict(error)) {
               throw new RecordValidationError('Linked records changed concurrently; retry the write')
             }
