@@ -38,7 +38,7 @@
 > rows L1, L2, L6, **L8 (now landed — PR 4805 MERGED)**, L9, L10,
 > **L11 (Gate C implementation landed — PR 4839 MERGED)**, L12, and §10.
 > Re-verified 2026-08-11 against
-> `origin/main@3767d87cc352bc8341e729a121b7c92b5b4a234d`.
+> `origin/main@b4ec95146a11d2155de17654d69b0c241953a8f0`.
 
 ## 0. Purpose and authority
 
@@ -666,7 +666,7 @@ Code:
 - L8 wiring evidence — **the gap this evidence chain tracked is now closed**
   (found by the #4804 adversarial gate; tracked through five rebase rounds
   while `PR 4805` was open; re-verified 2026-08-11 against
-  `origin/main@3767d87cc352bc8341e729a121b7c92b5b4a234d`, after `PR 4805`
+  `origin/main@b4ec95146a11d2155de17654d69b0c241953a8f0`, after `PR 4805`
   MERGED `4c28467c54f376ad5a68718d3dbe6ad50c76a917`):
   `.github/workflows/plugin-tests.yml` no-DB core-backend test step ("Run
   core-backend tests", no `DATABASE_URL`, `~L646` at the current tip — this
@@ -702,7 +702,7 @@ Documents:
 - W7 draft lock `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md` (companion document in this PR)
 
 GitHub state, **re-queried 2026-08-11 against current
-`origin/main@3767d87cc352bc8341e729a121b7c92b5b4a234d`** (this branch has
+`origin/main@b4ec95146a11d2155de17654d69b0c241953a8f0`** (this branch has
 been caught up to this exact main tip; the older `5c3146ac…` base remains
 historical provenance only — the
 2026-08-08 round's line recorded PRs 4805/4821 as OPEN/unmerged; both have

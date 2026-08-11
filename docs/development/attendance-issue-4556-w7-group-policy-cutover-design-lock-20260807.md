@@ -57,7 +57,7 @@ below as decided, and treats every W6 semantic beyond it (W6-2 contract
 wiring, W6-3 UI, W6-4 verification) as still undecided. Section 6 lists every
 remaining dependence on a W6 outcome explicitly.
 
-**Re-verified 2026-08-11 against `origin/main@3767d87cc352bc8341e729a121b7c92b5b4a234d`
+**Re-verified 2026-08-11 against `origin/main@b4ec95146a11d2155de17654d69b0c241953a8f0`
 — the decision state has moved three times since this document's pinned baseline,
 and all three moves are recorded here rather than silently carried forward or left
 at their earlier "OPEN/unmerged" wording.**
@@ -498,7 +498,7 @@ Documents:
 - `docs/development/attendance-4709-fser4-member-projection-contract-amendment-20260804.md:136-183` (§3-§4)
 
 GitHub state, **re-queried 2026-08-11 against current
-`origin/main@3767d87cc352bc8341e729a121b7c92b5b4a234d`** (this branch has
+`origin/main@b4ec95146a11d2155de17654d69b0c241953a8f0`** (this branch has
 been caught up to that exact tip; the older `5c3146ac…` base remains
 historical provenance only). The 2026-08-08 round's line this replaces listed
 PRs 4805/4821 as
