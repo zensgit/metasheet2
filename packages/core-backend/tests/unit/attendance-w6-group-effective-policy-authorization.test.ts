@@ -81,10 +81,17 @@ type Client = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[
 /** Every SQL shape a `free_time`, no-rule-set, no-membership-overlap group
  * touches — the aggregate's own reads, plus the membership check when the
  * caller is not admin. Throws on anything unmatched so drift is loud. */
-function respond(sql: string, memberRow: Row | null): { rows: Row[]; rowCount: number } {
+function respond(
+  sql: string,
+  memberRow: Row | null,
+  platformAdminRow: Row | null = null,
+): { rows: Row[]; rowCount: number } {
   const s = sql.toLowerCase()
   if (s.includes('set transaction read only')) return { rows: [], rowCount: 0 }
-  if (s.includes('from user_roles')) return { rows: [], rowCount: 0 }
+  if (s.includes('from user_roles')) {
+    const rows = platformAdminRow ? [platformAdminRow] : []
+    return { rows, rowCount: rows.length }
+  }
   if (s.includes('from user_orgs uo')) {
     const rows = memberRow ? [memberRow] : []
     return { rows, rowCount: rows.length }
@@ -103,13 +110,13 @@ function respond(sql: string, memberRow: Row | null): { rows: Row[]; rowCount: n
   throw new Error(`unexpected SQL reached the shared transaction client: ${sql}`)
 }
 
-function installSharedTransaction(memberRow: Row | null): { calls: string[] } {
+function installSharedTransaction(memberRow: Row | null, platformAdminRow: Row | null = null): { calls: string[] } {
   const calls: string[] = []
   transactionMock.mockImplementation(async (handler: (client: Client) => Promise<unknown>) => {
     const client: Client = {
       query: vi.fn(async (sql: string) => {
         calls.push(sql)
-        return respond(sql, memberRow)
+        return respond(sql, memberRow, platformAdminRow)
       }),
     }
     return handler(client)
@@ -181,6 +188,18 @@ describe('post-guard platform-admin, membership, validation, and aggregate reads
     // No `user_orgs` statement: the admin claim short-circuits it.
     expect(calls.some((sql) => sql.toLowerCase().includes('from user_orgs'))).toBe(false)
     // But the aggregate's own reads did run, on the same handle.
+    expect(calls.some((sql) => sql.toLowerCase().includes('from attendance_groups'))).toBe(true)
+  })
+
+  it('a DB-backed platform admin without a legacy role is recognized on the shared handle and skips membership', async () => {
+    const { calls } = installSharedTransaction(null, { '?column?': 1 })
+    pinned.setApp(makeApp({ id: ADMIN_USER, orgId: ORG }))
+    const res = await request(pinned.url()).get(`/api/attendance/groups/${GROUP}/effective-policy`)
+    expect(res.status).toBe(200)
+    expect(transactionMock).toHaveBeenCalledTimes(1)
+    expect(queryMock).not.toHaveBeenCalled()
+    expect(calls.filter((sql) => sql.toLowerCase().includes('from user_roles'))).toHaveLength(1)
+    expect(calls.some((sql) => sql.toLowerCase().includes('from user_orgs'))).toBe(false)
     expect(calls.some((sql) => sql.toLowerCase().includes('from attendance_groups'))).toBe(true)
   })
 
