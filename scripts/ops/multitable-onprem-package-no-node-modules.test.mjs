@@ -328,6 +328,21 @@ test('on-prem package build emits first-hop Windows bootstrap sidecar assets', (
   )
   assert.match(
     buildScript,
+    /set "INSTALL_DEPS=%~3"[\s\S]*if "%INSTALL_DEPS%"=="" set "INSTALL_DEPS=1"/,
+    'the bootstrap wrapper should accept an explicit dependency-install control while preserving its default',
+  )
+  assert.match(
+    buildScript,
+    /set "RUN_MIGRATIONS=%~4"[\s\S]*if "%RUN_MIGRATIONS%"=="" set "RUN_MIGRATIONS=1"/,
+    'the bootstrap wrapper should accept an explicit migration control while preserving its default',
+  )
+  assert.match(
+    buildScript,
+    /-InstallDeps "%INSTALL_DEPS%" -RunMigrations "%RUN_MIGRATIONS%"/,
+    'the bootstrap wrapper should forward both controls to the fresh launcher sidecar',
+  )
+  assert.match(
+    buildScript,
     /write_sha_file "\$BOOTSTRAP_PS1_TMP_PATH"/,
     'the PowerShell sidecar should get a sha256 file',
   )
