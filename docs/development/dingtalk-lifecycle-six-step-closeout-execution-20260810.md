@@ -3,7 +3,7 @@
 - Date: 2026-08-10
 - Updated: 2026-08-12
 - Status: **CODE + STAGING ALIAS CANARY COMPLETE / PENDING + DEPROVISION + EXTERNAL GATES NOT EXECUTED**
-- Baseline: `origin/main @ ddec28b12ebff97fae33af45553d77c149d816e1`
+- Baseline: `origin/main @ 24794811b1c800402006b30d6e4fa9df670e124e`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
 - Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status` and transient `alias -> off` executed; pending/deprovision not executed
 
@@ -105,6 +105,9 @@ The safe OFF baseline and transient alias canary are proven:
 6. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
 7. [Lifecycle status 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038) re-proved the exact staging SHA, healthy backend, zero pending migrations, mode `off`, and all three flags `false`.
 8. [Lifecycle alias 31504979575](https://github.com/zensgit/metasheet2/actions/runs/31504979575) proved real password login before ON, while alias-only was live, and after rollback. It reported zero collisions and finished in exact mode `off` with all three flags `false`.
+9. [#4873](https://github.com/zensgit/metasheet2/pull/4873), merge commit `24794811b1c800402006b30d6e4fa9df670e124e`, hardened deprovision execution with a caller-reserved exact run id, recovery journal, exact ledger binding, and dedicated one-account/exclusive-window gates.
+10. [Attendance staging deploy 31528635839](https://github.com/zensgit/metasheet2/actions/runs/31528635839), [lifecycle status 31528753683](https://github.com/zensgit/metasheet2/actions/runs/31528753683), and [OFF preflight 31528911914](https://github.com/zensgit/metasheet2/actions/runs/31528911914) jointly proved the exact hardened deploy, healthy backend, zero pending migrations, and all three lifecycle flags OFF.
+11. [Lifecycle alias 31529335625](https://github.com/zensgit/metasheet2/actions/runs/31529335625) re-ran the three password-login legs against the hardened deploy, reported zero collisions, and finished in exact mode `off`. This supersedes the older deploy as the current alias proof.
 
 The former image-tag/health-commit conflict is resolved. Alias production enablement remains a separate owner GO. Pending and deprovision operators are implemented but remain blocked by the absence of an explicitly owned real test subject and, for deprovision, a dedicated one-account integration. The existing shared employee integration is not eligible.
 
@@ -157,5 +160,6 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Staging operator lane, #4851 | `0083621f5dd1fd6dbeb0a5b71815156804e20a3b` |
 | Per-lane scratch DB mitigation, #4852 | `f0745831fe5385ccacf8fe6d6e5fd51174c02117` |
 | Exact staging Compose/provenance sync, #4853 | `ddec28b12ebff97fae33af45553d77c149d816e1` |
+| Canary exact-run recovery and dedicated-integration hardening, #4873 | `24794811b1c800402006b30d6e4fa9df670e124e` |
 
 The staging alias canary is complete and rolled back. Pending/deprovision canaries, U1-U13/corp-anchor, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Issue #4820 remains open for recurrence observation. None of those remaining gates is represented as PASS by this closeout.

@@ -1,7 +1,7 @@
 # DingTalk lifecycle canary — separate ops GO (not auto-enabled)
 
 **Date:** 2026-07-24
-**Updated:** 2026-08-12 (alias run 31504979575 completed with required OFF rollback; pending/deprovision now have fail-closed transient operators but remain **NOT EXECUTED**; deprovision requires a dedicated one-account integration and pre-reserves its exact sync run UUID before env/HTTP)
+**Updated:** 2026-08-12 (hardened-deploy alias run 31529335625 completed with required OFF rollback at exact SHA `24794811b1c800402006b30d6e4fa9df670e124e`; pending/deprovision have fail-closed transient operators but remain **NOT EXECUTED**; deprovision requires a dedicated one-account integration and pre-reserves its exact sync run UUID before env/HTTP)
 **Related locks:**
 - `dingtalk-directory-admission-activation-lifecycle-design-20260723.md` Rev 4.2
 - `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.5
@@ -108,7 +108,7 @@ Backfill alias rows **may persist** after the run. Artifacts report only boolean
 
 ## Current staging baseline (alias executed and rolled back)
 
-As of 2026-08-11 the alias cutover canary is complete and rolled back. Pending and deprovision remain **NOT EXECUTED**. Safe preparation and execution evidence:
+As of 2026-08-12 the alias cutover canary is complete and rolled back. Pending and deprovision remain **NOT EXECUTED**. Safe preparation and execution evidence:
 
 1. Attendance staging runner [run 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed backup + clone rehearsal + real apply: migration state `296 applied / 18 pending` -> `314 applied / 0 pending`; rehearsal isolation held and auth round-trip returned 200.
 2. [#4853](https://github.com/zensgit/metasheet2/pull/4853), merge commit `ddec28b12ebff97fae33af45553d77c149d816e1`, installs and validates the checked-out staging Compose file, pins Compose project-directory, and derives build metadata from the exact `IMAGE_TAG`.
@@ -118,11 +118,15 @@ As of 2026-08-11 the alias cutover canary is complete and rolled back. Pending a
 6. The existing `DEPLOY_KNOWN_HOSTS` secret is the independently verified deploy-host identity. The lane uses `StrictHostKeyChecking=yes`; missing host identity blocks dispatch rather than producing forgeable evidence.
 7. Lifecycle [status 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038) re-proved the exact staging SHA, healthy backend, zero pending migrations, mode `off`, and all three flags `false`.
 8. Lifecycle [alias 31504979575](https://github.com/zensgit/metasheet2/actions/runs/31504979575) proved password login before ON, during alias-only, and after rollback; it reported zero collisions and finished in exact mode `off` with all three flags `false`.
+9. [#4873](https://github.com/zensgit/metasheet2/pull/4873), merge commit `24794811b1c800402006b30d6e4fa9df670e124e`, added caller-reserved sync-run ids, exact-run recovery, a staged recovery journal, and the dedicated one-account/exclusive-window deprovision gates.
+10. Attendance staging [deploy 31528635839](https://github.com/zensgit/metasheet2/actions/runs/31528635839) deployed exact SHA `24794811b1c800402006b30d6e4fa9df670e124e`; lifecycle [status 31528753683](https://github.com/zensgit/metasheet2/actions/runs/31528753683) and [OFF preflight 31528911914](https://github.com/zensgit/metasheet2/actions/runs/31528911914) proved healthy backend, zero pending migrations, exact mode `off`, and all three flags `false`.
+11. Hardened-deploy lifecycle [alias 31529335625](https://github.com/zensgit/metasheet2/actions/runs/31529335625) again proved password login before ON, during alias-only, and after rollback; zero collisions; exact deployed SHA; and terminal mode `off` with all three flags `false`. This is the current alias proof; run `31504979575` remains historical evidence for the older deploy.
 
 The former image-tag/health-commit provenance conflict is resolved. This establishes the safe OFF baseline and the transient alias staging canary; it does not authorize production alias traffic.
 
-The secret-backed operators now exist, but neither action has been run in staging. Execution still
-requires one explicitly owned source employee. Deprovision additionally refuses any integration
+The secret-backed pending and deprovision operators now exist, but neither pending admission nor
+deprovision has been run in staging. Execution still requires one explicitly owned source employee.
+Deprovision additionally refuses any integration
 that is scheduled, auto-admitting, member-group projecting, or contains anything other than the
 single selected directory account (inactive rows count too). The current shared employee
 integration is therefore ineligible by construction.
