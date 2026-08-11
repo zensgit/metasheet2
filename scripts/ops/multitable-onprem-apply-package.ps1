@@ -978,12 +978,19 @@ function Invoke-Healthcheck {
   }
 
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    $allUrlsHealthy = $true
     foreach ($url in $Urls) {
       Write-Info "Healthcheck attempt ${attempt}/${Attempts}: $url"
       if (Invoke-HealthcheckOnce -Url $url) {
         Write-Info "Healthcheck OK ($url)"
-        return $true
+      } else {
+        Write-Info "Healthcheck failed ($url)"
+        $allUrlsHealthy = $false
       }
+    }
+
+    if ($allUrlsHealthy) {
+      return $true
     }
 
     if ($attempt -lt $Attempts -and $DelaySec -gt 0) {
@@ -1171,13 +1178,36 @@ try {
     }
     catch {
       $copyError = $_
+      $rollbackErrors = @()
       try {
         Restore-PackageOverlay -Transaction $noDepsOverlayTransaction
         $noDepsOverlayStarted = $false
       }
       catch {
         $preserveRollbackRoot = $true
-        throw "PACKAGE_NO_DEPS_ROLLBACK_FAILED after '$($copyError.Exception.Message)': package overlay rollback failed: $($_.Exception.Message)"
+        $rollbackErrors += "package overlay rollback failed: $($_.Exception.Message)"
+      }
+
+      if ($rollbackErrors.Count -eq 0 -and $RestartService -ne '0') {
+        try {
+          $restoredStartScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
+          if (-not (Test-Path -LiteralPath $restoredStartScript)) {
+            throw "Missing restored PM2 startup helper: $restoredStartScript"
+          }
+          Write-Info 'Restart restored PM2 service after package copy rollback'
+          & $restoredStartScript -RootDir $resolvedRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw 'restored pm2 startup failed'
+          }
+        }
+        catch {
+          $preserveRollbackRoot = $true
+          $rollbackErrors += "restored service restart failed: $($_.Exception.Message)"
+        }
+      }
+
+      if ($rollbackErrors.Count -gt 0) {
+        throw "PACKAGE_NO_DEPS_ROLLBACK_FAILED after '$($copyError.Exception.Message)': $($rollbackErrors -join '; ')"
       }
       throw $copyError
     }
