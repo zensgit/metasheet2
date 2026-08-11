@@ -5,6 +5,10 @@
 > (正文 + 附录 A–E);B4 绑定的 RATIFIED 记录在
 > `k3wise-material-list-b4-binding-draft-20260805.md`。本文不另立记录点,冲突时以上述为准。
 > 全文 values-free:只含计数、闭集 token、run/PR 引用与 PASS/FAIL。
+>
+> **2026-08-11 现行状态**:当前交付目标已收窄为单客户、只读、零外部写，并已按 §8 完成
+> 实体机功能 dry-run 验收。本文后续 Save-only 内容保留为历史规划/未来独立写操作，不得据此扩大本次结论；
+> 权威优先级见计划文档 §0。
 
 ## 1. 范围(owner 四项裁决,20260805,基点 `d368700536`)
 
@@ -258,7 +262,7 @@ P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示
 **方法学结论**:声称"某一类已关闭"时,**交付物必须是机械断言而非清单** ——
 本线现有 sweep 契约(遍历源码枚举读取点、要求三集合全覆盖、带匹配下限防空过)即为此。
 
-## 7. 未完成项
+## 7. 历史未完成项与后续收口（现行状态见 §8）
 
 ### 7.0 勘误(2026-08-05,owner 复审后):本节原文「代码侧无剩余工作」为**假**,撤回
 
@@ -301,7 +305,7 @@ PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
 
 > **状态时点提示(2026-08-07 追加)**:本表是 **2026-08-05 的时点记录**,不改写。
 > R2/R3/R4 此后已完成(#4768 已 MERGED,彩排最终跑 17/17 见 §8')。
-> **当前状态以 §7.6 为准** —— 链条现在卡在配置面修复,而不是本表列出的那些项。
+> §7.6 是 2026-08-07 的后续历史状态;**最终现行状态以 §8 为准**。
 
 | # | 项 | 状态 | 阻塞于 |
 |---|---|---|---|
@@ -367,7 +371,7 @@ R2/R3 的该前置已解除。
 
 ### 7.3 窗口 PASS 后
 
-在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。
+在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。**已于 2026-08-11 履行。**
 
 ## 7.5 实体机窗口(已授权排期,2026-08-06)
 
@@ -390,7 +394,9 @@ zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
 
 ---
 
-## 7.6 配置修复阻塞:两道门与正确的修复前提(2026-08-07,实测)
+## 7.6 历史配置修复阻塞:两道门与正确的修复前提(2026-08-07,已解除)
+
+> **历史状态,已解除(2026-08-11)**:本节记录 2026-08-07 的配置阻塞;最终配置、读取和实体机结果见 §8。
 
 窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
 
@@ -521,13 +527,77 @@ owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒
 
 ---
 
+## 8. 实体机只读验收记录（2026-08-11）
+
+### 8.1 范围与运行身份
+
+本次验收只覆盖：真实 SQL Server approved source、真实 K3 只读探针、备料清洗与一次 C6 dry-run。
+不执行 Apply、普通 pipeline run、dead-letter replay、K3 Save/Submit/Audit，也不读取客户生产业务行。
+
+```text
+issue=4628
+baseRuntimeCommit=bb0574fcde4ad4dc1d059065c6c2348b96b54ed1
+baseArtifactId=9087053934
+reviewedOverlayPr=4860
+reviewedOverlayMergeCommit=d9a3feba2615a9c3660907451f27c3a3bff1d6c6
+reviewedOverlayRuntimeFileCount=5
+reviewedOverlayPrFileCount=7
+finalOperationId=stockprep_d9a3feba_readonly_entity_20260811_10_VALUES_FREE_TENANT_PROCESS_AUDIT_SINGLE_DRY_RUN_AND_EXACT_UNUSED_TOKEN_DELETE
+```
+
+实体机使用已验证的 `bb0574fc…` 基础运行时，加上 #4860 中部署的五个非测试运行时/配置文件;
+#4860 另含两个测试文件,PR 总计七个文件。该组合经过 owner 单独批准；不得把它改写成
+“`d9a3feba…` 完整包已重新构建并原字节验证”。
+
+### 8.2 前置与业务结果
+
+| 层 | values-free 证据 | 结果 |
+|---|---|---|
+| 包与运行时 | `_06` Phase 0：checksum、provenance、packaged/deployed K3 runtime hash；迁移与健康 | PASS |
+| 配置与真实读取 | `_07`：前后端及 tenant 绑定、配置回读、SQL Server 只读源、两行受控视图、D2 身份、K3 read-smoke 10 行 | PASS |
+| 审计能力 | #4860：tenant 分区、process epoch、values-free 闭合计数；当前 main 必需检查全绿 | PASS |
+| 单次 dry-run | `_10`：`sourceRows=2`、`planned=2`、`add=2`、`update=skip=held=failed=0`，源完整且未截断 | PASS |
+| 独立零写证据 | 同 epoch/tenant：`GetDetail=2` 正控；Save/Submit/Audit/其它生命周期写、Apply/普通 run/replay 全部 0 | PASS |
+| 内部 token 收口 | 只按锁定行定位删除恰一条未使用 `_10` token；未读取、输出或持久化 token 值 | PASS |
+
+最终回执：[comment 5249278343](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249278343)；
+阶段关闭：[comment 5249316596](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249316596)。
+#4628 已以 `COMPLETED` 关闭。
+
+### 8.3 验收判定
+
+```text
+stageDisposition=COMPLETED
+acceptedEvidenceClass=CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN
+singleFinalDryRun=PASS
+externalWrites=0
+apply=NOT_RUN
+k3SaveCalls=0
+k3SubmitCalls=0
+k3AuditCalls=0
+flagsRestoredOff=YES
+customerProductionCertification=NOT_CLAIMED
+```
+
+因此，当前**单客户、只读、零外部写**交付目标的实体机业务功能验收完成。S4 已由 #4757 合入，
+数据库读取、K3 读取、备料清洗、dry-run 计划和零写证据形成闭环。
+
+### 8.4 复跑与结论边界
+
+`_10` 已关闭且禁止重试。复跑必须使用新 operation id、新 owner 授权和新冻结运行时身份；before/after
+审计必须绑定同一 tenant 与同一 `processEpoch`，以 `GetDetail` 非零增量为正控，并再次证明所有写计数为 0。
+任一计数不可用或 epoch 改变都不得判 PASS。完整复跑规则以权威计划 §0.3 为准。
+
+本次证据不授权或证明 Save-only Apply、回滚、生产认证、客户生产业务行读取、规模能力，亦不证明
+PLM/ERP/CRM/SRM 全面通用化。上述能力进入后续独立路线。
+
 ## 8'. staging 彩排实测(最终跑,2026-08-06)
 
-> **编号说明**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**,那一节尚未产生。
-> 本节是 staging 彩排(第二层),与实体机验收(第三层)是不同的东西,**不得互相顶替**,
-> 故编为 §8' 而不占用预留号。实体机窗口执行后,验收记录仍落在 §8。
+> **编号说明（已履行）**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**，
+> 该记录现已在上节产生。本节仍是 staging 彩排(第二层)，与实体机验收(第三层)是不同的东西，
+> **不得互相顶替**，故继续编号为 §8'。
 
-### 8.1 运行标识
+### 8'.1 运行标识
 
 - workflow:`Stock-prep staging window rehearsal (ephemeral substrate)`
 - **run id `31103021849`,head `aa48c3f18`(#4790 D2 窄修复的合并点)—— 这是最终跑**
@@ -541,7 +611,7 @@ owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒
   ⚠️ **勘误**:本节曾把最终跑的 run id 与**首跑的时间戳**并列。两次跑的证据不得混用 ——
   行数相同(17/17)不代表是同一次运行,更不代表证明力相同(见 §8'.4)。
 
-### 8.2 逐步实测值
+### 8'.2 逐步实测值
 
 | 步 | 实测 |
 |---|---|
@@ -571,14 +641,14 @@ lane 级实测:
 - `integrationPluginStatus=active`,`loginTokenObtained=PASS`
 - wire:`wireGetListCallsLogged=1`,`wireSaveCallsLogged=2`,Submit/Audit 为 0
 
-### 8.3 `add=2` 为什么是那条 P1 的判别器
+### 8'.3 `add=2` 为什么是那条 P1 的判别器
 
 两条 fieldMapping 都带 `required`;`validateRecord` 的 required 用 `isEmpty()`,覆盖
 undefined / null / 纯空白;校验失败即 `counts.failed += 1; continue`,该行到不了
 `counts[decision]`;而 `canApply` 要求 `failed===0 && held===0`。所以 `code`/`name` 为空
 **在结构上无法**产出 `add=2`。这不是「没看见错误」,是空值产不出这个数。
 
-### 8.4 这次绿的边界(必须与 8.2 同等醒目)
+### 8'.4 这次绿的边界(必须与 8'.2 同等醒目)
 
 0. **当前客户源 = 已批准的 SQL Server source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`)。
    `plm:yuantus-wrapper` 留作**未来 profile**、尚无 E2E 证据、**不是当前阻塞**
