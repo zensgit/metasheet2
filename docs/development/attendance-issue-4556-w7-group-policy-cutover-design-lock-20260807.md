@@ -84,9 +84,12 @@ RATIFY record itself is now on `main`:
 
 1. **Scope.** The authorization PR 4821 carries, by its own text, is the
    **W6-1 backend aggregate slice only**, Draft/HOLD, stopping after a fresh
-   exact-head gate. **PR 4814** (the W6-1 backend slice itself) is **OPEN,
-   Draft, unmerged** at `origin/main@d78b27d3` (head
-   `4cc0122883846900a1325cdacd5eda0355d77215`, re-verified 2026-08-10). W6-2
+   exact-head gate. The current clean-rebuild W6-1 candidate is **PR 4849**,
+   **OPEN, Draft, unmerged** at head
+   `c2ac8284ab38756133c74ce54fde50d07d5bf13a` (re-verified 2026-08-11).
+   **PR 4814** remains OPEN/Draft/unmerged at its older head
+   `4cc0122883846900a1325cdacd5eda0355d77215`; it is not the current delivery
+   candidate. W6-2
    contract wiring, W6-3 UI, W6-4 verification, any merge, staging, soak,
    flag, deployment, and closure of issue 4556 each remain withheld. Ratifying
    the OD table is not an adoption of W6 runtime.
@@ -383,7 +386,7 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
 | Whether W7's resolver may share code with the W6 aggregate's readers | OD-W6-2 (FSER composition) and W6-R4 (single FSER derivation) | W7 must compose the same FSER service rather than re-derive, whatever W6 decides about embedding. |
 | The aggregate as calculation input | W6-R5 | Preserved by default (W7-R10); overriding it is an owner-level W6 decision, and the W6 lock is now RATIFIED (W6-1 backend aggregate only), so overriding W6-R5 can only be made as a **W6 amendment**, not a W7 choice. |
 | Label spellings reused in read-side labeling | OD-W6-3 | For the W6-owned source-label union, W7 §4.4 adopts the ratified spellings and mints none of its own. The W7-owned provenance values on the W4 detail/trace enums are a different enum family, owned by OD-W7-5 (strings fixed at W7-0) — see §4.4. |
-| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-10** (§0 update): OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, and the W6 lock's own header on `origin/main` reads RATIFIED (W6-1 backend aggregate only) — so the "declines" branch is now foreclosed for the W6-1 scope specifically, not merely recorded pending a merge. That still does not satisfy this row: the row requires W6 **completion gates**, and the **second** conjunct is untouched — no W6 runtime is on `main` (`git diff` over the five W6-relevant paths between the pinned baseline and current main is empty), and only the W6-1 backend slice is prospectively authorized (PR 4814, Draft/HOLD, unmerged), which does not reach the four-label workflow item 8 names. This row stays conditional. |
+| W6 runtime existing at all | OD-W6-0 + W6 completion gates | If W6 completion is not reached, W7 as specified here is **not startable**; §8's sequence makes this a hard precondition. **Status as of 2026-08-11** (§0 update): OD-W6-0 is **RATIFIED as adopt** — PR 4821 MERGED `ecf77d2433596bbdd8b67c312a37178dbc97f715`, and the W6 lock's own header on `origin/main` reads RATIFIED (W6-1 backend aggregate only) — so the "declines" branch is now foreclosed for the W6-1 scope specifically, not merely recorded pending a merge. That still does not satisfy this row: the row requires W6 **completion gates**, and the **second** conjunct is untouched — no W6 runtime is on `origin/main@0e1e1778baffa00d600d5a980ff3ed87993e79f7` (`git diff` over the five W6-relevant paths between the pinned baseline and current main is empty), and only the W6-1 backend slice is prospectively authorized (current candidate PR 4849, Draft/HOLD, unmerged, head `c2ac8284ab38756133c74ce54fde50d07d5bf13a`), which does not reach the four-label workflow item 8 names. PR 4814 remains open at an older head but is not the current delivery candidate. This row stays conditional. |
 
 ## 7. Decision points (owner menu, all OPEN)
 
@@ -409,8 +412,10 @@ Every W7 dependence on an undecided W6 outcome, stated once, here:
    merged SHA `2967da018ceea41b91098e14d4c15a57236eb5f8` and answering
    OD-W6-1..9 option (a); the authorization it carries reaches only the W6-1
    backend slice. The second clause — W6 runtime slices completing their own
-   gates — remains unmet: PR 4814 (the W6-1 slice) is OPEN/Draft/unmerged, and
-   no W6 runtime exists on `main`. So this precondition as a whole is still
+   gates — remains unmet: current W6-1 candidate PR 4849 is OPEN/Draft/unmerged
+   at `c2ac8284ab38756133c74ce54fde50d07d5bf13a`, and no W6 runtime exists on
+   `main`. PR 4814 also remains OPEN/Draft/unmerged at an older head but is not
+   the current delivery candidate. So this precondition as a whole is still
    unmet and step 2 below is not reached.)
 2. Owner reviews this draft, answers OD-W7-1..10, and signs off the exact
    merged SHA of this document (docs may be amended until then).
@@ -513,10 +518,12 @@ re-dated:
   criterion was the `scratchDrain=` line reporting `CLEAN` on main's required
   gate, not a green run.
 - PRs OPEN / unmerged, named for provenance only and authorized by nothing
-  here: **4814** (the W6-1 backend slice itself, Draft, head
-  `4cc0122883846900a1325cdacd5eda0355d77215`, re-verified 2026-08-10 —
-  this is the one PR whose merge would actually put W6 runtime on `main`);
-  **4839** (Draft operator CLI for the rollout-transition writer named at
+  here: **4849** (the current clean-rebuild W6-1 backend candidate, Draft,
+  head `c2ac8284ab38756133c74ce54fde50d07d5bf13a`, re-verified 2026-08-11 —
+  this is the current PR whose merge would put W6-1 runtime on `main`);
+  **4814** (an older W6-1 candidate that remains Draft/open/unmerged at head
+  `4cc0122883846900a1325cdacd5eda0355d77215`, not the current delivery
+  candidate); **4839** (Draft operator CLI for the rollout-transition writer named at
   `w4c3a-rollout-control.ts:1125` — the W8 plan §5 ledger row L11 records that
   landing this PR removes the "no production caller" gap it documents) —
   naming either authorizes neither.
