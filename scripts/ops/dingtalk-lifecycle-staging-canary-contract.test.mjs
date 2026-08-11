@@ -2,17 +2,20 @@
 // dingtalk-lifecycle-staging-canary-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL SAFE staging lifecycle lane:
-//   EXECUTABLE: status | preflight | off | alias
+//   EXECUTABLE: status | preflight | off | bootstrap | alias
 //   NOT EXECUTABLE: pending | deprovision (fail-closed preflight-only)
 //
 // Alias is a TRANSIENT secret-backed cutover canary: success requires/proves OFF;
 // failure restores the OFF override before failing. Runtime OFF cannot be proven
-// if rollback recreate itself fails.
+// if rollback recreate itself fails. Admin JWT is minted from canary password
+// login (never secrets.ATTENDANCE_ADMIN_JWT).
+// Bootstrap creates/repairs the fixed owned canary admin only (collision
+// fail-closed; no lifecycle env write).
 // Load-bearing mutations for owner P1/P2 gaps:
-//   * migrations_pending_zero unknown must fail preflight/off/alias (never success)
+//   * migrations_pending_zero unknown must fail preflight/off/alias/bootstrap
 //   * pending/deprovision never apply (transition_applied=false; NOT EXECUTABLE)
-//   * alias requires pre-login, backfill, readiness, post-ON login, rollback,
-//     post-rollback login, exact SHA, migrations, and secret-file transport
+//   * alias requires pre-login(+JWT mint), backfill, readiness, post-ON login,
+//     rollback, post-rollback login, exact SHA, migrations, secret-file transport
 //   * recreate requires health true after restart
 //   * previous-override restore on transition failure
 //   * multi-on: status/preflight fail closed; off still clears via classify_mode
@@ -115,6 +118,14 @@ function actionOffBody(source) {
   return source.slice(start, end)
 }
 
+function actionBootstrapBody(source) {
+  const start = source.indexOf('action_bootstrap()')
+  assert.notEqual(start, -1, 'action_bootstrap() must exist')
+  const end = source.indexOf('\naction_off()', start)
+  assert.notEqual(end, -1, 'action_off after action_bootstrap')
+  return source.slice(start, end)
+}
+
 // --- parse / presence -----------------------------------------------------------------
 
 test('remote script and workflow files exist', () => {
@@ -145,9 +156,17 @@ test('PR contract workflow executes this exact suite without changing the sealed
 
 // --- workflow shape -------------------------------------------------------------------
 
-test('workflow action choices include status/preflight/off/alias and non-executable ON names', () => {
+test('workflow action choices include status/preflight/off/bootstrap/alias and non-executable ON names', () => {
   const options = workflowOn(loadYaml(read(WORKFLOW))).workflow_dispatch.inputs.action.options
-  assert.deepEqual(options, ['status', 'preflight', 'off', 'alias', 'pending', 'deprovision'])
+  assert.deepEqual(options, [
+    'status',
+    'preflight',
+    'off',
+    'bootstrap',
+    'alias',
+    'pending',
+    'deprovision',
+  ])
   assert.ok(options.every((o) => typeof o === 'string'), 'quote off so YAML 1.1 keeps string')
 })
 
@@ -181,13 +200,17 @@ test('SSH transport requires a pinned known_hosts secret', () => {
   assert.doesNotMatch(yaml, /StrictHostKeyChecking=no/)
 })
 
-test('workflow requires deploy_sha + expected_current for off and alias; pending/deprovision NOT EXECUTABLE', () => {
+test('workflow requires deploy_sha + expected_current for off/bootstrap/alias; pending/deprovision NOT EXECUTABLE', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /expected_current_mode is required for action=off/)
-  assert.match(yaml, /expected_current_mode must be exactly 'off' for action=alias/)
-  assert.match(yaml, /deploy_sha must be the FULL 40-char lowercase commit SHA for action=alias/)
+  assert.match(yaml, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
+  assert.match(yaml, /deploy_sha must be the FULL 40-char lowercase commit SHA for action=\$\{ACTION\}/)
+  assert.match(yaml, /ACTION" == "bootstrap" \|\| "\$ACTION" == "alias"/)
   // Secret presence is checked only in Run remote action (not Validate inputs).
-  assert.match(yaml, /alias requires ATTENDANCE_ADMIN_JWT \+ LIFECYCLE_CANARY_LOGIN_IDENTIFIER\/PASSWORD \(checked in Run remote action only\)/)
+  assert.match(
+    yaml,
+    /requires LIFECYCLE_CANARY_LOGIN_IDENTIFIER\/PASSWORD \(checked in Run remote action only\); never ATTENDANCE_ADMIN_JWT/,
+  )
   assert.match(yaml, /NOT EXECUTABLE/)
   // Must not require canary subject/integration for a pretend ON transition.
   assert.doesNotMatch(yaml, /canary_subject_id:/)
@@ -200,29 +223,44 @@ test('workflow requires deploy_sha + expected_current for off and alias; pending
   assert.doesNotMatch(yaml, /always OFF after/i)
 })
 
-test('workflow alias secret transport uses chmod-600 files + scp, not secret values in remote argv', () => {
+test('workflow requires an explicit privileged bootstrap confirmation phrase', () => {
+  const yaml = read(WORKFLOW)
+  const doc = loadYaml(yaml)
+  assert.ok(workflowOn(doc).workflow_dispatch.inputs.bootstrap_confirmation)
+  const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
+  assert.equal(validate.env.BOOTSTRAP_CONFIRMATION, '${{ inputs.bootstrap_confirmation }}')
+  assert.match(validate.run, /ACTION" == "bootstrap"/)
+  assert.match(validate.run, /BOOTSTRAP_CONFIRMATION" != "CREATE_STAGING_CANARY_ADMIN"/)
+})
+
+test('workflow bootstrap/alias secret transport uses chmod-600 files + scp; never ATTENDANCE_ADMIN_JWT', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /chmod 600/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
-  assert.match(yaml, /ATTENDANCE_ADMIN_JWT/)
-  assert.match(yaml, /CANARY_ADMIN_JWT_FILE=/)
   assert.match(yaml, /CANARY_LOGIN_IDENTIFIER_FILE=/)
   assert.match(yaml, /CANARY_LOGIN_PASSWORD_FILE=/)
   assert.match(yaml, /\.canary-secrets/)
   assert.match(yaml, /scp \$ssh_opts/)
   // printf uses non-exported shell vars after env demote (not raw env names).
   assert.match(yaml, /printf '%s' "\$\{_CANARY_PASS\}"/)
-  assert.match(yaml, /printf '%s' "\$\{_CANARY_JWT\}"/)
   assert.match(yaml, /printf '%s' "\$\{_CANARY_IDENT\}"/)
+  // Must not materialize or demote ATTENDANCE_ADMIN_JWT (alias mints JWT from login).
+  // Prose may mention the forbidden secret; forbid GHA secret injection only.
+  assert.doesNotMatch(yaml, /_CANARY_JWT=/)
+  assert.doesNotMatch(yaml, /printf '%s' "\$\{_CANARY_JWT\}"/)
+  assert.doesNotMatch(yaml, /\$\{\{\s*secrets\.ATTENDANCE_ADMIN_JWT/)
+  assert.doesNotMatch(yaml, /export CANARY_ADMIN_JWT_FILE=/)
   // Must not export raw secret values into the remote script env.
   assert.doesNotMatch(yaml, /export ATTENDANCE_ADMIN_JWT=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_IDENTIFIER=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export CANARY_LOGIN_PASSWORD='/)
+  // bootstrap shares the same secret transport gate as alias.
+  assert.match(yaml, /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap"/)
 })
 
-test('workflow Validate inputs does not receive alias secrets (no child inheritance gap)', () => {
+test('workflow Validate inputs does not receive canary login secrets (no child inheritance gap)', () => {
   const yaml = read(WORKFLOW)
   const doc = loadYaml(yaml)
   const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
@@ -235,8 +273,9 @@ test('workflow Validate inputs does not receive alias secrets (no child inherita
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
   assert.match(validate.run, /bash -n scripts\/ops\/dingtalk-lifecycle-staging-canary-remote\.sh/)
-  // Structural alias checks remain; secret presence does not.
-  assert.match(validate.run, /expected_current_mode must be exactly 'off' for action=alias/)
+  // Structural bootstrap/alias checks remain; secret presence does not.
+  assert.match(validate.run, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
+  assert.match(validate.run, /bootstrap\|alias/)
 })
 
 test('workflow materializes secrets inside Run remote action under EXIT trap (no separate secrets step)', () => {
@@ -273,7 +312,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
       if (t === 'set -euo pipefail') sawSet = true
       continue
     }
-    if (t.startsWith('unset ATTENDANCE_ADMIN_JWT LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD')) {
+    if (t.startsWith('unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD')) {
       sawEnvUnset = true
       break
     }
@@ -285,23 +324,22 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.deepEqual(
     demoteCode,
     [
-      '_CANARY_JWT="${ATTENDANCE_ADMIN_JWT-}"',
       '_CANARY_IDENT="${LIFECYCLE_CANARY_LOGIN_IDENTIFIER-}"',
       '_CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"',
     ],
-    'only demote assignments (builtins) before secret env unset — no external commands',
+    'only demote assignments (builtins) before secret env unset — no external commands; no JWT',
   )
 
   // Order after demote: trap → mktemp → printf from shell vars → unset shell vars → remote scp.
   const trapIdx = runBody.indexOf('trap cleanup_canary_ephemeral_paths EXIT INT TERM')
   const envUnsetIdx = runBody.indexOf(
-    'unset ATTENDANCE_ADMIN_JWT LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD',
+    'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD',
   )
   const mktempIdx = runBody.indexOf('mktemp -d')
   const printfPassIdx = runBody.indexOf("printf '%s' \"${_CANARY_PASS}\"")
   // Post-write shell-var wipe (must follow password printf; fail-path unset is earlier).
   const unsetShellIdx = runBody.indexOf(
-    'unset _CANARY_JWT _CANARY_IDENT _CANARY_PASS',
+    'unset _CANARY_IDENT _CANARY_PASS',
     printfPassIdx,
   )
   const localCleanAssignIdx = runBody.indexOf('CLEAN_LOCAL_SECRETS_DIR="${secrets_dir}"')
@@ -320,9 +358,9 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(remoteStep.run, /trap cleanup_canary_ephemeral_paths EXIT INT TERM/)
   assert.match(remoteStep.run, /mktemp -d/)
   assert.match(remoteStep.run, /printf '%s' "\$\{_CANARY_PASS\}"/)
-  assert.match(remoteStep.run, /unset ATTENDANCE_ADMIN_JWT LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD/)
+  assert.match(remoteStep.run, /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD/)
   assert.ok(remoteStep.env, 'Run remote action must declare env')
-  assert.ok(remoteStep.env.ATTENDANCE_ADMIN_JWT, 'JWT secret on Run remote action only')
+  assert.equal(remoteStep.env.ATTENDANCE_ADMIN_JWT, undefined, 'never inject ATTENDANCE_ADMIN_JWT')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, 'identifier secret on Run remote action only')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, 'password secret on Run remote action only')
   assert.equal(remoteStep.env.SECRETS_DIR, undefined, 'no secrets_dir cross-step handoff')
@@ -334,6 +372,9 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(runBody, /OUTPUT_COLLECTED=1/)
   // Explicit: secrets_dir must not be a step output handoff.
   assert.doesNotMatch(runBody, /secrets_dir=.*GITHUB_OUTPUT/)
+  // bootstrap|alias share materialize gate; no admin.jwt from GHA secrets.
+  assert.match(runBody, /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap"/)
+  assert.doesNotMatch(runBody, /admin\.jwt/)
 })
 
 test('workflow cleanup never deletes persistent .metasheet2 overrides', () => {
@@ -618,8 +659,9 @@ test('production function: require_migrations_pending_zero_true accepts only tru
 
 // --- P1: pending/deprovision NOT EXECUTABLE; alias is executable ----------------------
 
-test('P1 pending/deprovision route to action_not_executable_on; alias routes to action_alias', () => {
+test('P1 pending/deprovision route to action_not_executable_on; alias routes to action_alias; bootstrap routes to action_bootstrap', () => {
   const source = read(REMOTE_SH)
+  assert.match(source, /bootstrap\) action_bootstrap/)
   assert.match(source, /alias\) action_alias/)
   assert.match(source, /pending\) action_not_executable_on pending/)
   assert.match(source, /deprovision\) action_not_executable_on deprovision/)
@@ -628,7 +670,7 @@ test('P1 pending/deprovision route to action_not_executable_on; alias routes to 
   assert.match(source, /transition_applied=false/)
   // Must not call write_lifecycle_override from the not-executable path with true flags.
   const start = source.indexOf('action_not_executable_on()')
-  const end = source.indexOf('\naction_off()', start)
+  const end = source.indexOf('\naction_bootstrap()', start)
   assert.notEqual(start, -1)
   assert.notEqual(end, -1)
   const body = source.slice(start, end)
@@ -646,17 +688,22 @@ test('P1 pending/deprovision route to action_not_executable_on; alias routes to 
   )
 })
 
-test('P1 action=off and action=alias write lifecycle override; pending/deprovision do not', () => {
+test('P1 action=off and action=alias write lifecycle override; bootstrap/pending/deprovision do not', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /off\) action_off/)
+  assert.match(source, /bootstrap\) action_bootstrap/)
   assert.match(source, /alias\) action_alias/)
   assert.match(source, /action_off\(\)/)
+  assert.match(source, /action_bootstrap\(\)/)
   assert.match(source, /action_alias\(\)/)
   assert.match(source, /write_lifecycle_override "false" "false" "false"/)
   assert.match(source, /write_lifecycle_override "true" "false" "false"/)
+  const bootstrapBody = actionBootstrapBody(source)
+  assert.doesNotMatch(bootstrapBody, /write_lifecycle_override/)
+  assert.doesNotMatch(bootstrapBody, /recreate_backend_only/)
   const notExec = source.slice(
     source.indexOf('action_not_executable_on()'),
-    source.indexOf('\naction_off()'),
+    source.indexOf('\naction_bootstrap()'),
   )
   assert.doesNotMatch(notExec, /write_lifecycle_override/)
 })
@@ -904,7 +951,8 @@ test('alias summary reports only booleans/counts/reason enums/SHA (no secret fie
 
 test('alias requires secret files, expected_current_mode=off, exact SHA, migrations, health', () => {
   const body = actionAliasBody(read(REMOTE_SH))
-  assert.match(body, /require_canary_secret_files/)
+  assert.match(body, /require_canary_secret_files "alias"/)
+  assert.match(body, /assert_canary_identifier_matches_owner "alias"/)
   assert.match(body, /require_sha/)
   assert.match(body, /assert_exact_sha/)
   assert.match(body, /require_migrations_pending_zero_true/)
@@ -916,24 +964,27 @@ test('alias requires secret files, expected_current_mode=off, exact SHA, migrati
   assert.doesNotMatch(body, /resetPassword|reset_password|password-reset/)
   assert.doesNotMatch(body, /container_name: metasheet-backend/)
   assert.doesNotMatch(body, /metasheet-backend:latest/)
+  // Alias never consumes repo-global ATTENDANCE_ADMIN_JWT.
+  assert.match(body, /never secrets\.ATTENDANCE_ADMIN_JWT|Never.*ATTENDANCE_ADMIN_JWT/i)
 })
 
-test('alias proves pre-login before any env write; backfill and readiness before write', () => {
+test('alias proves pre-login JWT mint before any env write; backfill and readiness before write', () => {
   const body = actionAliasBody(read(REMOTE_SH))
-  const preLogin = body.indexOf('prove_canary_password_login "pre_on"')
+  const mint = body.indexOf('mint_canary_admin_jwt_from_password_login "pre_on"')
   const backfill = body.indexOf('run_alias_backfill')
   const cutover = body.indexOf('run_alias_cutover_status')
   const baseline = body.indexOf('establish_alias_off_rollback_baseline')
   const write = body.indexOf('write_lifecycle_override "true" "false" "false"')
-  assert.ok(preLogin > 0, 'pre_on login required')
-  assert.ok(backfill > preLogin, 'backfill after pre-login')
+  assert.ok(mint > 0, 'pre_on login+JWT mint required')
+  assert.ok(backfill > mint, 'backfill after pre-login JWT mint')
   assert.ok(cutover > backfill, 'cutover-status after backfill')
   assert.ok(baseline > cutover, 'explicit OFF baseline after readiness')
   assert.ok(write > baseline, 'ON write after OFF baseline')
   assert.doesNotMatch(body, /backup_lifecycle_override/)
-  assert.match(body, /pre-ON password login failed \(no env write performed\)/)
+  assert.match(body, /pre-ON password login \/ JWT mint failed \(no env write performed\)/)
   assert.match(body, /login-aliases backfill failed \(no env write performed\)/)
   assert.match(body, /cutover-status not ready\/canEnableCutover \(no env write performed\)/)
+  assert.match(body, /admin JWT file missing after mint/)
 })
 
 test('alias post-ON path requires recreate, exact SHA, mode alias, post-ON login; failures restore first', () => {
@@ -972,6 +1023,7 @@ test('alias secret helpers never interpolate secret values into shell argv or lo
   const source = read(REMOTE_SH)
   assert.match(source, /require_canary_secret_files\(\)/)
   assert.match(source, /prove_canary_password_login\(\)/)
+  assert.match(source, /mint_canary_admin_jwt_from_password_login\(\)/)
   assert.match(source, /admin_api_request\(\)/)
   assert.match(source, /CANARY_ADMIN_JWT_FILE/)
   assert.match(source, /CANARY_LOGIN_IDENTIFIER_FILE/)
@@ -991,12 +1043,22 @@ test('alias secret helpers never interpolate secret values into shell argv or lo
     /^\s*password = pathlib\.Path\(pass_path\)\.read_bytes\(\)\.decode\("utf-8"\)\.strip\(\)\s*$/m,
   )
   assert.match(source, /pathlib\.Path\(jwt_path\)\.read_text/)
+  // Minted JWT is written via pathlib write_bytes, never echoed.
+  assert.match(source, /out\.write_bytes\(token\.encode\("utf-8"\)\)/)
+  assert.match(source, /os\.chmod\(out, 0o600\)/)
   // Never curl -d with expanded password env or echo secret file contents.
   assert.doesNotMatch(source, /curl[^\n]*\$\{?CANARY_LOGIN_PASSWORD\}?/)
   assert.doesNotMatch(source, /curl[^\n]*\$\{?ATTENDANCE_ADMIN_JWT\}?/)
   assert.doesNotMatch(source, /echo\s+[\"']?\$\{?(CANARY_LOGIN_PASSWORD|ATTENDANCE_ADMIN_JWT|CANARY_ADMIN_JWT)/)
   assert.doesNotMatch(source, /cat\s+\"?\$\{?CANARY_LOGIN_PASSWORD_FILE/)
   assert.match(source, /values never logged/)
+  // require_canary_secret_files must not require JWT file from secrets.
+  const reqStart = source.indexOf('require_canary_secret_files()')
+  const reqEnd = source.indexOf('\nassert_canary_identifier_matches_owner()', reqStart)
+  const reqBody = source.slice(reqStart, reqEnd)
+  assert.match(reqBody, /CANARY_LOGIN_IDENTIFIER_FILE/)
+  assert.match(reqBody, /CANARY_LOGIN_PASSWORD_FILE/)
+  assert.doesNotMatch(reqBody, /CANARY_ADMIN_JWT_FILE/)
 })
 
 test('alias admin calls target backfill and cutover-status endpoints', () => {
@@ -1008,13 +1070,16 @@ test('alias admin calls target backfill and cutover-status endpoints', () => {
 })
 
 // Load-bearing MUTATION tests: removing any required gate turns the suite red.
-test('MUTATION: removing pre-ON login requirement turns alias contract red', () => {
+test('MUTATION: removing pre-ON login/JWT mint requirement turns alias contract red', () => {
   const original = read(REMOTE_SH)
-  const mutated = original.replace('prove_canary_password_login "pre_on"', 'true # pre_on removed')
+  const mutated = original.replace(
+    'mint_canary_admin_jwt_from_password_login "pre_on"',
+    'true # pre_on mint removed',
+  )
   const body = actionAliasBody(mutated)
   let failed = false
   try {
-    assert.match(body, /prove_canary_password_login "pre_on"/)
+    assert.match(body, /mint_canary_admin_jwt_from_password_login "pre_on"/)
   } catch {
     failed = true
   }
@@ -1154,14 +1219,14 @@ test('MUTATION: removing secret-file requirement turns alias contract red', () =
   assert.equal(failed, true)
 })
 
-test('production function: require_canary_secret_files rejects missing paths', () => {
+test('production function: require_canary_secret_files rejects missing login paths (JWT not required)', () => {
   const result = spawnSync(
     'bash',
     [
       '-o',
       'pipefail',
       '-c',
-      'source "$1"; CANARY_ADMIN_JWT_FILE=; CANARY_LOGIN_IDENTIFIER_FILE=; CANARY_LOGIN_PASSWORD_FILE=; require_canary_secret_files',
+      'source "$1"; CANARY_ADMIN_JWT_FILE=; CANARY_LOGIN_IDENTIFIER_FILE=; CANARY_LOGIN_PASSWORD_FILE=; require_canary_secret_files alias',
       'bash',
       REMOTE_SH,
     ],
@@ -1177,7 +1242,8 @@ test('production function: require_canary_secret_files rejects missing paths', (
     },
   )
   assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /CANARY_ADMIN_JWT_FILE|secret file/)
+  assert.match(result.stderr, /CANARY_LOGIN_IDENTIFIER_FILE|CANARY_LOGIN_PASSWORD_FILE|secret file/)
+  assert.doesNotMatch(result.stderr, /CANARY_ADMIN_JWT_FILE/)
 })
 
 test('alias backfill requires exact nonnegative counts and collisions==0 before env write', () => {
@@ -1521,7 +1587,7 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
   }
 })
 
-test('FUNCTIONAL harness: action_alias success call order pre-login→backfill→status→ON→OFF', () => {
+test('FUNCTIONAL harness: action_alias success call order pre-login+mint→backfill→status→ON→OFF', () => {
   const sha = 'c'.repeat(40)
   const result = spawnSync(
     'bash',
@@ -1534,6 +1600,7 @@ test('FUNCTIONAL harness: action_alias success call order pre-login→backfill�
        record() { CALL_LOG+=("\$1"); }
        require_sha() { record require_sha; }
        require_canary_secret_files() { record require_secrets; }
+       assert_canary_identifier_matches_owner() { record assert_owner_ident; }
        capture_live_snapshot() {
          record capture_live_snapshot
          SNAP_ALIAS=false; SNAP_PENDING=false; SNAP_DEPROV=false; SNAP_MODE=off
@@ -1543,6 +1610,12 @@ test('FUNCTIONAL harness: action_alias success call order pre-login→backfill�
        assert_exact_sha() { record assert_exact_sha; }
        pin_live_backend_image_for_transition() { record pin_image; }
        require_migrations_pending_zero_true() { record require_migrations; }
+       mint_canary_admin_jwt_from_password_login() {
+         record "mint:\$1"
+         CANARY_ADMIN_JWT_FILE="/tmp/lifecycle-canary-minted.jwt"
+         printf 'minted-token' > "\$CANARY_ADMIN_JWT_FILE"
+         return 0
+       }
        prove_canary_password_login() { record "login:\$1"; return 0; }
        run_alias_backfill() {
          record backfill
@@ -1599,7 +1672,8 @@ test('FUNCTIONAL harness: action_alias success call order pre-login→backfill�
     assert.ok(i >= 0, `missing call ${name} in ${lines.join(',')}`)
     return i
   }
-  assert.ok(idx('login:pre_on') < idx('backfill'))
+  assert.ok(idx('assert_owner_ident') < idx('mint:pre_on'))
+  assert.ok(idx('mint:pre_on') < idx('backfill'))
   assert.ok(idx('backfill') < idx('cutover_status'))
   assert.ok(idx('cutover_status') < idx('off_baseline'))
   assert.ok(idx('off_baseline') < idx('write:true:false:false'))
@@ -1718,6 +1792,7 @@ test('FUNCTIONAL harness: post-ON login failure invokes fail_transition_restore 
        record() { CALL_LOG+=("\$1"); }
        require_sha() { :; }
        require_canary_secret_files() { :; }
+       assert_canary_identifier_matches_owner() { :; }
        capture_live_snapshot() {
          SNAP_ALIAS=false; SNAP_PENDING=false; SNAP_DEPROV=false; SNAP_MODE=off
          SNAP_BUILD_SHA="$DEPLOY_SHA"; SNAP_ALIAS_READY=true; SNAP_CAN_ENABLE_ALIAS=true
@@ -1726,6 +1801,12 @@ test('FUNCTIONAL harness: post-ON login failure invokes fail_transition_restore 
        assert_exact_sha() { :; }
        pin_live_backend_image_for_transition() { :; }
        require_migrations_pending_zero_true() { :; }
+       mint_canary_admin_jwt_from_password_login() {
+         record "mint:\$1"
+         CANARY_ADMIN_JWT_FILE="/tmp/lifecycle-canary-minted-fail.jwt"
+         printf 'minted-token' > "\$CANARY_ADMIN_JWT_FILE"
+         return 0
+       }
        prove_canary_password_login() {
          record "login:\$1"
          if [[ "\$1" == "post_on" ]]; then return 1; fi
@@ -1887,9 +1968,445 @@ ON
   }
 })
 
+// --- bootstrap fixed canary admin -----------------------------------------------------
+
+/** Extract the embedded non-secret bootstrap Node program (NODE heredoc). */
+function bootstrapNodeSource(source = read(REMOTE_SH)) {
+  const start = source.indexOf("cat >\"$node_tmp\" <<'NODE'")
+  assert.notEqual(start, -1, 'bootstrap node_tmp NODE heredoc must exist')
+  const bodyStart = source.indexOf('\n', start) + 1
+  const end = source.indexOf('\nNODE\n', bodyStart)
+  assert.notEqual(end, -1, 'NODE terminator missing')
+  return source.slice(bodyStart, end)
+}
+
+/** SQL string payloads passed to c.query("...") inside the bootstrap node program. */
+function bootstrapSqlPayloads(nodeSrc) {
+  const payloads = []
+  const re = /c\.query\(\s*"((?:\\.|[^"\\])*)"/g
+  let m
+  while ((m = re.exec(nodeSrc)) !== null) {
+    payloads.push(m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'))
+  }
+  return payloads
+}
+
+test('bootstrap fixed ownership markers and collision fail-closed transaction shape', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /CANARY_OWNER_EMAIL="lifecycle-canary@staging\.invalid"/)
+  assert.match(
+    source,
+    /CANARY_OWNER_USER_ID="6c1fe000-ca0a-4000-8000-1ec0c1e00001"/,
+  )
+  assert.match(source, /bootstrap_lifecycle_canary_admin\(\)/)
+  assert.match(source, /action_bootstrap\(\)/)
+  assert.match(source, /collision_not_owned/)
+  assert.match(source, /collision_multiple_rows/)
+  assert.match(source, /FOR UPDATE/)
+  assert.match(source, /BEGIN/)
+  assert.match(source, /COMMIT/)
+  assert.match(source, /ROLLBACK/)
+  assert.match(source, /local_password_set = TRUE/)
+  assert.match(source, /must_change_password = FALSE/)
+  assert.match(source, /activation_status = 'activated'/)
+  assert.match(source, /user_roles/)
+  assert.match(source, /role_id.*admin|VALUES \(\$1, 'admin'\)/)
+  // permissions omitted (054 TEXT[] vs jsonb drift) — never '[]'::jsonb cast.
+  assert.doesNotMatch(source, /'::jsonb/)
+  assert.match(source, /Omit permissions|omit permissions/i)
+  // Never mutates an arbitrary admin by email/role scan.
+  assert.doesNotMatch(source, /WHERE role = 'admin'[\s\S]{0,80}UPDATE users/)
+  assert.doesNotMatch(source, /WHERE is_admin = TRUE[\s\S]{0,80}UPDATE users/)
+})
+
+test('bootstrap SQL uses single-quoted PostgreSQL string literals (double-quote reversion is red)', () => {
+  const node = bootstrapNodeSource()
+  const sqls = bootstrapSqlPayloads(node)
+  assert.ok(sqls.length >= 5, `expected multiple c.query SQL strings, got ${sqls.length}`)
+  const joined = sqls.join('\n')
+
+  // Required single-quoted literals (PG string syntax).
+  assert.match(joined, /role = 'admin'/)
+  assert.match(joined, /activation_status = 'activated'/)
+  assert.match(joined, /table_schema = 'public'/)
+  assert.match(joined, /VALUES \(\$1, 'admin'\)/)
+  assert.match(joined, /VALUES \(\$1, \$2, \$3, \$4, 'admin'/)
+  assert.match(joined, /IN \('\*:\*', 'admin:users', 'admin:roles', 'admin:permissions'\)/)
+  assert.match(joined, /NULLIF\(trim\(name\), ''\)/)
+
+  // Forbidden: double-quoted SQL string literals (PG treats them as identifiers).
+  const forbidden = [
+    /role\s*=\s*"admin"/,
+    /activation_status\s*=\s*"activated"/,
+    /table_schema\s*=\s*"public"/,
+    /VALUES\s*\([^)]*"admin"/,
+    /IN\s*\(\s*"/,
+    /NULLIF\([^)]*,\s*""\)/,
+  ]
+  for (const re of forbidden) {
+    assert.doesNotMatch(joined, re)
+  }
+
+  // MUTATION: reintroducing double-quoted SQL literals must fail this contract.
+  const mutated = joined
+    .replaceAll("role = 'admin'", 'role = "admin"')
+    .replaceAll("activation_status = 'activated'", 'activation_status = "activated"')
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /role\s*=\s*"admin"/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true, 'double-quoted role = "admin" must turn the contract red')
+})
+
+test('bootstrap create and repair upsert user_session_revocations like session-revocation.ts', () => {
+  const node = bootstrapNodeSource()
+  const removeRevocationUpsert = (source, reason) => {
+    const reasonArgs = `[ownerId, ownerId, "${reason}"]`
+    const reasonIdx = source.indexOf(reasonArgs)
+    assert.ok(reasonIdx > 0, `${reason} args must exist`)
+    const queryStart = source.lastIndexOf('await c.query(', reasonIdx)
+    const queryEnd = source.indexOf(');', reasonIdx)
+    assert.ok(queryStart > 0 && queryEnd > reasonIdx, `${reason} query bounds must exist`)
+    assert.match(
+      source.slice(queryStart, reasonIdx),
+      /INSERT INTO user_session_revocations/,
+      `${reason} must belong to the revocation upsert`,
+    )
+    return `${source.slice(0, queryStart)}/* revocation upsert removed */${source.slice(queryEnd + 2)}`
+  }
+  // Primary guard: same column list + ON CONFLICT watermark as revokeUserSessions().
+  assert.match(
+    node,
+    /INSERT INTO user_session_revocations \(user_id, revoked_after, updated_at, updated_by, reason\) VALUES \(\$1, NOW\(\), NOW\(\), \$2, \$3\) ON CONFLICT \(user_id\) DO UPDATE SET revoked_after = EXCLUDED\.revoked_after, updated_at = EXCLUDED\.updated_at, updated_by = EXCLUDED\.updated_by, reason = EXCLUDED\.reason/,
+  )
+  assert.match(node, /lifecycle_canary_bootstrap_password_repair/)
+  assert.match(node, /lifecycle_canary_bootstrap_password_create/)
+  assert.equal((node.match(/INSERT INTO user_session_revocations/g) || []).length, 2)
+  // Param shape: userId, updatedBy, reason — not reason-only / userId-as-reason confusion.
+  assert.match(
+    node,
+    /\[ownerId, ownerId, "lifecycle_canary_bootstrap_password_repair"\]/,
+  )
+  // Order: revocations upsert before optional user_sessions belt.
+  const revIdx = node.indexOf('INSERT INTO user_session_revocations')
+  const sessIdx = node.indexOf('UPDATE user_sessions SET revoked_at')
+  assert.ok(revIdx > 0, 'user_session_revocations upsert required')
+  assert.ok(sessIdx > revIdx, 'user_sessions belt must follow user_session_revocations primary guard')
+  assert.match(node, /Additional belt only|additional belt/i)
+  assert.doesNotMatch(node, /table_name = 'user_session_revocations'/)
+  assert.match(node, /absence must roll back the repair/i)
+
+  // MUTATION: dropping either branch's revocation upsert must redden its own contract.
+  const withoutRepairRev = removeRevocationUpsert(
+    node,
+    'lifecycle_canary_bootstrap_password_repair',
+  )
+  assert.match(withoutRepairRev, /lifecycle_canary_bootstrap_password_create/)
+  let repairFailed = false
+  try {
+    assert.match(
+      withoutRepairRev,
+      /\[ownerId, ownerId, "lifecycle_canary_bootstrap_password_repair"\]/,
+    )
+  } catch {
+    repairFailed = true
+  }
+  assert.equal(repairFailed, true)
+
+  const withoutCreateRev = removeRevocationUpsert(
+    node,
+    'lifecycle_canary_bootstrap_password_create',
+  )
+  assert.match(withoutCreateRev, /lifecycle_canary_bootstrap_password_repair/)
+  let createFailed = false
+  try {
+    assert.match(
+      withoutCreateRev,
+      /\[ownerId, ownerId, "lifecycle_canary_bootstrap_password_create"\]/,
+    )
+  } catch {
+    createFailed = true
+  }
+  assert.equal(createFailed, true)
+})
+
+test('bootstrap streams secrets over docker exec stdin; never docker cp container secret files', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('bootstrap_lifecycle_canary_admin()')
+  const end = source.indexOf('\n# Admin API via JWT file', start)
+  const body = source.slice(start, end)
+  assert.match(body, /struct\.pack\(">I"/)
+  assert.match(body, /readFrame|readUInt32BE/)
+  assert.match(body, /docker exec -i/)
+  assert.match(body, /no container secret files/i)
+  assert.doesNotMatch(body, /docker cp/)
+  // Host may mktemp a non-secret node source; must never docker-cp login secret files.
+  assert.doesNotMatch(body, /docker cp[^\n]*login\.(identifier|password)/)
+  assert.doesNotMatch(body, /BACKEND_CONTAINER:[^\n]*login\.(identifier|password)/)
+  assert.match(body, /CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=12|password_too_short/)
+  assert.match(body, /password\.length < minLen|password_too_short/)
+  // JWT revocation watermark is authoritative; user_sessions is an additional belt.
+  assert.match(body, /INSERT INTO user_session_revocations/)
+  assert.match(body, /revoked_after = EXCLUDED\.revoked_after/)
+  assert.match(body, /ON CONFLICT \(user_id\) DO UPDATE/)
+  assert.match(body, /user_sessions/)
+  assert.match(body, /revoked_at/)
+  assert.match(body, /lifecycle_canary_bootstrap_password_repair/)
+})
+
+test('bootstrap requires exact SHA, OFF, health, migrations zero; never writes lifecycle env', () => {
+  const body = actionBootstrapBody(read(REMOTE_SH))
+  assert.match(body, /require_sha/)
+  assert.match(body, /assert_exact_sha/)
+  assert.match(body, /require_migrations_pending_zero_true "\$SNAP_MIGRATIONS_ZERO" "action=bootstrap"/)
+  assert.match(body, /require_canary_secret_files "bootstrap"/)
+  assert.match(body, /assert_canary_identifier_matches_owner "bootstrap"/)
+  assert.match(body, /expected_current_mode=off/)
+  assert.match(body, /backend_health_ok must be true before account mutation/)
+  assert.match(body, /live mode must be off/)
+  assert.match(body, /bootstrap_lifecycle_canary_admin/)
+  assert.match(body, /sleep 1\.1/)
+  assert.match(body, /prove_canary_password_login "bootstrap"/)
+  // Post-bootstrap re-assert mode/health/SHA.
+  assert.match(body, /post-bootstrap live mode must remain off/)
+  assert.match(body, /post-bootstrap backend_health_ok must remain true/)
+  assert.match(body, /require_migrations_pending_zero_true "\$SNAP_MIGRATIONS_ZERO" "action=bootstrap post-check"/)
+  assert.match(body, /post-bootstrap SHA/)
+  assert.match(body, /post_bootstrap_mode_off=true/)
+  assert.match(body, /transition_applied=false/)
+  assert.match(body, /lifecycle_env_write=false/)
+  assert.doesNotMatch(body, /write_lifecycle_override/)
+  assert.doesNotMatch(body, /recreate_backend_only/)
+  assert.doesNotMatch(body, /AUTH_LOGIN_USE_ALIASES/)
+  assert.doesNotMatch(body, /pin_live_backend_image_for_transition/)
+})
+
+test('MUTATION: bootstrap enabling a lifecycle flag would fail no-env-write contract', () => {
+  const original = actionBootstrapBody(read(REMOTE_SH))
+  const mutated = `${original}\n  write_lifecycle_override "true" "false" "false"\n`
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /write_lifecycle_override/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('alias JWT derivation mints from password login; never ATTENDANCE_ADMIN_JWT', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /mint_canary_admin_jwt_from_password_login\(\)/)
+  assert.match(source, /admin\.jwt/)
+  assert.match(source, /never secrets\.ATTENDANCE_ADMIN_JWT|Never.*ATTENDANCE_ADMIN_JWT/i)
+  assert.match(source, /CANARY_ADMIN_JWT_FILE set from password login mint/)
+  const aliasBody = actionAliasBody(source)
+  assert.match(aliasBody, /mint_canary_admin_jwt_from_password_login "pre_on"/)
+  const mintIdx = aliasBody.indexOf('mint_canary_admin_jwt_from_password_login "pre_on"')
+  const backfillIdx = aliasBody.indexOf('run_alias_backfill')
+  assert.ok(mintIdx >= 0 && backfillIdx > mintIdx)
+  // Workflow must not inject secrets.ATTENDANCE_ADMIN_JWT; remote must not read that secret.
+  const yaml = read(WORKFLOW)
+  assert.doesNotMatch(yaml, /\$\{\{\s*secrets\.ATTENDANCE_ADMIN_JWT/)
+  assert.doesNotMatch(source, /\$\{\{\s*secrets\.ATTENDANCE_ADMIN_JWT/)
+  assert.doesNotMatch(source, /ATTENDANCE_ADMIN_JWT_FILE|printf.*ATTENDANCE_ADMIN_JWT/)
+})
+
+test('FUNCTIONAL harness: action_bootstrap order gates then create/repair then login then reassert; no env write', () => {
+  const sha = 'f'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       CALL_LOG=()
+       record() { CALL_LOG+=("\$1"); }
+       require_sha() { record require_sha; }
+       require_canary_secret_files() { record require_secrets; }
+       assert_canary_identifier_matches_owner() { record assert_owner; }
+       capture_live_snapshot() {
+         record capture
+         SNAP_ALIAS=false; SNAP_PENDING=false; SNAP_DEPROV=false; SNAP_MODE=off
+         SNAP_BUILD_SHA="$DEPLOY_SHA"; SNAP_ALIAS_READY=true; SNAP_CAN_ENABLE_ALIAS=true
+         SNAP_MIGRATIONS_ZERO=true; SNAP_HEALTH_OK=true
+       }
+       assert_exact_sha() { record assert_sha; }
+       require_migrations_pending_zero_true() { record require_mig; }
+       bootstrap_lifecycle_canary_admin() { record bootstrap_txn; BOOTSTRAP_OUTCOME=created; return 0; }
+       prove_canary_password_login() { record "login:\$1"; return 0; }
+       write_lifecycle_override() { record "write:\$1:\$2:\$3"; }
+       write_status_artifact() { record write_status; }
+       OUTPUT_DIR="$2"
+       mkdir -p "$OUTPUT_DIR"
+       DEPLOY_SHA="$3"
+       EXPECTED_CURRENT_MODE=off
+       ACTION=bootstrap
+       action_bootstrap
+       printf '%s\\n' "\${CALL_LOG[@]}"`,
+      'bash',
+      REMOTE_SH,
+      '/tmp/lifecycle-canary-bootstrap-success',
+      sha,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'bootstrap',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-bootstrap-success',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        DEPLOY_SHA: sha,
+        EXPECTED_CURRENT_MODE: 'off',
+      },
+    },
+  )
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const lines = result.stdout.trim().split('\n')
+  const idx = (name) => {
+    const i = lines.indexOf(name)
+    assert.ok(i >= 0, `missing call ${name} in ${lines.join(',')}`)
+    return i
+  }
+  assert.ok(idx('require_sha') < idx('require_secrets'))
+  assert.ok(idx('require_secrets') < idx('assert_owner'))
+  assert.ok(idx('assert_sha') < idx('bootstrap_txn'))
+  assert.ok(idx('require_mig') < idx('bootstrap_txn'))
+  assert.ok(idx('bootstrap_txn') < idx('login:bootstrap'))
+  // Second capture + assert_exact_sha after login for post-bootstrap reassert.
+  const loginI = idx('login:bootstrap')
+  const secondCapture = lines.indexOf('capture', loginI + 1)
+  assert.ok(secondCapture > loginI, 'post-bootstrap recapture required')
+  const secondSha = lines.indexOf('assert_sha', loginI + 1)
+  assert.ok(secondSha > secondCapture, 'post-bootstrap SHA reassert after recapture')
+  assert.ok(!lines.some((l) => l.startsWith('write:')), 'bootstrap must not write lifecycle override')
+})
+
+test('FUNCTIONAL: mint_canary_admin_jwt_from_password_login writes chmod-600 JWT file from login', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-canary-mint-'))
+  /** @type {import('node:child_process').ChildProcess | null} */
+  let serverProc = null
+  /** @type {import('node:child_process').ChildProcess | null} */
+  let helperProc = null
+  const overallMs = 8000
+  try {
+    const identFile = join(dir, 'login.identifier')
+    const passFile = join(dir, 'login.password')
+    writeFileSync(identFile, 'lifecycle-canary@staging.invalid')
+    writeFileSync(passFile, 's3cret-canary-pass')
+    const jwtOut = join(dir, 'admin.jwt')
+
+    const serverPy = `
+import json
+import http.server
+import socketserver
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(n)
+        body = json.dumps({"success": True, "data": {"token": "minted-loopback-jwt"}}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_args):
+        return
+
+with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+    print(httpd.server_address[1], flush=True)
+    httpd.handle_request()
+`
+    serverProc = spawn('python3', ['-c', serverPy], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    })
+    const serverDone = collectChild(serverProc, overallMs)
+    const port = await new Promise((resolve, reject) => {
+      let buf = ''
+      const timer = setTimeout(() => reject(new Error('loopback server port timeout')), 3000)
+      const onData = (chunk) => {
+        buf += chunk.toString('utf8')
+        const line = buf.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+        if (/^\d+$/.test(line)) {
+          clearTimeout(timer)
+          serverProc.stdout.off('data', onData)
+          resolve(Number(line))
+        }
+      }
+      serverProc.stdout.on('data', onData)
+      serverProc.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+    })
+
+    helperProc = spawn(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         CANARY_LOGIN_IDENTIFIER_FILE="$2"
+         CANARY_LOGIN_PASSWORD_FILE="$3"
+         STAGING_API_BASE_URL="$4"
+         mint_canary_admin_jwt_from_password_login loopback_mint
+         printf 'PATH=%s\\n' "\$CANARY_ADMIN_JWT_FILE"
+         printf 'TOKEN='
+         cat "\$CANARY_ADMIN_JWT_FILE"
+         printf '\\n'
+         stat -f '%Lp' "\$CANARY_ADMIN_JWT_FILE" 2>/dev/null || stat -c '%a' "\$CANARY_ADMIN_JWT_FILE"`,
+        'bash',
+        REMOTE_SH,
+        identFile,
+        passFile,
+        `http://127.0.0.1:${port}`,
+      ],
+      {
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    const helperResult = await collectChild(helperProc, overallMs)
+    assert.equal(
+      helperResult.code,
+      0,
+      `helper failed: ${helperResult.stderr}${helperResult.stdout}`,
+    )
+    assert.match(helperResult.stdout, /PATH=.*admin\.jwt/)
+    assert.match(helperResult.stdout, /TOKEN=minted-loopback-jwt/)
+    assert.match(helperResult.stdout, /600/)
+    assert.ok(existsSync(jwtOut))
+    assert.equal(readFileSync(jwtOut, 'utf8'), 'minted-loopback-jwt')
+    await Promise.race([serverDone, new Promise((resolve) => setTimeout(resolve, 1000))])
+  } finally {
+    for (const proc of [helperProc, serverProc]) {
+      if (proc && !proc.killed && proc.exitCode === null) {
+        try {
+          proc.kill('SIGKILL')
+        } catch {
+          // ignore
+        }
+      }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // --- docs / staging blockers ----------------------------------------------------------
 
-test('docs mark pending/deprovision NOT EXECUTABLE; alias is executable transient canary', () => {
+test('docs mark pending/deprovision NOT EXECUTABLE; alias is executable transient canary; bootstrap documented', () => {
   const closeout = read(CLOSEOUT_DOC)
   const go = read(CANARY_GO_DOC)
   // Closeout may still describe historical NOT EXECUTABLE for ON names; go-doc is authoritative.
@@ -1899,12 +2416,16 @@ test('docs mark pending/deprovision NOT EXECUTABLE; alias is executable transien
   assert.match(go, /deprovision/)
   assert.match(go, /EXECUTABLE/)
   assert.match(go, /alias/)
+  assert.match(go, /bootstrap/)
+  assert.match(go, /lifecycle-canary@staging\.invalid/)
   assert.match(go, /success requires\/proves OFF|Success requires\/proves OFF/i)
   assert.match(go, /failure restores the OFF override before failing/i)
   assert.match(go, /runtime OFF cannot be proven/i)
   assert.doesNotMatch(go, /ALWAYS returns to OFF|always returns to OFF|always restores OFF/i)
   assert.match(go, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER|secret-backed/)
   assert.match(go, /collisions==0|collisions must be 0|collisions==0/i)
+  assert.match(go, /ATTENDANCE_ADMIN_JWT/)
+  assert.match(go, /never.*ATTENDANCE_ADMIN_JWT|not.*ATTENDANCE_ADMIN_JWT|mint.*password login/i)
   // No invented successful canary execution evidence.
   assert.doesNotMatch(go, /alias canary EXECUTED successfully|alias cutover canary PASSED on staging/i)
   assert.match(go, /NOT EXECUTED/)
@@ -1951,4 +2472,5 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
   assert.doesNotMatch(yaml, /export OWNER_CONFIRM=/)
   assert.doesNotMatch(yaml, /export ATTENDANCE_ADMIN_JWT=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
+  assert.doesNotMatch(yaml, /export CANARY_ADMIN_JWT_FILE=/)
 })

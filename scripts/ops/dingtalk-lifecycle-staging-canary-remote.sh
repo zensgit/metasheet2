@@ -10,16 +10,27 @@
 #   off        — emergency operational rollback of the THREE lifecycle env gates
 #                to OFF. Atomic previous-override backup + restore on
 #                restart/health/mode failure.
+#   bootstrap  — staging-only, manual create/repair of the FIXED dedicated
+#                lifecycle canary platform admin (email+UUID ownership markers).
+#                Requires full deploy SHA, expected_current_mode=off, exact mode
+#                off, health true, migrations_pending_zero true.
+#                Idempotent for the owned row; email/id collision not matching
+#                BOTH markers fails closed. Proves real password login.
+#                NEVER writes lifecycle env flags; never touches arbitrary admins.
+#                Requires login identifier/password secret files only (chmod 600).
 #   alias      — TRANSIENT secret-backed alias cutover canary.
 #                Success requires/proves OFF (post-rollback mode+login).
 #                Failure restores the OFF override before failing (post-write).
 #                Runtime OFF cannot be proven if rollback recreate itself fails
 #                (override restored on disk; operator must inspect).
-#                Requires full deploy SHA, expected_current_mode=off, admin JWT
-#                file + login identifier/password files (chmod 600).
-#                Sequence: pre-login → backfill (collisions==0) → cutover-status
-#                ready → write alias ON → recreate backend only → post-ON login
-#                → restore OFF → recreate → post-rollback login.
+#                Requires full deploy SHA, expected_current_mode=off, and login
+#                identifier/password files (chmod 600) only — NO repo-global
+#                ATTENDANCE_ADMIN_JWT. Short-lived admin JWT is minted from the
+#                canary password login into a chmod-600 per-run remote file after
+#                successful pre-login, then used for backfill/cutover-status.
+#                Sequence: pre-login (+mint JWT) → backfill (collisions==0) →
+#                cutover-status ready → write alias ON → recreate backend only →
+#                post-ON login → restore OFF → recreate → post-rollback login.
 #                Backfill rows may persist.
 #
 # NOT EXECUTABLE (fail-closed preflight-only; transition_applied always false):
@@ -31,10 +42,12 @@
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
 #   * migrations_pending_zero must be exactly "true" for preflight_ok and for
-#     action=off / action=alias (unknown is a fail, never treated as success).
+#     action=off / action=alias / action=bootstrap (unknown is a fail, never
+#     treated as success).
 #   * action=off|alias: recreate backend only; prove postgres/redis IDs unchanged;
 #     require backend health true after restart; prove exact mode; restore
 #     previous override and re-recreate on any failure after the write.
+#   * action=bootstrap: no lifecycle env write; no backend recreate.
 #   * multi-on: status/preflight report and fail closed; action=off still clears
 #     the exact three flags (does not die in derive_mode before clear).
 #   * Artifacts never contain env values, credentials, subject ids, or PII —
@@ -47,7 +60,7 @@ set -euo pipefail
 log() { echo "[lifecycle-canary] $*"; }
 fail() { echo "[lifecycle-canary][error] $*" >&2; exit 1; }
 
-ACTION="${ACTION:?ACTION is required (status|preflight|off|alias|pending|deprovision)}"
+ACTION="${ACTION:?ACTION is required (status|preflight|off|bootstrap|alias|pending|deprovision)}"
 TARGET_MODE="${TARGET_MODE:-}"
 EXPECTED_CURRENT_MODE="${EXPECTED_CURRENT_MODE:-}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
@@ -56,11 +69,19 @@ DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
 
-# Secret-backed alias canary inputs: FILE PATHS only (values never exported).
-# Workflow materializes chmod-600 files into the per-run remote directory.
+# Secret-backed canary inputs: FILE PATHS only (values never exported).
+# Workflow materializes chmod-600 identifier/password into the per-run remote dir.
+# Alias mints CANARY_ADMIN_JWT_FILE after successful pre-login (never from
+# secrets.ATTENDANCE_ADMIN_JWT). Bootstrap does not consume a JWT file.
 CANARY_ADMIN_JWT_FILE="${CANARY_ADMIN_JWT_FILE:-}"
 CANARY_LOGIN_IDENTIFIER_FILE="${CANARY_LOGIN_IDENTIFIER_FILE:-}"
 CANARY_LOGIN_PASSWORD_FILE="${CANARY_LOGIN_PASSWORD_FILE:-}"
+
+# Fixed dedicated lifecycle canary admin ownership markers (values-free constants).
+# Create/repair ONLY this (email, id) pair. Any email/id collision that does not
+# match BOTH markers fails closed — never mutates an arbitrary existing admin.
+CANARY_OWNER_EMAIL="lifecycle-canary@staging.invalid"
+CANARY_OWNER_USER_ID="6c1fe000-ca0a-4000-8000-1ec0c1e00001"
 
 # Intentionally ignored: not a real verifier path. Kept empty so accidental
 # exports cannot be mistaken for canary completion evidence.
@@ -378,36 +399,75 @@ require_migrations_pending_zero_true() {
 }
 
 require_canary_secret_files() {
+  # Login identifier/password paths only — never JWT from secrets.ATTENDANCE_ADMIN_JWT.
   # Paths only — never read values into shell variables that get logged.
-  local f
+  local f context="${1:-alias}"
   for f in \
-    CANARY_ADMIN_JWT_FILE \
     CANARY_LOGIN_IDENTIFIER_FILE \
     CANARY_LOGIN_PASSWORD_FILE
   do
     local path="${!f:-}"
-    [[ -n "$path" ]] || fail "action=alias requires ${f} (chmod-600 secret file path); no auto-selection"
-    [[ -f "$path" ]] || fail "action=alias secret file missing for ${f}"
-    [[ -s "$path" ]] || fail "action=alias secret file empty for ${f}"
+    [[ -n "$path" ]] || fail "action=${context} requires ${f} (chmod-600 secret file path); no auto-selection"
+    [[ -f "$path" ]] || fail "action=${context} secret file missing for ${f}"
+    [[ -s "$path" ]] || fail "action=${context} secret file empty for ${f}"
   done
-  log "alias canary secret files present (paths only; values never logged)"
+  log "${context} canary login secret files present (paths only; values never logged)"
+}
+
+# Identifier secret file (app trim) must equal the fixed ownership email marker.
+# Values never logged; only ok / reason enums leave python.
+assert_canary_identifier_matches_owner() {
+  local context="$1"
+  local result ok note
+  result="$(
+    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_OWNER_EMAIL" <<'PY'
+import pathlib
+import sys
+
+ident_path, expected = sys.argv[1], sys.argv[2]
+try:
+    identifier = pathlib.Path(ident_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if not identifier:
+    print("false|empty_identifier")
+    raise SystemExit(0)
+if identifier != expected:
+    print("false|identifier_not_fixed_owner")
+    raise SystemExit(0)
+print("true|ok")
+PY
+  )"
+  ok="${result%%|*}"
+  note="${result#*|}"
+  if [[ "$ok" == "true" ]]; then
+    log "canary identifier matches fixed owner email (${context})"
+    return 0
+  fi
+  fail "action=${context} refused: login identifier must be exact fixed owner email (${note}); values never logged"
 }
 
 # Real password login via secret files. Values stay inside python; never argv/export/log.
 # Identifier may follow app trim semantics (strip ends). Password is read EXACTLY as
-# stored (no CR/LF strip, no transform). stdout: true|ok or false|<reason_enum>.
+# stored (no CR/LF strip, no transform).
+# Usage: prove_canary_password_login CONTEXT [jwt_out_file]
+# When jwt_out_file is set and login succeeds, write the short-lived token there
+# (chmod 600) for subsequent admin API calls. Never logs token contents.
 prove_canary_password_login() {
   local context="$1"
+  local jwt_out="${2:-}"
   local result ok note
   result="$(
-    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$STAGING_API_BASE_URL" <<'PY'
+    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$STAGING_API_BASE_URL" "$jwt_out" <<'PY'
 import json
+import os
 import pathlib
 import sys
 import urllib.error
 import urllib.request
 
-ident_path, pass_path, base = sys.argv[1], sys.argv[2], sys.argv[3]
+ident_path, pass_path, base, jwt_out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 try:
     # read_bytes+decode avoids text-mode universal-newline translation.
     # App sanitizeLoginIdentifier trims ends; password must not be transformed.
@@ -450,17 +510,353 @@ ok = (
     and isinstance(token, str)
     and len(token) > 0
 )
-print("true|ok" if ok else f"false|http_{code}_login_rejected")
+if not ok:
+    print(f"false|http_{code}_login_rejected")
+    raise SystemExit(0)
+if jwt_out:
+    try:
+        out = pathlib.Path(jwt_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # Exact token bytes; no trailing newline added.
+        out.write_bytes(token.encode("utf-8"))
+        os.chmod(out, 0o600)
+    except Exception:
+        print("false|jwt_write_failed")
+        raise SystemExit(0)
+print("true|ok")
 PY
   )"
   ok="${result%%|*}"
   note="${result#*|}"
   if [[ "$ok" == "true" ]]; then
-    log "password login OK (${context})"
+    if [[ -n "$jwt_out" ]]; then
+      log "password login OK (${context}); short-lived admin JWT written to secret file (path only)"
+    else
+      log "password login OK (${context})"
+    fi
     return 0
   fi
   log "password login FAILED (${context}): ${note}"
   return 1
+}
+
+# Mint short-lived admin JWT into a chmod-600 file beside the login password file.
+# Never consumes secrets.ATTENDANCE_ADMIN_JWT or any repo-global JWT secret.
+mint_canary_admin_jwt_from_password_login() {
+  local context="$1"
+  local jwt_path
+  [[ -n "${CANARY_LOGIN_PASSWORD_FILE:-}" ]] \
+    || fail "mint admin JWT requires CANARY_LOGIN_PASSWORD_FILE path"
+  jwt_path="$(dirname "$CANARY_LOGIN_PASSWORD_FILE")/admin.jwt"
+  if ! prove_canary_password_login "$context" "$jwt_path"; then
+    return 1
+  fi
+  [[ -f "$jwt_path" && -s "$jwt_path" ]] \
+    || fail "mint admin JWT: secret file missing/empty after login (${context})"
+  CANARY_ADMIN_JWT_FILE="$jwt_path"
+  log "CANARY_ADMIN_JWT_FILE set from password login mint (path only; never ATTENDANCE_ADMIN_JWT)"
+  return 0
+}
+
+# Strong minimum password length for the fixed canary admin (matches on-prem bootstrap floor).
+CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=12
+
+# Transactional create/repair of the FIXED owned lifecycle canary admin only.
+# Collision fail-closed: any users row matching email OR id that does not match
+# BOTH ownership markers refuses mutation. Values never logged.
+#
+# Credential transport: host python reads chmod-600 secret files and streams exact
+# bytes over docker exec stdin (uint32be length frames). Container node receives
+# ONLY non-secret ownership markers via env. No docker cp of secrets, no persistent
+# container secret files — interrupt cannot leave identifier/password under /tmp.
+# Node program is non-secret host temp source base64'd into env (not secret files).
+# stdout reason enums only via result lines.
+bootstrap_lifecycle_canary_admin() {
+  local result note node_tmp node_b64
+  BOOTSTRAP_OUTCOME="unset"
+  node_tmp=""
+
+  cleanup_bootstrap_node_tmp() {
+    if [[ -n "${node_tmp:-}" && -f "${node_tmp}" ]]; then
+      rm -f "${node_tmp}"
+    fi
+    node_tmp=""
+  }
+
+  # Non-secret node program on host only (never contains credentials).
+  # permissions column omitted (054 TEXT[] default / later jsonb default both work).
+  # Repair revokes sessions when schema supports it (user_session_revocations and/or user_sessions).
+  node_tmp="$(mktemp "${TMPDIR:-/tmp}/lifecycle-canary-bootstrap-node.XXXXXX")"
+  cat >"$node_tmp" <<'NODE'
+const { Client } = require("pg");
+
+function fail(code) {
+  process.stdout.write("false|" + code);
+  process.exit(0);
+}
+
+function readExact(n) {
+  return new Promise(function (resolve, reject) {
+    if (n === 0) {
+      resolve(Buffer.alloc(0));
+      return;
+    }
+    var chunks = [];
+    var got = 0;
+    function onData(c) {
+      chunks.push(c);
+      got += c.length;
+      if (got >= n) {
+        process.stdin.pause();
+        process.stdin.off("data", onData);
+        process.stdin.off("error", onErr);
+        process.stdin.off("end", onEnd);
+        var buf = Buffer.concat(chunks);
+        if (buf.length > n) {
+          process.stdin.unshift(buf.subarray(n));
+        }
+        resolve(buf.subarray(0, n));
+      }
+    }
+    function onErr(e) { reject(e); }
+    function onEnd() { reject(new Error("short_stdin")); }
+    process.stdin.on("data", onData);
+    process.stdin.on("error", onErr);
+    process.stdin.on("end", onEnd);
+    process.stdin.resume();
+  });
+}
+
+function readFrame() {
+  return readExact(4).then(function (hdr) {
+    var len = hdr.readUInt32BE(0);
+    if (len > 1024 * 1024) throw new Error("frame_too_large");
+    return readExact(len);
+  });
+}
+
+(async function () {
+  var ownerId = String(process.env.CANARY_BOOTSTRAP_OWNER_ID || "");
+  var ownerEmail = String(process.env.CANARY_BOOTSTRAP_OWNER_EMAIL || "");
+  var minLen = Number(process.env.CANARY_BOOTSTRAP_MIN_PASSWORD_LEN || "12");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId)) {
+    fail("owner_id_not_uuid");
+    return;
+  }
+  if (!ownerEmail) {
+    fail("owner_email_missing");
+    return;
+  }
+  if (!Number.isInteger(minLen) || minLen < 12) {
+    fail("min_password_len_invalid");
+    return;
+  }
+
+  var identifier;
+  var password;
+  try {
+    var identBuf = await readFrame();
+    var passBuf = await readFrame();
+    identifier = identBuf.toString("utf8").trim();
+    // Password: exact UTF-8 decode of framed bytes (no CR/LF strip).
+    password = passBuf.toString("utf8");
+  } catch (e) {
+    fail("secret_stdin_read_failed");
+    return;
+  }
+  if (!identifier || password === "") {
+    fail("empty_credentials");
+    return;
+  }
+  if (identifier !== ownerEmail) {
+    fail("identifier_not_fixed_owner");
+    return;
+  }
+  if (password.length < minLen) {
+    fail("password_too_short");
+    return;
+  }
+
+  var bcrypt;
+  try {
+    bcrypt = require("bcryptjs");
+  } catch (e) {
+    fail("bcryptjs_unavailable");
+    return;
+  }
+  var roundsRaw = process.env.BCRYPT_SALT_ROUNDS || "12";
+  var rounds = Number(roundsRaw);
+  if (!Number.isInteger(rounds) || rounds < 12) {
+    fail("bcrypt_rounds_invalid");
+    return;
+  }
+  var passwordHash;
+  try {
+    passwordHash = bcrypt.hashSync(password, rounds);
+  } catch (e) {
+    fail("password_hash_failed");
+    return;
+  }
+
+  var url = process.env.DATABASE_URL;
+  if (!url) {
+    fail("database_url_missing");
+    return;
+  }
+  var c = new Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    await c.query("BEGIN");
+    // Lock any colliding ownership rows for the duration of the transaction.
+    var found = await c.query(
+      "SELECT id, email FROM users WHERE id = $1 OR lower(email) = lower($2) FOR UPDATE",
+      [ownerId, ownerEmail]
+    );
+    if (found.rows.length > 1) {
+      await c.query("ROLLBACK");
+      fail("collision_multiple_rows");
+      return;
+    }
+    if (found.rows.length === 1) {
+      var row = found.rows[0];
+      var emailOk =
+        typeof row.email === "string" && row.email.toLowerCase() === ownerEmail.toLowerCase();
+      var idOk = row.id === ownerId;
+      if (!emailOk || !idOk) {
+        await c.query("ROLLBACK");
+        fail("collision_not_owned");
+        return;
+      }
+      // Idempotent repair of the fixed owned row only.
+      // Omit permissions: leave existing value (avoids TEXT[] vs jsonb cast issues).
+      await c.query(
+        "UPDATE users SET password_hash = $1, name = COALESCE(NULLIF(trim(name), ''), $2), role = 'admin', is_admin = TRUE, is_active = TRUE, activation_status = 'activated', local_password_set = TRUE, must_change_password = FALSE, updated_at = NOW() WHERE id = $3 AND lower(email) = lower($4)",
+        [passwordHash, "Lifecycle Canary Admin", ownerId, ownerEmail]
+      );
+      // Password rotation PRIMARY guard (same shape as session-revocation.ts revokeUserSessions):
+      // upsert user_session_revocations.revoked_after — JWT verify uses this watermark.
+      // user_sessions row revoke is an additional belt only (not sufficient alone).
+      // Required when migrations_pending_zero=true; absence must roll back the repair.
+      await c.query(
+        "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, NOW(), NOW(), $2, $3) ON CONFLICT (user_id) DO UPDATE SET revoked_after = EXCLUDED.revoked_after, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason",
+        [ownerId, ownerId, "lifecycle_canary_bootstrap_password_repair"]
+      );
+      // Additional belt only — not a substitute for user_session_revocations.
+      var sessTable = await c.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'user_sessions' LIMIT 1"
+      );
+      if (sessTable.rows.length > 0) {
+        await c.query(
+          "UPDATE user_sessions SET revoked_at = NOW(), revoked_by = $1, revoke_reason = $2, updated_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+          [ownerId, "lifecycle_canary_bootstrap_password_repair"]
+        );
+      }
+      await c.query(
+        "INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT (user_id, role_id) DO NOTHING",
+        [ownerId]
+      );
+      await c.query(
+        "INSERT INTO user_permissions (user_id, permission_code) SELECT $1, p.code FROM permissions p WHERE p.code IN ('*:*', 'admin:users', 'admin:roles', 'admin:permissions') ON CONFLICT (user_id, permission_code) DO NOTHING",
+        [ownerId]
+      );
+      await c.query("COMMIT");
+      process.stdout.write("true|repaired");
+      return;
+    }
+
+    // No collision: insert fixed owned row.
+    // Omit permissions so both TEXT[] default (054) and jsonb default work.
+    await c.query(
+      "INSERT INTO users (id, email, name, password_hash, role, is_admin, is_active, activation_status, local_password_set, must_change_password, created_at, updated_at) VALUES ($1, $2, $3, $4, 'admin', TRUE, TRUE, 'activated', TRUE, FALSE, NOW(), NOW())",
+      [ownerId, ownerEmail, "Lifecycle Canary Admin", passwordHash]
+    );
+    // A prior deleted canary row may have left orphaned stateless tokens because
+    // the revocation table has no users FK. Advance the watermark on create too.
+    await c.query(
+      "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, NOW(), NOW(), $2, $3) ON CONFLICT (user_id) DO UPDATE SET revoked_after = EXCLUDED.revoked_after, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason",
+      [ownerId, ownerId, "lifecycle_canary_bootstrap_password_create"]
+    );
+    await c.query(
+      "INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT (user_id, role_id) DO NOTHING",
+      [ownerId]
+    );
+    await c.query(
+      "INSERT INTO user_permissions (user_id, permission_code) SELECT $1, p.code FROM permissions p WHERE p.code IN ('*:*', 'admin:users', 'admin:roles', 'admin:permissions') ON CONFLICT (user_id, permission_code) DO NOTHING",
+      [ownerId]
+    );
+    await c.query("COMMIT");
+    process.stdout.write("true|created");
+  } catch (err) {
+    try { await c.query("ROLLBACK"); } catch (e2) { /* ignore */ }
+    process.stdout.write("false|txn_failed");
+  } finally {
+    try { await c.end(); } catch (e3) { /* ignore */ }
+  }
+})().catch(function () {
+  process.stdout.write("false|txn_failed");
+});
+NODE
+
+  # shellcheck disable=SC2064
+  trap cleanup_bootstrap_node_tmp RETURN
+
+  node_b64="$(base64 <"$node_tmp" | tr -d '\n')"
+  cleanup_bootstrap_node_tmp
+
+  # Host: exact-byte secret files → framed stdin only. No secret values in argv/export.
+  # Also enforce password minimum length on host (values-free) before streaming.
+  if ! result="$(
+    python3 - "$CANARY_LOGIN_IDENTIFIER_FILE" "$CANARY_LOGIN_PASSWORD_FILE" "$CANARY_BOOTSTRAP_MIN_PASSWORD_LEN" <<'PY' | docker exec -i \
+      -e "CANARY_BOOTSTRAP_OWNER_ID=${CANARY_OWNER_USER_ID}" \
+      -e "CANARY_BOOTSTRAP_OWNER_EMAIL=${CANARY_OWNER_EMAIL}" \
+      -e "CANARY_BOOTSTRAP_MIN_PASSWORD_LEN=${CANARY_BOOTSTRAP_MIN_PASSWORD_LEN}" \
+      -e "CANARY_BOOTSTRAP_NODE_B64=${node_b64}" \
+      "$BACKEND_CONTAINER" \
+      node -e 'eval(Buffer.from(process.env.CANARY_BOOTSTRAP_NODE_B64||"","base64").toString("utf8"))'
+import pathlib
+import struct
+import sys
+
+ident_path, pass_path, min_len_s = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    min_len = int(min_len_s)
+except Exception:
+    min_len = 12
+try:
+    identifier = pathlib.Path(ident_path).read_bytes().decode("utf-8").strip().encode("utf-8")
+    # Exact password bytes — no transform.
+    password = pathlib.Path(pass_path).read_bytes()
+except Exception:
+    # Empty frames → container reports secret_stdin / empty_credentials path.
+    sys.stdout.buffer.write(struct.pack(">I", 0) + struct.pack(">I", 0))
+    raise SystemExit(0)
+# Host-side strong minimum: decode for length check only (UTF-8), still stream exact bytes.
+try:
+    password_text = password.decode("utf-8")
+except Exception:
+    password_text = ""
+if len(password_text) < min_len:
+    # Still stream frames so container fails closed with password_too_short (same enum).
+    pass
+sys.stdout.buffer.write(struct.pack(">I", len(identifier)) + identifier)
+sys.stdout.buffer.write(struct.pack(">I", len(password)) + password)
+sys.stdout.buffer.flush()
+PY
+  )"; then
+    fail "action=bootstrap: container bootstrap transaction runner failed"
+  fi
+
+  # Collapse multi-line docker/node noise to the last values-free status line.
+  result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  local ok="${result%%|*}"
+  note="${result#*|}"
+  BOOTSTRAP_OUTCOME="$note"
+  if [[ "$ok" != "true" ]]; then
+    log "bootstrap transaction refused: note=${note}"
+    return 1
+  fi
+  log "bootstrap transaction OK outcome=${note} (fixed owned row only; no container secret files; values never logged)"
+  return 0
 }
 
 # Admin API via JWT file. Prints values-free result lines; never logs token.
@@ -1180,7 +1576,88 @@ action_not_executable_on() {
     echo "transition_applied=false"
     echo "executable=false"
   } > "${OUTPUT_DIR}/summary.txt"
-  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|alias only. transition_applied=false"
+  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|bootstrap|alias only. transition_applied=false"
+}
+
+# Staging-only create/repair of the fixed dedicated lifecycle canary admin.
+# Never writes lifecycle env flags. Never mutates an arbitrary existing admin.
+# Idempotent for the (email, id) owned row; collision fail-closed otherwise.
+action_bootstrap() {
+  local note="bootstrap_canary_admin"
+  local login_ok="false"
+  BOOTSTRAP_OUTCOME="unset"
+
+  require_sha
+  require_canary_secret_files "bootstrap"
+  assert_canary_identifier_matches_owner "bootstrap"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=bootstrap"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=bootstrap requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=bootstrap"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=bootstrap refused: backend_health_ok must be true before account mutation"
+  fi
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=bootstrap refused: live mode must be off (live='${SNAP_MODE}')"
+  fi
+  if [[ "$SNAP_MODE" != "$EXPECTED_CURRENT_MODE" ]]; then
+    fail "strict expected-current-mode transition failed: live='${SNAP_MODE}' expected_current_mode='${EXPECTED_CURRENT_MODE}'"
+  fi
+
+  # No lifecycle env write path exists below — collision/txn only touches fixed owned row.
+  if ! bootstrap_lifecycle_canary_admin; then
+    fail "action=bootstrap refused: fixed-owner create/repair failed (note=${BOOTSTRAP_OUTCOME:-unset}); no env write performed"
+  fi
+
+  # JWT iat is second-granularity while revoked_after is timestamptz. Both create
+  # and repair advance the watermark, so cross the next token second before proof.
+  sleep 1.1
+
+  if prove_canary_password_login "bootstrap"; then
+    login_ok="true"
+  else
+    fail "action=bootstrap refused: password login proof failed after create/repair (note=${BOOTSTRAP_OUTCOME:-unset})"
+  fi
+
+  # Re-prove stack posture after account mutation: mode still off, health true, SHA unchanged.
+  capture_live_snapshot
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=bootstrap refused: post-bootstrap live mode must remain off (live='${SNAP_MODE}'); no lifecycle env write expected"
+  fi
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=bootstrap refused: post-bootstrap backend_health_ok must remain true"
+  fi
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=bootstrap post-check"
+  if [[ "${SNAP_BUILD_SHA:-}" != "$DEPLOY_SHA" ]]; then
+    fail "action=bootstrap refused: post-bootstrap SHA '${SNAP_BUILD_SHA:-}' must match deploy_sha '${DEPLOY_SHA}'"
+  fi
+  assert_exact_sha
+
+  note="bootstrap_canary_admin_${BOOTSTRAP_OUTCOME}"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "" "" "false" "$note"
+  {
+    echo "action=bootstrap"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=false"
+    echo "bootstrap_outcome=${BOOTSTRAP_OUTCOME}"
+    echo "login_ok=${login_ok}"
+    echo "lifecycle_env_write=false"
+    echo "post_bootstrap_mode_off=true"
+    echo "post_bootstrap_health_ok=true"
+    echo "post_bootstrap_sha_match=true"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=bootstrap OK outcome=${BOOTSTRAP_OUTCOME} login_ok=${login_ok} (no lifecycle env write; mode/health/SHA reasserted)"
 }
 
 # Sole executable env write: clear the exact three lifecycle flags to false.
@@ -1245,16 +1722,20 @@ action_off() {
 # on-disk prior file). Persistent override is left explicitly OFF. Runtime OFF
 # cannot be proven if rollback recreate fails (OFF baseline restored on disk;
 # operator must inspect). Backfill rows may persist.
+# Admin JWT is minted from the canary password login into a chmod-600 per-run
+# remote file after successful pre-login — never secrets.ATTENDANCE_ADMIN_JWT.
 action_alias() {
   local pre_login_ok="false"
   local post_on_login_ok="false"
   local post_rollback_login_ok="false"
   local rolled_back_to_off="false"
   local alias_on_applied="false"
+  local admin_jwt_minted="false"
   local note="alias_cutover_canary"
 
   require_sha
-  require_canary_secret_files
+  require_canary_secret_files "alias"
+  assert_canary_identifier_matches_owner "alias"
   [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=alias"
   [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
     || fail "action=alias requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
@@ -1274,14 +1755,19 @@ action_alias() {
     fail "strict expected-current-mode transition failed: live='${SNAP_MODE}' expected_current_mode='${EXPECTED_CURRENT_MODE}'"
   fi
 
-  # 1) Pre-write real password login (OR-column path while mode=off).
-  if prove_canary_password_login "pre_on"; then
+  # 1) Pre-write real password login (OR-column path while mode=off) AND mint
+  #    short-lived admin JWT into a chmod-600 per-run secret file for admin APIs.
+  #    Never read/overwrite secrets.ATTENDANCE_ADMIN_JWT.
+  if mint_canary_admin_jwt_from_password_login "pre_on"; then
     pre_login_ok="true"
+    admin_jwt_minted="true"
   else
-    fail "action=alias refused: pre-ON password login failed (no env write performed)"
+    fail "action=alias refused: pre-ON password login / JWT mint failed (no env write performed)"
   fi
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || fail "action=alias refused: admin JWT file missing after mint (no env write performed)"
 
-  # 2) T2a backfill + T2b readiness via admin JWT (no env write yet).
+  # 2) T2a backfill + T2b readiness via minted admin JWT file (no env write yet).
   if ! run_alias_backfill; then
     fail "action=alias refused: login-aliases backfill failed (no env write performed)"
   fi
@@ -1356,6 +1842,7 @@ action_alias() {
     echo "to_mode=off"
     echo "alias_on_applied=${alias_on_applied}"
     echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
     echo "post_on_login_ok=${post_on_login_ok}"
     echo "post_rollback_login_ok=${post_rollback_login_ok}"
     echo "rolled_back_to_off=${rolled_back_to_off}"
@@ -1380,10 +1867,11 @@ main() {
     status) action_status ;;
     preflight) action_preflight ;;
     off) action_off ;;
+    bootstrap) action_bootstrap ;;
     alias) action_alias ;;
     pending) action_not_executable_on pending ;;
     deprovision) action_not_executable_on deprovision ;;
-    *) fail "invalid ACTION='${ACTION}' (status|preflight|off|alias|pending|deprovision)" ;;
+    *) fail "invalid ACTION='${ACTION}' (status|preflight|off|bootstrap|alias|pending|deprovision)" ;;
   esac
 }
 
