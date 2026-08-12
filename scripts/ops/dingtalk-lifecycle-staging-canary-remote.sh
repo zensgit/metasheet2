@@ -73,6 +73,17 @@
 #                pre-recovery intact access graph, external source re-add, flags-OFF
 #                sync, owned directory account active, and access graph unchanged —
 #                then and only then clears the journal.
+#                SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY (confirmation=
+#                DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED):
+#                staging-only fail-closed recovery when the journal is stranded at
+#                phase=run_bound after an exact terminal failed sync with zero ledger
+#                (e.g. ledger_verify_failed_sync_deprovision_not_applied after the
+#                observed idx_directory_accounts_provider_corp_external_key collision).
+#                Never writes lifecycle env. Journal binds deprovision_applied=false;
+#                run API proves status=failed + exact observed error class (values-free);
+#                zero ledger + intact active access graph prove no mutation. External
+#                source re-add, flags-OFF sync (deprovisionApplied=false), graph
+#                unchanged, final zero-ledger + exact run identity — then clears journal.
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
@@ -143,6 +154,10 @@ DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"
 # Staging-only recovery for a completed empty_directory_fetch safe abort stranded at
 # phase=run_bound with no deprovision ledger. Never writes lifecycle env flags.
 DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION="DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED"
+# Staging-only recovery for a terminal failed sync stranded at phase=run_bound with
+# journal deprovision_applied=false and zero ledger (exact observed constraint class).
+# Never writes lifecycle env flags.
+DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION="DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED"
 PENDING_SSO_ACTIVATE_CONFIRMATION="PENDING_SSO_ACTIVATE"
 # Optional subject password file (path only). When present, deprovision may prove
 # pre-login then post-denial with the SAME proven credential. Never invent a wrong
@@ -3244,11 +3259,253 @@ PY
   return 1
 }
 
+# Load host journal for sync-failure-before-deprovision recovery only.
+# Accepts EXACTLY phase=run_bound with deprovision_applied=false and no ledger
+# binding (same journal shape as empty_fetch abort, different exact-run proof).
+# Pins the immutable failed run id separately from any later recovery sync run.
+# Leaves journal intact on any refuse (caller must not clear).
+load_run_bound_sync_failure_before_deprovision_journal() {
+  FAILED_SYNC_JOURNAL_OK="false"
+  FAILED_SYNC_JOURNAL_NOTE="unset"
+  [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]] \
+    || { FAILED_SYNC_JOURNAL_NOTE="journal_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { FAILED_SYNC_JOURNAL_NOTE="live_local_user_id_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { FAILED_SYNC_JOURNAL_NOTE="live_integration_id_missing"; return 1; }
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || { FAILED_SYNC_JOURNAL_NOTE="live_directory_account_id_missing"; return 1; }
+  local sec_dir
+  sec_dir="$(_subject_secret_dir)"
+  if ! python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$sec_dir" \
+    "$SUBJECT_OWNER_USERNAME" \
+    "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+    "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+    "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, os, pathlib, re, sys
+(
+    state_path, sec_dir, subject_key,
+    live_user_path, live_integ_path, live_acct_path,
+) = sys.argv[1:7]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+try:
+    state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(state, dict) or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(3)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(4)
+# Exact phase only — prepared must not skip to this recovery; ledger_bound uses restore.
+if state.get("phase") != "run_bound":
+    raise SystemExit(5)
+# Terminal failed-before-deprovision outcome: applied must be false (never true/null).
+if state.get("deprovision_applied") is not False:
+    raise SystemExit(6)
+# No ledger binding may exist for this recovery path.
+if state.get("event_id") not in (None, ""):
+    raise SystemExit(7)
+if state.get("effect_count") not in (None, 0):
+    raise SystemExit(8)
+effects = state.get("effects")
+if effects is not None and effects != []:
+    raise SystemExit(9)
+run_id = str(state.get("sync_run_id") or "").strip()
+local_user_id = str(state.get("local_user_id") or "").strip()
+integration_id = str(state.get("integration_id") or "").strip()
+directory_account_id = str(state.get("directory_account_id") or "").strip()
+for val in (run_id, local_user_id, integration_id, directory_account_id):
+    if not uuid_re.fullmatch(val):
+        raise SystemExit(10)
+live_user = pathlib.Path(live_user_path).read_bytes().decode("utf-8").strip()
+live_integ = pathlib.Path(live_integ_path).read_bytes().decode("utf-8").strip()
+live_acct = pathlib.Path(live_acct_path).read_bytes().decode("utf-8").strip()
+if live_user != local_user_id or live_integ != integration_id or live_acct != directory_account_id:
+    raise SystemExit(11)
+sec = pathlib.Path(sec_dir)
+sec.mkdir(parents=True, exist_ok=True)
+# Immutable failed-run pin must survive the recovery sync, which writes its own
+# fresh run id to subject.sync-run-id.
+failed_run_path = sec / "subject.failed-sync-run-id"
+failed_run_path.write_bytes(run_id.encode("utf-8"))
+os.chmod(failed_run_path, 0o600)
+(sec / "subject.local-user-id").write_bytes(local_user_id.encode("utf-8"))
+os.chmod(sec / "subject.local-user-id", 0o600)
+(sec / "subject.integration-id").write_bytes(integration_id.encode("utf-8"))
+os.chmod(sec / "subject.integration-id", 0o600)
+PY
+  then
+    FAILED_SYNC_JOURNAL_NOTE="journal_not_run_bound_failed_before_deprovision"
+    return 1
+  fi
+  CANARY_FAILED_SYNC_RUN_ID_FILE="${sec_dir}/subject.failed-sync-run-id"
+  CANARY_SUBJECT_LOCAL_USER_ID_FILE="${sec_dir}/subject.local-user-id"
+  CANARY_SUBJECT_INTEGRATION_ID_FILE="${sec_dir}/subject.integration-id"
+  JOURNAL_PHASE="run_bound"
+  FAILED_SYNC_JOURNAL_OK="true"
+  FAILED_SYNC_JOURNAL_NOTE="ok"
+  log "loaded recovery journal phase=run_bound for sync_failure_before_deprovision recovery (exact failed run bound; no ledger; ids never logged)"
+  return 0
+}
+
+# Prove the exact journaled sync run is terminal failed with the exact observed
+# error class (values-free). Binds ONLY CANARY_FAILED_SYNC_RUN_ID_FILE.
+# deprovision_applied=false is journal-bound (load_run_bound_*), not inferred from
+# absent/null run stats. Zero ledger + intact access graph prove no mutation.
+# Never latest-run guess. Never logs raw errorMessage / ids / secrets.
+prove_exact_run_sync_failure_before_deprovision() {
+  FAILED_SYNC_RUN_OK="false"
+  FAILED_SYNC_RUN_NOTE="unset"
+  FAILED_SYNC_ERROR_CLASS=""
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || { FAILED_SYNC_RUN_NOTE="admin_jwt_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { FAILED_SYNC_RUN_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_FAILED_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_FAILED_SYNC_RUN_ID_FILE}" ]] \
+    || { FAILED_SYNC_RUN_NOTE="sync_run_id_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_FAILED_SYNC_RUN_ID_FILE" <<'PY'
+import json, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, integ_path, run_path = sys.argv[1:5]
+
+def emit(ok, note, err_class=""):
+    print(f"{ok}|{note}|{err_class}")
+    raise SystemExit(0)
+
+def classify_error(msg):
+    """Accept only exact observed constraint + a duplicate/unique-violation marker.
+
+    Rejects sibling identity indexes, null-corp index, generic provider/external_key
+    prose, and 23505 without the exact constraint name. Values-free: never returns msg.
+    """
+    # Literals live inside classify_error so contract extraction of this function
+    # remains load-bearing (constants outside the function are easy to miss).
+    exact_constraint = "idx_directory_accounts_provider_corp_external_key"
+    exact_signature = (
+        'duplicate key value violates unique constraint "'
+        + exact_constraint
+        + '"'
+    )
+    exact_error_class = "duplicate_provider_corp_external_key"
+    if type(msg) is not str:
+        return ""
+    m = msg.lower()
+    # Exact observed PostgreSQL signature required. A sibling index suffix or a
+    # diagnostic that merely mentions this constraint must not qualify.
+    if exact_signature not in m:
+        return ""
+    return exact_error_class
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+    run_id = pathlib.Path(run_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+if not uuid_re.fullmatch(integration_id) or not uuid_re.fullmatch(run_id):
+    emit("false", "ids_invalid")
+url = (
+    base.rstrip("/")
+    + "/api/admin/directory/integrations/"
+    + urllib.parse.quote(integration_id, safe="")
+    + "/runs/"
+    + urllib.parse.quote(run_id, safe="")
+)
+req = urllib.request.Request(
+    url,
+    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    method="GET",
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"run_http_{int(e.code)}")
+except Exception:
+    emit("false", "run_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "run_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"run_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+run = data.get("run") if isinstance(data.get("run"), dict) else None
+if run is None and isinstance(data.get("id"), str):
+    run = data
+if not isinstance(run, dict):
+    emit("false", "run_missing")
+if str(run.get("id") or "").strip() != run_id:
+    emit("false", "run_id_mismatch")
+status = str(run.get("status") or "").strip().lower()
+if status != "failed":
+    emit("false", "run_not_failed")
+# Fail closed only when stats explicitly claim deprovision already applied.
+# Absent/null/false stats do NOT alone prove deprovision_applied=false — that is
+# journal-bound; zero ledger + intact access graph are the no-mutation proofs.
+stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
+applied = stats.get("deprovisionApplied")
+if applied is True:
+    emit("false", "deprovision_applied_true")
+# Belt: if effect counters are present they must be zero (still not a substitute
+# for journal deprovision_applied=false or Postgres zero-ledger proof).
+for key in (
+    "deprovisionUsersDeactivatedCount",
+    "deprovisionGrantsDisabledCount",
+    "deprovisionMembershipDeactivationAttemptedCount",
+):
+    val = stats.get(key)
+    if val is None:
+        continue
+    if type(val) is not int or val != 0:
+        emit("false", "non_zero_user_or_grant_or_membership_effect_count")
+# Exact observed error class — values-free. Never print errorMessage.
+err_msg = run.get("errorMessage")
+if err_msg is None:
+    err_msg = run.get("error_message")
+err_class = classify_error(err_msg if isinstance(err_msg, str) else "")
+if not err_class:
+    emit("false", "error_class_not_allowlisted")
+emit("true", "ok", err_class)
+PY
+  )" || {
+    FAILED_SYNC_RUN_NOTE="python_failed"
+    return 1
+  }
+  FAILED_SYNC_RUN_OK="${result%%|*}"
+  local rest="${result#*|}"
+  FAILED_SYNC_RUN_NOTE="${rest%%|*}"
+  FAILED_SYNC_ERROR_CLASS="${rest#*|}"
+  if [[ "$FAILED_SYNC_RUN_OK" == "true" ]]; then
+    log "exact run sync_failure_before_deprovision proven (failed + exact observed error class=${FAILED_SYNC_ERROR_CLASS}; journal binds deprovision_applied=false; ids/raw error never logged)"
+    return 0
+  fi
+  log "exact run sync_failure_before_deprovision proof refused: note=${FAILED_SYNC_RUN_NOTE}"
+  return 1
+}
+
 # Prove zero deprovision ledger events/effects for the exact journaled run via
 # host docker/Postgres — never a paginated admin list / limit / latest inference.
 # Scope is exact equality on run_id::uuid + integration_id::uuid + local_user_id +
 # directory_account_id with NO status filter. Counts joined
 # directory_deprovision_effects for matched event(s). Both counts must be 0.
+# Immutable pin only: CANARY_FAILED_SYNC_RUN_ID_FILE (sync-failure recovery) or
+# CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE (empty_fetch recovery). Never the recovery
+# sync's subject.sync-run-id pin.
 prove_zero_deprovision_ledger_for_exact_run() {
   local context="${1:-empty_fetch_abort_recovery}"
   SAFE_ABORT_LEDGER_OK="false"
@@ -3259,14 +3516,21 @@ prove_zero_deprovision_ledger_for_exact_run() {
     || { SAFE_ABORT_LEDGER_NOTE="local_user_id_file_missing"; return 1; }
   [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
     || { SAFE_ABORT_LEDGER_NOTE="integration_id_file_missing"; return 1; }
-  [[ -n "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE}" ]] \
-    || { SAFE_ABORT_LEDGER_NOTE="sync_run_id_file_missing"; return 1; }
+  local exact_run_pin=""
+  if [[ -n "${CANARY_FAILED_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_FAILED_SYNC_RUN_ID_FILE}" ]]; then
+    exact_run_pin="$CANARY_FAILED_SYNC_RUN_ID_FILE"
+  elif [[ -n "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE}" ]]; then
+    exact_run_pin="$CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE"
+  else
+    SAFE_ABORT_LEDGER_NOTE="sync_run_id_file_missing"
+    return 1
+  fi
   [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
     || { SAFE_ABORT_LEDGER_NOTE="directory_account_id_file_missing"; return 1; }
   local payload_json result
   payload_json="$(
     python3 - \
-      "$CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE" \
+      "$exact_run_pin" \
       "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
       "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
       "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
@@ -5605,16 +5869,27 @@ action_pending() {
 #   phase=run_bound after completed empty_directory_fetch abort with zero ledger.
 #   Clears journal only after proving directory account reactivated + access graph
 #   unchanged. Never writes lifecycle env flags.
+# Deprovision sync_failure_before_deprovision recovery
+# (confirmation=DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED):
+#   staging-only, flags stay OFF forever. Recovers a journal stranded at
+#   phase=run_bound (journal deprovision_applied=false, zero ledger) after terminal
+#   failed sync whose error class is the exact observed constraint
+#   idx_directory_accounts_provider_corp_external_key. Run API proves failed + class;
+#   zero ledger + intact graph prove no mutation. Clears journal only after those
+#   proofs + exact run identity recheck. Never writes lifecycle env; never claims
+#   end-to-end restore.
 action_deprovision() {
   local phase="apply"
   if [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_RESTORE_CONFIRMATION" ]]; then
     phase="restore"
   elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION" ]]; then
     phase="empty_fetch_abort_recovery"
+  elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION" ]]; then
+    phase="sync_failure_before_deprovision_recovery"
   elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_SOURCE_CONFIRMATION" ]]; then
     phase="apply"
   else
-    fail "action=deprovision requires bootstrap_confirmation=${DEPROVISION_SOURCE_CONFIRMATION}|${DEPROVISION_RESTORE_CONFIRMATION}|${DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION}"
+    fail "action=deprovision requires bootstrap_confirmation=${DEPROVISION_SOURCE_CONFIRMATION}|${DEPROVISION_RESTORE_CONFIRMATION}|${DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION}|${DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION}"
   fi
 
   if [[ "$phase" == "restore" ]]; then
@@ -5623,6 +5898,10 @@ action_deprovision() {
   fi
   if [[ "$phase" == "empty_fetch_abort_recovery" ]]; then
     action_deprovision_empty_fetch_abort_recovery
+    return $?
+  fi
+  if [[ "$phase" == "sync_failure_before_deprovision_recovery" ]]; then
+    action_deprovision_sync_failure_before_deprovision_recovery
     return $?
   fi
   action_deprovision_apply
@@ -6232,6 +6511,209 @@ action_deprovision_empty_fetch_abort_recovery() {
     echo "note=${note}"
   } > "${OUTPUT_DIR}/summary.txt"
   log "action=deprovision empty_fetch_abort_recovery OK (flags OFF; directory reactivated; access graph unchanged; journal cleared; no lifecycle env write)"
+}
+
+# Staging-only recovery for journal phase=run_bound after terminal failed sync with
+# journal deprovision_applied=false, zero ledger, and exact observed error class
+# idx_directory_accounts_provider_corp_external_key. Never writes lifecycle env.
+# Never calls rehire restore. Clears journal only after final post-sync proofs +
+# final zero-ledger recheck + exact failed-run identity recheck.
+action_deprovision_sync_failure_before_deprovision_recovery() {
+  local pre_login_ok="false"
+  local admin_jwt_minted="false"
+  local journal_ok="false"
+  local exact_run_ok="false"
+  local exact_run_final_ok="false"
+  local zero_ledger_ok="false"
+  local zero_ledger_final_ok="false"
+  local pre_graph_ok="false"
+  local source_active_after_sync="false"
+  local sync_ok="false"
+  local post_graph_ok="false"
+  local graph_unchanged_ok="false"
+  local flags_remain_off="false"
+  local journal_cleared="false"
+  local pre_graph_snapshot=""
+  local post_graph_snapshot=""
+  local note="sync_failure_before_deprovision_recovery_phase"
+
+  require_sha
+  require_canary_secret_files "deprovision"
+  assert_canary_identifier_matches_owner "deprovision"
+  require_canary_directory_account_id_file "deprovision"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=deprovision sync_failure_before_deprovision_recovery"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=deprovision sync_failure_before_deprovision_recovery requires expected_current_mode=off"
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision sync_failure_before_deprovision_recovery"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: backend_health_ok must be true (journal left intact)"
+  fi
+  # Any lifecycle flag ON refuses recovery and leaves the journal intact.
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: all lifecycle flags must be OFF (live mode='${SNAP_MODE}'); journal left intact"
+  fi
+
+  if mint_canary_admin_jwt_from_password_login "sync_failure_before_deprovision_recovery_pre"; then
+    pre_login_ok="true"
+    admin_jwt_minted="true"
+  else
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: canary login / JWT mint failed (journal left intact)"
+  fi
+
+  if ! load_canary_directory_subject "sync_failure_before_deprovision_recovery_pre"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: subject load failed (note=${SUBJECT_NOTE:-unset}); journal left intact; no auto-selection"
+  fi
+  if [[ "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: subject is not owned canary employee; journal left intact; no auto-selection"
+  fi
+  if [[ "$SUBJECT_HAS_LOCAL_USER" != "true" || -z "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" || ! -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: owned local user required; journal left intact"
+  fi
+
+  # Journal-bound proof: phase=run_bound, deprovision_applied=false, no ledger fields.
+  # Immutable pin → CANARY_FAILED_SYNC_RUN_ID_FILE (survives recovery sync run id).
+  # deprovision_applied=false is proven here — not by absent run stats.
+  if ! load_run_bound_sync_failure_before_deprovision_journal; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: journal not eligible run_bound failed-before-deprovision (note=${FAILED_SYNC_JOURNAL_NOTE:-unset}); journal left intact"
+  fi
+  journal_ok="true"
+
+  # Run API proof: status=failed + exact observed error class only (values-free).
+  # Does not alone prove deprovision_applied=false (that is journal-bound above).
+  if ! prove_exact_run_sync_failure_before_deprovision; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: exact run not failed with observed error class (note=${FAILED_SYNC_RUN_NOTE:-unset}); journal left intact"
+  fi
+  exact_run_ok="true"
+
+  # No-mutation proof: zero user/membership/grant ledger for that exact failed run
+  # only (exact SQL; no list/limit). Complements journal deprovision_applied=false.
+  if ! prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_pre"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: ledger not empty for exact run (note=${SAFE_ABORT_LEDGER_NOTE:-unset}); journal left intact"
+  fi
+  zero_ledger_ok="true"
+
+  # No-mutation proof: access graph still activated + active membership + enabled grant.
+  if ! assert_subject_user_access_state "activated" "true" "sync_failure_before_deprovision_recovery_pre"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: pre-recovery access not activated+active (note=${ACCESS_NOTE:-unset}); journal left intact"
+  fi
+  if ! prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_pre"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: pre-recovery access graph not intact (note=${INTACT_GRAPH_NOTE:-unset}); journal left intact"
+  fi
+  pre_graph_ok="true"
+  pre_graph_snapshot="${INTACT_GRAPH_SNAPSHOT}"
+
+  # External source re-add is operator-confirmed via bootstrap_confirmation.
+  # Flags stay OFF: sync under require_deprov_applied=false only.
+  if ! run_directory_sync_for_subject "sync_failure_before_deprovision_recovery" "false"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: flags-OFF sync failed (note=${SYNC_NOTE:-unset}); journal left intact"
+  fi
+  if [[ "$SYNC_DEPROVISION_APPLIED" != "false" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: flags-OFF sync did not prove deprovisionApplied=false; journal left intact"
+  fi
+  sync_ok="true"
+
+  if ! load_canary_directory_subject "sync_failure_before_deprovision_recovery_post_sync"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: subject reload failed (note=${SUBJECT_NOTE:-unset}); journal left intact"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "true" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: owned directory account not active after sync (external re-add gate); journal left intact"
+  fi
+  source_active_after_sync="true"
+
+  if ! assert_subject_user_access_state "activated" "true" "sync_failure_before_deprovision_recovery_post"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: post-sync access not activated+active (note=${ACCESS_NOTE:-unset}); journal left intact"
+  fi
+  if ! prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_post"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: post-sync access graph not intact (note=${INTACT_GRAPH_NOTE:-unset}); journal left intact"
+  fi
+  post_graph_ok="true"
+  post_graph_snapshot="${INTACT_GRAPH_SNAPSHOT}"
+  if [[ -z "$pre_graph_snapshot" || "$post_graph_snapshot" != "$pre_graph_snapshot" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: access graph drift after flags-OFF sync (pre!=post); journal left intact"
+  fi
+  graph_unchanged_ok="true"
+
+  capture_live_snapshot
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: lifecycle flags must remain OFF after recovery sync; journal left intact"
+  fi
+  flags_remain_off="true"
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision sync_failure_before_deprovision_recovery post-check"
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: backend_health_ok must remain true; journal left intact"
+  fi
+
+  # FINAL proof gate: re-prove exact no-ledger AND exact failed-run identity AFTER
+  # flags-OFF sync + graph/flag checks and IMMEDIATELY before clear.
+  # Load-bearing order — contract MUTATION removes this recheck / moves clear earlier and must turn red.
+  # Immutable pin is CANARY_FAILED_SYNC_RUN_ID_FILE, never the recovery subject.sync-run-id pin.
+  if ! prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_final_pre_clear"; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: final pre-clear zero-ledger recheck failed (note=${SAFE_ABORT_LEDGER_NOTE:-unset}); journal left intact"
+  fi
+  zero_ledger_final_ok="true"
+  if ! prove_exact_run_sync_failure_before_deprovision; then
+    fail "action=deprovision sync_failure_before_deprovision_recovery refused: final pre-clear exact failed-run identity recheck failed (note=${FAILED_SYNC_RUN_NOTE:-unset}); journal left intact"
+  fi
+  exact_run_final_ok="true"
+  clear_deprovision_apply_state
+  journal_cleared="true"
+
+  note="sync_failure_before_deprovision_recovery_source_restored_access_graph_unchanged_journal_cleared"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "deprovision" "true" "false" "$note"
+  {
+    echo "action=deprovision"
+    echo "phase=sync_failure_before_deprovision_recovery"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=false"
+    echo "lifecycle_env_write=false"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
+    echo "subject_owned=true"
+    echo "subject_auto_selected=false"
+    echo "source_re_add_confirmation=true"
+    echo "journal_ok=${journal_ok}"
+    echo "journal_phase_required=run_bound"
+    echo "journal_deprovision_applied_required=false"
+    echo "exact_run_ok=${exact_run_ok}"
+    echo "exact_run_final_ok=${exact_run_final_ok}"
+    echo "run_status_required=failed"
+    echo "error_class_required=duplicate_provider_corp_external_key"
+    echo "error_constraint_required=idx_directory_accounts_provider_corp_external_key"
+    echo "error_class_observed=${FAILED_SYNC_ERROR_CLASS:-unknown}"
+    echo "zero_ledger_ok=${zero_ledger_ok}"
+    echo "zero_ledger_final_ok=${zero_ledger_final_ok}"
+    echo "zero_ledger_event_count=${SAFE_ABORT_LEDGER_EVENT_COUNT:-0}"
+    echo "zero_ledger_effect_count=${SAFE_ABORT_LEDGER_EFFECT_COUNT:-0}"
+    echo "pre_graph_ok=${pre_graph_ok}"
+    echo "sync_ok=${sync_ok}"
+    echo "source_active_after_sync=${source_active_after_sync}"
+    echo "post_graph_ok=${post_graph_ok}"
+    echo "graph_unchanged_ok=${graph_unchanged_ok}"
+    echo "access_graph_user_active=${INTACT_GRAPH_USER_ACTIVE:-unknown}"
+    echo "access_graph_membership_active_count=${INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT:-0}"
+    echo "access_graph_grant_state=${INTACT_GRAPH_GRANT_STATE:-unknown}"
+    echo "flags_remain_off=${flags_remain_off}"
+    echo "journal_cleared=${journal_cleared}"
+    echo "server_side_access_graph_mutation_proven=false"
+    echo "access_graph_unchanged_proven=true"
+    echo "no_mutation_proven_by_zero_ledger_and_access_graph=true"
+    echo "sync_failure_before_deprovision_source_recovery_complete=true"
+    echo "canary_access_rollback_complete=false"
+    echo "end_to_end_restore_claimed=false"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=deprovision sync_failure_before_deprovision_recovery OK (flags OFF; source restored; access graph unchanged; journal cleared; no lifecycle env write; end_to_end_restore_claimed=false)"
 }
 
 # --- main ------------------------------------------------------------------------------
