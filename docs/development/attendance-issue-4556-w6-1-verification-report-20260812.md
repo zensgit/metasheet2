@@ -9,7 +9,7 @@
 > Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02`
+> `39d9a969e4d36f6600a51b8cb7a527d39fce34cd`
 
 ## 0. Evidence rules
 
@@ -31,9 +31,9 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
-| Evidence head | `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02` |
+| Evidence head | `39d9a969e4d36f6600a51b8cb7a527d39fce34cd` |
 | Database | Local PostgreSQL 15.17 |
-| Scratch database | `metasheet_w6_4849_codex_20260812_c` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
+| Scratch database | `metasheet_w6_4849_codex_20260812_d` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
 | Data | Synthetic only |
 | Runtime posture | No feature flag, rollout transition, deployment, staging, or soak |
 
@@ -58,7 +58,7 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   --watch=false
 ```
 
-Result: **12 files / 297 tests passed**.
+Result: **12 files / 300 tests passed**.
 
 This matrix covers pure aggregate behavior, exact recursive response shape,
 authorization and app-assembly guards, static DML call-path closure, API path
@@ -68,6 +68,12 @@ DB-backed platform-admin positive leg whose principal has no legacy admin role:
 the real `isAdmin(userId, runQuery)` query returns true on the shared
 transaction handle, the membership query is skipped, and aggregate reads still
 run on that handle.
+
+The three net-new unit legs close the discovery-gate gaps: AST-derived resolver
+call coverage with dynamic-target refusal, UUID enforcement at every
+UUID-formatted response position, and rejection of a zero managed-set
+`rowCount`. Existing fixture reproduction also pins the newly emitted
+`RULE_SOURCE_MISSING` conflict.
 
 ### 2.2 Migration and real-DB execution
 
@@ -157,9 +163,10 @@ claim:
 - GPT-5.6 Sol: exact-head code gate;
 - GPT-5.6 Terra: exact-head evidence, scope, and claims gate.
 
-The final exact-head outcomes are recorded in the PR gate comment because that
-comment can bind the SHA containing this report. Any P1/P2 requires a fix and a
-new exact-head gate; an older-head approval cannot transfer by wording alone.
+The final exact-head outcomes will be recorded in a PR gate comment after fresh
+checks and independent gates complete, because only that comment can bind the
+SHA containing this report. Any P1/P2 requires a fix and a new exact-head gate;
+an older-head approval cannot transfer by wording alone.
 
 ## 5. Verdict boundary
 

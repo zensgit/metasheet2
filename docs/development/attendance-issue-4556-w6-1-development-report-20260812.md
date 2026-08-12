@@ -13,7 +13,7 @@
 > (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02`
+> `39d9a969e4d36f6600a51b8cb7a527d39fce34cd`
 
 ## 0. Scope delivered
 
@@ -97,6 +97,19 @@ The runtime implementation delta before the two report files is 31 files; the
 exact base-to-report-head delta is 33 files. No migration, feature flag,
 rollout-state mutation, staging action, deployment action, or customer data is
 part of that delta.
+
+The final discovery gates on the pre-report implementation head found four
+material gaps. The evidence head closes them without widening the slice:
+
+- the plugin-library closed-set guard now derives every tracked backend source
+  file and parses resolver calls through the TypeScript AST, including nested
+  arrow-function generics and non-literal fail-closed behavior;
+- production files that may name FSER without composing it are occurrence
+  pinned to zero factory calls;
+- `RULE_SOURCE_MISSING` is now emitted through the ratified conflict channel;
+- the runtime response validator now matches the OpenAPI UUID and positive
+  managed-row-count constraints, and the platform-admin positive leg uses the
+  real transaction-bound PostgreSQL role lookup rather than a legacy claim.
 
 ## 5. Explicit residuals
 
