@@ -226,6 +226,9 @@ async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
     [undefined, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
     [{}, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
     [{ secretField: { $operator: 'PRIVATE-ERROR-SENTINEL' } }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ 'invalid-key-PRIVATE': 'PRIVATE-KEY-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ $or: 'PRIVATE-OPERATOR-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [JSON.parse('{"__proto__":"PRIVATE-PROTO-SENTINEL"}'), 'C6_WRITE_SOURCE_FILTERS_INVALID'],
   ]) {
     let reads = 0
     const { input, calls } = baseInput({
@@ -242,8 +245,16 @@ async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
       (error) => {
         const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
         return error && error.code === expectedCode
-          && !text.includes('secretField')
-          && !text.includes('PRIVATE-ERROR-SENTINEL')
+          && [
+            'secretField',
+            'PRIVATE-ERROR-SENTINEL',
+            'invalid-key-PRIVATE',
+            'PRIVATE-KEY-SENTINEL',
+            '$or',
+            'PRIVATE-OPERATOR-SENTINEL',
+            '__proto__',
+            'PRIVATE-PROTO-SENTINEL',
+          ].every((sentinel) => !text.includes(sentinel))
       },
     )
     assert.equal(reads, 0, 'invalid/missing persisted filter fails before source contact')

@@ -379,6 +379,7 @@ function valuesEqual(left, right) {
 }
 
 const SQL_READONLY_SOURCE_KIND = 'data-source:sql-readonly'
+const SQL_EQUALITY_FILTER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/
 
 // C6 never accepts source predicates from the request. For the SQL read-only source, the only
 // predicate surface is the already persisted pipeline options. Keep the accepted language equal
@@ -404,7 +405,9 @@ function normalizeServerBoundSqlEqualityFilters(pipeline, sourceSystem) {
   }
   const normalized = {}
   for (const [key, value] of entries.sort(([left], [right]) => left.localeCompare(right))) {
-    if (typeof key !== 'string' || key.trim() === '' || key !== key.trim()) {
+    if (typeof key !== 'string' ||
+        key === '__proto__' ||
+        !SQL_EQUALITY_FILTER_IDENTIFIER_PATTERN.test(key)) {
       throw new ExternalWriteDryRunError(422, 'C6_WRITE_SOURCE_FILTERS_INVALID', 'persisted SQL read-only source equality filters are invalid')
     }
     if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
