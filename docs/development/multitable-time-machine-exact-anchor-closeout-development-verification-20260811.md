@@ -59,12 +59,12 @@
 
 ## 5. 旧栈处置（收口后）
 
-- 七个旧 Draft（#4472/#4474/#4478/#4519 + #4417/#4445/#4446）内容已被 #4654 在 current main 上取代，应标 **superseded** 关闭。
-- **#4446 先抽 resurrect 参考件落 main**（77 行 apply + 5 golden + 594 行 realdb + owner 亲抓两处 P1 级修复）——它是本线唯一把 trash 行互斥/锚点态 vs 终态快照/链接重建幂等做对的范例，从未接线，丢的是参考实现非已交付能力。
+- 七个旧 Draft（#4472/#4474/#4478/#4519 + #4417/#4445/#4446）内容已被 #4654 在 current main 上取代——**均已标 superseded 关闭（2026-08-12）**。
+- **#4446 先抽 resurrect 参考件落 main**（77 行 apply + 5 golden + 594 行 realdb + owner 亲抓**一处** P1 级修复；见 §8 勘误）——它是本线唯一把 trash 行互斥/锚点态 vs 终态快照/链接重建幂等做对的范例，从未接线，丢的是参考实现非已交付能力。
 
 ## 6. 安全边界重申
 
-flags 全 default-OFF · triggers 出厂 DISABLED · 无 flag 翻转 / 无 staging / 无生产开关 / 无 auto-merge。O-2 启用与 staging cutover 是独立 owner/ops 决策。
+**部署 ≠ 启用**：截至 2026-08-12，#4654 镜像已落 **prod + staging**（3 条 recovery 迁移均已执行），但装入的是 **inert 基座**——flags 全 default-OFF、9 触发器出厂 DISABLED、无 `meta_links.foreign_record_id` FK。本轮**无 flag 翻转 / 无 trigger 启用 / 无 auto-merge**（镜像发布是常规部署，不是能力开关）。O-2 启用与 flag cutover 仍是独立 owner/ops 决策；双主机 inert 姿态由 postdeploy-full `target=both` PASS 证实（§8）。
 
 ## 7. 门后 REQUEST_CHANGES 轮次（2026-08-11/12，owner 三轮独立复核）
 
@@ -74,12 +74,18 @@ flags 全 default-OFF · triggers 出厂 DISABLED · 无 flag 翻转 / 无 stagi
 - **轮 2（3 P2 + 2 P3）**：① default-inertness 代码侧——containment env-check 从 2 flag 扩到 **4 flag**（+`MULTITABLE_HISTORY_CONTIGUITY_STRICT` +`MULTITABLE_ENABLE_WRITER_FENCE`）；② release gate——merge origin/main 追平（落后 0、merge-tree CLEAR、s6a-pin 仍匹配、CI 全绿）；③ 第三处 FK 注释（`multitable-cross-base-automation-delete-lock.test.ts:176`，前轮只扫 src 漏 test）；④ PR body 收口更新段。
 - **轮 3（1 P2 + 2 P3）**：① **4-flag containment 未被 CI 钉住**（owner 删 WRITER_FENCE 后 8/8 仍绿=假开关空转）⇒ 在 required 的 `multitable-recovery-schema-containment.test.mjs`（跑于 plugin-tests.yml:179 → test 20.x）补 **FLAGS 精确契约**：断言 `FLAGS` 集合恰等于四项 + 两处 `for f in $FLAGS` 循环均存在；**变异证：删任一 flag 或任一循环即红**（删 WRITER_FENCE → 9→8/1）；② line 47「the two flags」→「four flags」；③ 本 MD 更新 + 注册口径收窄（见 §1 commit 3 / §4）。
 
-**合并前仍待 owner/ops（非本轮开发能闭合）**：① staging/prod 容器核验 4 flag 均未启用（**最近 containment run 仍是 7-15 旧版本，须先跑 `target=both` 取 PASS**）；② 合并决定（安装 DISABLED 平台授权触发器 DDL = owner 保留的治理判断）+ 旧七 Draft superseded（#4446 先抽 resurrect 参考件）；③ O-2 启用相位（注册同事务原子性 + 40001 全平台清扫）。
+**收口后续（2026-08-12 结算，明细见 §8）**：① staging/prod 容器 4 flag 均未启用——**已由 postdeploy-full `target=both` PASS 证实**（run `31651250987`，双主机同刻同指纹）；② 合并决定（安装 DISABLED 平台授权触发器 DDL = owner 治理授权）**已合入** #4654 @ `12f1f8c466` + 旧七 Draft **已全 superseded 关闭**（#4446 先抽 resurrect 参考件）；③ **仍待（后续独立）**：O-2 启用相位（注册同事务原子性 + 40001 全平台清扫）；发布链 SSH host-key pinning（`docker-build.yml` 等，见 §8 发布侧残留）。
 
 ## 8. 合并落地与后续（2026-08-12）
 
 - **#4654 MERGED @ `12f1f8c466`**（squash，手动合并、无 auto-merge；owner 明确治理授权「接受 8 张平台授权表安装 9 个 DISABLED triggers + 6 functions」；≠授权启用）。合并前 required 全绿、behind 0；`test (18.x)` 一次 attendance-integration flake（非本线；`test (20.x)` 同 suite 绿）重跑即绿。main 现含 `RECONSTRUCTION_CAUSALITY_LANDED = true` + containment helper + 两模式 containment workflow。flags 全 default-OFF、triggers 出厂 DISABLED = **inert 落地**。
 - **合并前主机证据（predeploy-flags）**：run `31609975258`（`workflow_dispatch`，只读，`Contents: read`），target=both、mode=predeploy-flags：`metasheet-backend`(prod) + `metasheet-staging-backend`(staging) 四 flag（SHEET_REVERT/PIT_RESET/HISTORY_CONTIGUITY_STRICT/WRITER_FENCE）在 running env 与 next-restart compose 均 CONTAINED；`VERDICT: PASS (predeploy-flags)`（明写 schema NOT verified）。
-- **两模式 containment（对应 owner 收尾计划 stage 4-5）**：`predeploy-flags`=运行态+next-restart 四开关（当前镜像即可，已 PASS）；`postdeploy-full`=另加 9 disabled triggers + 6 function 指纹 + 无 `meta_links.foreign_record_id` FK（需部署新镜像后逐主机跑）。**postdeploy-full staging/prod PASS 证据待部署后补入本节。**
+- **两模式 containment（对应 owner 收尾计划 stage 4-5）**：`predeploy-flags`=运行态+next-restart 四开关（当前镜像即可，已 PASS）；`postdeploy-full`=另加 9 disabled triggers + 6 function 指纹 + 无 `meta_links.foreign_record_id` FK（需部署新镜像后逐主机跑）。**postdeploy-full 双主机 PASS 已取得（2026-08-12，见下条部署台账）。**
 - **#4446 resurrect 参考设计**：抽为 `multitable-4446-resurrect-reference-design-20260812.md`（supersede #4446 前保全）。勘误：#4446 只有**一处** owner 亲抓 P1（`a5a154f17a`，打包 FOR UPDATE 锁 + outbound 重建 + trash DELETE）；`NOT EXISTS` 幂等为自评 P3。且 #4446 的锚机制**明确拒绝墙钟**（非「基于墙钟锚点」——那是它取代的旧 PIT-reset 路径）；它 reference-only 的真因=从未接线 + at-anchor **inbound** authority 从未建（=#4654 `INBOUND_UNPROVABLE` fail-close 根因）。
-- **待办**：supersede 七个旧 Draft（#4417/#4445/#4446/#4472/#4474/#4478/#4519）；staging→prod 部署 + postdeploy-full 逐主机 PASS（ops/owner，需逐次 dispatch 授权）。**O-2（注册同事务原子性 + 40001 全平台清扫 + 启用阶梯）、retention 后恢复、整表 resurrect、归档/大表异步恢复 = 后续独立能力,不计入本次收尾完成。**
+- **部署台账（2026-08-12，实际顺序 = 生产先行，非原计划的 staging→prod）**：#4654 合并**自动触发** `Build and Push Docker Images` run **`31615811214`** → 部署 `12f1f8c466` 到生产（`metasheet-backend`），3 条 recovery 迁移成功执行、`/health` build==`12f1f8c466`。其后依次：
+  - **生产 postdeploy-full** run **`31650980676`**（`target=production`、`mode=postdeploy-full`、只读、host-key pinned）= **PASS**：4 flag CONTAINED（running + next-restart）、recovery-authority-triggers 9/9 disabled（`8c1be0b0…`）、functions 6/6（`14c180aa…`）、meta_links FK 0/0。
+  - **staging 部署** run **`31651154126`**（Attendance Staging Window Runner，`action=deploy`、`deploy_sha=12f1f8c466…`、`set_window_env=none`）→ `12f1f8c466` 落 `metasheet-staging-backend`，同 3 条迁移成功执行、health build 匹配。
+  - **双主机 postdeploy-full** run **`31651250987`**（`target=both`）= **PASS**：`metasheet-backend` 与 `metasheet-staging-backend` **同刻同指纹**（triggers `8c1be0b0…`、functions `14c180aa…`、FK 0/0、4 flag 全 CONTAINED）——即 owner 收尾计划要求的「最终双主机同刻证据」。
+- **旧七 Draft**（#4417/#4445/#4446/#4472/#4474/#4478/#4519）**已全 superseded 关闭**；#4446 先抽 resurrect 参考件 @ #4885 `b4492c3047`。
+- **发布侧残留（P1，下一次生产部署前修）**：`docker-build.yml:95,169` 用 `StrictHostKeyChecking=no` 承载部署命令+密钥 ⇒ 须改 `DEPLOY_KNOWN_HOSTS` + `StrictHostKeyChecking=yes`（containment-check 与 staging-window-runner 已 pinned，可参照）。同类未 pin 尚有 `attendance-remote-{env-reconcile,log-snapshot,metrics,preflight,upload-cleanup}-prod`、`yjs-staging-validation`（是否一并纳入由 owner 裁范围）。
+- **后续独立能力（不计入本次收尾完成）**：O-2（注册同事务原子性 + 40001 全平台清扫 + 启用阶梯）、retention 后恢复、整表 resurrect、归档/大表异步恢复。
