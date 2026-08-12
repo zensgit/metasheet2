@@ -60,6 +60,12 @@ on:
         type: choice
         options: [staging, production, both]
         default: both
+      mode:
+        description: 'predeploy-flags = flag-only (running env + next-restart compose), works on the CURRENTLY deployed image BEFORE #4654 / the new schema helper + trigger migrations land. postdeploy-full = also verifies the live-DB recovery schema (9 disabled triggers, 6 function fingerprints, no meta_links.foreign_record_id FK) and REQUIRES the closeout image to be deployed. Fixed choices only — never free text reaches the remote host.'
+        required: true
+        type: choice
+        options: [predeploy-flags, postdeploy-full]
+        default: postdeploy-full
 
 concurrency:
   group: multitable-recovery-flag-containment-check
@@ -80,6 +86,7 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           TARGET: ${{ github.event.inputs.target }}
+          MODE: ${{ github.event.inputs.mode }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -128,6 +135,19 @@ jobs:
 
           echo "target='${TARGET}'"
 
+          # Validate `mode` is EXACTLY one of the fixed choices before it reaches the ssh command line
+          # (same injection-boundary discipline as target; the unmapped default fails closed).
+          case "$MODE" in
+            predeploy-flags|postdeploy-full)
+              ;;
+            *)
+              echo "::error::unexpected mode '${MODE}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+
+          echo "mode='${MODE}'"
+
           # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
           # machine-greppable. TARGET (already validated above to be exactly staging|production|both,
           # i.e. a single word with no spaces or shell metacharacters) is the ONLY input-derived token
@@ -137,7 +157,7 @@ jobs:
           # as an env-assignment on the ssh command line, because ssh concatenates all trailing arguments
           # into a single string and re-parses it through the remote login shell — a space there
           # previously caused the second word to be parsed as a bogus extra command (exit 127).
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE"
           SCHEMA_HELPER_SHA256="d8e8669a0e027480edd32703fa6b014e9e23124d4ef28293fab3d428c505dd00"
@@ -166,6 +186,18 @@ jobs:
           esac
 
           echo "target='${TARGET:-}' -> EXPECTED_CONTAINERS='${EXPECTED_CONTAINERS}'"
+
+          # Re-validate MODE on the remote side (defense in depth, mirrors the TARGET re-mapping above);
+          # anything outside the fixed set fails closed rather than falling through to a mode-less run.
+          case "${MODE:-}" in
+            predeploy-flags|postdeploy-full)
+              ;;
+            *)
+              echo "VERDICT: FAIL — unexpected mode '${MODE:-}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              exit 2
+              ;;
+          esac
+          echo "mode='${MODE}'"
 
           if ! command -v docker >/dev/null 2>&1; then
             echo "VERDICT: FAIL — docker not available on host (observation broken)"
@@ -214,6 +246,12 @@ jobs:
               fi
             done
 
+            # Leg 2 (postdeploy-full mode ONLY): the schema helper + trigger migrations exist only on the
+            # deployed closeout image; requiring them on the pre-#4654 image would always FAIL (missing
+            # helper). predeploy-flags SKIPS this leg entirely so legs 1+3 still yield pre-deploy flag
+            # evidence. In postdeploy-full this guard is the ONLY thing gating the helper — full can never
+            # bypass it (there is no other exit from the schema check).
+            if [ "$MODE" = "postdeploy-full" ]; then
             # Leg 2: live database schema. The helper runs inside the backend container so it observes
             # the service's own DATABASE_URL without ever exporting or printing it. Its output contract
             # is values-free: object counts, deterministic fingerprints, and PASS/FAIL only. Missing DB
@@ -242,6 +280,8 @@ jobs:
               continue
             fi
             rm -f "$schema_out"
+            fi
+            # end Leg 2 (postdeploy-full only)
 
             # Leg 3: authoritative next-restart check. Derive the compose project's OWN config from the
             # running container's own compose labels (covers env_file AND compose YAML/override merges,
@@ -308,7 +348,13 @@ jobs:
           echo "== summary =="
           echo "containers expected: $checked"
           if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
-          echo "VERDICT: PASS — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected default-inert posture (triggers disabled, no meta_links.foreign_record_id FK)"
+          # Two DISTINCT PASS sentinels — a predeploy-flags PASS must never be mistaken for a full
+          # containment PASS: it explicitly states the database schema was NOT verified in this mode.
+          if [ "$MODE" = "postdeploy-full" ]; then
+            echo "VERDICT: PASS (postdeploy-full) — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected default-inert posture (triggers disabled, no meta_links.foreign_record_id FK)"
+          else
+            echo "VERDICT: PASS (predeploy-flags) — recovery flags inactive in running AND next-restart compose config; database recovery schema NOT verified in this mode (pre-deploy flag-only check)"
+          fi
           REMOTE
 
       - name: Upload report
