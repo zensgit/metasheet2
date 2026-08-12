@@ -42,12 +42,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 import {
   buildAssemblyModel,
+  buildThisPartition,
+  deriveSafeCensus,
   findThisMethodCalls,
   sitesInMethod,
   subjectState,
   textMentions,
   type AssemblyModel,
+  type ThisPartition,
 } from '../helpers/attendance-w6-index-assembly-order'
+import { createHash } from 'node:crypto'
 import { isApiPath } from '../../src/auth/api-path-policy'
 import { isWhitelisted, isPublicFormAuthBypass } from '../../src/auth/jwt-middleware'
 import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
@@ -876,7 +880,9 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       expect(escapesOf("    const a = this['foo']\n    a.use('/', S())")).toEqual([])
     })
 
-    it('NEGATIVE — documented residual: a non-literal bracket index on `this` cannot be proven to name `app` and is not collected (see module docblock)', () => {
+    it('a non-literal bracket index on `this` is not collected by the ESCAPE layer — round 4 reclassifies it as UNKNOWN (see the four-bucket partition block), so it is no longer a silent residual', () => {
+      // The model's escape collector is deliberately this.app-only; the fail-closed
+      // layer is buildThisPartition's UNKNOWN bucket, proved below.
       expect(escapesOf('    const a = this[key]\n    a.use(S())')).toEqual([])
     })
 
@@ -1063,4 +1069,128 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       })
     })
   })
+
+/**
+ * Round 4 — the FOUR-BUCKET partition, fail-closed by an UNKNOWN census.
+ *
+ * Rounds 1-3 enumerated wrapper/alias shapes and never converged; the owner
+ * ruled the convergent design is a COMPLEMENT: partition every `this` in the
+ * assembly scope (setupMiddleware + constructor) into {SITE, ESCAPE, SAFE,
+ * UNKNOWN} and assert UNKNOWN empty, so a shape nobody enumerated lands in
+ * UNKNOWN by default and reds. SAFE is a FROZEN OCCURRENCE census (count + a
+ * sha256 over the sorted AST-path keys — never line/column), so a duplicate /
+ * move / re-context of a safe access mints a new key and reds, while an
+ * unrelated edit in another method does not move any key.
+ *
+ * A count identity |T| = |SITE|+|ESCAPE|+|SAFE|+|UNKNOWN| ALONE is insufficient
+ * (miss-one + double-another keeps the count equal), so the partition is proven
+ * at SET level: coverage (the occurrence node-set equals the independently
+ * walked ThisKeyword node-set) AND multiplicity-1 (each node once).
+ */
+describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
+  const SCOPE = new Set(['setupMiddleware', 'constructor'])
+  const FROZEN_SAFE_COUNT = 46
+  const FROZEN_SAFE_HASH = 'aa66a16a5832860b92ead9998278b826acb135d7795f8f7b1fc1810844b0bd75'
+
+
+  // assert coverage + multiplicity-1 + disjointness, returning the safe-census hash.
+  const assertValidPartition = (part: ThisPartition): string => {
+    const starts = part.all.map((o) => o.start)
+    // multiplicity-1: no ThisKeyword appears in two buckets / twice
+    expect(new Set(starts).size).toBe(part.all.length)
+    // coverage as identity sets: buckets partition `all`
+    expect(part.site.length + part.escape.length + part.safe.length + part.unknown.length).toBe(part.all.length)
+    const union = [...part.site, ...part.escape, ...part.safe, ...part.unknown].map((o) => o.start).sort((a, b) => a - b)
+    expect(union).toEqual([...starts].sort((a, b) => a - b))
+    return createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
+  }
+
+  describe('real src/index.ts', () => {
+    const indexPath = join(__dirname, '..', '..', 'src', 'index.ts')
+    const indexText = readFileSync(indexPath, 'utf8')
+    const source = ts.createSourceFile(indexPath, indexText, ts.ScriptTarget.ES2022, true)
+    const frozen = new Set(deriveSafeCensus(source, SCOPE))
+    const part = buildThisPartition(source, frozen, SCOPE)
+
+    it('UNKNOWN is EMPTY — every this-use in the assembly scope is provably classified', () => {
+      expect(part.unknown).toEqual([])
+    })
+
+    it('the partition is valid at SET level (coverage + multiplicity-1 + disjoint), not merely by count', () => {
+      assertValidPartition(part)
+    })
+
+    it('the SAFE census is frozen: exact count and sha256 over sorted AST-path keys (no line/column)', () => {
+      expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
+      const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
+      expect(hash).toBe(FROZEN_SAFE_HASH)
+    })
+  })
+
+  // fixtures: wrap a body in setupMiddleware so enclosingNamedFunction resolves to it.
+  const wrapSetup = (body: string): string => `class C {\n  setupMiddleware() {\n${body}\n  }\n}\n`
+  const partitionOf = (body: string, frozen: ReadonlySet<string> = new Set<string>()): ThisPartition => {
+    const f = ts.createSourceFile('fixture.ts', wrapSetup(body), ts.ScriptTarget.ES2022, true)
+    return buildThisPartition(f, frozen, SCOPE)
+  }
+  const bucketsByShape = (body: string): Record<string, string> => {
+    const p = partitionOf(body)
+    const m: Record<string, string> = {}
+    for (const o of p.all) m[o.shape] = o.bucket
+    return m
+  }
+
+  describe('convergence — an unenumerated `this` shape lands in UNKNOWN, not through', () => {
+    it('this[computed] -> UNKNOWN', () => {
+      expect(bucketsByShape("    this[key].use('/', S())")['[computed]']).toBe('UNKNOWN')
+    })
+    it('({app} = this) assignment-form destructure -> UNKNOWN (declaration form stays ESCAPE)', () => {
+      const p = partitionOf('    let app\n    ;({ app } = this)\n    app.use(S())')
+      expect(p.unknown.some((o) => o.shape === 'bare')).toBe(true)
+    })
+    it('Reflect.get(this, "app") — bare this into a call -> UNKNOWN', () => {
+      const p = partitionOf("    Reflect.get(this, 'app').use('/', S())")
+      expect(p.unknown.some((o) => o.shape === 'bare')).toBe(true)
+    })
+    it('this.newAlias — a this.<name> not in the frozen census -> UNKNOWN (SAFE is occurrence-level, not a name rule)', () => {
+      expect(bucketsByShape('    this.newAlias.doThing()')['.newAlias']).toBe('UNKNOWN')
+    })
+  })
+
+  describe('SAFE is occurrence-level with fixed multiplicity', () => {
+    it('a single this.injector read, when frozen, is SAFE; a COPY of it (a new occurrence key) is UNKNOWN', () => {
+      const single = '    this.injector.get(X)'
+      const frozen = new Set(deriveSafeCensus(ts.createSourceFile('f.ts', wrapSetup(single), ts.ScriptTarget.ES2022, true), SCOPE))
+      // original alone: SAFE
+      expect(partitionOf(single, frozen).safe.length).toBe(1)
+      expect(partitionOf(single, frozen).unknown.length).toBe(0)
+      // add a second, identical access -> a new AST-path key -> UNKNOWN (census drift)
+      const copied = partitionOf('    this.injector.get(X)\n    this.injector.get(X)', frozen)
+      expect(copied.safe.length).toBe(1)
+      expect(copied.unknown.length).toBe(1)
+    })
+  })
+
+  describe('the context key is position-independent (no line/column) — unrelated edits do not false-red', () => {
+    it('inserting a statement in ANOTHER method does not change any assembly-scope key', () => {
+      const before = deriveSafeCensus(ts.createSourceFile('a.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
+      const after = deriveSafeCensus(ts.createSourceFile('b.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1; const w = 2; const v = 3 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
+      expect(after).toEqual(before)
+    })
+  })
+
+  describe('the set-level partition proof is load-bearing (a count identity alone is not)', () => {
+    it('assertValidPartition throws on a miss-one + double-another partition that KEEPS the count equal', () => {
+      const p = partitionOf('    this.injector.get(X)\n    this.logger.info(Y)')
+      // hand-build a broken partition: drop one occurrence, duplicate another — count unchanged
+      const broken: ThisPartition = {
+        total: p.total,
+        all: [p.all[0], p.all[0]], // node 0 twice, node 1 missing — |all| still 2
+        site: [], escape: [], safe: [p.all[0], p.all[0]], unknown: [],
+      }
+      expect(() => assertValidPartition(broken)).toThrow()
+    })
+  })
+})
+
 })
