@@ -145,6 +145,7 @@ async function testMultitableWriteSourceRidesC6Lifecycle() {
       sourceSystemId: 'src', sourceObject: 'items',
       targetSystemId: multitableSystem.id, targetObject: 'approved_materials',
       createdBy: 'owner-1',
+      options: { source: { filters: { fixtureScope: 'approved' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name' },
@@ -232,6 +233,7 @@ async function testMultitableAmbiguousKeyHolds() {
     pipeline: {
       id: 'pipe_dup', tenantId: 't1', workspaceId: 'w1', sourceSystemId: 'src', sourceObject: 'items',
       targetSystemId: system.id, targetObject: 'approved_materials', createdBy: 'owner-1',
+      options: { source: { filters: { fixtureScope: 'approved' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name' },
@@ -271,6 +273,7 @@ async function testMultitableUnmappedFieldRoundTrips() {
     pipeline: {
       id: 'pipe_unmapped', tenantId: 't1', workspaceId: 'w1', sourceSystemId: 'src', sourceObject: 'items',
       targetSystemId: system.id, targetObject: 'approved_materials', createdBy: 'owner-1',
+      options: { source: { filters: { fixtureScope: 'approved' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'code', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name' },

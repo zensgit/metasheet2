@@ -226,6 +226,7 @@ function pipelineFixture() {
     targetSystemId: 'k3-target-1',
     targetObject: 'material',
     createdBy: 'owner-7',
+    options: { source: { filters: { fixtureScope: 'approved' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
       { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },

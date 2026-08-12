@@ -76,6 +76,7 @@ function baseInput(overrides = {}) {
       targetSystemId: 'target_1',
       targetObject: 'target_items',
       createdBy: 'owner-7',
+      options: { source: { filters: { approvedSlice: 'fixture' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'externalId', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name', validation: [{ type: 'required' }] },
@@ -165,6 +166,101 @@ async function testReadyDryRunIssuesTokenAndStaysValuesFree() {
   assert.equal(evidenceText.includes('Widget'), false, 'evidence must not include source names')
   assert.equal(evidenceText.includes(result.dryRunToken), false, 'evidence must not include the bearer dry-run token')
   assert.equal(result.evidence.dryRunTokenPresent, true)
+}
+
+async function testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness() {
+  const reads = []
+  const filterValue = 'PRIVATE-FILTER-SENTINEL'
+  const persistedFilters = {
+    zString: filterValue,
+    aNull: null,
+    mNumber: 7,
+    bBoolean: true,
+  }
+  const { input } = baseInput({
+    input: {
+      maxRows: 3,
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: persistedFilters } },
+      },
+    },
+    sourceRead: (readInput) => {
+      reads.push(JSON.parse(JSON.stringify(readInput)))
+      if (!readInput.filters) {
+        return {
+          records: [
+            { code: 'P-001', name: 'Widget', status: 'new' },
+            { code: 'P-002', name: 'Gadget', status: 'old' },
+            { code: 'P-003', name: 'Third', status: 'new' },
+          ],
+          done: false,
+          nextCursor: '3',
+        }
+      }
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const result = await dryRunExternalWrite(input)
+  assert.equal(result.status, 'ready', 'persisted filter changes the unfiltered truncated RED plan to ready')
+  assert.deepEqual(reads, [{
+    object: 'items',
+    filters: { aNull: null, bBoolean: true, mNumber: 7, zString: filterValue },
+    limit: 3,
+    cursor: null,
+  }])
+  const publicText = JSON.stringify(result)
+  assert.equal(publicText.includes(filterValue), false, 'filter values never enter public result/evidence')
+  assert.equal(publicText.includes('zString'), false, 'filter keys never enter public result/evidence')
+}
+
+async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree() {
+  for (const [filters, expectedCode] of [
+    [undefined, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{}, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{ secretField: { $operator: 'PRIVATE-ERROR-SENTINEL' } }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+  ]) {
+    let reads = 0
+    const { input, calls } = baseInput({
+      input: {
+        pipeline: {
+          ...baseInput().input.pipeline,
+          options: filters === undefined ? {} : { source: { filters } },
+        },
+      },
+      sourceRead: () => { reads += 1; return { records: [], done: true, nextCursor: null } },
+    })
+    await assert.rejects(
+      () => dryRunExternalWrite(input),
+      (error) => {
+        const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+        return error && error.code === expectedCode
+          && !text.includes('secretField')
+          && !text.includes('PRIVATE-ERROR-SENTINEL')
+      },
+    )
+    assert.equal(reads, 0, 'invalid/missing persisted filter fails before source contact')
+    assert.equal(calls.test.length, 0, 'invalid/missing persisted filter also fails before target capability contact')
+  }
+}
+
+async function testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite() {
+  const { input, calls } = baseInput({ input: { dryRunUser: 'user_write' } })
+  const dryRun = await dryRunExternalWrite(input)
+  input.pipeline.options.source.filters.approvedSlice = 'changed-after-dry-run'
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+  )
+  assert.equal(calls.insertRows.length, 0, 'stored filter revision mismatch fails before insert')
+  assert.equal(calls.updateRows.length, 0, 'stored filter revision mismatch fails before update')
 }
 
 async function testApplyConsumesTokenRecomputesAndWritesEligibleRows() {
@@ -806,6 +902,9 @@ async function testWriteSourceSeamIsolatesRowFailureValuesFree() {
 
 async function main() {
   await testReadyDryRunIssuesTokenAndStaysValuesFree()
+  await testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness()
+  await testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
+  await testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite()
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
