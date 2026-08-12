@@ -17,14 +17,42 @@ import * as ts from 'typescript'
  *
  * This module never reads raw text for its verdicts. It walks the real AST:
  * every `CallExpression` whose callee is a member access on `this.app`
- * naming an Express verb is a *registration site* (`R`, `model.sites`);
- * every other read of `this.app` — assignment, computed dispatch
- * (`this.app[x](...)`), or the value escaping into some other call or
- * constructor — is separately collected (`C`, `model.escapes`), so a mount
+ * naming an Express verb is a *registration site* (`R`, `model.sites`).
+ *
+ * EVERY OTHER READ of the `app` property off `this` is separately collected
+ * (`C`, `model.escapes`) — assignment, computed dispatch
+ * (`this.app[x](...)`), the value escaping into some other call or
+ * constructor, OR the SAME property reached through a syntax this module
+ * does not treat as a registration site: a bare `this.app` used as an
+ * initializer/argument (`const a = this.app`), string-literal bracket
+ * notation naming the same property (`this['app']`, in any of the shapes
+ * above), or a direct `const`/`let`/`var` destructure of `this` that binds
+ * `app` — by name (`const { app } = this`), by rename
+ * (`const { app: a } = this`), or via a rest element that captures it along
+ * with every other own property (`const { ...rest } = this`). So a mount
  * this module cannot itself order is at least visible and pinnable, not
  * silently invisible. A comment produces no AST node in either set, so
  * "commented out" and "deleted" are the same state by construction, not by
  * a special case that could itself be wrong.
+ *
+ * NOT collected, named rather than silently missed (the property-identity
+ * problem does not converge past this point — see the design note above
+ * `isThisAppElementAccess` and `bindingElementSourceName`):
+ *  - a NON-literal bracket index on `this` (`this[computedExpr]`) — this
+ *    module cannot decide whether `computedExpr` evaluates to `'app'`
+ *    without executing it, so it collects neither a site nor an escape for
+ *    that read (a negative fixture proves this residual, not merely that
+ *    it happens not to trigger).
+ *  - destructuring `this` on the LEFT side of a plain ASSIGNMENT
+ *    (`({ app } = this)`) — that parses as an object/array LITERAL
+ *    expression, a structurally different node from the `const`/`let`/`var`
+ *    `BindingPattern` this module walks.
+ *  - `this` itself escaping bare (not `.app`, not `['app']`, not
+ *    destructured) into another call, constructor, or closure that might
+ *    read `.app` out of band (`Reflect.get(this, 'app')`, `{...this}`,
+ *    `for...in this`, `.bind`/`.call`/`.apply`, a `Proxy` over `this`) — an
+ *    unbounded family; naming it here is the intended fail-closed posture,
+ *    not an attempt to enumerate it.
  */
 
 const REGISTRAR_VERBS = new Set([
@@ -180,8 +208,103 @@ function isThisAppPropertyAccess(node: ts.Node): node is ts.PropertyAccessExpres
   )
 }
 
+/**
+ * `this['app']` (or `this["app"]`) — the SAME property, reached through
+ * string-literal bracket notation instead of dot notation. Deliberately
+ * decidable-only: a NON-literal index (`this[computedExpr]`) cannot be
+ * proven to name `'app'` without executing it, so this predicate declines
+ * rather than guessing — see the module docblock's residual note. A literal
+ * index naming any OTHER property (`this['foo']`) is provably not this
+ * property and also declines; the negative fixture for this shape asserts
+ * exactly zero collected entries, distinguishing "matches string literals"
+ * from "matches every bracket access on `this`".
+ */
+function isThisAppElementAccess(node: ts.Node): node is ts.ElementAccessExpression {
+  return (
+    ts.isElementAccessExpression(node) &&
+    node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    ts.isStringLiteralLike(node.argumentExpression) &&
+    node.argumentExpression.text === 'app'
+  )
+}
+
+/** Either spelling of a read of the `app` property off `this` — the union
+ *  this module's SITE and ESCAPE collectors both key on. */
+function isThisAppRead(node: ts.Node): node is ts.PropertyAccessExpression | ts.ElementAccessExpression {
+  return isThisAppPropertyAccess(node) || isThisAppElementAccess(node)
+}
+
 function lineOf(source: ts.SourceFile, pos: number): number {
   return source.getLineAndCharacterOfPosition(pos).line + 1
+}
+
+function unwrapParens(node: ts.Expression): ts.Expression {
+  let current: ts.Expression = node
+  while (ts.isParenthesizedExpression(current)) current = current.expression
+  return current
+}
+
+/**
+ * The statically-knowable SOURCE property name a `BindingElement` reads —
+ * `null` when it genuinely cannot be decided (a non-literal computed
+ * property name), which callers must treat as "not provably `app`", not as
+ * "definitely not `app`" (see the module docblock's residual note; this
+ * mirrors `isThisAppElementAccess`'s same refusal-to-guess posture).
+ */
+function bindingElementSourceName(el: ts.BindingElement): string | null {
+  const key = el.propertyName ?? el.name
+  if (ts.isComputedPropertyName(key)) {
+    return ts.isStringLiteralLike(key.expression) ? key.expression.text : null
+  }
+  if (ts.isIdentifier(key)) return key.text
+  if (ts.isStringLiteralLike(key)) return key.text
+  return null
+}
+
+/**
+ * Direct `const`/`let`/`var` destructuring of `this` that binds `app` —
+ * by name, by rename, or via a rest element (which captures every property
+ * NOT otherwise named in the same pattern, `app` included). A separate pass
+ * from `visitForEscapes` because the read here is of `this` (a
+ * `ThisKeyword`) flowing into a `BindingPattern`, not a `this.app`-shaped
+ * node — see the module docblock's residual note on the ASSIGNMENT form
+ * (`({ app } = this)`), which is a structurally different node this pass
+ * does not visit.
+ */
+function collectThisDestructuringEscapes(source: ts.SourceFile): AppEscape[] {
+  const found: AppEscape[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer &&
+      unwrapParens(node.initializer).kind === ts.SyntaxKind.ThisKeyword &&
+      ts.isObjectBindingPattern(node.name)
+    ) {
+      const enclosing = enclosingNamedFunction(node)
+      const enclosingMethod = enclosing ? functionLikeLabel(enclosing) : '<anonymous>'
+      for (const el of node.name.elements) {
+        const isRest = el.dotDotDotToken !== undefined
+        const sourceName = bindingElementSourceName(el)
+        if (!isRest && sourceName !== 'app') continue
+        const local = ts.isIdentifier(el.name) ? el.name.text : '<pattern>'
+        const signature = isRest
+          ? `{ ...${local} } = this`
+          : el.propertyName
+            ? `{ app: ${local} } = this`
+            : `{ app } = this`
+        found.push({
+          kind: 'ESCAPE',
+          start: node.getStart(source),
+          line: lineOf(source, node.getStart(source)),
+          enclosingMethod,
+          signature,
+        })
+      }
+    }
+    node.forEachChild(visit)
+  }
+  visit(source)
+  return found
 }
 
 /** Every identifier subtree reachable from any of `call`'s arguments whose
@@ -212,7 +335,15 @@ function argumentsReachIdentifier(call: ts.CallExpression, name: string): boolea
  *  unmodelled. */
 export function buildAssemblyModel(source: ts.SourceFile): AssemblyModel {
   const sites: RegistrationSite[] = []
-  const siteCalleeExpressions = new Set<ts.PropertyAccessExpression>()
+  // Typed `Set<ts.Node>`, not `Set<ts.PropertyAccessExpression>`, purely so
+  // the exclusion check below (`!siteCalleeExpressions.has(node)`) can be
+  // asked of the widened `isThisAppRead` union without a cast. Every value
+  // actually inserted is still a genuine SITE callee (a `this.app`
+  // `PropertyAccessExpression`) — `visitForSites` below never adds an
+  // `ElementAccessExpression`, since the SITE definition itself stays
+  // dot-notation-only (see `isThisAppRead`'s own doc for why `this['app']`
+  // is escape-only, never promoted to an orderable site).
+  const siteCalleeExpressions = new Set<ts.Node>()
 
   const visitForSites = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
@@ -244,7 +375,7 @@ export function buildAssemblyModel(source: ts.SourceFile): AssemblyModel {
 
   const escapes: AppEscape[] = []
   const visitForEscapes = (node: ts.Node): void => {
-    if (isThisAppPropertyAccess(node) && !siteCalleeExpressions.has(node)) {
+    if (isThisAppRead(node) && !siteCalleeExpressions.has(node)) {
       const enclosing = enclosingNamedFunction(node)
       const enclosingMethod = enclosing ? functionLikeLabel(enclosing) : '<anonymous>'
       const parent = node.parent
@@ -270,6 +401,7 @@ export function buildAssemblyModel(source: ts.SourceFile): AssemblyModel {
     node.forEachChild(visitForEscapes)
   }
   visitForEscapes(source)
+  escapes.push(...collectThisDestructuringEscapes(source))
   escapes.sort((a, b) => a.start - b.start)
 
   return { sites, escapes }

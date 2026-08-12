@@ -372,6 +372,145 @@ describe('the client-input boundary: org-selector mismatch and query/body reject
 })
 
 /**
+ * Guarantee 3 continued (F1b follow-up): `getAuthenticatedAttendanceGroupEffectivePolicyOrgId`
+ * (`attendance-admin.ts` ~L157) derives the org identity through FIVE
+ * distinct sources, tried in order, before this route ever reaches the
+ * "which value did the CLIENT repeat" check proven above:
+ *
+ *   L1 `user.orgId`            (string)
+ *   L2 `user.workspaceId`      (string) — only reached when `orgId` is
+ *                              strictly null/undefined (`??`, not "falsy")
+ *   L3 `user.orgId`            (finite number, coerced via `String(...)`)
+ *   L4 `user.workspaceId`      (finite number) — same `??` gate as L2
+ *   L5 `req.authenticatedTenantId` (string) — the terminal fallback, only
+ *                              reached when neither L1-L4 produced a claim
+ *   L6 (terminal) — nothing usable anywhere → `null` → 403
+ *
+ * Before this describe block, ONLY the `orgId`-string leg (L1) was ever
+ * exercised anywhere in this repository — DB-free or DB-backed; grepping
+ * both `.db.test.ts` suites for this route turns up zero references to
+ * `workspaceId` or `authenticatedTenantId`. So L2-L5 were unverified by
+ * anything on a green board, DB-gated or not. Every negative here is proven
+ * discriminating by neutering the corresponding production branch and
+ * confirming the paired positive-control test below reds (see PR
+ * description / commit log for that mutation round).
+ */
+describe('org-identity derivation: each source (leg) is independently DB-free unit-tested (F1b)', () => {
+  const NUMERIC_ORG = 424242
+  const WORKSPACE_ORG = '99999999-9999-4999-8999-999999999999'
+  const TENANT_ORG = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const UNUSED_WORKSPACE_ORG = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const PATH = `/api/attendance/groups/${GROUP}/effective-policy`
+
+  /** Like `makeApp`, plus an optional direct `req.authenticatedTenantId` —
+   *  the field the real `jwtAuthMiddleware` populates from the JWT's
+   *  `tenantId` claim (`auth/jwt-middleware.ts` ~L101). This suite mounts
+   *  the router directly (DB-free), so it sets the field the same way it
+   *  already sets `req.user`, rather than running the real JWT middleware. */
+  function makeAppWithIdentity(user: Record<string, unknown> | undefined, authenticatedTenantId?: string) {
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as express.Request & { user?: unknown }).user = user
+      if (authenticatedTenantId !== undefined) {
+        ;(req as express.Request & { authenticatedTenantId?: string }).authenticatedTenantId = authenticatedTenantId
+      }
+      next()
+    })
+    app.use(attendanceAdminRouter())
+    return app
+  }
+
+  describe('positive controls — each source, ALONE, derives a usable org identity and the request reaches 200', () => {
+    it('L1: user.orgId (string)', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('L2: user.workspaceId (string) — no orgId key at all', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, workspaceId: WORKSPACE_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('L3: user.orgId (finite number), coerced to its decimal string form', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: NUMERIC_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('L4: user.workspaceId (finite number) — no orgId key at all', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, workspaceId: NUMERIC_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('L5: req.authenticatedTenantId — terminal fallback, reached only when neither orgId nor workspaceId is present', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER }, TENANT_ORG))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('precedence: user.orgId wins over user.workspaceId when both are present — proven DIFFERENTIALLY (the SAME membership seeding that lets `orgId=ORG` through is what this reaches, and a workspaceId-only seed for a DIFFERENT org would not have matched)', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: ORG, workspaceId: UNUSED_WORKSPACE_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('negatives — no usable identity anywhere is refused before any DB call', () => {
+    it('L6 (terminal): no orgId, no workspaceId, no authenticatedTenantId anywhere on the request', async () => {
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('documented edge: a present-but-EMPTY user.orgId does NOT fall through to workspaceId — `??` only triggers on null/undefined, not on an empty string — so this falls all the way to authenticatedTenantId (also absent here) and refuses', async () => {
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: '', workspaceId: WORKSPACE_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('an orgId of an unsupported type (boolean) is not derivable and does not fall through to workspaceId either (same `??` non-nullish reasoning)', async () => {
+      pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: true, workspaceId: WORKSPACE_ORG }))
+      const res = await request(pinned.url()).get(PATH)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+  })
+})
+
+/**
  * Guarantee 4 (see file header): in the REAL application assembly, this
  * route sits behind the global authentication gate and the attendance
  * audit/security middleware. The suites above mount `attendanceAdminRouter()`
@@ -656,6 +795,81 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       // shape or count. Recorded here as a fixture proving what the state
       // machine does NOT claim, not as something it defends against.
       expect(stateOf('    const r = S()\n    this.app.use(r)')).toBe('NO_SITE')
+    })
+  })
+
+  /**
+   * The ESCAPE collector's own permanent regression coverage (P2 follow-up
+   * to the gate on this PR): a prior independent review found the module
+   * docblock's completeness claim ("every OTHER read of `this.app` ... is
+   * separately collected") FALSE by construction for two shapes that
+   * produced neither a site nor an escape — invisible to A4 entirely, not
+   * merely mis-classified. `buildAssemblyModel` is now extended to close
+   * both (see the module docblock's own updated claim and residual list).
+   * These fixtures pin the closed shapes as a permanent regression,
+   * independent of whether any such shape ever appears in `index.ts` itself
+   * — the live A4 mutation proof for this exact round is recorded in the PR
+   * description / commit log, not here; a snapshot pin against `index.ts`
+   * alone stops testing an evasion shape the day no such shape exists in
+   * production source.
+   */
+  describe('escape-collector state-space coverage (inline fixtures, not index.ts)', () => {
+    const wrap = (body: string) => `class C {\n  m() {\n${body}\n  }\n}\n`
+    const escapesOf = (src: string) => {
+      const f = ts.createSourceFile('fixture.ts', wrap(src), ts.ScriptTarget.ES2022, true)
+      return buildAssemblyModel(f).escapes.map((e) => ({ kind: e.kind, signature: e.signature }))
+    }
+
+    it('bare alias initializer: const a = this.app — was the exact shape the gate named as invisible; already caught pre-fix (regression pin)', () => {
+      expect(escapesOf("    const a = this.app\n    a.use('/', S())")).toEqual([
+        { kind: 'ESCAPE', signature: '<VariableDeclaration>' },
+      ])
+    })
+
+    it("this['app'] read via string-literal bracket notation — the SAME property, was totally invisible (zero sites, zero escapes) before this fix", () => {
+      expect(escapesOf("    const a = this['app']\n    a.use('/', S())")).toEqual([
+        { kind: 'ESCAPE', signature: '<VariableDeclaration>' },
+      ])
+    })
+
+    it("this['app'].use(...) dispatched directly through bracket notation, no intermediate alias — also was totally invisible before this fix", () => {
+      expect(escapesOf("    this['app'].use('/', S())")).toEqual([
+        { kind: 'ESCAPE', signature: '<PropertyAccessExpression>' },
+      ])
+    })
+
+    it('destructuring by name: const { app } = this', () => {
+      expect(escapesOf('    const { app } = this\n    app.use(S())')).toEqual([
+        { kind: 'ESCAPE', signature: '{ app } = this' },
+      ])
+    })
+
+    it('destructuring by rename: const { app: a } = this', () => {
+      expect(escapesOf('    const { app: a } = this\n    a.use(S())')).toEqual([
+        { kind: 'ESCAPE', signature: '{ app: a } = this' },
+      ])
+    })
+
+    it('destructuring via a rest element: const { ...rest } = this — rest captures every own property NOT otherwise named in the pattern, app included', () => {
+      expect(escapesOf('    const { ...rest } = this\n    rest.app.use(S())')).toEqual([
+        { kind: 'ESCAPE', signature: '{ ...rest } = this' },
+      ])
+    })
+
+    it('NEGATIVE — discriminator: a literal bracket index naming a DIFFERENT property produces ZERO entries, proving the predicate matches the string "app", not every bracket access on `this`', () => {
+      expect(escapesOf("    const a = this['foo']\n    a.use('/', S())")).toEqual([])
+    })
+
+    it('NEGATIVE — documented residual: a non-literal bracket index on `this` cannot be proven to name `app` and is not collected (see module docblock)', () => {
+      expect(escapesOf('    const a = this[key]\n    a.use(S())')).toEqual([])
+    })
+
+    it('NEGATIVE — discriminator: destructuring an unrelated property off `this` produces ZERO entries', () => {
+      expect(escapesOf('    const { foo } = this\n    foo.use(S())')).toEqual([])
+    })
+
+    it('POSITIVE CONTROL: ordinary this.app.use(...) still produces zero escapes (the site collector, not the escape collector, is what should see it)', () => {
+      expect(escapesOf("    this.app.use('/', S())")).toEqual([])
     })
   })
 })
