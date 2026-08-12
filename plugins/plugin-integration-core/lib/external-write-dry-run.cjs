@@ -473,7 +473,22 @@ async function readSourceRows({ sourceAdapter, object, maxRows, filters }) {
       cursor,
     }
     if (filters !== undefined) readRequest.filters = filters
-    const read = await sourceAdapter.read(readRequest)
+    let read
+    try {
+      read = await sourceAdapter.read(readRequest)
+    } catch (error) {
+      // SQL drivers commonly echo identifiers and rejected literal values in their errors.
+      // Persisted equality filters are private server-side configuration, so never let a
+      // filtered-read driver error escape into HTTP responses or Apply run evidence.
+      if (filters !== undefined) {
+        throw new ExternalWriteDryRunError(
+          502,
+          'C6_WRITE_SOURCE_READ_FAILED',
+          'persisted SQL read-only source read failed',
+        )
+      }
+      throw error
+    }
     const pageRecords = Array.isArray(read && read.records) ? read.records : []
     records.push(...pageRecords.slice(0, Math.max(0, maxRows - records.length)))
     if ((read && read.done === true) || !(read && read.nextCursor)) {

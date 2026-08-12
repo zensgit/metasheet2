@@ -262,6 +262,52 @@ async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
   }
 }
 
+async function testSqlFilterDriverFailuresAreRedactedForDryRunAndApply() {
+  const filterKey = 'privateFilterColumn'
+  const filterValue = 'PRIVATE-FILTER-LITERAL'
+  const driverLeak = `invalid input for ${filterKey}: ${filterValue}`
+  let failRead = true
+  const { input } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: { [filterKey]: filterValue } } },
+      },
+    },
+    sourceRead: () => {
+      if (failRead) throw new Error(driverLeak)
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const assertRedacted = (error) => {
+    const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+    return error && error.code === 'C6_WRITE_SOURCE_READ_FAILED'
+      && error.status === 502
+      && !text.includes(filterKey)
+      && !text.includes(filterValue)
+      && !text.includes(driverLeak)
+  }
+
+  await assert.rejects(() => dryRunExternalWrite(input), assertRedacted)
+
+  failRead = false
+  const dryRun = await dryRunExternalWrite(input)
+  failRead = true
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    assertRedacted,
+    'Apply recomputation uses the same values-free filtered-read failure boundary',
+  )
+}
+
 async function testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite() {
   const { input, calls } = baseInput({ input: { dryRunUser: 'user_write' } })
   const dryRun = await dryRunExternalWrite(input)
@@ -915,6 +961,7 @@ async function main() {
   await testReadyDryRunIssuesTokenAndStaysValuesFree()
   await testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness()
   await testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
+  await testSqlFilterDriverFailuresAreRedactedForDryRunAndApply()
   await testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite()
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
