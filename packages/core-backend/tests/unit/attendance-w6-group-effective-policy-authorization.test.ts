@@ -888,4 +888,179 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       expect(escapesOf("    this.app.use('/', S())")).toEqual([])
     })
   })
+
+  /**
+   * Receiver-wrapper normalization (P2, third round): an INDEPENDENT gate
+   * found that `isThisAppPropertyAccess`/`isThisAppElementAccess` gated the
+   * receiver on `node.expression.kind === ts.SyntaxKind.ThisKeyword`
+   * DIRECTLY, no unwrap — so a `this` receiver wrapped in a single no-op
+   * node evaded BOTH collectors entirely: `this!.app.use(...)`,
+   * `(this).app.use(...)`, `(this as any).app.use(...)`, and
+   * `this!['app'].use(...)` were each `{sites: 0, escapes: 0}` — invisible
+   * to A4 (escape census) AND A5 (pre-gate prefix) alike, live-verified
+   * against real `index.ts` (see PR description / commit log for that
+   * round's mutation proof: a `(this as any).app.use(...)` pre-gate insert,
+   * properly ASI-guarded with a leading `;` so it does not merge into the
+   * PRECEDING statement — this codebase's own no-semicolon style makes that
+   * leading `;` load-bearing, not decorative, for any inserted statement
+   * that starts with `(`).
+   *
+   * `unwrapNoOpWrappers` closes this: a CLOSED, finite set of wrapper kinds
+   * (`ParenthesizedExpression`, `NonNullExpression`, `AsExpression`,
+   * `TypeAssertionExpression`, `SatisfiesExpression`) is stripped from the
+   * RECEIVER before the `ThisKeyword` check, to a fixed point so composed
+   * wrappers unwrap fully. Applied in three places sharing one predicate
+   * (`hasUnwrappedThisReceiver`): `isThisAppPropertyAccess`,
+   * `isThisAppElementAccess`, and the destructure initializer check in
+   * `collectThisDestructuringEscapes` — plus `findThisMethodCalls`, which
+   * had the IDENTICAL unwrapped check for `this.<methodName>()` and would
+   * otherwise let a wrapped ADDITIONAL `this!.setupMiddleware()` stay
+   * invisible while "exactly one call site" kept asserting true.
+   *
+   * What promotes to a SITE vs. stays ESCAPE-only is unchanged by this fix:
+   * wrapping the RECEIVER (the `this` inside a `.app` read) is a site, same
+   * as bare `this.app`; wrapping the WHOLE `this.app` VALUE, AFTER the
+   * property read (`(this.app).use(...)`, `this.app!.use(...)`), is a
+   * structurally different position — `callee.expression` there is the
+   * wrapper node itself, not a `this.app` `PropertyAccessExpression` — and
+   * stays escape-only, exactly as an unwrapped bare-alias read
+   * (`const a = this.app`) already did. That split is asserted explicitly
+   * below, not merely left untested.
+   */
+  describe('receiver-wrapper normalization: this!, (this), this as X, <X>this, this satisfies X (P2, inline fixtures, not index.ts)', () => {
+    const wrap = (body: string) => `class C {\n  m() {\n${body}\n  }\n}\n`
+    const modelOf = (src: string) => {
+      const f = ts.createSourceFile('fixture.ts', wrap(src), ts.ScriptTarget.ES2022, true)
+      return buildAssemblyModel(f)
+    }
+    const stateOf = (src: string, subject = 'S') => subjectState(modelOf(src), subject).state
+    const escapesOf = (src: string) => modelOf(src).escapes.map((e) => ({ kind: e.kind, signature: e.signature }))
+
+    describe('SITE: each wrapper form, alone, is UNCONDITIONAL_SITE — same as bare this.app', () => {
+      it.each([
+        ['this!.app.use(S())', 'NonNullExpression'],
+        ['(this).app.use(S())', 'ParenthesizedExpression'],
+        ['(this as any).app.use(S())', 'AsExpression'],
+        ['(this as SomeServer).app.use(S())', 'AsExpression (non-any type)'],
+        ['(<any>this).app.use(S())', 'TypeAssertionExpression'],
+        ['(this satisfies SomeServer).app.use(S())', 'SatisfiesExpression'],
+      ] as const)('%s (%s)', (src, _kind) => {
+        expect(stateOf(`    ${src}`)).toBe('UNCONDITIONAL_SITE')
+      })
+
+      it('composed wrappers unwrap to a fixed point: ((this as any)!).app.use(S())', () => {
+        expect(stateOf('    ((this as any)!).app.use(S())')).toBe('UNCONDITIONAL_SITE')
+      })
+    })
+
+    describe('ESCAPE: string-literal bracket notation through a wrapped receiver — same signatures as the unwrapped form (F1b precedent)', () => {
+      it("this!['app'] via an alias initializer", () => {
+        expect(escapesOf("    const a = this!['app']\n    a.use('/', S())")).toEqual([
+          { kind: 'ESCAPE', signature: '<VariableDeclaration>' },
+        ])
+      })
+
+      it("this!['app'].use(...) dispatched directly, no intermediate alias", () => {
+        expect(escapesOf("    this!['app'].use('/', S())")).toEqual([
+          { kind: 'ESCAPE', signature: '<PropertyAccessExpression>' },
+        ])
+      })
+
+      it("(this as any)['app'] via an alias initializer", () => {
+        expect(escapesOf("    const a = (this as any)['app']\n    a.use('/', S())")).toEqual([
+          { kind: 'ESCAPE', signature: '<VariableDeclaration>' },
+        ])
+      })
+    })
+
+    describe('ESCAPE: destructuring a wrapped `this` — same signatures as the unwrapped form (the wrapper does not appear in the signature, only the binding shape does)', () => {
+      it('const { app } = this!', () => {
+        expect(escapesOf('    const { app } = this!\n    app.use(S())')).toEqual([
+          { kind: 'ESCAPE', signature: '{ app } = this' },
+        ])
+      })
+
+      it('const { app } = (this as any)', () => {
+        expect(escapesOf('    const { app } = (this as any)\n    app.use(S())')).toEqual([
+          { kind: 'ESCAPE', signature: '{ app } = this' },
+        ])
+      })
+
+      it('const { app: a } = this! (rename form)', () => {
+        expect(escapesOf('    const { app: a } = this!\n    a.use(S())')).toEqual([
+          { kind: 'ESCAPE', signature: '{ app: a } = this' },
+        ])
+      })
+    })
+
+    it('ESCAPE: alias of a wrapped this.app — const a = (this as any).app; a.use(...) — the exact P2 shape named as invisible before this fix', () => {
+      expect(escapesOf("    const a = (this as any).app\n    a.use('/', S())")).toEqual([
+        { kind: 'ESCAPE', signature: '<VariableDeclaration>' },
+      ])
+    })
+
+    describe('NEGATIVE — discriminator: a wrapped receiver reading a DIFFERENT property is collected as NEITHER a site NOR an escape', () => {
+      it('(this as any).foo.use(S()) — property-access form', () => {
+        const m = modelOf("    (this as any).foo.use('/', S())")
+        expect(m.sites).toEqual([])
+        expect(m.escapes).toEqual([])
+      })
+
+      it("this!['foo'].use(S()) — bracket-notation form", () => {
+        const m = modelOf("    this!['foo'].use('/', S())")
+        expect(m.sites).toEqual([])
+        expect(m.escapes).toEqual([])
+      })
+
+      it('const a = this!.foo — destructure-adjacent alias form', () => {
+        const m = modelOf("    const a = this!.foo\n    a.use('/', S())")
+        expect(m.sites).toEqual([])
+        expect(m.escapes).toEqual([])
+      })
+    })
+
+    describe('documented split: wrapping the WHOLE this.app VALUE (after the property read) is a different position — stays ESCAPE-only, never promoted to a site', () => {
+      it('(this.app).use(S()) — the wrapper is around the property-access result, not the this receiver', () => {
+        expect(escapesOf("    (this.app).use('/', S())")).toEqual([
+          { kind: 'ESCAPE', signature: '<ParenthesizedExpression>' },
+        ])
+      })
+
+      it('this.app!.use(S()) — non-null on the whole this.app value', () => {
+        expect(escapesOf("    this.app!.use('/', S())")).toEqual([
+          { kind: 'ESCAPE', signature: '<NonNullExpression>' },
+        ])
+      })
+    })
+
+    describe('findThisMethodCalls: the SAME wrapper-blindness bug, same fix, over this.<methodName>() rather than this.app', () => {
+      const methodCallsOf = (src: string, methodName: string) => {
+        const f = ts.createSourceFile('fixture.ts', src, ts.ScriptTarget.ES2022, true)
+        return findThisMethodCalls(f, methodName)
+      }
+
+      it('this!.setupMiddleware() is found, unconditional, in its enclosing named method', () => {
+        const src = 'class C {\n  constructor() {\n    this!.setupMiddleware()\n  }\n}\n'
+        const calls = methodCallsOf(src, 'setupMiddleware')
+        expect(calls).toHaveLength(1)
+        expect(calls[0]).toMatchObject({ enclosingMethod: 'constructor', unconditional: true })
+      })
+
+      it('(this as any).setupMiddleware() is found too', () => {
+        const src = 'class C {\n  constructor() {\n    ;(this as any).setupMiddleware()\n  }\n}\n'
+        const calls = methodCallsOf(src, 'setupMiddleware')
+        expect(calls).toHaveLength(1)
+      })
+
+      it('NEGATIVE — a wrapped receiver calling a DIFFERENT method name is not collected', () => {
+        const src = 'class C {\n  constructor() {\n    this!.otherMethod()\n  }\n}\n'
+        expect(methodCallsOf(src, 'setupMiddleware')).toEqual([])
+      })
+
+      it('regression: an ADDITIONAL wrapped call site is counted, not silently missed — "exactly one call site" would wrongly stay true without this fix', () => {
+        const src = 'class C {\n  constructor() {\n    this.setupMiddleware()\n    this!.setupMiddleware()\n  }\n}\n'
+        expect(methodCallsOf(src, 'setupMiddleware')).toHaveLength(2)
+      })
+    })
+  })
 })

@@ -17,21 +17,39 @@ import * as ts from 'typescript'
  *
  * This module never reads raw text for its verdicts. It walks the real AST:
  * every `CallExpression` whose callee is a member access on `this.app`
- * naming an Express verb is a *registration site* (`R`, `model.sites`).
+ * naming an Express verb is a *registration site* (`R`, `model.sites`). The
+ * `this` RECEIVER of that `.app` read is normalized through
+ * `unwrapNoOpWrappers` first — see that function's own doc for the closed,
+ * finite set of wrapper kinds it strips (`this!.app`, `(this).app`,
+ * `this as X`, `<X>this`, `this satisfies X`, and any composition of them)
+ * — so a receiver written through any of those forms is a site exactly as
+ * if it had been written as bare `this.app`. This is RECEIVER normalization
+ * only: a wrapper around the WHOLE `this.app` VALUE, after the property
+ * read (`(this.app).use(...)`, `this.app!.use(...)`), is a structurally
+ * different position — `callee.expression` there is the wrapper node, not
+ * a `this.app` `PropertyAccessExpression` at all — and is NOT promoted to a
+ * site; it is still collected as an ESCAPE (`<ParenthesizedExpression>`,
+ * `<NonNullExpression>`, etc.), per the very next paragraph. That split is
+ * a deliberate, verified fixture (see "receiver vs. whole-value wrapping"
+ * below), not an oversight.
  *
  * EVERY OTHER READ of the `app` property off `this` is separately collected
  * (`C`, `model.escapes`) — assignment, computed dispatch
  * (`this.app[x](...)`), the value escaping into some other call or
- * constructor, OR the SAME property reached through a syntax this module
- * does not treat as a registration site: a bare `this.app` used as an
- * initializer/argument (`const a = this.app`), string-literal bracket
- * notation naming the same property (`this['app']`, in any of the shapes
- * above), or a direct `const`/`let`/`var` destructure of `this` that binds
- * `app` — by name (`const { app } = this`), by rename
- * (`const { app: a } = this`), or via a rest element that captures it along
- * with every other own property (`const { ...rest } = this`). So a mount
- * this module cannot itself order is at least visible and pinnable, not
- * silently invisible. A comment produces no AST node in either set, so
+ * constructor, a wrapper around the whole `this.app` VALUE rather than its
+ * `this` receiver (`(this.app).use(...)`, `this.app!.use(...)` — see above),
+ * OR the SAME property reached through a syntax this module does not treat
+ * as a registration site: a bare `this.app` used as an initializer/argument
+ * (`const a = this.app`), string-literal bracket notation naming the same
+ * property (`this['app']`, in any of the shapes above — INCLUDING through a
+ * no-op receiver wrapper, e.g. `this!['app']`, `(this as any)['app']`), or
+ * a direct `const`/`let`/`var` destructure of `this` — itself optionally
+ * behind a no-op wrapper (`const { app } = this!`, `const { app } = (this
+ * as any)`) — that binds `app` — by name (`const { app } = this`), by
+ * rename (`const { app: a } = this`), or via a rest element that captures
+ * it along with every other own property (`const { ...rest } = this`). So a
+ * mount this module cannot itself order is at least visible and pinnable,
+ * not silently invisible. A comment produces no AST node in either set, so
  * "commented out" and "deleted" are the same state by construction, not by
  * a special case that could itself be wrong.
  *
@@ -42,11 +60,15 @@ import * as ts from 'typescript'
  *    module cannot decide whether `computedExpr` evaluates to `'app'`
  *    without executing it, so it collects neither a site nor an escape for
  *    that read (a negative fixture proves this residual, not merely that
- *    it happens not to trigger).
+ *    it happens not to trigger). This residual is unaffected by receiver
+ *    unwrapping: `(this as any)[computedExpr]` is exactly as undecidable as
+ *    the unwrapped form.
  *  - destructuring `this` on the LEFT side of a plain ASSIGNMENT
  *    (`({ app } = this)`) — that parses as an object/array LITERAL
  *    expression, a structurally different node from the `const`/`let`/`var`
- *    `BindingPattern` this module walks.
+ *    `BindingPattern` this module walks. Also unaffected by receiver
+ *    unwrapping: `({ app } = this as any)` is the same LITERAL-expression
+ *    shape, not a `BindingPattern`.
  *  - `this` itself escaping bare (not `.app`, not `['app']`, not
  *    destructured) into another call, constructor, or closure that might
  *    read `.app` out of band (`Reflect.get(this, 'app')`, `{...this}`,
@@ -200,11 +222,77 @@ function projectArgument(node: ts.Node): string {
   return `<${ts.SyntaxKind[node.kind]}>`
 }
 
+/**
+ * Strips a NO-OP wrapper node — one that changes nothing about which
+ * runtime value the expression evaluates to — to reach the underlying
+ * expression, looping to a fixed point so a composition of wrappers
+ * (`((this as any))`, `this! as X`, …) is fully unwrapped, not just the
+ * outermost layer.
+ *
+ * The set is closed and finite BY THE TYPESCRIPT GRAMMAR, not by this
+ * module's enumeration effort: every kind switched on below has exactly one
+ * `.expression` child that spans strictly fewer source tokens than the
+ * wrapper itself, so each iteration strictly descends and the loop
+ * terminates in at most the wrapper's own nesting depth. Membership is
+ * decided purely by `node.kind` — no type information, no execution:
+ *  - `ParenthesizedExpression`   — `(this)`
+ *  - `NonNullExpression`         — `this!`
+ *  - `AsExpression`              — `this as X`
+ *  - `TypeAssertionExpression`   — `<X>this` (legacy angle-bracket form;
+ *                                  valid in a `.ts` file, this module's own
+ *                                  target)
+ *  - `SatisfiesExpression`       — `this satisfies X`
+ *
+ * `ts.createSourceFile` (this module's only entry point into the AST) can
+ * never produce a `PartiallyEmittedExpression` — that kind exists solely as
+ * a transform-synthetic marker inserted by the emitter, not by the parser —
+ * so it is correctly absent from this switch, not an oversight.
+ *
+ * This unwraps the RECEIVER of a read (the `this` a `.app` access, a
+ * `this.<method>()` call, or a destructure pulls from), never the whole
+ * read's VALUE — see the module docblock for why a wrapper around the whole
+ * `this.app` expression (`(this.app).use(...)`) is a structurally different
+ * position that stays escape-only, not promoted to a site by this function.
+ */
+function unwrapNoOpWrappers(node: ts.Expression): ts.Expression {
+  let current: ts.Expression = node
+  for (;;) {
+    switch (current.kind) {
+      case ts.SyntaxKind.ParenthesizedExpression:
+        current = (current as ts.ParenthesizedExpression).expression
+        continue
+      case ts.SyntaxKind.NonNullExpression:
+        current = (current as ts.NonNullExpression).expression
+        continue
+      case ts.SyntaxKind.AsExpression:
+        current = (current as ts.AsExpression).expression
+        continue
+      case ts.SyntaxKind.TypeAssertionExpression:
+        current = (current as ts.TypeAssertion).expression
+        continue
+      case ts.SyntaxKind.SatisfiesExpression:
+        current = (current as ts.SatisfiesExpression).expression
+        continue
+      default:
+        return current
+    }
+  }
+}
+
+/** `node.expression` is `this`, directly OR through any composition of the
+ *  no-op wrappers `unwrapNoOpWrappers` strips (`this!`, `(this)`,
+ *  `this as X`, `<X>this`, `this satisfies X`). Shared by every predicate
+ *  below that keys on "the receiver is `this`" so the wrapper set is
+ *  enumerated in exactly one place. */
+function hasUnwrappedThisReceiver(node: { expression: ts.Expression }): boolean {
+  return unwrapNoOpWrappers(node.expression).kind === ts.SyntaxKind.ThisKeyword
+}
+
 function isThisAppPropertyAccess(node: ts.Node): node is ts.PropertyAccessExpression {
   return (
     ts.isPropertyAccessExpression(node) &&
     node.name.text === 'app' &&
-    node.expression.kind === ts.SyntaxKind.ThisKeyword
+    hasUnwrappedThisReceiver(node)
   )
 }
 
@@ -217,12 +305,14 @@ function isThisAppPropertyAccess(node: ts.Node): node is ts.PropertyAccessExpres
  * index naming any OTHER property (`this['foo']`) is provably not this
  * property and also declines; the negative fixture for this shape asserts
  * exactly zero collected entries, distinguishing "matches string literals"
- * from "matches every bracket access on `this`".
+ * from "matches every bracket access on `this`". The receiver is unwrapped
+ * the same way as `isThisAppPropertyAccess`, so `this!['app']`,
+ * `(this as any)['app']`, etc. match too.
  */
 function isThisAppElementAccess(node: ts.Node): node is ts.ElementAccessExpression {
   return (
     ts.isElementAccessExpression(node) &&
-    node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    hasUnwrappedThisReceiver(node) &&
     ts.isStringLiteralLike(node.argumentExpression) &&
     node.argumentExpression.text === 'app'
   )
@@ -236,12 +326,6 @@ function isThisAppRead(node: ts.Node): node is ts.PropertyAccessExpression | ts.
 
 function lineOf(source: ts.SourceFile, pos: number): number {
   return source.getLineAndCharacterOfPosition(pos).line + 1
-}
-
-function unwrapParens(node: ts.Expression): ts.Expression {
-  let current: ts.Expression = node
-  while (ts.isParenthesizedExpression(current)) current = current.expression
-  return current
 }
 
 /**
@@ -262,14 +346,16 @@ function bindingElementSourceName(el: ts.BindingElement): string | null {
 }
 
 /**
- * Direct `const`/`let`/`var` destructuring of `this` that binds `app` —
- * by name, by rename, or via a rest element (which captures every property
- * NOT otherwise named in the same pattern, `app` included). A separate pass
- * from `visitForEscapes` because the read here is of `this` (a
- * `ThisKeyword`) flowing into a `BindingPattern`, not a `this.app`-shaped
- * node — see the module docblock's residual note on the ASSIGNMENT form
- * (`({ app } = this)`), which is a structurally different node this pass
- * does not visit.
+ * Direct `const`/`let`/`var` destructuring of `this` — or of `this` behind
+ * any of the same no-op receiver wrappers `unwrapNoOpWrappers` strips
+ * elsewhere in this module (`const { app } = this!`, `const { app } =
+ * (this as any)`) — that binds `app`: by name, by rename, or via a rest
+ * element (which captures every property NOT otherwise named in the same
+ * pattern, `app` included). A separate pass from `visitForEscapes` because
+ * the read here is of `this` (a `ThisKeyword`, possibly wrapped) flowing
+ * into a `BindingPattern`, not a `this.app`-shaped node — see the module
+ * docblock's residual note on the ASSIGNMENT form (`({ app } = this)`),
+ * which is a structurally different node this pass does not visit.
  */
 function collectThisDestructuringEscapes(source: ts.SourceFile): AppEscape[] {
   const found: AppEscape[] = []
@@ -277,7 +363,7 @@ function collectThisDestructuringEscapes(source: ts.SourceFile): AppEscape[] {
     if (
       ts.isVariableDeclaration(node) &&
       node.initializer &&
-      unwrapParens(node.initializer).kind === ts.SyntaxKind.ThisKeyword &&
+      unwrapNoOpWrappers(node.initializer).kind === ts.SyntaxKind.ThisKeyword &&
       ts.isObjectBindingPattern(node.name)
     ) {
       const enclosing = enclosingNamedFunction(node)
@@ -443,8 +529,14 @@ export interface MethodCallSite {
 /** Every `this.<methodName>()` call in the file — used to prove
  *  `setupMiddleware()` itself is invoked exactly once, unconditionally,
  *  from the constructor, using the same whitelist predicate as registration
- *  sites (see `classifyUnconditional`). General over any method name so it
- *  is testable against fixtures independent of `index.ts`. */
+ *  sites (see `classifyUnconditional`). The receiver is unwrapped the same
+ *  way as `isThisAppPropertyAccess` (`this!.setupMiddleware()`, `(this as
+ *  any).setupMiddleware()`, etc. all count), so this shares the SAME
+ *  wrapper-blindness fix, not a separate one — a wrapped ADDITIONAL call
+ *  site would otherwise be invisible to this function while the "exactly
+ *  one call site" assertion built on it stayed green. General over any
+ *  method name so it is testable against fixtures independent of
+ *  `index.ts`. */
 export function findThisMethodCalls(source: ts.SourceFile, methodName: string): MethodCallSite[] {
   const out: MethodCallSite[] = []
   const visit = (node: ts.Node): void => {
@@ -453,7 +545,7 @@ export function findThisMethodCalls(source: ts.SourceFile, methodName: string): 
       if (
         ts.isPropertyAccessExpression(callee) &&
         callee.name.text === methodName &&
-        callee.expression.kind === ts.SyntaxKind.ThisKeyword
+        hasUnwrappedThisReceiver(callee)
       ) {
         const { unconditional, blockingAncestorKind } = classifyUnconditional(node)
         const enclosing = enclosingNamedFunction(node)
