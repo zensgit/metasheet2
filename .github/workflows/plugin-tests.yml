@@ -176,7 +176,12 @@ jobs:
       # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
-        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs
+
+      # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
+      # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
+      - name: W0 exact-anchor L6/L7 CI wiring contract
+        run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
 
       # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
       # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
@@ -986,6 +991,14 @@ jobs:
             tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts \
             tests/integration/multitable-history-trust-checkpoint-realdb.test.ts \
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
+            tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
+            tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts \
+            tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
+            tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \

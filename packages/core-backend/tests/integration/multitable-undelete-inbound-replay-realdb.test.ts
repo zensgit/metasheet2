@@ -404,6 +404,11 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     // link, so the diag classifies the row neighborDeclined (replayable=0).
     await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb) WHERE id = $1`, [N, `{${F}}`])
 
+    // The production restore path inserts R before invoking replayInboundLinks. This test calls the
+    // lower-level helper directly, so recreate that precondition explicitly; the live-target FK now
+    // enforces it at COMMIT instead of permitting an edge to a still-deleted record.
+    await insertRecord(SHEET_A, R, {})
+
     // Same injection shape as RB15, opposite direction: strictly between the diagnostic and the
     // write, the neighbour RE-consents — the write's fresh precondition-6 then passes and inserts.
     let racedOnce = false

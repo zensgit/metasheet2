@@ -50,6 +50,7 @@ import {
   type AccessGraphTransactionClient,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -379,6 +380,30 @@ const ADMIN_USER_PROFILE_SELECT = `
   created_at,
   updated_at
 `
+
+// P23: exact-anchor recovery holds a per-subject advisory lease across the eight
+// recovery-authority tables (users, user_roles, user_permissions, role_permissions,
+// field_permissions, record_permissions, spreadsheet_permissions,
+// platform_member_group_members) while it stabilizes permissions. A write against one of
+// those tables that lands under a held lease fails fast with Postgres SQLSTATE 40001 and
+// message RECOVERY_AUTHORITY_BUSY_MARKER (see recovery-authorization-stability.ts). That is
+// a transient, retryable condition — the multitable permission routes in univer-meta.ts
+// already map it to 409 RECOVERY_AUTHORITY_BUSY. This helper gives the platform admin routes
+// in this file the same mapping instead of letting it fall through to an unclassified 500.
+// Reuses the SAME discriminator (isRecoveryAuthorityBusyError) and error code
+// (RECOVERY_AUTHORITY_BUSY) as univer-meta.ts — no new marker/constant is introduced.
+// Body is values-free: fixed code/message/retryable flag, no user- or request-derived data.
+function sendIfRecoveryAuthorityBusy(res: Response, error: unknown): boolean {
+  if (!isRecoveryAuthorityBusyError(error)) return false
+  jsonError(
+    res,
+    409,
+    'RECOVERY_AUTHORITY_BUSY',
+    'Recovery is stabilizing permissions; retry this change.',
+    { retryable: true },
+  )
+  return true
+}
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -2685,6 +2710,7 @@ export function adminUsersRouter(): Router {
         memberGroups,
       })
     } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', (error as Error)?.message || 'Failed to update platform member group membership')
     }
   })
@@ -3102,6 +3128,7 @@ export function adminUsersRouter(): Router {
           : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
     }
   })
@@ -3904,6 +3931,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
     }
   })
@@ -4486,6 +4514,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
     }
   })
@@ -4540,6 +4569,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
     }
   })
@@ -4627,6 +4657,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
     }
   })
