@@ -1678,6 +1678,7 @@ async function testPipelineExternalWriteDryRunRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'PRIVATE-ROUTE-FILTER' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -1761,7 +1762,7 @@ async function testPipelineExternalWriteDryRunRoute() {
   assert.equal(res.body.data.counts.add, 1)
   assert.equal(res.body.data.evidence.dryRunTokenPresent, true)
   assert.equal(storage.map.size, 1, 'route persists the dry-run token through plugin storage')
-  assert.deepEqual(sourceReadCalls, [{ object: 'public.source_items', limit: 100, cursor: null }])
+  assert.deepEqual(sourceReadCalls, [{ object: 'public.source_items', filters: { approvedSlice: 'PRIVATE-ROUTE-FILTER' }, limit: 100, cursor: null }])
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 1, 'only the source system uses adapter-ready credential loading')
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter')[0][1].id, sourceSystem.id)
   assert.equal(findCalls(calls, 'getExternalSystem').length, 1, 'target system is loaded as config only')
@@ -1808,6 +1809,21 @@ async function testPipelineExternalWriteDryRunRoute() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
   assert.equal(calls.length, callsBeforeClientInjection, 'client-supplied dry-run injection control is rejected before loading the pipeline')
+
+  const callsBeforeFilterSteering = calls.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: pipeline.id },
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      filters: { approvedSlice: 'REQUEST-STEERING-SENTINEL' },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
+  assert.equal(calls.length, callsBeforeFilterSteering, 'request-supplied filter steering is rejected before loading the pipeline')
+  assert.equal(JSON.stringify(res.body).includes('REQUEST-STEERING-SENTINEL'), false, 'rejected request values stay out of errors')
 }
 
 async function testPipelineExternalWriteApplyRoute() {
@@ -1849,6 +1865,7 @@ async function testPipelineExternalWriteApplyRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2091,6 +2108,7 @@ async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2315,6 +2333,7 @@ async function testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2507,6 +2526,7 @@ async function testPipelineExternalWriteApplyDoesNotOverstateProvenancePersisten
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2621,6 +2641,7 @@ async function testPipelineExternalWriteDryRunPreflightFailsClosed() {
           targetSystemId: 'target_c6',
           targetObject: 'public.target_items',
           createdBy: 'owner-7',
+          options: { source: { filters: { approvedSlice: 'fixture' } } },
           fieldMappings: [],
           ...pipelineOverride,
         }
@@ -5655,6 +5676,7 @@ async function testPipelineExternalWriteMultitableRoute() {
     id: 'pipe_mt', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'C6 multitable', status: 'active',
     sourceSystemId: sourceSystem.id, sourceObject: 'src_items',
     targetSystemId: targetSystem.id, targetObject: 'approved_materials', createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'c', targetField: 'code' },
       { sourceField: 'n', targetField: 'name' },
