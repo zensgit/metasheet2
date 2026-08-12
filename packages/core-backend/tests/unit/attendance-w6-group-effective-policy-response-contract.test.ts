@@ -23,6 +23,7 @@ import {
 } from '../../src/attendance/w6-group-effective-policy-response-contract'
 
 const FIXTURE_DIR = join(__dirname, '../fixtures/attendance/w6')
+const TEST_UUID = 'a4556006-ffff-4000-8000-000000000001'
 
 function readFixture(name: string): unknown {
   return JSON.parse(readFileSync(join(FIXTURE_DIR, name), 'utf8'))
@@ -122,7 +123,7 @@ describe('W6 group effective-policy response contract validator', () => {
       const minimal = {
         ok: true,
         data: {
-          groupId: 'g1',
+          groupId: TEST_UUID,
           groupType: 'free_time',
           timezone: 'UTC',
           activeMemberCount: 0,
@@ -156,7 +157,7 @@ describe('W6 group effective-policy response contract validator', () => {
     const base = {
       ok: true,
       data: {
-        groupId: 'g1',
+        groupId: TEST_UUID,
         groupType: 'free_time',
         timezone: 'UTC',
         activeMemberCount: 0,
@@ -399,7 +400,7 @@ describe('W6 group effective-policy response contract validator', () => {
       for (const kind of unknownKinds) {
         expect(ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1, kind).not.toContain(kind)
         const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
-        patched.data.domains.segments.sourceRefs = [{ kind, id: 'sg-1' }]
+        patched.data.domains.segments.sourceRefs = [{ kind, id: TEST_UUID }]
         expect(validateAttendanceGroupEffectivePolicyResponseV1(patched), kind).toEqual({
           ok: false,
           reason: 'domains.segments.sourceRefs: invalid shape',
@@ -411,7 +412,7 @@ describe('W6 group effective-policy response contract validator', () => {
       // to keep single-sourced.
       for (const kind of ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1) {
         const ok = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
-        ok.data.domains.segments.sourceRefs = [{ kind, id: 'x-1' }]
+        ok.data.domains.segments.sourceRefs = [{ kind, id: TEST_UUID }]
         expect(validateAttendanceGroupEffectivePolicyResponseV1(ok), kind).toEqual({ ok: true })
       }
     })
@@ -425,7 +426,7 @@ describe('W6 group effective-policy response contract validator', () => {
       // makes the compile-time derivation and the runtime gate the same fact.)
       const probeKind = 'w6_probe_kind_not_a_real_source'
       const patched = structuredClone(base) as { data: { domains: Record<string, Record<string, unknown>> } }
-      patched.data.domains.segments.sourceRefs = [{ kind: probeKind, id: 'p-1' }]
+      patched.data.domains.segments.sourceRefs = [{ kind: probeKind, id: TEST_UUID }]
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,
         reason: 'domains.segments.sourceRefs: invalid shape',
@@ -518,8 +519,37 @@ describe('W6 group effective-policy response contract validator', () => {
       expect(removed.join(' | ')).toMatch(/not assignable/i)
     })
 
+    it('rejects non-UUID IDs at every UUID-formatted response position', () => {
+      const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
+        ok: true
+        data: {
+          groupId: string
+          domains: {
+            schedule: {
+              sourceRefs: Array<Record<string, unknown>>
+              fixedSchedule: {
+                desired: Record<string, unknown>
+                drift: { managedSets: Array<Record<string, unknown>> }
+              }
+            }
+          }
+        }
+      }
+      const probes: Array<(candidate: typeof fixture) => void> = [
+        (candidate) => { candidate.data.groupId = 'not-a-uuid' },
+        (candidate) => { candidate.data.domains.schedule.sourceRefs[0].id = 'not-a-uuid' },
+        (candidate) => { candidate.data.domains.schedule.fixedSchedule.desired.shiftId = 'not-a-uuid' },
+        (candidate) => { candidate.data.domains.schedule.fixedSchedule.drift.managedSets[0].shiftId = 'not-a-uuid' },
+      ]
+      for (const mutate of probes) {
+        const candidate = structuredClone(fixture)
+        mutate(candidate)
+        expect(validateAttendanceGroupEffectivePolicyResponseV1(candidate).ok).toBe(false)
+      }
+    })
+
     // managedSets[] entries are checked on VALUE TYPE, not just key presence —
-    // `rowCount: {}` or `producerKey: 42` must fail.
+    // `rowCount: {}`, `rowCount: 0`, or `producerKey: 42` must fail.
     it('rejects a managedSets[] entry with a non-string producerKey', () => {
       const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
         ok: true
@@ -542,7 +572,19 @@ describe('W6 group effective-policy response contract validator', () => {
       patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].rowCount = {}
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,
-        reason: 'fixedSchedule.drift.managedSets[]: rowCount not a non-negative int',
+        reason: 'fixedSchedule.drift.managedSets[]: rowCount not a positive int',
+      })
+    })
+    it('rejects a managedSets[] entry with rowCount zero', () => {
+      const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
+        ok: true
+        data: { domains: { schedule: { fixedSchedule: { drift: { managedSets: Array<Record<string, unknown>> } } } } }
+      }
+      const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].rowCount = 0
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
+        ok: false,
+        reason: 'fixedSchedule.drift.managedSets[]: rowCount not a positive int',
       })
     })
   })

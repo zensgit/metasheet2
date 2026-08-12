@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -9,6 +10,7 @@ import {
   resolveCoreBackendRepoRoot,
   resolvePluginAttendanceLibPath,
 } from '../../src/util/resolve-plugin-attendance-lib'
+import { pluginLibRequestsIn } from '../helpers/attendance-w6-call-path-closure'
 
 /**
  * Hardening gate for `resolvePluginAttendanceLibPath`.
@@ -283,29 +285,35 @@ describe('resolvePluginAttendanceLibPath hardening', () => {
     })
 
     it('covers every file the production code actually requires through this resolver', () => {
-      // Derived, not hand-listed: scan the real call sites for their literal
+      // Derived, not hand-listed: scan every tracked backend source file for
       // `requirePluginAttendanceLib(__dirname, '<file>')` arguments and require
-      // the closed set to be a superset. A new require with a file nobody added
-      // to the set would otherwise only surface as a production boot crash.
+      // exact set equality. The TypeScript AST parser handles nested generic
+      // arrow types and rejects a non-literal target instead of silently
+      // narrowing the scan.
       const realRepoRoot = resolveCoreBackendRepoRoot(__dirname)
-      const callSites = [
-        'packages/core-backend/src/routes/attendance-admin.ts',
-        'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
-      ]
+      const callSites = execFileSync('git', ['ls-files', '-z', '--cached', 'packages/core-backend/src'], {
+        cwd: realRepoRoot,
+        maxBuffer: 16 * 1024 * 1024,
+      })
+        .toString('utf8')
+        .split('\0')
+        .filter((relative) => /\.[cm]?[jt]sx?$/.test(relative))
       const requested = new Set<string>()
       for (const relative of callSites) {
         const text = fs.readFileSync(path.join(realRepoRoot, relative), 'utf8')
-        for (const match of text.matchAll(/requirePluginAttendanceLib<[^>]*>\(\s*__dirname,\s*'([^']+)'/gs)) {
-          requested.add(match[1])
-        }
-        for (const match of text.matchAll(/requirePluginAttendanceLib\(\s*__dirname,\s*'([^']+)'/gs)) {
-          requested.add(match[1])
-        }
+        for (const target of pluginLibRequestsIn(text)) requested.add(target)
       }
       // Non-empty-domain leg: an empty scan would satisfy the subset check vacuously.
       expect(requested.size).toBeGreaterThan(0)
-      const unclaimed = [...requested].filter((file) => !PLUGIN_ATTENDANCE_LIB_CLOSED_FILE_SET.includes(file))
-      expect(unclaimed).toEqual([])
+      expect([...requested].sort()).toEqual([...PLUGIN_ATTENDANCE_LIB_CLOSED_FILE_SET].sort())
+    })
+
+    it('parses arrow-type generics and refuses a dynamic target instead of skip-greening', () => {
+      const arrowGeneric = `const lib = requirePluginAttendanceLib<{ build: (input: string) => string }>(__dirname, 'arrow.cjs')`
+      expect(pluginLibRequestsIn(arrowGeneric)).toEqual(['arrow.cjs'])
+      expect(() => pluginLibRequestsIn('requirePluginAttendanceLib(__dirname, targetFile)')).toThrow(
+        'requirePluginAttendanceLib must use (__dirname, <literal file>)',
+      )
     })
   })
 })

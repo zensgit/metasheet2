@@ -233,10 +233,27 @@ function identifiersIn(node: ts.Node): string[] {
   return names
 }
 
+function pluginLibTargetFromCall(node: ts.CallExpression): string | null {
+  if (!ts.isIdentifier(node.expression) || node.expression.text !== 'requirePluginAttendanceLib') return null
+  const [startDir, target] = node.arguments
+  if (!startDir || !ts.isIdentifier(startDir) || startDir.text !== '__dirname' || !target || !ts.isStringLiteral(target)) {
+    throw new Error('requirePluginAttendanceLib must use (__dirname, <literal file>)')
+  }
+  return target.text
+}
+
 /** `requirePluginAttendanceLib<...>(__dirname, '<file>')` literal arguments. */
-function pluginLibRequestsIn(text: string): string[] {
+export function pluginLibRequestsIn(text: string): string[] {
+  const source = ts.createSourceFile('attendance-w6-plugin-lib-call.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const out: string[] = []
-  for (const m of text.matchAll(/requirePluginAttendanceLib(?:<[\s\S]*?>)?\(\s*__dirname,\s*'([^']+)'/g)) out.push(m[1])
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const target = pluginLibTargetFromCall(node)
+      if (target !== null) out.push(target)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
   return out
 }
 
@@ -247,16 +264,28 @@ function pluginLibRequestsIn(text: string): string[] {
  * pulling the whole module in.
  */
 function pluginLibBindingsIn(text: string): Array<{ binding: string; libFile: string }> {
+  const source = ts.createSourceFile('attendance-w6-plugin-lib-binding.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const out: Array<{ binding: string; libFile: string }> = []
-  for (const m of text.matchAll(
-    // The `const` keyword is OPTIONAL in this pattern on purpose: a
-    // VariableDeclaration node's own text starts at the NAME, so requiring the
-    // keyword silently matched nothing once declarations (rather than whole
-    // files) became the unit of expansion.
-    /(?:(?:const|let|var)\s+)?([A-Za-z0-9_$]+)\s*=\s*requirePluginAttendanceLib(?:<[\s\S]*?>)?\(\s*__dirname,\s*'([^']+)'/g,
-  )) {
-    out.push({ binding: m[1], libFile: m[2] })
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
+      const target = pluginLibTargetFromCall(node.initializer)
+      if (target !== null) out.push({ binding: node.name.text, libFile: target })
+    }
+    // Declaration slices produced by this helper begin at the variable name,
+    // not at `const`, so TypeScript parses that isolated text as an assignment
+    // expression. Treat both parser shapes identically.
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left) &&
+      ts.isCallExpression(node.right)
+    ) {
+      const target = pluginLibTargetFromCall(node.right)
+      if (target !== null) out.push({ binding: node.left.text, libFile: target })
+    }
+    ts.forEachChild(node, visit)
   }
+  visit(source)
   return out
 }
 

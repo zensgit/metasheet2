@@ -515,10 +515,12 @@ export function createAttendanceGroupEffectivePolicyAggregateService(deps: Atten
       } else {
         rulesLabel = 'needs_configuration'
         rulesReasonCodes = ['RULE_SOURCE_MISSING']
-        // No conflicts[] entry: RULE_SOURCE_MISSING is a domain reasonCode
-        // only (asymmetric with SCHEDULE_STRATEGY_INCOMPLETE, which is in
-        // both the domain and conflicts[] — the fixture pack pins both
-        // shapes as-is).
+        conflicts.push({
+          code: 'RULE_SOURCE_MISSING',
+          domain: 'rules',
+          label: 'conflict_action_required',
+          editorRef: scheduleRouteRef('rules', 'rule-sets'),
+        })
       }
     }
 

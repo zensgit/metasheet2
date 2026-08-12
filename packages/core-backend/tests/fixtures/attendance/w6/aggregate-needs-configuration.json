@@ -62,6 +62,12 @@
         "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "advanced-scheduling" }
       },
       {
+        "code": "RULE_SOURCE_MISSING",
+        "domain": "rules",
+        "label": "conflict_action_required",
+        "editorRef": { "kind": "group_context_route", "step": "rules", "surface": "rule-sets" }
+      },
+      {
         "code": "TIMEZONE_MISSING",
         "domain": "basics",
         "label": "conflict_action_required",

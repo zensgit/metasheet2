@@ -238,6 +238,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
 
   beforeAll(async () => {
     for (const userId of seededUserIds) await seedUser(userId)
+    await pool.query("INSERT INTO roles (id, name) VALUES ('admin', 'Platform admin') ON CONFLICT (id) DO NOTHING")
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [platformAdminUser])
     await seedMembership(adminUser, orgA)
     await seedMembership(memberUser, orgA)
     await seedMembership(outsiderUser, orgB)
@@ -245,8 +247,9 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     await seedMembership(dualOrgUser, orgB)
     // nonMemberAdminUser: holds attendance:admin permission but NO active
     // org_A membership row at all (delegated-non-member probe).
-    // platformAdminUser: global admin, ALSO no org_A membership row —
-    // proves the bypass.
+    // platformAdminUser: global admin only through the real user_roles row,
+    // with no legacy role claim and no org_A membership row — proves the
+    // transaction-bound production isAdmin query and its bypass.
     // noOrgUser: no user_orgs row anywhere, no orgId claim either.
 
     await pool.query(`INSERT INTO attendance_groups (id, org_id, name, timezone, attendance_type, rule_set_id) VALUES ($1, $2, 'W6 Group A', 'Asia/Shanghai', 'fixed_shift', $3)`, [
@@ -348,6 +351,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
     await pool.query('DELETE FROM attendance_shifts WHERE org_id = ANY($1::text[])', [[orgA, orgB]])
     await pool.query('DELETE FROM attendance_rule_sets WHERE org_id = ANY($1::text[])', [[orgA, orgB]])
     await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [seededUserIds])
+    await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [seededUserIds])
     await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [seededUserIds])
     await pool.end()
   })
@@ -434,6 +438,11 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       expect(data.conflicts).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ code: 'SCHEDULE_STRATEGY_INCOMPLETE', domain: 'schedule' }),
+          expect.objectContaining({
+            code: 'RULE_SOURCE_MISSING',
+            domain: 'rules',
+            editorRef: { kind: 'group_context_route', step: 'rules', surface: 'rule-sets' },
+          }),
         ]),
       )
     })
@@ -624,7 +633,7 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       await request(adminApp())
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
         .set('x-org-id', orgB) // 403 spoof
-      await request(makeApp({ id: platformAdminUser, permissions: [], role: 'admin', orgId: orgA }))
+      await request(makeApp({ id: platformAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
         .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 200 platform admin
 
       const after = await snapshotTables()
@@ -727,10 +736,15 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       expect(res.body.ok).toBe(false)
     })
 
-    it('platform-admin bypass: global admin with NO org_A membership row still reaches the aggregate (permission bypass, org identity NOT bypassed)', async () => {
-      const app = makeApp({ id: platformAdminUser, permissions: [], role: 'admin', orgId: orgA })
+    it('DB-backed platform-admin bypass: the real user_roles lookup returns true on the shared read-only transaction and skips membership', async () => {
+      observedTransactions.length = 0
+      const app = makeApp({ id: platformAdminUser, permissions: ['attendance:admin'], orgId: orgA })
       const res = await request(app).get(`/api/attendance/groups/${groupAId}/effective-policy`)
       expect(res.status).toBe(200)
+      expect(observedTransactions.length).toBe(1)
+      const statements = observedTransactions[0].statements
+      expect(statements.filter((sql) => /FROM user_roles/.test(sql) && /role_id = \$2/.test(sql))).toHaveLength(1)
+      expect(statements.filter((sql) => /FROM user_orgs uo/.test(sql) && /uo\.is_active = true/.test(sql))).toHaveLength(0)
     })
 
     it('missing authenticated org: 403 before any scoped SQL', async () => {

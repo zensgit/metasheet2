@@ -39,7 +39,6 @@ const TARGET_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
 // match fails the gate.
 const ALLOWED_RELATIVE_FILES = new Set([
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
-  'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
   'packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
   'packages/core-backend/tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
   'packages/core-backend/tests/integration/attendance-w6-group-effective-policy.db.test.ts',
@@ -48,7 +47,6 @@ const ALLOWED_RELATIVE_FILES = new Set([
   'packages/core-backend/tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts',
   // Names the module in a CLOSED FILE SET / a derived-domain floor list, not
   // as a caller. Both are guards over this same module.
-  'packages/core-backend/src/util/resolve-plugin-attendance-lib.ts',
   'packages/core-backend/tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts',
   'packages/core-backend/tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts',
 ])
@@ -67,7 +65,11 @@ const FACTORY_CALL_RE = /createAttendanceGroupFixedScheduleEffectivenessService\
 
 /** Also allowed to NAME the module/factory (types, aggregates) but must contain
  * ZERO factory CALL sites — the aggregate composes an INJECTED service. */
-const ZERO_FACTORY_CALL_FILES = ['packages/core-backend/src/attendance/w6-group-effective-policy-aggregate.ts']
+const ZERO_FACTORY_CALL_FILES = [
+  'packages/core-backend/src/attendance/w6-group-effective-policy-aggregate.ts',
+  'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
+  'packages/core-backend/src/util/resolve-plugin-attendance-lib.ts',
+]
 
 const FSER_REFERENCE_PATTERNS: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
   { label: 'module path reference', pattern: /attendance-group-fixed-schedule-effectiveness-service\.cjs/ },
@@ -151,7 +153,7 @@ describe('W6-R4 repository inventory: the FSER derivation has exactly one caller
     }
   })
 
-  it('the aggregate module itself contains zero factory call sites (it composes an injected service)', () => {
+  it('every production file allowed to name FSER without composing it contains zero factory call sites', () => {
     for (const file of ZERO_FACTORY_CALL_FILES) {
       const text = fs.readFileSync(path.join(ROOT, file), 'utf8')
       expect(text.length).toBeGreaterThan(1000)

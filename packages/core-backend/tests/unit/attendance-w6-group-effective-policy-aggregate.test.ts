@@ -631,12 +631,13 @@ describe('W6-R5 — the membership-overlap SQL is pinned, so a choose-first/choo
   })
 
   it("the service really issues THAT string (the pin is not describing a constant nobody uses)", async () => {
+    const groupId = 'a4556006-000d-4000-8000-000000000001'
     const seen: string[] = []
     const query: AttendanceGroupEffectivePolicyQueryFn = async (sql) => {
       seen.push(sql)
       const s = sql.toLowerCase()
       if (s.includes('from attendance_groups')) {
-        return [{ id: 'g', attendance_type: 'free_time', timezone: 'Asia/Shanghai', rule_set_id: null }]
+        return [{ id: groupId, attendance_type: 'free_time', timezone: 'Asia/Shanghai', rule_set_id: null }]
       }
       if (s.includes('from attendance_group_managers')) return []
       if (s.includes('from attendance_calculation_rollout_state')) return []
@@ -649,7 +650,7 @@ describe('W6-R5 — the membership-overlap SQL is pinned, so a choose-first/choo
       },
     }
     const service = createAttendanceGroupEffectivePolicyAggregateService({ query, fser, now: () => NOW })
-    await service.getAggregate({ orgId: 'org-1', groupId: 'g' })
+    await service.getAggregate({ orgId: 'org-1', groupId })
     expect(seen).toContain(ATTENDANCE_GROUP_MEMBERSHIP_OVERLAP_SQL_V1)
   })
 })
@@ -673,7 +674,9 @@ describe('NIT-2 — one injected clock feeds both timestamps in a response', () 
       if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 1 }]
       if (s.includes('from attendance_group_managers')) return []
       if (s.includes('from attendance_calculation_rollout_state')) return []
-      if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: 'cfg' }]
+      if (s.includes('from attendance_group_fixed_schedule_configs')) {
+        return [{ id: 'a4556006-0009-4000-8000-000000000102' }]
+      }
       if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
       if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
       if (s.includes('from attendance_calculation_group_memberships')) return []
@@ -746,7 +749,9 @@ describe('W6-R4 — the schedule label is a PURE FUNCTION of FSER state (no para
     if (s.includes('count(*)::int as cnt from attendance_group_members')) return [{ cnt: 4 }]
     if (s.includes('from attendance_group_managers')) return []
     if (s.includes('from attendance_calculation_rollout_state')) return []
-    if (s.includes('from attendance_group_fixed_schedule_configs')) return [{ id: 'cfg-1' }]
+    if (s.includes('from attendance_group_fixed_schedule_configs')) {
+      return [{ id: 'a4556006-000c-4000-8000-000000000102' }]
+    }
     if (s.includes('count(*)::int as cnt from attendance_shift_segments')) return [{ cnt: 1 }]
     if (s.includes('from attendance_shifts')) return [{ flex_mode: 'strict' }]
     if (s.includes('from attendance_calculation_group_memberships')) return []

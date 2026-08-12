@@ -59,6 +59,7 @@ const FSER_STATES = Object.freeze(['not_configured', 'pending_apply', 'effective
 
 const FLEX_MODES = Object.freeze(['strict', 'flex_required_duration'])
 const RULE_SOURCES = Object.freeze(['org_default', 'group_rule_set'])
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /**
  * W6-R8: the #4711 closed step/surface table, re-declared here because the
  * canonical table (`ATTENDANCE_GROUP_STEP_SURFACES` in
@@ -121,6 +122,10 @@ function hasClosedKeys(
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value)
 }
 
 function isNonNegativeInt(value: unknown): value is number {
@@ -202,7 +207,7 @@ function validateSourceRefs(value: unknown): boolean {
       hasClosedKeys(item, ['kind', 'id']) &&
       typeof (item as Record<string, unknown>).kind === 'string' &&
       SOURCE_REF_KINDS.includes((item as Record<string, unknown>).kind as string) &&
-      isNonEmptyString((item as Record<string, unknown>).id),
+      isUuid((item as Record<string, unknown>).id),
   )
 }
 
@@ -224,7 +229,7 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
     // shape); `startDate` does not (NOT NULL column); `revision` is a
     // positive int, matching the OpenAPI draft's `minimum: 1`.
     if (
-      !isNonEmptyString(d.shiftId) ||
+      !isUuid(d.shiftId) ||
       !isDateOnly(d.startDate) ||
       !isDateOnlyOrNull(d.endDate) ||
       !isPositiveInt(d.revision)
@@ -255,15 +260,15 @@ function validateFixedSchedule(value: unknown): AttendanceGroupEffectivePolicyVa
     const managedSet = set as Record<string, unknown>
     // `endDate: null` is a legal open-ended managed row.
     if (
-      !isNonEmptyString(managedSet.shiftId) ||
+      !isUuid(managedSet.shiftId) ||
       !isDateOnly(managedSet.startDate) ||
       !isDateOnlyOrNull(managedSet.endDate) ||
       !isNonEmptyString(managedSet.producerKey)
     ) {
       return fail('fixedSchedule.drift.managedSets[]: field type mismatch')
     }
-    if (!isNonNegativeInt(managedSet.rowCount)) {
-      return fail('fixedSchedule.drift.managedSets[]: rowCount not a non-negative int')
+    if (!isPositiveInt(managedSet.rowCount)) {
+      return fail('fixedSchedule.drift.managedSets[]: rowCount not a positive int')
     }
   }
   if (!isIsoTimestamp(v.evaluatedAt)) return fail('fixedSchedule.evaluatedAt: not an ISO timestamp')
@@ -334,7 +339,7 @@ export function validateAttendanceGroupEffectivePolicyResponseV1(
     return fail('data: unexpected key set')
   }
   const d = data as Record<string, unknown>
-  if (!isNonEmptyString(d.groupId)) return fail('data.groupId: not a non-empty string')
+  if (!isUuid(d.groupId)) return fail('data.groupId: not a UUID')
   if (typeof d.groupType !== 'string' || !GROUP_TYPES.includes(d.groupType as never)) return fail('data.groupType: unknown enum value')
   if (d.timezone !== null && !isNonEmptyString(d.timezone)) return fail('data.timezone: not string|null')
   if (!isNonNegativeInt(d.activeMemberCount)) return fail('data.activeMemberCount: not a non-negative int')

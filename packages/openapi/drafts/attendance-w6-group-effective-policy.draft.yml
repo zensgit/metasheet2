@@ -52,10 +52,11 @@ paths:
                 $ref: '#/components/schemas/AttendanceGroupEffectivePolicyResponse'
         '400':
           description: >
-            Typed validation failure before scoped SQL, including any
-            label/state/posture override input (red line W6-R7) and malformed
-            groupId. Enum-strict: unknown enum values are rejected, never
-            defaulted (red line W6-R6).
+            Typed validation failure. Any label/state/posture override input
+            is rejected before aggregate SQL (red line W6-R7); malformed
+            groupId is rejected after the transaction-bound authorization
+            reads but before aggregate SQL. Enum-strict: unknown enum values
+            are rejected, never defaulted (red line W6-R6).
         '403':
           description: >
             Authenticated-but-unscoped principal, org-selector mismatch, or
