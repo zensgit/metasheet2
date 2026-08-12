@@ -530,15 +530,10 @@ describe('W6-1 rebuild — fixtures added because their branch was uncovered', (
       drift: {
         unconfiguredManagedRows: 0,
         unpublishedManagedRows: 3,
-        managedSets: [
-          {
-            shiftId,
-            startDate: '2026-08-01',
-            endDate: null,
-            producerKey: `attendance_group_fixed_schedule:${groupId}:${shiftId}:2026-08-01:null`,
-            rowCount: 3,
-          },
-        ],
+        // Canonical FSER reports configured-group managedSets from published
+        // different-key rows. Unpublished rows are counted separately and do
+        // not appear in this list.
+        managedSets: [],
       },
       evaluatedAt: NOW,
     })

@@ -2257,6 +2257,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts',
   'tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts',
   'tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts',
+  'tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts',
   'tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts',
   'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
   'tests/integration/attendance-work-date-resolver-w2.db.test.ts',

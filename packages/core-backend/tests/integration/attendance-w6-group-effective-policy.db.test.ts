@@ -634,6 +634,11 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       await request(adminApp())
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
         .set('x-org-id', orgB) // 403 spoof
+      await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy?orgId=${encodeURIComponent(orgB)}`) // 403 query-org spoof
+      await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .send({ orgId: orgB }) // 403 body-org spoof
       await request(makeApp({ id: platformAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
         .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 200 platform admin
 
@@ -730,6 +735,26 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       expect(res.status).toBe(200)
     })
 
+    it('query/body org selectors are assertions only: byte-equal is inert, mismatch is 403 before aggregate SQL', async () => {
+      const equalQuery = await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy?orgId=${encodeURIComponent(orgA)}`)
+      expect(equalQuery.status).toBe(200)
+
+      const equalBody = await request(adminApp())
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+        .send({ orgId: orgA })
+      expect(equalBody.status).toBe(200)
+
+      for (const run of [
+        () => request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?orgId=${encodeURIComponent(orgB)}`),
+        () => request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy`).send({ orgId: orgB }),
+        () => request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?orgId=${encodeURIComponent(orgA)}&orgId=${encodeURIComponent(orgA)}`),
+      ]) {
+        const res = await run()
+        expect(res.status).toBe(403)
+      }
+    })
+
     it('spoofed x-org-id probe, sharp form: claims org A but is ALSO an active member of org B — a header claiming org B must still 403, proving org identity is not merely "ignored because unreachable" but genuinely never sourced from the header', async () => {
       const app = makeApp({ id: dualOrgUser, permissions: ['attendance:admin'], orgId: orgA })
       const res = await request(app).get(`/api/attendance/groups/${groupBId}/effective-policy`).set('x-org-id', orgB)
@@ -775,18 +800,23 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       expect(res.body.error.code).toBe('GROUP_ID_INVALID')
     })
 
-    it('any query parameter is rejected 400 before AGGREGATE SQL (R7 — no state-selecting input accepted)', async () => {
+    it('any state-selecting query parameter is rejected 400 before AGGREGATE SQL (R7)', async () => {
       const res = await request(adminApp()).get(`/api/attendance/groups/${groupAId}/effective-policy?label=effective`)
       expect(res.status).toBe(400)
       expect(res.body.error.code).toBe('QUERY_NOT_ACCEPTED')
     })
 
     it('a STATE-BEARING JSON body is rejected 400 before AGGREGATE SQL (R7)', async () => {
-      const res = await request(adminApp())
-        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
-        .send({ domains: { membership: { label: 'effective' } } })
-      expect(res.status).toBe(400)
-      expect(res.body.error.code).toBe('BODY_NOT_ACCEPTED')
+      for (const body of [
+        { domains: { membership: { label: 'effective' } } },
+        ['effective'],
+      ]) {
+        const res = await request(adminApp())
+          .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+          .send(body)
+        expect(res.status).toBe(400)
+        expect(res.body.error.code).toBe('BODY_NOT_ACCEPTED')
+      }
     })
 
     it('an EMPTY JSON body carries no state and is ACCEPTED — §4.1 verbatim, and must not be tightened into "no body bytes"', async () => {
@@ -870,6 +900,21 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
             request(adminApp())
               .get(`/api/attendance/groups/${groupAId}/effective-policy`)
               .set('x-org-id', orgB)
+              .expect(403),
+        },
+        {
+          label: '403 spoofed query-org',
+          run: () =>
+            request(adminApp())
+              .get(`/api/attendance/groups/${groupAId}/effective-policy?orgId=${encodeURIComponent(orgB)}`)
+              .expect(403),
+        },
+        {
+          label: '403 spoofed body-org',
+          run: () =>
+            request(adminApp())
+              .get(`/api/attendance/groups/${groupAId}/effective-policy`)
+              .send({ orgId: orgB })
               .expect(403),
         },
         {

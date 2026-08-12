@@ -303,12 +303,13 @@ describe('W6 group effective-policy response contract validator', () => {
       expect(validateAttendanceGroupEffectivePolicyResponseV1(fixture)).toEqual({ ok: true })
     })
     it('accepts a NULL managedSets[].endDate, and still rejects a non-date string there', () => {
-      const fixture = readFixture('aggregate-conflict-unpublished-managed-row.json') as {
+      const fixture = readFixture('aggregate-conflict-fixed-schedule-changed.json') as {
         ok: true
         data: { domains: { schedule: { fixedSchedule: { drift: { managedSets: { endDate: unknown }[] } } } } }
       }
-      expect(fixture.data.domains.schedule.fixedSchedule.drift.managedSets[0].endDate).toBe(null)
       const patched = structuredClone(fixture)
+      patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].endDate = null
+      expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({ ok: true })
       patched.data.domains.schedule.fixedSchedule.drift.managedSets[0].endDate = 'not-a-date'
       expect(validateAttendanceGroupEffectivePolicyResponseV1(patched)).toEqual({
         ok: false,

@@ -150,8 +150,9 @@ function createAttendanceGroupEffectivePolicyReadOnlyService(
  * only from the authenticated principal — the #4711 §3.2 rules applied
  * verbatim, mirroring `resolveAttendanceFixedScheduleRouteActorContext` in
  * `plugins/plugin-attendance/index.cjs` so the same JWT authenticates
- * identically on both the CJS FSER route and this TS route. Never
- * `req.query.orgId` — this route accepts no query parameters at all.
+ * identically on both the CJS FSER route and this TS route. A client may
+ * repeat the authenticated org in query/body/header form, but that value is
+ * only a byte-equality assertion; it never selects the organization.
  */
 function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): string | null {
   const raw = req.user as Record<string, unknown> | undefined
@@ -164,9 +165,9 @@ function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): stri
 }
 
 /**
- * True when a client-supplied `x-org-id` header is present and does not
+ * True when any client-supplied org selector is present and does not
  * byte-equal the authenticated org — the request must fail before any
- * aggregate SQL (W6-R3).
+ * aggregate SQL (W6-R3 / #4711 §3.2).
  *
  * A present-but-empty `x-org-id` is treated as a mismatch (the predicate
  * tests presence, not non-empty presence). That is fail-closed by
@@ -175,8 +176,16 @@ function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): stri
  */
 function attendanceGroupEffectivePolicyOrgSelectorMismatch(req: Request, orgId: string): boolean {
   const headerValue = req.headers['x-org-id']
-  const header = Array.isArray(headerValue) ? headerValue[0] : headerValue
-  return header !== undefined && String(header) !== orgId
+  const query = req.query as Record<string, unknown>
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+    ? req.body as Record<string, unknown>
+    : null
+  const selectors = [
+    ...(Object.prototype.hasOwnProperty.call(query, 'orgId') ? [query.orgId] : []),
+    ...(body && Object.prototype.hasOwnProperty.call(body, 'orgId') ? [body.orgId] : []),
+    ...(headerValue !== undefined ? [headerValue] : []),
+  ]
+  return selectors.some((selector) => typeof selector !== 'string' || selector !== orgId)
 }
 
 function readStrictString(value: unknown): string | null {
@@ -1723,22 +1732,6 @@ export function attendanceAdminRouter(): Router {
     rbacGuard('attendance', 'admin'),
     async (req: Request, res: Response) => {
       try {
-        // W6-R7: the route accepts no state-selecting query parameter and
-        // no state-bearing body. Presence of either is rejected before
-        // aggregate SQL runs. This also covers a `?orgId=` "query-org"
-        // spoofing attempt, since there is no legitimate query parameter on
-        // this route at all.
-        //
-        // An empty JSON body (`{}`, or an unparsed content type) carries no
-        // state and is deliberately allowed — the lock states this
-        // verbatim. Both boundaries are pinned by tests.
-        if (Object.keys(req.query).length > 0) {
-          return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no query parameters')
-        }
-        if (req.body && typeof req.body === 'object' && Object.keys(req.body as Record<string, unknown>).length > 0) {
-          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no request body fields')
-        }
-
         const userId = getAttendanceAdminRequestUserId(req)
         if (!userId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
 
@@ -1746,6 +1739,25 @@ export function attendanceAdminRouter(): Router {
         if (!orgId) return jsonError(res, 403, 'FORBIDDEN', 'Authenticated organization not found')
         if (attendanceGroupEffectivePolicyOrgSelectorMismatch(req, orgId)) {
           return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
+        }
+
+        // W6-R7: only an orgId that byte-equals the authenticated principal
+        // may be repeated by the client; it is an assertion, never a selector.
+        // Every other query/body key is state-bearing and is rejected before
+        // aggregate SQL. An empty JSON object remains explicitly accepted.
+        const queryKeys = Object.keys(req.query).filter((key) => key !== 'orgId')
+        if (queryKeys.length > 0) {
+          return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no state-selecting query parameters')
+        }
+        if (req.body !== undefined && req.body !== null
+          && (typeof req.body !== 'object' || Array.isArray(req.body))) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no state-bearing request body')
+        }
+        const bodyKeys = req.body && typeof req.body === 'object'
+          ? Object.keys(req.body as Record<string, unknown>).filter((key) => key !== 'orgId')
+          : []
+        if (bodyKeys.length > 0) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no state-bearing request body fields')
         }
 
         // W6-R1: everything from here on that runs through `readOnlyQuery`
