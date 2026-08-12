@@ -93,8 +93,8 @@ recomputed from the resulting tree; it was byte-identical to the pinned file,
 including `evidenceFiles.pluginTestsWorkflow = be00b174108df71c67bdfd971af2098b00b0149cf6a08be45770d2f3b981e461`, so no
 pin-only diff was manufactured.
 
-The runtime implementation delta before the two report files is 31 files; the
-exact base-to-report-head delta is 33 files. No migration, feature flag,
+The runtime implementation delta before the two report files is 32 files; the
+exact base-to-report-head delta is 34 files. No migration, feature flag,
 rollout-state mutation, staging action, deployment action, or customer data is
 part of that delta.
 
