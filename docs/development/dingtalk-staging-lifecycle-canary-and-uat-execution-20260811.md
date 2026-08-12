@@ -1,8 +1,8 @@
 # DingTalk staging lifecycle canary and UAT execution record (2026-08-11/12)
 
-- Status: **PARTIAL EXECUTION / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT PASS WITH BROWSER OAUTH NOT EXECUTED / DEPROVISION APPLY NOT COMPLETE + TWO SAFE RECOVERIES PASS / U1-U13 NOT EXECUTED**
-- Repository evidence head: `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
-- Lifecycle staging deploy SHA: `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
+- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT PASS WITH BROWSER OAUTH NOT EXECUTED / DEPROVISION APPLY + RESTORE PASS / U1-U13 NOT EXECUTED**
+- Repository evidence head: `2bf058c2a4fd5abed76df347b3bfdb74dba148ee`
+- Lifecycle staging deploy SHA: `2bf058c2a4fd5abed76df347b3bfdb74dba148ee`
 - Production-readiness inventory deploy SHA: `24794811b1c800402006b30d6e4fa9df670e124e`
 - Owner instruction: keep all lifecycle flags OFF after every canary; do not convert missing real-enterprise evidence into PASS.
 
@@ -17,8 +17,8 @@ Two independently configured deployment roots were observed and must not be conf
 
 | Evidence lane | Deployed SHA | Purpose |
 |---|---|---|
-| Lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` | Exact lifecycle status, retained-journal recovery, and terminal OFF proof |
-| Production-readiness inventory (`DEPLOY_PATH`) | `24794811b1c800402006b30d6e4fa9df670e124e` | Read-only DingTalk integration, account, Stream, and flag inventory |
+| Lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `2bf058c2a4fd5abed76df347b3bfdb74dba148ee` | Exact lifecycle status, deprovision apply/restore, and terminal OFF proof |
+| Production-readiness inventory (`DEPLOY_PATH`) | `2bf058c2a4fd5abed76df347b3bfdb74dba148ee` | Read-only DingTalk integration, account, Stream, and flag inventory |
 
 The matching code SHA is not used to infer shared runtime state between the two roots; each
 runtime fact below is tied to its own workflow run and artifact. Production enablement remains a
@@ -137,9 +137,19 @@ migrations, and preserved the non-lifecycle staging mode. Recovery run
 [31559371562](https://github.com/zensgit/metasheet2/actions/runs/31559371562) then cleared the retained
 journal only after exact failed-run, zero-ledger, source-active, and unchanged-access-graph proofs.
 Independent read-only status run
-[31559480395](https://github.com/zensgit/metasheet2/actions/runs/31559480395) is the current terminal
-proof: exact deployed SHA, healthy backend, zero pending migrations, mode `off`, all three lifecycle
-flags `false`, and `transition_applied=false`.
+[31559480395](https://github.com/zensgit/metasheet2/actions/runs/31559480395) was the terminal proof for
+that recovery head: exact deployed SHA, healthy backend, zero pending migrations, mode `off`, all
+three lifecycle flags `false`, and `transition_applied=false`.
+
+[#4879](https://github.com/zensgit/metasheet2/pull/4879), merge
+`2bf058c2a4fd5abed76df347b3bfdb74dba148ee`, added the explicit second-sentinel contract. Staging
+deploy [31573166502](https://github.com/zensgit/metasheet2/actions/runs/31573166502) pinned backend
+and web to that exact SHA with `314/0` migrations. Read-only status
+[31573329397](https://github.com/zensgit/metasheet2/actions/runs/31573329397), deprovision preflight
+[31575076447](https://github.com/zensgit/metasheet2/actions/runs/31575076447), and terminal status
+[31576139497](https://github.com/zensgit/metasheet2/actions/runs/31576139497) each reported a healthy
+backend, zero pending migrations, mode `off`, all three lifecycle flags `false`, and
+`transition_applied=false`. The terminal status supersedes the earlier terminal-state proof.
 
 ## 4. Canary sequence
 
@@ -147,7 +157,7 @@ flags `false`, and `transition_applied=false`.
 |---|---|---|---|
 | 1 | alias-only | **PASS, rolled back** | Hardened-deploy run `31529335625`; transient ON was proven by real password login and success required a return to exact OFF |
 | 2 | pending admission | **PASS for admit + SSO activate intent, rolled back; browser OAuth NOT EXECUTED** | Runs `31551343313` and `31551426867` used an explicit owned subject, never auto-selected it, and left lifecycle flags OFF |
-| 3 | deprovision | **ATTEMPTED, NOT COMPLETE** | Empty-source and duplicate-sentinel attempts made no lifecycle mutation; both retained journals were recovered with zero ledger and unchanged access graph. A second unique DingTalk sentinel is still required for a real apply/restore cycle |
+| 3 | deprovision | **PASS server-side, restored and rolled back; browser login/OAuth checkpoints NOT EXECUTED** | Apply run `31575411459` wrote one event and three effects for the explicit target; restore run `31575938536` reversed the exact effect set, restored the access graph, cleared the journal, and kept all lifecycle flags OFF |
 
 ### 4.1 Alias result
 
@@ -194,7 +204,7 @@ successful password-backed administrator login. They do **not** prove browser OA
 post-activation browser OAuth success: both browser checkpoints remain `NOT_EXECUTED`. Pending
 production enablement therefore remains a separate NO-GO decision despite the server-side canary.
 
-### 4.3 Deprovision attempts, recovery, and remaining gate
+### 4.3 Deprovision attempts, recovery, and completed server-side cycle
 
 The earlier read-only directory preview saw no removal candidate and reported zero
 would-deactivate accounts. A later browser inspection showed that the active integration is a
@@ -206,12 +216,12 @@ failed most-recent sync. It cannot be repurposed as the dedicated integration fo
 corp without a separately authorized reconfiguration and valid source credentials.
 
 After Section 4.2 succeeds, an authorized operator must create/use a separate active DingTalk
-integration that contains exactly the selected account (all active and inactive account rows
-count), has scheduler, admission automation, and member-group projection disabled, and uses
-`mark_inactive`. Apply requires
+integration containing exactly the selected linked account plus one distinct active unlinked
+sentinel (all active and inactive account rows count), with scheduler, admission automation, and
+member-group projection disabled, using `mark_inactive`. Apply requires
 `DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`, which attests that the source is disabled
 and no other operator will sync or edit this dedicated integration until the lifecycle flags are
-proven OFF. The preview and one-account checks are not an atomic scope lock, so this exclusive
+proven OFF. The preview and exact target-plus-sentinel checks are not an atomic scope lock, so this exclusive
 window is mandatory. The apply sequence then requires an exact one-subject preview and planner result,
 persists a random sync run UUID before env/HTTP, transiently enables only deprovision, and starts
 the async sync with that UUID. A lost 202 or runner crash retains the exact recovery journal;
@@ -222,8 +232,8 @@ An exact run that terminates without a matching ledger event leaves a fail-close
 be resolved through a reason-specific, owner-reviewed recovery path; deleting the journal to force
 a new apply is prohibited.
 
-The dedicated integration and explicit target passed the ownership/exclusivity gates, but a real
-destructive apply/restore cycle is still incomplete:
+The dedicated integration and explicit target passed the ownership/exclusivity gates. Two earlier
+pre-ledger attempts failed safely before the completed cycle:
 
 1. An attempt with only the target removed produced the provider's empty-directory safeguard. No
    event/effect was written and no access-graph row changed. After the source was restored,
@@ -240,18 +250,37 @@ destructive apply/restore cycle is still incomplete:
    source, unchanged access graph, flags OFF, and then cleared the journal. It explicitly reports
    `end_to_end_restore_claimed=false`.
 
-The remaining external prerequisite is a **second dedicated DingTalk employee identity with a real,
-unique phone number that is absent from every other integration**. It is needed only as a temporary
-source sentinel so the provider fetch remains nonempty when the target departs. Reusing an existing
-employee or inventing a phone number is prohibited. After it exists, the controlled sequence is:
-target absent + sentinel present -> apply; target re-added -> restore; sentinel removed; terminal
-status OFF.
+[#4879](https://github.com/zensgit/metasheet2/pull/4879) then added an explicit sentinel secret and
+enforced an exact two-account integration shape: the owned linked target plus one distinct active,
+unlinked sentinel. Three early apply dispatches
+([31574918042](https://github.com/zensgit/metasheet2/actions/runs/31574918042),
+[31575135399](https://github.com/zensgit/metasheet2/actions/runs/31575135399), and
+[31575274256](https://github.com/zensgit/metasheet2/actions/runs/31575274256)) rejected a malformed
+sentinel secret at the UUID-shape gate before lifecycle env or ledger mutation. The operator then
+corrected the secret through stdin without exposing its value.
+
+The controlled source sequence was observed in the DingTalk administrator UI without recording
+identifiers: organization membership remained five; the canary department changed from target plus
+sentinel, to sentinel only for apply, back to both for restore, and finally to the target only after
+the temporary sentinel was removed.
+
+[Apply run 31575411459](https://github.com/zensgit/metasheet2/actions/runs/31575411459) proved the
+exact target-and-sentinel gate, a one-target preview, one deactivated user/account, one ledger event,
+three effects, and a present generation. It then restored all flags to OFF while retaining the
+`ledger_bound` journal and disabled access graph for the explicit restore phase.
+
+[Restore run 31575938536](https://github.com/zensgit/metasheet2/actions/runs/31575938536) synchronized
+the re-added source with deprovision OFF, reversed exactly three effects, proved the event fully
+resolved, restored one active membership and the enabled grant, cleared the journal, and left all
+three lifecycle flags OFF. The artifact deliberately reports password-login and OAuth browser
+checkpoints as `NOT_EXECUTED` and `end_to_end_restore_claimed=false`; this is a real provider sync and
+server-side access-graph apply/restore proof, not a fabricated browser acceptance result.
 
 ## 5. DingTalk directory readiness
 
-[Production-readiness inventory run 31529929612](https://github.com/zensgit/metasheet2/actions/runs/31529929612)
-completed successfully against deployed SHA
-`24794811b1c800402006b30d6e4fa9df670e124e` and reported:
+[Production-readiness inventory run 31579935836](https://github.com/zensgit/metasheet2/actions/runs/31579935836)
+completed successfully after the lifecycle restore against deployed SHA
+`2bf058c2a4fd5abed76df347b3bfdb74dba148ee` and reported:
 
 | Signal | Result |
 |---|---|
@@ -269,9 +298,9 @@ completed successfully against deployed SHA
 | all lifecycle/Stream flags OFF | `true` |
 | log level | ready (`LOG_LEVEL` missing; runtime default is `info`) |
 
-This historical inventory proves a usable directory baseline. The later server-side pending
-canary completed as recorded in Section 4.2; it does not prove browser OAuth or destructive
-deprovision completion, and it is not interactive-card readiness.
+This fresh read-only inventory proves that the usable directory baseline and exact OFF state still
+held after the server-side pending and deprovision canaries recorded in Sections 4.2 and 4.3. It
+does not prove the omitted browser checkpoints and is not interactive-card readiness.
 
 ## 6. U1-U13 and real callback corp-anchor
 
@@ -310,9 +339,11 @@ into this document or chat.
 |---|---|
 | production alias enable | **NO GO** until owner reviews staging evidence and separately authorizes production |
 | production pending enable | **NO GO**; server-side staging admit/activate passed, but browser OAuth checkpoints and owner GO remain incomplete |
-| production deprovision enable | **NO GO**; safe-abort/recovery paths passed, but destructive apply/restore has not completed |
+| production deprovision enable | **NO GO**; staging server-side apply/restore passed, but production still requires a separate owner GO and the remaining real-enterprise/browser acceptance evidence |
 | interactive-card Stream enable | **NO GO**; U1-U13/U11-a not executed |
 | Transfer T3-T5 | **FROZEN**; real two-corp T2-Gate remains separate and unexecuted |
+| lifecycle production-enable owner | **NOT ASSIGNED**; do not infer an owner from repository or staging access |
+| interactive-card UAT owner | **NOT ASSIGNED**; assign before provisioning the missing Stream/template inputs |
 
 The safe terminal state for this execution is therefore:
 
@@ -325,16 +356,13 @@ DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false
 
 ## 8. Next executable actions
 
-1. Provision a second dedicated DingTalk sentinel employee with a real unique phone number and add
-   it only to the dedicated canary department/integration.
-2. Execute the destructive deprovision apply/restore sequence, remove the sentinel, and prove exact
-   OFF again. Separately complete the pending browser OAuth checkpoints if production pending is to
-   be considered.
-3. Configure the staging Stream/template inputs, re-confirm the info/debug log level, execute U1-U13 and the
+1. Complete the pending/deprovision browser login/OAuth checkpoints if production lifecycle
+   enablement is to be considered; do not infer them from the server-side results.
+2. Configure the staging Stream/template inputs, re-confirm the info/debug log level, execute U1-U13 and the
    real callback corp-anchor procedure.
-4. Record named owners and explicit production switch decisions. Any absent evidence remains
+3. Record named owners and explicit production switch decisions. Any absent evidence remains
    `NOT EXECUTED`.
 
-Until those external actions occur, the lifecycle code line, alias canary, pending server-side
-canary, and fail-closed deprovision recovery paths are closed. Destructive deprovision/restore,
-production enablement, and real-enterprise acceptance are not.
+The lifecycle code line and all three server-side staging canaries are closed with terminal OFF
+proof. Browser acceptance, production enablement, U1-U13, the real callback corp-anchor, and the
+remaining real-enterprise acceptance are not complete.
