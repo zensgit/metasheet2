@@ -356,14 +356,20 @@ test('prepare refuses a live Stream worker instead of relying on a fallible rest
   assert.match(prepare, /run action=off first/)
 })
 
-test('remote prepare derives exactly one active corp-anchored integration with >=2 linked users', () => {
+test('remote prepare derives exactly one eligible integration under the live configured corp', () => {
   const source = read(REMOTE_SH)
-  assert.match(source, /exactly one active DingTalk integration with nonempty corp_id/)
+  assert.match(source, /process\.env\.DINGTALK_CORP_ID/)
+  assert.match(source, /configuredRows = configuredCorpId/)
+  assert.match(source, /String\(row\.corp_id \|\| ""\)\.trim\(\) === configuredCorpId/)
+  assert.match(source, /eligibleRows = configuredRows\.filter/)
+  assert.match(source, /eligibleRows\.length === 1/)
+  assert.match(source, /requires exactly one eligible integration for configured corp/)
   assert.match(source, />=2 active linked local users/)
   assert.match(source, /count\(DISTINCT u\.id\)/)
   assert.match(source, /provider = 'dingtalk'/)
   assert.match(source, /status = 'active'/)
   assert.match(source, /corp_id IS NOT NULL/)
+  assert.doesNotMatch(source, /requires exactly one active DingTalk integration with nonempty corp_id/)
   assert.match(source, /chmod 600 "\$id_tmp"/)
   // Never log integration id value.
   assert.doesNotMatch(source, /log ".*integration_id=\$/)
@@ -746,7 +752,7 @@ test('workflow and remote script never echo secrets or raw credential env values
 
 test('status artifacts emit only booleans/counts/reason classes/sha schema keys', () => {
   const source = read(REMOTE_SH)
-  assert.match(source, /schema=dingtalk-interactive-card-stream-staging-uat-status-v1/)
+  assert.match(source, /schema=dingtalk-interactive-card-stream-staging-uat-status-v2/)
   for (const key of [
     'stream_enabled=',
     'client_id_present=',
@@ -754,8 +760,11 @@ test('status artifacts emit only booleans/counts/reason classes/sha schema keys'
     'template_id_present=',
     'stream_integration_id_present=',
     'active_corp_anchored_integration_count=',
-    'linked_local_users_for_anchor_count=',
-    'single_anchor_two_users_ready=',
+    'configured_corp_present=',
+    'configured_corp_anchor_count=',
+    'eligible_anchor_count=',
+    'linked_local_users_for_eligible_anchor_count=',
+    'single_configured_corp_eligible_anchor_ready=',
     'lifecycle_flags_all_off=',
     'log_level_ready=',
     'log_level_reason=',
