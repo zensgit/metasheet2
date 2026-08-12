@@ -198,6 +198,7 @@ jobs:
         if: matrix.node-version == '20.x'
         run: |
           node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
           node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
       # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
