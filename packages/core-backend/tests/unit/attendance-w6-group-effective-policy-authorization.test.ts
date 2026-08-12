@@ -44,6 +44,7 @@ import {
   buildAssemblyModel,
   buildThisPartition,
   deriveSafeCensus,
+  independentThisStarts,
   findThisMethodCalls,
   sitesInMethod,
   subjectState,
@@ -1078,74 +1079,82 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  * assembly scope (setupMiddleware + constructor) into {SITE, ESCAPE, SAFE,
  * UNKNOWN} and assert UNKNOWN empty, so a shape nobody enumerated lands in
  * UNKNOWN by default and reds. SAFE is a FROZEN OCCURRENCE census (count + a
- * sha256 over the sorted AST-path keys — never line/column), so a duplicate /
- * move / re-context of a safe access mints a new key and reds, while an
- * unrelated edit in another method does not move any key.
+ * sha256 over the sorted keys). Each key is enclosing-symbol + ANCESTOR-KIND
+ * path (no child ordinals, no line/column) + shape + a per-base-key occurrence
+ * ordinal — so a duplicate / re-context of a safe access mints a new key and
+ * reds, while an unrelated insertion (even in the SAME method) moves nothing
+ * (P2-b). T itself is EVERY `this` textually in scope: a `this` whose binding is
+ * rebound by a non-arrow function on the path to the method is forced UNKNOWN,
+ * not dropped (P2-a).
  *
  * A count identity |T| = |SITE|+|ESCAPE|+|SAFE|+|UNKNOWN| ALONE is insufficient
  * (miss-one + double-another keeps the count equal), so the partition is proven
- * at SET level: coverage (the occurrence node-set equals the independently
- * walked ThisKeyword node-set) AND multiplicity-1 (each node once).
+ * at SET level: coverage against an INDEPENDENT un-pruned ThisKeyword walk (not
+ * the builder's own `part.all` — P2-c) AND multiplicity-1 (each node once).
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
   const FROZEN_SAFE_COUNT = 46
-  const FROZEN_SAFE_HASH = 'aa66a16a5832860b92ead9998278b826acb135d7795f8f7b1fc1810844b0bd75'
+  const FROZEN_SAFE_HASH = '4d74175f6d2a3d8ff0147be6d441c68274a130f9db82a01c7f0c78cb396e907b'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
   const FROZEN_SAFE_KEYS = new Set<string>([
-      "constructor//1.0.0.0.0//.injector",
-      "constructor//1.10.0.0.0//.afterSalesApprovalBridgeService",
-      "constructor//1.10.0.2.3.0.1.4.0.0.0.0.0//.handleAfterSalesApprovalDecisionCallback",
-      "constructor//1.10.0.2.3.1.1.4.0.0.0.0.0//.handleAfterSalesApprovalDecisionCallback",
-      "constructor//1.11.0.0.0//.snapshotService",
-      "constructor//1.12.0.0.0//.setupMiddleware",
-      "constructor//1.13.0.0.0//.initializeCache",
-      "constructor//1.14.0.0.0//.registerInternalPluginApis",
-      "constructor//1.2.0.0.0//.httpServer",
-      "constructor//1.3.0.0.0//.eventBus",
-      "constructor//1.4.0.0.0//.logger",
-      "constructor//1.5.0.0.0//.portLocked",
-      "constructor//1.6.0.0.0//.port",
-      "constructor//1.7.0.0.0//.host",
-      "constructor//1.8.0.0.1.0.0//.createCoreAPI",
-      "constructor//1.9.0.0.0.0//.injector",
-      "setupMiddleware//3.13.1.0.1.0.0.0.0.0//.logger",
-      "setupMiddleware//3.13.1.1.1.0.0.0.0.0//.logger",
-      "setupMiddleware//3.14.0.1.4.0.0.0.0.0//.logger",
-      "setupMiddleware//3.20.0.0.1.3.1.0.2.0.0.0.2.0.0.0.0.0.0//.pluginLoader",
-      "setupMiddleware//3.20.0.0.1.3.1.0.3.0.1.4.1.0.0.0.0//.pluginLoader",
-      "setupMiddleware//3.24.0.1.1.0.1.0//.injector",
-      "setupMiddleware//3.24.0.1.1.1.1.0//.afterSalesApprovalBridgeService",
-      "setupMiddleware//3.26.0.1.1.0.1.0//.injector",
-      "setupMiddleware//3.32.0.1.1.0//.injector",
-      "setupMiddleware//3.34.0.1.1.0//.injector",
-      "setupMiddleware//3.47.0.2.1.1.0//.automationService",
-      "setupMiddleware//3.54.0.1.1.0//.injector",
-      "setupMiddleware//3.60.0.2.1.0.1.0//.pluginLoader",
-      "setupMiddleware//3.60.0.2.1.1.1.0//.pluginStatus",
-      "setupMiddleware//3.60.0.2.1.2.1.0.0.0//.activatePluginByName",
-      "setupMiddleware//3.60.0.2.1.2.1.1//bare",
-      "setupMiddleware//3.60.0.2.1.3.1.0.0.0//.deactivatePluginByName",
-      "setupMiddleware//3.60.0.2.1.3.1.1//bare",
-      "setupMiddleware//3.60.0.2.1.4.1.0//.snapshotService",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.0.0.0//.yjsSyncMetricsSource",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.0.2.0//.yjsBridgeMetricsSource",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.2.0//.yjsSocketMetricsSource",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.2.1.0.0.0.0//.yjsSyncMetricsSource",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.3.1.0.0.0.0//.yjsBridgeMetricsSource",
-      "setupMiddleware//3.60.0.2.1.5.1.1.0.4.1.0.0.0.0//.yjsSocketMetricsSource",
-      "setupMiddleware//3.73.0.2.3.1.0.0.0.0.1.0.0.1.0.0.0.0.0//.pluginLoader",
-      "setupMiddleware//3.73.0.2.3.1.0.0.0.0.1.1.2.0.0.0.1.0.0.0//.pluginStatus",
-      "setupMiddleware//3.73.0.2.3.1.0.1.0.0.1.0.0.0.0.0.0.0//.pluginLoader",
-      "setupMiddleware//3.74.0.2.1.0.1.0//.pluginLoader",
-      "setupMiddleware//3.74.0.2.1.1.1.0//.pluginStatus",
+      "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#1",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.afterSalesApprovalBridgeService//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.eventBus//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.host//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.httpServer//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.injector//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.logger//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.port//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.portLocked//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.snapshotService//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.initializeCache//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.registerInternalPluginApis//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.setupMiddleware//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.injector//#0",
+      "constructor//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>PropertyAccessExpression//.createCoreAPI//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.logger//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>BinaryExpression>CallExpression>PropertyAccessExpression>ParenthesizedExpression>AsExpression>AsExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>ArrowFunction>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginStatus//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>PropertyAccessExpression>CallExpression>CallExpression>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ArrowFunction>PropertyAccessExpression//.automationService//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>BinaryExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yjsBridgeMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>BinaryExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yjsSocketMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>BinaryExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yjsSyncMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>PrefixUnaryExpression>PrefixUnaryExpression>ParenthesizedExpression>BinaryExpression>BinaryExpression>PropertyAccessExpression//.yjsBridgeMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>PrefixUnaryExpression>PrefixUnaryExpression>ParenthesizedExpression>BinaryExpression>BinaryExpression>PropertyAccessExpression//.yjsSyncMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>PrefixUnaryExpression>PrefixUnaryExpression>ParenthesizedExpression>BinaryExpression>PropertyAccessExpression//.yjsSocketMetricsSource//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>CallExpression//bare//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>CallExpression//bare//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.activatePluginByName//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.deactivatePluginByName//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.afterSalesApprovalBridgeService//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.injector//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.injector//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.pluginLoader//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.pluginStatus//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.pluginStatus//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression//.snapshotService//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#1",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#2",
+      "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>ExpressionStatement>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>TryStatement>Block>ExpressionStatement>BinaryExpression>CallExpression>PropertyAccessExpression>ParenthesizedExpression>AsExpression>AsExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>IfStatement>Block>IfStatement>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.logger//#0",
+      "setupMiddleware//Block>IfStatement>Block>IfStatement>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.logger//#1",
     ])
 
 
-  // assert coverage + multiplicity-1 + disjointness, returning the safe-census hash.
-  const assertValidPartition = (part: ThisPartition): string => {
+  // assert coverage + multiplicity-1 + disjointness, returning the safe-census
+  // hash. When `expectedStarts` is given (from an INDEPENDENT un-pruned walker,
+  // NOT from this same partition), also assert the partition's node set equals
+  // it member-by-member — so a pruning bug in the builder cannot hide behind a
+  // self-consistent-but-incomplete `part.all` (P2-c).
+  const assertValidPartition = (part: ThisPartition, expectedStarts?: readonly number[]): string => {
     const starts = part.all.map((o) => o.start)
     // multiplicity-1: no ThisKeyword appears in two buckets / twice
     expect(new Set(starts).size).toBe(part.all.length)
@@ -1153,6 +1162,10 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
     expect(part.site.length + part.escape.length + part.safe.length + part.unknown.length).toBe(part.all.length)
     const union = [...part.site, ...part.escape, ...part.safe, ...part.unknown].map((o) => o.start).sort((a, b) => a - b)
     expect(union).toEqual([...starts].sort((a, b) => a - b))
+    if (expectedStarts) {
+      // reference-independent completeness: T from the un-pruned walker
+      expect([...starts].sort((a, b) => a - b)).toEqual([...expectedStarts].sort((a, b) => a - b))
+    }
     return createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
   }
 
@@ -1168,8 +1181,11 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(part.unknown).toEqual([])
     })
 
-    it('the partition is valid at SET level (coverage + multiplicity-1 + disjoint), not merely by count', () => {
-      assertValidPartition(part)
+    it('the partition is valid at SET level (coverage + multiplicity-1 + disjoint) AND covers the INDEPENDENT walk (not merely a self-proof)', () => {
+      // expectedStarts comes from a separate un-pruned ThisKeyword walk (P2-c):
+      // if buildThisPartition pruned any node, part.all would be missing it and
+      // this comparison — unlike the old buckets-vs-part.all self-proof — reds.
+      assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
     it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 46, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
@@ -1193,6 +1209,43 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       // literal -> UNKNOWN reds ON ITS OWN, not only the count/hash sibling pin.
       expect(mpart.unknown.length).toBeGreaterThan(0)
       expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
+    })
+
+    it('P2-a LOAD-BEARING: a `this` inside an ordinary nested function ENTERS T (not pruned) and reds UNKNOWN — the reference set is not narrowed', () => {
+      // Owner counterexample: pre-fix `inScope` EXCLUDED this `this` from T, so
+      // rawThis=1 / partitionTotal=0 / UNKNOWN=0 (incomplete-but-self-consistent).
+      // Post-fix: it is in T (a descendant of setupMiddleware), its `this` is
+      // rebound by the ordinary function -> UNKNOWN. Reds on pre-fix code.
+      const marker = 'private setupMiddleware(): void {'
+      expect(indexText).toContain(marker)
+      const mutated = indexText.replace(
+        marker,
+        marker + "\n    function __p2aNested() { return this.app.use('/__p2a__', () => {}) }",
+      )
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      const mIndep = independentThisStarts(msrc, SCOPE)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      // the injected `this` is in the INDEPENDENT walk (T grew by exactly one)
+      expect(mIndep.length).toBe(independentThisStarts(source, SCOPE).length + 1)
+      // and the partition COVERS T (pre-fix, total stayed 124 -> this reds)
+      expect(mpart.total).toBe(mIndep.length)
+      // and it is bucketed UNKNOWN as a rebound `this` (never SITE/SAFE)
+      expect(mpart.unknown.some((o) => o.shape === 'rebound-this')).toBe(true)
+    })
+
+    it('P2-b LOAD-BEARING NEGATIVE: an unrelated `const` inserted in the SAME setupMiddleware moves NO key — SAFE census is byte-identical, no false-red', () => {
+      // Pre-fix the child-index key shifted (`//1.0`->`//1.1`) so downstream SAFE
+      // accesses fell out of the frozen literal -> SAFE<46 / UNKNOWN>0 false-red.
+      // Post-fix the kind-path key is ordinal-free, so nothing moves.
+      const marker = 'private setupMiddleware(): void {'
+      expect(indexText).toContain(marker)
+      const mutated = indexText.replace(marker, marker + '\n    const __p2bUnrelated = 1; void __p2bUnrelated;')
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      // the safe-eligible census is unchanged (same 46 keys)
+      expect(new Set(deriveSafeCensus(msrc, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      expect(mpart.safe.length).toBe(FROZEN_SAFE_COUNT)
+      expect(mpart.unknown).toEqual([])
     })
   })
 
@@ -1240,11 +1293,25 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
     })
   })
 
-  describe('the context key is LINE/COLUMN-independent (an edit in another method does not false-red; a same-scope structural move DOES red, by design)', () => {
+  describe('the context key is ORDINAL-independent (an unrelated insertion — even in the SAME method — does not false-red; a structural re-context DOES red, by design)', () => {
     it('inserting a statement in ANOTHER method does not change any assembly-scope key', () => {
       const before = deriveSafeCensus(ts.createSourceFile('a.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
       const after = deriveSafeCensus(ts.createSourceFile('b.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1; const w = 2; const v = 3 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
       expect(after).toEqual(before)
+    })
+    it('P2-b: inserting an UNRELATED statement BEFORE a safe access in the SAME method does not move its key (kind-path, not child-ordinal)', () => {
+      const before = deriveSafeCensus(ts.createSourceFile('a.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
+      const after = deriveSafeCensus(ts.createSourceFile('b.ts', 'class C {\n  setupMiddleware() {\n    const z = 1; void z\n    this.injector.get(X)\n  }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
+      expect(after).toEqual(before)
+    })
+    it('P2-b: a genuine RE-CONTEXT (nesting a frozen safe access under a new construct) DOES red — the kind-path changes', () => {
+      const flat = '    this.injector.get(X)'
+      const frozen = new Set(deriveSafeCensus(ts.createSourceFile('f.ts', wrapSetup(flat), ts.ScriptTarget.ES2022, true), SCOPE))
+      // same access, now nested under `if (cond) { ... }` -> kind-path gains
+      // IfStatement>Block -> the frozen key no longer matches -> UNKNOWN.
+      const nested = partitionOf('    if (cond) {\n      this.injector.get(X)\n    }', frozen)
+      expect(nested.safe.length).toBe(0)
+      expect(nested.unknown.length).toBe(1)
     })
   })
 

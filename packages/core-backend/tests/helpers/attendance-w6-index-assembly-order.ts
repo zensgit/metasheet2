@@ -638,31 +638,65 @@ function outermostWrapperOf(node: ts.Node): ts.Node {
   }
 }
 
-/** Stable occurrence key: enclosing named symbol + the child-index path from
- *  that symbol (or the source root) down to the node + the access shape.
- *  Child indices come from `forEachChild` order (structural children, not
- *  punctuation tokens), so whitespace/comment/other-function edits do not
- *  move a key; a sibling insertion in the SAME structure does (which is
- *  exactly copy/move/re-context, and must red). No line/column anywhere. */
-function astPathKey(node: ts.Node, source: ts.SourceFile, shape: string): string {
+/** Base occurrence key: enclosing named symbol + the ANCESTOR-KIND path from
+ *  that symbol (or the source root) down to the node + the access shape. The
+ *  path records `SyntaxKind` names, never child ORDINALS — so an unrelated
+ *  sibling insertion in the SAME method (which shifts ordinals) does NOT move a
+ *  key (P2-b fix), while nesting the access under a different construct
+ *  (re-context) DOES. No line/column anywhere. Occurrences that share a base
+ *  key are disambiguated by a source-order occurrence ordinal in
+ *  `collectOccurrences`, so a duplicate still mints a distinct final key. */
+function baseKeyOf(node: ts.Node, source: ts.SourceFile, shape: string): string {
   const enclosing = enclosingNamedFunction(node)
   const stop: ts.Node = enclosing ?? source
   const label = enclosing ? functionLikeLabel(enclosing) : '<file>'
-  const path: number[] = []
+  const kinds: string[] = []
   let current: ts.Node = node
-  while (current !== stop && current.parent) {
-    const parent: ts.Node = current.parent
-    let idx = -1
-    let i = 0
-    parent.forEachChild((child) => {
-      if (child === current) idx = i
-      i += 1
-    })
-    path.push(idx)
-    current = parent
+  while (current.parent && current.parent !== stop) {
+    current = current.parent
+    kinds.push(ts.SyntaxKind[current.kind])
   }
-  path.reverse()
-  return `${label}//${path.join('.')}//${shape}`
+  kinds.reverse()
+  return `${label}//${kinds.join('>')}//${shape}`
+}
+
+/** The constructor/method nodes whose label is in `scopeSymbols`. The reference
+ *  set T is EVERY `ThisKeyword` textually inside these subtrees (including
+ *  nested functions) — no scope pruning, so a `this` a bucket rule forgets
+ *  cannot silently leave T (P2-a/P2-c fix). */
+function findTargetMethods(source: ts.SourceFile, scopeSymbols: ReadonlySet<string>): ts.Node[] {
+  const targets: ts.Node[] = []
+  const walk = (node: ts.Node): void => {
+    if (
+      (ts.isConstructorDeclaration(node) || ts.isMethodDeclaration(node)) &&
+      scopeSymbols.has(functionLikeLabel(node))
+    ) {
+      targets.push(node)
+    }
+    node.forEachChild(walk)
+  }
+  walk(source)
+  return targets
+}
+
+/** True iff the `this` at `node` binds to `target`'s instance `this` — i.e.
+ *  EVERY function boundary strictly between `node` and `target` is an
+ *  `ArrowFunction` (arrows do not rebind `this`). Any non-arrow function-like or
+ *  class static block on the path rebinds `this`, so the value is not provably
+ *  the assembly instance and the caller fails closed to UNKNOWN. Expressed as a
+ *  COMPLEMENT (all boundaries are arrows) rather than an enumeration of
+ *  rebinding kinds, so object-literal methods, accessors, class expressions and
+ *  static blocks are covered without listing them (P2-a fix). */
+function thisBindsToTarget(node: ts.Node, target: ts.Node): boolean {
+  let current: ts.Node | undefined = node.parent
+  while (current && current !== target) {
+    const rebinds =
+      (ts.isFunctionLike(current) && !ts.isArrowFunction(current)) ||
+      ts.isClassStaticBlockDeclaration(current)
+    if (rebinds) return false
+    current = current.parent
+  }
+  return current === target
 }
 
 /** Is `access` (a `this.app` PropertyAccessExpression) the receiver of a
@@ -685,72 +719,118 @@ function isDeclDestructureOfThis(outer: ts.Node): boolean {
   return ts.isObjectBindingPattern(parent.name) || ts.isArrayBindingPattern(parent.name)
 }
 
+/** Preliminary classification of one `ThisKeyword`, before the census consult.
+ *  `SITE`/`ESCAPE` are decided by shape alone; `FORCED_UNKNOWN` ([computed] or a
+ *  rebound `this`) NEVER consults the census (must never become SAFE);
+ *  `SAFE_ELIGIBLE` consults the frozen census once the final key is known. */
+type RawKind = 'SITE' | 'ESCAPE' | 'FORCED_UNKNOWN' | 'SAFE_ELIGIBLE'
+
+function classifyThis(
+  node: ts.Node,
+  source: ts.SourceFile,
+  boundToInstance: boolean,
+): { shape: string; baseKey: string; kind: RawKind } {
+  const outer = outermostWrapperOf(node)
+  const p = outer.parent
+  const keyOf = (shape: string): string => baseKeyOf(node, source, shape)
+  // A `this` rebound by a non-arrow function on the path to the method cannot be
+  // proven to be the assembly instance -> UNKNOWN regardless of shape (P2-a).
+  if (!boundToInstance) {
+    const shape = 'rebound-this'
+    return { shape, baseKey: keyOf(shape), kind: 'FORCED_UNKNOWN' }
+  }
+  if (p && ts.isPropertyAccessExpression(p) && p.expression === outer && p.name.text === 'app') {
+    const shape = '.app'
+    return { shape, baseKey: keyOf(shape), kind: isRegistrarCallReceiver(p) ? 'SITE' : 'ESCAPE' }
+  }
+  if (
+    p && ts.isElementAccessExpression(p) && p.expression === outer &&
+    ts.isStringLiteralLike(p.argumentExpression) && p.argumentExpression.text === 'app'
+  ) {
+    const shape = "['app']" // element-access this['app'] is escape-only, never an orderable site (round 3)
+    return { shape, baseKey: keyOf(shape), kind: 'ESCAPE' }
+  }
+  if (isDeclDestructureOfThis(outer)) {
+    const shape = 'destructure-decl'
+    return { shape, baseKey: keyOf(shape), kind: 'ESCAPE' }
+  }
+  if (p && ts.isPropertyAccessExpression(p) && p.expression === outer) {
+    const shape = `.${p.name.text}`
+    return { shape, baseKey: keyOf(shape), kind: 'SAFE_ELIGIBLE' }
+  }
+  if (
+    p && ts.isElementAccessExpression(p) && p.expression === outer &&
+    ts.isStringLiteralLike(p.argumentExpression)
+  ) {
+    const shape = `['${p.argumentExpression.text}']`
+    return { shape, baseKey: keyOf(shape), kind: 'SAFE_ELIGIBLE' }
+  }
+  if (p && ts.isElementAccessExpression(p) && p.expression === outer) {
+    const shape = '[computed]' // computed member on this: undecidable, fail closed
+    return { shape, baseKey: keyOf(shape), kind: 'FORCED_UNKNOWN' }
+  }
+  const shape = 'bare'
+  return { shape, baseKey: keyOf(shape), kind: 'SAFE_ELIGIBLE' }
+}
+
+interface FinalOccurrence {
+  readonly key: string
+  readonly shape: string
+  readonly start: number
+  readonly kind: RawKind
+}
+
+/** Collect EVERY `ThisKeyword` textually inside the `scopeSymbols` subtrees
+ *  (no pruning), classify each, and assign a per-base-key source-order
+ *  occurrence ordinal so the final key is unique per occurrence yet stable under
+ *  unrelated sibling insertion. Shared by `buildThisPartition` and
+ *  `deriveSafeCensus` so they can never diverge on domain or key. */
+function collectOccurrences(source: ts.SourceFile, scopeSymbols?: ReadonlySet<string>): FinalOccurrence[] {
+  const targets = scopeSymbols ? findTargetMethods(source, scopeSymbols) : [source]
+  const raw: { shape: string; baseKey: string; kind: RawKind; start: number }[] = []
+  for (const target of targets) {
+    const boundTarget = scopeSymbols ? target : null
+    const collect = (node: ts.Node): void => {
+      if (node.kind === ts.SyntaxKind.ThisKeyword) {
+        const bound = boundTarget ? thisBindsToTarget(node, boundTarget) : true
+        const c = classifyThis(node, source, bound)
+        raw.push({ ...c, start: node.getStart(source) })
+      }
+      node.forEachChild(collect)
+    }
+    collect(target)
+  }
+  raw.sort((a, b) => a.start - b.start)
+  const seen = new Map<string, number>()
+  return raw.map((r) => {
+    const n = seen.get(r.baseKey) ?? 0
+    seen.set(r.baseKey, n + 1)
+    return { key: `${r.baseKey}//#${n}`, shape: r.shape, start: r.start, kind: r.kind }
+  })
+}
+
 /**
- * Partition every `ThisKeyword` in `source`. `frozenSafeKeys` is the census of
- * occurrence keys reviewed-and-frozen as SAFE; a non-SITE/non-ESCAPE `this` use
- * whose key is not in it lands in UNKNOWN.
+ * Partition every `ThisKeyword` textually inside the `scopeSymbols` method
+ * subtrees into {SITE, ESCAPE, SAFE, UNKNOWN}. T is built by an UN-PRUNED walk
+ * of those subtrees, so a `this` a bucket rule does not recognise stays in T and
+ * lands in UNKNOWN — never dropped. `frozenSafeKeys` is the census of occurrence
+ * keys reviewed-and-frozen as SAFE; a safe-eligible `this` whose final key is
+ * not in it lands in UNKNOWN. A rebound `this` and a `this[computed]` are forced
+ * UNKNOWN and never consult the census.
  */
 export function buildThisPartition(
   source: ts.SourceFile,
   frozenSafeKeys: ReadonlySet<string>,
   scopeSymbols?: ReadonlySet<string>,
 ): ThisPartition {
-  const all: ThisOccurrence[] = []
-  const inScope = (node: ts.Node): boolean => {
-    if (!scopeSymbols) return true
-    // `enclosingNamedFunction` walks PAST arrow functions (which do not rebind
-    // `this`) to the nearest named function/method — so a `this` captured by a
-    // nested arrow inside `setupMiddleware` is attributed to `setupMiddleware`
-    // and is IN scope, while a `this` inside an ordinary nested function (its
-    // own `this` binding) resolves to that function and is OUT of scope.
-    const enclosing = enclosingNamedFunction(node)
-    if (!enclosing) return false
-    return scopeSymbols.has(functionLikeLabel(enclosing))
-  }
-  const visit = (node: ts.Node): void => {
-    if (node.kind === ts.SyntaxKind.ThisKeyword && inScope(node)) {
-      const outer = outermostWrapperOf(node)
-      const p = outer.parent
-      let bucket: ThisBucket
-      let shape: string
-      if (p && ts.isPropertyAccessExpression(p) && p.expression === outer && p.name.text === 'app') {
-        shape = '.app'
-        bucket = isRegistrarCallReceiver(p) ? 'SITE' : 'ESCAPE'
-      } else if (
-        p && ts.isElementAccessExpression(p) && p.expression === outer &&
-        ts.isStringLiteralLike(p.argumentExpression) && p.argumentExpression.text === 'app'
-      ) {
-        shape = "['app']"
-        bucket = 'ESCAPE' // element-access this['app'] is escape-only, never an orderable site (round 3)
-      } else if (isDeclDestructureOfThis(outer)) {
-        shape = 'destructure-decl'
-        bucket = 'ESCAPE'
-      } else if (p && ts.isPropertyAccessExpression(p) && p.expression === outer) {
-        shape = `.${p.name.text}`
-        const key = astPathKey(node, source, shape)
-        bucket = frozenSafeKeys.has(key) ? 'SAFE' : 'UNKNOWN'
-      } else if (
-        p && ts.isElementAccessExpression(p) && p.expression === outer &&
-        ts.isStringLiteralLike(p.argumentExpression)
-      ) {
-        shape = `['${p.argumentExpression.text}']`
-        const key = astPathKey(node, source, shape)
-        bucket = frozenSafeKeys.has(key) ? 'SAFE' : 'UNKNOWN'
-      } else if (p && ts.isElementAccessExpression(p) && p.expression === outer) {
-        shape = '[computed]'
-        bucket = 'UNKNOWN' // computed member on this: undecidable, fail closed
-      } else {
-        shape = 'bare'
-        const key = astPathKey(node, source, shape)
-        bucket = frozenSafeKeys.has(key) ? 'SAFE' : 'UNKNOWN'
-      }
-      const key = astPathKey(node, source, shape)
-      all.push({ key, bucket, shape, start: node.getStart(source) })
-    }
-    node.forEachChild(visit)
-  }
-  visit(source)
-  all.sort((a, b) => a.start - b.start)
+  const all: ThisOccurrence[] = collectOccurrences(source, scopeSymbols).map((o) => {
+    let bucket: ThisBucket
+    if (o.kind === 'SITE') bucket = 'SITE'
+    else if (o.kind === 'ESCAPE') bucket = 'ESCAPE'
+    else if (o.kind === 'FORCED_UNKNOWN') bucket = 'UNKNOWN'
+    else bucket = frozenSafeKeys.has(o.key) ? 'SAFE' : 'UNKNOWN'
+    return { key: o.key, bucket, shape: o.shape, start: o.start }
+  })
   return {
     total: all.length,
     site: all.filter((o) => o.bucket === 'SITE'),
@@ -761,13 +841,28 @@ export function buildThisPartition(
   }
 }
 
-/** The frozen SAFE occurrence census for the real `index.ts`, computed once
- *  from the reviewed assembly. Filled by the test after a one-shot derivation
- *  (see the round-4 describe block). Exported so the census lives beside the
+/** The occurrence START positions of every `ThisKeyword` textually inside the
+ *  `scopeSymbols` subtrees, computed by an INDEPENDENT un-pruned walk that does
+ *  NO bucketing. The test compares this to the partition's node set member-by-
+ *  member, so a pruning bug in `buildThisPartition` cannot hide (the old proof
+ *  compared the buckets to `part.all` from the SAME builder — a self-proof;
+ *  P2-c fix). */
+export function independentThisStarts(source: ts.SourceFile, scopeSymbols: ReadonlySet<string>): number[] {
+  const targets = findTargetMethods(source, scopeSymbols)
+  const starts: number[] = []
+  const collect = (node: ts.Node): void => {
+    if (node.kind === ts.SyntaxKind.ThisKeyword) starts.push(node.getStart(source))
+    node.forEachChild(collect)
+  }
+  for (const t of targets) collect(t)
+  return starts.sort((a, b) => a - b)
+}
+
+/** The SAFE-eligible census: final keys of the safe-eligible occurrences (a
+ *  one-shot bootstrap the test freezes literally). Forced-UNKNOWN shapes
+ *  ([computed], rebound-this) are EXCLUDED — they must never become SAFE even if
+ *  a matching key were frozen. Exported so the census lives beside the
  *  partitioner it pins. */
 export function deriveSafeCensus(source: ts.SourceFile, scopeSymbols?: ReadonlySet<string>): string[] {
-  // Everything not SITE/ESCAPE under an EMPTY frozen set is UNKNOWN; those keys
-  // ARE the census. One-shot bootstrap; the test freezes the result literally.
-  const p = buildThisPartition(source, new Set<string>(), scopeSymbols)
-  return p.unknown.map((o) => o.key)
+  return collectOccurrences(source, scopeSymbols).filter((o) => o.kind === 'SAFE_ELIGIBLE').map((o) => o.key)
 }
