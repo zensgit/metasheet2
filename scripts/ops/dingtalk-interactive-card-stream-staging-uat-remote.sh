@@ -775,6 +775,60 @@ require_staging_env_file() {
   [[ -w "$STAGING_ENV_FILE" ]] || fail "staging env file not writable: ${STAGING_ENV_FILE}"
 }
 
+atomic_replace_staging_env() {
+  local candidate="$1"
+  local target_dir target_name target_uid target_gid backend_image privileged_tmp
+  target_dir="$(dirname "$STAGING_ENV_FILE")"
+  target_name="$(basename "$STAGING_ENV_FILE")"
+
+  if [[ -w "$target_dir" ]]; then
+    mv -f "$candidate" "$STAGING_ENV_FILE"
+    chmod 600 "$STAGING_ENV_FILE"
+    return 0
+  fi
+
+  # The staging env can be writable while its root-owned parent directory refuses
+  # rename(2). On this rootful staging Docker host, reuse the already-authorized
+  # Docker control plane to stage a 0600 file in the target directory, then rename
+  # it there atomically. The candidate is mounted read-only and the helper has no
+  # network access. Rootless/userns-remapped Docker fails closed here.
+  target_uid="$(stat -c '%u' "$STAGING_ENV_FILE")" \
+    || fail "cannot resolve staging env owner uid"
+  target_gid="$(stat -c '%g' "$STAGING_ENV_FILE")" \
+    || fail "cannot resolve staging env owner gid"
+  backend_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")" \
+    || fail "cannot resolve live backend image for atomic env install"
+  [[ -n "$backend_image" ]] || fail "live backend image is empty; refuse env install"
+  privileged_tmp=".${target_name}.stream-uat-${RUN_STAMP}.tmp"
+
+  if ! timeout 30s docker run --rm --pull never --network none --entrypoint /bin/sh \
+    --mount "type=bind,src=${candidate},dst=/stream-uat-candidate,readonly" \
+    --mount "type=bind,src=${target_dir},dst=/stream-uat-target" \
+    -e "STREAM_UAT_TARGET_NAME=${target_name}" \
+    -e "STREAM_UAT_TARGET_TMP=${privileged_tmp}" \
+    -e "STREAM_UAT_TARGET_UID=${target_uid}" \
+    -e "STREAM_UAT_TARGET_GID=${target_gid}" \
+    "$backend_image" -c '
+      set -eu
+      umask 077
+      cleanup() { rm -f "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"; }
+      cleanup_and_exit() { cleanup; exit "$1"; }
+      trap cleanup EXIT
+      trap "cleanup_and_exit 129" HUP
+      trap "cleanup_and_exit 130" INT
+      trap "cleanup_and_exit 143" TERM
+      cp /stream-uat-candidate "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"
+      chown "${STREAM_UAT_TARGET_UID}:${STREAM_UAT_TARGET_GID}" "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"
+      chmod 600 "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"
+      mv -f "/stream-uat-target/${STREAM_UAT_TARGET_TMP}" "/stream-uat-target/${STREAM_UAT_TARGET_NAME}"
+      trap - EXIT HUP INT TERM
+    ' >/dev/null; then
+    fail "atomic staging env install through network-disabled helper failed; previous env retained"
+  fi
+  rm -f "$candidate"
+  log "staging env atomically installed through network-disabled helper (values never logged)"
+}
+
 atomic_upsert_env_keys_from_files() {
   # Args: pairs of KEY FILE_OR_LITERAL where FILE is a path, or @literal:VALUE for non-secret flags.
   # Stream flag is always written as false for prepare via @literal:false.
@@ -865,9 +919,8 @@ PY
   backup="${STREAM_UAT_PERSIST_DIR}/app.staging.env.backup-${RUN_STAMP}"
   cp -p "$STAGING_ENV_FILE" "$backup"
   chmod 600 "$backup" 2>/dev/null || true
-  mv -f "$tmp" "$STAGING_ENV_FILE"
-  chmod 600 "$STAGING_ENV_FILE"
-  # $tmp path no longer exists after mv; trap rm -f is a no-op for the old path.
+  atomic_replace_staging_env "$tmp"
+  # The helper consumes or removes $tmp; registered cleanup is then a no-op.
   log "staging env keys updated atomically (backup=${backup}; values never logged)"
 }
 
@@ -945,9 +998,8 @@ PY
   backup="${STREAM_UAT_PERSIST_DIR}/app.staging.env.flag-backup-${RUN_STAMP}"
   cp -p "$STAGING_ENV_FILE" "$backup"
   chmod 600 "$backup" 2>/dev/null || true
-  mv -f "$tmp" "$STAGING_ENV_FILE"
-  chmod 600 "$STAGING_ENV_FILE"
-  # $tmp path no longer exists after mv; trap rm -f is a no-op for the old path.
+  atomic_replace_staging_env "$tmp"
+  # The helper consumes or removes $tmp; registered cleanup is then a no-op.
   log "stream flag set to ${desired} atomically (value is enum only)"
 }
 
