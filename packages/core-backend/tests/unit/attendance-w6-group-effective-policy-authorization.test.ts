@@ -472,14 +472,30 @@ describe('org-identity derivation: each source (leg) is independently DB-free un
       expect(transactionMock).toHaveBeenCalledTimes(1)
     })
 
-    it('precedence: user.orgId wins over user.workspaceId when both are present — proven DIFFERENTIALLY (the SAME membership seeding that lets `orgId=ORG` through is what this reaches, and a workspaceId-only seed for a DIFFERENT org would not have matched)', async () => {
-      installSharedTransaction({ '?column?': 1 })
+    it('precedence: user.orgId wins over user.workspaceId when both are present — proven DIFFERENTIALLY by reading the actual org VALUE the membership SQL received, not merely by which response code came back (a same-shape 200 does not by itself say which org drove it)', async () => {
+      // A dedicated capture, not `installSharedTransaction`: that shared
+      // helper's `respond()` switches on SQL TEXT only, so it would return
+      // the SAME canned membership row regardless of which org VALUE
+      // reached `$2` — a 200 alone cannot distinguish "orgId won" from
+      // "workspaceId won". This reads the actual parameter.
+      const orgParams: unknown[] = []
+      transactionMock.mockImplementation(async (handler: (client: Client) => Promise<unknown>) => {
+        const client: Client = {
+          query: vi.fn(async (sql: string, params?: unknown[]) => {
+            if (sql.toLowerCase().includes('from user_orgs uo')) orgParams.push(params?.[1])
+            return respond(sql, { '?column?': 1 }, null)
+          }),
+        }
+        return handler(client)
+      })
       pinned.setApp(makeAppWithIdentity({ id: DELEGATED_USER, orgId: ORG, workspaceId: UNUSED_WORKSPACE_ORG }))
       const res = await request(pinned.url()).get(PATH)
       expect(res.status).toBe(200)
       expect(res.body.ok).toBe(true)
       expect(res.body.data.groupId).toBe(GROUP)
-      expect(transactionMock).toHaveBeenCalledTimes(1)
+      // The discriminator: the membership query's org parameter is `ORG`
+      // (from `orgId`), never `UNUSED_WORKSPACE_ORG` (from `workspaceId`).
+      expect(orgParams).toEqual([ORG])
     })
   })
 
