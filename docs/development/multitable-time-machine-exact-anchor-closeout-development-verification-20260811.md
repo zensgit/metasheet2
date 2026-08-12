@@ -75,3 +75,11 @@ flags 全 default-OFF · triggers 出厂 DISABLED · 无 flag 翻转 / 无 stagi
 - **轮 3（1 P2 + 2 P3）**：① **4-flag containment 未被 CI 钉住**（owner 删 WRITER_FENCE 后 8/8 仍绿=假开关空转）⇒ 在 required 的 `multitable-recovery-schema-containment.test.mjs`（跑于 plugin-tests.yml:179 → test 20.x）补 **FLAGS 精确契约**：断言 `FLAGS` 集合恰等于四项 + 两处 `for f in $FLAGS` 循环均存在；**变异证：删任一 flag 或任一循环即红**（删 WRITER_FENCE → 9→8/1）；② line 47「the two flags」→「four flags」；③ 本 MD 更新 + 注册口径收窄（见 §1 commit 3 / §4）。
 
 **合并前仍待 owner/ops（非本轮开发能闭合）**：① staging/prod 容器核验 4 flag 均未启用（**最近 containment run 仍是 7-15 旧版本，须先跑 `target=both` 取 PASS**）；② 合并决定（安装 DISABLED 平台授权触发器 DDL = owner 保留的治理判断）+ 旧七 Draft superseded（#4446 先抽 resurrect 参考件）；③ O-2 启用相位（注册同事务原子性 + 40001 全平台清扫）。
+
+## 8. 合并落地与后续（2026-08-12）
+
+- **#4654 MERGED @ `12f1f8c466`**（squash，手动合并、无 auto-merge；owner 明确治理授权「接受 8 张平台授权表安装 9 个 DISABLED triggers + 6 functions」；≠授权启用）。合并前 required 全绿、behind 0；`test (18.x)` 一次 attendance-integration flake（非本线；`test (20.x)` 同 suite 绿）重跑即绿。main 现含 `RECONSTRUCTION_CAUSALITY_LANDED = true` + containment helper + 两模式 containment workflow。flags 全 default-OFF、triggers 出厂 DISABLED = **inert 落地**。
+- **合并前主机证据（predeploy-flags）**：run `31609975258`（`workflow_dispatch`，只读，`Contents: read`），target=both、mode=predeploy-flags：`metasheet-backend`(prod) + `metasheet-staging-backend`(staging) 四 flag（SHEET_REVERT/PIT_RESET/HISTORY_CONTIGUITY_STRICT/WRITER_FENCE）在 running env 与 next-restart compose 均 CONTAINED；`VERDICT: PASS (predeploy-flags)`（明写 schema NOT verified）。
+- **两模式 containment（对应 owner 收尾计划 stage 4-5）**：`predeploy-flags`=运行态+next-restart 四开关（当前镜像即可，已 PASS）；`postdeploy-full`=另加 9 disabled triggers + 6 function 指纹 + 无 `meta_links.foreign_record_id` FK（需部署新镜像后逐主机跑）。**postdeploy-full staging/prod PASS 证据待部署后补入本节。**
+- **#4446 resurrect 参考设计**：抽为 `multitable-4446-resurrect-reference-design-20260812.md`（supersede #4446 前保全）。勘误：#4446 只有**一处** owner 亲抓 P1（`a5a154f17a`，打包 FOR UPDATE 锁 + outbound 重建 + trash DELETE）；`NOT EXISTS` 幂等为自评 P3。且 #4446 的锚机制**明确拒绝墙钟**（非「基于墙钟锚点」——那是它取代的旧 PIT-reset 路径）；它 reference-only 的真因=从未接线 + at-anchor **inbound** authority 从未建（=#4654 `INBOUND_UNPROVABLE` fail-close 根因）。
+- **待办**：supersede 七个旧 Draft（#4417/#4445/#4446/#4472/#4474/#4478/#4519）；staging→prod 部署 + postdeploy-full 逐主机 PASS（ops/owner，需逐次 dispatch 授权）。**O-2（注册同事务原子性 + 40001 全平台清扫 + 启用阶梯）、retention 后恢复、整表 resurrect、归档/大表异步恢复 = 后续独立能力,不计入本次收尾完成。**
