@@ -421,6 +421,110 @@ function runRemote({ target, mode, stub = {} }) {
   }
 }
 
+// ── LOCAL pre-SSH segment behaviour harness ─────────────────────────────────────────────────────
+// The remote heredoc re-validates MODE/TARGET, but the only guard that can stop a bad value from
+// being re-parsed on the ssh command line is the LOCAL `case` that runs BEFORE `ssh`. A structural
+// "the case exists" assertion does NOT prove fail-closed: weakening the default-branch `exit 1` to a
+// no-op (`:`) leaves the case textually intact while letting an illegal value fall through to ssh.
+// So execute the whole `run:` block (up to the ssh line) with a PATH-shadowing `ssh` stub and assert:
+// illegal MODE/TARGET → non-zero exit AND ssh NEVER invoked; both legal → ssh reached.
+function extractLocalRunScript(text) {
+  const lines = text.split('\n')
+  const runIdx = lines.findIndex((line) => /^        run: \|\s*$/.test(line))
+  assert.ok(runIdx >= 0, 'workflow step must have a `run: |` block')
+  let endIdx = lines.length
+  for (let i = runIdx + 1; i < lines.length; i++) {
+    if (/^      - name:/.test(lines[i])) {
+      endIdx = i
+      break
+    }
+  }
+  return (
+    lines
+      .slice(runIdx + 1, endIdx)
+      .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+      .join('\n') + '\n'
+  )
+}
+
+// A PATH-shadowing `ssh` that records that it was reached (drains the heredoc on stdin so bash never
+// blocks) and exits 0 — so a test can assert whether the local validation let control reach ssh.
+const SSH_STUB = `#!/usr/bin/env bash
+printf 'ssh %s\\n' "$*" >> "$STUB_LOG"
+cat >/dev/null 2>&1 || true
+exit 0
+`
+writeFileSync(join(containmentBinDir, 'ssh'), SSH_STUB)
+chmodSync(join(containmentBinDir, 'ssh'), 0o755)
+const localScriptPath = join(containmentStubBase, 'local.sh')
+writeFileSync(localScriptPath, extractLocalRunScript(workflowText))
+
+function runLocal({ target, mode }) {
+  const logPath = join(containmentStubBase, `local-log-${containmentLogSeq++}.txt`)
+  writeFileSync(logPath, '')
+  // Fresh HOME so the script's `~/.ssh/{known_hosts,deploy_key}` writes never touch the real home.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ct-home-'))
+  const env = {
+    ...process.env,
+    PATH: `${containmentBinDir}:${process.env.PATH}`,
+    HOME: fakeHome,
+    STUB_LOG: logPath,
+    TARGET: target,
+    MODE: mode,
+    DEPLOY_HOST: 'deploy.invalid',
+    DEPLOY_USER: 'deployer',
+    DEPLOY_SSH_KEY_B64: Buffer.from('dummy-deploy-key').toString('base64'),
+    DEPLOY_KNOWN_HOSTS: 'deploy.invalid ssh-ed25519 AAAAdummyknownhostentry',
+  }
+  const result = spawnSync('bash', [localScriptPath], {
+    env,
+    cwd: containmentStubBase,
+    encoding: 'utf8',
+  })
+  assert.equal(
+    result.error,
+    undefined,
+    `bash must spawn cleanly: ${result.error && result.error.message}`,
+  )
+  const log = readFileSync(logPath, 'utf8')
+  return {
+    status: result.status,
+    sshCalled: /^ssh /m.test(log),
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  }
+}
+
+test('containment local pre-SSH validation FAILS CLOSED: illegal MODE/TARGET exit non-zero and never reach ssh', () => {
+  // Both legal → local validation passes and control reaches the ssh invocation.
+  const ok = runLocal({ target: 'staging', mode: 'predeploy-flags' })
+  assert.equal(
+    ok.status,
+    0,
+    `legal MODE+TARGET must pass local validation and reach ssh (stderr: ${ok.stderr})`,
+  )
+  assert.ok(ok.sshCalled, 'legal MODE+TARGET must reach the ssh invocation')
+
+  // Illegal MODE → non-zero exit AND ssh never called. Weakening the default-branch `exit 1` to a
+  // no-op (`:`) would let this value fall through to ssh — this assertion is what reds that mutation.
+  const badMode = runLocal({ target: 'staging', mode: 'garbage; touch pwned' })
+  assert.notEqual(badMode.status, 0, 'illegal MODE must exit non-zero before ssh')
+  assert.equal(
+    badMode.sshCalled,
+    false,
+    'illegal MODE must NEVER reach ssh (the pre-SSH case must fail closed, not just exist)',
+  )
+
+  // Illegal TARGET → non-zero exit AND ssh never called.
+  const badTarget = runLocal({ target: 'garbage; touch pwned', mode: 'predeploy-flags' })
+  assert.notEqual(badTarget.status, 0, 'illegal TARGET must exit non-zero before ssh')
+  assert.equal(
+    badTarget.sshCalled,
+    false,
+    'illegal TARGET must NEVER reach ssh (the pre-SSH case must fail closed, not just exist)',
+  )
+})
+
 // A containment PASS *verdict* is always mode-tagged: `PASS (predeploy-flags)`
 // or `PASS (postdeploy-full)`. The DB helper emits its own `VERDICT: PASS -`
 // line (echoed prefixed with `schema:` in full mode), so FAIL scenarios must
