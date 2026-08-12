@@ -1091,6 +1091,57 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
   const FROZEN_SAFE_COUNT = 46
   const FROZEN_SAFE_HASH = 'aa66a16a5832860b92ead9998278b826acb135d7795f8f7b1fc1810844b0bd75'
+  // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
+  // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
+  // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
+  const FROZEN_SAFE_KEYS = new Set<string>([
+      "constructor//1.0.0.0.0//.injector",
+      "constructor//1.10.0.0.0//.afterSalesApprovalBridgeService",
+      "constructor//1.10.0.2.3.0.1.4.0.0.0.0.0//.handleAfterSalesApprovalDecisionCallback",
+      "constructor//1.10.0.2.3.1.1.4.0.0.0.0.0//.handleAfterSalesApprovalDecisionCallback",
+      "constructor//1.11.0.0.0//.snapshotService",
+      "constructor//1.12.0.0.0//.setupMiddleware",
+      "constructor//1.13.0.0.0//.initializeCache",
+      "constructor//1.14.0.0.0//.registerInternalPluginApis",
+      "constructor//1.2.0.0.0//.httpServer",
+      "constructor//1.3.0.0.0//.eventBus",
+      "constructor//1.4.0.0.0//.logger",
+      "constructor//1.5.0.0.0//.portLocked",
+      "constructor//1.6.0.0.0//.port",
+      "constructor//1.7.0.0.0//.host",
+      "constructor//1.8.0.0.1.0.0//.createCoreAPI",
+      "constructor//1.9.0.0.0.0//.injector",
+      "setupMiddleware//3.13.1.0.1.0.0.0.0.0//.logger",
+      "setupMiddleware//3.13.1.1.1.0.0.0.0.0//.logger",
+      "setupMiddleware//3.14.0.1.4.0.0.0.0.0//.logger",
+      "setupMiddleware//3.20.0.0.1.3.1.0.2.0.0.0.2.0.0.0.0.0.0//.pluginLoader",
+      "setupMiddleware//3.20.0.0.1.3.1.0.3.0.1.4.1.0.0.0.0//.pluginLoader",
+      "setupMiddleware//3.24.0.1.1.0.1.0//.injector",
+      "setupMiddleware//3.24.0.1.1.1.1.0//.afterSalesApprovalBridgeService",
+      "setupMiddleware//3.26.0.1.1.0.1.0//.injector",
+      "setupMiddleware//3.32.0.1.1.0//.injector",
+      "setupMiddleware//3.34.0.1.1.0//.injector",
+      "setupMiddleware//3.47.0.2.1.1.0//.automationService",
+      "setupMiddleware//3.54.0.1.1.0//.injector",
+      "setupMiddleware//3.60.0.2.1.0.1.0//.pluginLoader",
+      "setupMiddleware//3.60.0.2.1.1.1.0//.pluginStatus",
+      "setupMiddleware//3.60.0.2.1.2.1.0.0.0//.activatePluginByName",
+      "setupMiddleware//3.60.0.2.1.2.1.1//bare",
+      "setupMiddleware//3.60.0.2.1.3.1.0.0.0//.deactivatePluginByName",
+      "setupMiddleware//3.60.0.2.1.3.1.1//bare",
+      "setupMiddleware//3.60.0.2.1.4.1.0//.snapshotService",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.0.0.0//.yjsSyncMetricsSource",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.0.2.0//.yjsBridgeMetricsSource",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.1.1.0.0.0.2.0//.yjsSocketMetricsSource",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.2.1.0.0.0.0//.yjsSyncMetricsSource",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.3.1.0.0.0.0//.yjsBridgeMetricsSource",
+      "setupMiddleware//3.60.0.2.1.5.1.1.0.4.1.0.0.0.0//.yjsSocketMetricsSource",
+      "setupMiddleware//3.73.0.2.3.1.0.0.0.0.1.0.0.1.0.0.0.0.0//.pluginLoader",
+      "setupMiddleware//3.73.0.2.3.1.0.0.0.0.1.1.2.0.0.0.1.0.0.0//.pluginStatus",
+      "setupMiddleware//3.73.0.2.3.1.0.1.0.0.1.0.0.0.0.0.0.0//.pluginLoader",
+      "setupMiddleware//3.74.0.2.1.0.1.0//.pluginLoader",
+      "setupMiddleware//3.74.0.2.1.1.1.0//.pluginStatus",
+    ])
 
 
   // assert coverage + multiplicity-1 + disjointness, returning the safe-census hash.
@@ -1109,8 +1160,9 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
     const indexPath = join(__dirname, '..', '..', 'src', 'index.ts')
     const indexText = readFileSync(indexPath, 'utf8')
     const source = ts.createSourceFile(indexPath, indexText, ts.ScriptTarget.ES2022, true)
-    const frozen = new Set(deriveSafeCensus(source, SCOPE))
-    const part = buildThisPartition(source, frozen, SCOPE)
+    const part = buildThisPartition(source, FROZEN_SAFE_KEYS, SCOPE)
+    // sanity: the frozen literal is exactly what a one-shot derivation yields today
+    expect(new Set(deriveSafeCensus(source, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
 
     it('UNKNOWN is EMPTY — every this-use in the assembly scope is provably classified', () => {
       expect(part.unknown).toEqual([])
@@ -1120,10 +1172,27 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part)
     })
 
-    it('the SAFE census is frozen: exact count and sha256 over sorted AST-path keys (no line/column)', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 46, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
+      for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
       expect(hash).toBe(FROZEN_SAFE_HASH)
+    })
+
+    it('UNKNOWN-empty is LOAD-BEARING against the literal census: a novel app-reaching this-use reds UNKNOWN itself, not only the count/hash pin', () => {
+      // inject a bare-this app read that is NOT in the frozen literal
+      const marker = 'private setupMiddleware(): void {'
+      expect(indexText).toContain(marker) // guard against a silent no-op mutation
+      const mutated = indexText.replace(
+        marker,
+        marker + "\n    Reflect.get(this, 'app').use('/__round4_probe__', () => {})",
+      )
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      // the novel bare-this app read (and the keys it shifts) are NOT in the frozen
+      // literal -> UNKNOWN reds ON ITS OWN, not only the count/hash sibling pin.
+      expect(mpart.unknown.length).toBeGreaterThan(0)
+      expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
     })
   })
 
@@ -1171,7 +1240,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
     })
   })
 
-  describe('the context key is position-independent (no line/column) — unrelated edits do not false-red', () => {
+  describe('the context key is LINE/COLUMN-independent (an edit in another method does not false-red; a same-scope structural move DOES red, by design)', () => {
     it('inserting a statement in ANOTHER method does not change any assembly-scope key', () => {
       const before = deriveSafeCensus(ts.createSourceFile('a.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
       const after = deriveSafeCensus(ts.createSourceFile('b.ts', 'class C {\n  setupMiddleware() {\n    this.injector.get(X)\n  }\n  other() { const z = 1; const w = 2; const v = 3 }\n}\n', ts.ScriptTarget.ES2022, true), SCOPE)
