@@ -12934,9 +12934,9 @@ export function univerMetaRouter(): Router {
         return sendForbidden(res)
       }
       // Referential integrity: the sheet's records are about to be deleted by the
-      // meta_sheets -> meta_records cascade. Source-side links cascade, but the target-side FK is
-      // deliberately NO ACTION; remove inbound edges explicitly in the same transaction before their
-      // targets vanish.
+      // meta_sheets -> meta_records cascade. Source-side links cascade, but `meta_links.foreign_record_id`
+      // carries NO FK at all (closeout removed it; the containment guard enforces its absence); remove
+      // inbound edges explicitly in the same transaction before their targets vanish.
       await pool.transaction(async ({ query }) => {
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
