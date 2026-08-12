@@ -135,6 +135,31 @@ test('workflow FLAGS pins exactly the four default-inert recovery flags, consume
   assert.equal(loopCount, 2, 'both the running-env and next-restart legs must iterate `for f in $FLAGS`')
 })
 
+test('MODE + TARGET are validated against their fixed choices BEFORE the ssh line (the real injection boundary)', () => {
+  const workflow = readFileSync(
+    join(repoRoot, '.github/workflows/multitable-recovery-flag-containment-check.yml'),
+    'utf8',
+  )
+  // The remote heredoc re-validates MODE/TARGET too, but that runs AFTER the value is already
+  // interpolated onto the ssh command line — only the LOCAL `case` (before `ssh `) can stop an ssh-line
+  // re-parse of a non-enum / space / metacharacter value. The behavior harness only extracts the remote
+  // heredoc, so without this slice-and-assert, deleting the local pre-SSH guard passes green (P2). Slice
+  // the run: portion up to the ssh invocation and require both fixed-choice guards to live there.
+  const sshIdx = workflow.indexOf('ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST"')
+  assert.ok(sshIdx > 0, 'workflow must invoke ssh to the deploy host')
+  const preSsh = workflow.slice(0, sshIdx)
+  assert.match(
+    preSsh,
+    /case\s+"\$MODE"\s+in\s*\n\s*predeploy-flags\|postdeploy-full\)/,
+    'MODE must be validated against exactly {predeploy-flags,postdeploy-full} BEFORE it reaches the ssh command line',
+  )
+  assert.match(
+    preSsh,
+    /case\s+"\$TARGET"\s+in\s*\n\s*staging\|production\|both\)/,
+    'TARGET must be validated against exactly {staging,production,both} BEFORE it reaches the ssh command line',
+  )
+})
+
 test('missing or unexpectedly enabled authority triggers fail closed', () => {
   const missing = expectedCopy()
   missing.authorityTriggers.pop()
