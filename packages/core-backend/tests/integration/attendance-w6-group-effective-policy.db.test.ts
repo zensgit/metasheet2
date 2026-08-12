@@ -625,7 +625,8 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
         .send({ label: 'effective' }) // 400
       await request(makeApp({ id: nonMemberAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
-        .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 403 non-member
+        // 404 delegated non-member, matching missing/inaccessible parity.
+        .get(`/api/attendance/groups/${groupAId}/effective-policy`)
       await request(makeApp({ id: noOrgUser, permissions: ['attendance:admin'] }))
         .get(`/api/attendance/groups/${groupAId}/effective-policy`) // 403 no org
       await request(makeApp({ id: memberUser, permissions: [], orgId: orgA }))

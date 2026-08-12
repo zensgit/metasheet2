@@ -31,10 +31,12 @@ import {
  * `unclaimed = 0`, a non-empty-domain floor, and an off-path negative —
  * without the third, "sweep the whole repo" satisfies the first two trivially.
  *
- * Detector — refuses what it cannot sweep, and exempts no file. Every DB-seam
- * argument is `resolved` (a literal), `passthrough` (a named adapter's own
- * formal parameter, forwarded, with a non-empty and fully-classified caller
- * set), or a finding. There is no fourth bucket and no file allowlist.
+ * Detector — refuses what its bounded AST grammar recognizes but cannot sweep,
+ * and exempts no file. Within that grammar, every DB-seam argument is
+ * `resolved` (a literal), `passthrough` (a named adapter's own formal
+ * parameter, forwarded, with a non-empty and fully-classified caller set), or
+ * a finding. Opaque higher-order returns, arbitrary identity functions, and
+ * object-spread propagation are not claimed as covered.
  *
  * Scope, stated narrowly rather than inflated: this is a static leg over
  * source text. It proves no reachable declaration contains a DML verb, every
@@ -258,7 +260,7 @@ describe('W6-R3 static leg — every AGGREGATE-authored read is org-scoped', () 
   })
 })
 
-describe('W6-R1 static leg — every reachable DB-seam argument is accounted for', () => {
+describe('W6-R1 static leg — every recognized DB-seam argument is accounted for', () => {
   it('the sweep REFUSES nothing today: findings is empty', () => {
     // The headline. `findings` is the bucket for "SQL this sweep cannot
     // account for" — composed strings, helper-authored strings, anonymous
@@ -653,19 +655,28 @@ describe('W6-R1 static leg — no file is exempt as a file (composition/provenan
      * `*query` callee and used to produce no classification at all. They now
      * exercise the fail-closed path itself.
      */
-    const SHAPES: Array<[string, string]> = [
+    const SHAPES: Array<[string, string, number?]> = [
       ['local alias', 'async function h() { const q = query; await q(buildTouchSql()) }'],
       ['destructured alias', 'async function h(deps) { const { query: q } = deps; await q(buildTouchSql()) }'],
       ['element access', "async function h() { await client['query'](buildTouchSql()) }"],
       ['computed element access', 'async function h(k) { await client[k](buildTouchSql()) }'],
       ['Function.prototype.call', 'async function h() { await query.call(null, buildTouchSql()) }'],
       ['Function.prototype.apply', 'async function h() { await query.apply(null, [buildTouchSql()]) }'],
+      ['Function.prototype.bind', 'async function h() { const q = query.bind(null); await q(buildTouchSql()) }', 2],
+      ['object-property alias', 'async function h() { const holder = { q: query }; await holder.q(buildTouchSql()) }'],
+      ['nested object-property alias', 'async function h() { const holder = { db: { run: query } }; await holder.db.run(buildTouchSql()) }'],
+      ['assignment alias', 'async function h() { let q; q = query; await q(buildTouchSql()) }'],
+      ['property assignment alias', 'async function h() { const holder = {}; holder.q = query; await holder.q(buildTouchSql()) }'],
+      ['literal element alias', "async function h() { const holder = { q: query }; await holder['q'](buildTouchSql()) }"],
+      ['object-literal destructuring', 'async function h() { const { q } = { q: query }; await q(buildTouchSql()) }'],
+      ['conditional alias', 'async function h(flag) { const q = flag ? query : other; await q(buildTouchSql()) }'],
+      ['logical alias', 'async function h() { const q = query || other; await q(buildTouchSql()) }'],
     ]
-    for (const [label, text] of SHAPES) {
+    for (const [label, text, expectedFindings = 1] of SHAPES) {
       const result = classifyIn(text, label)
       expect(result.resolved, label).toEqual([])
       expect(result.passthrough, label).toEqual([])
-      expect(result.findings.length, label).toBe(1)
+      expect(result.findings.length, label).toBe(expectedFindings)
       expect(result.findings[0].reason).toContain('indirect or computed DB-seam call')
     }
 

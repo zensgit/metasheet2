@@ -401,9 +401,9 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
 }
 
 /**
- * Classifies the SQL-bearing argument of every DB-seam call the closure can
- * reach, into exactly three buckets: resolved (a literal SQL string, swept
- * by the DML text detectors), pass-through (forwards an adapter's own
+ * Classifies the SQL-bearing argument of every DB-seam call this bounded AST
+ * detector recognizes, into exactly three buckets: resolved (a literal SQL
+ * string, swept by the DML text detectors), pass-through (forwards an adapter's own
  * formal parameter, never composing it), or finding (anything else — an
  * unclassifiable argument is a refusal, not a pass). No file is exempt as a
  * file; every call site is classified on its own shape.
@@ -448,12 +448,15 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
  *
  * Direct DB-seam call sites are matched by callee name ending in `query`
  * (case-insensitive): `query`, `.query`, `runQuery`, `readOnlyQuery`,
- * `wrappedQuery`. Known indirect forms — local/destructured aliases, element
- * access, and `.call`/`.apply`/`.bind` — are refused as findings rather than
- * disappearing from the classification. The mechanism of record for W6-R1
- * remains the read-only transaction, which refuses a write whatever spelling
- * reached its transaction-bound handle; this sweep is a second, independent
- * leg over the same closure.
+ * `wrappedQuery`. Covered indirect forms include local/destructured aliases,
+ * assignment and object-property aliases, static/computed element access,
+ * conditional/logical aliases, and `.call`/`.apply`/`.bind`; they are refused
+ * as findings rather than disappearing from the classification. This is not a
+ * whole-JavaScript data-flow proof: opaque higher-order returns, arbitrary
+ * identity functions, and object-spread propagation remain outside the
+ * bounded grammar. The mechanism of record for W6-R1 remains the read-only
+ * transaction, which refuses a write that reaches its transaction-bound
+ * handle; this sweep is a second, independent leg over the same closure.
  *
  * `src/db/pg.ts` and `src/integration/db/connection-pool.ts` pass for a
  * structural reason (their `sql`/`sqlOrConfig` formal parameters are what
@@ -724,6 +727,135 @@ function bindingPropertyName(element: ts.BindingElement): string | null {
   return null
 }
 
+function propertyNameText(name: ts.PropertyName): string | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) return name.text
+  if (ts.isComputedPropertyName(name)) {
+    const expression = unwrapExpression(name.expression)
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression) || ts.isNumericLiteral(expression)) {
+      return expression.text
+    }
+  }
+  return null
+}
+
+function staticAccessPath(expression: ts.Expression): string[] | null {
+  const current = unwrapExpression(expression)
+  if (ts.isIdentifier(current)) return [current.text]
+  if (ts.isPropertyAccessExpression(current)) {
+    const parent = staticAccessPath(current.expression)
+    return parent ? [...parent, current.name.text] : null
+  }
+  if (ts.isElementAccessExpression(current)) {
+    const parent = staticAccessPath(current.expression)
+    const key = current.argumentExpression && unwrapExpression(current.argumentExpression)
+    if (!parent || !key || (!ts.isStringLiteral(key) && !ts.isNoSubstitutionTemplateLiteral(key) && !ts.isNumericLiteral(key))) {
+      return null
+    }
+    return [...parent, key.text]
+  }
+  return null
+}
+
+function sameAccessPath(left: ts.Expression, expected: readonly string[]): boolean {
+  const actual = staticAccessPath(left)
+  return actual !== null && actual.length === expected.length && actual.every((part, index) => part === expected[index])
+}
+
+function resolveLocalAssignment(path: readonly string[], from: ts.Node): ts.Expression | null {
+  let current: ts.Node | undefined = from
+  while (current) {
+    let statements: readonly ts.Statement[] | null = null
+    if (ts.isBlock(current) || ts.isSourceFile(current)) statements = current.statements
+    else if (ts.isCaseClause(current) || ts.isDefaultClause(current)) statements = current.statements
+    if (statements) {
+      let latest: ts.Expression | null = null
+      for (const statement of statements) {
+        if (statement.pos >= from.pos || !ts.isExpressionStatement(statement)) continue
+        const expression = unwrapExpression(statement.expression)
+        if (
+          ts.isBinaryExpression(expression) &&
+          expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          sameAccessPath(expression.left, path)
+        ) {
+          latest = expression.right
+        }
+      }
+      if (latest) return latest
+    }
+    current = current.parent
+  }
+  return null
+}
+
+function objectPropertyInitializer(object: ts.ObjectLiteralExpression, key: string): ts.Expression | null {
+  for (const property of object.properties) {
+    if (ts.isPropertyAssignment(property) && propertyNameText(property.name) === key) return property.initializer
+    if (ts.isShorthandPropertyAssignment(property) && property.name.text === key) return property.name
+  }
+  return null
+}
+
+function resolveDestructuredBinding(name: string, from: ts.Node): ts.Expression | null {
+  let current: ts.Node | undefined = from
+  while (current) {
+    let statements: readonly ts.Statement[] | null = null
+    if (ts.isBlock(current) || ts.isSourceFile(current)) statements = current.statements
+    else if (ts.isCaseClause(current) || ts.isDefaultClause(current)) statements = current.statements
+    if (statements) {
+      for (const statement of statements) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isObjectBindingPattern(declaration.name)) continue
+          for (const element of declaration.name.elements) {
+            if (!ts.isIdentifier(element.name) || element.name.text !== name) continue
+            const key = bindingPropertyName(element)
+            if (!key) return null
+            if (isDbSeamCalleeName(key)) return element.propertyName ?? element.name
+            const initializer = declaration.initializer && unwrapExpression(declaration.initializer)
+            return initializer && ts.isObjectLiteralExpression(initializer)
+              ? objectPropertyInitializer(initializer, key)
+              : null
+          }
+        }
+      }
+    }
+    current = current.parent
+  }
+  return null
+}
+
+function resolveStaticValue(
+  expression: ts.Expression,
+  from: ts.Node,
+  seen: Set<string>,
+): ts.Expression {
+  const current = unwrapExpression(expression)
+  const accessPath = staticAccessPath(current)
+  if (!accessPath) return current
+
+  const pathKey = accessPath.join('\u0000')
+  if (seen.has(pathKey)) return current
+  seen.add(pathKey)
+
+  const assigned = resolveLocalAssignment(accessPath, from)
+  if (assigned) return resolveStaticValue(assigned, from, seen)
+
+  if (ts.isIdentifier(current)) {
+    const initializer = resolveLocalBinding(current.text, from) ?? resolveDestructuredBinding(current.text, from)
+    return initializer ? resolveStaticValue(initializer, from, seen) : current
+  }
+
+  if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    const receiver = resolveStaticValue(current.expression, from, seen)
+    const key = accessPath[accessPath.length - 1]
+    if (ts.isObjectLiteralExpression(receiver)) {
+      const initializer = objectPropertyInitializer(receiver, key)
+      if (initializer) return resolveStaticValue(initializer, from, seen)
+    }
+  }
+  return current
+}
+
 /**
  * Resolves the known indirect spellings that previously made a DB-seam call
  * disappear from all three classification buckets. This is deliberately
@@ -736,6 +868,8 @@ function expressionResolvesToDbSeam(
   seen: Set<string> = new Set(),
 ): boolean {
   const current = unwrapExpression(expression)
+  const resolved = resolveStaticValue(current, from, new Set(seen))
+  if (resolved !== current) return expressionResolvesToDbSeam(resolved, from, seen)
   if (ts.isIdentifier(current)) {
     if (isDbSeamCalleeName(current.text)) return true
     if (seen.has(current.text)) return false
@@ -781,6 +915,23 @@ function expressionResolvesToDbSeam(
       return isDbSeamCalleeName(key.text)
     }
     return true
+  }
+  if (ts.isConditionalExpression(current)) {
+    return expressionResolvesToDbSeam(current.whenTrue, current, new Set(seen)) ||
+      expressionResolvesToDbSeam(current.whenFalse, current, new Set(seen))
+  }
+  if (
+    ts.isBinaryExpression(current) &&
+    (
+      current.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+      current.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+      current.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+      current.operatorToken.kind === ts.SyntaxKind.CommaToken ||
+      current.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    )
+  ) {
+    return expressionResolvesToDbSeam(current.left, current, new Set(seen)) ||
+      expressionResolvesToDbSeam(current.right, current, new Set(seen))
   }
   if (ts.isCallExpression(current)) return expressionResolvesToDbSeam(current.expression, current, seen)
   return false
