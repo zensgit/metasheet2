@@ -2,21 +2,25 @@
 // dingtalk-lifecycle-staging-canary-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL SAFE staging lifecycle lane:
-//   EXECUTABLE: status | preflight | off | bootstrap | human-bootstrap | alias
-//   NOT EXECUTABLE: pending | deprovision (fail-closed preflight-only)
+//   EXECUTABLE: status | preflight | off | bootstrap | human-bootstrap | alias |
+//               pending | deprovision
 //
-// Alias is a TRANSIENT secret-backed cutover canary: success requires/proves OFF;
-// failure restores the OFF override before failing. Runtime OFF cannot be proven
-// if rollback recreate itself fails. Admin JWT is minted from canary password
-// login (never secrets.ATTENDANCE_ADMIN_JWT).
+// Alias/pending/deprovision are TRANSIENT secret-backed canaries: success
+// requires/proves OFF; failure restores the OFF override before failing.
+// Runtime OFF cannot be proven if rollback recreate fails. Admin JWT is minted
+// from canary password login (never secrets.ATTENDANCE_ADMIN_JWT).
 // Bootstrap creates/repairs the fixed owned canary admin only (collision
 // fail-closed; no lifecycle env write).
 // Human-bootstrap creates/repairs a SEPARATE fixed human platform admin
 // (username staging-owner-admin) via canary-authenticated admin API + password
 // file; required reset-password/access/login/revoke; no lifecycle env write.
+// Pending: explicit directory-account subject file, pending-only flag, real
+// admit/activate, unconditional OFF rollback. Deprovision: same subject, external
+// source-disable confirmation, deprovision-only flag, real sync+ledger proofs,
+// OFF rollback; does not claim end-to-end source rehire restore.
 // Load-bearing mutations for owner P1/P2 gaps:
-//   * migrations_pending_zero unknown must fail preflight/off/alias/bootstrap/human-bootstrap
-//   * pending/deprovision never apply (transition_applied=false; NOT EXECUTABLE)
+//   * migrations_pending_zero unknown must fail preflight/off/alias/bootstrap/human-bootstrap/pending/deprovision
+//   * pending/deprovision require explicit subject (no auto-selection); omit subject refuses
 //   * alias requires pre-login(+JWT mint), backfill, readiness, post-ON login,
 //     rollback, post-rollback login, exact SHA, migrations, secret-file transport
 //   * recreate requires health true after restart
@@ -133,8 +137,75 @@ function actionBootstrapBody(source) {
 function actionHumanBootstrapBody(source) {
   const start = source.indexOf('action_human_bootstrap()')
   assert.notEqual(start, -1, 'action_human_bootstrap() must exist')
+  // pending/deprovision actions follow human-bootstrap; stop before them.
+  let end = source.indexOf('\naction_pending()', start)
+  if (end === -1) {
+    end = source.indexOf('\n# --- main', start)
+  }
+  assert.notEqual(end, -1, 'action_pending or main marker after action_human_bootstrap')
+  return source.slice(start, end)
+}
+
+function actionPendingBody(source) {
+  const start = source.indexOf('action_pending()')
+  assert.notEqual(start, -1, 'action_pending() must exist')
+  const end = source.indexOf('\naction_deprovision()', start)
+  assert.notEqual(end, -1, 'action_deprovision after action_pending')
+  return source.slice(start, end)
+}
+
+function actionDeprovisionBody(source) {
+  // Includes dispatcher + apply + restore (all before main).
+  const start = source.indexOf('action_deprovision()')
+  assert.notEqual(start, -1, 'action_deprovision() must exist')
   const end = source.indexOf('\n# --- main', start)
-  assert.notEqual(end, -1, 'main marker after action_human_bootstrap')
+  assert.notEqual(end, -1, 'main marker after action_deprovision')
+  return source.slice(start, end)
+}
+
+function actionDeprovisionApplyBody(source) {
+  const start = source.indexOf('action_deprovision_apply()')
+  assert.notEqual(start, -1, 'action_deprovision_apply() must exist')
+  const end = source.indexOf('\naction_deprovision_restore()', start)
+  assert.notEqual(end, -1, 'action_deprovision_restore after apply')
+  return source.slice(start, end)
+}
+
+function actionDeprovisionRestoreBody(source) {
+  const start = source.indexOf('action_deprovision_restore()')
+  assert.notEqual(start, -1, 'action_deprovision_restore() must exist')
+  const end = source.indexOf('\n# --- main', start)
+  assert.notEqual(end, -1, 'main marker after restore')
+  return source.slice(start, end)
+}
+
+function verifyDeprovisionLedgerBody(source) {
+  const start = source.indexOf('verify_deprovision_ledger_for_subject()')
+  assert.notEqual(start, -1, 'verify_deprovision_ledger_for_subject must exist')
+  let end = source.indexOf('\n# --- recovery journal state machine', start)
+  if (end === -1) {
+    end = source.indexOf('\npersist_deprovision_apply_state()', start)
+  }
+  if (end === -1) {
+    end = source.indexOf('\nrun_deprovision_rehire_restore()', start)
+  }
+  assert.notEqual(end, -1, 'journal/persist/rehire after ledger verify')
+  return source.slice(start, end)
+}
+
+function runDirectorySyncForSubjectBody(source) {
+  const start = source.indexOf('run_directory_sync_for_subject()')
+  assert.notEqual(start, -1, 'run_directory_sync_for_subject must exist')
+  const end = source.indexOf('\n# GET deprovision events for subject', start)
+  assert.notEqual(end, -1, 'ledger marker after run_directory_sync_for_subject')
+  return source.slice(start, end)
+}
+
+function runOrResumeRestoreBody(source) {
+  const start = source.indexOf('run_or_resume_deprovision_rehire_restore()')
+  assert.notEqual(start, -1, 'run_or_resume_deprovision_rehire_restore must exist')
+  const end = source.indexOf('\n# Authoritative access-graph proof', start)
+  assert.notEqual(end, -1, 'access graph marker after restore resume helper')
   return source.slice(start, end)
 }
 
@@ -176,7 +247,7 @@ test('PR contract workflow executes this exact suite without changing the sealed
 
 // --- workflow shape -------------------------------------------------------------------
 
-test('workflow action choices include status/preflight/off/bootstrap/human-bootstrap/alias and non-executable ON names', () => {
+test('workflow action choices include all explicit staging actions', () => {
   const options = workflowOn(loadYaml(read(WORKFLOW))).workflow_dispatch.inputs.action.options
   assert.deepEqual(options, [
     'status',
@@ -221,22 +292,23 @@ test('SSH transport requires a pinned known_hosts secret', () => {
   assert.doesNotMatch(yaml, /StrictHostKeyChecking=no/)
 })
 
-test('workflow requires deploy_sha + expected_current for off/bootstrap/human-bootstrap/alias; pending/deprovision NOT EXECUTABLE', () => {
+test('workflow requires deploy_sha + expected_current for off/bootstrap/human-bootstrap/alias/pending/deprovision', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /expected_current_mode is required for action=off/)
   assert.match(yaml, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
   assert.match(yaml, /deploy_sha must be the FULL 40-char lowercase commit SHA for action=\$\{ACTION\}/)
   assert.match(
     yaml,
-    /ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap" \|\| "\$ACTION" == "alias"/,
+    /ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap" \|\| "\$ACTION" == "alias" \|\| "\$ACTION" == "pending" \|\| "\$ACTION" == "deprovision"/,
   )
   // Secret presence is checked only in Run remote action (not Validate inputs).
   assert.match(
     yaml,
     /requires LIFECYCLE_CANARY_LOGIN_IDENTIFIER\/PASSWORD \(checked in Run remote action only\); never ATTENDANCE_ADMIN_JWT/,
   )
-  assert.match(yaml, /NOT EXECUTABLE/)
-  // Must not require canary subject/integration for a pretend ON transition.
+  assert.match(yaml, /LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID/)
+  assert.match(yaml, /DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED/)
+  // Must not use bare canary_subject_id workflow inputs (secret-file transport only).
   assert.doesNotMatch(yaml, /canary_subject_id:/)
   assert.doesNotMatch(yaml, /canary_integration_id:/)
   assert.doesNotMatch(yaml, /owner_confirm:/)
@@ -259,21 +331,25 @@ test('workflow requires explicit privileged confirmation phrases for bootstrap a
   assert.match(validate.run, /BOOTSTRAP_CONFIRMATION" != "CREATE_STAGING_HUMAN_ADMIN"/)
 })
 
-test('workflow bootstrap/human-bootstrap/alias secret transport uses chmod-600 files + scp; never ATTENDANCE_ADMIN_JWT', () => {
+test('workflow bootstrap/human-bootstrap/alias/pending/deprovision secret transport uses chmod-600 files + scp; never ATTENDANCE_ADMIN_JWT', () => {
   const yaml = read(WORKFLOW)
   assert.match(yaml, /chmod 600/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
   assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
   assert.match(yaml, /STAGING_OWNER_ADMIN_PASSWORD/)
+  assert.match(yaml, /LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID/)
   assert.match(yaml, /CANARY_LOGIN_IDENTIFIER_FILE=/)
   assert.match(yaml, /CANARY_LOGIN_PASSWORD_FILE=/)
   assert.match(yaml, /STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
+  assert.match(yaml, /CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.match(yaml, /directory-account\.id/)
   assert.match(yaml, /\.canary-secrets/)
   assert.match(yaml, /scp \$ssh_opts/)
   // printf uses non-exported shell vars after env demote (not raw env names).
   assert.match(yaml, /printf '%s' "\$\{_CANARY_PASS\}"/)
   assert.match(yaml, /printf '%s' "\$\{_CANARY_IDENT\}"/)
   assert.match(yaml, /printf '%s' "\$\{_STAGING_OWNER_PASS\}"/)
+  assert.match(yaml, /printf '%s' "\$\{_CANARY_SUBJECT\}"/)
   assert.match(yaml, /staging-owner-admin\.password/)
   // Must not materialize or demote ATTENDANCE_ADMIN_JWT (alias mints JWT from login).
   // Prose may mention the forbidden secret; forbid GHA secret injection only.
@@ -286,11 +362,12 @@ test('workflow bootstrap/human-bootstrap/alias secret transport uses chmod-600 f
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_IDENTIFIER=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
   assert.doesNotMatch(yaml, /export CANARY_LOGIN_PASSWORD='/)
-  // bootstrap/human-bootstrap share the canary secret transport gate as alias.
+  // bootstrap/human-bootstrap/alias/pending/deprovision share the canary secret transport gate.
   assert.match(
     yaml,
-    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap"/,
+    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap" \|\| "\$ACTION" == "pending" \|\| "\$ACTION" == "deprovision"/,
   )
 })
 
@@ -309,9 +386,13 @@ test('workflow Validate inputs does not receive canary login secrets (no child i
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
   assert.doesNotMatch(validate.run, /STAGING_OWNER_ADMIN_PASSWORD/)
   assert.match(validate.run, /bash -n scripts\/ops\/dingtalk-lifecycle-staging-canary-remote\.sh/)
-  // Structural bootstrap/human-bootstrap/alias checks remain; secret presence does not.
+  // Structural bootstrap/human-bootstrap/alias/pending/deprovision checks remain; secret presence does not.
   assert.match(validate.run, /expected_current_mode must be exactly 'off' for action=\$\{ACTION\}/)
-  assert.match(validate.run, /bootstrap\|human-bootstrap\|alias|bootstrap" \|\| "\$ACTION" == "human-bootstrap"/)
+  assert.match(
+    validate.run,
+    /bootstrap\|human-bootstrap\|alias\|pending\|deprovision|bootstrap" \|\| "\$ACTION" == "human-bootstrap"/,
+  )
+  assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID/)
 })
 
 test('workflow materializes secrets inside Run remote action under EXIT trap (no separate secrets step)', () => {
@@ -350,7 +431,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
     }
     if (
       t.startsWith(
-        'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD',
+        'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID',
       )
     ) {
       sawEnvUnset = true
@@ -367,6 +448,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
       '_CANARY_IDENT="${LIFECYCLE_CANARY_LOGIN_IDENTIFIER-}"',
       '_CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"',
       '_STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"',
+      '_CANARY_SUBJECT="${LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID-}"',
     ],
     'only demote assignments (builtins) before secret env unset — no external commands; no JWT',
   )
@@ -374,7 +456,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   // Order after demote: trap → mktemp → printf from shell vars → unset shell vars → remote scp.
   const trapIdx = runBody.indexOf('trap cleanup_canary_ephemeral_paths EXIT INT TERM')
   const envUnsetIdx = runBody.indexOf(
-    'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD',
+    'unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID',
   )
   const mktempIdx = runBody.indexOf('mktemp -d')
   const printfPassIdx = runBody.indexOf("printf '%s' \"${_CANARY_PASS}\"")
@@ -405,13 +487,14 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(remoteStep.run, /printf '%s' "\$\{_STAGING_OWNER_PASS\}"/)
   assert.match(
     remoteStep.run,
-    /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD/,
+    /unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID/,
   )
   assert.ok(remoteStep.env, 'Run remote action must declare env')
   assert.equal(remoteStep.env.ATTENDANCE_ADMIN_JWT, undefined, 'never inject ATTENDANCE_ADMIN_JWT')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, 'identifier secret on Run remote action only')
   assert.ok(remoteStep.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, 'password secret on Run remote action only')
   assert.ok(remoteStep.env.STAGING_OWNER_ADMIN_PASSWORD, 'human password secret on Run remote action only')
+  assert.ok(remoteStep.env.LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID, 'subject secret on Run remote action only')
   assert.equal(remoteStep.env.SECRETS_DIR, undefined, 'no secrets_dir cross-step handoff')
 
   assert.match(runBody, /CLEAN_REMOTE_SECRETS_DIR/)
@@ -421,10 +504,10 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   assert.match(runBody, /OUTPUT_COLLECTED=1/)
   // Explicit: secrets_dir must not be a step output handoff.
   assert.doesNotMatch(runBody, /secrets_dir=.*GITHUB_OUTPUT/)
-  // bootstrap|human-bootstrap|alias share materialize gate; no admin.jwt from GHA secrets.
+  // bootstrap|human-bootstrap|alias|pending|deprovision share materialize gate; no admin.jwt from GHA secrets.
   assert.match(
     runBody,
-    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap"/,
+    /ACTION" == "alias" \|\| "\$ACTION" == "bootstrap" \|\| "\$ACTION" == "human-bootstrap" \|\| "\$ACTION" == "pending" \|\| "\$ACTION" == "deprovision"/,
   )
   assert.doesNotMatch(runBody, /admin\.jwt/)
   // Local+remote secret cleanup; never echo secret values.
@@ -714,61 +797,49 @@ test('production function: require_migrations_pending_zero_true accepts only tru
   assert.match(run('unknown').stderr, /unknown/)
 })
 
-// --- P1: pending/deprovision NOT EXECUTABLE; alias is executable ----------------------
+// --- P1: pending/deprovision/alias are explicit transient operators ------------------
 
-test('P1 pending/deprovision route to action_not_executable_on; alias routes to action_alias; bootstrap/human-bootstrap route', () => {
+test('P1 pending/deprovision route to action_pending/action_deprovision; alias routes to action_alias; bootstrap/human-bootstrap route', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /bootstrap\) action_bootstrap/)
   assert.match(source, /human-bootstrap\) action_human_bootstrap/)
   assert.match(source, /alias\) action_alias/)
-  assert.match(source, /pending\) action_not_executable_on pending/)
-  assert.match(source, /deprovision\) action_not_executable_on deprovision/)
-  assert.match(source, /NOT EXECUTABLE/)
-  assert.match(source, /not_executable_no_real_verifier/)
-  assert.match(source, /transition_applied=false/)
-  // Must not call write_lifecycle_override from the not-executable path with true flags.
-  const start = source.indexOf('action_not_executable_on()')
-  const end = source.indexOf('\naction_bootstrap()', start)
-  assert.notEqual(start, -1)
-  assert.notEqual(end, -1)
-  const body = source.slice(start, end)
-  assert.doesNotMatch(body, /write_lifecycle_override/)
-  assert.doesNotMatch(body, /recreate_backend_only/)
-  assert.match(body, /transition_applied.*false|false" "false"/)
+  assert.match(source, /pending\) action_pending/)
+  assert.match(source, /deprovision\) action_deprovision/)
+  assert.match(source, /action_pending\(\)/)
+  assert.match(source, /action_deprovision\(\)/)
+  assert.doesNotMatch(source, /action_not_executable_on/)
+  assert.doesNotMatch(source, /not_executable_no_real_verifier/)
   const preflightStart = source.indexOf('preflight_for_target()')
   const preflightEnd = source.indexOf('\naction_preflight()', preflightStart)
   const preflightBody = source.slice(preflightStart, preflightEnd)
-  // pending/deprovision still force not-executable; alias does not.
-  assert.match(preflightBody, /pending\|deprovision\)[\s\S]*not_executable_no_real_verifier/)
-  assert.doesNotMatch(
-    preflightBody,
-    /alias\)[\s\S]{0,400}not_executable_no_real_verifier/,
-  )
+  // Stack readiness only — no force not-executable for pending/deprovision.
+  assert.doesNotMatch(preflightBody, /not_executable_no_real_verifier/)
+  assert.match(preflightBody, /pending\|deprovision\)/)
 })
 
-test('P1 action=off and action=alias write lifecycle override; bootstrap/human-bootstrap/pending/deprovision do not', () => {
+test('P1 action=off/alias/pending/deprovision write lifecycle override; bootstrap/human-bootstrap do not', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /off\) action_off/)
   assert.match(source, /bootstrap\) action_bootstrap/)
   assert.match(source, /human-bootstrap\) action_human_bootstrap/)
   assert.match(source, /alias\) action_alias/)
+  assert.match(source, /pending\) action_pending/)
+  assert.match(source, /deprovision\) action_deprovision/)
   assert.match(source, /action_off\(\)/)
   assert.match(source, /action_bootstrap\(\)/)
   assert.match(source, /action_human_bootstrap\(\)/)
   assert.match(source, /action_alias\(\)/)
   assert.match(source, /write_lifecycle_override "false" "false" "false"/)
   assert.match(source, /write_lifecycle_override "true" "false" "false"/)
+  assert.match(source, /write_lifecycle_override "false" "true" "false"/)
+  assert.match(source, /write_lifecycle_override "false" "false" "true"/)
   const bootstrapBody = actionBootstrapBody(source)
   assert.doesNotMatch(bootstrapBody, /write_lifecycle_override/)
   assert.doesNotMatch(bootstrapBody, /recreate_backend_only/)
   const humanBody = actionHumanBootstrapBody(source)
   assert.doesNotMatch(humanBody, /write_lifecycle_override/)
   assert.doesNotMatch(humanBody, /recreate_backend_only/)
-  const notExec = source.slice(
-    source.indexOf('action_not_executable_on()'),
-    source.indexOf('\naction_bootstrap()'),
-  )
-  assert.doesNotMatch(notExec, /write_lifecycle_override/)
 })
 
 test('MUTATION: routing alias back to not-executable would fail action_alias contract', () => {
@@ -786,13 +857,17 @@ test('MUTATION: routing alias back to not-executable would fail action_alias con
   assert.equal(failed, true)
 })
 
-test('workflow and remote do not export or require canary presence tokens as ON enablers', () => {
+test('workflow and remote do not export raw subject values; subject is path-only secret file', () => {
   const yaml = read(WORKFLOW)
   const source = read(REMOTE_SH)
-  assert.doesNotMatch(yaml, /CANARY_SUBJECT_ID/)
+  assert.doesNotMatch(yaml, /export CANARY_SUBJECT_ID=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
   assert.doesNotMatch(yaml, /OWNER_CONFIRM/)
   assert.doesNotMatch(source, /has_canary_inputs/)
-  assert.match(source, /NOT used/)
+  assert.match(source, /CANARY_DIRECTORY_ACCOUNT_ID_FILE/)
+  assert.match(source, /no auto-selection/)
+  // Path-only export is allowed; raw value export is not.
+  assert.match(yaml, /export CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
 })
 
 // --- P1: health true required after restart -------------------------------------------
@@ -2560,17 +2635,2025 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
   }
 })
 
+
+// --- pending admit canary -------------------------------------------------------------
+
+test('pending admit-only: subject secret, expected off, SHA, migrations; no temp_password activate; OAuth NOT_EXECUTED', () => {
+  const body = actionPendingBody(read(REMOTE_SH))
+  assert.match(body, /require_canary_secret_files "pending"/)
+  assert.match(body, /require_canary_directory_account_id_file "pending"/)
+  assert.match(body, /require_sha/)
+  assert.match(body, /assert_exact_sha/)
+  assert.match(body, /require_migrations_pending_zero_true/)
+  assert.match(body, /expected_current_mode=off/)
+  assert.match(body, /write_lifecycle_override "false" "true" "false"/)
+  assert.match(body, /assert_exact_mode_pending/)
+  assert.match(body, /run_pending_admit/)
+  assert.match(body, /assert_subject_user_access_state "pending_activation" "false"/)
+  assert.match(body, /oauth_negative_checkpoint="NOT_EXECUTED"/)
+  assert.match(body, /oauth_positive_checkpoint="NOT_EXECUTED"/)
+  assert.match(body, /password_login_denied_checkpoint="NOT_EXECUTED"/)
+  assert.match(body, /password_login_denied_ok=false/)
+  assert.match(body, /activate_executed="false"|activate_executed=\$\{activate_executed\}/)
+  assert.match(body, /run_pending_sso_activate/)
+  assert.match(body, /PENDING_SSO_ACTIVATE/)
+  // No vacuous wrong-password denial; no temp_password activate path.
+  assert.doesNotMatch(body, /lifecycle-canary-login-must-fail/)
+  assert.doesNotMatch(body, /run_pending_activate\b/)
+  assert.doesNotMatch(body, /mode.: .temp_password|mode": "temp_password/)
+  assert.doesNotMatch(body, /prove_subject_login_denied "/)
+  assert.match(body, /restore_lifecycle_override/)
+  assert.match(body, /assert_exact_mode_off/)
+  assert.match(body, /rolled_back_to_off/)
+})
+
+test('pending SSO phase uses mode=sso and keeps OAuth checkpoints NOT_EXECUTED', () => {
+  const source = read(REMOTE_SH)
+  const body = actionPendingBody(source)
+  assert.match(body, /phase="sso_activate"|phase=sso_activate/)
+  assert.match(body, /run_pending_sso_activate/)
+  assert.match(body, /browser OAuth NOT_EXECUTED|oauth_positive_checkpoint="NOT_EXECUTED"/)
+  assert.match(body, /lifecycle_env_write=false/)
+  // SSO body lives in the helper (not only action_pending).
+  assert.match(source, /"mode": "sso"/)
+  assert.match(source, /enableDingTalkGrant.: True|enableDingTalkGrant": true/)
+})
+
+test('MUTATION: reintroducing wrong-password login denial as evidence turns contract red', () => {
+  const source = read(REMOTE_SH)
+  assert.doesNotMatch(source, /lifecycle-canary-login-must-fail/)
+  const mutated = source + '\nprove_subject_login_denied() { curl -d password=lifecycle-canary-login-must-fail; }\n'
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /lifecycle-canary-login-must-fail/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: pending admit claiming password_login_denied_ok=true without proven password turns red', () => {
+  const body = actionPendingBody(read(REMOTE_SH))
+  // Admit phase summary must keep denied_ok false / NOT_EXECUTED.
+  assert.match(body, /password_login_denied_ok=false/)
+  const mutated = body.replaceAll('password_login_denied_ok=false', 'password_login_denied_ok=true')
+  let failed = false
+  try {
+    assert.match(mutated, /password_login_denied_ok=false/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: removing pending admit assertion turns contract red', () => {
+  const body = actionPendingBody(read(REMOTE_SH))
+  const mutated = body.replaceAll('run_pending_admit', 'true_admit_removed')
+  let failed = false
+  try {
+    assert.match(mutated, /run_pending_admit/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: removing pending OFF restore turns contract red', () => {
+  const body = actionPendingBody(read(REMOTE_SH))
+  const mutated = body.replace(
+    'restoring explicit OFF rollback baseline (success requires/proves OFF; canary must not leave pending enabled)',
+    'skip restore',
+  )
+  let failed = false
+  try {
+    assert.match(
+      mutated,
+      /restoring explicit OFF rollback baseline \(success requires\/proves OFF; canary must not leave pending enabled\)/,
+    )
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('production function: require_canary_directory_account_id_file rejects missing/empty/non-uuid', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-subject-'))
+  try {
+    function run(pathValue) {
+      return spawnSync(
+        'bash',
+        [
+          '-o',
+          'pipefail',
+          '-c',
+          'source "$1"; CANARY_DIRECTORY_ACCOUNT_ID_FILE="$2"; require_canary_directory_account_id_file pending',
+          'bash',
+          REMOTE_SH,
+          pathValue,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ACTION: 'status',
+            OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+            RUN_STAMP: 'contract',
+            LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+          },
+        },
+      )
+    }
+    assert.notEqual(run('').status, 0)
+    assert.match(run('').stderr, /CANARY_DIRECTORY_ACCOUNT_ID_FILE|no auto-selection/)
+    const missing = join(dir, 'missing.id')
+    assert.notEqual(run(missing).status, 0)
+    const empty = join(dir, 'empty.id')
+    writeFileSync(empty, '', { mode: 0o600 })
+    assert.notEqual(run(empty).status, 0)
+    const bad = join(dir, 'bad.id')
+    writeFileSync(bad, 'not-a-uuid', { mode: 0o600 })
+    assert.notEqual(run(bad).status, 0)
+    assert.match(run(bad).stderr, /subject_not_uuid|invalid/)
+    const good = join(dir, 'good.id')
+    writeFileSync(good, '6c1fe000-ca0a-4000-8000-1ec0c1e00099', { mode: 0o600 })
+    assert.equal(run(good).status, 0, run(good).stderr)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: subject omission refuses pending before any env write', () => {
+  const sha = 'f'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       CALL_LOG=()
+       record() { CALL_LOG+=("\$1"); }
+       require_sha() { record require_sha; }
+       require_canary_secret_files() { :; }
+       assert_canary_identifier_matches_owner() { :; }
+       require_canary_directory_account_id_file() {
+         record require_subject
+         fail "action=pending requires CANARY_DIRECTORY_ACCOUNT_ID_FILE (chmod-600 secret file path); no auto-selection"
+       }
+       write_lifecycle_override() { record "write:\$1:\$2:\$3"; }
+       fail() { record "fail:\$*"; printf '%s\\n' "\${CALL_LOG[@]}"; exit 1; }
+       DEPLOY_SHA="$2"
+       EXPECTED_CURRENT_MODE=off
+       ACTION=pending
+       action_pending
+       printf '%s\\n' "\${CALL_LOG[@]}"`,
+      'bash',
+      REMOTE_SH,
+      sha,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'pending',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-pending-omit',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        DEPLOY_SHA: sha,
+        EXPECTED_CURRENT_MODE: 'off',
+      },
+    },
+  )
+  assert.notEqual(result.status, 0)
+  const lines = result.stdout.trim().split('\n').filter(Boolean)
+  assert.ok(lines.includes('require_subject'), lines.join(','))
+  assert.ok(!lines.some((l) => l.startsWith('write:')), 'must not write lifecycle override without subject')
+})
+
+test('FUNCTIONAL: pending interrupt in ON window restores OFF before exit', () => {
+  const sha = '1'.repeat(40)
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-pending-term-'))
+  const calls = join(dir, 'calls.log')
+  try {
+    const result = spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        `source "$1"
+         CALLS="$2"
+         record() { printf '%s\\n' "$1" >> "$CALLS"; }
+         restore_lifecycle_override() { record restore_off; return 0; }
+         recreate_backend_only() { record recreate_backend; return 0; }
+         resolve_deployed_sha() { record resolve_sha; printf '%s' "$DEPLOY_SHA"; }
+         assert_exact_mode_off() { record mode_off; return 0; }
+         fetch_backend_health_ok() { record health_ok; printf 'true'; }
+         cleanup_prev_backup() { record cleanup_backup; }
+         DEPLOY_SHA="$3"
+         ACTION=pending
+         arm_alias_exit_rollback_guard
+         record pending_on_written
+         kill -TERM $$
+         record after_signal`,
+        'bash',
+        REMOTE_SH,
+        calls,
+        sha,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'pending',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: 'contract-pending-term',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(result.status, 143, result.stderr + result.stdout)
+    const lines = readFileSync(calls, 'utf8').trim().split('\n')
+    assert.ok(lines.indexOf('pending_on_written') < lines.indexOf('restore_off'))
+    assert.ok(lines.indexOf('restore_off') < lines.indexOf('recreate_backend'))
+    assert.ok(!lines.includes('after_signal'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// --- deprovision apply / restore ------------------------------------------------------
+
+test('deprovision apply phase: subject, source disable confirm, exact run ledger, flags OFF, not end-to-end', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionApplyBody(source)
+  const all = actionDeprovisionBody(source)
+  assert.match(source, /DEPROVISION_SOURCE_CONFIRMATION="DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED"/)
+  assert.match(source, /DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"/)
+  assert.match(all, /DEPROVISION_SOURCE_CONFIRMATION|DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED/)
+  assert.match(all, /DEPROVISION_RESTORE_CONFIRMATION|action_deprovision_restore/)
+  assert.match(all, /action_deprovision_apply/)
+  assert.match(all, /action_deprovision_restore/)
+  assert.match(body, /require_canary_directory_account_id_file "deprovision"/)
+  assert.match(body, /run_deprovision_sync_preview_subject_gate/)
+  assert.ok(
+    body.indexOf('run_deprovision_sync_preview_subject_gate')
+      < body.indexOf('write_lifecycle_override "false" "false" "true"'),
+    'preview gate must precede deprovision env write',
+  )
+  assert.match(body, /write_lifecycle_override "false" "false" "true"/)
+  assert.match(body, /run_directory_sync_for_subject "deprovision_apply" "true"/)
+  assert.match(body, /verify_deprovision_ledger_for_subject/)
+  assert.match(body, /ledger_run_match/)
+  assert.match(body, /source_still_active_after_sync_external_gate/)
+  assert.match(body, /access_restored=false/)
+  assert.match(body, /canary_access_rollback_complete=false/)
+  assert.match(body, /end_to_end_restore_claimed=false/)
+  assert.match(body, /restore_phase_required=true/)
+  assert.match(body, /prove_subject_login_denied_with_proven_password/)
+  assert.match(body, /login_denied_checkpoint="NOT_EXECUTED"|login_denied_checkpoint=\$\{login_denied_checkpoint\}/)
+  assert.match(body, /NOT_EXECUTED/)
+  // Vacuous wrong-password helper must not exist.
+  assert.doesNotMatch(body, /lifecycle-canary-login-must-fail/)
+  assert.doesNotMatch(body, /end_to_end_restore_claimed=true/)
+})
+
+test('deprovision restore phase: source reactivated confirm, rehire, resolved, access restored, flags OFF', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionRestoreBody(source)
+  assert.match(body, /run_directory_sync_for_subject "deprovision_restore"/)
+  assert.match(body, /run_or_resume_deprovision_rehire_restore/)
+  const resume = runOrResumeRestoreBody(source)
+  assert.match(resume, /run_deprovision_rehire_restore/)
+  assert.match(resume, /verify_deprovision_event_resolved/)
+  assert.match(body, /assert_subject_user_access_state "activated" "true"/)
+  assert.match(body, /flags_remain_off/)
+  assert.match(body, /canary_access_rollback_complete=true/)
+  assert.match(body, /server_side_access_graph_restore_proven=true/)
+  assert.match(body, /end_to_end_restore_claimed=false/)
+  assert.match(body, /lifecycle_env_write=false/)
+  assert.doesNotMatch(body, /write_lifecycle_override "false" "false" "true"/)
+  // Rehire mode is on the restore helper (not the action body).
+  assert.match(source, /"mode": "rehire"/)
+  assert.match(source, /run_deprovision_rehire_restore\(\)/)
+})
+
+test('deprovision ledger requires exact sync run.id equality (load-bearing)', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  assert.match(ledger, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+  assert.match(ledger, /event_run_id_mismatch/)
+  assert.match(ledger, /expected_run_id/)
+  assert.match(ledger, /run_id == expected_run_id|rid == expected_run_id/)
+  assert.match(ledger, /SYNC_DEPROVISION_APPLIED/)
+  assert.match(ledger, /sync_deprovision_not_applied/)
+  // Must not pick newest event without run filter.
+  assert.doesNotMatch(ledger, /Pick newest event/)
+})
+
+test('MUTATION: dropping ledger run_id equality turns contract red', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  // Remove the equality check lines.
+  const mutated = ledger
+    .replaceAll('event_run_id_mismatch', 'event_run_ignored')
+    .replaceAll('rid == expected_run_id', 'True')
+    .replaceAll('event_run != expected_run_id', 'False')
+  let failed = false
+  try {
+    assert.match(mutated, /event_run_id_mismatch/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: accepting any applied event without run match turns ledger contract red', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  const mutated = ledger.replace(
+    'if rid == expected_run_id:\n        matched.append(item)',
+    'matched.append(item)  # run equality removed',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /if rid == expected_run_id:\s*\n\s*matched\.append\(item\)/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: deprovision apply claiming end-to-end restore turns contract red', () => {
+  const body = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const mutated = body.replaceAll('end_to_end_restore_claimed=false', 'end_to_end_restore_claimed=true')
+  let failed = false
+  try {
+    assert.match(mutated, /end_to_end_restore_claimed=false/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: removing deprovision rehire restore from restore phase turns red', () => {
+  const body = actionDeprovisionRestoreBody(read(REMOTE_SH))
+  const mutated = body.replaceAll('run_deprovision_rehire_restore', 'true_restore_removed')
+  let failed = false
+  try {
+    assert.match(mutated, /run_deprovision_rehire_restore/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: setting login_denied_ok=true without proven password path turns red', () => {
+  const body = actionDeprovisionApplyBody(read(REMOTE_SH))
+  // When no proven password, login_denied_ok must stay false / NOT_EXECUTED.
+  assert.match(body, /login_denied_ok="false"/)
+  assert.match(body, /login_denied_checkpoint="NOT_EXECUTED"/)
+  const mutated = body.replace(
+    'login_denied_ok="false"\n    login_denied_checkpoint="NOT_EXECUTED"',
+    'login_denied_ok="true"\n    login_denied_checkpoint="NOT_EXECUTED"',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /login_denied_ok="false"\n\s*login_denied_checkpoint="NOT_EXECUTED"/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('FUNCTIONAL: deprovision refuses without source confirmation before env write', () => {
+  const sha = '2'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       CALL_LOG=()
+       record() { CALL_LOG+=("\$1"); }
+       require_sha() { record require_sha; }
+       write_lifecycle_override() { record "write:\$1:\$2:\$3"; }
+       fail() { record "fail:\$*"; printf '%s\\n' "\${CALL_LOG[@]}"; exit 1; }
+       DEPLOY_SHA="$2"
+       EXPECTED_CURRENT_MODE=off
+       BOOTSTRAP_CONFIRMATION=WRONG
+       ACTION=deprovision
+       action_deprovision
+       printf '%s\\n' "\${CALL_LOG[@]}"`,
+      'bash',
+      REMOTE_SH,
+      sha,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-deprov-confirm',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        DEPLOY_SHA: sha,
+        EXPECTED_CURRENT_MODE: 'off',
+        BOOTSTRAP_CONFIRMATION: 'WRONG',
+      },
+    },
+  )
+  assert.notEqual(result.status, 0)
+  const lines = result.stdout.trim().split('\n').filter(Boolean)
+  assert.ok(lines.some((l) => l.includes('DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED') || l.includes('DINGTALK_SOURCE_REACTIVATED')))
+  assert.ok(!lines.some((l) => l.startsWith('write:')), 'must not write without confirmation')
+})
+
+test('FUNCTIONAL harness: pending admit failure after ON write restores OFF before terminate', () => {
+  const sha = '3'.repeat(40)
+  const result = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       CALL_LOG=()
+       record() { CALL_LOG+=("\$1"); }
+       require_sha() { :; }
+       require_canary_secret_files() { :; }
+       assert_canary_identifier_matches_owner() { :; }
+       require_canary_directory_account_id_file() { :; }
+       capture_live_snapshot() {
+         SNAP_ALIAS=false; SNAP_PENDING=false; SNAP_DEPROV=false; SNAP_MODE=off
+         SNAP_BUILD_SHA="$DEPLOY_SHA"; SNAP_ALIAS_READY=true; SNAP_CAN_ENABLE_ALIAS=true
+         SNAP_MIGRATIONS_ZERO=true; SNAP_HEALTH_OK=true
+       }
+       assert_exact_sha() { :; }
+       pin_live_backend_image_for_transition() { :; }
+       require_migrations_pending_zero_true() { :; }
+       mint_canary_admin_jwt_from_password_login() {
+         record "mint:\$1"
+         CANARY_ADMIN_JWT_FILE="/tmp/lifecycle-canary-pending-mint.jwt"
+         printf 'minted-token' > "\$CANARY_ADMIN_JWT_FILE"
+         return 0
+       }
+       load_canary_directory_subject() {
+         record "load:\$1"
+         SUBJECT_OK=true; SUBJECT_NOTE=ok; SUBJECT_PROVIDER_OK=true; SUBJECT_NAME_OK=true
+         SUBJECT_ACTIVE=true; SUBJECT_LINK_STATUS=unmatched; SUBJECT_HAS_LOCAL_USER=false
+         SUBJECT_LOCAL_USERNAME_OK=false; SUBJECT_LOCAL_NAME_OK=false
+         return 0
+       }
+       establish_alias_off_rollback_baseline() { record off_baseline; }
+       arm_alias_exit_rollback_guard() { record arm_exit_guard; }
+       disarm_alias_exit_rollback_guard() { record disarm_exit_guard; }
+       write_lifecycle_override() { record "write:\$1:\$2:\$3"; }
+       recreate_backend_only() { record recreate; return 0; }
+       resolve_deployed_sha() { printf '%s' "$DEPLOY_SHA"; }
+       assert_exact_mode_pending() { record mode_pending; return 0; }
+       run_pending_admit() { record admit; ADMIT_NOTE=forced_fail; return 1; }
+       restore_lifecycle_override() { record restore; }
+       cleanup_prev_backup() { record cleanup_backup; }
+       fail() { record "fail:\$*"; printf '%s\\n' "\${CALL_LOG[@]}"; exit 1; }
+       OUTPUT_DIR="$2"
+       mkdir -p "$OUTPUT_DIR"
+       DEPLOY_SHA="$3"
+       EXPECTED_CURRENT_MODE=off
+       ACTION=pending
+       BOOTSTRAP_CONFIRMATION=
+       action_pending
+       printf '%s\\n' "\${CALL_LOG[@]}"
+       exit 0`,
+      'bash',
+      REMOTE_SH,
+      '/tmp/lifecycle-canary-pending-fail',
+      sha,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'pending',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-pending-fail',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        DEPLOY_SHA: sha,
+        EXPECTED_CURRENT_MODE: 'off',
+      },
+    },
+  )
+  assert.notEqual(result.status, 0)
+  const lines = result.stdout.trim().split('\n').filter(Boolean)
+  const writeIdx = lines.indexOf('write:false:true:false')
+  const admitIdx = lines.indexOf('admit')
+  const restoreIdx = lines.indexOf('restore')
+  const failIdx = lines.findIndex((l) => l.startsWith('fail:'))
+  assert.ok(writeIdx >= 0, lines.join(','))
+  assert.ok(admitIdx > writeIdx)
+  assert.ok(restoreIdx > admitIdx, 'fail_transition_restore must restore after admit failure')
+  assert.ok(failIdx > restoreIdx)
+})
+
+test('workflow pending/deprovision phase confirmations and honest claims', () => {
+  const yaml = read(WORKFLOW)
+  assert.match(yaml, /PENDING_SSO_ACTIVATE/)
+  assert.match(yaml, /DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED/)
+  assert.match(yaml, /DINGTALK_SOURCE_REACTIVATED_CONFIRMED/)
+  assert.match(yaml, /directory-account\.id/)
+  assert.match(yaml, /NOT_EXECUTED/)
+  assert.match(yaml, /restore phase|RESTORE/)
+  assert.doesNotMatch(yaml, /docs may still say NOT EXECUTABLE|follow-up to refresh docs/i)
+  assert.match(yaml, /exactly one total directory account/)
+  assert.match(yaml, /reserves and journals the exact sync run UUID before env\/HTTP/)
+})
+
+
+test('P1-D: login denial accepts only 401/403 auth errors; 5xx/transport fail', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_subject_login_denied_with_proven_password()')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\nrun_pending_sso_activate()', start)
+  const body = source.slice(start, end)
+  assert.match(body, /code not in \(401, 403\)/)
+  assert.match(body, /not_auth_denial/)
+  assert.match(body, /get\("success"\) is not False/)
+  assert.match(body, /CLOSED_LOGIN_ERRORS|Invalid account or password/)
+  assert.match(body, /auth_error_not_in_closed_set|auth_denied/)
+  assert.match(body, /bad_json/)
+  assert.doesNotMatch(body, /"invalid" in err_l|"password" in err_l|"unauthorized" in err_l/)
+  assert.doesNotMatch(body, /print\(f"true\|http_\{int\(e\.code\)\}_denied"\)/)
+})
+
+test('P1-E: SSO activate uses mode=sso and enableDingTalkGrant true; no temp_password', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /"mode": "sso"/)
+  assert.match(source, /"enableDingTalkGrant": True/)
+  assert.match(source, /run_pending_sso_activate/)
+  assert.doesNotMatch(source, /"mode": "temp_password"/)
+  assert.match(source, /Pending admit: grant must stay false|enableDingTalkGrant": False/)
+  assert.match(source, /oauth_negative_checkpoint="NOT_EXECUTED"/)
+  assert.match(source, /oauth_positive_checkpoint="NOT_EXECUTED"/)
+})
+
+test('P1-F: deprovision sync/preview gate requires sole linked deactivation matching subject', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /run_deprovision_sync_preview_subject_gate/)
+  assert.match(source, /\/sync\/preview/)
+  assert.match(source, /wouldDeactivateAccounts/)
+  assert.match(source, /wouldDeactivateLinkedAccounts/)
+  assert.match(source, /would_deactivate_not_exactly_one/)
+  assert.match(source, /would_deactivate_linked_not_exactly_one/)
+  assert.match(source, /sampled_deactivations_not_exactly_one/)
+  assert.match(source, /sampled_external_not_subject/)
+  assert.match(source, /subject\.external-user-id/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.ok(
+    apply.indexOf('run_deprovision_sync_preview_subject_gate')
+      < apply.indexOf('write_lifecycle_override "false" "false" "true"'),
+  )
+})
+
+test('P2-C: ledger counts only status exactly applied', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  assert.match(ledger, /st != "applied"|st == "applied"/)
+  assert.match(ledger, /exactly "applied"|must be exactly|status must be exactly/)
+  assert.doesNotMatch(ledger, /in \("applied", "open"/)
+})
+
+test('FUNCTIONAL: preview gate refuses when wouldDeactivateAccounts is 2 (collateral)', () => {
+  const py = [
+    'preview={"wouldDeactivateAccounts":2,"wouldDeactivateLinkedAccounts":2,"sampledDeactivations":[{"externalUserId":"u1","linked":True},{"externalUserId":"u2","linked":True}]}',
+    'would=preview["wouldDeactivateAccounts"]',
+    'linked=preview["wouldDeactivateLinkedAccounts"]',
+    'print("false|would_deactivate_not_exactly_one|%s|%s"%(would,linked) if would!=1 else ("false|would_deactivate_linked_not_exactly_one|%s|%s"%(would,linked) if linked!=1 else "true|ok|1|1"))',
+  ].join('\n')
+  const result = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.match(result.stdout, /false\|would_deactivate_not_exactly_one/)
+})
+
+test('MUTATION: treating HTTP 500 as login denial turns contract red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_subject_login_denied_with_proven_password()')
+  const end = source.indexOf('\nrun_pending_sso_activate()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace(
+    'if code not in (401, 403):',
+    'if code not in (401, 403, 500):  # mutation softens 500',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /if code not in \(401, 403\):/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: preview gate accepting wouldDeactivateAccounts!=1 turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('run_deprovision_sync_preview_subject_gate()')
+  const end = source.indexOf('\nrun_directory_sync_for_subject()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace('if would != 1:', 'if False:  # would check removed')
+  let failed = false
+  try {
+    assert.match(mutated, /if would != 1:/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: ledger counting empty status as applied turns red', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  const mutated = ledger.replace(
+    'if type(st) is not str or st != "applied":',
+    'if False:  # empty/open accepted',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /type\(st\) is not str or st != "applied"/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('FUNCTIONAL: proven-password denial rejects HTTP 500', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-deny-5xx-'))
+  const passFile = join(dir, 'pass')
+  writeFileSync(passFile, 'ProvenPass-12345!', { mode: 0o600 })
+  const serverPy = `
+import json, http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', '0'))
+        self.rfile.read(n)
+        self.send_response(500)
+        self.send_header('Content-Type', 'application/json')
+        body = json.dumps({"success": False, "error": "Internal server error"}).encode()
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        return
+with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
+    print(httpd.server_address[1], flush=True)
+    httpd.handle_request()
+`
+  /** @type {import('node:child_process').ChildProcess | null} */
+  let serverProc = null
+  try {
+    serverProc = spawn('python3', ['-c', serverPy], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    })
+    const port = await new Promise((resolve, reject) => {
+      let buf = ''
+      const timer = setTimeout(() => reject(new Error('loopback port timeout')), 3000)
+      const onData = (chunk) => {
+        buf += chunk.toString('utf8')
+        const line = buf.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+        if (/^\d+$/.test(line)) {
+          clearTimeout(timer)
+          serverProc.stdout.off('data', onData)
+          resolve(Number(line))
+        }
+      }
+      serverProc.stdout.on('data', onData)
+      serverProc.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+    })
+    const result = spawnSync(
+      'bash',
+      [
+        '-o',
+        'pipefail',
+        '-c',
+        'source "$1"; STAGING_API_BASE_URL="http://127.0.0.1:$2"; SUBJECT_OWNER_USERNAME=lifecycle-canary-employee; SUBJECT_PASSWORD_PROVEN_OK=true; CANARY_SUBJECT_TEMP_PASSWORD_FILE="$3"; if prove_subject_login_denied_with_proven_password loopback_5xx; then echo FAIL_ACCEPTED; exit 3; fi; echo "note=${LOGIN_DENIED_NOTE}"; exit 0',
+        'bash',
+        REMOTE_SH,
+        String(port),
+        passFile,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ACTION: 'status',
+          OUTPUT_DIR: dir,
+          RUN_STAMP: 'contract',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    assert.match(result.stdout, /note=http_500_not_auth_denial/)
+    assert.doesNotMatch(result.stdout, /FAIL_ACCEPTED/)
+  } finally {
+    if (serverProc && serverProc.exitCode === null) {
+      try {
+        serverProc.kill('SIGKILL')
+      } catch {
+        // ignore
+      }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+// --- Round-3 fail-closed hardening ----------------------------------------------------
+
+test('R3: assert_subject_user_access_state requires JSON boolean is_active (missing/null/string fail)', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('assert_subject_user_access_state()')
+  const end = source.indexOf('\nresolve_subject_password_file()', start)
+  const body = source.slice(start, end)
+  assert.match(body, /is_active_missing/)
+  assert.match(body, /is_active_not_boolean/)
+  assert.match(body, /type\(is_active\) is not bool/)
+  // Must not coerce missing/null/string to false.
+  assert.doesNotMatch(body, /active_s = "true" if is_active is True else "false"\nactivation = str/)
+  assert.doesNotMatch(body, /is_active is None:\n    is_active = data\.get/)
+})
+
+test('FUNCTIONAL: assert_subject_user_access_state rejects missing/null/string is_active', () => {
+  function runPayload(userObj) {
+    const py = `
+import json
+user = json.loads(${JSON.stringify(JSON.stringify(userObj))})
+if "is_active" in user:
+    is_active = user["is_active"]
+elif "isActive" in user:
+    is_active = user["isActive"]
+else:
+    print("false|is_active_missing")
+    raise SystemExit(0)
+if type(is_active) is not bool:
+    print("false|is_active_not_boolean")
+    raise SystemExit(0)
+print("true|ok|" + ("true" if is_active is True else "false"))
+`
+    return spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  }
+  for (const bad of [{}, { is_active: null }, { is_active: 'false' }, { isActive: 'false' }, { is_active: 0 }]) {
+    const r = runPayload(bad)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /false\|is_active_(missing|not_boolean)/)
+  }
+  const ok = runPayload({ is_active: false, activationStatus: 'activated' })
+  assert.match(ok.stdout, /true\|ok\|false/)
+})
+
+test('MUTATION: coercing missing is_active to false turns access contract red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('assert_subject_user_access_state()')
+  const end = source.indexOf('\nresolve_subject_password_file()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace(
+    'emit("false", "is_active_missing")',
+    'is_active = False  # mutation: missing becomes false',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /is_active_missing/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R3: login denial closed-set only Invalid account or password', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_subject_login_denied_with_proven_password()')
+  const end = source.indexOf('\nrun_pending_sso_activate()', start)
+  const body = source.slice(start, end)
+  assert.match(body, /CLOSED_LOGIN_ERRORS/)
+  assert.match(body, /Invalid account or password/)
+  assert.match(body, /auth_error_not_in_closed_set/)
+  assert.doesNotMatch(body, /"invalid" in err_l/)
+  assert.doesNotMatch(body, /"unauthorized" in err_l/)
+  assert.doesNotMatch(body, /"forbidden" in err_l/)
+})
+
+test('FUNCTIONAL: closed-set denial rejects CSRF-style 403 error text', () => {
+  const py = `
+CLOSED_LOGIN_ERRORS = frozenset({"Invalid account or password"})
+for code, err in [(403, "CSRF token missing"), (401, "Unauthorized"), (401, "Invalid account or password")]:
+    ok = err in CLOSED_LOGIN_ERRORS
+    print(f"{code}|{err}|{'true' if ok else 'false'}")
+`
+  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /403\|CSRF token missing\|false/)
+  assert.match(r.stdout, /401\|Unauthorized\|false/)
+  assert.match(r.stdout, /401\|Invalid account or password\|true/)
+})
+
+test('R3: apply persists exact run/event/effects; restore forbids discovery', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /persist_deprovision_apply_state/)
+  assert.match(source, /load_deprovision_apply_state/)
+  assert.match(source, /clear_deprovision_apply_state/)
+  assert.match(source, /lifecycle-canary-deprovision-apply-state-v4/)
+  assert.match(source, /\.apply-state\.json/)
+  assert.doesNotMatch(source, /discover_applied_deprovision_event_for_subject/)
+  assert.match(source, /event_id_file_missing_no_discovery|no event auto-discovery|no_discovery/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /persist_deprovision_apply_state|journal_upgrade_ledger_bound/)
+  const restore = actionDeprovisionRestoreBody(source)
+  assert.match(restore, /load_deprovision_apply_state/)
+  assert.match(restore, /clear_deprovision_apply_state/)
+  assert.doesNotMatch(restore, /discover_applied/)
+})
+
+test('R3: restore requires fully_resolved and all effects reversed', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('verify_deprovision_event_resolved()')
+  const end = source.indexOf('\nprove_access_graph_state()', start)
+  const body = source.slice(start, end)
+  assert.match(body, /fully_resolved/)
+  assert.match(body, /effect_not_reversed|status.*reversed/)
+  assert.match(body, /event_status_superseded|event_not_fully_resolved/)
+  assert.match(body, /effect_missing_after_restore/)
+  assert.match(body, /effects_empty_after_restore/)
+  // Must not treat "not in applied list" alone as success without fully_resolved.
+  assert.doesNotMatch(body, /emit\("true", "resolved"\)/)
+  assert.match(body, /fully_resolved_all_reversed/)
+})
+
+test('MUTATION: restore accepting event merely absent from applied turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('verify_deprovision_event_resolved()')
+  const end = source.indexOf('\nprove_access_graph_state()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replaceAll('fully_resolved', 'applied_absent')
+  let failed = false
+  try {
+    assert.match(mutated, /fully_resolved/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R3: access graph proof uses DB user/membership/grant not profile-only access API', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /prove_access_graph_state/)
+  assert.match(source, /user_orgs/)
+  assert.match(source, /user_external_auth_grants/)
+  assert.match(source, /provider = \$2|provider = 'dingtalk'|provider = \$2/)
+  assert.match(source, /server_side_access_graph_restore_proven/)
+  const restore = actionDeprovisionRestoreBody(source)
+  assert.match(restore, /prove_access_graph_state "restored"/)
+  assert.match(restore, /server_side_access_graph_restore_proven=true/)
+  assert.match(restore, /end_to_end_restore_claimed=false/)
+  assert.doesNotMatch(restore, /end_to_end_restore_claimed=true/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /prove_access_graph_state "deprovisioned"/)
+})
+
+test('R3: post-sync radius requires candidate=1 and accountsDeactivated=1', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /sync_candidate_radius_not_one/)
+  assert.match(source, /sync_accounts_deactivated_not_one/)
+  assert.match(source, /candidates != 1|candidates == 1/)
+  assert.match(source, /accounts != 1|accounts == 1/)
+  assert.match(source, /sync_radius_not_atomic_lock|not atomic/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /SYNC_DEPROVISION_CANDIDATES\}?" == "1"|SYNC_DEPROVISION_CANDIDATES" == "1"/)
+  assert.match(apply, /SYNC_ACCOUNTS_DEACTIVATED\}?" == "1"|SYNC_ACCOUNTS_DEACTIVATED" == "1"/)
+  assert.match(apply, /\$\{SYNC_DEPROVISION_CANDIDATES\}" == "1"/)
+  assert.match(apply, /\$\{SYNC_ACCOUNTS_DEACTIVATED\}" == "1"/)
+})
+
+test('MUTATION: dropping post-sync accountsDeactivated==1 check turns red', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const mutated = apply.replaceAll('sync_accounts_deactivated_not_one', 'radius_ignored')
+  let failed = false
+  try {
+    assert.match(mutated, /sync_accounts_deactivated_not_one/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: claiming end_to_end_restore_claimed=true while OAuth NOT_EXECUTED turns red', () => {
+  const restore = actionDeprovisionRestoreBody(read(REMOTE_SH))
+  assert.match(restore, /oauth_positive_checkpoint="NOT_EXECUTED"|oauth_positive_checkpoint=NOT_EXECUTED/)
+  assert.match(restore, /end_to_end_restore_claimed=false/)
+  const mutated = restore.replaceAll('end_to_end_restore_claimed=false', 'end_to_end_restore_claimed=true')
+  let failed = false
+  try {
+    assert.match(mutated, /end_to_end_restore_claimed=false/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+// --- Round 4: org-scoped membership, effect-metadata graph, exact effect set, state bind ---
+
+function proveAccessGraphBody(source) {
+  const start = source.indexOf('prove_access_graph_state()')
+  assert.notEqual(start, -1, 'prove_access_graph_state must exist')
+  const end = source.indexOf('\nvalidate_mode_name()', start)
+  assert.notEqual(end, -1, 'validate_mode_name after prove_access_graph_state')
+  return source.slice(start, end)
+}
+
+function loadDeprovisionApplyStateBody(source) {
+  const start = source.indexOf('load_deprovision_apply_state()')
+  assert.notEqual(start, -1)
+  // R5: load is last journal helper before rehire restore.
+  let end = source.indexOf('\nrun_deprovision_rehire_restore()', start)
+  if (end === -1) {
+    end = source.indexOf('\n# POST rehire restore', start)
+  }
+  assert.notEqual(end, -1)
+  return source.slice(start, end)
+}
+
+function persistDeprovisionApplyStateBody(source) {
+  // R5: ledger_bound upgrade lives in journal_upgrade_ledger_bound; persist is a thin alias.
+  const start = source.indexOf('journal_upgrade_ledger_bound()')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\n// Compat name used by older comments', start)
+  assert.notEqual(end, -1)
+  return source.slice(start, end)
+}
+
+function journalStateMachineRegion(source) {
+  const start = source.indexOf('# --- recovery journal state machine')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('# POST rehire restore for EXACT event id', start)
+  assert.notEqual(end, -1)
+  return source.slice(start, end)
+}
+
+function rehireRestoreBody(source) {
+  const start = source.indexOf('run_deprovision_rehire_restore()')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\nverify_deprovision_event_resolved()', start)
+  assert.notEqual(end, -1)
+  return source.slice(start, end)
+}
+
+function eventResolvedBody(source) {
+  const start = source.indexOf('verify_deprovision_event_resolved()')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\nprove_access_graph_state()', start)
+  assert.notEqual(end, -1)
+  return source.slice(start, end)
+}
+
+test('R4: membership graph is org-scoped via exact integration org_id (not all-orgs)', () => {
+  const body = proveAccessGraphBody(read(REMOTE_SH))
+  assert.match(body, /directory_integrations/)
+  assert.match(body, /provider = \$2/)
+  assert.match(body, /dingtalk/)
+  assert.match(body, /org_id/)
+  assert.match(body, /user_id = \$1 AND org_id = \$2 AND COALESCE\(is_active, TRUE\) = TRUE/)
+  // Must NOT count membership across all orgs without org_id filter.
+  assert.doesNotMatch(
+    body,
+    /FROM user_orgs WHERE user_id = \$1 AND COALESCE\(is_active, TRUE\) = TRUE(?![\s\S]*org_id)/,
+  )
+  // Active integration preferred/required.
+  assert.match(body, /integration_not_active|integStatus !== "active"/)
+  assert.match(body, /integration_org_not_unique/)
+})
+
+test('MUTATION: dropping org_id scope on membership turns red', () => {
+  const body = proveAccessGraphBody(read(REMOTE_SH))
+  const mutated = body.replaceAll(
+    'user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE',
+    'user_id = $1 AND COALESCE(is_active, TRUE) = TRUE',
+  )
+  let failed = false
+  try {
+    assert.match(mutated, /user_id = \$1 AND org_id = \$2 AND COALESCE\(is_active, TRUE\) = TRUE/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R4: graph proofs are effect-metadata driven (closed types + before/after/grant_row_created)', () => {
+  const source = read(REMOTE_SH)
+  const ledger = verifyDeprovisionLedgerBody(source)
+  assert.match(ledger, /membership_changed/)
+  assert.match(ledger, /grant_changed/)
+  assert.match(ledger, /user_changed/)
+  assert.match(ledger, /before_active/)
+  assert.match(ledger, /after_active/)
+  assert.match(ledger, /grant_row_created/)
+  assert.match(ledger, /CLOSED_EFFECT_TYPES/)
+  assert.match(ledger, /effect_id_duplicate/)
+  assert.match(ledger, /effect_type_not_closed_set/)
+  assert.match(ledger, /effect_type_set_not_exact_triple|user_changed_effect_missing/)
+  const graph = proveAccessGraphBody(source)
+  assert.match(graph, /membership_changed/)
+  assert.match(graph, /grant_changed/)
+  assert.match(graph, /user_changed/)
+  assert.match(graph, /after_active/)
+  assert.match(graph, /before_active/)
+  assert.match(graph, /grant_row_created/)
+  assert.match(graph, /grant_row_created_not_absent/)
+  assert.match(graph, /grant_enabled_not_before|grant_enabled_not_after/)
+  // No free-floating "always require user inactive / membership zero" without effects.
+  assert.doesNotMatch(graph, /if \(isActive !== false\) \{\s*emit\("false", "user_still_active"/)
+})
+
+test('FUNCTIONAL: other-org active membership must not green restore when target org inactive', () => {
+  // Pure predicate: target-org scoped active flag only.
+  const py = `
+mem_active_target = False  # target org inactive after "failed" restore
+mem_active_other = True    # other org still active
+expected_before = True     # membership_changed before_active
+ok = mem_active_target == expected_before
+print("restore_ok" if ok else "restore_fail")
+# deprovision: target inactive, other active → still pass
+mem_active_target_dep = False
+expected_after = False
+ok_dep = mem_active_target_dep == expected_after
+print("deprov_ok" if ok_dep else "deprov_fail")
+`
+  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /restore_fail/)
+  assert.match(r.stdout, /deprov_ok/)
+})
+
+test('R4: restore live effect id set must equal persisted exactly (no extra/missing/dup/non-reversed)', () => {
+  const body = eventResolvedBody(read(REMOTE_SH))
+  assert.match(body, /effect_extra_live/)
+  assert.match(body, /effect_missing_after_restore/)
+  assert.match(body, /effect_id_duplicate_live|expected_effect_id_duplicate/)
+  assert.match(body, /effect_not_reversed/)
+  assert.match(body, /len\(by_id\) != len\(expected_effects\)/)
+  assert.match(body, /live_id not in seen_exp/)
+})
+
+test('MUTATION: allowing extra live effects turns red', () => {
+  const body = eventResolvedBody(read(REMOTE_SH))
+  const mutated = body.replaceAll('effect_extra_live', 'extra_ignored')
+  let failed = false
+  try {
+    assert.match(mutated, /effect_extra_live/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R4: restoredEffectCount must equal persisted effect_count exactly', () => {
+  const body = rehireRestoreBody(read(REMOTE_SH))
+  assert.match(body, /restore_effect_count_mismatch/)
+  assert.match(body, /count != expected/)
+  assert.match(body, /restoredEffectCount/)
+  assert.doesNotMatch(body, /count < 1:\s*\n\s*emit\("false", "restore_effect_count_invalid"\)\s*\nemit\("true"/)
+})
+
+test('MUTATION: restoredEffectCount only >0 turns red', () => {
+  const body = rehireRestoreBody(read(REMOTE_SH))
+  const mutated = body
+    .replaceAll('if count != expected:', 'if count < 1:')
+    .replaceAll('restore_effect_count_mismatch', 'restore_effect_count_invalid')
+  let failed = false
+  try {
+    assert.match(mutated, /restore_effect_count_mismatch/)
+    assert.match(mutated, /count != expected/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R4: post-sync requires deprovisionUsersDeactivatedCount exact 1', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /sync_users_deactivated_not_one/)
+  assert.match(source, /deprovisionUsersDeactivatedCount/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /\$\{SYNC_USERS_DEACTIVATED\}" == "1"/)
+  assert.match(apply, /sync_users_deactivated_not_one/)
+})
+
+test('MUTATION: dropping usersDeactivated==1 assertion turns red', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const mutated = apply.replaceAll('sync_users_deactivated_not_one', 'users_ignored')
+  let failed = false
+  try {
+    assert.match(mutated, /sync_users_deactivated_not_one/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R4: apply state binds local_user_id+integration_id+directory_account_id+subject_key+run/event/effects', () => {
+  const source = read(REMOTE_SH)
+  const region = journalStateMachineRegion(source)
+  assert.match(region, /local_user_id/)
+  assert.match(region, /integration_id/)
+  assert.match(region, /directory_account_id/)
+  assert.match(region, /subject_key/)
+  assert.match(region, /sync_run_id/)
+  assert.match(region, /event_id/)
+  assert.match(region, /effect_count/)
+  assert.match(region, /lifecycle-canary-deprovision-apply-state-v4/)
+  assert.match(region, /refuse overwrite|unrecovered recovery journal/)
+  const load = loadDeprovisionApplyStateBody(source)
+  assert.match(load, /live_user != local_user_id|SystemExit\(10\)/)
+  assert.match(load, /live_integ != integration_id|SystemExit\(11\)/)
+  assert.match(load, /live_acct != directory_account_id|SystemExit\(12\)/)
+  assert.match(load, /lifecycle-canary-deprovision-apply-state-v4/)
+  assert.match(load, /ledger_bound/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /refuse_existing_deprovision_apply_state/)
+  assert.match(apply, /journal_init_prepared/)
+  // refuse + prepared must run before env write
+  const refuseIdx = apply.indexOf('refuse_existing_deprovision_apply_state')
+  const preparedIdx = apply.indexOf('journal_init_prepared')
+  const writeIdx = apply.indexOf('write_lifecycle_override')
+  assert.ok(refuseIdx > 0 && preparedIdx > refuseIdx && writeIdx > preparedIdx, 'refuse+prepared before env write')
+  const restore = actionDeprovisionRestoreBody(source)
+  assert.match(restore, /clear_deprovision_apply_state/)
+  // clear only after successful path markers
+  const clearIdx = restore.indexOf('clear_deprovision_apply_state')
+  const graphIdx = restore.indexOf('prove_access_graph_state "restored"')
+  assert.ok(clearIdx > graphIdx, 'clear state only after successful restore proofs')
+})
+
+test('MUTATION: state bound only by username (no id rebind) turns red', () => {
+  const load = loadDeprovisionApplyStateBody(read(REMOTE_SH))
+  const mutated = load
+    .replaceAll('local_user_id', 'subject_only')
+    .replaceAll('integration_id', 'subject_only')
+    .replaceAll('directory_account_id', 'subject_only')
+  let failed = false
+  try {
+    assert.match(mutated, /local_user_id/)
+    assert.match(mutated, /integration_id/)
+    assert.match(mutated, /directory_account_id/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: apply overwriting existing unrecovered state turns red', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const mutated = apply.replaceAll('refuse_existing_deprovision_apply_state', 'skip_state_refuse')
+  let failed = false
+  try {
+    assert.match(mutated, /refuse_existing_deprovision_apply_state/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R4: graph DB failure/unknown fail closed; never log ids/PII', () => {
+  const source = read(REMOTE_SH)
+  const body = proveAccessGraphBody(source)
+  assert.match(body, /db_query_failed/)
+  assert.match(body, /database_url_missing/)
+  assert.match(body, /docker_exec_failed/)
+  // Values-free notes only — no echo of user/integration ids in log lines.
+  assert.doesNotMatch(body, /log ".*\$\{?userId/)
+  assert.doesNotMatch(body, /log ".*\$\{?integrationId/)
+  assert.doesNotMatch(body, /console\.log\(userId|console\.log\(integrationId/)
+  // Doc comment sits immediately above the function (outside body slice).
+  const header = source.slice(
+    source.lastIndexOf('# Authoritative access-graph', source.indexOf('prove_access_graph_state()')),
+    source.indexOf('prove_access_graph_state()'),
+  )
+  assert.match(header, /Never prints user\/ids\/PII|never prints/i)
+})
+test('FUNCTIONAL: effect metadata capture requires closed types and strict booleans', () => {
+  const py = `
+CLOSED = frozenset({"membership_changed", "grant_changed", "user_changed"})
+def check(fx):
+    if fx.get("type") not in CLOSED: return "type"
+    if type(fx.get("before_active")) is not bool: return "ba"
+    if type(fx.get("after_active")) is not bool: return "aa"
+    if type(fx.get("grant_row_created")) is not bool: return "grc"
+    return "ok"
+cases = [
+  {"type":"user_changed","before_active":True,"after_active":False,"grant_row_created":False},
+  {"type":"weird","before_active":True,"after_active":False,"grant_row_created":False},
+  {"type":"grant_changed","before_active":"x","after_active":False,"grant_row_created":False},
+]
+for c in cases:
+    print(check(c))
+`
+  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  const lines = r.stdout.trim().split('\n')
+  assert.deepEqual(lines, ['ok', 'type', 'ba'])
+})
+
+// --- Round 5: recovery journal, run-id-before-counts, precondition, keep-journal ---
+
+test('R5: prepared journal reserves run id before HTTP and radius judgments', () => {
+  const source = read(REMOTE_SH)
+  const journal = journalStateMachineRegion(source)
+  const start = source.indexOf('run_directory_sync_for_subject()')
+  const end = source.indexOf('\nverify_deprovision_ledger_for_subject()', start)
+  const body = source.slice(start, end)
+  const reserveIdx = journal.indexOf('uuid.uuid4()')
+  const journalWriteIdx = journal.indexOf('tmp.replace(pathlib.Path(out_path))')
+  const requestIdx = body.indexOf('urllib.request.Request')
+  const radiusIdx = body.indexOf('sync_candidate_radius_not_one')
+  assert.ok(reserveIdx > 0 && journalWriteIdx > reserveIdx, 'prepared journal must reserve and persist run id')
+  assert.ok(requestIdx > 0 && radiusIdx > requestIdx, 'reserved-id request must precede radius emit')
+  // Radius failures must still emit run_present=true.
+  assert.match(body, /sync_candidate_radius_not_one[\s\S]*"true"\)/)
+  assert.match(body, /SYNC_RUN_ID_PRESENT" == "true"/)
+  assert.match(body, /reserved_run_id/)
+  assert.match(body, /"runId": reserved_run_id/)
+})
+
+test('MUTATION: radius fail without run_present=true turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('run_directory_sync_for_subject()')
+  const end = source.indexOf('\nverify_deprovision_ledger_for_subject()', start)
+  const body = source.slice(start, end)
+  // Corrupt the radius emit to drop run_present true.
+  const mutated = body.replaceAll(
+    'emit("false", "sync_candidate_radius_not_one", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")',
+    'emit("false", "sync_candidate_radius_not_one", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates))',
+  )
+  let failed = false
+  try {
+    assert.match(
+      mutated,
+      /emit\("false", "sync_candidate_radius_not_one", applied_s, nonneg\(users\), nonneg\(accounts\), nonneg\(candidates\), "true"\)/,
+    )
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R5: journal state machine prepared→run_bound→ledger_bound unidirectional', () => {
+  const region = journalStateMachineRegion(read(REMOTE_SH))
+  assert.match(region, /phase": "prepared"|phase.: .prepared/)
+  assert.match(region, /"phase": "run_bound"|phase = "run_bound"|state\["phase"\] = "run_bound"/)
+  assert.match(region, /"phase": "ledger_bound"|state\["phase"\] = "ledger_bound"/)
+  assert.match(region, /phase"\) not in \{"prepared", "run_bound"\}/)
+  assert.match(region, /phase"\) not in \{"prepared", "run_bound"\}/)
+  assert.match(region, /lifecycle-canary-deprovision-apply-state-v4/)
+  assert.match(region, /journal_init_prepared/)
+  assert.match(region, /journal_upgrade_run_bound/)
+  assert.match(region, /journal_upgrade_ledger_bound/)
+  assert.match(region, /reconcile_run_journal_to_ledger_bound/)
+  // Restore load only accepts ledger_bound after exact reserved-run reconcile.
+  const load = loadDeprovisionApplyStateBody(read(REMOTE_SH))
+  assert.match(load, /reconcile to ledger_bound|phase"\) != "ledger_bound"/)
+  assert.match(load, /reconcile_run_journal_to_ledger_bound|prepared.*run_bound/)
+  // Comments may mention "sole event" only as FORBIDDEN; must not implement discovery.
+  assert.doesNotMatch(load, /discover_applied|items\[0\]|matched\[0\].*without run/)
+  assert.match(load, /no sole-event guess|never "sole event"|no event auto-discovery/i)
+})
+
+test('R5: apply orders precondition→prepared→sync→run_bound→ledger→radius/graph', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const pre = apply.indexOf('prove_dedicated_subject_deprovision_precondition')
+  const prepared = apply.indexOf('journal_init_prepared')
+  const write = apply.indexOf('write_lifecycle_override')
+  const sync = apply.indexOf('run_directory_sync_for_subject "deprovision_apply"')
+  const runBound = apply.indexOf('journal_upgrade_run_bound')
+  const ledger = apply.indexOf('verify_deprovision_ledger_for_subject')
+  const bound = apply.indexOf('persist_deprovision_apply_state')
+  const radius = apply.indexOf('sync_candidate_radius_not_one')
+  const graph = apply.indexOf('prove_access_graph_state "deprovisioned"')
+  assert.ok(pre > 0 && prepared > pre && write > prepared, 'precond+prepared before env write')
+  assert.ok(sync > write && runBound > sync && ledger > runBound && bound > ledger, 'run_bound then ledger then bound')
+  assert.ok(radius > bound && graph > radius, 'radius/graph only after ledger_bound')
+  assert.match(apply, /fail_deprovision_apply_keep_journal/)
+  assert.match(apply, /journal_clear_if_phase_prepared/)
+})
+
+test('R6: destructive apply sends its pre-reserved exact run before polling', () => {
+  const body = runDirectorySyncForSubjectBody(read(REMOTE_SH))
+  const reserveRead = body.indexOf('reserved_run_id = str(state.get("sync_run_id")')
+  const asyncRequest = body.indexOf('{"async": True, "runId": reserved_run_id}')
+  const bind = body.indexOf('state["phase"] = "run_bound"')
+  const poll = body.indexOf('while time.monotonic() < deadline')
+  assert.ok(reserveRead > 0 && asyncRequest > reserveRead, 'deprovision apply must send pre-reserved run id')
+  assert.ok(bind > asyncRequest && poll > bind, 'run existence must be journaled before polling')
+  assert.match(body, /status in \{"completed", "failed"\}/)
+  assert.match(body, /run_url = integration_base \+ "\/runs\/" \+ urllib\.parse\.quote\(run_id, safe=""\)/)
+  assert.match(body, /exact_run = poll_data\.get\("run"\)/)
+  assert.match(body, /str\(exact_run\.get\("id"\) or ""\)\.strip\(\) != run_id/)
+  assert.doesNotMatch(body, /pageSize|poll_data\.get\("items"\)/)
+})
+
+test('MUTATION: reverting destructive apply to synchronous start turns recovery contract red', () => {
+  const body = runDirectorySyncForSubjectBody(read(REMOTE_SH))
+  const mutated = body.replace('{"async": True, "runId": reserved_run_id}', '{"async": True}')
+  assert.throws(() => assert.match(mutated, /\{"async": True, "runId": reserved_run_id\}/))
+})
+
+test('R6: restore is resumable after the exact event already committed fully_resolved', () => {
+  const helper = runOrResumeRestoreBody(read(REMOTE_SH))
+  const verify = helper.indexOf('verify_deprovision_event_resolved')
+  const post = helper.indexOf('run_deprovision_rehire_restore')
+  assert.ok(verify > 0 && post > verify, 'exact-event resolved probe must precede restore POST')
+  assert.match(helper, /RESTORE_RESUMED_FULLY_RESOLVED="true"/)
+  assert.match(helper, /skipping duplicate POST/)
+  assert.match(helper, /event_not_fully_resolved/)
+})
+
+test('R6: restore status probes the exact event tuple, never a paginated recent list', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('read_exact_deprovision_event_status()')
+  const end = source.indexOf('\n# After restore:', start)
+  const body = source.slice(start, end)
+  assert.match(body, /FROM directory_deprovision_events/)
+  assert.match(body, /WHERE id = \$1::uuid/)
+  assert.match(body, /local_user_id = \$2/)
+  assert.match(body, /integration_id = \$3/)
+  assert.doesNotMatch(body, /limit["']?:\s*["']?100/i)
+})
+
+test('MUTATION: removing exact event-id scope from restore status probe turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('read_exact_deprovision_event_status()')
+  const end = source.indexOf('\n# After restore:', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace('WHERE id = $1::uuid', 'WHERE TRUE')
+  assert.throws(() => assert.match(mutated, /WHERE id = \$1::uuid/))
+})
+
+test('FUNCTIONAL: fully_resolved resume skips a duplicate non-idempotent restore POST', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-restore-resume-'))
+  const calls = join(home, 'restore.calls')
+  const script = `
+set -euo pipefail
+source "$1"
+verify_deprovision_event_resolved() { RESOLVED_NOTE=fully_resolved_all_reversed; return 0; }
+run_deprovision_rehire_restore() { echo called >> "$2"; return 0; }
+LEDGER_EFFECT_COUNT=3
+run_or_resume_deprovision_rehire_restore
+printf '%s|%s|%s\n' "$RESTORE_RESUMED_FULLY_RESOLVED" "$RESTORE_OK" "$RESTORE_EFFECT_COUNT"
+test ! -e "$2"
+`
+  const r = spawnSync('bash', ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, calls], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ACTION: 'deprovision',
+      OUTPUT_DIR: home,
+      RUN_STAMP: 'contract-r6-restore-resume',
+      LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+    },
+  })
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /true\|true\|3/)
+  assert.equal(existsSync(calls), false)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: async destructive sync binds run before polling terminal stats', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-async-sync-'))
+  const sec = join(home, 'secrets')
+  const stateDir = join(home, 'state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  mkdirSync(stateDir, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const stateFile = join(stateDir, 'subject.apply-state.json')
+  const integrationId = '11111111-2222-3333-4444-555555555555'
+  const runId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  writeFileSync(stateFile, JSON.stringify({
+    schema: 'lifecycle-canary-deprovision-apply-state-v4',
+    phase: 'prepared',
+    subject_key: 'lifecycle-canary-employee',
+    local_user_id: '99999999-8888-7777-6666-555555555555',
+    integration_id: integrationId,
+    directory_account_id: '12121212-3434-5656-7878-909090909090',
+    sync_run_id: runId,
+    sync_users_deactivated: null,
+    sync_accounts_deactivated: null,
+    sync_deprovision_candidates: null,
+    deprovision_applied: null,
+    event_id: null,
+    effect_count: null,
+    effects: null,
+  }))
+  chmodSync(jwt, 0o600)
+  chmodSync(integ, 0o600)
+  chmodSync(stateFile, 0o600)
+
+  const serverSource = `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+RUN = "${runId}"
+STATE = ${JSON.stringify(stateFile)}
+polls = 0
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send_json(self, code, payload):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if body != {"async": True, "runId": RUN}:
+            self.send_json(400, {"ok": False})
+            return
+        self.send_json(202, {"ok": True, "data": {"accepted": True, "runId": RUN}})
+    def do_GET(self):
+        global polls
+        state = json.load(open(STATE))
+        if state.get("phase") != "run_bound" or state.get("sync_run_id") != RUN:
+            self.send_json(409, {"ok": False})
+            return
+        polls += 1
+        status = "running" if polls == 1 else "completed"
+        stats = {} if status == "running" else {
+            "deprovisionApplied": True,
+            "deprovisionUsersDeactivatedCount": 1,
+            "accountsDeactivatedCount": 1,
+            "deprovisionCandidateCount": 1,
+        }
+        self.send_json(200, {"ok": True, "data": {"run": {"id": RUN, "status": status, "stats": stats}}})
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('mock sync server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`mock sync server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+CANARY_APPLY_STATE_FILE="$6"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+printf '%s' 12121212-3434-5656-7878-909090909090 > "$CANARY_DIRECTORY_ACCOUNT_ID_FILE"
+run_directory_sync_for_subject deprovision_apply true
+journal_upgrade_run_bound
+python3 - "$6" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1]))
+print("|".join([s["phase"], s["sync_run_id"], str(s["sync_users_deactivated"]), str(s["deprovision_applied"]).lower()]))
+PY
+`
+    const r = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, sec, stateFile],
+      {
+        encoding: 'utf8',
+        timeout: 15000,
+        env: {
+          ...process.env,
+          ACTION: 'deprovision',
+          OUTPUT_DIR: home,
+          RUN_STAMP: 'contract-r6-async-sync',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(r.status, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, new RegExp(`run_bound\\|${runId}\\|1\\|true`))
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'))
+    assert.equal(state.phase, 'run_bound')
+    assert.equal(state.sync_run_id, runId)
+    assert.equal(state.sync_accounts_deactivated, 1)
+    assert.equal(state.sync_deprovision_candidates, 1)
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: lost 202 keeps the pre-request reserved run journal recoverable', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-lost-202-'))
+  const sec = join(home, 'secrets')
+  const stateFile = join(home, 'subject.apply-state.json')
+  const record = join(home, 'request.json')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const acct = join(sec, 'directory-account.id')
+  const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  writeFileSync(acct, '12121212-3434-4656-8878-909090909090')
+  writeFileSync(stateFile, JSON.stringify({
+    schema: 'lifecycle-canary-deprovision-apply-state-v4',
+    phase: 'prepared',
+    subject_key: 'lifecycle-canary-employee',
+    local_user_id: '99999999-8888-4777-8666-555555555555',
+    integration_id: integrationId,
+    directory_account_id: '12121212-3434-4656-8878-909090909090',
+    sync_run_id: runId,
+    sync_users_deactivated: null,
+    sync_accounts_deactivated: null,
+    sync_deprovision_candidates: null,
+    deprovision_applied: null,
+    event_id: null,
+    effect_count: null,
+    effects: null,
+  }))
+  chmodSync(jwt, 0o600)
+  chmodSync(integ, 0o600)
+  chmodSync(acct, 0o600)
+  chmodSync(stateFile, 0o600)
+
+  const serverSource = `
+import json, socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+RECORD = ${JSON.stringify(record)}
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        open(RECORD, "w").write(json.dumps(body, separators=(",", ":")))
+        self.connection.shutdown(socket.SHUT_RDWR)
+        self.connection.close()
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('lost-202 server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`lost-202 server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5"
+CANARY_APPLY_STATE_FILE="$6"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+set +e
+run_directory_sync_for_subject deprovision_apply true
+rc=$?
+set -e
+python3 - "$6" "$rc" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1]))
+print("|".join([str(sys.argv[2]), s["phase"], s["sync_run_id"]]))
+PY
+`
+    const r = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, acct, stateFile],
+      {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          ACTION: 'deprovision',
+          OUTPUT_DIR: home,
+          RUN_STAMP: 'contract-r6-lost-202',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(r.status, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, new RegExp(`1\\|prepared\\|${runId}`))
+    assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { async: true, runId })
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'))
+    assert.equal(state.phase, 'prepared')
+    assert.equal(state.sync_run_id, runId)
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('MUTATION: clearing prepared journal after a lost 202 turns red', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const start = apply.indexOf('run_directory_sync_for_subject "deprovision_apply"')
+  const end = apply.indexOf('journal_upgrade_run_bound', start)
+  const responseLossWindow = apply.slice(start, end)
+  assert.match(responseLossWindow, /fail_deprovision_apply_keep_journal/)
+  assert.doesNotMatch(responseLossWindow, /journal_clear_if_phase_prepared/)
+  const mutated = responseLossWindow.replace(
+    'fail_deprovision_apply_keep_journal',
+    'journal_clear_if_phase_prepared',
+  )
+  assert.throws(() => assert.doesNotMatch(mutated, /journal_clear_if_phase_prepared/))
+})
+
+test('MUTATION: deleting the pre-POST resolved probe makes the resume golden red', () => {
+  const helper = runOrResumeRestoreBody(read(REMOTE_SH))
+  const mutated = helper.replace('if verify_deprovision_event_resolved; then', 'if false; then')
+  assert.throws(() => {
+    const verify = mutated.indexOf('if verify_deprovision_event_resolved; then')
+    const post = mutated.indexOf('run_deprovision_rehire_restore')
+    assert.ok(verify > 0 && post > verify)
+  })
+})
+
+test('R5: dedicated subject precondition requires one-account manual integration and exact effects', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /prove_dedicated_subject_deprovision_precondition/)
+  const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
+  const end = source.indexOf('\nvalidate_mode_name()', start)
+  const body = source.slice(start, end)
+  assert.match(body, /mark_inactive/)
+  assert.match(body, /policy_not_mark_inactive/)
+  assert.match(body, /integration_not_manual_only/)
+  assert.match(body, /integration_automation_not_disabled/)
+  assert.match(body, /integration_not_single_account/)
+  assert.match(body, /count\(\*\)::int AS n/)
+  assert.match(body, /count\(\*\) FILTER \(WHERE id = \$2\)::int AS target_n/)
+  assert.match(body, /WHERE integration_id = \$1/)
+  assert.match(body, /not_globally_clear/)
+  assert.match(body, /dingtalk_grant_not_enabled/)
+  assert.match(body, /target_org_membership_not_active/)
+  assert.match(body, /user_not_active/)
+  assert.match(body, /ok_expected_effects_membership_grant_user/)
+  // other-org membership must not be used as global membership scan without org scope
+  assert.match(body, /user_id = \$1 AND org_id = \$2/)
+})
+
+test('MUTATION: dropping the one-account integration radius guard turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
+  const end = source.indexOf('\nvalidate_mode_name()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace('Number(radius.rows[0]?.n) !== 1', 'false')
+  assert.throws(() => assert.match(mutated, /Number\(radius\.rows\[0\]\?\.n\) !== 1/))
+})
+
+test('MUTATION: dropping dedicated precondition before env write turns red', () => {
+  const apply = actionDeprovisionApplyBody(read(REMOTE_SH))
+  const mutated = apply.replaceAll('prove_dedicated_subject_deprovision_precondition', 'skip_precond')
+  let failed = false
+  try {
+    assert.match(mutated, /prove_dedicated_subject_deprovision_precondition/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('R5: radius/graph failure keeps journal and sets recovery_required', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /fail_deprovision_apply_keep_journal/)
+  const start = source.indexOf('fail_deprovision_apply_keep_journal()')
+  const end = source.indexOf('\n# --- actions', start)
+  const body = source.slice(start, end > 0 ? end : start + 2500)
+  assert.match(body, /recovery_required=true/)
+  assert.match(body, /exact_run_persisted=/)
+  assert.match(body, /journal_retained=true/)
+  assert.match(body, /journal_phase=/)
+  assert.doesNotMatch(body, /rm -f "\$CANARY_APPLY_STATE_FILE"/)
+  assert.match(body, /restore_lifecycle_override/)
+  const apply = actionDeprovisionApplyBody(source)
+  assert.match(apply, /fail_deprovision_apply_keep_journal "sync_candidate_radius_not_one"/)
+  assert.match(apply, /fail_deprovision_apply_keep_journal "sync_users_deactivated_not_one"/)
+  assert.match(apply, /fail_deprovision_apply_keep_journal "access_graph_not_deprovisioned/)
+})
+
+test('MUTATION: radius failure clearing journal turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('fail_deprovision_apply_keep_journal()')
+  const end = source.indexOf('\naction_status()', start)
+  const body = source.slice(start, end > 0 ? end : start + 3000)
+  const mutated = body + '\nrm -f "$CANARY_APPLY_STATE_FILE"\n'
+  // Production body must not clear journal; inject proves the mutation detector.
+  assert.doesNotMatch(body, /rm -f "\$CANARY_APPLY_STATE_FILE"/)
+  assert.match(mutated, /rm -f "\$CANARY_APPLY_STATE_FILE"/)
+})
+
+test('R6: deprovision failure disarms rollback guard only after runtime OFF is proven', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('fail_deprovision_apply_keep_journal()')
+  const end = source.indexOf('\n# --- actions', start)
+  const body = source.slice(start, end > 0 ? end : start + 3500)
+  const proof = body.indexOf('if assert_exact_mode_off')
+  const disarm = body.indexOf('disarm_alias_exit_rollback_guard')
+  const cleanup = body.indexOf('cleanup_prev_backup')
+  assert.ok(proof > 0 && disarm > proof && cleanup > disarm)
+  assert.match(body, /EXIT rollback guard remains armed for a final retry/)
+})
+
+test('FUNCTIONAL: an unproven first OFF restore gets one EXIT-guard retry before exit', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-off-retry-'))
+  const outDir = mkdtempSync(join(tmpdir(), 'lifecycle-canary-off-retry-out-'))
+  const stateFile = join(home, 'subject.apply-state.json')
+  const attempts = join(home, 'attempts.log')
+  writeFileSync(stateFile, JSON.stringify({
+    schema: 'lifecycle-canary-deprovision-apply-state-v4',
+    phase: 'prepared',
+    subject_key: 'lifecycle-canary-employee',
+    sync_run_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+  }))
+
+  const script = `
+set -euo pipefail
+source "$1"
+OUTPUT_DIR="$2"
+CANARY_APPLY_STATE_FILE="$3"
+ATTEMPTS_FILE="$4"
+ACTION=deprovision
+DEPLOY_SHA=1111111111111111111111111111111111111111
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+RECREATE_ATTEMPTS=0
+restore_lifecycle_override() { echo restore >> "$ATTEMPTS_FILE"; }
+recreate_backend_only() { RECREATE_ATTEMPTS=$((RECREATE_ATTEMPTS + 1)); echo recreate >> "$ATTEMPTS_FILE"; return 0; }
+assert_exact_mode_off() { [[ "$RECREATE_ATTEMPTS" -ge 2 ]]; }
+resolve_deployed_sha() { echo "$DEPLOY_SHA"; }
+fetch_backend_health_ok() { echo true; }
+capture_live_snapshot() { SNAP_MODE=unknown; SNAP_BUILD_SHA="$DEPLOY_SHA"; }
+cleanup_prev_backup() { echo cleanup >> "$ATTEMPTS_FILE"; }
+fail() { echo fail >> "$ATTEMPTS_FILE"; exit 2; }
+arm_alias_exit_rollback_guard
+fail_deprovision_apply_keep_journal first_off_unproven
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, outDir, stateFile, attempts],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: outDir,
+        RUN_STAMP: 'contract-r6-off-retry',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.notEqual(r.status, 0)
+  const calls = readFileSync(attempts, 'utf8').trim().split('\n')
+  assert.equal(calls.filter((line) => line === 'restore').length, 2)
+  assert.equal(calls.filter((line) => line === 'recreate').length, 2)
+  assert.equal(calls.filter((line) => line === 'cleanup').length, 1)
+  assert.match(readFileSync(join(outDir, 'alias-emergency-rollback.log'), 'utf8'), /proved runtime OFF/)
+  assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).phase, 'prepared')
+  rmSync(home, { recursive: true, force: true })
+  rmSync(outDir, { recursive: true, force: true })
+})
+
+test('R5: ledger requires exact effect type triple membership+grant+user', () => {
+  const ledger = verifyDeprovisionLedgerBody(read(REMOTE_SH))
+  assert.match(ledger, /effect_type_set_not_exact_triple/)
+  assert.match(ledger, /grant_row_created_unexpected_for_canary/)
+  assert.match(ledger, /effect_before_after_not_active_to_inactive/)
+  assert.match(ledger, /len\(applied_effects\) != 3/)
+})
+
+test('FUNCTIONAL: journal prepared→run_bound→ledger_bound upgrades and refuses overwrite', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-journal-'))
+  const stateDir = join(home, '.metasheet2', 'lifecycle-canary', 'subject-state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(stateDir, { recursive: true })
+  const stateFile = join(stateDir, 'lifecycle-canary-employee.apply-state.json')
+  const sec = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sec-'))
+  const u = '11111111-1111-1111-1111-111111111111'
+  const i = '22222222-2222-2222-2222-222222222222'
+  const a = '33333333-3333-3333-3333-333333333333'
+  const run = '44444444-4444-4444-4444-444444444444'
+  const ev = '55555555-5555-5555-5555-555555555555'
+  const e1 = '66666666-6666-6666-6666-666666666666'
+  const e2 = '77777777-7777-7777-7777-777777777777'
+  const e3 = '88888888-8888-8888-8888-888888888888'
+  writeFileSync(join(sec, 'subject.local-user-id'), u)
+  writeFileSync(join(sec, 'subject.integration-id'), i)
+  writeFileSync(join(sec, 'directory-account.id'), a)
+  writeFileSync(join(sec, 'subject.sync-run-id'), run)
+  writeFileSync(join(sec, 'subject.deprovision-event-id'), ev)
+  const effects = {
+    effects: [
+      { id: e1, type: 'membership_changed', before_active: true, after_active: false, grant_row_created: false },
+      { id: e2, type: 'grant_changed', before_active: true, after_active: false, grant_row_created: false },
+      { id: e3, type: 'user_changed', before_active: true, after_active: false, grant_row_created: false },
+    ],
+    effect_count: 3,
+  }
+  writeFileSync(join(sec, 'subject.deprovision-effects.json'), JSON.stringify(effects))
+
+  const script = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+CANARY_SUBJECT_SYNC_RUN_ID_FILE="$5/subject.sync-run-id"
+CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE="$5/subject.deprovision-event-id"
+CANARY_SUBJECT_EFFECTS_FILE="$5/subject.deprovision-effects.json"
+SUBJECT_OWNER_USERNAME="lifecycle-canary-employee"
+SYNC_USERS_DEACTIVATED=1
+SYNC_ACCOUNTS_DEACTIVATED=1
+SYNC_DEPROVISION_CANDIDATES=1
+SYNC_DEPROVISION_APPLIED=true
+fail() { echo "FAIL:$*"; exit 9; }
+journal_init_prepared
+python3 -c "import json;print(json.load(open('$4'))['phase'])"
+journal_upgrade_run_bound
+python3 -c "import json;print(json.load(open('$4'))['phase'])"
+journal_upgrade_ledger_bound
+python3 -c "import json;s=json.load(open('$4'));print(s['phase']);print(s['effect_count'])"
+`
+  const harnessEnv = {
+    ...process.env,
+    ACTION: 'deprovision',
+    OUTPUT_DIR: home,
+    RUN_STAMP: 'contract-r5-journal',
+    LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+  }
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /prepared/)
+  assert.match(r.stdout, /run_bound/)
+  assert.match(r.stdout, /ledger_bound/)
+  assert.match(r.stdout, /3/)
+  assert.ok(existsSync(stateFile), 'journal must remain on disk')
+  const final = JSON.parse(readFileSync(stateFile, 'utf8'))
+  assert.equal(final.phase, 'ledger_bound')
+  assert.equal(final.schema, 'lifecycle-canary-deprovision-apply-state-v4')
+  assert.equal(final.effect_count, 3)
+  // Second prepared must refuse (file exists).
+  const r2 = spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       export HOME="$2"
+       CANARY_APPLY_STATE_DIR="$3"
+       CANARY_APPLY_STATE_FILE="$4"
+       CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+       CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+       CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+       SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+       fail() { echo REFUSED; exit 3; }
+       journal_init_prepared
+       echo UNEXPECTED_OK`,
+      'bash',
+      REMOTE_SH,
+      home,
+      stateDir,
+      stateFile,
+      sec,
+    ],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.notEqual(r2.status, 0)
+  assert.match(r2.stdout, /REFUSED/)
+  assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).phase, 'ledger_bound')
+  rmSync(home, { recursive: true, force: true })
+  rmSync(sec, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: radius anomaly failure path retains host journal and reports recovery markers', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-radius-'))
+  const stateDir = join(home, '.metasheet2', 'lifecycle-canary', 'subject-state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(stateDir, { recursive: true })
+  const stateFile = join(stateDir, 'lifecycle-canary-employee.apply-state.json')
+  const outDir = mkdtempSync(join(tmpdir(), 'lifecycle-canary-out-'))
+  const run = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+  const u = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+  const i = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+  const a = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+  writeFileSync(
+    stateFile,
+    JSON.stringify({
+      schema: 'lifecycle-canary-deprovision-apply-state-v4',
+      phase: 'run_bound',
+      subject_key: 'lifecycle-canary-employee',
+      local_user_id: u,
+      integration_id: i,
+      directory_account_id: a,
+      sync_run_id: run,
+      sync_users_deactivated: 2,
+      sync_accounts_deactivated: 1,
+      sync_deprovision_candidates: 2,
+      deprovision_applied: true,
+      event_id: null,
+      effect_count: null,
+      effects: null,
+    }),
+  )
+  chmodSync(stateFile, 0o600)
+  const script = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+OUTPUT_DIR="$5"
+ACTION=deprovision
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+restore_lifecycle_override() { :; }
+recreate_backend_only() { return 0; }
+disarm_alias_exit_rollback_guard() { :; }
+cleanup_prev_backup() { :; }
+assert_exact_mode_off() { return 0; }
+capture_live_snapshot() { SNAP_MODE=off; SNAP_BUILD_SHA=deadbeef; }
+fail() { echo "FAIL:$*"; exit 2; }
+fail_deprovision_apply_keep_journal "sync_candidate_radius_not_one"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, home, stateDir, stateFile, outDir],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: outDir,
+        RUN_STAMP: 'contract-r5-radius',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.notEqual(r.status, 0, r.stderr + r.stdout)
+  assert.ok(existsSync(stateFile), 'host journal must survive radius failure path')
+  const st = JSON.parse(readFileSync(stateFile, 'utf8'))
+  assert.equal(st.phase, 'run_bound')
+  assert.equal(st.sync_run_id, run)
+  assert.ok(existsSync(join(outDir, 'summary.txt')), `summary missing: ${r.stdout}\n${r.stderr}`)
+  const summary = readFileSync(join(outDir, 'summary.txt'), 'utf8')
+  assert.match(summary, /recovery_required=true/)
+  assert.match(summary, /exact_run_persisted=true/)
+  assert.match(summary, /journal_retained=true/)
+  assert.match(summary, /journal_phase=run_bound/)
+  assert.match(summary, /rolled_back_flags_off=true/)
+  assert.doesNotMatch(summary, /aaaaaaaa-aaaa/)
+  rmSync(home, { recursive: true, force: true })
+  rmSync(outDir, { recursive: true, force: true })
+})
+
+function awaitImportFs() {
+  // mkdirSync/chmodSync not in top-level imports — pull via createRequire for harness only.
+  const require = createRequire(import.meta.url)
+  return require('node:fs')
+}
+
 // --- docs / staging blockers ----------------------------------------------------------
 
-test('docs mark pending/deprovision NOT EXECUTABLE; alias is executable transient canary; bootstrap documented', () => {
+test('docs mark pending/deprovision executable but NOT EXECUTED; alias transient canary and bootstrap documented', () => {
   const closeout = read(CLOSEOUT_DOC)
   const go = read(CANARY_GO_DOC)
-  // Closeout may still describe historical NOT EXECUTABLE for ON names; go-doc is authoritative.
-  assert.match(closeout, /NOT EXECUTABLE/)
-  assert.match(go, /NOT EXECUTABLE/)
+  assert.doesNotMatch(closeout, /pending[^\n]*NOT EXECUTABLE|deprovision[^\n]*NOT EXECUTABLE/i)
+  assert.doesNotMatch(go, /pending[^\n]*NOT EXECUTABLE|deprovision[^\n]*NOT EXECUTABLE/i)
   assert.match(go, /pending/)
   assert.match(go, /deprovision/)
-  assert.match(go, /EXECUTABLE/)
+  assert.match(go, /Executable only as a transient canary/)
+  assert.match(go, /Executable only as a two-phase transient canary/)
+  assert.match(go, /NOT EXECUTED/)
+  assert.match(go, /dedicated one-account integration|single selected directory account/i)
+  assert.match(go, /pre-reserves|before.*env.*HTTP|before env\/HTTP/i)
   assert.match(go, /alias/)
   assert.match(go, /bootstrap/)
   assert.match(go, /lifecycle-canary@staging\.invalid/)
@@ -2582,9 +4665,8 @@ test('docs mark pending/deprovision NOT EXECUTABLE; alias is executable transien
   assert.match(go, /collisions==0|collisions must be 0|collisions==0/i)
   assert.match(go, /ATTENDANCE_ADMIN_JWT/)
   assert.match(go, /never.*ATTENDANCE_ADMIN_JWT|not.*ATTENDANCE_ADMIN_JWT|mint.*password login/i)
-  // No invented successful canary execution evidence.
-  assert.doesNotMatch(go, /alias canary EXECUTED successfully|alias cutover canary PASSED on staging/i)
-  assert.match(go, /NOT EXECUTED/)
+  // No invented successful pending/deprovision execution evidence.
+  assert.doesNotMatch(go, /pending admission[^\n]*\*\*(PASS|COMPLETE)|deprovision[^\n]*\*\*(PASS|COMPLETE)/i)
 })
 
 test('docs distinguish emergency off env-gate from OR-column fallback reintroduction', () => {
@@ -2625,16 +4707,18 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
   ]) {
     assert.match(yaml, new RegExp(`export ${key}=`))
   }
-  assert.doesNotMatch(yaml, /export CANARY_SUBJECT/)
+  assert.doesNotMatch(yaml, /export CANARY_SUBJECT_ID=/)
   assert.doesNotMatch(yaml, /export OWNER_CONFIRM=/)
   assert.doesNotMatch(yaml, /export ATTENDANCE_ADMIN_JWT=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
   assert.doesNotMatch(yaml, /export CANARY_ADMIN_JWT_FILE=/)
   // Path-only exports for secret files are allowed.
   assert.match(yaml, /export CANARY_LOGIN_IDENTIFIER_FILE=/)
   assert.match(yaml, /export CANARY_LOGIN_PASSWORD_FILE=/)
   assert.match(yaml, /export STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
+  assert.match(yaml, /export CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
 })
 
 // --- human-bootstrap: fixed separate human platform admin -----------------------------

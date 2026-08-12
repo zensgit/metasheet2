@@ -47,21 +47,33 @@
 #                cutover-status ready → write alias ON → recreate backend only →
 #                post-ON login → restore OFF → recreate → post-rollback login.
 #                Backfill rows may persist.
-#
-# NOT EXECUTABLE (fail-closed preflight-only; transition_applied always false):
-#   pending / deprovision
-#     Env flips alone are NOT a canary. There is no secret-backed real verifier
-#     for admit→activate or sync→deprovision. Presence tokens must not pretend
-#     to drive those paths.
+#   pending    — TRANSIENT secret-backed pending-admit canary on an EXPLICIT
+#                owned directory account subject (file path only; never printed).
+#                Requires full deploy SHA, expected_current_mode=off, health true,
+#                migrations zero, canary login secrets, and
+#                CANARY_DIRECTORY_ACCOUNT_ID_FILE. Temporarily enables only
+#                DIRECTORY_PENDING_ACTIVATION_ENABLED, real admin admit, pending
+#                state assertions, optional activate path, then unconditional
+#                rollback/recreate/prove OFF (success/failure/interrupt).
+#                No auto-selection of directory accounts.
+#   deprovision — TRANSIENT secret-backed sync→deprovision canary on the SAME
+#                explicit owned subject. Never mutates a real/auto-selected
+#                account. Requires subject file + confirmation that the DingTalk
+#                source employee was disabled externally. Temporarily enables
+#                only DIRECTORY_DEPROVISION_ENABLED, runs real integration sync,
+#                verifies ledger/effects/generation/access denial, then
+#                restore/prove OFF. Full source rehire/reactivate restore is an
+#                EXTERNAL phase (fail-closed note; not claimed by this action).
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
 #   * migrations_pending_zero must be exactly "true" for preflight_ok and for
-#     action=off / action=alias / action=bootstrap / action=human-bootstrap
-#     (unknown is a fail, never treated as success).
-#   * action=off|alias: recreate backend only; prove postgres/redis IDs unchanged;
-#     require backend health true after restart; prove exact mode; restore
-#     previous override and re-recreate on any failure after the write.
+#     action=off / action=alias / action=bootstrap / action=human-bootstrap /
+#     action=pending / action=deprovision (unknown is a fail, never success).
+#   * action=off|alias|pending|deprovision: recreate backend only; prove
+#     postgres/redis IDs unchanged; require backend health true after restart;
+#     prove exact mode; restore previous/OFF override and re-recreate on any
+#     failure after the write. EXIT/signal guard armed in ON window.
 #   * action=bootstrap|human-bootstrap: no lifecycle env write; no backend recreate.
 #   * multi-on: status/preflight report and fail closed; action=off still clears
 #     the exact three flags (does not die in derive_mode before clear).
@@ -87,14 +99,17 @@ RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
 
 # Secret-backed canary inputs: FILE PATHS only (values never exported).
 # Workflow materializes chmod-600 identifier/password into the per-run remote dir.
-# Alias mints CANARY_ADMIN_JWT_FILE after successful pre-login (never from
-# secrets.ATTENDANCE_ADMIN_JWT). Bootstrap does not consume a JWT file.
+# Alias/pending/deprovision mint CANARY_ADMIN_JWT_FILE after successful pre-login
+# (never from secrets.ATTENDANCE_ADMIN_JWT). Bootstrap does not consume a JWT file.
 # human-bootstrap mints JWT from canary login for admin API, and consumes a
 # separate STAGING_OWNER_ADMIN_PASSWORD_FILE for the human admin password only.
+# pending/deprovision require CANARY_DIRECTORY_ACCOUNT_ID_FILE (explicit owned
+# directory account UUID path only — never auto-selected, never printed).
 CANARY_ADMIN_JWT_FILE="${CANARY_ADMIN_JWT_FILE:-}"
 CANARY_LOGIN_IDENTIFIER_FILE="${CANARY_LOGIN_IDENTIFIER_FILE:-}"
 CANARY_LOGIN_PASSWORD_FILE="${CANARY_LOGIN_PASSWORD_FILE:-}"
 STAGING_OWNER_ADMIN_PASSWORD_FILE="${STAGING_OWNER_ADMIN_PASSWORD_FILE:-}"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}"
 
 # Fixed dedicated lifecycle canary admin ownership markers (values-free constants).
 # Create/repair ONLY this (email, id) pair. Any email/id collision that does not
@@ -108,9 +123,24 @@ CANARY_OWNER_USER_ID="6c1fe000-ca0a-4000-8000-1ec0c1e00001"
 HUMAN_OWNER_USERNAME="staging-owner-admin"
 HUMAN_OWNER_NAME="Staging Owner Admin"
 
-# Intentionally ignored: not a real verifier path. Kept empty so accidental
-# exports cannot be mistaken for canary completion evidence.
-# CANARY_SUBJECT_ID / CANARY_INTEGRATION_ID / OWNER_CONFIRM are NOT used.
+# Fixed dedicated DingTalk directory subject ownership markers (values-free).
+# pending/deprovision operate ONLY on the secret-backed account id whose live
+# directory account name matches SUBJECT_OWNER_NAME. Username is the stable
+# local admit identifier (not printed in artifacts). No auto-selection.
+SUBJECT_OWNER_NAME="Lifecycle Canary Employee"
+SUBJECT_OWNER_USERNAME="lifecycle-canary-employee"
+DEPROVISION_SOURCE_CONFIRMATION="DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED"
+DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"
+PENDING_SSO_ACTIVATE_CONFIRMATION="PENDING_SSO_ACTIVATE"
+# Optional subject password file (path only). When present, deprovision may prove
+# pre-login then post-denial with the SAME proven credential. Never invent a wrong
+# password as denial evidence.
+CANARY_SUBJECT_PASSWORD_FILE="${CANARY_SUBJECT_PASSWORD_FILE:-}"
+CANARY_SUBJECT_SYNC_RUN_ID_FILE="${CANARY_SUBJECT_SYNC_RUN_ID_FILE:-}"
+CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE="${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE:-}"
+
+# Legacy presence-token names are intentionally NOT env-driven enablers.
+# Subject identity is path-only via CANARY_DIRECTORY_ACCOUNT_ID_FILE.
 
 BACKEND_CONTAINER="metasheet-staging-backend"
 WEB_CONTAINER="metasheet-staging-web"
@@ -150,13 +180,31 @@ fi
 
 LIFECYCLE_PERSIST_DIR="${HOME}/.metasheet2/lifecycle-canary"
 LIFECYCLE_OVERRIDE_FILE="${LIFECYCLE_PERSIST_DIR}/docker-compose.lifecycle-canary.override.yml"
-# Previous-override backup used during action=off|alias for restore-on-failure
-# (alias success path also restores OFF to prove rollback; failure restores first).
+# Previous-override backup used during action=off|alias|pending|deprovision for
+# restore-on-failure (alias/pending/deprovision success paths also restore OFF).
 LIFECYCLE_PREV_BACKUP=""
 LIFECYCLE_PREV_STATE="absent" # absent | present
 PINNED_IMAGE_OWNER=""
 PINNED_IMAGE_TAG=""
 ALIAS_ROLLBACK_ARMED="false"
+# Subject-local ephemeral secret files written under the per-run secrets dir
+# (local user id / temp password). Never logged; cleaned with secrets dir.
+CANARY_SUBJECT_LOCAL_USER_ID_FILE=""
+CANARY_SUBJECT_TEMP_PASSWORD_FILE=""
+CANARY_SUBJECT_INTEGRATION_ID_FILE=""
+# Host-persisted recovery journal for cross-run restore (mode 600). Keyed by
+# fixed SUBJECT_OWNER_USERNAME. Schema v4 state machine (unidirectional):
+#   prepared → run_bound → ledger_bound → (clear after successful restore)
+# Binds subject_key + local_user_id + integration_id + directory_account_id;
+# prepared also reserves exact run UUID; run_bound adds terminal counts;
+# ledger_bound adds exact event/effects.
+# Survives per-run secret cleanup. Deleted only after successful restore.
+CANARY_APPLY_STATE_DIR="${HOME}/.metasheet2/lifecycle-canary/subject-state"
+CANARY_APPLY_STATE_FILE="${CANARY_APPLY_STATE_DIR}/${SUBJECT_OWNER_USERNAME}.apply-state.json"
+CANARY_SUBJECT_EFFECTS_FILE=""
+JOURNAL_PHASE="none"
+# Dedicated canary expected effect type set (planner mark_inactive + grant enabled + global clear).
+CANARY_EXPECTED_EFFECT_TYPES="grant_changed membership_changed user_changed"
 
 is_truthy() {
   local v
@@ -448,6 +496,38 @@ require_staging_owner_admin_password_file() {
   [[ -f "$path" ]] || fail "action=${context} secret file missing for STAGING_OWNER_ADMIN_PASSWORD_FILE"
   [[ -s "$path" ]] || fail "action=${context} secret file empty for STAGING_OWNER_ADMIN_PASSWORD_FILE"
   log "${context} staging owner admin password file present (path only; values never logged)"
+}
+
+require_canary_directory_account_id_file() {
+  # Explicit owned directory account subject path only — never auto-select.
+  local path="${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}"
+  local context="${1:-pending}"
+  [[ -n "$path" ]] || fail "action=${context} requires CANARY_DIRECTORY_ACCOUNT_ID_FILE (chmod-600 secret file path); no auto-selection"
+  [[ -f "$path" ]] || fail "action=${context} secret file missing for CANARY_DIRECTORY_ACCOUNT_ID_FILE"
+  [[ -s "$path" ]] || fail "action=${context} secret file empty for CANARY_DIRECTORY_ACCOUNT_ID_FILE"
+  # Shape-only check inside python; value never printed.
+  local shape
+  shape="$(
+    python3 - "$path" <<'PY'
+import pathlib, re, sys
+try:
+    raw = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8").strip()
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if not raw:
+    print("false|empty_subject")
+    raise SystemExit(0)
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw):
+    print("false|subject_not_uuid")
+    raise SystemExit(0)
+print("true|ok")
+PY
+  )"
+  if [[ "${shape%%|*}" != "true" ]]; then
+    fail "action=${context} refused: directory account subject file invalid (${shape#*|}); values never logged"
+  fi
+  log "${context} directory account subject file present (path only; values never logged; no auto-selection)"
 }
 
 # Identifier secret file (app trim) must equal the fixed ownership email marker.
@@ -925,17 +1005,19 @@ PY
 }
 
 # Admin API via JWT file. Prints values-free result lines; never logs token.
-# Usage: admin_api_request METHOD PATH
+# Usage: admin_api_request METHOD PATH [optional_json_body_file]
+# When body file is set, POST/PATCH send exact file bytes (never logged).
+# When body file empty and method is POST, send {}.
 # stdout on transport success: HTTP_CODE\nBODY
 admin_api_request() {
-  local method="$1" path="$2"
-  python3 - "$CANARY_ADMIN_JWT_FILE" "$STAGING_API_BASE_URL" "$method" "$path" <<'PY'
+  local method="$1" path="$2" body_file="${3:-}"
+  python3 - "$CANARY_ADMIN_JWT_FILE" "$STAGING_API_BASE_URL" "$method" "$path" "$body_file" <<'PY'
 import pathlib
 import sys
 import urllib.error
 import urllib.request
 
-jwt_path, base, method, path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+jwt_path, base, method, path, body_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 try:
     token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
 except Exception:
@@ -945,19 +1027,30 @@ if not token:
     sys.stderr.write("admin jwt file empty\n")
     raise SystemExit(2)
 url = base.rstrip("/") + path
-data = b"{}" if method.upper() == "POST" else None
+method_u = method.upper()
+data = None
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/json",
+}
+if body_file:
+    try:
+        data = pathlib.Path(body_file).read_bytes()
+    except Exception:
+        sys.stderr.write("admin api body file read failed\n")
+        raise SystemExit(2)
+    headers["Content-Type"] = "application/json"
+elif method_u == "POST":
+    data = b"{}"
+    headers["Content-Type"] = "application/json"
 req = urllib.request.Request(
     url,
     data=data,
-    headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    },
-    method=method.upper(),
+    headers=headers,
+    method=method_u,
 )
 try:
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:
         body = resp.read().decode("utf-8", errors="replace")
         code = int(resp.getcode())
 except urllib.error.HTTPError as e:
@@ -1405,6 +1498,2419 @@ print(("true" if ready is True else "false") + "|" + ("true" if can is True else
   return 0
 }
 
+# --- pending / deprovision subject helpers (secret-file paths only) --------------------
+# All helpers emit values-free reason enums / booleans / counts. Subject ids, integration
+# ids, user ids, and temp passwords stay only in chmod-600 files under the per-run
+# secrets directory and are never logged or written to artifacts.
+
+_subject_secret_dir() {
+  local base="${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-${CANARY_LOGIN_PASSWORD_FILE:-}}"
+  [[ -n "$base" ]] || fail "subject secret dir: no secret file base path"
+  dirname "$base"
+}
+
+# Load GET /api/admin/directory/accounts/:id for the explicit subject file.
+# Sets SUBJECT_* booleans/enums only; writes integration/local-user id files when present.
+# SUBJECT_NOTE is a reason enum on failure paths.
+load_canary_directory_subject() {
+  local context="${1:-pending}"
+  SUBJECT_OK="false"
+  SUBJECT_NOTE="unset"
+  SUBJECT_PROVIDER_OK="false"
+  SUBJECT_NAME_OK="false"
+  SUBJECT_ACTIVE="false"
+  SUBJECT_LINK_STATUS="unknown"
+  SUBJECT_HAS_LOCAL_USER="false"
+  SUBJECT_LOCAL_USERNAME_OK="false"
+  SUBJECT_LOCAL_NAME_OK="false"
+  CANARY_SUBJECT_INTEGRATION_ID_FILE=""
+  CANARY_SUBJECT_LOCAL_USER_ID_FILE=""
+
+  local sec_dir result
+  sec_dir="$(_subject_secret_dir)"
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" \
+      "$SUBJECT_OWNER_NAME" \
+      "$SUBJECT_OWNER_USERNAME" \
+      "$sec_dir" <<'PY'
+import json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, acct_path, owner_name, owner_username, sec_dir = sys.argv[1:7]
+
+def emit(parts):
+    print("|".join(parts))
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    account_id = pathlib.Path(acct_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit(["false", "secret_file_read_failed", "false", "false", "false", "unknown", "false", "false", "false"])
+if not token:
+    emit(["false", "admin_jwt_empty", "false", "false", "false", "unknown", "false", "false", "false"])
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", account_id):
+    emit(["false", "subject_not_uuid", "false", "false", "false", "unknown", "false", "false", "false"])
+
+url = base.rstrip("/") + "/api/admin/directory/accounts/" + urllib.parse.quote(account_id, safe="")
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, method="GET")
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit(["false", f"account_http_{int(e.code)}", "false", "false", "false", "unknown", "false", "false", "false"])
+except Exception:
+    emit(["false", "account_transport_failed", "false", "false", "false", "unknown", "false", "false", "false"])
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit(["false", "account_bad_json", "false", "false", "false", "unknown", "false", "false", "false"])
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit(["false", f"account_http_{code}", "false", "false", "false", "unknown", "false", "false", "false"])
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+account = data.get("account") if isinstance(data.get("account"), dict) else {}
+if not account:
+    emit(["false", "account_missing", "false", "false", "false", "unknown", "false", "false", "false"])
+
+provider = str(account.get("provider") or "").strip().lower()
+name = account.get("name") if isinstance(account.get("name"), str) else ""
+is_active = account.get("isActive") is True
+link_status = str(account.get("linkStatus") or "unknown")
+integration_id = str(account.get("integrationId") or "").strip()
+external_user_id = str(account.get("externalUserId") or "").strip()
+local_user = account.get("localUser") if isinstance(account.get("localUser"), dict) else None
+local_id = str(local_user.get("id") or "").strip() if local_user else ""
+local_username = str(local_user.get("username") or "").strip() if local_user else ""
+local_name = str(local_user.get("name") or "") if local_user else ""
+
+provider_ok = "true" if provider == "dingtalk" else "false"
+name_ok = "true" if name == owner_name else "false"
+active = "true" if is_active else "false"
+has_local = "true" if local_id else "false"
+local_username_ok = "true" if local_username.lower() == owner_username.lower() else "false"
+local_name_ok = "true" if local_name == owner_name else "false"
+
+if name_ok != "true":
+    emit(["false", "subject_name_not_owned", provider_ok, name_ok, active, link_status, has_local, local_username_ok, local_name_ok])
+if provider_ok != "true":
+    emit(["false", "subject_provider_not_dingtalk", provider_ok, name_ok, active, link_status, has_local, local_username_ok, local_name_ok])
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", integration_id):
+    emit(["false", "integration_id_missing", provider_ok, name_ok, active, link_status, has_local, local_username_ok, local_name_ok])
+if not external_user_id:
+    emit(["false", "external_user_id_missing", provider_ok, name_ok, active, link_status, has_local, local_username_ok, local_name_ok])
+
+sec = pathlib.Path(sec_dir)
+sec.mkdir(parents=True, exist_ok=True)
+integ_path = sec / "subject.integration-id"
+integ_path.write_bytes(integration_id.encode("utf-8"))
+os.chmod(integ_path, 0o600)
+# External user id for values-free subject match against sync/preview samples (never logged).
+ext_path = sec / "subject.external-user-id"
+ext_path.write_bytes(external_user_id.encode("utf-8"))
+os.chmod(ext_path, 0o600)
+local_path = ""
+if local_id:
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", local_id):
+        emit(["false", "local_user_id_invalid", provider_ok, name_ok, active, link_status, has_local, local_username_ok, local_name_ok])
+    lp = sec / "subject.local-user-id"
+    lp.write_bytes(local_id.encode("utf-8"))
+    os.chmod(lp, 0o600)
+    local_path = str(lp)
+
+# stdout: ok|note|provider_ok|name_ok|active|link|has_local|local_user_ok|local_name_ok|integ_file|local_file
+print("|".join([
+    "true", "ok", provider_ok, name_ok, active, link_status, has_local,
+    local_username_ok, local_name_ok, str(integ_path), local_path,
+]))
+PY
+  )" || {
+    SUBJECT_NOTE="python_failed"
+    log "load subject failed (python); values never logged"
+    return 1
+  }
+
+  local ok note rest
+  ok="${result%%|*}"
+  rest="${result#*|}"
+  note="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_PROVIDER_OK="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_NAME_OK="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_ACTIVE="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_LINK_STATUS="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_HAS_LOCAL_USER="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_LOCAL_USERNAME_OK="${rest%%|*}"
+  rest="${rest#*|}"
+  SUBJECT_LOCAL_NAME_OK="${rest%%|*}"
+  rest="${rest#*|}"
+  CANARY_SUBJECT_INTEGRATION_ID_FILE="${rest%%|*}"
+  CANARY_SUBJECT_LOCAL_USER_ID_FILE="${rest#*|}"
+  SUBJECT_NOTE="$note"
+  if [[ "$ok" != "true" ]]; then
+    SUBJECT_OK="false"
+    log "load subject refused (${context}): note=${note} link=${SUBJECT_LINK_STATUS} active=${SUBJECT_ACTIVE}"
+    return 1
+  fi
+  SUBJECT_OK="true"
+  log "subject loaded (${context}): owned name/provider ok; link=${SUBJECT_LINK_STATUS} active=${SUBJECT_ACTIVE} has_local=${SUBJECT_HAS_LOCAL_USER} (ids never logged)"
+  return 0
+}
+
+# POST /api/admin/directory/accounts/:id/admit-user under pending mode.
+# Body uses fixed owned username + owned name only (no email/mobile/password).
+# enableDingTalkGrant=false is intentional for pending_activation (server also forces
+# grant off while DIRECTORY_PENDING_ACTIVATION_ENABLED). DingTalk OAuth grant is
+# exercised only in PENDING_SSO_ACTIVATE (mode=sso + enableDingTalkGrant=true).
+# Writes local user id file on success. Sets ADMIT_OK / ADMIT_NOTE / ADMIT_ACTIVATION_STATUS.
+run_pending_admit() {
+  local sec_dir body_file result
+  ADMIT_OK="false"
+  ADMIT_NOTE="unset"
+  ADMIT_ACTIVATION_STATUS="unknown"
+  sec_dir="$(_subject_secret_dir)"
+  body_file="$(mktemp "${sec_dir}/admit.body.XXXXXX")"
+  chmod 600 "$body_file"
+  # Fixed owned markers only — no PII from directory account email/mobile.
+  python3 - "$body_file" "$SUBJECT_OWNER_NAME" "$SUBJECT_OWNER_USERNAME" <<'PY'
+import json, pathlib, sys
+path, name, username = sys.argv[1], sys.argv[2], sys.argv[3]
+pathlib.Path(path).write_bytes(json.dumps({
+    "name": name,
+    "username": username,
+    # Pending admit: grant must stay false until explicit SSO activate phase.
+    "enableDingTalkGrant": False,
+}).encode("utf-8"))
+PY
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" \
+      "$body_file" \
+      "$sec_dir" \
+      "$SUBJECT_OWNER_NAME" \
+      "$SUBJECT_OWNER_USERNAME" <<'PY'
+import json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, acct_path, body_path, sec_dir, owner_name, owner_username = sys.argv[1:8]
+
+def emit(ok, note, activation="unknown"):
+    print(f"{ok}|{note}|{activation}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    account_id = pathlib.Path(acct_path).read_bytes().decode("utf-8").strip()
+    body = pathlib.Path(body_path).read_bytes()
+except Exception:
+    emit("false", "secret_file_read_failed")
+url = base.rstrip("/") + "/api/admin/directory/accounts/" + urllib.parse.quote(account_id, safe="") + "/admit-user"
+req = urllib.request.Request(
+    url,
+    data=body,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"admit_http_{int(e.code)}")
+except Exception:
+    emit("false", "admit_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "admit_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"admit_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+user = data.get("user") if isinstance(data.get("user"), dict) else {}
+activation = str(data.get("activationStatus") or user.get("activationStatus") or "unknown")
+user_id = str(user.get("id") or "").strip()
+user_name = str(user.get("name") or "")
+user_username = str(user.get("username") or "").strip()
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", user_id):
+    emit("false", "admit_missing_user_id", activation)
+if user_name != owner_name:
+    emit("false", "admit_name_mismatch", activation)
+if user_username.lower() != owner_username.lower():
+    emit("false", "admit_username_mismatch", activation)
+if activation != "pending_activation":
+    emit("false", "admit_not_pending_activation", activation)
+lp = pathlib.Path(sec_dir) / "subject.local-user-id"
+lp.write_bytes(user_id.encode("utf-8"))
+os.chmod(lp, 0o600)
+emit("true", "admitted", activation)
+PY
+  )" || {
+    rm -f "$body_file"
+    ADMIT_NOTE="python_failed"
+    return 1
+  }
+  rm -f "$body_file"
+  ADMIT_OK="${result%%|*}"
+  local rest="${result#*|}"
+  ADMIT_NOTE="${rest%%|*}"
+  ADMIT_ACTIVATION_STATUS="${rest#*|}"
+  if [[ "$ADMIT_OK" == "true" ]]; then
+    CANARY_SUBJECT_LOCAL_USER_ID_FILE="$(_subject_secret_dir)/subject.local-user-id"
+    log "pending admit OK activation=${ADMIT_ACTIVATION_STATUS} (ids never logged)"
+    return 0
+  fi
+  log "pending admit refused: note=${ADMIT_NOTE}"
+  return 1
+}
+
+# Assert local user activation/access state via GET /api/admin/users/:id/access.
+# Sets ACCESS_OK ACCESS_IS_ACTIVE ACCESS_ACTIVATION ACCESS_NOTE
+# Profile activation_status + is_active only (not membership/grant). is_active MUST be
+# JSON boolean exactly equal to expected; missing/null/string/unknown all fail closed.
+assert_subject_user_access_state() {
+  local expect_activation="$1" expect_active="$2" context="${3:-pending}"
+  ACCESS_OK="false"
+  ACCESS_IS_ACTIVE="unknown"
+  ACCESS_ACTIVATION="unknown"
+  ACCESS_NOTE="unset"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { ACCESS_NOTE="local_user_id_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - "$CANARY_ADMIN_JWT_FILE" "$STAGING_API_BASE_URL" "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$expect_activation" "$expect_active" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, user_path, exp_act, exp_active = sys.argv[1:6]
+
+def emit(ok, note, is_active="unknown", activation="unknown"):
+    print(f"{ok}|{note}|{is_active}|{activation}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+url = base.rstrip("/") + "/api/admin/users/" + urllib.parse.quote(user_id, safe="") + "/access"
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, method="GET")
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"access_http_{int(e.code)}")
+except Exception:
+    emit("false", "access_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "access_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"access_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+user = data.get("user") if isinstance(data.get("user"), dict) else {}
+if not user:
+    emit("false", "access_user_missing")
+# Strict: is_active must be JSON boolean on user (prefer snake_case, else camelCase).
+# Missing / null / string / number / unknown MUST fail — never coerce.
+if "is_active" in user:
+    is_active = user["is_active"]
+elif "isActive" in user:
+    is_active = user["isActive"]
+else:
+    emit("false", "is_active_missing")
+if type(is_active) is not bool:
+    emit("false", "is_active_not_boolean", "unknown")
+active_s = "true" if is_active is True else "false"
+activation = user.get("activationStatus")
+if activation is None:
+    activation = user.get("activation_status")
+if type(activation) is not str or not activation.strip():
+    emit("false", "activation_missing_or_not_string", active_s, "unknown")
+activation = activation.strip()
+if activation != exp_act:
+    emit("false", "activation_mismatch", active_s, activation)
+if active_s != exp_active:
+    emit("false", "is_active_mismatch", active_s, activation)
+emit("true", "ok", active_s, activation)
+PY
+  )" || {
+    ACCESS_NOTE="python_failed"
+    return 1
+  }
+  ACCESS_OK="${result%%|*}"
+  local rest="${result#*|}"
+  ACCESS_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  ACCESS_IS_ACTIVE="${rest%%|*}"
+  ACCESS_ACTIVATION="${rest#*|}"
+  if [[ "$ACCESS_OK" == "true" ]]; then
+    log "subject access state OK (${context}): activation=${ACCESS_ACTIVATION} is_active=${ACCESS_IS_ACTIVE}"
+    return 0
+  fi
+  log "subject access state refused (${context}): note=${ACCESS_NOTE} activation=${ACCESS_ACTIVATION} is_active=${ACCESS_IS_ACTIVE}"
+  return 1
+}
+
+# Resolve optional subject password path (path only). Prefer explicit
+# CANARY_SUBJECT_PASSWORD_FILE, else subject.temp-password under secret dir.
+resolve_subject_password_file() {
+  if [[ -n "${CANARY_SUBJECT_PASSWORD_FILE:-}" && -s "${CANARY_SUBJECT_PASSWORD_FILE}" ]]; then
+    printf '%s' "$CANARY_SUBJECT_PASSWORD_FILE"
+    return 0
+  fi
+  if [[ -n "${CANARY_SUBJECT_TEMP_PASSWORD_FILE:-}" && -s "${CANARY_SUBJECT_TEMP_PASSWORD_FILE}" ]]; then
+    printf '%s' "$CANARY_SUBJECT_TEMP_PASSWORD_FILE"
+    return 0
+  fi
+  local candidate
+  candidate="$(_subject_secret_dir)/subject.temp-password"
+  if [[ -s "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+# Prove subject password login using SUBJECT_OWNER_USERNAME + password file.
+# Never uses a deliberately wrong password as evidence.
+prove_subject_password_login() {
+  local context="${1:-subject_login}"
+  local pass_file="${2:-}"
+  SUBJECT_LOGIN_OK="false"
+  SUBJECT_LOGIN_NOTE="unset"
+  if [[ -z "$pass_file" ]]; then
+    pass_file="$(resolve_subject_password_file 2>/dev/null || true)"
+  fi
+  [[ -n "$pass_file" && -s "$pass_file" ]] \
+    || { SUBJECT_LOGIN_NOTE="subject_password_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - "$STAGING_API_BASE_URL" "$SUBJECT_OWNER_USERNAME" "$pass_file" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.request
+base, username, pass_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    # Exact subject password bytes (not the canary-admin prove helper line).
+    password = pathlib.Path(pass_path).read_bytes().decode("utf-8", errors="strict")
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if password == "":
+    print("false|empty_password")
+    raise SystemExit(0)
+body = json.dumps({"identifier": username, "password": password}).encode("utf-8")
+req = urllib.request.Request(
+    base.rstrip("/") + "/api/auth/login",
+    data=body,
+    headers={"Content-Type": "application/json", "Accept": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    print(f"false|http_{int(e.code)}")
+    raise SystemExit(0)
+except Exception:
+    print("false|request_failed")
+    raise SystemExit(0)
+try:
+    data = json.loads(raw)
+except Exception:
+    print(f"false|http_{code}_bad_json")
+    raise SystemExit(0)
+token = ""
+if isinstance(data, dict) and isinstance(data.get("data"), dict):
+    token = data["data"].get("token") or ""
+ok = code == 200 and data.get("success") is True and isinstance(token, str) and len(token) > 0
+print("true|ok" if ok else f"false|http_{code}_login_rejected")
+PY
+  )" || {
+    SUBJECT_LOGIN_NOTE="python_failed"
+    return 1
+  }
+  SUBJECT_LOGIN_OK="${result%%|*}"
+  SUBJECT_LOGIN_NOTE="${result#*|}"
+  if [[ "$SUBJECT_LOGIN_OK" == "true" ]]; then
+    CANARY_SUBJECT_TEMP_PASSWORD_FILE="$pass_file"
+    log "subject password login OK (${context})"
+    return 0
+  fi
+  log "subject password login FAILED (${context}): ${SUBJECT_LOGIN_NOTE}"
+  return 1
+}
+
+# Denial proof ONLY with a credential that was just proven to work (same file).
+# Authoritative denial evidence: HTTP 401 or 403 + JSON success=false + auth error
+# string (e.g. Invalid account or password). Transport errors, 5xx, non-auth 4xx,
+# and bad JSON are FAIL — never treated as successful denial.
+prove_subject_login_denied_with_proven_password() {
+  local context="${1:-deprovision}"
+  local pass_file="${2:-${CANARY_SUBJECT_TEMP_PASSWORD_FILE:-}}"
+  LOGIN_DENIED_OK="false"
+  LOGIN_DENIED_NOTE="unset"
+  [[ -n "$pass_file" && -s "$pass_file" ]] \
+    || { LOGIN_DENIED_NOTE="proven_password_file_missing"; return 1; }
+  # Must not claim denial without a positive proof in this process earlier.
+  [[ "${SUBJECT_PASSWORD_PROVEN_OK:-false}" == "true" ]] \
+    || { LOGIN_DENIED_NOTE="password_not_proven_before_denial"; return 1; }
+  local result
+  result="$(
+    python3 - "$STAGING_API_BASE_URL" "$SUBJECT_OWNER_USERNAME" "$pass_file" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.request
+base, username, pass_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    password = pathlib.Path(pass_path).read_bytes().decode("utf-8", errors="strict")
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if password == "":
+    print("false|empty_password")
+    raise SystemExit(0)
+body = json.dumps({"identifier": username, "password": password}).encode("utf-8")
+req = urllib.request.Request(
+    base.rstrip("/") + "/api/auth/login",
+    data=body,
+    headers={"Content-Type": "application/json", "Accept": "application/json"},
+    method="POST",
+)
+raw = ""
+code = 0
+try:
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    code = int(e.code)
+    try:
+        raw = e.read().decode("utf-8", errors="replace")
+    except Exception:
+        print(f"false|http_{code}_body_unreadable")
+        raise SystemExit(0)
+except Exception:
+    print("false|request_failed")
+    raise SystemExit(0)
+# Only 401/403 may count as auth denial. 5xx/other 4xx fail closed.
+if code not in (401, 403):
+    if code == 200:
+        # Fall through to JSON parse — must not have a usable token.
+        pass
+    else:
+        print(f"false|http_{code}_not_auth_denial")
+        raise SystemExit(0)
+try:
+    data = json.loads(raw) if raw else None
+except Exception:
+    print(f"false|http_{code}_bad_json")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print(f"false|http_{code}_bad_json")
+    raise SystemExit(0)
+token = ""
+if isinstance(data.get("data"), dict):
+    token = data["data"].get("token") or ""
+if code == 200 and data.get("success") is True and isinstance(token, str) and len(token) > 0:
+    print("false|login_unexpectedly_succeeded")
+    raise SystemExit(0)
+if code in (401, 403):
+    # Authoritative auth error body from production login route closed set only.
+    # CSRF/gateway/other 401/403 must not false-green.
+    if data.get("success") is not False:
+        print(f"false|http_{code}_missing_success_false")
+        raise SystemExit(0)
+    err = data.get("error")
+    if not isinstance(err, str):
+        print(f"false|http_{code}_missing_auth_error")
+        raise SystemExit(0)
+    # Closed set from packages/core-backend/src/routes/auth.ts login failures.
+    CLOSED_LOGIN_ERRORS = frozenset({
+        "Invalid account or password",
+    })
+    if err in CLOSED_LOGIN_ERRORS:
+        print(f"true|http_{code}_auth_denied")
+        raise SystemExit(0)
+    print(f"false|http_{code}_auth_error_not_in_closed_set")
+    raise SystemExit(0)
+print(f"false|http_{code}_not_auth_denial")
+PY
+  )" || {
+    LOGIN_DENIED_NOTE="python_failed"
+    return 1
+  }
+  LOGIN_DENIED_OK="${result%%|*}"
+  LOGIN_DENIED_NOTE="${result#*|}"
+  if [[ "$LOGIN_DENIED_OK" == "true" ]]; then
+    log "subject proven-password login denied OK (${context}): ${LOGIN_DENIED_NOTE}"
+    return 0
+  fi
+  log "subject proven-password login denial failed (${context}): ${LOGIN_DENIED_NOTE}"
+  return 1
+}
+
+# POST /api/admin/users/:id/activate with mode=sso + enableDingTalkGrant=true.
+# This is the DingTalk lifecycle activation path (grant/deny-row surface). Never
+# temp_password. Browser OAuth negative/positive remain human NOT_EXECUTED.
+run_pending_sso_activate() {
+  local sec_dir body_file result
+  ACTIVATE_OK="false"
+  ACTIVATE_NOTE="unset"
+  sec_dir="$(_subject_secret_dir)"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { ACTIVATE_NOTE="local_user_id_file_missing"; return 1; }
+  body_file="$(mktemp "${sec_dir}/activate.sso.body.XXXXXX")"
+  chmod 600 "$body_file"
+  python3 - "$body_file" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(json.dumps({
+    "mode": "sso",
+    "enableDingTalkGrant": True,
+}).encode("utf-8"))
+PY
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$body_file" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, user_path, body_path, acct_path = sys.argv[1:6]
+
+def emit(ok, note):
+    print(f"{ok}|{note}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+    body = pathlib.Path(body_path).read_bytes()
+    account_id = pathlib.Path(acct_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+try:
+    obj = json.loads(body.decode("utf-8"))
+except Exception:
+    emit("false", "activate_body_bad_json")
+obj["directoryAccountId"] = account_id
+body = json.dumps(obj).encode("utf-8")
+url = base.rstrip("/") + "/api/admin/users/" + urllib.parse.quote(user_id, safe="") + "/activate"
+req = urllib.request.Request(
+    url,
+    data=body,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"activate_http_{int(e.code)}")
+except Exception:
+    emit("false", "activate_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "activate_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"activate_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+activation = str(data.get("activationStatus") or "")
+if activation != "activated":
+    emit("false", "activate_status_not_activated")
+emit("true", "sso_activated")
+PY
+  )" || {
+    rm -f "$body_file"
+    ACTIVATE_NOTE="python_failed"
+    return 1
+  }
+  rm -f "$body_file"
+  ACTIVATE_OK="${result%%|*}"
+  ACTIVATE_NOTE="${result#*|}"
+  if [[ "$ACTIVATE_OK" == "true" ]]; then
+    log "pending SSO activate OK (browser OAuth still NOT_EXECUTED; values never logged)"
+    return 0
+  fi
+  log "pending SSO activate refused: note=${ACTIVATE_NOTE}"
+  return 1
+}
+
+# POST /api/admin/directory/integrations/:id/sync/preview — collateral radius gate.
+# Must run while lifecycle flags are still OFF (no env write yet). Whole-integration
+# preview: require exactly one wouldDeactivateAccount, exactly one
+# wouldDeactivateLinkedAccount, and the sole sampled deactivation externalUserId
+# matches the explicit subject externalUserId (secret-file compare only).
+# Sets PREVIEW_OK PREVIEW_NOTE PREVIEW_WOULD_DEACTIVATE PREVIEW_WOULD_DEACTIVATE_LINKED
+run_deprovision_sync_preview_subject_gate() {
+  PREVIEW_OK="false"
+  PREVIEW_NOTE="unset"
+  PREVIEW_WOULD_DEACTIVATE="0"
+  PREVIEW_WOULD_DEACTIVATE_LINKED="0"
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { PREVIEW_NOTE="integration_id_file_missing"; return 1; }
+  local ext_path
+  ext_path="$(_subject_secret_dir)/subject.external-user-id"
+  [[ -s "$ext_path" ]] || { PREVIEW_NOTE="external_user_id_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$ext_path" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, integ_path, ext_path = sys.argv[1:5]
+
+def emit(ok, note, would="0", linked="0"):
+    print(f"{ok}|{note}|{would}|{linked}")
+    raise SystemExit(0)
+
+def nonneg_int(v, name):
+    if type(v) is not int or v < 0:
+        raise ValueError(name)
+    return v
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+    subject_external = pathlib.Path(ext_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+if not subject_external:
+    emit("false", "subject_external_empty")
+url = (
+    base.rstrip("/")
+    + "/api/admin/directory/integrations/"
+    + urllib.parse.quote(integration_id, safe="")
+    + "/sync/preview"
+)
+req = urllib.request.Request(
+    url,
+    data=b"{}",
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"preview_http_{int(e.code)}")
+except Exception:
+    emit("false", "preview_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "preview_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"preview_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+preview = data.get("preview") if isinstance(data.get("preview"), dict) else data
+if not isinstance(preview, dict):
+    emit("false", "preview_missing")
+try:
+    would = nonneg_int(preview.get("wouldDeactivateAccounts"), "wouldDeactivateAccounts")
+    linked = nonneg_int(preview.get("wouldDeactivateLinkedAccounts"), "wouldDeactivateLinkedAccounts")
+except Exception:
+    emit("false", "preview_counts_malformed")
+if would != 1:
+    emit("false", "would_deactivate_not_exactly_one", str(would), str(linked))
+if linked != 1:
+    emit("false", "would_deactivate_linked_not_exactly_one", str(would), str(linked))
+samples = preview.get("sampledDeactivations")
+if not isinstance(samples, list) or len(samples) != 1:
+    emit("false", "sampled_deactivations_not_exactly_one", str(would), str(linked))
+sample = samples[0] if isinstance(samples[0], dict) else {}
+sample_ext = str(sample.get("externalUserId") or "").strip()
+if not sample_ext:
+    emit("false", "sampled_external_missing", str(would), str(linked))
+# Secret-file compare only — never print either id.
+if sample_ext != subject_external:
+    emit("false", "sampled_external_not_subject", str(would), str(linked))
+if sample.get("linked") is not True:
+    emit("false", "sampled_not_linked", str(would), str(linked))
+emit("true", "ok", "1", "1")
+PY
+  )" || {
+    PREVIEW_NOTE="python_failed"
+    return 1
+  }
+  PREVIEW_OK="${result%%|*}"
+  local rest="${result#*|}"
+  PREVIEW_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  PREVIEW_WOULD_DEACTIVATE="${rest%%|*}"
+  PREVIEW_WOULD_DEACTIVATE_LINKED="${rest#*|}"
+  if [[ "$PREVIEW_OK" == "true" ]]; then
+    log "deprovision sync/preview subject gate OK would_deactivate=1 would_deactivate_linked=1 subject_match=true (ids never logged)"
+    return 0
+  fi
+  log "deprovision sync/preview subject gate refused: note=${PREVIEW_NOTE} would_deactivate=${PREVIEW_WOULD_DEACTIVATE} would_deactivate_linked=${PREVIEW_WOULD_DEACTIVATE_LINKED}"
+  return 1
+}
+
+# POST /api/admin/directory/integrations/:id/sync (sync body {}).
+# Captures exact synchronous run.id into a secret file (never printed).
+# For deprovision-apply context: requires deprovisionApplied === true.
+# Sets SYNC_OK SYNC_NOTE SYNC_DEPROVISION_APPLIED SYNC_USERS_DEACTIVATED
+# SYNC_ACCOUNTS_DEACTIVATED SYNC_DEPROVISION_CANDIDATES SYNC_RUN_ID_PRESENT
+run_directory_sync_for_subject() {
+  local context="${1:-deprovision}"
+  local require_deprov_applied="${2:-false}"
+  SYNC_OK="false"
+  SYNC_NOTE="unset"
+  SYNC_DEPROVISION_APPLIED="false"
+  SYNC_USERS_DEACTIVATED="0"
+  SYNC_ACCOUNTS_DEACTIVATED="0"
+  SYNC_DEPROVISION_CANDIDATES="0"
+  SYNC_RUN_ID_PRESENT="false"
+  CANARY_SUBJECT_SYNC_RUN_ID_FILE=""
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { SYNC_NOTE="integration_id_file_missing"; return 1; }
+  local sec_dir result
+  sec_dir="$(_subject_secret_dir)"
+  result="$(
+    python3 - "$CANARY_ADMIN_JWT_FILE" "$STAGING_API_BASE_URL" "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$sec_dir" "$require_deprov_applied" "$CANARY_APPLY_STATE_FILE" "$SUBJECT_OWNER_USERNAME" <<'PY'
+import json, os, pathlib, re, sys, time, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, integ_path, sec_dir, require_applied, state_path, subject_key = sys.argv[1:8]
+
+def emit(ok, note, applied="false", users="0", accounts="0", candidates="0", run_present="false"):
+    print(f"{ok}|{note}|{applied}|{users}|{accounts}|{candidates}|{run_present}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+integration_base = base.rstrip("/") + "/api/admin/directory/integrations/" + urllib.parse.quote(integration_id, safe="")
+url = integration_base + "/sync"
+async_apply = require_applied == "true"
+reserved_run_id = ""
+request_body = b"{}"
+if async_apply:
+    try:
+        state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+    except Exception:
+        emit("false", "journal_prepared_state_invalid")
+    reserved_run_id = str(state.get("sync_run_id") or "").strip() if isinstance(state, dict) else ""
+    if (
+        not isinstance(state, dict)
+        or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4"
+        or state.get("phase") not in {"prepared", "run_bound"}
+        or state.get("subject_key") != subject_key
+        or not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", reserved_run_id)
+    ):
+        emit("false", "journal_prepared_state_invalid")
+    request_body = json.dumps(
+        {"async": True, "runId": reserved_run_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+req = urllib.request.Request(
+    url,
+    data=request_body,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"sync_http_{int(e.code)}")
+except Exception:
+    emit("false", "sync_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "sync_bad_json")
+expected_code = 202 if async_apply else 200
+if code != expected_code or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"sync_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+run = data.get("run") if isinstance(data.get("run"), dict) else {}
+if not run and isinstance(data.get("id"), str):
+    run = data
+run_id = str(data.get("runId") if async_apply else (run.get("id") or data.get("runId") or "")).strip()
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", run_id):
+    emit("false", "sync_run_id_missing")
+if async_apply and run_id != reserved_run_id:
+    emit("false", "sync_run_id_mismatch")
+# The run UUID was already persisted in phase=prepared before any env write or HTTP
+# request. Materialize the same value for exact-run polling and ledger verification.
+run_path = pathlib.Path(sec_dir) / "subject.sync-run-id"
+run_path.write_bytes(run_id.encode("utf-8"))
+os.chmod(run_path, 0o600)
+
+if async_apply:
+    # Record only that the reserved run now exists. This is deliberately not named
+    # Terminal status and deprovision outcome are still unknown here.
+    try:
+        state_file = pathlib.Path(state_path)
+        state = json.loads(state_file.read_bytes().decode("utf-8"))
+        if (
+            not isinstance(state, dict)
+            or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4"
+            or state.get("phase") not in {"prepared", "run_bound"}
+            or state.get("subject_key") != subject_key
+            or str(state.get("sync_run_id") or "").strip() != run_id
+        ):
+            emit("false", "journal_prepared_state_invalid", run_present="true")
+        state["phase"] = "run_bound"
+        state["sync_users_deactivated"] = None
+        state["sync_accounts_deactivated"] = None
+        state["sync_deprovision_candidates"] = None
+        state["deprovision_applied"] = None
+        tmp = pathlib.Path(state_path + ".tmp")
+        tmp.write_bytes(json.dumps(state, separators=(",", ":")).encode("utf-8"))
+        os.chmod(tmp, 0o600)
+        tmp.replace(state_file)
+        os.chmod(state_file, 0o600)
+    except SystemExit:
+        raise
+    except Exception:
+        emit("false", "journal_run_bind_failed", run_present="true")
+
+    # Poll the exact async run; never use latest/sole-run inference.
+    deadline = time.monotonic() + 180
+    terminal = None
+    while time.monotonic() < deadline:
+        run_url = integration_base + "/runs/" + urllib.parse.quote(run_id, safe="")
+        poll_req = urllib.request.Request(
+            run_url,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(poll_req, timeout=30) as poll_resp:
+                poll_raw = poll_resp.read().decode("utf-8", errors="replace")
+                poll_code = int(poll_resp.getcode())
+        except urllib.error.HTTPError as e:
+            emit("false", f"sync_poll_http_{int(e.code)}", run_present="true")
+        except Exception:
+            emit("false", "sync_poll_transport_failed", run_present="true")
+        try:
+            poll_payload = json.loads(poll_raw) if poll_raw else {}
+        except Exception:
+            emit("false", "sync_poll_bad_json", run_present="true")
+        if poll_code != 200 or not isinstance(poll_payload, dict) or poll_payload.get("ok") is not True:
+            emit("false", f"sync_poll_http_{poll_code}", run_present="true")
+        poll_data = poll_payload.get("data") if isinstance(poll_payload.get("data"), dict) else {}
+        exact_run = poll_data.get("run") if isinstance(poll_data.get("run"), dict) else None
+        if exact_run is None or str(exact_run.get("id") or "").strip() != run_id:
+            emit("false", "sync_poll_run_mismatch", run_present="true")
+        status = str(exact_run.get("status") or "").strip().lower()
+        if status in {"completed", "failed"}:
+            terminal = exact_run
+            break
+        if status not in {"pending", "running"}:
+            emit("false", "sync_poll_status_invalid", run_present="true")
+        time.sleep(2)
+    if terminal is None:
+        emit("false", "sync_poll_timeout", run_present="true")
+    if str(terminal.get("status") or "").strip().lower() != "completed":
+        emit("false", "sync_run_failed", run_present="true")
+    run = terminal
+
+stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
+if not stats and isinstance(data.get("stats"), dict):
+    stats = data["stats"]
+applied = stats.get("deprovisionApplied")
+applied_s = "true" if applied is True else "false"
+users = stats.get("deprovisionUsersDeactivatedCount")
+accounts = stats.get("accountsDeactivatedCount")
+candidates = stats.get("deprovisionCandidateCount")
+
+def nonneg(v):
+    if type(v) is int and v >= 0:
+        return str(v)
+    return "0"
+
+if require_applied == "true" and applied is not True:
+    # run id already on disk; emit run_present=true so caller upgrades journal.
+    emit("false", "deprovision_not_applied_on_sync", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+
+# Radius notes for apply: emit false WITH run_present=true so recovery journal can bind.
+# Callers must journal phase=run_bound before treating this as terminal.
+if require_applied == "true":
+    if type(candidates) is not int or candidates != 1:
+        emit("false", "sync_candidate_radius_not_one", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+    if type(accounts) is not int or accounts != 1:
+        emit("false", "sync_accounts_deactivated_not_one", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+    if type(users) is not int or users != 1:
+        emit("false", "sync_users_deactivated_not_one", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+
+emit("true", "ok", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+PY
+  )" || {
+    SYNC_NOTE="python_failed"
+    return 1
+  }
+  SYNC_OK="${result%%|*}"
+  local rest="${result#*|}"
+  SYNC_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  SYNC_DEPROVISION_APPLIED="${rest%%|*}"
+  rest="${rest#*|}"
+  SYNC_USERS_DEACTIVATED="${rest%%|*}"
+  rest="${rest#*|}"
+  SYNC_ACCOUNTS_DEACTIVATED="${rest%%|*}"
+  rest="${rest#*|}"
+  SYNC_DEPROVISION_CANDIDATES="${rest%%|*}"
+  SYNC_RUN_ID_PRESENT="${rest#*|}"
+  # Run id file is recovery anchor even when radius counts fail.
+  if [[ "$SYNC_RUN_ID_PRESENT" == "true" ]]; then
+    CANARY_SUBJECT_SYNC_RUN_ID_FILE="${sec_dir}/subject.sync-run-id"
+  fi
+  if [[ "$SYNC_OK" == "true" ]]; then
+    log "directory sync OK (${context}): deprovision_applied=${SYNC_DEPROVISION_APPLIED} users_deactivated=${SYNC_USERS_DEACTIVATED} accounts_deactivated=${SYNC_ACCOUNTS_DEACTIVATED} candidates=${SYNC_DEPROVISION_CANDIDATES} run_id_present=${SYNC_RUN_ID_PRESENT}"
+    return 0
+  fi
+  if [[ "$SYNC_RUN_ID_PRESENT" == "true" ]]; then
+    log "directory sync radius/apply anomaly (${context}): note=${SYNC_NOTE} run_id_persisted=true (recovery journal required; ids never logged)"
+  else
+    log "directory sync refused (${context}): note=${SYNC_NOTE}"
+  fi
+  return 1
+}
+
+# GET deprovision events for subject; require applied event whose run_id equals the
+# exact synchronous sync run.id captured in CANARY_SUBJECT_SYNC_RUN_ID_FILE.
+# Also requires caller already observed deprovisionApplied=true from that sync.
+# Writes matching event id to secret file for restore phase.
+# Sets LEDGER_OK LEDGER_NOTE LEDGER_EVENT_COUNT LEDGER_EFFECT_COUNT LEDGER_GENERATION_PRESENT LEDGER_RUN_MATCH
+verify_deprovision_ledger_for_subject() {
+  LEDGER_OK="false"
+  LEDGER_NOTE="unset"
+  LEDGER_EVENT_COUNT="0"
+  LEDGER_EFFECT_COUNT="0"
+  LEDGER_GENERATION_PRESENT="false"
+  LEDGER_RUN_MATCH="false"
+  CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE=""
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { LEDGER_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { LEDGER_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SUBJECT_SYNC_RUN_ID_FILE}" ]] \
+    || { LEDGER_NOTE="sync_run_id_file_missing"; return 1; }
+  [[ "${SYNC_DEPROVISION_APPLIED:-false}" == "true" ]] \
+    || { LEDGER_NOTE="sync_deprovision_not_applied"; return 1; }
+  local sec_dir result
+  sec_dir="$(_subject_secret_dir)"
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_SUBJECT_SYNC_RUN_ID_FILE" \
+      "$sec_dir" <<'PY'
+import json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, user_path, integ_path, run_path, sec_dir = sys.argv[1:7]
+
+def emit(ok, note, events="0", effects="0", gen="false", run_match="false"):
+    print(f"{ok}|{note}|{events}|{effects}|{gen}|{run_match}")
+    raise SystemExit(0)
+
+def get_json(token, url):
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            code = int(resp.getcode())
+    except urllib.error.HTTPError as e:
+        return int(e.code), None
+    except Exception:
+        return None, None
+    try:
+        return code, json.loads(raw) if raw else {}
+    except Exception:
+        return code, None
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+    expected_run_id = pathlib.Path(run_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", expected_run_id):
+    emit("false", "expected_run_id_invalid")
+
+q = urllib.parse.urlencode({"userId": user_id, "integrationId": integration_id, "status": "applied", "limit": "50"})
+code, payload = get_json(token, base.rstrip("/") + "/api/admin/directory/deprovision/events?" + q)
+if code is None:
+    emit("false", "events_transport_failed")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"events_http_{code if code is not None else 'na'}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+items = data.get("items") if isinstance(data.get("items"), list) else []
+if not items:
+    emit("false", "events_empty", "0", "0", "false", "false")
+
+# Load-bearing: select ONLY the event whose run_id equals the exact sync run.
+matched = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    rid = str(item.get("run_id") or item.get("runId") or "").strip()
+    if rid == expected_run_id:
+        matched.append(item)
+if not matched:
+    emit("false", "event_run_id_mismatch", str(len(items)), "0", "false", "false")
+if len(matched) > 1:
+    emit("false", "event_run_id_ambiguous", str(len(matched)), "0", "false", "false")
+event = matched[0]
+event_id = str(event.get("id") or "").strip()
+gen = event.get("access_generation_at_apply")
+if gen is None:
+    gen = event.get("accessGenerationAtApply")
+gen_present = "true" if isinstance(gen, int) or (isinstance(gen, str) and gen.strip().isdigit()) else "false"
+if not event_id:
+    emit("false", "event_id_missing", "1", "0", gen_present, "true")
+# LOAD-BEARING equality: event.run_id must equal expected sync run.id
+event_run = str(event.get("run_id") or event.get("runId") or "").strip()
+if event_run != expected_run_id:
+    emit("false", "event_run_id_mismatch", "1", "0", gen_present, "false")
+
+code2, payload2 = get_json(token, base.rstrip("/") + "/api/admin/directory/deprovision/events/" + urllib.parse.quote(event_id, safe="") + "/effects")
+if code2 is None:
+    emit("false", "effects_transport_failed", "1", "0", gen_present, "true")
+if code2 != 200 or not isinstance(payload2, dict) or payload2.get("ok") is not True:
+    emit("false", f"effects_http_{code2 if code2 is not None else 'na'}", "1", "0", gen_present, "true")
+data2 = payload2.get("data") if isinstance(payload2.get("data"), dict) else {}
+effects = data2.get("items") if isinstance(data2.get("items"), list) else []
+# Closed set mirrors packages/core-backend deprovision-ledger/planner effect types.
+CLOSED_EFFECT_TYPES = frozenset({"membership_changed", "grant_changed", "user_changed"})
+applied_effects = []
+seen_ids = set()
+for fx in effects:
+    if not isinstance(fx, dict):
+        emit("false", "effect_not_object", "1", "0", gen_present, "true")
+    # status must be exactly "applied" — empty/open/other do not count.
+    st = fx.get("status")
+    if type(st) is not str or st != "applied":
+        emit("false", "effect_status_not_applied", "1", "0", gen_present, "true")
+    fx_id = str(fx.get("id") or "").strip()
+    fx_type = str(fx.get("effect_type") or fx.get("effectType") or "").strip()
+    if not fx_id or not fx_type:
+        emit("false", "effect_id_or_type_missing", "1", "0", gen_present, "true")
+    if fx_type not in CLOSED_EFFECT_TYPES:
+        emit("false", "effect_type_not_closed_set", "1", "0", gen_present, "true")
+    if fx_id in seen_ids:
+        emit("false", "effect_id_duplicate", "1", "0", gen_present, "true")
+    seen_ids.add(fx_id)
+    # Strict booleans from ledger — drive access-graph proofs later.
+    ba = fx.get("before_active")
+    if ba is None:
+        ba = fx.get("beforeActive")
+    aa = fx.get("after_active")
+    if aa is None:
+        aa = fx.get("afterActive")
+    if type(ba) is not bool or type(aa) is not bool:
+        emit("false", "effect_active_flags_not_boolean", "1", "0", gen_present, "true")
+    grc = fx.get("grant_row_created")
+    if grc is None:
+        grc = fx.get("grantRowCreated")
+    if grc is None:
+        grc = False
+    if type(grc) is not bool:
+        emit("false", "effect_grant_row_created_not_boolean", "1", "0", gen_present, "true")
+    if grc is True and fx_type != "grant_changed":
+        emit("false", "effect_grant_row_created_type_invalid", "1", "0", gen_present, "true")
+    if grc is True and (ba is not False or aa is not False):
+        emit("false", "effect_grant_row_created_flags_invalid", "1", "0", gen_present, "true")
+    applied_effects.append({
+        "id": fx_id,
+        "type": fx_type,
+        "before_active": ba,
+        "after_active": aa,
+        "grant_row_created": grc,
+    })
+if len(applied_effects) < 1:
+    emit("false", "effects_empty", "1", "0", gen_present, "true")
+# Dedicated canary: exact effect type set from planner (mark_inactive + grant enabled + global clear).
+type_list = [fx["type"] for fx in applied_effects]
+type_set = set(type_list)
+if type_set != CLOSED_EFFECT_TYPES or len(applied_effects) != 3 or len(type_list) != len(type_set):
+    emit("false", "effect_type_set_not_exact_triple", "1", str(len(applied_effects)), gen_present, "true")
+# Canary subject established via SSO+grant true → grant_changed flips enabled (not deny-row create).
+for fx in applied_effects:
+    if fx["type"] == "grant_changed" and fx["grant_row_created"] is True:
+        emit("false", "grant_row_created_unexpected_for_canary", "1", str(len(applied_effects)), gen_present, "true")
+    if fx["before_active"] is not True or fx["after_active"] is not False:
+        emit("false", "effect_before_after_not_active_to_inactive", "1", str(len(applied_effects)), gen_present, "true")
+if gen_present != "true":
+    emit("false", "generation_missing", "1", str(len(applied_effects)), gen_present, "true")
+
+ev_path = pathlib.Path(sec_dir) / "subject.deprovision-event-id"
+ev_path.write_bytes(event_id.encode("utf-8"))
+os.chmod(ev_path, 0o600)
+fx_path = pathlib.Path(sec_dir) / "subject.deprovision-effects.json"
+fx_path.write_bytes(json.dumps({"effects": applied_effects, "effect_count": len(applied_effects)}, separators=(",", ":")).encode("utf-8"))
+os.chmod(fx_path, 0o600)
+emit("true", "ok", "1", str(len(applied_effects)), gen_present, "true")
+PY
+  )" || {
+    LEDGER_NOTE="python_failed"
+    return 1
+  }
+  LEDGER_OK="${result%%|*}"
+  local rest="${result#*|}"
+  LEDGER_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  LEDGER_EVENT_COUNT="${rest%%|*}"
+  rest="${rest#*|}"
+  LEDGER_EFFECT_COUNT="${rest%%|*}"
+  rest="${rest#*|}"
+  LEDGER_GENERATION_PRESENT="${rest%%|*}"
+  LEDGER_RUN_MATCH="${rest#*|}"
+  if [[ "$LEDGER_OK" == "true" ]]; then
+    CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE="${sec_dir}/subject.deprovision-event-id"
+    CANARY_SUBJECT_EFFECTS_FILE="${sec_dir}/subject.deprovision-effects.json"
+    log "deprovision ledger OK events=${LEDGER_EVENT_COUNT} effects=${LEDGER_EFFECT_COUNT} generation_present=${LEDGER_GENERATION_PRESENT} run_match=${LEDGER_RUN_MATCH}"
+    return 0
+  fi
+  log "deprovision ledger refused: note=${LEDGER_NOTE}"
+  return 1
+}
+
+# --- recovery journal state machine (v4): prepared → run_bound → ledger_bound ---
+# Host path under ~/.metasheet2 survives per-run secret cleanup. Never logs ids.
+# `prepared` already owns the caller-reserved run UUID before env write / HTTP.
+# Unidirectional upgrades only; restore accepts ledger_bound or reconciles
+# prepared/run_bound via that exact UUID — never a latest/sole-event guess.
+
+_journal_read_phase() {
+  JOURNAL_PHASE="none"
+  [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]] || return 0
+  JOURNAL_PHASE="$(
+    python3 - "$CANARY_APPLY_STATE_FILE" <<'PY'
+import json, pathlib, sys
+try:
+    st = json.loads(pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8"))
+except Exception:
+    print("invalid")
+    raise SystemExit(0)
+print(str(st.get("phase") or "invalid") if isinstance(st, dict) else "invalid")
+PY
+  )"
+}
+
+refuse_existing_deprovision_apply_state() {
+  if [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]]; then
+    fail "action=deprovision apply refused: unrecovered recovery journal exists at host path (restore/reconcile first); no env write; refuse overwrite"
+  fi
+}
+
+# Create phase=prepared BEFORE env write, including a caller-reserved run UUID.
+journal_init_prepared() {
+  mkdir -p "$CANARY_APPLY_STATE_DIR"
+  chmod 700 "$CANARY_APPLY_STATE_DIR"
+  refuse_existing_deprovision_apply_state
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || fail "journal prepared: local user id file missing"
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || fail "journal prepared: integration id file missing"
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || fail "journal prepared: directory account id file missing"
+  local sec_dir
+  sec_dir="$(_subject_secret_dir)"
+  python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+    "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+    "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" \
+    "$SUBJECT_OWNER_USERNAME" \
+    "$sec_dir" <<'PY'
+import json, os, pathlib, re, sys, uuid
+out_path, user_path, integ_path, acct_path, subject_key, sec_dir = sys.argv[1:7]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+if pathlib.Path(out_path).is_file() and pathlib.Path(out_path).stat().st_size > 0:
+    raise SystemExit(9)
+local_user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+directory_account_id = pathlib.Path(acct_path).read_bytes().decode("utf-8").strip()
+for val in (local_user_id, integration_id, directory_account_id):
+    if not uuid_re.fullmatch(val):
+        raise SystemExit(2)
+run_id = str(uuid.uuid4())
+payload = {
+    "schema": "lifecycle-canary-deprovision-apply-state-v4",
+    "phase": "prepared",
+    "subject_key": subject_key,
+    "local_user_id": local_user_id,
+    "integration_id": integration_id,
+    "directory_account_id": directory_account_id,
+    "sync_run_id": run_id,
+    "sync_users_deactivated": None,
+    "sync_accounts_deactivated": None,
+    "sync_deprovision_candidates": None,
+    "deprovision_applied": None,
+    "event_id": None,
+    "effect_count": None,
+    "effects": None,
+}
+tmp = pathlib.Path(out_path + ".tmp")
+tmp.write_bytes(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+os.chmod(tmp, 0o600)
+tmp.replace(pathlib.Path(out_path))
+os.chmod(out_path, 0o600)
+run_path = pathlib.Path(sec_dir) / "subject.sync-run-id"
+run_path.write_bytes(run_id.encode("utf-8"))
+os.chmod(run_path, 0o600)
+PY
+  CANARY_SUBJECT_SYNC_RUN_ID_FILE="${sec_dir}/subject.sync-run-id"
+  JOURNAL_PHASE="prepared"
+  log "recovery journal phase=prepared (subject + reserved run id bound before env/HTTP; ids never logged)"
+}
+
+# Finalize prepared/run_bound → run_bound after the exact async run reaches terminal.
+# The async starter may already have set run_bound with null outcome fields; this step
+# fills the exact terminal counts without claiming that the deprovision ledger is bound.
+journal_upgrade_run_bound() {
+  [[ -n "${CANARY_SUBJECT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SUBJECT_SYNC_RUN_ID_FILE}" ]] \
+    || fail "journal run_bound refused: sync run id file missing"
+  python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$CANARY_SUBJECT_SYNC_RUN_ID_FILE" \
+    "$SUBJECT_OWNER_USERNAME" \
+    "${SYNC_USERS_DEACTIVATED:-0}" \
+    "${SYNC_ACCOUNTS_DEACTIVATED:-0}" \
+    "${SYNC_DEPROVISION_CANDIDATES:-0}" \
+    "${SYNC_DEPROVISION_APPLIED:-false}" <<'PY'
+import json, os, pathlib, re, sys
+(
+    state_path, run_path, subject_key,
+    users_s, accounts_s, candidates_s, applied_s,
+) = sys.argv[1:8]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+try:
+    state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(state, dict) or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(3)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(4)
+if state.get("phase") not in {"prepared", "run_bound"}:
+    # Strict monotonicity: prepared/run_bound may become run_bound; never overwrite ledger_bound.
+    raise SystemExit(5)
+run_id = pathlib.Path(run_path).read_bytes().decode("utf-8").strip()
+if not uuid_re.fullmatch(run_id):
+    raise SystemExit(6)
+if str(state.get("sync_run_id") or "").strip() != run_id:
+    raise SystemExit(7)
+def as_int(s):
+    try:
+        v = int(s)
+        return v if v >= 0 else None
+    except Exception:
+        return None
+state["phase"] = "run_bound"
+state["sync_users_deactivated"] = as_int(users_s)
+state["sync_accounts_deactivated"] = as_int(accounts_s)
+state["sync_deprovision_candidates"] = as_int(candidates_s)
+state["deprovision_applied"] = applied_s == "true"
+state["event_id"] = None
+state["effect_count"] = None
+state["effects"] = None
+tmp = pathlib.Path(state_path + ".tmp")
+tmp.write_bytes(json.dumps(state, separators=(",", ":")).encode("utf-8"))
+os.chmod(tmp, 0o600)
+tmp.replace(pathlib.Path(state_path))
+os.chmod(state_path, 0o600)
+PY
+  JOURNAL_PHASE="run_bound"
+  log "recovery journal phase=run_bound (exact async run + terminal outcome persisted; ledger/radius may still be abnormal; ids never logged)"
+}
+
+# Upgrade run_bound → ledger_bound with exact event + typed effects (atomic).
+journal_upgrade_ledger_bound() {
+  [[ -n "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE:-}" && -s "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE}" ]] \
+    || fail "journal ledger_bound refused: event id file missing"
+  [[ -n "${CANARY_SUBJECT_EFFECTS_FILE:-}" && -s "${CANARY_SUBJECT_EFFECTS_FILE}" ]] \
+    || fail "journal ledger_bound refused: effects file missing"
+  [[ -n "${CANARY_SUBJECT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SUBJECT_SYNC_RUN_ID_FILE}" ]] \
+    || fail "journal ledger_bound refused: run id file missing"
+  python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$CANARY_SUBJECT_SYNC_RUN_ID_FILE" \
+    "$CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE" \
+    "$CANARY_SUBJECT_EFFECTS_FILE" \
+    "$SUBJECT_OWNER_USERNAME" <<'PY'
+import json, os, pathlib, re, sys
+state_path, run_path, event_path, fx_path, subject_key = sys.argv[1:6]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+CLOSED = frozenset({"membership_changed", "grant_changed", "user_changed"})
+try:
+    state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(state, dict) or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(3)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(4)
+if state.get("phase") not in {"prepared", "run_bound"}:
+    raise SystemExit(5)
+run_id = pathlib.Path(run_path).read_bytes().decode("utf-8").strip()
+event_id = pathlib.Path(event_path).read_bytes().decode("utf-8").strip()
+if not uuid_re.fullmatch(run_id) or not uuid_re.fullmatch(event_id):
+    raise SystemExit(6)
+if str(state.get("sync_run_id") or "").strip() != run_id:
+    raise SystemExit(7)
+fx = json.loads(pathlib.Path(fx_path).read_bytes().decode("utf-8"))
+effects = fx.get("effects") if isinstance(fx, dict) else None
+if not isinstance(effects, list) or len(effects) != 3:
+    raise SystemExit(8)
+seen = set()
+types = []
+for fx_item in effects:
+    if not isinstance(fx_item, dict):
+        raise SystemExit(9)
+    fid = str(fx_item.get("id") or "").strip()
+    ftype = str(fx_item.get("type") or "").strip()
+    if not uuid_re.fullmatch(fid) or ftype not in CLOSED:
+        raise SystemExit(10)
+    if fid in seen:
+        raise SystemExit(11)
+    seen.add(fid)
+    types.append(ftype)
+    if type(fx_item.get("before_active")) is not bool or type(fx_item.get("after_active")) is not bool:
+        raise SystemExit(12)
+    if type(fx_item.get("grant_row_created")) is not bool:
+        raise SystemExit(13)
+if set(types) != CLOSED or len(types) != 3:
+    raise SystemExit(14)
+state["phase"] = "ledger_bound"
+state["event_id"] = event_id
+state["effect_count"] = 3
+state["effects"] = effects
+tmp = pathlib.Path(state_path + ".tmp")
+tmp.write_bytes(json.dumps(state, separators=(",", ":")).encode("utf-8"))
+os.chmod(tmp, 0o600)
+tmp.replace(pathlib.Path(state_path))
+os.chmod(state_path, 0o600)
+PY
+  JOURNAL_PHASE="ledger_bound"
+  log "recovery journal phase=ledger_bound (exact event+effects bound; ids never logged)"
+}
+
+# Early-fail before any deprovision write: drop prepared-only journal so re-apply is possible.
+journal_clear_if_phase_prepared() {
+  _journal_read_phase
+  if [[ "$JOURNAL_PHASE" == "prepared" ]]; then
+    rm -f "$CANARY_APPLY_STATE_FILE"
+    JOURNAL_PHASE="none"
+    log "cleared prepared-only recovery journal (no sync run occurred)"
+  fi
+}
+
+clear_deprovision_apply_state() {
+  if [[ -f "$CANARY_APPLY_STATE_FILE" ]]; then
+    rm -f "$CANARY_APPLY_STATE_FILE"
+    JOURNAL_PHASE="none"
+    log "cleared recovery journal after successful restore"
+  fi
+}
+
+# Compat name used by older comments/tests: ledger_bound write path is journal_upgrade_ledger_bound.
+persist_deprovision_apply_state() {
+  journal_upgrade_ledger_bound
+}
+
+# Reconcile phase=prepared/run_bound → ledger_bound using ONLY the pre-request
+# reserved run id (no sole-event / latest-event discovery). Safe at restore entry
+# after a lost HTTP response or runner crash.
+reconcile_run_journal_to_ledger_bound() {
+  [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]] \
+    || { LEDGER_NOTE="journal_missing"; return 1; }
+  local sec_dir
+  sec_dir="$(_subject_secret_dir)"
+  # Materialize run id from journal into secret file for ledger verify.
+  python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$sec_dir" \
+    "$SUBJECT_OWNER_USERNAME" \
+    "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+    "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+    "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, os, pathlib, re, sys
+(
+    state_path, sec_dir, subject_key,
+    live_user_path, live_integ_path, live_acct_path,
+) = sys.argv[1:7]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+if state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(2)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(3)
+if state.get("phase") not in {"prepared", "run_bound"}:
+    raise SystemExit(4)
+run_id = str(state.get("sync_run_id") or "").strip()
+local_user_id = str(state.get("local_user_id") or "").strip()
+integration_id = str(state.get("integration_id") or "").strip()
+directory_account_id = str(state.get("directory_account_id") or "").strip()
+for val in (run_id, local_user_id, integration_id, directory_account_id):
+    if not uuid_re.fullmatch(val):
+        raise SystemExit(5)
+live_user = pathlib.Path(live_user_path).read_bytes().decode("utf-8").strip()
+live_integ = pathlib.Path(live_integ_path).read_bytes().decode("utf-8").strip()
+live_acct = pathlib.Path(live_acct_path).read_bytes().decode("utf-8").strip()
+if live_user != local_user_id or live_integ != integration_id or live_acct != directory_account_id:
+    raise SystemExit(6)
+sec = pathlib.Path(sec_dir)
+sec.mkdir(parents=True, exist_ok=True)
+(sec / "subject.sync-run-id").write_bytes(run_id.encode("utf-8"))
+os.chmod(sec / "subject.sync-run-id", 0o600)
+# Ensure local/integ files match journal for ledger query.
+(sec / "subject.local-user-id").write_bytes(local_user_id.encode("utf-8"))
+os.chmod(sec / "subject.local-user-id", 0o600)
+(sec / "subject.integration-id").write_bytes(integration_id.encode("utf-8"))
+os.chmod(sec / "subject.integration-id", 0o600)
+PY
+  CANARY_SUBJECT_SYNC_RUN_ID_FILE="${sec_dir}/subject.sync-run-id"
+  CANARY_SUBJECT_LOCAL_USER_ID_FILE="${sec_dir}/subject.local-user-id"
+  CANARY_SUBJECT_INTEGRATION_ID_FILE="${sec_dir}/subject.integration-id"
+  SYNC_DEPROVISION_APPLIED="true"
+  if ! verify_deprovision_ledger_for_subject; then
+    log "reconcile prepared/run_bound→ledger_bound refused: ledger note=${LEDGER_NOTE:-unset} (exact reserved run only; no sole-event guess)"
+    return 1
+  fi
+  if ! journal_upgrade_ledger_bound; then
+    log "reconcile prepared/run_bound→ledger_bound refused: journal upgrade failed"
+    return 1
+  fi
+  log "reconcile prepared/run_bound→ledger_bound OK (exact reserved run bound; ids never logged)"
+  return 0
+}
+
+# Load host journal for restore. Accepts ledger_bound; prepared/run_bound first
+# reconcile only the pre-request reserved run UUID. Never auto-discovers events.
+load_deprovision_apply_state() {
+  [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]] \
+    || fail "deprovision restore refused: recovery journal missing (run apply phase first); no event auto-discovery"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || fail "deprovision restore refused: live local user id missing for state rebind"
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || fail "deprovision restore refused: live integration id missing for state rebind"
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || fail "deprovision restore refused: live directory account id missing for state rebind"
+  _journal_read_phase
+  if [[ "$JOURNAL_PHASE" == "prepared" || "$JOURNAL_PHASE" == "run_bound" ]]; then
+    log "recovery journal phase=${JOURNAL_PHASE}; attempting exact reserved-run reconcile to ledger_bound"
+    if ! reconcile_run_journal_to_ledger_bound; then
+      fail "deprovision restore refused: journal phase=${JOURNAL_PHASE} and exact-run ledger reconcile failed (note=${LEDGER_NOTE:-unset}); recovery_required=true; no latest/sole-event guess"
+    fi
+  fi
+  _journal_read_phase
+  if [[ "$JOURNAL_PHASE" != "ledger_bound" ]]; then
+    fail "deprovision restore refused: journal phase must reconcile to ledger_bound (got '${JOURNAL_PHASE}'); no auto-discovery"
+  fi
+  local sec_dir loaded_count
+  sec_dir="$(_subject_secret_dir)"
+  loaded_count="$(
+    python3 - \
+      "$CANARY_APPLY_STATE_FILE" \
+      "$sec_dir" \
+      "$SUBJECT_OWNER_USERNAME" \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, os, pathlib, re, sys
+(
+    state_path, sec_dir, subject_key,
+    live_user_path, live_integ_path, live_acct_path,
+) = sys.argv[1:7]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+CLOSED = frozenset({"membership_changed", "grant_changed", "user_changed"})
+try:
+    state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(state, dict) or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(3)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(4)
+if state.get("phase") != "ledger_bound":
+    raise SystemExit(15)
+run_id = str(state.get("sync_run_id") or "").strip()
+event_id = str(state.get("event_id") or "").strip()
+local_user_id = str(state.get("local_user_id") or "").strip()
+integration_id = str(state.get("integration_id") or "").strip()
+directory_account_id = str(state.get("directory_account_id") or "").strip()
+effects = state.get("effects")
+count = state.get("effect_count")
+for val in (run_id, event_id, local_user_id, integration_id, directory_account_id):
+    if not uuid_re.fullmatch(val):
+        raise SystemExit(5)
+if type(count) is not int or count != 3 or not isinstance(effects, list) or len(effects) != count:
+    raise SystemExit(6)
+live_user = pathlib.Path(live_user_path).read_bytes().decode("utf-8").strip()
+live_integ = pathlib.Path(live_integ_path).read_bytes().decode("utf-8").strip()
+live_acct = pathlib.Path(live_acct_path).read_bytes().decode("utf-8").strip()
+if live_user != local_user_id:
+    raise SystemExit(10)
+if live_integ != integration_id:
+    raise SystemExit(11)
+if live_acct != directory_account_id:
+    raise SystemExit(12)
+seen = set()
+types = []
+for fx in effects:
+    if not isinstance(fx, dict):
+        raise SystemExit(7)
+    fid = str(fx.get("id") or "").strip()
+    ftype = str(fx.get("type") or "").strip()
+    if not uuid_re.fullmatch(fid) or ftype not in CLOSED:
+        raise SystemExit(8)
+    if fid in seen:
+        raise SystemExit(9)
+    seen.add(fid)
+    types.append(ftype)
+    if type(fx.get("before_active")) is not bool or type(fx.get("after_active")) is not bool:
+        raise SystemExit(13)
+    if type(fx.get("grant_row_created")) is not bool:
+        raise SystemExit(14)
+if set(types) != CLOSED:
+    raise SystemExit(16)
+sec = pathlib.Path(sec_dir)
+sec.mkdir(parents=True, exist_ok=True)
+(sec / "subject.sync-run-id").write_bytes(run_id.encode("utf-8"))
+(sec / "subject.deprovision-event-id").write_bytes(event_id.encode("utf-8"))
+(sec / "subject.deprovision-effects.json").write_bytes(
+    json.dumps({"effects": effects, "effect_count": count}, separators=(",", ":")).encode("utf-8")
+)
+for name in ("subject.sync-run-id", "subject.deprovision-event-id", "subject.deprovision-effects.json"):
+    os.chmod(sec / name, 0o600)
+print(str(count))
+PY
+  )" || fail "deprovision restore refused: ledger_bound journal load failed (missing/drift); no event auto-discovery"
+  CANARY_SUBJECT_SYNC_RUN_ID_FILE="${sec_dir}/subject.sync-run-id"
+  CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE="${sec_dir}/subject.deprovision-event-id"
+  CANARY_SUBJECT_EFFECTS_FILE="${sec_dir}/subject.deprovision-effects.json"
+  LEDGER_EFFECT_COUNT="$loaded_count"
+  JOURNAL_PHASE="ledger_bound"
+  log "loaded recovery journal phase=ledger_bound (exact ids+run+event+effects re-verified; no auto-discovery)"
+}
+
+# POST rehire restore for EXACT event id from apply state only. No discovery.
+# restoredEffectCount must equal persisted effect_count exactly (not merely >0).
+run_deprovision_rehire_restore() {
+  RESTORE_OK="false"
+  RESTORE_NOTE="unset"
+  RESTORE_EFFECT_COUNT="0"
+  [[ -n "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE:-}" && -s "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE}" ]] \
+    || { RESTORE_NOTE="event_id_file_missing_no_discovery"; return 1; }
+  [[ -n "${CANARY_SUBJECT_EFFECTS_FILE:-}" && -s "${CANARY_SUBJECT_EFFECTS_FILE}" ]] \
+    || { RESTORE_NOTE="effects_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE" \
+      "$CANARY_SUBJECT_EFFECTS_FILE" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, event_path, fx_path = sys.argv[1:5]
+
+def emit(ok, note, effects="0"):
+    print(f"{ok}|{note}|{effects}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    event_id = pathlib.Path(event_path).read_bytes().decode("utf-8").strip()
+    fx = json.loads(pathlib.Path(fx_path).read_bytes().decode("utf-8"))
+except Exception:
+    emit("false", "secret_file_read_failed")
+effects = fx.get("effects") if isinstance(fx, dict) else None
+expected = fx.get("effect_count") if isinstance(fx, dict) else None
+if not isinstance(effects, list) or len(effects) < 1:
+    emit("false", "expected_effects_invalid")
+if type(expected) is not int or expected != len(effects):
+    expected = len(effects)
+if expected < 1:
+    emit("false", "expected_effect_count_invalid")
+url = base.rstrip("/") + "/api/admin/directory/deprovision/events/" + urllib.parse.quote(event_id, safe="") + "/restore"
+body = json.dumps({"mode": "rehire"}).encode("utf-8")
+req = urllib.request.Request(
+    url,
+    data=body,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"restore_http_{int(e.code)}")
+except Exception:
+    emit("false", "restore_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "restore_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"restore_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+count = data.get("restoredEffectCount")
+if type(count) is not int:
+    count = data.get("restored_effect_count")
+if type(count) is not int:
+    emit("false", "restore_effect_count_invalid")
+# Load-bearing: exact equality with persisted effect_count (not merely >0).
+if count != expected:
+    emit("false", "restore_effect_count_mismatch", str(count))
+emit("true", "restored", str(count))
+PY
+  )" || {
+    RESTORE_NOTE="python_failed"
+    return 1
+  }
+  RESTORE_OK="${result%%|*}"
+  local rest="${result#*|}"
+  RESTORE_NOTE="${rest%%|*}"
+  RESTORE_EFFECT_COUNT="${rest#*|}"
+  if [[ "$RESTORE_OK" == "true" ]]; then
+    log "deprovision rehire restore OK effects=${RESTORE_EFFECT_COUNT}"
+    return 0
+  fi
+  log "deprovision rehire restore refused: note=${RESTORE_NOTE}"
+  return 1
+}
+
+# Read the exact persisted event status from the authoritative table. A paginated
+# "latest 100" list is not an identity lookup and can miss an old committed restore,
+# causing a second non-idempotent POST.
+read_exact_deprovision_event_status() {
+  EXACT_EVENT_STATUS="unknown"
+  [[ -n "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE:-}" && -s "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE}" ]] \
+    || return 1
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || return 1
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || return 1
+  local payload result
+  payload="$(python3 - \
+    "$CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE" \
+    "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+    "$CANARY_SUBJECT_INTEGRATION_ID_FILE" <<'PY'
+import json, pathlib, sys
+event_path, user_path, integration_path = sys.argv[1:4]
+print(json.dumps({
+    "event_id": pathlib.Path(event_path).read_bytes().decode("utf-8").strip(),
+    "user_id": pathlib.Path(user_path).read_bytes().decode("utf-8").strip(),
+    "integration_id": pathlib.Path(integration_path).read_bytes().decode("utf-8").strip(),
+}, separators=(",", ":")))
+PY
+  )" || return 1
+  if ! result="$(printf '%s' "$payload" | docker exec -i "$BACKEND_CONTAINER" node -e '
+const { Client } = require("pg");
+function emit(status) { process.stdout.write(status); process.exit(0); }
+(async () => {
+  let p;
+  try {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    p = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) { emit("invalid"); return; }
+  const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  if (!uuid.test(String(p.event_id || "")) || !String(p.user_id || "").trim()
+      || !String(p.integration_id || "").trim()) { emit("invalid"); return; }
+  if (!process.env.DATABASE_URL) { emit("db_error"); return; }
+  const c = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    const r = await c.query(
+      `SELECT status
+         FROM directory_deprovision_events
+        WHERE id = $1::uuid
+          AND local_user_id = $2
+          AND integration_id = $3
+        LIMIT 2`,
+      [p.event_id, p.user_id, p.integration_id]
+    );
+    if (r.rows.length !== 1) { emit(r.rows.length === 0 ? "missing" : "ambiguous"); return; }
+    const status = String(r.rows[0].status || "").trim();
+    emit(["applied", "fully_resolved", "superseded"].includes(status) ? status : "invalid_status");
+  } catch (e) { emit("db_error"); }
+  finally { try { await c.end(); } catch (e2) {} }
+})().catch(() => emit("db_error"));
+')"; then
+    return 1
+  fi
+  EXACT_EVENT_STATUS="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  case "$EXACT_EVENT_STATUS" in
+    applied|fully_resolved|superseded) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# After restore: exact event must be fully_resolved; live effect id set must equal
+# persisted set exactly (length+ids); each type match and status exactly reversed.
+# extra / missing / duplicate / non-reversed all fail closed.
+verify_deprovision_event_resolved() {
+  RESOLVED_OK="false"
+  RESOLVED_NOTE="unset"
+  [[ -n "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE:-}" && -s "${CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE}" ]] \
+    || { RESOLVED_NOTE="event_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_EFFECTS_FILE:-}" && -s "${CANARY_SUBJECT_EFFECTS_FILE}" ]] \
+    || { RESOLVED_NOTE="effects_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { RESOLVED_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { RESOLVED_NOTE="integration_id_file_missing"; return 1; }
+  if ! read_exact_deprovision_event_status; then
+    RESOLVED_NOTE="event_status_probe_${EXACT_EVENT_STATUS:-unknown}"
+    return 1
+  fi
+  case "$EXACT_EVENT_STATUS" in
+    fully_resolved) ;;
+    superseded) RESOLVED_NOTE="event_status_superseded"; return 1 ;;
+    applied) RESOLVED_NOTE="event_not_fully_resolved"; return 1 ;;
+    *) RESOLVED_NOTE="event_status_${EXACT_EVENT_STATUS:-unknown}"; return 1 ;;
+  esac
+  local result
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_DEPROVISION_EVENT_ID_FILE" \
+      "$CANARY_SUBJECT_EFFECTS_FILE" \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$EXACT_EVENT_STATUS" <<'PY'
+import json, pathlib, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, event_path, fx_path, user_path, integ_path, exact_status = sys.argv[1:8]
+
+def emit(ok, note):
+    print(f"{ok}|{note}")
+    raise SystemExit(0)
+
+def get_json(token, url):
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            code = int(resp.getcode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        return int(e.code), None
+    except Exception:
+        return None, None
+    try:
+        return code, json.loads(raw) if raw else {}
+    except Exception:
+        return code, None
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    event_id = pathlib.Path(event_path).read_bytes().decode("utf-8").strip()
+    expected = json.loads(pathlib.Path(fx_path).read_bytes().decode("utf-8"))
+    user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+expected_effects = expected.get("effects") if isinstance(expected, dict) else None
+if not isinstance(expected_effects, list) or len(expected_effects) < 1:
+    emit("false", "expected_effects_invalid")
+expected_ids = []
+seen_exp = set()
+for exp in expected_effects:
+    if not isinstance(exp, dict):
+        emit("false", "expected_effects_invalid")
+    eid = str(exp.get("id") or "").strip()
+    etype = str(exp.get("type") or "").strip()
+    if not eid or not etype:
+        emit("false", "expected_effects_invalid")
+    if eid in seen_exp:
+        emit("false", "expected_effect_id_duplicate")
+    seen_exp.add(eid)
+    expected_ids.append(eid)
+
+if exact_status != "fully_resolved":
+    emit("false", f"event_status_{exact_status or 'missing'}")
+
+# Live effects: exact id-set equality with persisted (no extra/missing/duplicate).
+code2, payload2 = get_json(
+    token,
+    base.rstrip("/") + "/api/admin/directory/deprovision/events/"
+    + urllib.parse.quote(event_id, safe="") + "/effects",
+)
+if code2 != 200 or not isinstance(payload2, dict) or payload2.get("ok") is not True:
+    emit("false", f"effects_http_{code2 if code2 is not None else 'na'}")
+data2 = payload2.get("data") if isinstance(payload2.get("data"), dict) else {}
+effects = data2.get("items") if isinstance(data2.get("items"), list) else []
+if not effects:
+    emit("false", "effects_empty_after_restore")
+by_id = {}
+for fx in effects:
+    if not isinstance(fx, dict):
+        emit("false", "effect_not_object")
+    fx_id = str(fx.get("id") or "").strip()
+    if not fx_id:
+        emit("false", "effect_id_missing")
+    if fx_id in by_id:
+        emit("false", "effect_id_duplicate_live")
+    by_id[fx_id] = fx
+# Exact set equality: same length and same ids.
+if len(by_id) != len(expected_effects):
+    if len(by_id) > len(expected_effects):
+        emit("false", "effect_extra_live")
+    emit("false", "effect_missing_after_restore")
+for exp in expected_effects:
+    eid = str(exp.get("id") or "").strip()
+    etype = str(exp.get("type") or "").strip()
+    if eid not in by_id:
+        emit("false", "effect_missing_after_restore")
+    live = by_id[eid]
+    live_type = str(live.get("effect_type") or live.get("effectType") or "").strip()
+    if live_type != etype:
+        emit("false", "effect_type_mismatch")
+    live_st = live.get("status")
+    if type(live_st) is not str or live_st != "reversed":
+        emit("false", "effect_not_reversed")
+# Any live id not in expected is already caught by length+set equality above.
+for live_id in by_id:
+    if live_id not in seen_exp:
+        emit("false", "effect_extra_live")
+emit("true", "fully_resolved_all_reversed")
+PY
+  )" || {
+    RESOLVED_NOTE="python_failed"
+    return 1
+  }
+  RESOLVED_OK="${result%%|*}"
+  RESOLVED_NOTE="${result#*|}"
+  if [[ "$RESOLVED_OK" == "true" ]]; then
+    log "deprovision event fully_resolved + exact effect set reversed OK"
+    return 0
+  fi
+  log "deprovision event resolve check refused: note=${RESOLVED_NOTE}"
+  return 1
+}
+
+# Idempotent runner-side restore recovery. A previous restore request may have
+# committed while its response or the following verification was lost. Probe the
+# exact persisted event first: fully_resolved means resume verification without a
+# second non-idempotent POST; only the exact applied-state note may call restore.
+run_or_resume_deprovision_rehire_restore() {
+  RESTORE_RESUMED_FULLY_RESOLVED="false"
+  if verify_deprovision_event_resolved; then
+    RESTORE_RESUMED_FULLY_RESOLVED="true"
+    RESTORE_OK="true"
+    RESTORE_NOTE="already_fully_resolved"
+    RESTORE_EFFECT_COUNT="${LEDGER_EFFECT_COUNT:-0}"
+    log "deprovision restore resume: exact event already fully_resolved; skipping duplicate POST"
+    return 0
+  fi
+  if [[ "${RESOLVED_NOTE:-unset}" != "event_not_fully_resolved" ]]; then
+    RESTORE_NOTE="pre_restore_event_probe_${RESOLVED_NOTE:-unset}"
+    return 1
+  fi
+  if ! run_deprovision_rehire_restore; then
+    return 1
+  fi
+  if ! verify_deprovision_event_resolved; then
+    RESTORE_NOTE="post_restore_event_probe_${RESOLVED_NOTE:-unset}"
+    return 1
+  fi
+  return 0
+}
+
+# Authoritative access-graph proof via read-only SQL in staging backend (DATABASE_URL).
+# Never prints user/ids/PII. expect_mode: deprovisioned | restored.
+# Effect-metadata driven (membership_changed|grant_changed|user_changed):
+#   deprovisioned → current == after_active; restored → current == before_active.
+# Membership is org-scoped: resolve unique org_id from exact integration
+# (provider=dingtalk, status=active), then
+#   WHERE user_id=$1 AND org_id=$2 AND COALESCE(is_active,TRUE)=TRUE.
+# Without a corresponding effect, that leg is not required/claimed.
+# DB read failure / unknown → fail closed.
+prove_access_graph_state() {
+  local expect_mode="$1" context="${2:-deprovision}"
+  GRAPH_OK="false"
+  GRAPH_NOTE="unset"
+  GRAPH_USER_ACTIVE="unknown"
+  GRAPH_MEMBERSHIP_ACTIVE_COUNT="0"
+  GRAPH_GRANT_STATE="unknown"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { GRAPH_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { GRAPH_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_EFFECTS_FILE:-}" && -s "${CANARY_SUBJECT_EFFECTS_FILE}" ]] \
+    || { GRAPH_NOTE="effects_file_missing"; return 1; }
+  local payload_json result
+  payload_json="$(
+    python3 - \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_SUBJECT_EFFECTS_FILE" \
+      "$expect_mode" <<'PY'
+import json, pathlib, sys
+user_path, integ_path, fx_path, mode = sys.argv[1:5]
+user_id = pathlib.Path(user_path).read_bytes().decode("utf-8").strip()
+integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+fx = json.loads(pathlib.Path(fx_path).read_bytes().decode("utf-8"))
+effects = fx.get("effects") if isinstance(fx, dict) else None
+if not isinstance(effects, list) or len(effects) < 1:
+    raise SystemExit(2)
+print(json.dumps({
+    "user_id": user_id,
+    "integration_id": integration_id,
+    "mode": mode,
+    "effects": effects,
+}, separators=(",", ":")))
+PY
+  )" || { GRAPH_NOTE="graph_payload_build_failed"; return 1; }
+  if ! result="$(printf '%s' "$payload_json" | docker exec -i \
+    "$BACKEND_CONTAINER" \
+    node -e '
+const { Client } = require("pg");
+function emit(ok, note, userActive, memCount, grantState) {
+  process.stdout.write([ok, note, userActive, memCount, grantState].join("|"));
+  process.exit(0);
+}
+(async () => {
+  let payload;
+  try {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    emit("false", "graph_payload_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  const mode = String(payload.mode || "");
+  const userId = String(payload.user_id || "").trim();
+  const integrationId = String(payload.integration_id || "").trim();
+  const effects = Array.isArray(payload.effects) ? payload.effects : null;
+  if (!/^[0-9a-fA-F-]{36}$/.test(userId) || !/^[0-9a-fA-F-]{36}$/.test(integrationId)) {
+    emit("false", "graph_ids_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  if (!effects || effects.length < 1) {
+    emit("false", "graph_effects_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  if (mode !== "deprovisioned" && mode !== "restored") {
+    emit("false", "expect_mode_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  const CLOSED = new Set(["membership_changed", "grant_changed", "user_changed"]);
+  const seen = new Set();
+  for (const fx of effects) {
+    if (!fx || typeof fx !== "object") {
+      emit("false", "graph_effects_invalid", "unknown", "0", "unknown");
+      return;
+    }
+    const id = String(fx.id || "").trim();
+    const type = String(fx.type || "").trim();
+    if (!/^[0-9a-fA-F-]{36}$/.test(id) || !CLOSED.has(type)) {
+      emit("false", "graph_effect_type_invalid", "unknown", "0", "unknown");
+      return;
+    }
+    if (seen.has(id)) {
+      emit("false", "graph_effect_id_duplicate", "unknown", "0", "unknown");
+      return;
+    }
+    seen.add(id);
+    if (typeof fx.before_active !== "boolean" || typeof fx.after_active !== "boolean") {
+      emit("false", "graph_effect_flags_invalid", "unknown", "0", "unknown");
+      return;
+    }
+    if (typeof fx.grant_row_created !== "boolean") {
+      emit("false", "graph_effect_flags_invalid", "unknown", "0", "unknown");
+      return;
+    }
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    emit("false", "database_url_missing", "unknown", "0", "unknown");
+    return;
+  }
+  const c = new Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    // Exact integration → unique org (provider=dingtalk, prefer active).
+    const integ = await c.query(
+      "SELECT org_id, status FROM directory_integrations WHERE id = $1 AND provider = $2",
+      [integrationId, "dingtalk"]
+    );
+    if (integ.rows.length !== 1) {
+      emit("false", "integration_org_not_unique", "unknown", "0", "unknown");
+      return;
+    }
+    const orgId = String(integ.rows[0].org_id || "").trim();
+    const integStatus = String(integ.rows[0].status || "").trim().toLowerCase();
+    if (!orgId) {
+      emit("false", "integration_org_missing", "unknown", "0", "unknown");
+      return;
+    }
+    if (integStatus !== "active") {
+      emit("false", "integration_not_active", "unknown", "0", "unknown");
+      return;
+    }
+    const u = await c.query(
+      "SELECT is_active FROM users WHERE id = $1",
+      [userId]
+    );
+    if (u.rows.length !== 1) {
+      emit("false", "user_row_missing", "unknown", "0", "unknown");
+      return;
+    }
+    const isActive = u.rows[0].is_active;
+    if (typeof isActive !== "boolean") {
+      emit("false", "user_is_active_not_boolean", "unknown", "0", "unknown");
+      return;
+    }
+    // Org-scoped membership only — other-org active memberships must not green this.
+    const m = await c.query(
+      "SELECT count(*)::int AS n FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE",
+      [userId, orgId]
+    );
+    const memN = Number(m.rows[0]?.n);
+    if (!Number.isInteger(memN) || memN < 0) {
+      emit("false", "membership_count_invalid", isActive ? "true" : "false", "0", "unknown");
+      return;
+    }
+    const memActive = memN > 0;
+    const g = await c.query(
+      "SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1 AND provider = $2 LIMIT 2",
+      [userId, "dingtalk"]
+    );
+    let grantState = "absent";
+    if (g.rows.length > 1) {
+      emit("false", "grant_ambiguous", isActive ? "true" : "false", String(memN), "unknown");
+      return;
+    }
+    if (g.rows.length === 1) {
+      if (typeof g.rows[0].enabled !== "boolean") {
+        emit("false", "grant_enabled_not_boolean", isActive ? "true" : "false", String(memN), "unknown");
+        return;
+      }
+      grantState = g.rows[0].enabled === true ? "enabled" : "disabled";
+    }
+    // Effect-driven proofs only — no free-floating leg requirements.
+    for (const fx of effects) {
+      const expected = mode === "deprovisioned" ? fx.after_active : fx.before_active;
+      if (fx.type === "user_changed") {
+        if (isActive !== expected) {
+          emit("false", mode === "deprovisioned" ? "user_active_not_after" : "user_active_not_before",
+            isActive ? "true" : "false", String(memN), grantState);
+          return;
+        }
+      } else if (fx.type === "membership_changed") {
+        if (memActive !== expected) {
+          emit("false", mode === "deprovisioned" ? "membership_active_not_after" : "membership_active_not_before",
+            isActive ? "true" : "false", String(memN), grantState);
+          return;
+        }
+      } else if (fx.type === "grant_changed") {
+        if (fx.grant_row_created === true) {
+          if (mode === "deprovisioned") {
+            // after: deny-row exists and is disabled
+            if (g.rows.length !== 1 || g.rows[0].enabled !== false) {
+              emit("false", "grant_row_created_not_after", isActive ? "true" : "false", String(memN), grantState);
+              return;
+            }
+          } else {
+            // restore of creation: row must be ABSENT
+            if (g.rows.length !== 0) {
+              emit("false", "grant_row_created_not_absent", isActive ? "true" : "false", String(memN), grantState);
+              return;
+            }
+          }
+        } else {
+          const enabled = g.rows.length === 1 && g.rows[0].enabled === true;
+          if (enabled !== expected) {
+            emit("false", mode === "deprovisioned" ? "grant_enabled_not_after" : "grant_enabled_not_before",
+              isActive ? "true" : "false", String(memN), grantState);
+            return;
+          }
+        }
+      } else {
+        emit("false", "graph_effect_type_invalid", "unknown", "0", "unknown");
+        return;
+      }
+    }
+    emit("true", "ok", isActive ? "true" : "false", String(memN), grantState);
+  } catch (e) {
+    emit("false", "db_query_failed", "unknown", "0", "unknown");
+  } finally {
+    try { await c.end(); } catch (e2) { /* ignore */ }
+  }
+})().catch(() => emit("false", "db_query_failed", "unknown", "0", "unknown"));
+')"; then
+    GRAPH_NOTE="docker_exec_failed"
+    return 1
+  fi
+  result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  GRAPH_OK="${result%%|*}"
+  local rest="${result#*|}"
+  GRAPH_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  GRAPH_USER_ACTIVE="${rest%%|*}"
+  rest="${rest#*|}"
+  GRAPH_MEMBERSHIP_ACTIVE_COUNT="${rest%%|*}"
+  GRAPH_GRANT_STATE="${rest#*|}"
+  if [[ "$GRAPH_OK" == "true" ]]; then
+    log "access graph OK (${context}): mode=${expect_mode} user_active=${GRAPH_USER_ACTIVE} membership_active_count=${GRAPH_MEMBERSHIP_ACTIVE_COUNT} grant=${GRAPH_GRANT_STATE}"
+    return 0
+  fi
+  log "access graph refused (${context}): note=${GRAPH_NOTE}"
+  return 1
+}
+
+# Read-only dedicated-subject precondition BEFORE any deprovision env write.
+# Mirrors production planner inputs for mark_inactive + globally clear + grant enabled:
+# exact integration (dingtalk active) org, linked account/user, target-org membership
+# active, user active, no other active+linked siblings, DingTalk grant enabled,
+# policy=mark_inactive. Additionally requires a scheduler/admission/group-disabled
+# integration containing exactly this one directory account (active or inactive rows
+# count), so a post-preview scope change cannot strand collateral users outside the
+# one-subject journal. Expected effects: membership_changed+grant_changed+user_changed.
+# other-org membership is ignored for candidacy (org-scoped membership only).
+prove_dedicated_subject_deprovision_precondition() {
+  PRECOND_OK="false"
+  PRECOND_NOTE="unset"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { PRECOND_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { PRECOND_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || { PRECOND_NOTE="directory_account_id_file_missing"; return 1; }
+  local payload_json result
+  payload_json="$(
+    python3 - \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, pathlib, sys
+u, i, a = sys.argv[1:4]
+print(json.dumps({
+    "user_id": pathlib.Path(u).read_bytes().decode("utf-8").strip(),
+    "integration_id": pathlib.Path(i).read_bytes().decode("utf-8").strip(),
+    "directory_account_id": pathlib.Path(a).read_bytes().decode("utf-8").strip(),
+}, separators=(",", ":")))
+PY
+  )" || { PRECOND_NOTE="precond_payload_failed"; return 1; }
+  if ! result="$(printf '%s' "$payload_json" | docker exec -i \
+    "$BACKEND_CONTAINER" \
+    node -e '
+const { Client } = require("pg");
+function emit(ok, note) {
+  process.stdout.write(ok + "|" + note);
+  process.exit(0);
+}
+(async () => {
+  let p;
+  try {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    p = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    emit("false", "precond_payload_invalid");
+    return;
+  }
+  const userId = String(p.user_id || "").trim();
+  const integrationId = String(p.integration_id || "").trim();
+  const accountId = String(p.directory_account_id || "").trim();
+  const uuid = /^[0-9a-fA-F-]{36}$/;
+  if (!uuid.test(userId) || !uuid.test(integrationId) || !uuid.test(accountId)) {
+    emit("false", "precond_ids_invalid");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    emit("false", "database_url_missing");
+    return;
+  }
+  const c = new Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    const integ = await c.query(
+      "SELECT org_id, status, default_deprovision_policy, sync_enabled, schedule_cron, config FROM directory_integrations WHERE id = $1 AND provider = $2",
+      [integrationId, "dingtalk"]
+    );
+    if (integ.rows.length !== 1) {
+      emit("false", "integration_not_unique");
+      return;
+    }
+    const orgId = String(integ.rows[0].org_id || "").trim();
+    const status = String(integ.rows[0].status || "").trim().toLowerCase();
+    const policy = String(integ.rows[0].default_deprovision_policy || "").trim();
+    if (!orgId) {
+      emit("false", "integration_org_missing");
+      return;
+    }
+    if (status !== "active") {
+      emit("false", "integration_not_active");
+      return;
+    }
+    if (policy !== "mark_inactive") {
+      emit("false", "policy_not_mark_inactive");
+      return;
+    }
+    if (integ.rows[0].sync_enabled !== false || String(integ.rows[0].schedule_cron || "").trim() !== "") {
+      emit("false", "integration_not_manual_only");
+      return;
+    }
+    let config = integ.rows[0].config;
+    if (typeof config === "string") {
+      try { config = JSON.parse(config); } catch (e) { config = null; }
+    }
+    if (!config || typeof config !== "object"
+        || String(config.admissionMode || "manual_only") !== "manual_only"
+        || String(config.memberGroupSyncMode || "disabled") !== "disabled") {
+      emit("false", "integration_automation_not_disabled");
+      return;
+    }
+    // A destructive canary is never allowed on a shared real-employee integration.
+    // Count ALL rows, not only active rows: a stale/inactive sibling can be revived or
+    // rewritten by the provider walk and would escape the one-subject recovery journal.
+    const radius = await c.query(
+      `SELECT count(*)::int AS n,
+              count(*) FILTER (WHERE id = $2)::int AS target_n
+         FROM directory_accounts
+        WHERE integration_id = $1`,
+      [integrationId, accountId]
+    );
+    if (Number(radius.rows[0]?.n) !== 1 || Number(radius.rows[0]?.target_n) !== 1) {
+      emit("false", "integration_not_single_account");
+      return;
+    }
+    // Exact linked account/user for this integration.
+    const link = await c.query(
+      `SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+        WHERE l.directory_account_id = $1
+          AND l.local_user_id = $2
+          AND l.link_status = '\''linked'\''
+          AND a.integration_id = $3
+          AND a.is_active = TRUE
+        LIMIT 1`,
+      [accountId, userId, integrationId]
+    );
+    if (link.rows.length !== 1) {
+      emit("false", "account_not_linked_active");
+      return;
+    }
+    const u = await c.query("SELECT is_active FROM users WHERE id = $1", [userId]);
+    if (u.rows.length !== 1 || u.rows[0].is_active !== true) {
+      emit("false", "user_not_active");
+      return;
+    }
+    // Target-org membership active (other-org membership does not satisfy this).
+    const mem = await c.query(
+      "SELECT count(*)::int AS n FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE",
+      [userId, orgId]
+    );
+    if (Number(mem.rows[0]?.n) < 1) {
+      emit("false", "target_org_membership_not_active");
+      return;
+    }
+    // Global clear: no other active+linked sibling directory accounts.
+    const sib = await c.query(
+      `SELECT count(*)::int AS n
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+        WHERE l.local_user_id = $1
+          AND l.link_status = '\''linked'\''
+          AND a.is_active = TRUE
+          AND a.id <> $2`,
+      [userId, accountId]
+    );
+    if (Number(sib.rows[0]?.n) !== 0) {
+      emit("false", "not_globally_clear");
+      return;
+    }
+    const g = await c.query(
+      "SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1 AND provider = $2 LIMIT 2",
+      [userId, "dingtalk"]
+    );
+    if (g.rows.length !== 1 || g.rows[0].enabled !== true) {
+      emit("false", "dingtalk_grant_not_enabled");
+      return;
+    }
+    // Planner expectation locked for this dedicated canary.
+    emit("true", "ok_expected_effects_membership_grant_user");
+  } catch (e) {
+    emit("false", "db_query_failed");
+  } finally {
+    try { await c.end(); } catch (e2) { /* ignore */ }
+  }
+})().catch(() => emit("false", "db_query_failed"));
+')"; then
+    PRECOND_NOTE="docker_exec_failed"
+    return 1
+  fi
+  result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  PRECOND_OK="${result%%|*}"
+  PRECOND_NOTE="${result#*|}"
+  if [[ "$PRECOND_OK" == "true" ]]; then
+    log "dedicated subject precondition OK (single-account manual integration+planner mark_inactive+global_clear+grant_enabled; expected effects membership+grant+user; ids never logged)"
+    return 0
+  fi
+  log "dedicated subject precondition refused: note=${PRECOND_NOTE}"
+  return 1
+}
+
 validate_mode_name() {
   local m="$1" label="$2"
   case "$m" in
@@ -1572,10 +4078,10 @@ write_lifecycle_override() {
     echo "# OFF is an emergency operational rollback of these env gates only —"
     echo "# it does NOT reintroduce OR-column login fallback as a long-term design"
     echo "# (design lock Rev 4.2 §4.2 / §4.4: after T2b cutover, Auth reads aliases only)."
-    echo "# action=alias may write AUTH_LOGIN_USE_ALIASES=true transiently; success"
+    echo "# action=alias|pending|deprovision may write one flag true transiently; success"
     echo "# requires/proves OFF; failure restores the compose-validated explicit OFF"
     echo "# rollback baseline (never a stale on-disk prior file). Runtime OFF cannot be"
-    echo "# proven if rollback recreate fails. pending/deprovision ON remain NOT EXECUTABLE."
+    echo "# proven if rollback recreate fails."
     echo "services:"
     echo "  backend:"
     echo "    environment:"
@@ -1659,6 +4165,28 @@ assert_exact_mode_alias() {
   return 1
 }
 
+assert_exact_mode_pending() {
+  local a p d m
+  read -r a p d m <<< "$(read_live_flags)"
+  if [[ "$a" == "false" && "$p" == "true" && "$d" == "false" && "$m" == "pending" ]]; then
+    log "exact mode proven after restart: pending (only DIRECTORY_PENDING_ACTIVATION_ENABLED true)"
+    return 0
+  fi
+  log "post-restart mode is '${m}' (alias=${a} pending=${p} deprovision=${d}), expected pending with only pending true"
+  return 1
+}
+
+assert_exact_mode_deprovision() {
+  local a p d m
+  read -r a p d m <<< "$(read_live_flags)"
+  if [[ "$a" == "false" && "$p" == "false" && "$d" == "true" && "$m" == "deprovision" ]]; then
+    log "exact mode proven after restart: deprovision (only DIRECTORY_DEPROVISION_ENABLED true)"
+    return 0
+  fi
+  log "post-restart mode is '${m}' (alias=${a} pending=${p} deprovision=${d}), expected deprovision with only deprovision true"
+  return 1
+}
+
 assert_exact_sha() {
   require_sha
   local live
@@ -1732,13 +4260,59 @@ fail_transition_restore() {
   restore_lifecycle_override
   # Best-effort recreate after restore so live env matches restored override.
   recreate_backend_only || log "restore recreate did not reach health true; operator must inspect staging"
-  if [[ "$ACTION" == "alias" ]]; then
+  if [[ "$ACTION" == "alias" || "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
     # This explicit failure path already attempted runtime restore. Avoid a
     # second EXIT-handler recreate after its backup is cleaned below.
     disarm_alias_exit_rollback_guard
   fi
   cleanup_prev_backup
   fail "action=${ACTION} failed: ${reason} (previous override restored)"
+}
+
+# Deprovision apply failure AFTER a real sync write: restore three flags OFF,
+# keep host recovery journal (never clear), emit values-free recovery markers.
+fail_deprovision_apply_keep_journal() {
+  local reason="$1"
+  _journal_read_phase
+  local phase="${JOURNAL_PHASE:-unknown}"
+  local exact_run="false"
+  if [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]]; then
+    if [[ "$phase" == "prepared" || "$phase" == "run_bound" || "$phase" == "ledger_bound" ]]; then
+      exact_run="true"
+    fi
+  fi
+  log "deprovision apply failure (${reason}); restoring flags OFF; retaining recovery journal phase=${phase} exact_run_persisted=${exact_run} (ids never logged)"
+  restore_lifecycle_override
+  recreate_backend_only || log "restore recreate did not reach health true; operator must inspect staging"
+  # Prove OFF before disarming the EXIT guard. If the first restore/recreate did not
+  # converge, keep both the guard and its backup alive: `fail` below will trigger one
+  # final restore/recreate attempt instead of knowingly exiting with deprovision ON.
+  # The recovery journal is independent and remains retained either way.
+  local flags_off="false"
+  if assert_exact_mode_off 2>/dev/null; then
+    flags_off="true"
+    disarm_alias_exit_rollback_guard
+    cleanup_prev_backup
+  else
+    log "flags OFF not proven after keep-journal failure path; EXIT rollback guard remains armed for a final retry"
+  fi
+  capture_live_snapshot 2>/dev/null || true
+  {
+    echo "action=deprovision"
+    echo "phase=apply"
+    echo "mode=${SNAP_MODE:-unknown}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=true"
+    echo "recovery_required=true"
+    echo "exact_run_persisted=${exact_run}"
+    echo "journal_retained=true"
+    echo "journal_phase=${phase}"
+    echo "rolled_back_flags_off=${flags_off}"
+    echo "apply_completed=false"
+    echo "end_to_end_restore_claimed=false"
+    echo "note=deprovision_apply_failed_recovery_journal_retained_${reason}"
+  } > "${OUTPUT_DIR}/summary.txt" 2>/dev/null || true
+  fail "action=deprovision apply failed: ${reason} (flags restore attempted; recovery journal retained phase=${phase}; recovery_required=true)"
 }
 
 # --- actions ---------------------------------------------------------------------------
@@ -1863,14 +4437,14 @@ preflight_for_target() {
       fi
       ;;
     pending|deprovision)
+      # Stack readiness only. action=pending|deprovision additionally require the
+      # explicit secret-backed directory account subject (no auto-selection) and
+      # real admin API proofs before any write.
       if [[ "$SNAP_MODE" != "off" && "$SNAP_MODE" != "$target" ]]; then
         PREFLIGHT_OK="false"
         PREFLIGHT_NOTE="other_lifecycle_flag_on"
         return 0
       fi
-      # ON is NOT EXECUTABLE (no admit/activate or sync/deprovision proof).
-      PREFLIGHT_OK="false"
-      PREFLIGHT_NOTE="not_executable_no_real_verifier"
       ;;
     multi-on)
       PREFLIGHT_OK="false"
@@ -1906,39 +4480,7 @@ action_preflight() {
   if [[ "$PREFLIGHT_OK" != "true" ]]; then
     fail "preflight failed: ${PREFLIGHT_NOTE}"
   fi
-  # pending/deprovision remain NOT EXECUTABLE ON even when stack looks ready.
-  if [[ "$target" == "pending" || "$target" == "deprovision" ]]; then
-    log "preflight assessed target=${target} note=${PREFLIGHT_NOTE} (ON transition NOT EXECUTABLE)"
-  else
-    log "preflight OK target=${target} note=${PREFLIGHT_NOTE}"
-  fi
-}
-
-# Fail-closed: pending/deprovision never apply. Preflight assessment only.
-action_not_executable_on() {
-  local target="$1"
-  capture_live_snapshot
-  preflight_for_target "$target"
-  # Force not-executable note even if stack would look "ready".
-  local note="not_executable_no_real_verifier"
-  if [[ "$PREFLIGHT_OK" != "true" ]]; then
-    note="${PREFLIGHT_NOTE};not_executable_no_real_verifier"
-  fi
-  write_status_artifact \
-    "${SNAP_BUILD_SHA:-unknown}" \
-    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
-    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
-    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
-    "$target" "false" "false" "$note"
-  {
-    echo "action=${target}"
-    echo "mode=${SNAP_MODE}"
-    echo "preflight_ok=false"
-    echo "note=${note}"
-    echo "transition_applied=false"
-    echo "executable=false"
-  } > "${OUTPUT_DIR}/summary.txt"
-  fail "action=${target} is NOT EXECUTABLE: no secret-backed real verifier for canary proof (admit-activate / sync-deprovision). Env flip alone is refused. Use status|preflight|off|bootstrap|human-bootstrap|alias only. transition_applied=false"
+  log "preflight OK target=${target} note=${PREFLIGHT_NOTE}"
 }
 
 # Staging-only create/repair of the fixed dedicated lifecycle canary admin.
@@ -2309,6 +4851,680 @@ action_human_bootstrap() {
   log "action=human-bootstrap OK outcome=${HUMAN_BOOTSTRAP_OUTCOME} (no lifecycle env write; mode/health/SHA/migrations reasserted)"
 }
 
+# Transient secret-backed pending ADMIT canary (phase: admit-only by default).
+# Does NOT auto-activate via temp_password. DingTalk OAuth negative/positive
+# checkpoints are manual NOT_EXECUTED (never claimed true by a wrong-password probe).
+# Optional phase: BOOTSTRAP_CONFIRMATION=PENDING_SSO_ACTIVATE runs SSO activate only
+# (no lifecycle env write); browser OAuth still NOT_EXECUTED.
+# Success for admit phase requires/proves flags OFF. No auto-selection.
+action_pending() {
+  local pre_login_ok="false"
+  local admin_jwt_minted="false"
+  local pending_on_applied="false"
+  local admit_ok="false"
+  local pending_state_ok="false"
+  local rolled_back_to_off="false"
+  local sso_activate_ok="false"
+  local phase="admit"
+  local note="pending_admit_canary"
+  # Honest checkpoints — never true unless real evidence exists.
+  local oauth_negative_checkpoint="NOT_EXECUTED"
+  local oauth_positive_checkpoint="NOT_EXECUTED"
+  local password_login_denied_checkpoint="NOT_EXECUTED"
+  local activate_executed="false"
+
+  require_sha
+  require_canary_secret_files "pending"
+  assert_canary_identifier_matches_owner "pending"
+  require_canary_directory_account_id_file "pending"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=pending"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=pending requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
+
+  if [[ -n "${BOOTSTRAP_CONFIRMATION:-}" && "$BOOTSTRAP_CONFIRMATION" != "$PENDING_SSO_ACTIVATE_CONFIRMATION" && "$BOOTSTRAP_CONFIRMATION" != "PENDING_ADMIT" ]]; then
+    fail "action=pending: bootstrap_confirmation must be empty|PENDING_ADMIT|PENDING_SSO_ACTIVATE (got confirmation set; values never log secrets)"
+  fi
+  if [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$PENDING_SSO_ACTIVATE_CONFIRMATION" ]]; then
+    phase="sso_activate"
+  fi
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=pending"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=pending refused: backend_health_ok must be true before mutation"
+  fi
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=pending refused: live mode must be off (live='${SNAP_MODE}')"
+  fi
+
+  if mint_canary_admin_jwt_from_password_login "pending_pre"; then
+    pre_login_ok="true"
+    admin_jwt_minted="true"
+  else
+    fail "action=pending refused: canary password login / JWT mint failed (no mutation performed)"
+  fi
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || fail "action=pending refused: admin JWT file missing after mint"
+
+  if [[ "$phase" == "sso_activate" ]]; then
+    # --- SSO activate phase: no lifecycle env write; browser OAuth remains NOT_EXECUTED ---
+    if ! load_canary_directory_subject "pending_sso_pre"; then
+      fail "action=pending sso_activate refused: subject load failed (note=${SUBJECT_NOTE:-unset}); no auto-selection"
+    fi
+    if [[ "$SUBJECT_LINK_STATUS" != "linked" || "$SUBJECT_HAS_LOCAL_USER" != "true" \
+      || "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+      fail "action=pending sso_activate refused: subject must be owned linked pending user; no auto-selection"
+    fi
+    if ! assert_subject_user_access_state "pending_activation" "false" "sso_pre"; then
+      fail "action=pending sso_activate refused: user must be pending_activation (note=${ACCESS_NOTE:-unset})"
+    fi
+    if ! run_pending_sso_activate; then
+      fail "action=pending sso_activate refused: ${ACTIVATE_NOTE:-unset}"
+    fi
+    sso_activate_ok="true"
+    activate_executed="true"
+    if ! assert_subject_user_access_state "activated" "true" "sso_post"; then
+      fail "action=pending sso_activate refused: post-activate access state failed (note=${ACCESS_NOTE:-unset})"
+    fi
+    # Browser DingTalk OAuth login is human-only; never claim true here.
+    oauth_negative_checkpoint="NOT_EXECUTED"
+    oauth_positive_checkpoint="NOT_EXECUTED"
+    password_login_denied_checkpoint="NOT_EXECUTED"
+    capture_live_snapshot
+    if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+      fail "action=pending sso_activate refused: lifecycle flags must remain OFF (no env write expected)"
+    fi
+    note="pending_sso_activate_flags_off_oauth_not_executed"
+    write_status_artifact \
+      "${SNAP_BUILD_SHA:-unknown}" \
+      "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+      "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+      "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+      "pending" "true" "false" "$note"
+    {
+      echo "action=pending"
+      echo "phase=sso_activate"
+      echo "mode=${SNAP_MODE}"
+      echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+      echo "transition_applied=false"
+      echo "lifecycle_env_write=false"
+      echo "pre_login_ok=${pre_login_ok}"
+      echo "admin_jwt_minted=${admin_jwt_minted}"
+      echo "subject_owned=true"
+      echo "subject_auto_selected=false"
+      echo "sso_activate_ok=${sso_activate_ok}"
+      echo "activate_executed=${activate_executed}"
+      echo "oauth_negative_checkpoint=${oauth_negative_checkpoint}"
+      echo "oauth_positive_checkpoint=${oauth_positive_checkpoint}"
+      echo "password_login_denied_checkpoint=${password_login_denied_checkpoint}"
+      echo "password_login_denied_ok=false"
+      echo "note=${note}"
+    } > "${OUTPUT_DIR}/summary.txt"
+    log "action=pending SSO activate OK (flags OFF; browser OAuth NOT_EXECUTED)"
+    return 0
+  fi
+
+  # --- Admit phase: temporary pending-only flag, real admit, authoritative pending state ---
+  pin_live_backend_image_for_transition
+  if ! load_canary_directory_subject "pending_pre"; then
+    fail "action=pending refused: explicit subject load failed (note=${SUBJECT_NOTE:-unset}); no env write; no auto-selection"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "true" ]]; then
+    fail "action=pending refused: subject directory account must be active before admit (note=subject_inactive)"
+  fi
+  if [[ "$SUBJECT_LINK_STATUS" == "linked" ]]; then
+    if [[ "$SUBJECT_HAS_LOCAL_USER" != "true" || "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+      fail "action=pending refused: linked subject is not the owned canary employee (collision_not_owned); no auto-selection"
+    fi
+  elif [[ "$SUBJECT_LINK_STATUS" != "unmatched" && "$SUBJECT_LINK_STATUS" != "pending" ]]; then
+    fail "action=pending refused: subject link_status='${SUBJECT_LINK_STATUS}' is not admit-eligible"
+  fi
+
+  establish_alias_off_rollback_baseline
+  arm_alias_exit_rollback_guard
+  write_lifecycle_override "false" "true" "false"
+  pending_on_applied="true"
+
+  if ! recreate_backend_only; then
+    fail_transition_restore "backend_health_not_true_after_restart"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail_transition_restore "post_restart_sha_mismatch"
+  fi
+  if ! assert_exact_mode_pending; then
+    fail_transition_restore "post_restart_mode_not_pending"
+  fi
+
+  if ! load_canary_directory_subject "pending_on"; then
+    fail_transition_restore "subject_reload_failed_${SUBJECT_NOTE:-unset}"
+  fi
+
+  if [[ "$SUBJECT_LINK_STATUS" == "linked" && "$SUBJECT_HAS_LOCAL_USER" == "true" ]]; then
+    if ! assert_subject_user_access_state "pending_activation" "false" "pre_existing_pending"; then
+      if [[ "$ACCESS_ACTIVATION" == "activated" && "$ACCESS_IS_ACTIVE" == "true" ]]; then
+        fail_transition_restore "subject_already_activated_use_sso_or_deprovision"
+      fi
+      fail_transition_restore "pre_existing_pending_state_failed_${ACCESS_NOTE:-unset}"
+    fi
+    admit_ok="true"
+    ADMIT_NOTE="pre_existing_owned_pending"
+    ADMIT_ACTIVATION_STATUS="pending_activation"
+  else
+    if ! run_pending_admit; then
+      fail_transition_restore "admit_failed_${ADMIT_NOTE:-unset}"
+    fi
+    admit_ok="true"
+  fi
+
+  # Authoritative pending state via admin access API — not a wrong-password login probe.
+  if ! assert_subject_user_access_state "pending_activation" "false" "post_admit"; then
+    fail_transition_restore "pending_state_assert_failed_${ACCESS_NOTE:-unset}"
+  fi
+  pending_state_ok="true"
+  # Pending users have unusable passwords; OAuth blocked/allowed is human-only.
+  password_login_denied_checkpoint="NOT_EXECUTED"
+  oauth_negative_checkpoint="NOT_EXECUTED"
+  oauth_positive_checkpoint="NOT_EXECUTED"
+  activate_executed="false"
+
+  log "pending admit proven; restoring explicit OFF rollback baseline (success requires/proves OFF; canary must not leave pending enabled)"
+  restore_lifecycle_override
+  if ! recreate_backend_only; then
+    fail "action=pending: admit proven but rollback recreate failed — runtime OFF cannot be proven (explicit OFF baseline restored on disk; operator must inspect staging)"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail "action=pending: rollback SHA mismatch after restore — runtime OFF not fully proven (operator must inspect staging)"
+  fi
+  if ! assert_exact_mode_off; then
+    fail "action=pending: rollback did not prove exact mode=off (operator must inspect staging)"
+  fi
+  if [[ "$(fetch_backend_health_ok)" != "true" ]]; then
+    fail "action=pending: rollback backend health not true — runtime OFF not fully proven (operator must inspect staging)"
+  fi
+  rolled_back_to_off="true"
+  disarm_alias_exit_rollback_guard
+  cleanup_prev_backup
+
+  capture_live_snapshot
+  note="pending_admit_proved_off_oauth_not_executed"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "pending" "true" "true" "$note"
+  {
+    echo "action=pending"
+    echo "phase=admit"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=true"
+    echo "from_mode=off"
+    echo "to_mode=off"
+    echo "pending_on_applied=${pending_on_applied}"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
+    echo "subject_owned=true"
+    echo "subject_auto_selected=false"
+    echo "admit_ok=${admit_ok}"
+    echo "admit_note=${ADMIT_NOTE:-unset}"
+    echo "pending_state_ok=${pending_state_ok}"
+    echo "activate_executed=${activate_executed}"
+    echo "oauth_negative_checkpoint=${oauth_negative_checkpoint}"
+    echo "oauth_positive_checkpoint=${oauth_positive_checkpoint}"
+    echo "password_login_denied_checkpoint=${password_login_denied_checkpoint}"
+    echo "password_login_denied_ok=false"
+    echo "rolled_back_to_off=${rolled_back_to_off}"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=pending admit OK (transient pending ON proven; admit verified; flags OFF; OAuth/activate NOT_EXECUTED)"
+}
+
+# Deprovision apply phase
+# (confirmation=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED):
+#   temporary deprovision-only flag → real sync → exact run.id ledger bind → access denial
+#   → flags OFF. Does NOT restore access. Not an end-to-end rollback canary.
+# Deprovision restore phase (confirmation=DINGTALK_SOURCE_REACTIVATED_CONFIRMED):
+#   flags stay OFF → sync after external source re-enable → rehire restore exact event
+#   → prove event/effects resolved + access restored.
+action_deprovision() {
+  local phase="apply"
+  if [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_RESTORE_CONFIRMATION" ]]; then
+    phase="restore"
+  elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_SOURCE_CONFIRMATION" ]]; then
+    phase="apply"
+  else
+    fail "action=deprovision requires bootstrap_confirmation=${DEPROVISION_SOURCE_CONFIRMATION}|${DEPROVISION_RESTORE_CONFIRMATION}"
+  fi
+
+  if [[ "$phase" == "restore" ]]; then
+    action_deprovision_restore
+    return $?
+  fi
+  action_deprovision_apply
+}
+
+action_deprovision_apply() {
+  local pre_login_ok="false"
+  local admin_jwt_minted="false"
+  local deprovision_on_applied="false"
+  local source_inactive_after_sync="false"
+  local sync_ok="false"
+  local ledger_ok="false"
+  local access_denied_ok="false"
+  local login_denied_ok="false"
+  local login_denied_checkpoint="NOT_EXECUTED"
+  local subject_password_pre_ok="false"
+  local rolled_back_flags_off="false"
+  local note="deprovision_apply_phase"
+  SUBJECT_PASSWORD_PROVEN_OK="false"
+
+  require_sha
+  require_canary_secret_files "deprovision"
+  assert_canary_identifier_matches_owner "deprovision"
+  require_canary_directory_account_id_file "deprovision"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=deprovision"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=deprovision requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
+
+  capture_live_snapshot
+  assert_exact_sha
+  pin_live_backend_image_for_transition
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision apply refused: backend_health_ok must be true before any env write"
+  fi
+  if [[ "$SNAP_MODE" != "off" ]]; then
+    fail "action=deprovision apply refused: live mode must be off (live='${SNAP_MODE}')"
+  fi
+
+  if mint_canary_admin_jwt_from_password_login "deprovision_apply_pre"; then
+    pre_login_ok="true"
+    admin_jwt_minted="true"
+  else
+    fail "action=deprovision apply refused: canary login / JWT mint failed (no env write)"
+  fi
+
+  if ! load_canary_directory_subject "deprovision_apply_pre"; then
+    fail "action=deprovision apply refused: subject load failed (note=${SUBJECT_NOTE:-unset}); no auto-selection"
+  fi
+  if [[ "$SUBJECT_LINK_STATUS" != "linked" || "$SUBJECT_HAS_LOCAL_USER" != "true" ]]; then
+    fail "action=deprovision apply refused: subject must be linked owned local user; no auto-selection"
+  fi
+  if [[ "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+    fail "action=deprovision apply refused: linked local user is not owned canary employee; no auto-selection"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "true" ]]; then
+    fail "action=deprovision apply refused: account already inactive — need this-run active→inactive transition"
+  fi
+  if ! assert_subject_user_access_state "activated" "true" "deprovision_apply_pre"; then
+    fail "action=deprovision apply refused: local user must be activated+active (note=${ACCESS_NOTE:-unset})"
+  fi
+
+  # Optional proven-password checkpoint (never wrong-password).
+  local pass_file=""
+  if pass_file="$(resolve_subject_password_file 2>/dev/null)"; then
+    if prove_subject_password_login "deprovision_pre" "$pass_file"; then
+      subject_password_pre_ok="true"
+      SUBJECT_PASSWORD_PROVEN_OK="true"
+    else
+      fail "action=deprovision apply refused: subject password file present but pre-deprovision login failed (note=${SUBJECT_LOGIN_NOTE:-unset})"
+    fi
+  else
+    login_denied_checkpoint="NOT_EXECUTED"
+    login_denied_ok="false"
+  fi
+
+  # Collateral radius: whole-integration sync/preview BEFORE any deprovision env write.
+  # Require sole would-deactivate (linked) sample matches explicit subject externalUserId.
+  if ! run_deprovision_sync_preview_subject_gate; then
+    fail "action=deprovision apply refused: sync/preview subject gate failed (note=${PREVIEW_NOTE:-unset}); no env write performed; no auto-selection"
+  fi
+
+  # Read-only planner precondition (exact triple effects) before env write.
+  if ! prove_dedicated_subject_deprovision_precondition; then
+    fail "action=deprovision apply refused: dedicated subject precondition failed (note=${PRECOND_NOTE:-unset}); no env write"
+  fi
+
+  # Fail closed: unrecovered prior journal must not be overwritten.
+  refuse_existing_deprovision_apply_state
+  # Create recovery journal phase=prepared BEFORE env write (ids only).
+  journal_init_prepared
+
+  establish_alias_off_rollback_baseline
+  arm_alias_exit_rollback_guard
+  write_lifecycle_override "false" "false" "true"
+  deprovision_on_applied="true"
+
+  if ! recreate_backend_only; then
+    journal_clear_if_phase_prepared
+    fail_transition_restore "backend_health_not_true_after_restart"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    journal_clear_if_phase_prepared
+    fail_transition_restore "post_restart_sha_mismatch"
+  fi
+  if ! assert_exact_mode_deprovision; then
+    journal_clear_if_phase_prepared
+    fail_transition_restore "post_restart_mode_not_deprovision"
+  fi
+
+  # Sync may return radius anomaly; run id is still written first for recovery.
+  local sync_rc=0
+  run_directory_sync_for_subject "deprovision_apply" "true" || sync_rc=$?
+  if [[ "$SYNC_RUN_ID_PRESENT" != "true" || -z "${CANARY_SUBJECT_SYNC_RUN_ID_FILE:-}" || ! -s "${CANARY_SUBJECT_SYNC_RUN_ID_FILE}" ]]; then
+    # The reserved UUID was persisted before this POST. A transport failure may mean
+    # the server accepted and applied the run while the 202 was lost; deleting the
+    # prepared journal here would strand access changes with no recovery anchor.
+    fail_deprovision_apply_keep_journal "sync_start_or_response_failed_${SYNC_NOTE:-unset}"
+  fi
+  # ALWAYS upgrade journal to run_bound once the exact run reaches terminal
+  # (counts may be abnormal and ledger is not yet claimed).
+  if ! journal_upgrade_run_bound; then
+    fail_deprovision_apply_keep_journal "journal_upgrade_run_bound_failed"
+  fi
+
+  # Bind ledger (exact run → unique event + exact triple effects) BEFORE radius/graph gates.
+  if ! verify_deprovision_ledger_for_subject; then
+    # Keep phase=run_bound; restore flags; recovery_required (exact run persisted).
+    fail_deprovision_apply_keep_journal "ledger_verify_failed_${LEDGER_NOTE:-unset}"
+  fi
+  [[ "$LEDGER_RUN_MATCH" == "true" ]] \
+    || fail_deprovision_apply_keep_journal "ledger_run_id_not_matched"
+  # Atomic upgrade run_bound → ledger_bound (compat alias persist_deprovision_apply_state).
+  if ! persist_deprovision_apply_state; then
+    fail_deprovision_apply_keep_journal "journal_upgrade_ledger_bound_failed"
+  fi
+  ledger_ok="true"
+
+  # NOW post-sync TOCTOU radius: success requires exact 1/1/1. Failure keeps ledger_bound journal.
+  if [[ "$sync_rc" -ne 0 || "$SYNC_OK" != "true" ]]; then
+    fail_deprovision_apply_keep_journal "sync_radius_or_apply_anomaly_${SYNC_NOTE:-unset}"
+  fi
+  [[ "$SYNC_DEPROVISION_APPLIED" == "true" ]] \
+    || fail_deprovision_apply_keep_journal "deprovision_not_applied_on_sync"
+  [[ "${SYNC_DEPROVISION_CANDIDATES}" == "1" ]] \
+    || fail_deprovision_apply_keep_journal "sync_candidate_radius_not_one"
+  [[ "${SYNC_ACCOUNTS_DEACTIVATED}" == "1" ]] \
+    || fail_deprovision_apply_keep_journal "sync_accounts_deactivated_not_one"
+  [[ "${SYNC_USERS_DEACTIVATED}" == "1" ]] \
+    || fail_deprovision_apply_keep_journal "sync_users_deactivated_not_one"
+  sync_ok="true"
+
+  if ! load_canary_directory_subject "deprovision_post_sync"; then
+    fail_deprovision_apply_keep_journal "subject_reload_failed_${SUBJECT_NOTE:-unset}"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "false" ]]; then
+    fail_deprovision_apply_keep_journal "source_still_active_after_sync_external_gate"
+  fi
+  source_inactive_after_sync="true"
+
+  if ! assert_subject_user_access_state "activated" "false" "post_deprovision"; then
+    fail_deprovision_apply_keep_journal "access_not_denied_${ACCESS_NOTE:-unset}"
+  fi
+  access_denied_ok="true"
+
+  if ! prove_access_graph_state "deprovisioned" "post_deprovision"; then
+    fail_deprovision_apply_keep_journal "access_graph_not_deprovisioned_${GRAPH_NOTE:-unset}"
+  fi
+
+  if [[ "$SUBJECT_PASSWORD_PROVEN_OK" == "true" ]]; then
+    if ! prove_subject_login_denied_with_proven_password "deprovision_apply"; then
+      fail_deprovision_apply_keep_journal "login_not_denied_after_deprovision_${LOGIN_DENIED_NOTE:-unset}"
+    fi
+    login_denied_ok="true"
+    login_denied_checkpoint="proven_password_denied"
+  else
+    login_denied_ok="false"
+    login_denied_checkpoint="NOT_EXECUTED"
+  fi
+
+  # Flags OFF only — access remains disabled. Journal phase=ledger_bound retained for restore.
+  # NOTE: preview+sync radius checks are NOT an atomic scope lock; real deprovision
+  # may only target a dedicated isolated enterprise/integration — never a shared
+  # integration that holds real employees.
+  log "deprovision apply proven; restoring explicit OFF flags (access remains disabled; journal ledger_bound retained; restore phase required)"
+  restore_lifecycle_override
+  if ! recreate_backend_only; then
+    fail "action=deprovision apply: rollback recreate failed — runtime OFF cannot be proven (operator must inspect staging; journal retained)"
+  fi
+  if [[ "$(resolve_deployed_sha)" != "$DEPLOY_SHA" ]]; then
+    fail "action=deprovision apply: rollback SHA mismatch (operator must inspect staging; journal retained)"
+  fi
+  if ! assert_exact_mode_off; then
+    fail "action=deprovision apply: rollback did not prove exact mode=off (journal retained)"
+  fi
+  if [[ "$(fetch_backend_health_ok)" != "true" ]]; then
+    fail "action=deprovision apply: rollback backend health not true (journal retained)"
+  fi
+  rolled_back_flags_off="true"
+  disarm_alias_exit_rollback_guard
+  cleanup_prev_backup
+
+  capture_live_snapshot
+  note="deprovision_apply_flags_off_access_disabled_restore_phase_required"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "deprovision" "true" "true" "$note"
+  {
+    echo "action=deprovision"
+    echo "phase=apply"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=true"
+    echo "from_mode=off"
+    echo "to_mode=off"
+    echo "deprovision_on_applied=${deprovision_on_applied}"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
+    echo "subject_owned=true"
+    echo "subject_auto_selected=false"
+    echo "source_disable_confirmation=true"
+    echo "preview_subject_gate_ok=true"
+    echo "preview_would_deactivate=${PREVIEW_WOULD_DEACTIVATE:-0}"
+    echo "preview_would_deactivate_linked=${PREVIEW_WOULD_DEACTIVATE_LINKED:-0}"
+    echo "preview_subject_match=true"
+    echo "sync_radius_not_atomic_lock=true"
+    echo "source_inactive_after_sync=${source_inactive_after_sync}"
+    echo "sync_ok=${sync_ok}"
+    echo "sync_deprovision_applied=${SYNC_DEPROVISION_APPLIED:-false}"
+    echo "sync_run_id_present=${SYNC_RUN_ID_PRESENT:-false}"
+    echo "sync_users_deactivated=${SYNC_USERS_DEACTIVATED:-0}"
+    echo "sync_accounts_deactivated=${SYNC_ACCOUNTS_DEACTIVATED:-0}"
+    echo "sync_deprovision_candidates=${SYNC_DEPROVISION_CANDIDATES:-0}"
+    echo "ledger_ok=${ledger_ok}"
+    echo "ledger_run_match=${LEDGER_RUN_MATCH:-false}"
+    echo "ledger_event_count=${LEDGER_EVENT_COUNT:-0}"
+    echo "ledger_effect_count=${LEDGER_EFFECT_COUNT:-0}"
+    echo "ledger_generation_present=${LEDGER_GENERATION_PRESENT:-false}"
+    echo "journal_phase=ledger_bound"
+    echo "journal_retained=true"
+    echo "exact_run_persisted=true"
+    echo "recovery_required=false"
+    echo "apply_completed=true"
+    echo "apply_state_persisted=true"
+    echo "access_denied_ok=${access_denied_ok}"
+    echo "access_graph_user_active=${GRAPH_USER_ACTIVE:-unknown}"
+    echo "access_graph_membership_active_count=${GRAPH_MEMBERSHIP_ACTIVE_COUNT:-0}"
+    echo "access_graph_grant_state=${GRAPH_GRANT_STATE:-unknown}"
+    echo "subject_password_pre_ok=${subject_password_pre_ok}"
+    echo "login_denied_checkpoint=${login_denied_checkpoint}"
+    echo "login_denied_ok=${login_denied_ok}"
+    echo "rolled_back_flags_off=${rolled_back_flags_off}"
+    echo "access_restored=false"
+    echo "canary_access_rollback_complete=false"
+    echo "server_side_access_graph_restore_proven=false"
+    echo "end_to_end_restore_claimed=false"
+    echo "restore_phase_required=true"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=deprovision apply OK (flags OFF; access disabled; journal ledger_bound retained; restore phase required)"
+}
+
+action_deprovision_restore() {
+  local pre_login_ok="false"
+  local admin_jwt_minted="false"
+  local source_active_after_sync="false"
+  local sync_ok="false"
+  local restore_ok="false"
+  local resolved_ok="false"
+  local access_restored_ok="false"
+  local graph_restored_ok="false"
+  local login_restored_ok="false"
+  local login_restored_checkpoint="NOT_EXECUTED"
+  local oauth_negative_checkpoint="NOT_EXECUTED"
+  local oauth_positive_checkpoint="NOT_EXECUTED"
+  local flags_remain_off="false"
+  local note="deprovision_restore_phase"
+  SUBJECT_PASSWORD_PROVEN_OK="false"
+
+  require_sha
+  require_canary_secret_files "deprovision"
+  assert_canary_identifier_matches_owner "deprovision"
+  require_canary_directory_account_id_file "deprovision"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=deprovision restore"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=deprovision restore requires expected_current_mode=off"
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision restore"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision restore refused: backend_health_ok must be true"
+  fi
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision restore refused: all lifecycle flags must be OFF before restore (live mode='${SNAP_MODE}')"
+  fi
+
+  if mint_canary_admin_jwt_from_password_login "deprovision_restore_pre"; then
+    pre_login_ok="true"
+    admin_jwt_minted="true"
+  else
+    fail "action=deprovision restore refused: canary login / JWT mint failed"
+  fi
+
+  if ! load_canary_directory_subject "deprovision_restore_pre"; then
+    fail "action=deprovision restore refused: subject load failed (note=${SUBJECT_NOTE:-unset}); no auto-selection"
+  fi
+  if [[ "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+    fail "action=deprovision restore refused: subject is not owned canary employee; no auto-selection"
+  fi
+
+  # Exact apply correlation from host persistent state — NEVER discover events by scan.
+  if ! load_deprovision_apply_state; then
+    fail "action=deprovision restore refused: apply state load failed (missing/drift); no event auto-discovery"
+  fi
+
+  # External source reactivated → sync so local account becomes active again (no deprovision flag).
+  if ! run_directory_sync_for_subject "deprovision_restore" "false"; then
+    fail "action=deprovision restore refused: sync failed (note=${SYNC_NOTE:-unset})"
+  fi
+  sync_ok="true"
+
+  if ! load_canary_directory_subject "deprovision_restore_post_sync"; then
+    fail "action=deprovision restore refused: subject reload failed (note=${SUBJECT_NOTE:-unset})"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "true" ]]; then
+    fail "action=deprovision restore refused: subject source not active after sync (external re-enable gate)"
+  fi
+  source_active_after_sync="true"
+
+  if ! run_or_resume_deprovision_rehire_restore; then
+    fail "action=deprovision restore refused: rehire restore/resume failed (note=${RESTORE_NOTE:-unset})"
+  fi
+  restore_ok="true"
+  resolved_ok="true"
+
+  if ! assert_subject_user_access_state "activated" "true" "post_restore"; then
+    fail "action=deprovision restore refused: profile access not restored (note=${ACCESS_NOTE:-unset})"
+  fi
+  access_restored_ok="true"
+
+  if ! prove_access_graph_state "restored" "post_restore"; then
+    fail "action=deprovision restore refused: access graph not restored (note=${GRAPH_NOTE:-unset})"
+  fi
+  graph_restored_ok="true"
+
+  local pass_file=""
+  if pass_file="$(resolve_subject_password_file 2>/dev/null)"; then
+    if prove_subject_password_login "deprovision_restore" "$pass_file"; then
+      login_restored_ok="true"
+      login_restored_checkpoint="proven_password_ok"
+    else
+      fail "action=deprovision restore refused: subject password login failed after restore (note=${SUBJECT_LOGIN_NOTE:-unset})"
+    fi
+  else
+    login_restored_ok="false"
+    login_restored_checkpoint="NOT_EXECUTED"
+  fi
+  # Human DingTalk OAuth positive/negative remain manual.
+  oauth_negative_checkpoint="NOT_EXECUTED"
+  oauth_positive_checkpoint="NOT_EXECUTED"
+
+  capture_live_snapshot
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision restore refused: lifecycle flags must remain OFF after restore"
+  fi
+  flags_remain_off="true"
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision restore post-check"
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision restore refused: backend_health_ok must remain true"
+  fi
+
+  clear_deprovision_apply_state
+
+  note="deprovision_restore_server_side_access_graph_proven_flags_off"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "deprovision" "true" "false" "$note"
+  {
+    echo "action=deprovision"
+    echo "phase=restore"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=false"
+    echo "lifecycle_env_write=false"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
+    echo "subject_owned=true"
+    echo "subject_auto_selected=false"
+    echo "source_reactivate_confirmation=true"
+    echo "source_active_after_sync=${source_active_after_sync}"
+    echo "sync_ok=${sync_ok}"
+    echo "restore_ok=${restore_ok}"
+    echo "restore_resumed_fully_resolved=${RESTORE_RESUMED_FULLY_RESOLVED:-false}"
+    echo "restore_effect_count=${RESTORE_EFFECT_COUNT:-0}"
+    echo "event_fully_resolved_ok=${resolved_ok}"
+    echo "access_restored_ok=${access_restored_ok}"
+    echo "access_graph_restored_ok=${graph_restored_ok}"
+    echo "access_graph_user_active=${GRAPH_USER_ACTIVE:-unknown}"
+    echo "access_graph_membership_active_count=${GRAPH_MEMBERSHIP_ACTIVE_COUNT:-0}"
+    echo "access_graph_grant_state=${GRAPH_GRANT_STATE:-unknown}"
+    echo "login_restored_checkpoint=${login_restored_checkpoint}"
+    echo "login_restored_ok=${login_restored_ok}"
+    echo "oauth_negative_checkpoint=${oauth_negative_checkpoint}"
+    echo "oauth_positive_checkpoint=${oauth_positive_checkpoint}"
+    echo "flags_remain_off=${flags_remain_off}"
+    echo "server_side_access_graph_restore_proven=true"
+    echo "canary_access_rollback_complete=true"
+    # OAuth human checkpoints not executed → must not claim full end-to-end.
+    echo "end_to_end_restore_claimed=false"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=deprovision restore OK (server-side access graph proven; OAuth NOT_EXECUTED; end_to_end_restore_claimed=false; flags OFF)"
+}
+
 # --- main ------------------------------------------------------------------------------
 
 main() {
@@ -2322,8 +5538,8 @@ main() {
     bootstrap) action_bootstrap ;;
     human-bootstrap) action_human_bootstrap ;;
     alias) action_alias ;;
-    pending) action_not_executable_on pending ;;
-    deprovision) action_not_executable_on deprovision ;;
+    pending) action_pending ;;
+    deprovision) action_deprovision ;;
     *) fail "invalid ACTION='${ACTION}' (status|preflight|off|bootstrap|human-bootstrap|alias|pending|deprovision)" ;;
   esac
 }

@@ -5,7 +5,7 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 # Staging-only MINIMAL SAFE operator lane for DingTalk lifecycle env gates.
 # One dispatch = ONE action. All lifecycle flags remain OFF by default.
 #
-# EXECUTABLE: status | preflight | off | bootstrap | human-bootstrap | alias
+# EXECUTABLE: status | preflight | off | bootstrap | human-bootstrap | alias | pending | deprovision
 #   off       = emergency env-gate clear of the three lifecycle flags only (with
 #               previous-override restore on restart/health/mode failure).
 #   bootstrap = staging-only create/repair of the FIXED dedicated lifecycle
@@ -33,11 +33,21 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 #               + secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD only (chmod-600 file
 #               transport). Short-lived admin JWT is minted from the canary
 #               password login after pre-login — never secrets.ATTENDANCE_ADMIN_JWT.
-#
-# NOT EXECUTABLE: pending | deprovision
-#   Fail-closed preflight-only. Env flip alone is not a canary — there is no
-#   secret-backed real verifier for admit→activate or sync→deprovision.
-#   transition_applied is always false for these actions.
+#   pending   = TRANSIENT secret-backed pending ADMIT canary on an EXPLICIT owned
+#               directory account subject (file transport; never printed).
+#               Default phase: admit only (pending flag ON → real admit → pending
+#               state proofs → flags OFF). OAuth negative/positive checkpoints are
+#               NOT_EXECUTED (manual). Optional confirmation PENDING_SSO_ACTIVATE
+#               runs SSO activate only (no env write); browser OAuth still
+#               NOT_EXECUTED. No auto-selection. No temp_password activate claim.
+#   deprovision = Two-phase canary on the SAME explicit subject.
+#               APPLY: bootstrap_confirmation=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED
+#               → deprovision flag ON → real sync → ledger bound to exact run.id
+#               → access denial → flags OFF (access remains disabled; not
+#               end-to-end success).
+#               RESTORE: bootstrap_confirmation=DINGTALK_SOURCE_REACTIVATED_CONFIRMED
+#               → flags stay OFF → sync after external source re-enable → rehire
+#               restore for the applied event → prove resolved + access restored.
 #
 # See:
 #   docs/development/dingtalk-lifecycle-canary-separate-go-20260724.md
@@ -50,29 +60,29 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status/preflight/off/bootstrap/human-bootstrap/alias = executable; pending/deprovision = NOT EXECUTABLE (fail-closed preflight-only)'
+        description: 'status/preflight/off/bootstrap/human-bootstrap/alias/pending/deprovision = executable (pending/deprovision need explicit subject secret + rollback)'
         required: true
         type: choice
         # Quote 'off' — YAML 1.1 bare off becomes boolean false.
         options: [status, preflight, 'off', bootstrap, human-bootstrap, alias, pending, deprovision]
         default: status
       target_mode:
-        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). pending/deprovision assess readiness only — never apply.'
+        description: 'preflight only: target mode to assess (off|alias|pending|deprovision). Stack readiness only — action=pending|deprovision still require subject secret.'
         required: false
         type: choice
         options: ['off', alias, pending, deprovision]
         default: 'off'
       expected_current_mode:
-        description: 'Required for action=off (live mode before clear) and action=bootstrap|human-bootstrap|alias (must be off). Optional for preflight.'
+        description: 'Required for action=off (live mode before clear) and action=bootstrap|human-bootstrap|alias|pending|deprovision (must be off). Optional for preflight.'
         required: false
         type: string
         default: ''
       deploy_sha:
-        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off, bootstrap, human-bootstrap, and alias; optional exact-match for preflight.'
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for action=off, bootstrap, human-bootstrap, alias, pending, and deprovision; optional exact-match for preflight.'
         required: false
         default: ''
       bootstrap_confirmation:
-        description: 'For action=bootstrap enter CREATE_STAGING_CANARY_ADMIN; for action=human-bootstrap enter CREATE_STAGING_HUMAN_ADMIN. Ignored by other actions.'
+        description: 'bootstrap=CREATE_STAGING_CANARY_ADMIN; human-bootstrap=CREATE_STAGING_HUMAN_ADMIN; pending optional PENDING_SSO_ACTIVATE; deprovision=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply) or DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore).'
         required: false
         type: string
         default: ''
@@ -132,11 +142,11 @@ jobs:
             fi
           fi
 
-          # action=bootstrap|human-bootstrap|alias: structural inputs only here. Secret
-          # presence is checked in Run remote action. bootstrap/human-bootstrap never
-          # write lifecycle env flags. alias success requires/proves OFF; failure
-          # restores OFF override first.
-          if [[ "$ACTION" == "bootstrap" || "$ACTION" == "human-bootstrap" || "$ACTION" == "alias" ]]; then
+          # action=bootstrap|human-bootstrap|alias|pending|deprovision: structural inputs
+          # only here. Secret presence is checked in Run remote action.
+          # bootstrap/human-bootstrap never write lifecycle env flags.
+          # alias/pending/deprovision success requires/proves OFF; failure restores OFF.
+          if [[ "$ACTION" == "bootstrap" || "$ACTION" == "human-bootstrap" || "$ACTION" == "alias" || "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
             if [[ "$EXPECTED_CURRENT_MODE" != "off" ]]; then
               echo "expected_current_mode must be exactly 'off' for action=${ACTION} (no auto-selection)" >&2
               exit 2
@@ -157,14 +167,29 @@ jobs:
             exit 2
           fi
 
+          if [[ "$ACTION" == "deprovision" ]]; then
+            case "$BOOTSTRAP_CONFIRMATION" in
+              DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED|DINGTALK_SOURCE_REACTIVATED_CONFIRMED) ;;
+              *)
+                echo "bootstrap_confirmation must be DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply) or DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore) for action=deprovision" >&2
+                exit 2
+              ;;
+            esac
+          fi
+
+          if [[ "$ACTION" == "pending" && -n "$BOOTSTRAP_CONFIRMATION" ]]; then
+            case "$BOOTSTRAP_CONFIRMATION" in
+              PENDING_ADMIT|PENDING_SSO_ACTIVATE) ;;
+              *)
+                echo "bootstrap_confirmation for action=pending must be empty, PENDING_ADMIT, or PENDING_SSO_ACTIVATE" >&2
+                exit 2
+              ;;
+            esac
+          fi
+
           if [[ -n "$DEPLOY_SHA" && ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "deploy_sha must be empty or the FULL 40-char lowercase commit SHA, got: '$DEPLOY_SHA'" >&2
             exit 2
-          fi
-
-          # Document that pending/deprovision are NOT EXECUTABLE (remote fails closed).
-          if [[ "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
-            echo "NOTE: action=$ACTION is NOT EXECUTABLE in this lane (no real verifier). Remote will fail-closed with transition_applied=false." >&2
           fi
 
           bash -n scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh
@@ -210,15 +235,18 @@ jobs:
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           BOOTSTRAP_CONFIRMATION: ${{ inputs.bootstrap_confirmation }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
-          # bootstrap/human-bootstrap/alias login secrets are materialized INSIDE this
-          # step under EXIT trap — never via a prior step secrets_dir output (cross-step
-          # leak / cancel). ATTENDANCE_ADMIN_JWT is intentionally NOT consumed; alias
-          # and human-bootstrap mint a short-lived admin JWT from the canary password
-          # login on the remote host. STAGING_OWNER_ADMIN_PASSWORD is demoted and
-          # written to a chmod-600 file for human-bootstrap only (path transferred).
+          # bootstrap/human-bootstrap/alias/pending/deprovision login secrets are
+          # materialized INSIDE this step under EXIT trap — never via a prior step
+          # secrets_dir output (cross-step leak / cancel). ATTENDANCE_ADMIN_JWT is
+          # intentionally NOT consumed; alias/pending/deprovision/human-bootstrap mint a
+          # short-lived admin JWT from the canary password login on the remote host.
+          # STAGING_OWNER_ADMIN_PASSWORD is demoted and written to a chmod-600 file for
+          # human-bootstrap only. LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID is demoted for
+          # pending|deprovision only (path transferred; value never printed).
           LIFECYCLE_CANARY_LOGIN_IDENTIFIER: ${{ secrets.LIFECYCLE_CANARY_LOGIN_IDENTIFIER }}
           LIFECYCLE_CANARY_LOGIN_PASSWORD: ${{ secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD }}
           STAGING_OWNER_ADMIN_PASSWORD: ${{ inputs.action == 'human-bootstrap' && secrets.STAGING_OWNER_ADMIN_PASSWORD || '' }}
+          LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID: ${{ (inputs.action == 'pending' || inputs.action == 'deprovision') && secrets.LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID || '' }}
         run: |
           set -euo pipefail
           # --- SECRET DEMOTE (builtins only; no external child before unset) -------------
@@ -230,7 +258,8 @@ jobs:
           _CANARY_IDENT="${LIFECYCLE_CANARY_LOGIN_IDENTIFIER-}"
           _CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"
           _STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"
-          unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD
+          _CANARY_SUBJECT="${LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID-}"
+          unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID
           # --- end secret demote; external commands allowed after this point ------------
 
           ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
@@ -283,28 +312,35 @@ jobs:
             set -e
           }
 
-          # For bootstrap|human-bootstrap|alias: materialize chmod-600 secrets LOCALLY
-          # under EXIT trap, then scp path-only into the per-run remote directory. Never
-          # pass secrets_dir across steps. Never materialize ATTENDANCE_ADMIN_JWT.
-          # Password written with printf '%s' (exact bytes). Alias/human-bootstrap mint
-          # admin JWT on remote after successful canary pre-login into the same per-run
-          # secrets dir. human-bootstrap also materializes staging-owner-admin.password.
+          # For bootstrap|human-bootstrap|alias|pending|deprovision: materialize chmod-600
+          # secrets LOCALLY under EXIT trap, then scp path-only into the per-run remote
+          # directory. Never pass secrets_dir across steps. Never materialize
+          # ATTENDANCE_ADMIN_JWT. Password written with printf '%s' (exact bytes).
+          # Alias/pending/deprovision/human-bootstrap mint admin JWT on remote after
+          # successful canary pre-login. pending|deprovision also materialize
+          # directory-account.id (subject UUID path only; never printed).
           remote_secrets_dir=""
           canary_ident_export=""
           canary_pass_export=""
           staging_owner_pass_export=""
-          if [[ "$ACTION" == "alias" || "$ACTION" == "bootstrap" || "$ACTION" == "human-bootstrap" ]]; then
+          canary_subject_export=""
+          if [[ "$ACTION" == "alias" || "$ACTION" == "bootstrap" || "$ACTION" == "human-bootstrap" || "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
             # Install trap BEFORE any secret materialization (mktemp/write/chmod).
             trap cleanup_canary_ephemeral_paths EXIT INT TERM
             # Presence via non-exported shell vars only (env already unset above).
             if [[ -z "${_CANARY_IDENT}" || -z "${_CANARY_PASS}" ]]; then
               echo "${ACTION} requires LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (checked in Run remote action only); never ATTENDANCE_ADMIN_JWT" >&2
-              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
               exit 2
             fi
             if [[ "$ACTION" == "human-bootstrap" && -z "${_STAGING_OWNER_PASS}" ]]; then
               echo "human-bootstrap requires STAGING_OWNER_ADMIN_PASSWORD (checked in Run remote action only); never log secret" >&2
-              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
+              exit 2
+            fi
+            if [[ ( "$ACTION" == "pending" || "$ACTION" == "deprovision" ) && -z "${_CANARY_SUBJECT}" ]]; then
+              echo "${ACTION} requires LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; no auto-selection; checked in Run remote action only); never log secret" >&2
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
               exit 2
             fi
             secrets_dir="$(mktemp -d "${RUNNER_TEMP}/lifecycle-canary-secrets.XXXXXX")"
@@ -335,6 +371,16 @@ jobs:
             else
               unset _STAGING_OWNER_PASS
             fi
+            if [[ "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
+              printf '%s' "${_CANARY_SUBJECT}" > "${secrets_dir}/directory-account.id"
+              unset _CANARY_SUBJECT
+              chmod 600 "${secrets_dir}/directory-account.id"
+              [[ -s "${secrets_dir}/directory-account.id" ]] \
+                || { echo "secret file empty after materialize: directory-account.id" >&2; exit 2; }
+              scp_files+=("${secrets_dir}/directory-account.id")
+            else
+              unset _CANARY_SUBJECT
+            fi
             remote_secrets_dir="${RUNNER_DIR}/.canary-secrets"
             CLEAN_REMOTE_SECRETS_DIR="${remote_secrets_dir}"
             # Remote copy only after local materialize succeeded under trap coverage.
@@ -347,6 +393,10 @@ jobs:
               ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
                 "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password ${remote_secrets_dir}/staging-owner-admin.password'"
               staging_owner_pass_export="export STAGING_OWNER_ADMIN_PASSWORD_FILE='${remote_secrets_dir}/staging-owner-admin.password'"
+            elif [[ "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
+              ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+                "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password ${remote_secrets_dir}/directory-account.id'"
+              canary_subject_export="export CANARY_DIRECTORY_ACCOUNT_ID_FILE='${remote_secrets_dir}/directory-account.id'"
             else
               ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
                 "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password'"
@@ -355,7 +405,7 @@ jobs:
             canary_pass_export="export CANARY_LOGIN_PASSWORD_FILE='${remote_secrets_dir}/login.password'"
           else
             # Non-secret actions: drop any unused shell copies; clean per-run dirs on exit.
-            unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS
+            unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
             trap cleanup_canary_ephemeral_paths EXIT INT TERM
           fi
 
@@ -372,6 +422,7 @@ jobs:
           ${canary_ident_export}
           ${canary_pass_export}
           ${staging_owner_pass_export}
+          ${canary_subject_export}
           rm -rf '${remote_output_dir}'
           mkdir -p '${remote_output_dir}'
           set +e
@@ -425,13 +476,18 @@ jobs:
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
-            echo "**Executable:** status / preflight / off / bootstrap / human-bootstrap / alias (alias success requires/proves OFF; failure restores OFF override before failing)."
-            echo "**NOT EXECUTABLE:** pending / deprovision (no real canary verifier)."
+            echo "**Executable:** status / preflight / off / bootstrap / human-bootstrap / alias / pending / deprovision."
+            echo "Alias/pending/deprovision success requires/proves OFF; failure restores OFF override before failing."
             echo "OFF is emergency env-gate rollback only — not OR-column design reintroduction."
             echo "Bootstrap creates/repairs fixed lifecycle-canary@staging.invalid admin only (no lifecycle env write)."
             echo "Human-bootstrap creates/repairs fixed username staging-owner-admin human platform admin only (no lifecycle env write; password file transport)."
-            echo "Bootstrap/human-bootstrap/alias require LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (file transport); human-bootstrap also requires STAGING_OWNER_ADMIN_PASSWORD file; alias/human-bootstrap mint short-lived admin JWT from canary password login — never ATTENDANCE_ADMIN_JWT."
-            echo "Runtime OFF cannot be proven if alias rollback recreate itself fails (override restored on disk)."
+            echo "Bootstrap/human-bootstrap/alias/pending/deprovision require LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (file transport); human-bootstrap also requires STAGING_OWNER_ADMIN_PASSWORD; pending/deprovision also require LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; never printed)."
+            echo "Pending default phase is admit-only; OAuth checkpoints are NOT_EXECUTED; optional PENDING_SSO_ACTIVATE (browser OAuth still NOT_EXECUTED)."
+            echo "Deprovision apply uses DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (flags OFF, access remains disabled). Restore uses DINGTALK_SOURCE_REACTIVATED_CONFIRMED (rehire + access restore; flags stay OFF)."
+            echo "Deprovision refuses shared integrations: exactly one total directory account, manual scheduling, admission automation OFF, and member-group projection OFF are required."
+            echo "Deprovision reserves and journals the exact sync run UUID before env/HTTP; lost responses recover only through that run and its exact event/effects."
+            echo "Alias/pending/deprovision/human-bootstrap mint short-lived admin JWT from canary password login — never ATTENDANCE_ADMIN_JWT."
+            echo "Runtime OFF cannot be proven if rollback recreate itself fails (override restored on disk)."
             if [[ -f output/lifecycle-canary/summary.txt ]]; then
               echo ""
               echo '```text'

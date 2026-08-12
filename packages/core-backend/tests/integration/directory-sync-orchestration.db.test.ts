@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
 
 // R1-L4 — the syncDirectoryIntegration ORCHESTRATION HARNESS.
 //
@@ -42,6 +43,8 @@ import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovis
 import {
   createDirectoryIntegration,
   DirectorySyncInProgressError,
+  DirectorySyncRunReplayError,
+  getDirectorySyncRun,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
 import {
@@ -211,6 +214,50 @@ async function pollUntil<T>(read: () => Promise<T>, done: (value: T) => boolean,
 describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', () => {
   it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('claims a caller-reserved run UUID once and replays it without a second provider pull', async () => {
+    const integration = await createDirectoryIntegration({
+      name: `dso-reserved-${TS}`,
+      corpId: `dso-reserved-corp-${TS}`,
+      appKey: `dso-reserved-appkey-${TS}`,
+      appSecret: 'dso-secret',
+      admissionMode: 'manual_only',
+    })
+    const requestedRunId = randomUUID()
+    activeDirectory = { departments: [], usersByDept: {} }
+    const pullsBefore = clientMocks.fetchDingTalkAppAccessToken.mock.calls.length
+
+    try {
+      const first = await syncDirectoryIntegration(integration.id, 'system:dso-reserved', 'manual', {
+        requestedRunId,
+      })
+      expect(first.run.id).toBe(requestedRunId)
+      expect(first.run.status).toBe('completed')
+      const pullsAfterFirst = clientMocks.fetchDingTalkAppAccessToken.mock.calls.length
+      expect(pullsAfterFirst).toBeGreaterThan(pullsBefore)
+      expect(await getDirectorySyncRun(integration.id, requestedRunId)).toMatchObject({
+        id: requestedRunId,
+        integrationId: integration.id,
+        status: 'completed',
+      })
+      expect(await getDirectorySyncRun(randomUUID(), requestedRunId)).toBeNull()
+
+      const replay = await syncDirectoryIntegration(integration.id, 'system:dso-reserved', 'manual', {
+        requestedRunId,
+      }).catch((error) => error)
+      expect(replay).toBeInstanceOf(DirectorySyncRunReplayError)
+      expect((replay as DirectorySyncRunReplayError).runId).toBe(requestedRunId)
+      expect(clientMocks.fetchDingTalkAppAccessToken.mock.calls.length).toBe(pullsAfterFirst)
+
+      const rows = await query<{ id: string }>(
+        `SELECT id FROM directory_sync_runs WHERE id = $1 AND integration_id = $2`,
+        [requestedRunId, integration.id],
+      )
+      expect(rows.rows).toEqual([{ id: requestedRunId }])
+    } finally {
+      await cleanupIntegration(integration.id)
+    }
   })
 
   // -------------------------------------------------------------------------

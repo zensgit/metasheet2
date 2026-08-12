@@ -1,19 +1,19 @@
 # DingTalk lifecycle canary — separate ops GO (not auto-enabled)
 
 **Date:** 2026-07-24
-**Updated:** 2026-08-11 (bootstrap fixed canary admin + alias JWT mint from password login; bootstrap stdin secret transport / no container secret files / permissions-column omit / session revoke on repair / post-bootstrap OFF+health+SHA reassert; alias remains a **transient** secret-backed cutover; success requires/proves OFF; failure restores the OFF override before failing; pending/deprovision remain **NOT EXECUTABLE**; no successful ON canary run claimed here)
+**Updated:** 2026-08-12 (alias run 31504979575 completed with required OFF rollback; pending/deprovision now have fail-closed transient operators but remain **NOT EXECUTED**; deprovision requires a dedicated one-account integration and pre-reserves its exact sync run UUID before env/HTTP)
 **Related locks:**
 - `dingtalk-directory-admission-activation-lifecycle-design-20260723.md` Rev 4.2
-- `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.2
+- `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.5
 - Closeout execution: `dingtalk-lifecycle-six-step-closeout-execution-20260810.md`
 
 ## What is NOT enabled by merge
 
 | Flag / action | Default after code land | Executable in this lane? |
 |---------------|-------------------------|--------------------------|
-| `DIRECTORY_PENDING_ACTIVATION_ENABLED` ON | **OFF** | **NOT EXECUTABLE** — no admit→activate verifier |
+| `DIRECTORY_PENDING_ACTIVATION_ENABLED` ON | **OFF** | **Executable only as a transient canary** on an explicit owned account. Default phase admits to pending and proves OFF rollback; optional SSO activation still records browser OAuth as `NOT_EXECUTED` until a human observes it. |
 | `AUTH_LOGIN_USE_ALIASES` ON (T2b cutover) | **OFF** | **Executable only as a transient canary** (`action=alias`). Success requires/proves OFF in the same run; failure restores the OFF override before failing. Runtime OFF cannot be proven if rollback recreate itself fails (override restored on disk). Requires secret-backed password login; short-lived admin JWT is minted from that login (never `secrets.ATTENDANCE_ADMIN_JWT`). |
-| `DIRECTORY_DEPROVISION_ENABLED` ON | **OFF** | **NOT EXECUTABLE** — no sync→deprovision verifier |
+| `DIRECTORY_DEPROVISION_ENABLED` ON | **OFF** | **Executable only as a two-phase transient canary** on an explicit owned account in a dedicated one-account integration. Apply and restore are separate confirmed operations; every exit restores/proves the flags OFF or reports that runtime OFF is unproven. |
 | Env-gate clear (`action=off`) | n/a | Executable emergency only (after migrations true + exact SHA) |
 | Dedicated canary admin (`action=bootstrap`) | n/a | Executable staging-only create/repair of the **fixed** owned row only (no lifecycle env write) |
 
@@ -34,7 +34,8 @@ Presence of canary subject/integration/owner tokens is **not** a real canary and
 | `off` | yes | emergency clear of the three env gates; previous-override restore on failure; health true after restart required |
 | `bootstrap` | yes (manual) | staging-only create/repair of fixed canary admin; see below; **no lifecycle env write** |
 | `alias` | yes (transient) | secret-backed cutover canary; see sequence below; success requires/proves OFF |
-| `pending` / `deprovision` | **NOT EXECUTABLE** | fail-closed preflight-only; `transition_applied=false` always |
+| `pending` | yes (transient, **NOT EXECUTED**) | explicit owned directory account only; pending admit or optional SSO activation; required OFF rollback; browser OAuth remains a human checkpoint |
+| `deprovision` | yes (two-phase, **NOT EXECUTED**) | dedicated one-account manual integration only; exact preview/planner radius; reserved run UUID + recovery journal; exact event/effects restore; required OFF rollback |
 
 Shared concurrency with `attendance-staging-window-runner`. Status artifacts stay values-free (booleans / counts / reason enums / SHA only).
 
@@ -105,9 +106,9 @@ Backfill alias rows **may persist** after the run. Artifacts report only boolean
 
 **Repo state note:** `LIFECYCLE_CANARY_LOGIN_IDENTIFIER` / `LIFECYCLE_CANARY_LOGIN_PASSWORD` must be configured before a real bootstrap or alias dispatch. This lane does **not** use `ATTENDANCE_ADMIN_JWT`. Landing this code does **not** configure those secrets and does **not** claim a successful canary execution.
 
-## Current staging baseline (ON canary NOT EXECUTED)
+## Current staging baseline (alias executed and rolled back)
 
-As of 2026-08-11 this lane remains **NOT EXECUTED** for a completed alias cutover canary run (secrets for identifier/password may be absent; no invented success). Safe preparation evidence for the OFF baseline:
+As of 2026-08-11 the alias cutover canary is complete and rolled back. Pending and deprovision remain **NOT EXECUTED**. Safe preparation and execution evidence:
 
 1. Attendance staging runner [run 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed backup + clone rehearsal + real apply: migration state `296 applied / 18 pending` -> `314 applied / 0 pending`; rehearsal isolation held and auth round-trip returned 200.
 2. [#4853](https://github.com/zensgit/metasheet2/pull/4853), merge commit `ddec28b12ebff97fae33af45553d77c149d816e1`, installs and validates the checked-out staging Compose file, pins Compose project-directory, and derives build metadata from the exact `IMAGE_TAG`.
@@ -115,26 +116,45 @@ As of 2026-08-11 this lane remains **NOT EXECUTED** for a completed alias cutove
 4. Lifecycle [status 31418997337](https://github.com/zensgit/metasheet2/actions/runs/31418997337) proved exact build SHA, healthy backend, zero pending migrations, `mode=off`, and all three flags `false`.
 5. Lifecycle [preflight 31419066036](https://github.com/zensgit/metasheet2/actions/runs/31419066036) proved `preflight_target_mode=off`, `preflight_ok=true`, and `transition_applied=false`. No env write occurred.
 6. The existing `DEPLOY_KNOWN_HOSTS` secret is the independently verified deploy-host identity. The lane uses `StrictHostKeyChecking=yes`; missing host identity blocks dispatch rather than producing forgeable evidence.
+7. Lifecycle [status 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038) re-proved the exact staging SHA, healthy backend, zero pending migrations, mode `off`, and all three flags `false`.
+8. Lifecycle [alias 31504979575](https://github.com/zensgit/metasheet2/actions/runs/31504979575) proved password login before ON, during alias-only, and after rollback; it reported zero collisions and finished in exact mode `off` with all three flags `false`.
 
-The former image-tag/health-commit provenance conflict is resolved. This establishes only the safe OFF baseline, not an executed alias canary.
+The former image-tag/health-commit provenance conflict is resolved. This establishes the safe OFF baseline and the transient alias staging canary; it does not authorize production alias traffic.
 
-Until a **secret-backed real verifier** exists for:
+The secret-backed operators now exist, but neither action has been run in staging. Execution still
+requires one explicitly owned source employee. Deprovision additionally refuses any integration
+that is scheduled, auto-admitting, member-group projecting, or contains anything other than the
+single selected directory account (inactive rows count too). The current shared employee
+integration is therefore ineligible by construction.
 
-- pending: real admit→activate on an explicit canary subject,
-- deprovision: real sync→deprovision on an explicit canary integration,
+Apply also requires the literal confirmation
+`DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`: the source is disabled, the integration
+is dedicated to the one canary account, and no other operator may sync or edit that integration
+until the apply window has returned all lifecycle flags to OFF. Preview plus the one-account
+precondition are strong fail-closed gates, but they are not an atomic scope lock; this explicit
+exclusive window is therefore a required operational hold, not an optional note.
 
-those ON actions stay **NOT EXECUTABLE**. Alias now has a verifier path in this lane, but a successful run still requires configured secrets + operator dispatch and is **NOT EXECUTED** by this documentation alone.
+For deprovision apply, journal schema v4 persists the subject tuple and a random run UUID **before**
+the env write and HTTP request. The async API must claim that UUID; a repeated request returns the
+same run without a second provider pull. A lost 202 or runner crash is recovered only from that
+exact UUID, then the exact event/effect triple. Restore status is read by exact event/user/integration
+tuple rather than a recent-events page. No latest/sole-event inference is permitted.
+If the reserved run terminates without a matching ledger event, the journal intentionally blocks
+both overwrite and a guessed restore. That state requires an owner-reviewed abandonment procedure;
+operators must not delete the journal merely to retry.
 
-## Future canary sequence (when secrets + ops GO exist)
+The full values-free execution record is `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
 
-1. Staging: deploy exact SHA; image and health provenance agree; migrations pending=0 via backup/clone-rehearsal.
-2. Configure `LIFECYCLE_CANARY_LOGIN_IDENTIFIER` / `LIFECYCLE_CANARY_LOGIN_PASSWORD` for the fixed `lifecycle-canary@staging.invalid` identity.
-3. Dispatch `action=bootstrap` with full `deploy_sha`, `expected_current_mode=off`, and `bootstrap_confirmation=CREATE_STAGING_CANARY_ADMIN` — create/repair fixed owned admin (stdin secret stream, session revoke on repair) + password login proof + OFF/health/migrations/SHA reassert (no env write).
-4. Dispatch `action=alias` with full `deploy_sha` and `expected_current_mode=off` — mint JWT from canary password login, transient ON proof + OFF success proof (or OFF override restore on failure).
-5. Real admit→activate on explicit ids → only then pending ON (still not this lane today).
-6. Real deprovision proof → only then deprovision ON.
-7. Production = separate GO.
+## Canary sequence
+
+1. **Complete:** staging exact-SHA deployment, migrations, backup/clone rehearsal, and health provenance.
+2. **Complete:** configure the fixed alias-canary login secrets without exposing their values.
+3. **Complete:** create/repair the dedicated canary administrators and prove password login with all flags OFF.
+4. **Complete:** dispatch `action=alias`; prove transient ON login and required OFF rollback login.
+5. **NOT EXECUTED (operator ready):** real admit→activate on an explicitly owned DingTalk employee, then pending rollback.
+6. **NOT EXECUTED (operator ready, dedicated integration required):** real source departure and deprovision/restore proof on that same employee, then rollback.
+7. Production remains a separate GO.
 
 ## Owner note
 
-Landing this lane ≠ authorizing traffic and ≠ completing canary. **Alias cutover canary NOT EXECUTED** until a real dispatch with secrets succeeds. Merging code does not leave `AUTH_LOGIN_USE_ALIASES` enabled and does not complete lifecycle canary.
+Landing this lane does not authorize traffic. The alias staging canary succeeded and returned to OFF; pending and deprovision remain incomplete. Merging code and completing staging alias do not leave `AUTH_LOGIN_USE_ALIASES` enabled or authorize any production lifecycle flag.
