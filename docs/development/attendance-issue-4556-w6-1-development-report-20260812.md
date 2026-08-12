@@ -13,7 +13,7 @@
 > (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `413271e2d7a14aa21a9c5be48001d9c15c432b5d`
+> `d951b9e3da27a2b07615c5139c7e64edf656d104`
 
 ## 0. Scope delivered
 
@@ -141,6 +141,16 @@ closes the technical pair:
 
 The governance P2 is the ratified §7.2 delegated-non-member `403` text described
 below. This PR does not silently self-amend that lock.
+
+The next exact-head evidence gate at
+`4d2a9b217880290d33a92b9508e14ba469fca3f0` found that the newly added
+real-DB fixture suite legitimately loaded the canonical FSER but was absent
+from the exact test-caller inventory. That made two inventory assertions fail
+and invalidated the reported `300 / 300` result at that head. Evidence head
+`d951b9e3da27a2b07615c5139c7e64edf656d104` adds that one exact test-file
+identity to the existing closed set; it adds no directory exemption and does
+not change either production composition-site pin. The inventory then passed
+`8 / 8`, and the complete 12-file matrix passed `300 / 300`.
 
 ## 5. Explicit residuals
 

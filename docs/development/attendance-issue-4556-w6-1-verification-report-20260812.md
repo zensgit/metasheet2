@@ -9,7 +9,7 @@
 > Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `413271e2d7a14aa21a9c5be48001d9c15c432b5d`
+> `d951b9e3da27a2b07615c5139c7e64edf656d104`
 
 ## 0. Evidence rules
 
@@ -32,7 +32,7 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
-| Evidence head | `413271e2d7a14aa21a9c5be48001d9c15c432b5d` |
+| Evidence head | `d951b9e3da27a2b07615c5139c7e64edf656d104` |
 | Database | Local PostgreSQL 15.17 |
 | Database isolation | Local `metasheet_test` for the shared route suite; per-run `attendance_w6_matrix_*` and `attendance_w6agg_overlap_*` databases created and dropped by their suites |
 | Data | Synthetic only |
@@ -205,6 +205,14 @@ the normative 404 rule. Evidence head
 fresh local execution for both. The third remains an owner-governed durable
 text correction, not an implementation decision.
 
+The following evidence gate at
+`4d2a9b217880290d33a92b9508e14ba469fca3f0` reproduced a required-test
+failure: the new fixture-matrix suite called canonical FSER directly but its
+exact file identity was absent from the FSER caller inventory. Evidence head
+`d951b9e3da27a2b07615c5139c7e64edf656d104` adds that test file to the
+closed set without widening any production caller allowance. The inventory
+passed `8 / 8`, and the full command in §2.1 passed `12 files / 300 tests`.
+
 The same review found a governance contradiction in the ratified source:
 W6-R3 and endpoint §4.1 require missing and inaccessible groups to share one
 values-free `404`, but completion-skeleton §7.2 still says delegated non-member
@@ -215,7 +223,7 @@ P2.
 
 ## 5. Verdict boundary
 
-At evidence head `413271e2d7a14aa21a9c5be48001d9c15c432b5d`, the
+At evidence head `d951b9e3da27a2b07615c5139c7e64edf656d104`, the
 focused local matrix is green. The PR must remain Draft/HOLD until its report
 delta is committed, pushed, fresh GitHub checks are green, the ratified-lock
 contradiction above is durably resolved if a new gate continues to grade it P2,
