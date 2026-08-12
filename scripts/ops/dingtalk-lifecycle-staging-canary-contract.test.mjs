@@ -387,6 +387,7 @@ test('workflow bootstrap/human-bootstrap/alias/pending/deprovision secret transp
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID=/)
   assert.doesNotMatch(yaml, /export CANARY_LOGIN_PASSWORD='/)
   // bootstrap/human-bootstrap/alias/pending/deprovision share the canary secret transport gate.
   assert.match(
@@ -404,6 +405,7 @@ test('workflow Validate inputs does not receive canary login secrets (no child i
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, undefined)
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, undefined)
   assert.equal(validate.env.STAGING_OWNER_ADMIN_PASSWORD, undefined)
+  assert.equal(validate.env.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID, undefined)
   // No secret presence checks in this step (they launch after bash -n otherwise).
   assert.doesNotMatch(validate.run, /ATTENDANCE_ADMIN_JWT/)
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
@@ -473,6 +475,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
       '_CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"',
       '_STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"',
       '_CANARY_SUBJECT="${LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID-}"',
+      '_CANARY_SENTINEL="${LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID-}"',
     ],
     'only demote assignments (builtins) before secret env unset — no external commands; no JWT',
   )
@@ -537,8 +540,46 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   // Local+remote secret cleanup; never echo secret values.
   assert.match(runBody, /rm -rf "\$\{CLEAN_LOCAL_SECRETS_DIR\}"/)
   assert.match(runBody, /rm -rf '\$\{remote_secrets_dir\}'|rm -rf \$\{remote_rm\}/)
-  assert.doesNotMatch(runBody, /echo\s+[\"']?\$\{?(_CANARY_PASS|_STAGING_OWNER_PASS|STAGING_OWNER_ADMIN_PASSWORD)/)
+  assert.doesNotMatch(runBody, /echo\s+[\"']?\$\{?(_CANARY_PASS|_STAGING_OWNER_PASS|_CANARY_SENTINEL|STAGING_OWNER_ADMIN_PASSWORD)/)
   assert.doesNotMatch(runBody, /cat\s+[\"']?\$\{?secrets_dir\}.*password/)
+})
+
+test('workflow requires the explicit sentinel only for deprovision apply', () => {
+  const doc = loadYaml(read(WORKFLOW))
+  const remote = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
+  assert.ok(remote?.env && remote?.run)
+  assert.match(
+    String(remote.env.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID),
+    /inputs\.action == 'deprovision'.*inputs\.bootstrap_confirmation == 'DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED'.*secrets\.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID/,
+  )
+  assert.match(remote.run, /sentinel_apply=0/)
+  assert.match(
+    remote.run,
+    /\"\$ACTION\" == \"deprovision\" && \"\$BOOTSTRAP_CONFIRMATION\" == \"DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED\"/,
+  )
+  assert.match(remote.run, /if \[\[ \"\$sentinel_apply\" == \"1\" && -z \"\$\{_CANARY_SENTINEL\}\" \]\]/)
+  assert.match(remote.run, /export CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.doesNotMatch(remote.run, /export LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID=/)
+})
+
+test('deprovision restore and recovery paths never depend on the apply-only sentinel', () => {
+  const source = read(REMOTE_SH)
+  const restoreAndRecovery = [
+    actionDeprovisionRestoreBody(source),
+    actionDeprovisionEmptyFetchAbortRecoveryBody(source),
+    actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source),
+  ]
+  for (const body of restoreAndRecovery) {
+    assert.doesNotMatch(body, /CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE/)
+    assert.doesNotMatch(body, /require_canary_sentinel_directory_account_id_file/)
+    assert.doesNotMatch(body, /prove_dedicated_subject_deprovision_precondition/)
+  }
+
+  const mutatedRestore = restoreAndRecovery[0].replace(
+    'require_canary_directory_account_id_file "deprovision"',
+    'require_canary_directory_account_id_file "deprovision"\n  require_canary_sentinel_directory_account_id_file',
+  )
+  assert.throws(() => assert.doesNotMatch(mutatedRestore, /require_canary_sentinel_directory_account_id_file/))
 })
 
 test('workflow cleanup never deletes persistent .metasheet2 overrides', () => {
@@ -4669,7 +4710,7 @@ test('workflow pending/deprovision phase confirmations and honest claims', () =>
   assert.match(yaml, /empty-fetch abort recovery|EMPTY_FETCH_ABORT/)
   assert.match(yaml, /sync-failure-before-deprovision recovery|SYNC_FAILURE_BEFORE_DEPROVISION/)
   assert.doesNotMatch(yaml, /docs may still say NOT EXECUTABLE|follow-up to refresh docs/i)
-  assert.match(yaml, /exactly one total directory account/)
+  assert.match(yaml, /exactly two total directory accounts \(owned target \+ explicit sentinel\)/)
   assert.match(yaml, /reserves and journals the exact sync run UUID before env\/HTTP/)
   assert.match(yaml, /Never claims end-to-end restore|never claims end-to-end restore/)
 })
@@ -5800,7 +5841,7 @@ test('MUTATION: deleting the pre-POST resolved probe makes the resume golden red
   })
 })
 
-test('R5: dedicated subject precondition requires one-account manual integration and exact effects', () => {
+test('R5: dedicated subject precondition requires exact target+sentinel integration and exact effects', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /prove_dedicated_subject_deprovision_precondition/)
   const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
@@ -5810,10 +5851,19 @@ test('R5: dedicated subject precondition requires one-account manual integration
   assert.match(body, /policy_not_mark_inactive/)
   assert.match(body, /integration_not_manual_only/)
   assert.match(body, /integration_automation_not_disabled/)
-  assert.match(body, /integration_not_single_account/)
+  assert.match(body, /integration_not_exact_target_and_sentinel/)
   assert.match(body, /count\(\*\)::int AS n/)
   assert.match(body, /count\(\*\) FILTER \(WHERE id = \$2\)::int AS target_n/)
+  assert.match(body, /count\(\*\) FILTER \(WHERE id = \$3\)::int AS sentinel_n/)
+  assert.match(body, /Number\(radius\.rows\[0\]\?\.n\) !== 2/)
   assert.match(body, /WHERE integration_id = \$1/)
+  assert.match(body, /target_sentinel_ids_not_distinct/)
+  assert.match(body, /sentinel_provider_not_dingtalk/)
+  assert.match(body, /sentinel_not_same_integration_corp/)
+  assert.match(body, /!sentinelCorp \|\| !targetCorp \|\| sentinelCorp !== targetCorp/)
+  assert.match(body, /sentinel_not_active/)
+  assert.match(body, /sentinel_name_not_owned/)
+  assert.match(body, /sentinel_must_be_unlinked/)
   assert.match(body, /not_globally_clear/)
   assert.match(body, /dingtalk_grant_not_enabled/)
   assert.match(body, /target_org_membership_not_active/)
@@ -5823,13 +5873,22 @@ test('R5: dedicated subject precondition requires one-account manual integration
   assert.match(body, /user_id = \$1 AND org_id = \$2/)
 })
 
-test('MUTATION: dropping the one-account integration radius guard turns red', () => {
+test('MUTATION: dropping the exact target+sentinel integration radius guard turns red', () => {
   const source = read(REMOTE_SH)
   const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
   const end = source.indexOf('\nvalidate_mode_name()', start)
   const body = source.slice(start, end)
-  const mutated = body.replace('Number(radius.rows[0]?.n) !== 1', 'false')
-  assert.throws(() => assert.match(mutated, /Number\(radius\.rows\[0\]\?\.n\) !== 1/))
+  const mutated = body.replace('Number(radius.rows[0]?.n) !== 2', 'false')
+  assert.throws(() => assert.match(mutated, /Number\(radius\.rows\[0\]\?\.n\) !== 2/))
+})
+
+test('MUTATION: accepting a linked sentinel turns the sentinel contract red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
+  const end = source.indexOf('\nvalidate_mode_name()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace('if (s.has_linked_user === true)', 'if (false)')
+  assert.throws(() => assert.match(mutated, /if \(s\.has_linked_user === true\)/))
 })
 
 test('MUTATION: dropping dedicated precondition before env write turns red', () => {
@@ -6227,6 +6286,7 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
   assert.match(yaml, /export CANARY_LOGIN_PASSWORD_FILE=/)
   assert.match(yaml, /export STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
   assert.match(yaml, /export CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.match(yaml, /export CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE=/)
 })
 
 // --- human-bootstrap: fixed separate human platform admin -----------------------------

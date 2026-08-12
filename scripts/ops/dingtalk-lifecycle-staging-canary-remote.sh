@@ -58,12 +58,16 @@
 #                No auto-selection of directory accounts.
 #   deprovision — TRANSIENT secret-backed sync→deprovision canary on the SAME
 #                explicit owned subject. Never mutates a real/auto-selected
-#                account. Requires subject file + confirmation that the DingTalk
-#                source employee was disabled externally. Temporarily enables
-#                only DIRECTORY_DEPROVISION_ENABLED, runs real integration sync,
+#                account. Apply requires subject + explicit pre-synced sentinel
+#                files and confirmation that the DingTalk source employee was
+#                disabled externally. The dedicated integration must contain
+#                exactly target + active unlinked sentinel, keeping provider
+#                fetch nonempty. Temporarily enables only
+#                DIRECTORY_DEPROVISION_ENABLED, runs real integration sync,
 #                verifies ledger/effects/generation/access denial, then
-#                restore/prove OFF. Full source rehire/reactivate restore is an
-#                EXTERNAL phase (fail-closed note; not claimed by this action).
+#                restore/prove OFF. Restore/recovery do not require the sentinel
+#                file. Full source rehire/reactivate restore is an EXTERNAL phase
+#                (fail-closed note; not claimed by this action).
 #                EMPTY_FETCH_ABORT_RECOVERY (confirmation=
 #                DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED): staging-only
 #                fail-closed recovery when the journal is stranded at phase=run_bound
@@ -125,11 +129,13 @@ RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
 # separate STAGING_OWNER_ADMIN_PASSWORD_FILE for the human admin password only.
 # pending/deprovision require CANARY_DIRECTORY_ACCOUNT_ID_FILE (explicit owned
 # directory account UUID path only — never auto-selected, never printed).
+# Deprovision apply additionally requires an explicit pre-synced sentinel UUID.
 CANARY_ADMIN_JWT_FILE="${CANARY_ADMIN_JWT_FILE:-}"
 CANARY_LOGIN_IDENTIFIER_FILE="${CANARY_LOGIN_IDENTIFIER_FILE:-}"
 CANARY_LOGIN_PASSWORD_FILE="${CANARY_LOGIN_PASSWORD_FILE:-}"
 STAGING_OWNER_ADMIN_PASSWORD_FILE="${STAGING_OWNER_ADMIN_PASSWORD_FILE:-}"
 CANARY_DIRECTORY_ACCOUNT_ID_FILE="${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}"
+CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE="${CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE:-}"
 
 # Fixed dedicated lifecycle canary admin ownership markers (values-free constants).
 # Create/repair ONLY this (email, id) pair. Any email/id collision that does not
@@ -149,6 +155,7 @@ HUMAN_OWNER_NAME="Staging Owner Admin"
 # local admit identifier (not printed in artifacts). No auto-selection.
 SUBJECT_OWNER_NAME="Lifecycle Canary Employee"
 SUBJECT_OWNER_USERNAME="lifecycle-canary-employee"
+SENTINEL_OWNER_NAME="Lifecycle Canary Employee 2"
 DEPROVISION_SOURCE_CONFIRMATION="DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED"
 DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"
 # Staging-only recovery for a completed empty_directory_fetch safe abort stranded at
@@ -555,6 +562,30 @@ PY
     fail "action=${context} refused: directory account subject file invalid (${shape#*|}); values never logged"
   fi
   log "${context} directory account subject file present (path only; values never logged; no auto-selection)"
+}
+
+require_canary_sentinel_directory_account_id_file() {
+  local path="${CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE:-}"
+  [[ -n "$path" ]] || fail "action=deprovision apply requires CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE (chmod-600 secret file path); no auto-selection"
+  [[ -f "$path" ]] || fail "action=deprovision apply secret file missing for CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE"
+  [[ -s "$path" ]] || fail "action=deprovision apply secret file empty for CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE"
+  local shape
+  shape="$(python3 - "$path" <<'PY'
+import pathlib, re, sys
+try:
+    raw = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8").strip()
+except Exception:
+    print("false|secret_file_read_failed")
+    raise SystemExit(0)
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw):
+    print("false|sentinel_not_uuid")
+    raise SystemExit(0)
+print("true|ok")
+PY
+  )"
+  [[ "${shape%%|*}" == "true" ]] \
+    || fail "action=deprovision apply refused: sentinel file invalid (${shape#*|}); values never logged"
+  log "deprovision apply sentinel file present (path only; values never logged; no auto-selection)"
 }
 
 # Identifier secret file (app trim) must equal the fixed ownership email marker.
@@ -4495,8 +4526,8 @@ function emit(ok, note, userActive, memCount, grantState) {
 # exact integration (dingtalk active) org, linked account/user, target-org membership
 # active, user active, no other active+linked siblings, DingTalk grant enabled,
 # policy=mark_inactive. Additionally requires a scheduler/admission/group-disabled
-# integration containing exactly this one directory account (active or inactive rows
-# count), so a post-preview scope change cannot strand collateral users outside the
+# integration containing exactly the target and one explicit active, unlinked sentinel
+# across active/inactive rows, so provider fetch remains nonempty without widening the
 # one-subject journal. Expected effects: membership_changed+grant_changed+user_changed.
 # other-org membership is ignored for candidacy (org-scoped membership only).
 prove_dedicated_subject_deprovision_precondition() {
@@ -4508,18 +4539,24 @@ prove_dedicated_subject_deprovision_precondition() {
     || { PRECOND_NOTE="integration_id_file_missing"; return 1; }
   [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
     || { PRECOND_NOTE="directory_account_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || { PRECOND_NOTE="sentinel_directory_account_id_file_missing"; return 1; }
   local payload_json result
   payload_json="$(
     python3 - \
       "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
       "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
-      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" \
+      "$CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE" \
+      "$SENTINEL_OWNER_NAME" <<'PY'
 import json, pathlib, sys
-u, i, a = sys.argv[1:4]
+u, i, a, s, sentinel_name = sys.argv[1:6]
 print(json.dumps({
     "user_id": pathlib.Path(u).read_bytes().decode("utf-8").strip(),
     "integration_id": pathlib.Path(i).read_bytes().decode("utf-8").strip(),
     "directory_account_id": pathlib.Path(a).read_bytes().decode("utf-8").strip(),
+    "sentinel_directory_account_id": pathlib.Path(s).read_bytes().decode("utf-8").strip(),
+    "sentinel_owner_name": sentinel_name,
 }, separators=(",", ":")))
 PY
   )" || { PRECOND_NOTE="precond_payload_failed"; return 1; }
@@ -4544,9 +4581,19 @@ function emit(ok, note) {
   const userId = String(p.user_id || "").trim();
   const integrationId = String(p.integration_id || "").trim();
   const accountId = String(p.directory_account_id || "").trim();
+  const sentinelId = String(p.sentinel_directory_account_id || "").trim();
+  const sentinelOwnerName = String(p.sentinel_owner_name || "");
   const uuid = /^[0-9a-fA-F-]{36}$/;
-  if (!uuid.test(userId) || !uuid.test(integrationId) || !uuid.test(accountId)) {
+  if (!uuid.test(userId) || !uuid.test(integrationId) || !uuid.test(accountId) || !uuid.test(sentinelId)) {
     emit("false", "precond_ids_invalid");
+    return;
+  }
+  if (accountId.toLowerCase() === sentinelId.toLowerCase()) {
+    emit("false", "target_sentinel_ids_not_distinct");
+    return;
+  }
+  if (!sentinelOwnerName) {
+    emit("false", "sentinel_owner_name_missing");
     return;
   }
   const url = process.env.DATABASE_URL;
@@ -4594,18 +4641,57 @@ function emit(ok, note) {
       emit("false", "integration_automation_not_disabled");
       return;
     }
-    // A destructive canary is never allowed on a shared real-employee integration.
-    // Count ALL rows, not only active rows: a stale/inactive sibling can be revived or
-    // rewritten by the provider walk and would escape the one-subject recovery journal.
+    // Closed set across ALL rows: owned target + explicit sentinel only. A stale or
+    // inactive third row could be revived by the provider walk outside this journal.
     const radius = await c.query(
       `SELECT count(*)::int AS n,
-              count(*) FILTER (WHERE id = $2)::int AS target_n
+              count(*) FILTER (WHERE id = $2)::int AS target_n,
+              count(*) FILTER (WHERE id = $3)::int AS sentinel_n
          FROM directory_accounts
         WHERE integration_id = $1`,
-      [integrationId, accountId]
+      [integrationId, accountId, sentinelId]
     );
-    if (Number(radius.rows[0]?.n) !== 1 || Number(radius.rows[0]?.target_n) !== 1) {
-      emit("false", "integration_not_single_account");
+    if (Number(radius.rows[0]?.n) !== 2
+        || Number(radius.rows[0]?.target_n) !== 1
+        || Number(radius.rows[0]?.sentinel_n) !== 1) {
+      emit("false", "integration_not_exact_target_and_sentinel");
+      return;
+    }
+    const sentinel = await c.query(
+      `SELECT s.provider, s.corp_id, s.name, s.is_active, s.integration_id,
+              t.corp_id AS target_corp_id,
+              EXISTS (
+                SELECT 1 FROM directory_account_links l
+                 WHERE l.directory_account_id = s.id
+                   AND l.link_status = '\''linked'\''
+              ) AS has_linked_user
+         FROM directory_accounts s
+         JOIN directory_accounts t ON t.id = $2
+        WHERE s.id = $1`,
+      [sentinelId, accountId]
+    );
+    const s = sentinel.rows[0];
+    if (!s || String(s.provider || "").toLowerCase() !== "dingtalk") {
+      emit("false", "sentinel_provider_not_dingtalk");
+      return;
+    }
+    const sentinelCorp = String(s.corp_id || "").trim();
+    const targetCorp = String(s.target_corp_id || "").trim();
+    if (String(s.integration_id || "").toLowerCase() !== integrationId.toLowerCase()
+        || !sentinelCorp || !targetCorp || sentinelCorp !== targetCorp) {
+      emit("false", "sentinel_not_same_integration_corp");
+      return;
+    }
+    if (s.is_active !== true) {
+      emit("false", "sentinel_not_active");
+      return;
+    }
+    if (String(s.name || "") !== sentinelOwnerName) {
+      emit("false", "sentinel_name_not_owned");
+      return;
+    }
+    if (s.has_linked_user === true) {
+      emit("false", "sentinel_must_be_unlinked");
       return;
     }
     // Exact linked account/user for this integration.
@@ -4678,7 +4764,7 @@ function emit(ok, note) {
   PRECOND_OK="${result%%|*}"
   PRECOND_NOTE="${result#*|}"
   if [[ "$PRECOND_OK" == "true" ]]; then
-    log "dedicated subject precondition OK (single-account manual integration+planner mark_inactive+global_clear+grant_enabled; expected effects membership+grant+user; ids never logged)"
+    log "dedicated subject precondition OK (exact target+active unlinked sentinel, manual integration, planner mark_inactive, global_clear, grant_enabled; expected effects membership+grant+user; ids never logged)"
     return 0
   fi
   log "dedicated subject precondition refused: note=${PRECOND_NOTE}"
@@ -5926,6 +6012,7 @@ action_deprovision_apply() {
   require_canary_secret_files "deprovision"
   assert_canary_identifier_matches_owner "deprovision"
   require_canary_directory_account_id_file "deprovision"
+  require_canary_sentinel_directory_account_id_file
   [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=deprovision"
   [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
     || fail "action=deprovision requires expected_current_mode=off (got '${EXPECTED_CURRENT_MODE}'); refuse auto-selection"
@@ -6126,6 +6213,9 @@ action_deprovision_apply() {
     echo "admin_jwt_minted=${admin_jwt_minted}"
     echo "subject_owned=true"
     echo "subject_auto_selected=false"
+    echo "sentinel_owned=true"
+    echo "sentinel_auto_selected=false"
+    echo "integration_exact_target_and_sentinel=true"
     echo "source_disable_confirmation=true"
     echo "preview_subject_gate_ok=true"
     echo "preview_would_deactivate=${PREVIEW_WOULD_DEACTIVATE:-0}"

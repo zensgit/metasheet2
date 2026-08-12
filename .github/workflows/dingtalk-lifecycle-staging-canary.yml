@@ -260,10 +260,14 @@ jobs:
           # STAGING_OWNER_ADMIN_PASSWORD is demoted and written to a chmod-600 file for
           # human-bootstrap only. LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID is demoted for
           # pending|deprovision only (path transferred; value never printed).
+          # LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID is demoted only for the
+          # deprovision APPLY confirmation. Restore/recovery must remain operable
+          # without this extra preflight input.
           LIFECYCLE_CANARY_LOGIN_IDENTIFIER: ${{ secrets.LIFECYCLE_CANARY_LOGIN_IDENTIFIER }}
           LIFECYCLE_CANARY_LOGIN_PASSWORD: ${{ secrets.LIFECYCLE_CANARY_LOGIN_PASSWORD }}
           STAGING_OWNER_ADMIN_PASSWORD: ${{ inputs.action == 'human-bootstrap' && secrets.STAGING_OWNER_ADMIN_PASSWORD || '' }}
           LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID: ${{ (inputs.action == 'pending' || inputs.action == 'deprovision') && secrets.LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID || '' }}
+          LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID: ${{ inputs.action == 'deprovision' && inputs.bootstrap_confirmation == 'DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED' && secrets.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID || '' }}
         run: |
           set -euo pipefail
           # --- SECRET DEMOTE (builtins only; no external child before unset) -------------
@@ -276,8 +280,14 @@ jobs:
           _CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"
           _STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"
           _CANARY_SUBJECT="${LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID-}"
-          unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID
+          _CANARY_SENTINEL="${LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID-}"
+          unset LIFECYCLE_CANARY_LOGIN_IDENTIFIER LIFECYCLE_CANARY_LOGIN_PASSWORD STAGING_OWNER_ADMIN_PASSWORD LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID
           # --- end secret demote; external commands allowed after this point ------------
+
+          sentinel_apply=0
+          if [[ "$ACTION" == "deprovision" && "$BOOTSTRAP_CONFIRMATION" == "DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED" ]]; then
+            sentinel_apply=1
+          fi
 
           ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
@@ -336,28 +346,36 @@ jobs:
           # Alias/pending/deprovision/human-bootstrap mint admin JWT on remote after
           # successful canary pre-login. pending|deprovision also materialize
           # directory-account.id (subject UUID path only; never printed).
+          # deprovision apply also materializes sentinel-directory-account.id
+          # (explicit previously-synced sentinel UUID path only; never printed).
           remote_secrets_dir=""
           canary_ident_export=""
           canary_pass_export=""
           staging_owner_pass_export=""
           canary_subject_export=""
+          canary_sentinel_export=""
           if [[ "$ACTION" == "alias" || "$ACTION" == "bootstrap" || "$ACTION" == "human-bootstrap" || "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
             # Install trap BEFORE any secret materialization (mktemp/write/chmod).
             trap cleanup_canary_ephemeral_paths EXIT INT TERM
             # Presence via non-exported shell vars only (env already unset above).
             if [[ -z "${_CANARY_IDENT}" || -z "${_CANARY_PASS}" ]]; then
               echo "${ACTION} requires LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (checked in Run remote action only); never ATTENDANCE_ADMIN_JWT" >&2
-              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT _CANARY_SENTINEL
               exit 2
             fi
             if [[ "$ACTION" == "human-bootstrap" && -z "${_STAGING_OWNER_PASS}" ]]; then
               echo "human-bootstrap requires STAGING_OWNER_ADMIN_PASSWORD (checked in Run remote action only); never log secret" >&2
-              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT _CANARY_SENTINEL
               exit 2
             fi
             if [[ ( "$ACTION" == "pending" || "$ACTION" == "deprovision" ) && -z "${_CANARY_SUBJECT}" ]]; then
               echo "${ACTION} requires LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; no auto-selection; checked in Run remote action only); never log secret" >&2
-              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT _CANARY_SENTINEL
+              exit 2
+            fi
+            if [[ "$sentinel_apply" == "1" && -z "${_CANARY_SENTINEL}" ]]; then
+              echo "deprovision apply requires LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID (explicit sentinel; no auto-selection; checked in Run remote action only); never log secret" >&2
+              unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT _CANARY_SENTINEL
               exit 2
             fi
             secrets_dir="$(mktemp -d "${RUNNER_TEMP}/lifecycle-canary-secrets.XXXXXX")"
@@ -398,6 +416,16 @@ jobs:
             else
               unset _CANARY_SUBJECT
             fi
+            if [[ "$sentinel_apply" == "1" ]]; then
+              printf '%s' "${_CANARY_SENTINEL}" > "${secrets_dir}/sentinel-directory-account.id"
+              unset _CANARY_SENTINEL
+              chmod 600 "${secrets_dir}/sentinel-directory-account.id"
+              [[ -s "${secrets_dir}/sentinel-directory-account.id" ]] \
+                || { echo "secret file empty after materialize: sentinel-directory-account.id" >&2; exit 2; }
+              scp_files+=("${secrets_dir}/sentinel-directory-account.id")
+            else
+              unset _CANARY_SENTINEL
+            fi
             remote_secrets_dir="${RUNNER_DIR}/.canary-secrets"
             CLEAN_REMOTE_SECRETS_DIR="${remote_secrets_dir}"
             # Remote copy only after local materialize succeeded under trap coverage.
@@ -410,6 +438,11 @@ jobs:
               ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
                 "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password ${remote_secrets_dir}/staging-owner-admin.password'"
               staging_owner_pass_export="export STAGING_OWNER_ADMIN_PASSWORD_FILE='${remote_secrets_dir}/staging-owner-admin.password'"
+            elif [[ "$sentinel_apply" == "1" ]]; then
+              ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+                "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password ${remote_secrets_dir}/directory-account.id ${remote_secrets_dir}/sentinel-directory-account.id'"
+              canary_subject_export="export CANARY_DIRECTORY_ACCOUNT_ID_FILE='${remote_secrets_dir}/directory-account.id'"
+              canary_sentinel_export="export CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE='${remote_secrets_dir}/sentinel-directory-account.id'"
             elif [[ "$ACTION" == "pending" || "$ACTION" == "deprovision" ]]; then
               ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
                 "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/login.identifier ${remote_secrets_dir}/login.password ${remote_secrets_dir}/directory-account.id'"
@@ -422,7 +455,7 @@ jobs:
             canary_pass_export="export CANARY_LOGIN_PASSWORD_FILE='${remote_secrets_dir}/login.password'"
           else
             # Non-secret actions: drop any unused shell copies; clean per-run dirs on exit.
-            unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT
+            unset _CANARY_IDENT _CANARY_PASS _STAGING_OWNER_PASS _CANARY_SUBJECT _CANARY_SENTINEL
             trap cleanup_canary_ephemeral_paths EXIT INT TERM
           fi
 
@@ -440,6 +473,7 @@ jobs:
           ${canary_pass_export}
           ${staging_owner_pass_export}
           ${canary_subject_export}
+          ${canary_sentinel_export}
           rm -rf '${remote_output_dir}'
           mkdir -p '${remote_output_dir}'
           set +e
@@ -498,12 +532,12 @@ jobs:
             echo "OFF is emergency env-gate rollback only — not OR-column design reintroduction."
             echo "Bootstrap creates/repairs fixed lifecycle-canary@staging.invalid admin only (no lifecycle env write)."
             echo "Human-bootstrap creates/repairs fixed username staging-owner-admin human platform admin only (no lifecycle env write; password file transport)."
-            echo "Bootstrap/human-bootstrap/alias/pending/deprovision require LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (file transport); human-bootstrap also requires STAGING_OWNER_ADMIN_PASSWORD; pending/deprovision also require LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; never printed)."
+            echo "Bootstrap/human-bootstrap/alias/pending/deprovision require LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (file transport); human-bootstrap also requires STAGING_OWNER_ADMIN_PASSWORD; pending/deprovision also require LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; never printed); deprovision APPLY also requires LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID (explicit sentinel; never printed)."
             echo "Pending default phase is admit-only; OAuth checkpoints are NOT_EXECUTED; optional PENDING_SSO_ACTIVATE (browser OAuth still NOT_EXECUTED)."
             echo "Deprovision apply uses DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (flags OFF, access remains disabled). Restore uses DINGTALK_SOURCE_REACTIVATED_CONFIRMED (rehire + access restore; flags stay OFF)."
             echo "Empty-fetch abort recovery uses DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED (flags stay OFF; never writes lifecycle env; clears run_bound journal only after directory reactivated + access graph unchanged proofs)."
             echo "Sync-failure-before-deprovision recovery uses DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED (flags stay OFF; never writes lifecycle env; clears run_bound journal only after zero ledger + exact failed-run identity + access graph unchanged proofs)."
-            echo "Deprovision refuses shared integrations: exactly one total directory account, manual scheduling, admission automation OFF, and member-group projection OFF are required."
+            echo "Deprovision apply refuses shared integrations: exactly two total directory accounts (owned target + explicit sentinel), distinct UUIDs, manual scheduling, admission automation OFF, and member-group projection OFF are required. Sentinel stays active/unlinked so provider fetch remains nonempty while the target is deprovisioned."
             echo "Deprovision reserves and journals the exact sync run UUID before env/HTTP; lost responses recover only through that run and its exact event/effects."
             echo "Empty-fetch abort recovery binds only the exact journal run_bound completed empty_directory_fetch abort with zero ledger; wrong phase/run/abort reason, any ledger, source still missing, access drift, sync failure, or any lifecycle flag ON leaves the journal intact."
             echo "Sync-failure-before-deprovision recovery binds journal run_bound deprovision_applied=false + zero ledger; run API proves failed + exact observed constraint idx_directory_accounts_provider_corp_external_key; zero ledger + intact graph prove no mutation; wrong phase/run/status/error class, sibling indexes, any ledger, source still missing, access drift, sync failure, or any lifecycle flag ON leaves the journal intact. Never claims end-to-end restore."
