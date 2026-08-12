@@ -64,6 +64,15 @@
 #                verifies ledger/effects/generation/access denial, then
 #                restore/prove OFF. Full source rehire/reactivate restore is an
 #                EXTERNAL phase (fail-closed note; not claimed by this action).
+#                EMPTY_FETCH_ABORT_RECOVERY (confirmation=
+#                DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED): staging-only
+#                fail-closed recovery when the journal is stranded at phase=run_bound
+#                after an exact completed sync aborted with empty_directory_fetch and
+#                produced no user/membership/grant ledger. Never writes lifecycle env
+#                flags. Requires exact journal run, abortedReason match, zero ledger,
+#                pre-recovery intact access graph, external source re-add, flags-OFF
+#                sync, owned directory account active, and access graph unchanged —
+#                then and only then clears the journal.
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
@@ -131,6 +140,9 @@ SUBJECT_OWNER_NAME="Lifecycle Canary Employee"
 SUBJECT_OWNER_USERNAME="lifecycle-canary-employee"
 DEPROVISION_SOURCE_CONFIRMATION="DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED"
 DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"
+# Staging-only recovery for a completed empty_directory_fetch safe abort stranded at
+# phase=run_bound with no deprovision ledger. Never writes lifecycle env flags.
+DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION="DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED"
 PENDING_SSO_ACTIVATE_CONFIRMATION="PENDING_SSO_ACTIVATE"
 # Optional subject password file (path only). When present, deprovision may prove
 # pre-login then post-denial with the SAME proven credential. Never invent a wrong
@@ -2447,7 +2459,7 @@ stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
 if not stats and isinstance(data.get("stats"), dict):
     stats = data["stats"]
 applied = stats.get("deprovisionApplied")
-applied_s = "true" if applied is True else "false"
+applied_s = "true" if applied is True else ("false" if applied is False else "unknown")
 users = stats.get("deprovisionUsersDeactivatedCount")
 accounts = stats.get("accountsDeactivatedCount")
 candidates = stats.get("deprovisionCandidateCount")
@@ -2460,6 +2472,8 @@ def nonneg(v):
 if require_applied == "true" and applied is not True:
     # run id already on disk; emit run_present=true so caller upgrades journal.
     emit("false", "deprovision_not_applied_on_sync", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
+if require_applied == "false" and applied is not False:
+    emit("false", "deprovision_applied_not_false_on_sync", applied_s, nonneg(users), nonneg(accounts), nonneg(candidates), "true")
 
 # Radius notes for apply: emit false WITH run_present=true so recovery journal can bind.
 # Callers must journal phase=run_bound before treating this as terminal.
@@ -2948,7 +2962,8 @@ clear_deprovision_apply_state() {
   if [[ -f "$CANARY_APPLY_STATE_FILE" ]]; then
     rm -f "$CANARY_APPLY_STATE_FILE"
     JOURNAL_PHASE="none"
-    log "cleared recovery journal after successful restore"
+    # Context-neutral: used by rehire restore and empty_fetch abort recovery.
+    log "cleared recovery journal"
   fi
 }
 
@@ -3024,6 +3039,501 @@ PY
   fi
   log "reconcile prepared/run_bound→ledger_bound OK (exact reserved run bound; ids never logged)"
   return 0
+}
+
+# Load host journal for empty_directory_fetch safe-abort recovery only.
+# Accepts EXACTLY phase=run_bound with deprovision_applied=false and no ledger
+# binding. Never upgrades to ledger_bound; never auto-discovers events/runs.
+# Leaves journal intact on any refuse (caller must not clear).
+load_run_bound_empty_fetch_abort_journal() {
+  SAFE_ABORT_JOURNAL_OK="false"
+  SAFE_ABORT_JOURNAL_NOTE="unset"
+  [[ -f "$CANARY_APPLY_STATE_FILE" && -s "$CANARY_APPLY_STATE_FILE" ]] \
+    || { SAFE_ABORT_JOURNAL_NOTE="journal_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { SAFE_ABORT_JOURNAL_NOTE="live_local_user_id_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { SAFE_ABORT_JOURNAL_NOTE="live_integration_id_missing"; return 1; }
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || { SAFE_ABORT_JOURNAL_NOTE="live_directory_account_id_missing"; return 1; }
+  local sec_dir
+  sec_dir="$(_subject_secret_dir)"
+  if ! python3 - \
+    "$CANARY_APPLY_STATE_FILE" \
+    "$sec_dir" \
+    "$SUBJECT_OWNER_USERNAME" \
+    "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+    "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+    "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, os, pathlib, re, sys
+(
+    state_path, sec_dir, subject_key,
+    live_user_path, live_integ_path, live_acct_path,
+) = sys.argv[1:7]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+try:
+    state = json.loads(pathlib.Path(state_path).read_bytes().decode("utf-8"))
+except Exception:
+    raise SystemExit(2)
+if not isinstance(state, dict) or state.get("schema") != "lifecycle-canary-deprovision-apply-state-v4":
+    raise SystemExit(3)
+if state.get("subject_key") != subject_key:
+    raise SystemExit(4)
+# Exact phase only — prepared must not skip to this recovery; ledger_bound uses restore.
+if state.get("phase") != "run_bound":
+    raise SystemExit(5)
+# Terminal safe-abort outcome from journal_upgrade_run_bound: applied must be false.
+if state.get("deprovision_applied") is not False:
+    raise SystemExit(6)
+# No ledger binding may exist for this recovery path.
+if state.get("event_id") not in (None, ""):
+    raise SystemExit(7)
+if state.get("effect_count") not in (None, 0):
+    raise SystemExit(8)
+effects = state.get("effects")
+if effects is not None and effects != []:
+    raise SystemExit(9)
+run_id = str(state.get("sync_run_id") or "").strip()
+local_user_id = str(state.get("local_user_id") or "").strip()
+integration_id = str(state.get("integration_id") or "").strip()
+directory_account_id = str(state.get("directory_account_id") or "").strip()
+for val in (run_id, local_user_id, integration_id, directory_account_id):
+    if not uuid_re.fullmatch(val):
+        raise SystemExit(10)
+live_user = pathlib.Path(live_user_path).read_bytes().decode("utf-8").strip()
+live_integ = pathlib.Path(live_integ_path).read_bytes().decode("utf-8").strip()
+live_acct = pathlib.Path(live_acct_path).read_bytes().decode("utf-8").strip()
+if live_user != local_user_id or live_integ != integration_id or live_acct != directory_account_id:
+    raise SystemExit(11)
+sec = pathlib.Path(sec_dir)
+sec.mkdir(parents=True, exist_ok=True)
+abort_run_path = sec / "subject.safe-abort-sync-run-id"
+abort_run_path.write_bytes(run_id.encode("utf-8"))
+os.chmod(abort_run_path, 0o600)
+(sec / "subject.local-user-id").write_bytes(local_user_id.encode("utf-8"))
+os.chmod(sec / "subject.local-user-id", 0o600)
+(sec / "subject.integration-id").write_bytes(integration_id.encode("utf-8"))
+os.chmod(sec / "subject.integration-id", 0o600)
+PY
+  then
+    SAFE_ABORT_JOURNAL_NOTE="journal_not_run_bound_safe_abort"
+    return 1
+  fi
+  # This immutable pin must survive the recovery sync, which writes its own
+  # fresh run id to subject.sync-run-id.
+  CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE="${sec_dir}/subject.safe-abort-sync-run-id"
+  CANARY_SUBJECT_LOCAL_USER_ID_FILE="${sec_dir}/subject.local-user-id"
+  CANARY_SUBJECT_INTEGRATION_ID_FILE="${sec_dir}/subject.integration-id"
+  JOURNAL_PHASE="run_bound"
+  SAFE_ABORT_JOURNAL_OK="true"
+  SAFE_ABORT_JOURNAL_NOTE="ok"
+  log "loaded recovery journal phase=run_bound for empty_fetch_abort recovery (exact run bound; no ledger; ids never logged)"
+  return 0
+}
+
+# Prove the exact journaled sync run is terminal completed with
+# deprovisionApplied=false and deprovisionAbortedReason=empty_directory_fetch.
+# Binds ONLY CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE (journal run). Never latest-run guess.
+prove_exact_run_empty_fetch_safe_abort() {
+  SAFE_ABORT_RUN_OK="false"
+  SAFE_ABORT_RUN_NOTE="unset"
+  [[ -n "${CANARY_ADMIN_JWT_FILE:-}" && -s "${CANARY_ADMIN_JWT_FILE}" ]] \
+    || { SAFE_ABORT_RUN_NOTE="admin_jwt_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { SAFE_ABORT_RUN_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE}" ]] \
+    || { SAFE_ABORT_RUN_NOTE="sync_run_id_file_missing"; return 1; }
+  local result
+  result="$(
+    python3 - \
+      "$CANARY_ADMIN_JWT_FILE" \
+      "$STAGING_API_BASE_URL" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE" <<'PY'
+import json, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+jwt_path, base, integ_path, run_path = sys.argv[1:5]
+
+def emit(ok, note):
+    print(f"{ok}|{note}")
+    raise SystemExit(0)
+
+try:
+    token = pathlib.Path(jwt_path).read_text(encoding="utf-8").strip()
+    integration_id = pathlib.Path(integ_path).read_bytes().decode("utf-8").strip()
+    run_id = pathlib.Path(run_path).read_bytes().decode("utf-8").strip()
+except Exception:
+    emit("false", "secret_file_read_failed")
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+if not uuid_re.fullmatch(integration_id) or not uuid_re.fullmatch(run_id):
+    emit("false", "ids_invalid")
+url = (
+    base.rstrip("/")
+    + "/api/admin/directory/integrations/"
+    + urllib.parse.quote(integration_id, safe="")
+    + "/runs/"
+    + urllib.parse.quote(run_id, safe="")
+)
+req = urllib.request.Request(
+    url,
+    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    method="GET",
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        code = int(resp.getcode())
+except urllib.error.HTTPError as e:
+    emit("false", f"run_http_{int(e.code)}")
+except Exception:
+    emit("false", "run_transport_failed")
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    emit("false", "run_bad_json")
+if code != 200 or not isinstance(payload, dict) or payload.get("ok") is not True:
+    emit("false", f"run_http_{code}")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+run = data.get("run") if isinstance(data.get("run"), dict) else None
+if run is None and isinstance(data.get("id"), str):
+    run = data
+if not isinstance(run, dict):
+    emit("false", "run_missing")
+if str(run.get("id") or "").strip() != run_id:
+    emit("false", "run_id_mismatch")
+status = str(run.get("status") or "").strip().lower()
+if status != "completed":
+    emit("false", "run_not_completed")
+stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
+applied = stats.get("deprovisionApplied")
+if applied is not False:
+    emit("false", "deprovision_applied_not_false")
+aborted = stats.get("deprovisionAbortedReason")
+if aborted is None:
+    aborted = stats.get("deprovision_aborted_reason")
+if type(aborted) is not str or aborted.strip() != "empty_directory_fetch":
+    emit("false", "aborted_reason_not_empty_directory_fetch")
+# Belt: user/membership/grant deactivation counts must be zero when aborted.
+for key in (
+    "deprovisionUsersDeactivatedCount",
+    "deprovisionGrantsDisabledCount",
+    "deprovisionMembershipDeactivationAttemptedCount",
+):
+    val = stats.get(key)
+    if val is None:
+        continue
+    if type(val) is not int or val != 0:
+        emit("false", "non_zero_user_or_grant_or_membership_effect_count")
+emit("true", "ok")
+PY
+  )" || {
+    SAFE_ABORT_RUN_NOTE="python_failed"
+    return 1
+  }
+  SAFE_ABORT_RUN_OK="${result%%|*}"
+  SAFE_ABORT_RUN_NOTE="${result#*|}"
+  if [[ "$SAFE_ABORT_RUN_OK" == "true" ]]; then
+    log "exact run empty_directory_fetch safe abort proven (completed + applied=false + abortedReason match; ids never logged)"
+    return 0
+  fi
+  log "exact run empty_directory_fetch proof refused: note=${SAFE_ABORT_RUN_NOTE}"
+  return 1
+}
+
+# Prove zero deprovision ledger events/effects for the exact journaled run via
+# host docker/Postgres — never a paginated admin list / limit / latest inference.
+# Scope is exact equality on run_id::uuid + integration_id::uuid + local_user_id +
+# directory_account_id with NO status filter. Counts joined
+# directory_deprovision_effects for matched event(s). Both counts must be 0.
+prove_zero_deprovision_ledger_for_exact_run() {
+  local context="${1:-empty_fetch_abort_recovery}"
+  SAFE_ABORT_LEDGER_OK="false"
+  SAFE_ABORT_LEDGER_NOTE="unset"
+  SAFE_ABORT_LEDGER_EVENT_COUNT="0"
+  SAFE_ABORT_LEDGER_EFFECT_COUNT="0"
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { SAFE_ABORT_LEDGER_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { SAFE_ABORT_LEDGER_NOTE="integration_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE:-}" && -s "${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE}" ]] \
+    || { SAFE_ABORT_LEDGER_NOTE="sync_run_id_file_missing"; return 1; }
+  [[ -n "${CANARY_DIRECTORY_ACCOUNT_ID_FILE:-}" && -s "${CANARY_DIRECTORY_ACCOUNT_ID_FILE}" ]] \
+    || { SAFE_ABORT_LEDGER_NOTE="directory_account_id_file_missing"; return 1; }
+  local payload_json result
+  payload_json="$(
+    python3 - \
+      "$CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_DIRECTORY_ACCOUNT_ID_FILE" <<'PY'
+import json, pathlib, re, sys
+run_path, integ_path, user_path, acct_path = sys.argv[1:5]
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+vals = []
+for path in (run_path, integ_path, user_path, acct_path):
+    try:
+        raw = pathlib.Path(path).read_bytes().decode("utf-8").strip()
+    except Exception:
+        raise SystemExit(2)
+    if not uuid_re.fullmatch(raw):
+        raise SystemExit(3)
+    vals.append(raw)
+print(json.dumps({
+    "run_id": vals[0],
+    "integration_id": vals[1],
+    "local_user_id": vals[2],
+    "directory_account_id": vals[3],
+}, separators=(",", ":")))
+PY
+  )" || { SAFE_ABORT_LEDGER_NOTE="ledger_payload_build_failed"; return 1; }
+  if ! result="$(printf '%s' "$payload_json" | docker exec -i \
+    "$BACKEND_CONTAINER" \
+    node -e '
+const { Client } = require("pg");
+function emit(ok, note, events, effects) {
+  process.stdout.write([ok, note, events, effects].join("|"));
+  process.exit(0);
+}
+(async () => {
+  let payload;
+  try {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    emit("false", "ledger_payload_invalid", "0", "0");
+    return;
+  }
+  const runId = String(payload.run_id || "").trim();
+  const integrationId = String(payload.integration_id || "").trim();
+  const localUserId = String(payload.local_user_id || "").trim();
+  const directoryAccountId = String(payload.directory_account_id || "").trim();
+  const uuid = /^[0-9a-fA-F-]{36}$/;
+  if (!uuid.test(runId) || !uuid.test(integrationId) || !uuid.test(localUserId) || !uuid.test(directoryAccountId)) {
+    emit("false", "ledger_ids_invalid", "0", "0");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    emit("false", "database_url_missing", "0", "0");
+    return;
+  }
+  const c = new Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    // Exact four-key scope. No status filter. No limit/order/latest inference.
+    // run_id::uuid + integration_id::uuid + local_user_id + directory_account_id.
+    const r = await c.query(
+      `SELECT
+         count(DISTINCT e.id)::int AS event_count,
+         count(fx.id)::int AS effect_count
+       FROM directory_deprovision_events e
+       LEFT JOIN directory_deprovision_effects fx
+         ON fx.event_id = e.id
+      WHERE e.run_id = $1::uuid
+        AND e.integration_id = $2::uuid
+        AND e.local_user_id = $3
+        AND e.directory_account_id = $4::uuid`,
+      [runId, integrationId, localUserId, directoryAccountId]
+    );
+    if (r.rows.length !== 1) {
+      emit("false", "ledger_count_row_missing", "0", "0");
+      return;
+    }
+    const eventCount = Number(r.rows[0].event_count);
+    const effectCount = Number(r.rows[0].effect_count);
+    if (!Number.isInteger(eventCount) || eventCount < 0 || !Number.isInteger(effectCount) || effectCount < 0) {
+      emit("false", "ledger_counts_invalid", "0", "0");
+      return;
+    }
+    if (eventCount !== 0) {
+      emit("false", "ledger_event_present_for_exact_run", String(eventCount), String(effectCount));
+      return;
+    }
+    if (effectCount !== 0) {
+      emit("false", "ledger_effect_present_for_exact_run", String(eventCount), String(effectCount));
+      return;
+    }
+    emit("true", "ok", "0", "0");
+  } catch (e) {
+    emit("false", "db_query_failed", "0", "0");
+  } finally {
+    try { await c.end(); } catch (e2) { /* ignore */ }
+  }
+})().catch(() => emit("false", "db_query_failed", "0", "0"));
+')"; then
+    SAFE_ABORT_LEDGER_NOTE="docker_exec_failed"
+    return 1
+  fi
+  result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  SAFE_ABORT_LEDGER_OK="${result%%|*}"
+  local rest="${result#*|}"
+  SAFE_ABORT_LEDGER_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  SAFE_ABORT_LEDGER_EVENT_COUNT="${rest%%|*}"
+  SAFE_ABORT_LEDGER_EFFECT_COUNT="${rest#*|}"
+  if [[ "$SAFE_ABORT_LEDGER_OK" == "true" ]]; then
+    log "zero deprovision ledger for exact run proven (${context}): events=0 effects=0 (exact SQL scope; ids never logged)"
+    return 0
+  fi
+  log "zero deprovision ledger proof refused (${context}): note=${SAFE_ABORT_LEDGER_NOTE} events=${SAFE_ABORT_LEDGER_EVENT_COUNT} effects=${SAFE_ABORT_LEDGER_EFFECT_COUNT}"
+  return 1
+}
+
+# Access-graph intact proof WITHOUT effect ledger (safe-abort path only).
+# Requires: user is_active=true, org-scoped active membership >=1, DingTalk grant enabled.
+# Sets INTACT_GRAPH_* for pre/post equality checks. Never prints ids.
+prove_intact_access_graph_no_ledger() {
+  local context="${1:-empty_fetch_abort_recovery}"
+  INTACT_GRAPH_OK="false"
+  INTACT_GRAPH_NOTE="unset"
+  INTACT_GRAPH_USER_ACTIVE="unknown"
+  INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT="0"
+  INTACT_GRAPH_GRANT_STATE="unknown"
+  INTACT_GRAPH_SNAPSHOT=""
+  [[ -n "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" && -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]] \
+    || { INTACT_GRAPH_NOTE="local_user_id_file_missing"; return 1; }
+  [[ -n "${CANARY_SUBJECT_INTEGRATION_ID_FILE:-}" && -s "${CANARY_SUBJECT_INTEGRATION_ID_FILE}" ]] \
+    || { INTACT_GRAPH_NOTE="integration_id_file_missing"; return 1; }
+  local payload_json result
+  payload_json="$(
+    python3 - \
+      "$CANARY_SUBJECT_LOCAL_USER_ID_FILE" \
+      "$CANARY_SUBJECT_INTEGRATION_ID_FILE" <<'PY'
+import json, pathlib, sys
+u, i = sys.argv[1:3]
+print(json.dumps({
+    "user_id": pathlib.Path(u).read_bytes().decode("utf-8").strip(),
+    "integration_id": pathlib.Path(i).read_bytes().decode("utf-8").strip(),
+}, separators=(",", ":")))
+PY
+  )" || { INTACT_GRAPH_NOTE="graph_payload_build_failed"; return 1; }
+  if ! result="$(printf '%s' "$payload_json" | docker exec -i \
+    "$BACKEND_CONTAINER" \
+    node -e '
+const { Client } = require("pg");
+function emit(ok, note, userActive, memCount, grantState) {
+  process.stdout.write([ok, note, userActive, memCount, grantState].join("|"));
+  process.exit(0);
+}
+(async () => {
+  let payload;
+  try {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    emit("false", "graph_payload_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  const userId = String(payload.user_id || "").trim();
+  const integrationId = String(payload.integration_id || "").trim();
+  if (!/^[0-9a-fA-F-]{36}$/.test(userId) || !/^[0-9a-fA-F-]{36}$/.test(integrationId)) {
+    emit("false", "graph_ids_invalid", "unknown", "0", "unknown");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    emit("false", "database_url_missing", "unknown", "0", "unknown");
+    return;
+  }
+  const c = new Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+  try {
+    await c.connect();
+    const integ = await c.query(
+      "SELECT org_id, status FROM directory_integrations WHERE id = $1 AND provider = $2",
+      [integrationId, "dingtalk"]
+    );
+    if (integ.rows.length !== 1) {
+      emit("false", "integration_org_not_unique", "unknown", "0", "unknown");
+      return;
+    }
+    const orgId = String(integ.rows[0].org_id || "").trim();
+    const integStatus = String(integ.rows[0].status || "").trim().toLowerCase();
+    if (!orgId) {
+      emit("false", "integration_org_missing", "unknown", "0", "unknown");
+      return;
+    }
+    if (integStatus !== "active") {
+      emit("false", "integration_not_active", "unknown", "0", "unknown");
+      return;
+    }
+    const u = await c.query(
+      "SELECT is_active, activation_status FROM users WHERE id = $1",
+      [userId]
+    );
+    if (u.rows.length !== 1) {
+      emit("false", "user_row_missing", "unknown", "0", "unknown");
+      return;
+    }
+    const isActive = u.rows[0].is_active;
+    if (typeof isActive !== "boolean") {
+      emit("false", "user_is_active_not_boolean", "unknown", "0", "unknown");
+      return;
+    }
+    const activation = String(u.rows[0].activation_status || "").trim();
+    if (activation !== "activated") {
+      emit("false", "user_not_activated", isActive ? "true" : "false", "0", "unknown");
+      return;
+    }
+    if (isActive !== true) {
+      emit("false", "user_not_active", "false", "0", "unknown");
+      return;
+    }
+    const m = await c.query(
+      "SELECT count(*)::int AS n FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND COALESCE(is_active, TRUE) = TRUE",
+      [userId, orgId]
+    );
+    const memN = Number(m.rows[0]?.n);
+    if (!Number.isInteger(memN) || memN < 1) {
+      emit("false", "membership_not_active", "true", String(Number.isInteger(memN) ? memN : 0), "unknown");
+      return;
+    }
+    const g = await c.query(
+      "SELECT enabled FROM user_external_auth_grants WHERE local_user_id = $1 AND provider = $2 LIMIT 2",
+      [userId, "dingtalk"]
+    );
+    if (g.rows.length !== 1) {
+      emit("false", g.rows.length === 0 ? "grant_absent" : "grant_ambiguous", "true", String(memN), "unknown");
+      return;
+    }
+    if (typeof g.rows[0].enabled !== "boolean" || g.rows[0].enabled !== true) {
+      emit("false", "grant_not_enabled", "true", String(memN), g.rows[0].enabled === false ? "disabled" : "unknown");
+      return;
+    }
+    emit("true", "ok", "true", String(memN), "enabled");
+  } catch (e) {
+    emit("false", "db_query_failed", "unknown", "0", "unknown");
+  } finally {
+    try { await c.end(); } catch (e2) { /* ignore */ }
+  }
+})().catch(() => emit("false", "db_query_failed", "unknown", "0", "unknown"));
+')"; then
+    INTACT_GRAPH_NOTE="docker_exec_failed"
+    return 1
+  fi
+  result="$(printf '%s\n' "$result" | tail -n1 | tr -d '\r')"
+  INTACT_GRAPH_OK="${result%%|*}"
+  local rest="${result#*|}"
+  INTACT_GRAPH_NOTE="${rest%%|*}"
+  rest="${rest#*|}"
+  INTACT_GRAPH_USER_ACTIVE="${rest%%|*}"
+  rest="${rest#*|}"
+  INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT="${rest%%|*}"
+  INTACT_GRAPH_GRANT_STATE="${rest#*|}"
+  INTACT_GRAPH_SNAPSHOT="${INTACT_GRAPH_USER_ACTIVE}|${INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT}|${INTACT_GRAPH_GRANT_STATE}"
+  if [[ "$INTACT_GRAPH_OK" == "true" ]]; then
+    log "intact access graph OK (${context}): user_active=${INTACT_GRAPH_USER_ACTIVE} membership_active_count=${INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT} grant=${INTACT_GRAPH_GRANT_STATE}"
+    return 0
+  fi
+  log "intact access graph refused (${context}): note=${INTACT_GRAPH_NOTE}"
+  return 1
 }
 
 # Load host journal for restore. Accepts ledger_bound; prepared/run_bound first
@@ -5089,18 +5599,30 @@ action_pending() {
 # Deprovision restore phase (confirmation=DINGTALK_SOURCE_REACTIVATED_CONFIRMED):
 #   flags stay OFF → sync after external source re-enable → rehire restore exact event
 #   → prove event/effects resolved + access restored.
+# Deprovision empty_fetch_abort recovery
+# (confirmation=DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED):
+#   staging-only, flags stay OFF forever. Recovers a journal stranded at
+#   phase=run_bound after completed empty_directory_fetch abort with zero ledger.
+#   Clears journal only after proving directory account reactivated + access graph
+#   unchanged. Never writes lifecycle env flags.
 action_deprovision() {
   local phase="apply"
   if [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_RESTORE_CONFIRMATION" ]]; then
     phase="restore"
+  elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION" ]]; then
+    phase="empty_fetch_abort_recovery"
   elif [[ "${BOOTSTRAP_CONFIRMATION:-}" == "$DEPROVISION_SOURCE_CONFIRMATION" ]]; then
     phase="apply"
   else
-    fail "action=deprovision requires bootstrap_confirmation=${DEPROVISION_SOURCE_CONFIRMATION}|${DEPROVISION_RESTORE_CONFIRMATION}"
+    fail "action=deprovision requires bootstrap_confirmation=${DEPROVISION_SOURCE_CONFIRMATION}|${DEPROVISION_RESTORE_CONFIRMATION}|${DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION}"
   fi
 
   if [[ "$phase" == "restore" ]]; then
     action_deprovision_restore
+    return $?
+  fi
+  if [[ "$phase" == "empty_fetch_abort_recovery" ]]; then
+    action_deprovision_empty_fetch_abort_recovery
     return $?
   fi
   action_deprovision_apply
@@ -5523,6 +6045,193 @@ action_deprovision_restore() {
     echo "note=${note}"
   } > "${OUTPUT_DIR}/summary.txt"
   log "action=deprovision restore OK (server-side access graph proven; OAuth NOT_EXECUTED; end_to_end_restore_claimed=false; flags OFF)"
+}
+
+# Staging-only recovery for journal phase=run_bound after empty_directory_fetch safe abort.
+# Never writes lifecycle env flags. Never calls rehire restore. Clears journal only after
+# final post-sync proofs (directory account active + access graph unchanged + flags OFF).
+action_deprovision_empty_fetch_abort_recovery() {
+  local pre_login_ok="false"
+  local admin_jwt_minted="false"
+  local journal_ok="false"
+  local exact_run_ok="false"
+  local zero_ledger_ok="false"
+  local zero_ledger_final_ok="false"
+  local pre_graph_ok="false"
+  local source_active_after_sync="false"
+  local sync_ok="false"
+  local post_graph_ok="false"
+  local graph_unchanged_ok="false"
+  local flags_remain_off="false"
+  local journal_cleared="false"
+  local pre_graph_snapshot=""
+  local post_graph_snapshot=""
+  local note="empty_fetch_abort_recovery_phase"
+
+  require_sha
+  require_canary_secret_files "deprovision"
+  assert_canary_identifier_matches_owner "deprovision"
+  require_canary_directory_account_id_file "deprovision"
+  [[ -n "$EXPECTED_CURRENT_MODE" ]] || fail "expected_current_mode is required for action=deprovision empty_fetch_abort_recovery"
+  [[ "$EXPECTED_CURRENT_MODE" == "off" ]] \
+    || fail "action=deprovision empty_fetch_abort_recovery requires expected_current_mode=off"
+
+  capture_live_snapshot
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision empty_fetch_abort_recovery"
+
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: backend_health_ok must be true (journal left intact)"
+  fi
+  # Any lifecycle flag ON refuses recovery and leaves the journal intact.
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: all lifecycle flags must be OFF (live mode='${SNAP_MODE}'); journal left intact"
+  fi
+
+  if mint_canary_admin_jwt_from_password_login "empty_fetch_abort_recovery_pre"; then
+    pre_login_ok="true"
+    admin_jwt_minted="true"
+  else
+    fail "action=deprovision empty_fetch_abort_recovery refused: canary login / JWT mint failed (journal left intact)"
+  fi
+
+  if ! load_canary_directory_subject "empty_fetch_abort_recovery_pre"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: subject load failed (note=${SUBJECT_NOTE:-unset}); journal left intact; no auto-selection"
+  fi
+  if [[ "$SUBJECT_LOCAL_USERNAME_OK" != "true" || "$SUBJECT_LOCAL_NAME_OK" != "true" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: subject is not owned canary employee; journal left intact; no auto-selection"
+  fi
+  if [[ "$SUBJECT_HAS_LOCAL_USER" != "true" || -z "${CANARY_SUBJECT_LOCAL_USER_ID_FILE:-}" || ! -s "${CANARY_SUBJECT_LOCAL_USER_ID_FILE}" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: owned local user required; journal left intact"
+  fi
+
+  # Exact journal bind: phase=run_bound, deprovision_applied=false, no ledger fields.
+  if ! load_run_bound_empty_fetch_abort_journal; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: journal not eligible run_bound safe abort (note=${SAFE_ABORT_JOURNAL_NOTE:-unset}); journal left intact"
+  fi
+  journal_ok="true"
+
+  # Exact terminal run: completed + applied=false + abortedReason=empty_directory_fetch.
+  if ! prove_exact_run_empty_fetch_safe_abort; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: exact run not empty_directory_fetch safe abort (note=${SAFE_ABORT_RUN_NOTE:-unset}); journal left intact"
+  fi
+  exact_run_ok="true"
+
+  # Zero user/membership/grant ledger for that exact run only (exact SQL; no list/limit).
+  if ! prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_pre"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: ledger not empty for exact run (note=${SAFE_ABORT_LEDGER_NOTE:-unset}); journal left intact"
+  fi
+  zero_ledger_ok="true"
+
+  # Pre-recovery access graph must still be activated + active membership + enabled grant.
+  if ! assert_subject_user_access_state "activated" "true" "empty_fetch_abort_recovery_pre"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: pre-recovery access not activated+active (note=${ACCESS_NOTE:-unset}); journal left intact"
+  fi
+  if ! prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_pre"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: pre-recovery access graph not intact (note=${INTACT_GRAPH_NOTE:-unset}); journal left intact"
+  fi
+  pre_graph_ok="true"
+  pre_graph_snapshot="${INTACT_GRAPH_SNAPSHOT}"
+
+  # External source re-add is operator-confirmed via bootstrap_confirmation.
+  # Flags stay OFF: sync under require_deprov_applied=false only.
+  if ! run_directory_sync_for_subject "empty_fetch_abort_recovery" "false"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: flags-OFF sync failed (note=${SYNC_NOTE:-unset}); journal left intact"
+  fi
+  if [[ "$SYNC_DEPROVISION_APPLIED" != "false" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: flags-OFF sync did not prove deprovisionApplied=false; journal left intact"
+  fi
+  sync_ok="true"
+
+  if ! load_canary_directory_subject "empty_fetch_abort_recovery_post_sync"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: subject reload failed (note=${SUBJECT_NOTE:-unset}); journal left intact"
+  fi
+  if [[ "$SUBJECT_ACTIVE" != "true" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: owned directory account not active after sync (external re-add gate); journal left intact"
+  fi
+  source_active_after_sync="true"
+
+  if ! assert_subject_user_access_state "activated" "true" "empty_fetch_abort_recovery_post"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: post-sync access not activated+active (note=${ACCESS_NOTE:-unset}); journal left intact"
+  fi
+  if ! prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_post"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: post-sync access graph not intact (note=${INTACT_GRAPH_NOTE:-unset}); journal left intact"
+  fi
+  post_graph_ok="true"
+  post_graph_snapshot="${INTACT_GRAPH_SNAPSHOT}"
+  if [[ -z "$pre_graph_snapshot" || "$post_graph_snapshot" != "$pre_graph_snapshot" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: access graph drift after flags-OFF sync (pre!=post); journal left intact"
+  fi
+  graph_unchanged_ok="true"
+
+  capture_live_snapshot
+  if [[ "$SNAP_MODE" != "off" || "$SNAP_ALIAS" != "false" || "$SNAP_PENDING" != "false" || "$SNAP_DEPROV" != "false" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: lifecycle flags must remain OFF after recovery sync; journal left intact"
+  fi
+  flags_remain_off="true"
+  assert_exact_sha
+  require_migrations_pending_zero_true "$SNAP_MIGRATIONS_ZERO" "action=deprovision empty_fetch_abort_recovery post-check"
+  if [[ "$SNAP_HEALTH_OK" != "true" ]]; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: backend_health_ok must remain true; journal left intact"
+  fi
+
+  # FINAL proof gate: re-prove exact no-ledger AFTER flags-OFF sync + graph/flag checks
+  # and IMMEDIATELY before clear, so a concurrent/delayed exact event cannot appear
+  # between the first zero-ledger proof and journal clear.
+  # Load-bearing order — contract MUTATION removes this recheck / moves clear earlier and must turn red.
+  if ! prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"; then
+    fail "action=deprovision empty_fetch_abort_recovery refused: final pre-clear zero-ledger recheck failed (note=${SAFE_ABORT_LEDGER_NOTE:-unset}); journal left intact"
+  fi
+  zero_ledger_final_ok="true"
+  clear_deprovision_apply_state
+  journal_cleared="true"
+
+  note="empty_fetch_abort_recovery_directory_reactivated_access_graph_unchanged_journal_cleared"
+  write_status_artifact \
+    "${SNAP_BUILD_SHA:-unknown}" \
+    "$SNAP_ALIAS" "$SNAP_PENDING" "$SNAP_DEPROV" "$SNAP_MODE" \
+    "$SNAP_ALIAS_READY" "$SNAP_CAN_ENABLE_ALIAS" \
+    "$SNAP_MIGRATIONS_ZERO" "$SNAP_HEALTH_OK" \
+    "deprovision" "true" "false" "$note"
+  {
+    echo "action=deprovision"
+    echo "phase=empty_fetch_abort_recovery"
+    echo "mode=${SNAP_MODE}"
+    echo "build_sha=${SNAP_BUILD_SHA:-unknown}"
+    echo "transition_applied=false"
+    echo "lifecycle_env_write=false"
+    echo "pre_login_ok=${pre_login_ok}"
+    echo "admin_jwt_minted=${admin_jwt_minted}"
+    echo "subject_owned=true"
+    echo "subject_auto_selected=false"
+    echo "source_re_add_confirmation=true"
+    echo "journal_ok=${journal_ok}"
+    echo "journal_phase_required=run_bound"
+    echo "exact_run_ok=${exact_run_ok}"
+    echo "aborted_reason_required=empty_directory_fetch"
+    echo "deprovision_applied_required=false"
+    echo "zero_ledger_ok=${zero_ledger_ok}"
+    echo "zero_ledger_final_ok=${zero_ledger_final_ok}"
+    echo "zero_ledger_event_count=${SAFE_ABORT_LEDGER_EVENT_COUNT:-0}"
+    echo "zero_ledger_effect_count=${SAFE_ABORT_LEDGER_EFFECT_COUNT:-0}"
+    echo "pre_graph_ok=${pre_graph_ok}"
+    echo "sync_ok=${sync_ok}"
+    echo "source_active_after_sync=${source_active_after_sync}"
+    echo "post_graph_ok=${post_graph_ok}"
+    echo "graph_unchanged_ok=${graph_unchanged_ok}"
+    echo "access_graph_user_active=${INTACT_GRAPH_USER_ACTIVE:-unknown}"
+    echo "access_graph_membership_active_count=${INTACT_GRAPH_MEMBERSHIP_ACTIVE_COUNT:-0}"
+    echo "access_graph_grant_state=${INTACT_GRAPH_GRANT_STATE:-unknown}"
+    echo "flags_remain_off=${flags_remain_off}"
+    echo "journal_cleared=${journal_cleared}"
+    echo "server_side_access_graph_mutation_proven=false"
+    echo "access_graph_unchanged_proven=true"
+    echo "safe_abort_source_recovery_complete=true"
+    echo "canary_access_rollback_complete=false"
+    echo "end_to_end_restore_claimed=false"
+    echo "note=${note}"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "action=deprovision empty_fetch_abort_recovery OK (flags OFF; directory reactivated; access graph unchanged; journal cleared; no lifecycle env write)"
 }
 
 # --- main ------------------------------------------------------------------------------

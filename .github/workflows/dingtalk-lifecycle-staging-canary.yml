@@ -40,7 +40,7 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 #               NOT_EXECUTED (manual). Optional confirmation PENDING_SSO_ACTIVATE
 #               runs SSO activate only (no env write); browser OAuth still
 #               NOT_EXECUTED. No auto-selection. No temp_password activate claim.
-#   deprovision = Two-phase canary on the SAME explicit subject.
+#   deprovision = Multi-phase canary on the SAME explicit subject.
 #               APPLY: bootstrap_confirmation=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED
 #               → deprovision flag ON → real sync → ledger bound to exact run.id
 #               → access denial → flags OFF (access remains disabled; not
@@ -48,6 +48,13 @@ run-name: "DingTalk Lifecycle Staging Canary: ${{ inputs.action }}${{ inputs.act
 #               RESTORE: bootstrap_confirmation=DINGTALK_SOURCE_REACTIVATED_CONFIRMED
 #               → flags stay OFF → sync after external source re-enable → rehire
 #               restore for the applied event → prove resolved + access restored.
+#               EMPTY_FETCH_ABORT_RECOVERY:
+#               bootstrap_confirmation=DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED
+#               → flags stay OFF (never writes lifecycle env) → bind exact
+#               journal run_bound completed empty_directory_fetch abort with
+#               zero ledger → prove intact access graph → flags-OFF sync after
+#               external source re-add → prove owned directory account active +
+#               access graph unchanged → clear journal only then.
 #
 # See:
 #   docs/development/dingtalk-lifecycle-canary-separate-go-20260724.md
@@ -82,7 +89,7 @@ on:
         required: false
         default: ''
       bootstrap_confirmation:
-        description: 'bootstrap=CREATE_STAGING_CANARY_ADMIN; human-bootstrap=CREATE_STAGING_HUMAN_ADMIN; pending optional PENDING_SSO_ACTIVATE; deprovision=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply) or DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore).'
+        description: 'bootstrap=CREATE_STAGING_CANARY_ADMIN; human-bootstrap=CREATE_STAGING_HUMAN_ADMIN; pending optional PENDING_SSO_ACTIVATE; deprovision=DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply) or DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore) or DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED (empty-fetch abort recovery).'
         required: false
         type: string
         default: ''
@@ -169,9 +176,9 @@ jobs:
 
           if [[ "$ACTION" == "deprovision" ]]; then
             case "$BOOTSTRAP_CONFIRMATION" in
-              DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED|DINGTALK_SOURCE_REACTIVATED_CONFIRMED) ;;
+              DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED|DINGTALK_SOURCE_REACTIVATED_CONFIRMED|DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED) ;;
               *)
-                echo "bootstrap_confirmation must be DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply) or DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore) for action=deprovision" >&2
+                echo "bootstrap_confirmation must be DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (apply), DINGTALK_SOURCE_REACTIVATED_CONFIRMED (restore), or DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED (empty-fetch abort recovery) for action=deprovision" >&2
                 exit 2
               ;;
             esac
@@ -484,8 +491,10 @@ jobs:
             echo "Bootstrap/human-bootstrap/alias/pending/deprovision require LIFECYCLE_CANARY_LOGIN_IDENTIFIER/PASSWORD (file transport); human-bootstrap also requires STAGING_OWNER_ADMIN_PASSWORD; pending/deprovision also require LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID (explicit subject; never printed)."
             echo "Pending default phase is admit-only; OAuth checkpoints are NOT_EXECUTED; optional PENDING_SSO_ACTIVATE (browser OAuth still NOT_EXECUTED)."
             echo "Deprovision apply uses DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED (flags OFF, access remains disabled). Restore uses DINGTALK_SOURCE_REACTIVATED_CONFIRMED (rehire + access restore; flags stay OFF)."
+            echo "Empty-fetch abort recovery uses DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED (flags stay OFF; never writes lifecycle env; clears run_bound journal only after directory reactivated + access graph unchanged proofs)."
             echo "Deprovision refuses shared integrations: exactly one total directory account, manual scheduling, admission automation OFF, and member-group projection OFF are required."
             echo "Deprovision reserves and journals the exact sync run UUID before env/HTTP; lost responses recover only through that run and its exact event/effects."
+            echo "Empty-fetch abort recovery binds only the exact journal run_bound completed empty_directory_fetch abort with zero ledger; wrong phase/run/abort reason, any ledger, source still missing, access drift, sync failure, or any lifecycle flag ON leaves the journal intact."
             echo "Alias/pending/deprovision/human-bootstrap mint short-lived admin JWT from canary password login — never ATTENDANCE_ADMIN_JWT."
             echo "Runtime OFF cannot be proven if rollback recreate itself fails (override restored on disk)."
             if [[ -f output/lifecycle-canary/summary.txt ]]; then
