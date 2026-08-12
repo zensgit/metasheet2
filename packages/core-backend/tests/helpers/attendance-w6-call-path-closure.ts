@@ -446,17 +446,14 @@ export function pluginLibFilesInClosure(closure: CallPathClosure): string[] {
  *       every such call's argument at that index must itself classify as
  *       resolved or pass-through.
  *
- * DB-seam call sites are matched by callee name ending in `query`
+ * Direct DB-seam call sites are matched by callee name ending in `query`
  * (case-insensitive): `query`, `.query`, `runQuery`, `readOnlyQuery`,
- * `wrappedQuery`. A DB seam reached under a name outside that pattern is not
- * swept by this static leg — a real, measured limit:
- * `attendance-w6-group-effective-policy-dml-sweep.test.ts` carries a
- * measured-residual leg listing the exact shapes that fall outside it
- * (aliasing, destructured aliasing, element access, computed element access,
- * `.call`, `.apply`). The mechanism of record for W6-R1 is not this sweep —
- * it is the read-only transaction, which refuses the write whatever the call
- * site is named; this sweep is a second, independent leg over the same
- * closure.
+ * `wrappedQuery`. Known indirect forms — local/destructured aliases, element
+ * access, and `.call`/`.apply`/`.bind` — are refused as findings rather than
+ * disappearing from the classification. The mechanism of record for W6-R1
+ * remains the read-only transaction, which refuses a write whatever spelling
+ * reached its transaction-bound handle; this sweep is a second, independent
+ * leg over the same closure.
  *
  * `src/db/pg.ts` and `src/integration/db/connection-pool.ts` pass for a
  * structural reason (their `sql`/`sqlOrConfig` formal parameters are what
@@ -707,6 +704,96 @@ function resolveLocalBinding(name: string, from: ts.Node): ts.Expression | null 
   return null
 }
 
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+  let current = expression
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)
+  ) {
+    current = current.expression
+  }
+  return current
+}
+
+function bindingPropertyName(element: ts.BindingElement): string | null {
+  const property = element.propertyName ?? element.name
+  if (ts.isIdentifier(property) || ts.isStringLiteral(property) || ts.isNumericLiteral(property)) return property.text
+  return null
+}
+
+/**
+ * Resolves the known indirect spellings that previously made a DB-seam call
+ * disappear from all three classification buckets. This is deliberately
+ * fail-closed: a computed element-access call cannot prove which method it
+ * invokes, so it is refused rather than guessed safe.
+ */
+function expressionResolvesToDbSeam(
+  expression: ts.Expression,
+  from: ts.Node,
+  seen: Set<string> = new Set(),
+): boolean {
+  const current = unwrapExpression(expression)
+  if (ts.isIdentifier(current)) {
+    if (isDbSeamCalleeName(current.text)) return true
+    if (seen.has(current.text)) return false
+    seen.add(current.text)
+
+    let scope: ts.Node | undefined = from
+    while (scope) {
+      let statements: readonly ts.Statement[] | null = null
+      if (ts.isBlock(scope) || ts.isSourceFile(scope)) statements = scope.statements
+      else if (ts.isCaseClause(scope) || ts.isDefaultClause(scope)) statements = scope.statements
+      if (statements) {
+        for (const statement of statements) {
+          if (!ts.isVariableStatement(statement)) continue
+          for (const declaration of statement.declarationList.declarations) {
+            if (ts.isIdentifier(declaration.name) && declaration.name.text === current.text && declaration.initializer) {
+              return expressionResolvesToDbSeam(declaration.initializer, declaration, seen)
+            }
+            if (ts.isObjectBindingPattern(declaration.name)) {
+              for (const element of declaration.name.elements) {
+                if (ts.isIdentifier(element.name) && element.name.text === current.text) {
+                  const property = bindingPropertyName(element)
+                  return property !== null && isDbSeamCalleeName(property)
+                }
+              }
+            }
+          }
+        }
+      }
+      scope = scope.parent
+    }
+    return false
+  }
+  if (ts.isPropertyAccessExpression(current)) {
+    if (isDbSeamCalleeName(current.name.text)) return true
+    if (current.name.text === 'call' || current.name.text === 'apply' || current.name.text === 'bind') {
+      return expressionResolvesToDbSeam(current.expression, current, seen)
+    }
+    return false
+  }
+  if (ts.isElementAccessExpression(current)) {
+    const key = current.argumentExpression && unwrapExpression(current.argumentExpression)
+    if (key && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key))) {
+      return isDbSeamCalleeName(key.text)
+    }
+    return true
+  }
+  if (ts.isCallExpression(current)) return expressionResolvesToDbSeam(current.expression, current, seen)
+  return false
+}
+
+function unsupportedDbSeamReason(call: ts.CallExpression): string | null {
+  const directName = calleeNameOf(call)
+  if (directName && isDbSeamCalleeName(directName)) return null
+  return expressionResolvesToDbSeam(call.expression, call)
+    ? 'indirect or computed DB-seam call — refused, not silently omitted'
+    : null
+}
+
 /** Every function-like declaration the closure carries, indexed by name, so a
  *  callee appearing in a traced expression can be checked for (a) being swept
  *  at all and (b) composing nothing. */
@@ -927,6 +1014,16 @@ export function collectQuerySqlArguments(closure: CallPathClosure, repoRoot: str
                 provenanceLeaf: verdict.provenanceLeaf,
               })
             } else findings.push({ ...site, reason: verdict.reason })
+          }
+        } else {
+          const reason = unsupportedDbSeamReason(node)
+          if (reason) {
+            findings.push({
+              file: unit.file,
+              unit: unit.name,
+              snippet: node.getText(unit.source).replace(/\s+/g, ' ').slice(0, 200),
+              reason,
+            })
           }
         }
       }

@@ -699,11 +699,11 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found', details: undefined } })
     })
 
-    it('delegated-non-member probe: attendance:admin permission WITHOUT active org_A membership is 403', async () => {
+    it('delegated-non-member probe: inaccessible and missing groups share the values-free 404 shape', async () => {
       const app = makeApp({ id: nonMemberAdminUser, permissions: ['attendance:admin'], orgId: orgA })
       const res = await request(app).get(`/api/attendance/groups/${groupAId}/effective-policy`)
-      expect(res.status).toBe(403)
-      expect(res.body.ok).toBe(false)
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found', details: undefined } })
     })
 
     it('spoofed x-org-id probe: a header disagreeing with the authenticated org is rejected 403 BEFORE scoped SQL, regardless of which group is targeted', async () => {
@@ -881,15 +881,14 @@ describeIfDatabase('W6-1 group effective-policy aggregate route (real PostgreSQL
       }
     })
 
-    it('the delegated-non-member 403 issues the MEMBERSHIP read and then stops — no aggregate read follows it', async () => {
+    it('the delegated-non-member 404 issues the MEMBERSHIP read and then stops — no aggregate read follows it', async () => {
       // This leg genuinely reads (the active-membership gate is real SQL), so
       // the assertion is not "zero queries" but "the group SQL never ran":
       // proven by the aggregate's own 404/200 shapes never appearing.
       const res = await request(makeApp({ id: nonMemberAdminUser, permissions: ['attendance:admin'], orgId: orgA }))
         .get(`/api/attendance/groups/${groupAId}/effective-policy`)
-      expect(res.status).toBe(403)
-      expect(res.body.error.code).toBe('FORBIDDEN')
-      expect(res.body.error.message).toBe('Org membership required for effective-policy')
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found', details: undefined } })
     })
   })
 

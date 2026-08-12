@@ -37,9 +37,10 @@ import {
  * set), or a finding. There is no fourth bucket and no file allowlist.
  *
  * Scope, stated narrowly rather than inflated: this is a static leg over
- * source text. It proves no reachable declaration contains a DML verb and no
- * reachable DB seam receives SQL the sweep cannot account for. It is not the
- * mechanism of record for W6-R1 — the read-only transaction
+ * source text. It proves no reachable declaration contains a DML verb, every
+ * directly named DB seam is classified, and the known indirect/computed seam
+ * forms fail closed as findings. It is not the mechanism of record for W6-R1 —
+ * the read-only transaction
  * (`createAttendanceGroupEffectivePolicyReadOnlyService` in
  * `src/routes/attendance-admin.ts`) is; this sweep is a second, independent
  * leg.
@@ -646,14 +647,11 @@ describe('W6-R1 static leg — no file is exempt as a file (composition/provenan
     expect(unshadowed.resolved.map((entry) => entry.sql)).toEqual(['attendance.settings'])
   })
 
-  it('MEASURED RESIDUAL: DB seams reached under a name outside the `*query` pattern are NOT swept — the true boundary of this leg', () => {
+  it('indirect and computed DB-seam spellings fail closed instead of disappearing from the classification', () => {
     /**
-     * Stated as a measurement, not as a caveat, and asserted so it cannot
-     * quietly drift. Each shape below reaches a DB seam without a callee name
-     * this sweep matches, so it produces NO classification at all — not a
-     * pass, not a finding, nothing. Enumerating fixes for them is the failure
-     * mode that produced the allowlist twice already; what bounds the residual
-     * instead is stated below and is checkable.
+     * These were measured residuals: each reached a DB seam without a direct
+     * `*query` callee and used to produce no classification at all. They now
+     * exercise the fail-closed path itself.
      */
     const SHAPES: Array<[string, string]> = [
       ['local alias', 'async function h() { const q = query; await q(buildTouchSql()) }'],
@@ -665,44 +663,16 @@ describe('W6-R1 static leg — no file is exempt as a file (composition/provenan
     ]
     for (const [label, text] of SHAPES) {
       const result = classifyIn(text, label)
-      expect({
-        label,
-        resolved: result.resolved.length,
-        passthrough: result.passthrough.length,
-        findings: result.findings.length,
-      }).toEqual({ label, resolved: 0, passthrough: 0, findings: 0 })
+      expect(result.resolved, label).toEqual([])
+      expect(result.passthrough, label).toEqual([])
+      expect(result.findings.length, label).toBe(1)
+      expect(result.findings[0].reason).toContain('indirect or computed DB-seam call')
     }
 
-    // BOUND 1 — evading BOTH static legs needs a split-literal composer too: a
-    // plain literal write through the very same aliased seam still reds the
-    // raw-SQL DML text leg, which reads unit TEXT and never looks at call shape.
+    // The raw-text DML leg remains independent: the same input is rejected by
+    // both the indirect-seam classifier and the verb scan.
     const literalThroughAlias = "async function h() { const q = query; await q('INSERT INTO attendance_groups (org_id) VALUES ($1)') }"
-    expect(classifyIn(literalThroughAlias, 'literal via alias').findings.length).toBe(0)
+    expect(classifyIn(literalThroughAlias, 'literal via alias').findings.length).toBe(1)
     expect(RAW_SQL_DML.some((pattern) => pattern.test(literalThroughAlias))).toBe(true)
-
-    // BOUND 2 — none of these shapes exists on the real call path today. If one
-    // ever appears, this count moves and the assertion reds, which is the point
-    // of measuring rather than conceding.
-    let indirectSeamCallSites = 0
-    for (const unit of closure.units) {
-      // `.call`/`.apply`/`.bind` and element-access invocations, counted over
-      // the SAME unit text the sweep reads.
-      for (const m of unit.text.matchAll(/\.(?:call|apply|bind)\s*\(/g)) {
-        void m
-        indirectSeamCallSites += 1
-      }
-      for (const m of unit.text.matchAll(/\[[^\]\n]+\]\s*\(/g)) {
-        void m
-        indirectSeamCallSites += 1
-      }
-    }
-    // The five live hits are all `Object.prototype.hasOwnProperty.call(...)` in
-    // the response contract — named explicitly so a SIXTH cannot hide behind a
-    // loose inequality.
-    const hasOwnPropertyCalls = closure.units
-      .map((unit) => [...unit.text.matchAll(/Object\.prototype\.hasOwnProperty\.call\s*\(/g)].length)
-      .reduce((a, b) => a + b, 0)
-    expect(hasOwnPropertyCalls).toBe(5)
-    expect(indirectSeamCallSites).toBe(hasOwnPropertyCalls)
   })
 })

@@ -1756,7 +1756,7 @@ export function attendanceAdminRouter(): Router {
         // inside the transaction so they share the aggregate's and FSER's
         // read-only client instead of running on the pool.
         //
-        // A delegated-non-member 403 and an invalid-groupId 400 still open a
+        // A delegated-non-member 404 and an invalid-groupId 400 still open a
         // transaction (read-only, rolled back with nothing in it); the
         // ordering guarantee this route asserts is "no aggregate SQL before
         // authorization", not "zero transactions" (that guarantee belongs to
@@ -1765,9 +1765,9 @@ export function attendanceAdminRouter(): Router {
           const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId, readOnlyQuery)
           if (!allowed) {
             throw new AttendanceGroupEffectivePolicyServiceError(
-              403,
-              'FORBIDDEN',
-              'Org membership required for effective-policy',
+              404,
+              'NOT_FOUND',
+              'Group not found',
             )
           }
 
