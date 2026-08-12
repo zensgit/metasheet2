@@ -1,8 +1,11 @@
 name: Multitable Recovery-Flag Containment Check
 
-# W0 containment verification (owner-directed, 2026-07-14): prove on the RUNNING host that the two
-# destructive recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT` and
-# `MULTITABLE_ENABLE_PIT_RESET` must stay off until the W0-1 correction lock (#4262) is built and gated.
+# W0 containment verification (owner-directed, 2026-07-14; extended 2026-08-12): prove on the RUNNING
+# host that the destructive/strict recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT`,
+# `MULTITABLE_ENABLE_PIT_RESET`, `MULTITABLE_HISTORY_CONTIGUITY_STRICT`, and `MULTITABLE_ENABLE_WRITER_FENCE`
+# must all stay off. The closeout flips RECONSTRUCTION_CAUSALITY_LANDED=true, so the strict-precondition
+# and writer-fence consumers become reachable ONLY when the latter two flags are set — this leg proves
+# they are not (code-default-off is NOT evidence about the environment).
 # Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
 #
 # READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + catalog-only database reads +
@@ -136,7 +139,7 @@ jobs:
           # previously caused the second word to be parsed as a bogus extra command (exit 127).
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
-          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE"
           SCHEMA_HELPER_SHA256="d8e8669a0e027480edd32703fa6b014e9e23124d4ef28293fab3d428c505dd00"
           SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           fail=0
