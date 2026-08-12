@@ -11,20 +11,20 @@
  *     transaction, opened once per request.
  *     Proved by asserting the shared-transaction mock is invoked once and
  *     the pool-level mock is never invoked at all.
- *  3. In the REAL application (`src/index.ts`, not this file's router-only
- *     mount), the route sits behind the global authentication gate and the
- *     attendance audit/security middleware. Mounting the router directly (as
- *     guarantees 1-2 do, to stay DB-free) cannot prove that placement — this
- *     is a separate AST registration-site model over `index.ts` itself
- *     (`tests/helpers/attendance-w6-index-assembly-order.ts`), not a
- *     source-text guard. See the describe block below for the full scope
- *     statement, including the honest (weaker) claim for the gate subject.
- *  4. The client-input boundary at the top of the handler — org-identity is
+ *  3. The client-input boundary at the top of the handler — org-identity is
  *     derived only from the authenticated principal, and any query/body
  *     `orgId` the client repeats must byte-equal it or the request is
  *     refused before any aggregate SQL runs; every OTHER query/body key is
  *     rejected outright (W6-R7). See the "client-input boundary" describe
  *     block below — DB-free, same harness as guarantees 1-2.
+ *  4. In the REAL application (`src/index.ts`, not this file's router-only
+ *     mount), the route sits behind the global authentication gate and the
+ *     attendance audit/security middleware. Mounting the router directly (as
+ *     guarantees 1-3 do, to stay DB-free) cannot prove that placement — this
+ *     is a separate AST registration-site model over `index.ts` itself
+ *     (`tests/helpers/attendance-w6-index-assembly-order.ts`), not a
+ *     source-text guard. See the describe block below for the full scope
+ *     statement, including the honest (weaker) claim for the gate subject.
  *
  * DB-free: `../../src/db/pg` is replaced with a spy transaction whose
  * client answers a small, closed set of SQL shapes for a `free_time` group
@@ -247,7 +247,132 @@ describe('post-guard platform-admin, membership, validation, and aggregate reads
 })
 
 /**
- * Guarantee 3 (see file header): in the REAL application assembly, this
+ * Guarantee 3 (see file header): the client-input boundary at the top of
+ * the handler (`attendance-admin.ts:177-192` for the org-selector mismatch
+ * predicate, `:1740-1761` for the query/body rejection), all BEFORE any
+ * aggregate SQL runs. Prior to this describe block, ONLY the real-DB suite
+ * `attendance-w6-group-effective-policy.db.test.ts` exercised these —
+ * entirely behind `describeIfDatabase`, so without `DATABASE_URL` that file
+ * skip-greens and these guards were verified by nothing in the no-DB unit
+ * lane. Every negative here is proven discriminating by neutering the
+ * corresponding production predicate and confirming the specific test below
+ * reds (see PR description / commit log for that mutation round); every
+ * positive control below shares the SAME successful-response harness as the
+ * "post-guard..." suite above, so "it refuses" is distinguishable from
+ * "it's broken" — a positive control that never became a probe result would
+ * make the negatives compatible with a handler that always rejects.
+ */
+describe('the client-input boundary: org-selector mismatch and query/body rejection, before any aggregate SQL', () => {
+  const OTHER_ORG = '88888888-8888-4888-8888-888888888888'
+  const PATH = `/api/attendance/groups/${GROUP}/effective-policy`
+
+  describe('org-selector mismatch — negatives (403, zero DB calls)', () => {
+    it('a query orgId that does not byte-equal the authenticated org is refused', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(`${PATH}?orgId=${OTHER_ORG}`)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('a body orgId that does not byte-equal the authenticated org is refused', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).send({ orgId: OTHER_ORG })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('an x-org-id header that does not byte-equal the authenticated org is refused', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).set('x-org-id', OTHER_ORG)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('a present-but-EMPTY x-org-id header is treated as a mismatch, not as absent (documented fail-closed edge case)', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).set('x-org-id', '')
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('org-selector mismatch — positive controls (matching value is accepted, request proceeds to 200)', () => {
+    it('a query orgId that byte-equals the authenticated org is accepted (same successful path as the no-selector case)', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(`${PATH}?orgId=${ORG}`)
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('a body orgId that byte-equals the authenticated org is accepted', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).send({ orgId: ORG })
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('state-selecting QUERY parameters — negative (400 QUERY_NOT_ACCEPTED, zero DB calls)', () => {
+    it('any query key other than orgId is rejected before aggregate SQL', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(`${PATH}?groupId=other`)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: 'QUERY_NOT_ACCEPTED', message: 'This endpoint accepts no state-selecting query parameters', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('an extra query key alongside a matching orgId is still rejected — orgId is an assertion, not an allowlist opener', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(`${PATH}?orgId=${ORG}&state=active`)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: 'QUERY_NOT_ACCEPTED', message: 'This endpoint accepts no state-selecting query parameters', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('state-bearing BODY — negatives (400 BODY_NOT_ACCEPTED, two distinct branches, zero DB calls)', () => {
+    it('a non-object body (array) is rejected — "no state-bearing request body"', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).set('Content-Type', 'application/json').send('[1,2,3]')
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: 'BODY_NOT_ACCEPTED', message: 'This endpoint accepts no state-bearing request body', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+
+    it('an object body with a field other than orgId is rejected — "no state-bearing request body fields"', async () => {
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).send({ note: 'x' })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: 'BODY_NOT_ACCEPTED', message: 'This endpoint accepts no state-bearing request body fields', details: undefined } })
+      expect(transactionMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('empty body — positive control (explicitly accepted, not merely untested)', () => {
+    it('an explicit empty JSON object body ({}) is accepted, proceeding to 200', async () => {
+      installSharedTransaction({ '?column?': 1 })
+      pinned.setApp(makeApp({ id: DELEGATED_USER, orgId: ORG }))
+      const res = await request(pinned.url()).get(PATH).send({})
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(res.body.data.groupId).toBe(GROUP)
+      expect(transactionMock).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+/**
+ * Guarantee 4 (see file header): in the REAL application assembly, this
  * route sits behind the global authentication gate and the attendance
  * audit/security middleware. The suites above mount `attendanceAdminRouter()`
  * directly on a bare Express app — necessary to stay DB-free, but it proves
