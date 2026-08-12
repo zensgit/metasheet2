@@ -3554,6 +3554,22 @@ export class DirectorySyncInProgressError extends Error {
 }
 
 /**
+ * Async callers may reserve the run UUID before the request so a lost 202 response
+ * never loses correlation with a destructive sync. Reusing that UUID is an
+ * idempotent observation of the original run, not permission to execute it again.
+ */
+export class DirectorySyncRunReplayError extends Error {
+  readonly code = 'DIRECTORY_SYNC_RUN_REPLAY'
+  readonly runId: string
+
+  constructor(runId: string) {
+    super(`Directory sync run ${runId} already exists`)
+    this.name = 'DirectorySyncRunReplayError'
+    this.runId = runId
+  }
+}
+
+/**
  * Transfer MVP T2 (§12.2): an ACTIVE org transfer freezes its SOURCE integration's sync. The
  * dangerous write a mid-transfer sync performs is the unconditional absence sweep — a source
  * tenant being emptied/migrated looks exactly like "everyone left", and the sweep would mark the
@@ -3715,18 +3731,36 @@ async function claimDirectorySyncRun(
   integrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler',
+  requestedRunId?: string,
 ): Promise<{ rows: DirectoryRunRow[] }> {
   try {
     return await query<DirectoryRunRow>(
       `INSERT INTO directory_sync_runs (
-         integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
+         id, integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
        )
-       VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
+       VALUES (COALESCE($4::uuid, gen_random_uuid()), $1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
        RETURNING id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at`,
-      [integrationId, triggeredBy, triggerSource],
+      [integrationId, triggeredBy, triggerSource, requestedRunId ?? null],
     )
   } catch (error) {
     if (isUniqueViolation(error)) {
+      if (requestedRunId) {
+        const replay = await query<{ id: string }>(
+          `SELECT id
+             FROM directory_sync_runs
+            WHERE id = $1
+              AND integration_id = $2
+            LIMIT 1`,
+          [requestedRunId, integrationId],
+        )
+        if (replay.rows.length === 1) {
+          const activeRunId = await findActiveDirectorySyncRunId(integrationId)
+          if (activeRunId && activeRunId !== replay.rows[0].id) {
+            throw new DirectorySyncInProgressError(activeRunId)
+          }
+          throw new DirectorySyncRunReplayError(requestedRunId)
+        }
+      }
       throw new DirectorySyncInProgressError(await findActiveDirectorySyncRunId(integrationId))
     }
     throw error
@@ -3742,7 +3776,7 @@ export async function syncDirectoryIntegration(
    * caller that wants to answer 202 needs the runId, and only the runId, up front — it
    * cannot wait for a large-tenant walk to finish inside an HTTP request.
    */
-  hooks: { onRunStarted?: (runId: string) => void } = {},
+  hooks: { onRunStarted?: (runId: string) => void; requestedRunId?: string } = {},
 ): Promise<{
   integration: DirectoryIntegrationSummary
   run: DirectorySyncRunSummary
@@ -3774,7 +3808,12 @@ export async function syncDirectoryIntegration(
   // later apply would not protect it. Expired leases are reclaimed first so a crashed
   // run cannot wedge an integration forever.
   await reclaimStaleDirectorySyncRuns(integrationId)
-  const runResult = await claimDirectorySyncRun(integrationId, triggeredBy, triggerSource)
+  const runResult = await claimDirectorySyncRun(
+    integrationId,
+    triggeredBy,
+    triggerSource,
+    hooks.requestedRunId,
+  )
   const runId = runResult.rows[0].id
   // R5: wall-clock anchor for stats.durationMs. Measured app-side from the lease claim to
   // just before the completion UPDATE (stats is serialized inside the transaction), so it
@@ -4976,6 +5015,21 @@ export async function listDirectorySyncRuns(
     items: rowsResult.rows.map(summarizeRun),
     total: Number(totalResult.rows[0]?.total ?? 0),
   }
+}
+
+export async function getDirectorySyncRun(
+  integrationId: string,
+  runId: string,
+): Promise<DirectorySyncRunSummary | null> {
+  const result = await query<DirectoryRunRow>(
+    `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
+       FROM directory_sync_runs
+      WHERE integration_id = $1
+        AND id = $2
+      LIMIT 1`,
+    [integrationId, runId],
+  )
+  return result.rows[0] ? summarizeRun(result.rows[0]) : null
 }
 
 export async function listDirectorySyncAlerts(

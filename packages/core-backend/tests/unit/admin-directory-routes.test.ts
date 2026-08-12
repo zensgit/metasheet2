@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // Resolves through the vi.mock factory below, which re-exports the REAL class —
 // so `new DirectorySyncInProgressError(...)` here is the same constructor the
 // route's `instanceof` discriminates against in production.
-import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
+import {
+  DirectorySyncInProgressError,
+  DirectorySyncRunReplayError,
+} from '../../src/directory/directory-sync'
 // NOT mocked below — this is the REAL class the admin-directory routes reuse for schedule_cron save-time
 // validation (roadmap §7.8), and the SAME class `directory-sync-scheduler.ts` uses to actually run the
 // job. Importing it directly here pins its actual acceptance semantics, independent of any route-level mock.
@@ -27,6 +30,7 @@ const directoryMocks = vi.hoisted(() => ({
   batchUnbindDirectoryAccounts: vi.fn(),
   bindDirectoryAccount: vi.fn(),
   createDirectoryIntegration: vi.fn(),
+  getDirectorySyncRun: vi.fn(),
   getDirectorySyncScheduleSnapshot: vi.fn(),
   getDirectoryAccountSummary: vi.fn(),
   getDirectoryReviewItem: vi.fn(),
@@ -86,6 +90,8 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
   // every error path that reaches the catch (including the async pre-run-row failure).
   DirectorySyncFrozenByTransferError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
     .DirectorySyncFrozenByTransferError,
+  DirectorySyncRunReplayError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncRunReplayError,
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
@@ -93,6 +99,7 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
   batchUnbindDirectoryAccounts: directoryMocks.batchUnbindDirectoryAccounts,
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
   createDirectoryIntegration: directoryMocks.createDirectoryIntegration,
+  getDirectorySyncRun: directoryMocks.getDirectorySyncRun,
   getDirectorySyncScheduleSnapshot: directoryMocks.getDirectorySyncScheduleSnapshot,
   getDirectoryAccountSummary: directoryMocks.getDirectoryAccountSummary,
   getDirectoryReviewItem: directoryMocks.getDirectoryReviewItem,
@@ -231,6 +238,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.batchUnbindDirectoryAccounts.mockReset()
     directoryMocks.bindDirectoryAccount.mockReset()
     directoryMocks.createDirectoryIntegration.mockReset()
+    directoryMocks.getDirectorySyncRun.mockReset()
     directoryMocks.getDirectorySyncScheduleSnapshot.mockReset()
     directoryMocks.getDirectoryAccountSummary.mockReset()
     directoryMocks.getDirectoryReviewItem.mockReset()
@@ -1276,6 +1284,71 @@ describe('adminDirectoryRouter', () => {
     resolveSync({ run: { id: 'run-async-1' } })
   })
 
+  it('passes a caller-reserved UUID to the async claim and returns that exact run id', async () => {
+    const requestedRunId = '11111111-1111-4111-8111-111111111111'
+    let resolveSync: (value: unknown) => void = () => {}
+    directoryMocks.syncDirectoryIntegration.mockImplementation(
+      (_id: string, _actor: string, _source: string, hooks: {
+        onRunStarted?: (runId: string) => void
+        requestedRunId?: string
+      }) => {
+        expect(hooks.requestedRunId).toBe(requestedRunId)
+        hooks.onRunStarted?.(requestedRunId)
+        return new Promise((resolve) => { resolveSync = resolve })
+      },
+    )
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true, runId: requestedRunId },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { accepted: true, runId: requestedRunId, integrationId: 'dir-1' },
+    })
+    resolveSync({ run: { id: requestedRunId } })
+  })
+
+  it('rejects a malformed reserved run id before starting a sync', async () => {
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true, runId: 'not-a-uuid' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_RUN_ID_INVALID' },
+    })
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+  })
+
+  it('returns the reserved run id on idempotent replay without starting another pull', async () => {
+    const requestedRunId = '22222222-2222-4222-8222-222222222222'
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncRunReplayError(requestedRunId))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true, runId: requestedRunId },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        accepted: true,
+        runId: requestedRunId,
+        integrationId: 'dir-1',
+        replayed: true,
+      },
+    })
+  })
+
   it('surfaces an error when an async sync fails before the run row exists', async () => {
     directoryMocks.syncDirectoryIntegration.mockRejectedValue(new Error('Directory integration not found'))
 
@@ -1321,6 +1394,55 @@ describe('adminDirectoryRouter', () => {
       ok: false,
       error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-2' } },
     })
+  })
+
+  it('loads one exact sync run without paginated-list inference', async () => {
+    const runId = '11111111-1111-4111-8111-111111111111'
+    directoryMocks.getDirectorySyncRun.mockResolvedValue({ id: runId, status: 'completed' })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
+      params: { integrationId: 'dir-1', runId },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.getDirectorySyncRun).toHaveBeenCalledWith('dir-1', runId)
+    expect(response.body).toMatchObject({ ok: true, data: { run: { id: runId, status: 'completed' } } })
+  })
+
+  it('rejects malformed exact sync run ids before querying', async () => {
+    const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
+      params: { integrationId: 'dir-1', runId: 'not-a-uuid' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'DIRECTORY_SYNC_RUN_ID_INVALID' } })
+    expect(directoryMocks.getDirectorySyncRun).not.toHaveBeenCalled()
+  })
+
+  it('requires platform admin for an exact sync run lookup', async () => {
+    const runId = '22222222-2222-4222-8222-222222222222'
+    const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
+      params: { integrationId: 'dir-1', runId },
+      user: { id: 'not-admin' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(directoryMocks.getDirectorySyncRun).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 when the exact sync run does not belong to the integration', async () => {
+    const runId = '22222222-2222-4222-8222-222222222222'
+    directoryMocks.getDirectorySyncRun.mockResolvedValue(null)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
+      params: { integrationId: 'dir-1', runId },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'DIRECTORY_RUN_NOT_FOUND' } })
   })
 
   it('previews a sync without applying it', async () => {
