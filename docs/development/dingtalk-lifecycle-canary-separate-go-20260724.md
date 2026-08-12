@@ -1,7 +1,7 @@
 # DingTalk lifecycle canary — separate ops GO (not auto-enabled)
 
 **Date:** 2026-07-24
-**Updated:** 2026-08-12 (hardened-deploy alias run 31529335625 completed with required OFF rollback at exact SHA `24794811b1c800402006b30d6e4fa9df670e124e`; pending/deprovision have fail-closed transient operators but remain **NOT EXECUTED**; deprovision requires a dedicated one-account integration and pre-reserves its exact sync run UUID before env/HTTP)
+**Updated:** 2026-08-12 (alias and server-side pending canaries completed with required OFF rollback; two pre-ledger deprovision failure classes were safely recovered at exact SHA `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`; destructive apply/restore remains **NOT EXECUTED** pending a second unique DingTalk sentinel)
 **Related locks:**
 - `dingtalk-directory-admission-activation-lifecycle-design-20260723.md` Rev 4.2
 - `dingtalk-deprovision-reactivation-and-evidence-chain-design-20260723.md` Rev 4.5
@@ -34,8 +34,8 @@ Presence of canary subject/integration/owner tokens is **not** a real canary and
 | `off` | yes | emergency clear of the three env gates; previous-override restore on failure; health true after restart required |
 | `bootstrap` | yes (manual) | staging-only create/repair of fixed canary admin; see below; **no lifecycle env write** |
 | `alias` | yes (transient) | secret-backed cutover canary; see sequence below; success requires/proves OFF |
-| `pending` | yes (transient, **NOT EXECUTED**) | explicit owned directory account only; pending admit or optional SSO activation; required OFF rollback; browser OAuth remains a human checkpoint |
-| `deprovision` | yes (two-phase, **NOT EXECUTED**) | dedicated one-account manual integration only; exact preview/planner radius; reserved run UUID + recovery journal; exact event/effects restore; required OFF rollback |
+| `pending` | yes (transient, **SERVER-SIDE PASS**) | explicit owned account admitted and activated through SSO intent; required OFF rollback passed; browser OAuth remains a human checkpoint |
+| `deprovision` | yes (two-phase, **ATTEMPTED / NOT COMPLETE**) | dedicated manual integration and recovery paths proven; pre-reserves the exact run UUID before env/HTTP; destructive event/effects apply + restore awaits a second unique DingTalk sentinel; required OFF rollback remains mandatory |
 
 Shared concurrency with `attendance-staging-window-runner`. Status artifacts stay values-free (booleans / counts / reason enums / SHA only).
 
@@ -108,7 +108,7 @@ Backfill alias rows **may persist** after the run. Artifacts report only boolean
 
 ## Current staging baseline (alias executed and rolled back)
 
-As of 2026-08-12 the alias cutover canary is complete and rolled back. Pending and deprovision remain **NOT EXECUTED**. Safe preparation and execution evidence:
+As of 2026-08-12 the alias and server-side pending canaries are complete and rolled back. Deprovision recovery is proven, but destructive apply/restore remains **NOT EXECUTED**. Safe preparation and execution evidence:
 
 1. Attendance staging runner [run 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed backup + clone rehearsal + real apply: migration state `296 applied / 18 pending` -> `314 applied / 0 pending`; rehearsal isolation held and auth round-trip returned 200.
 2. [#4853](https://github.com/zensgit/metasheet2/pull/4853), merge commit `ddec28b12ebff97fae33af45553d77c149d816e1`, installs and validates the checked-out staging Compose file, pins Compose project-directory, and derives build metadata from the exact `IMAGE_TAG`.
@@ -121,15 +121,18 @@ As of 2026-08-12 the alias cutover canary is complete and rolled back. Pending a
 9. [#4873](https://github.com/zensgit/metasheet2/pull/4873), merge commit `24794811b1c800402006b30d6e4fa9df670e124e`, added caller-reserved sync-run ids, exact-run recovery, a staged recovery journal, and the dedicated one-account/exclusive-window deprovision gates.
 10. Attendance staging [deploy 31528635839](https://github.com/zensgit/metasheet2/actions/runs/31528635839) deployed exact SHA `24794811b1c800402006b30d6e4fa9df670e124e`; lifecycle [status 31528753683](https://github.com/zensgit/metasheet2/actions/runs/31528753683) and [OFF preflight 31528911914](https://github.com/zensgit/metasheet2/actions/runs/31528911914) proved healthy backend, zero pending migrations, exact mode `off`, and all three flags `false`.
 11. Hardened-deploy lifecycle [alias 31529335625](https://github.com/zensgit/metasheet2/actions/runs/31529335625) again proved password login before ON, during alias-only, and after rollback; zero collisions; exact deployed SHA; and terminal mode `off` with all three flags `false`. This is the current alias proof; run `31504979575` remains historical evidence for the older deploy.
+12. Pending [admit 31551343313](https://github.com/zensgit/metasheet2/actions/runs/31551343313) and [SSO activate-intent 31551426867](https://github.com/zensgit/metasheet2/actions/runs/31551426867) used the explicit owned subject and left all lifecycle flags OFF. Browser OAuth checkpoints remain `NOT_EXECUTED`.
+13. [#4875](https://github.com/zensgit/metasheet2/pull/4875) and recovery [31555162698](https://github.com/zensgit/metasheet2/actions/runs/31555162698) closed an exact empty-fetch abort with zero ledger and unchanged access graph.
+14. [#4877](https://github.com/zensgit/metasheet2/pull/4877), merge `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`, and runs [31559288370](https://github.com/zensgit/metasheet2/actions/runs/31559288370), [31559371562](https://github.com/zensgit/metasheet2/actions/runs/31559371562), and [31559480395](https://github.com/zensgit/metasheet2/actions/runs/31559480395) prove exact staging deploy, exact sync-failure recovery, cleared journal, unchanged access graph, zero ledger, and terminal mode `off`.
 
 The former image-tag/health-commit provenance conflict is resolved. This establishes the safe OFF baseline and the transient alias staging canary; it does not authorize production alias traffic.
 
-The secret-backed pending and deprovision operators now exist, but neither pending admission nor
-deprovision has been run in staging. Execution still requires one explicitly owned source employee.
-Deprovision additionally refuses any integration
+The secret-backed operators now exist and pending admission/SSO activation have run against the
+explicit owned source employee. Deprovision additionally refuses any integration
 that is scheduled, auto-admitting, member-group projecting, or contains anything other than the
-single selected directory account (inactive rows count too). The current shared employee
-integration is therefore ineligible by construction.
+single selected directory account (inactive rows count too). The dedicated integration passed those
+gates, but a destructive cycle still requires a second unique employee as a temporary non-target
+sentinel; using an employee already present in another integration fails before ledger by design.
 
 Apply also requires the literal confirmation
 `DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`: the source is disabled, the integration
@@ -155,10 +158,10 @@ The full values-free execution record is `dingtalk-staging-lifecycle-canary-and-
 2. **Complete:** configure the fixed alias-canary login secrets without exposing their values.
 3. **Complete:** create/repair the dedicated canary administrators and prove password login with all flags OFF.
 4. **Complete:** dispatch `action=alias`; prove transient ON login and required OFF rollback login.
-5. **NOT EXECUTED (operator ready):** real admit→activate on an explicitly owned DingTalk employee, then pending rollback.
-6. **NOT EXECUTED (operator ready, dedicated integration required):** real source departure and deprovision/restore proof on that same employee, then rollback.
+5. **Complete server-side; browser OAuth NOT EXECUTED:** real admit→SSO activate intent on the explicitly owned employee, with pending rollback to OFF.
+6. **NOT EXECUTED (operator ready, second unique sentinel required):** real source departure and deprovision/restore proof on that same employee, then rollback.
 7. Production remains a separate GO.
 
 ## Owner note
 
-Landing this lane does not authorize traffic. The alias staging canary succeeded and returned to OFF; pending and deprovision remain incomplete. Merging code and completing staging alias do not leave `AUTH_LOGIN_USE_ALIASES` enabled or authorize any production lifecycle flag.
+Landing this lane does not authorize traffic. Alias and server-side pending staging canaries succeeded and returned to OFF; browser OAuth and destructive deprovision remain incomplete. Merging code and completing staging canaries do not leave any lifecycle flag enabled or authorize production traffic.
