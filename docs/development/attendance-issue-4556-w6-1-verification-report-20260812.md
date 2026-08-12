@@ -9,7 +9,7 @@
 > Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
+> `c9005abe8c7d8efcabe0fdadd327635c3b4e121b`
 
 ## 0. Evidence rules
 
@@ -31,7 +31,7 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
-| Evidence head | `7c72f60340e1994dc66ebaae631fd331dd2bbfa9` |
+| Evidence head | `c9005abe8c7d8efcabe0fdadd327635c3b4e121b` |
 | Database | Local PostgreSQL 15.17 |
 | Scratch database | `metasheet_w6_4849_codex_20260812_e` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
 | Data | Synthetic only |
@@ -69,11 +69,14 @@ the real `isAdmin(userId, runQuery)` query returns true on the shared
 transaction handle, the membership query is skipped, and aggregate reads still
 run on that handle.
 
-The DML matrix also constructs six indirect or computed DB-seam spellings:
-local alias, destructured alias, element access, computed element access,
-`.call`, and `.apply`. Each now produces a fail-closed finding. A literal DML
-statement through an alias is independently rejected by both the seam
-classifier and the raw-text DML leg.
+The DML matrix constructs fifteen named indirect or computed DB-seam spellings,
+including local/destructured/assignment/object aliases, static and computed
+element access, conditional/logical aliases, and `.call`/`.apply`/`.bind`.
+Each produces a fail-closed finding. A literal DML statement through an alias is
+independently rejected by both the seam classifier and the raw-text DML leg.
+The detector is explicitly bounded rather than represented as complete
+JavaScript data-flow analysis; opaque higher-order returns, arbitrary identity
+functions, and object-spread propagation remain outside this secondary leg.
 
 The three net-new unit legs close the discovery-gate gaps: AST-derived resolver
 call coverage with dynamic-target refusal, UUID enforcement at every
@@ -180,17 +183,28 @@ The first report-head review round at
 `89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` produced two P2 findings: the
 delegated-inaccessible response differed from the ratified values-free `404`
 shape, and six indirect/computed DB-seam forms disappeared from the static
-classification. Evidence head `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
-contains the repairs and the fresh local executions above. All final model
+classification. A later adversarial pass found additional assignment,
+object-property, conditional, and object-destructuring spellings; evidence head
+`c9005abe8c7d8efcabe0fdadd327635c3b4e121b` contains the bounded-grammar repairs
+and the fresh local executions above. All final model
 gates must therefore rerun against the later exact PR head that includes this
 report; the earlier outcomes remain discovery evidence only.
+
+The same review found a governance contradiction in the ratified source:
+W6-R3 and endpoint §4.1 require missing and inaccessible groups to share one
+values-free `404`, but completion-skeleton §7.2 still says delegated non-member
+`403`. Runtime and tests follow the normative red line. This report discloses
+but does not amend that ratified text; a durable owner correction remains a
+separate prerequisite if the final gate continues to grade the contradiction
+P2.
 
 ## 5. Verdict boundary
 
 At the evidence head, the focused local matrix is green. The PR must remain
 Draft/HOLD until its report delta is committed, pushed, fresh GitHub checks are
-green, and the final exact-head independent gates report zero P1/P2. The
-owner's separate instruction then permits this PR only to become Ready and
+green, the ratified-lock contradiction above is durably resolved if a new gate
+continues to grade it P2, and the final independent gates report zero P1/P2.
+The owner's separate instruction then permits this PR only to become Ready and
 squash-merge, followed by an immediate stop at the exact merge SHA.
 
 Even after those conditions, this report authorizes none of the following:

@@ -13,7 +13,7 @@
 > (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
+> `c9005abe8c7d8efcabe0fdadd327635c3b4e121b`
 
 ## 0. Scope delivered
 
@@ -114,14 +114,14 @@ material gaps. The evidence head closes them without widening the slice:
 A later independent review round against report head
 `89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` found two additional P2 gaps. That
 older-head review is discovery evidence only. Evidence head
-`7c72f60340e1994dc66ebaae631fd331dd2bbfa9` closes both:
+`c9005abe8c7d8efcabe0fdadd327635c3b4e121b` closes the implementation gaps:
 
 - a delegated caller without active target-organization membership now receives
   the same exact values-free `404 NOT_FOUND` shape as a missing or inaccessible
   group, while selector mismatch remains a distinct pre-SQL `403`;
-- six known indirect or computed DB-seam spellings now fail closed as static
-  findings instead of disappearing from all classification buckets. PostgreSQL
-  `READ ONLY` remains the structural mechanism of record.
+- fifteen named indirect or computed DB-seam spellings now fail closed as
+  static findings instead of disappearing from all classification buckets.
+  PostgreSQL `READ ONLY` remains the structural mechanism of record.
 
 Because those changes modify the reviewed head, no review result bound to
 `89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` transfers to the final gate.
@@ -144,6 +144,16 @@ These are not represented as W6-1 guarantees:
    shape. Calendar-valid production values remain a producer/database
    invariant; W6-1 does not claim that its response validator rejects every
    lexically valid but impossible calendar date.
+6. The secondary DML seam detector is a bounded AST grammar, not a complete
+   JavaScript data-flow proof. Opaque higher-order returns, arbitrary identity
+   functions, and object-spread propagation are outside that grammar. The
+   report makes no static-proof claim for those forms; PostgreSQL `READ ONLY`
+   is the W6-R1 mechanism of record.
+7. The ratified lock contains an unresolved textual contradiction: normative
+   W6-R3 and endpoint §4.1 require one values-free `404` for missing and
+   inaccessible groups, while completion-skeleton §7.2 still says delegated
+   non-member `403`. The implementation follows W6-R3/§4.1. This report does
+   not amend the ratified lock or claim the stale checklist text is resolved.
 
 ## 6. Stop condition
 
