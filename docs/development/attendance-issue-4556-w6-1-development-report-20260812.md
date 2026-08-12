@@ -1,7 +1,7 @@
 # Attendance Issue #4556 W6-1 Development Report
 
-> Status: **RECORD / DRAFT-HOLD**. This report describes the W6-1 backend
-> aggregate implemented in PR #4849. It is not merge, runtime, flag, staging,
+> Status: **RECORD / PRE-MERGE GATE**. This report describes the W6-1 backend
+> aggregate implemented in PR #4849. It is not runtime, flag, staging,
 > deployment, soak, production-data, customer-data, or issue-close authority.
 >
 > Date: 2026-08-12
@@ -9,11 +9,11 @@
 > Ratified contract:
 > `docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md`
 >
-> Fresh base: `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
-> (the merge of PR #4804)
+> Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
+> (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `54c23a4dcd8539d126c3654bed92b487af7247da`
+> `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02`
 
 ## 0. Scope delivered
 
@@ -32,7 +32,7 @@ W6-3 UI, W6-4 whole-W6 closeout, W7 calculation cutover, or W8 closure.
 | Conflict handling | Membership overlap is reported as a count and `conflict_action_required`; no winner is selected |
 | Runtime loading | Three plugin attendance libraries resolve through one closed-set, repo-root-anchored, symlink-rejecting resolver |
 | Compatibility | A fixed strict shift with zero persisted segment rows keeps the W3 legacy-envelope single-segment reading |
-| CI | Both W6 real-DB suites are in the attendance database run list and no-DB exclusion; the workflow provenance pin was mechanically regenerated after fresh-main catch-up |
+| CI | Both W6 real-DB suites are in the attendance database run list and no-DB exclusion; the workflow provenance pin was mechanically recomputed after fresh-main catch-up and remained byte-identical |
 
 ## 1. Implementation surfaces
 
@@ -62,7 +62,7 @@ W6-2 and is intentionally absent from this slice.
 | W6-R6 | Runtime validators reject unknown labels, domains, conflict codes, reason codes, group types, rollout states, and editor-reference members. |
 | W6-R7 | Query parameters and state-bearing body fields are rejected before aggregate SQL. Labels use persisted facts plus rollout posture. |
 | W6-R8 | Editor references use the ratified two-kind closed union and existing route/stage spellings. |
-| W6-R9 | The pre-anchor procedural violation remains recorded in the ratified lock. This rebuilt PR is still Draft/HOLD and has no merge authority. |
+| W6-R9 | The pre-anchor procedural violation remains recorded in the ratified lock. A separate owner instruction authorizes only this PR's Ready/squash merge after fresh checks and an exact-head 0 P1/P2 gate; it does not authorize W6-2/3/4 or runtime action. |
 
 ## 3. Model allocation by difficulty
 
@@ -83,11 +83,15 @@ final head before it affects the verdict.
 
 ## 4. Fresh-main integration
 
-PR #4849 was caught up only after PR #4804 landed. The integration merge used
-`0287b250b33fe4c7ea98b880360af74fc08a5ebf` as the fresh base. The workflow
-file, no-DB exclusion, and attendance run list merged without semantic conflict.
-The sealed-export provenance JSON was regenerated from the resulting workflow
-bytes rather than copying an earlier branch value.
+PR #4849 was caught up after PR #4804 landed and again after the temporary main
+freeze was renewed. The final integration merge used
+`24794811b1c800402006b30d6e4fa9df670e124e` as the owner-authorized fresh base.
+The intervening main commit and the PR had zero changed-file overlap. The
+workflow file, no-DB exclusion, and attendance run list merged without semantic
+conflict. The complete sealed-export provenance JSON was mechanically
+recomputed from the resulting tree; it was byte-identical to the pinned file,
+including `evidenceFiles.pluginTestsWorkflow = be00b174108df71c67bdfd971af2098b00b0149cf6a08be45770d2f3b981e461`, so no
+pin-only diff was manufactured.
 
 The runtime implementation delta before the two report files is 31 files; the
 exact base-to-report-head delta is 33 files. No migration, feature flag,
@@ -115,10 +119,12 @@ These are not represented as W6-1 guarantees:
 
 ## 6. Stop condition
 
-The authorized end state for this work is:
+The owner-authorized end state for this landing is:
 
-- PR #4849 remains Draft/HOLD;
-- fresh exact-head checks and independent gates are recorded;
-- no merge is performed;
+- PR #4849 remains Draft/HOLD until fresh exact-head checks and independent
+  gates are recorded;
+- only after those gates report zero P1/P2, PR #4849 may become Ready and
+  squash-merge;
+- the lane stops after presenting the exact merge SHA;
 - no runtime, flag, deployment, staging, soak, production/customer data, or
   issue #4556 close action is performed.

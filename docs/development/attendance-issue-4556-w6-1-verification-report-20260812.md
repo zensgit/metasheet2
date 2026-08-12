@@ -1,15 +1,15 @@
 # Attendance Issue #4556 W6-1 Verification Report
 
-> Status: **RECORD / DRAFT-HOLD**. This report records synthetic and isolated
-> verification for PR #4849. Passing evidence does not authorize merge or any
-> runtime action.
+> Status: **RECORD / PRE-MERGE GATE**. This report records synthetic and
+> isolated verification for PR #4849. Passing evidence is only one condition
+> of the owner's bounded merge authorization and does not authorize runtime.
 >
 > Date: 2026-08-12
 >
-> Fresh base: `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
+> Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `54c23a4dcd8539d126c3654bed92b487af7247da`
+> `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02`
 
 ## 0. Evidence rules
 
@@ -30,10 +30,10 @@
 | Item | Value |
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
-| Base | `0287b250b33fe4c7ea98b880360af74fc08a5ebf` |
-| Evidence head | `54c23a4dcd8539d126c3654bed92b487af7247da` |
+| Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
+| Evidence head | `e7a73a6b8ac94f110bfbac1da04323c4c6be2b02` |
 | Database | Local PostgreSQL 15.17 |
-| Scratch database | `metasheet_w6_4849_codex_20260812_a` on a local role; credentials were not recorded |
+| Scratch database | `metasheet_w6_4849_codex_20260812_c` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
 | Data | Synthetic only |
 | Runtime posture | No feature flag, rollout transition, deployment, staging, or soak |
 
@@ -117,8 +117,10 @@ node --test \
   plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
 ```
 
-Result: **1 / 1 passed**. The provenance vector contains the SHA-256 derived
-from the merged fresh-main workflow bytes.
+Result: **1 / 1 passed**. A full call to `computePackageProvenancePinSet()`
+also produced JSON byte-identical to the checked-in pin file. The recomputed
+`pluginTestsWorkflow` SHA-256 remained
+`be00b174108df71c67bdfd971af2098b00b0149cf6a08be45770d2f3b981e461`.
 
 ### 2.5 TypeScript
 
@@ -163,11 +165,12 @@ new exact-head gate; an older-head approval cannot transfer by wording alone.
 
 At the evidence head, the focused local matrix is green. The PR must remain
 Draft/HOLD until its report delta is committed, pushed, fresh GitHub checks are
-green, and the final exact-head independent gates report zero P1/P2.
+green, and the final exact-head independent gates report zero P1/P2. The
+owner's separate instruction then permits this PR only to become Ready and
+squash-merge, followed by an immediate stop at the exact merge SHA.
 
 Even after those conditions, this report authorizes none of the following:
 
-- merge of PR #4849;
 - W6-2, W6-3, or W6-4 runtime work;
 - feature-flag or rollout-state change;
 - deployment, staging, or soak;
