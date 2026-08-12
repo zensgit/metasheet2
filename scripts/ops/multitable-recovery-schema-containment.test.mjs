@@ -101,6 +101,32 @@ test('with the FK removed the helper returns PASS with the exact workflow sentin
   )
 })
 
+test('workflow FLAGS pins exactly the four default-inert recovery flags, consumed by both legs', () => {
+  const workflow = readFileSync(
+    join(repoRoot, '.github/workflows/multitable-recovery-flag-containment-check.yml'),
+    'utf8',
+  )
+  // The remote heredoc declares FLAGS once; both the running-env leg and the next-restart leg iterate
+  // `for f in $FLAGS`. Pin the EXACT set so a silently dropped flag (e.g. deleting
+  // MULTITABLE_ENABLE_WRITER_FENCE) cannot pass green — it must red this required (test 20.x) contract.
+  const flagsDecl = workflow.match(/^\s*FLAGS="([^"]+)"$/m)
+  assert.ok(flagsDecl, 'workflow must declare FLAGS')
+  const flags = flagsDecl[1].trim().split(/\s+/).sort()
+  assert.deepEqual(
+    flags,
+    [
+      'MULTITABLE_ENABLE_PIT_RESET',
+      'MULTITABLE_ENABLE_SHEET_REVERT',
+      'MULTITABLE_ENABLE_WRITER_FENCE',
+      'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    ],
+    'containment must verdict EXACTLY the four default-inert recovery flags: the two destructive execute gates (SHEET_REVERT/PIT_RESET) plus the two seam/fence consumers the closeout makes reachable (HISTORY_CONTIGUITY_STRICT/ENABLE_WRITER_FENCE)',
+  )
+  // Both legs must consume FLAGS or a flag is only half-checked. Assert exactly two `for f in $FLAGS`.
+  const loopCount = (workflow.match(/for f in \$FLAGS/g) || []).length
+  assert.equal(loopCount, 2, 'both the running-env and next-restart legs must iterate `for f in $FLAGS`')
+})
+
 test('missing or unexpectedly enabled authority triggers fail closed', () => {
   const missing = expectedCopy()
   missing.authorityTriggers.pop()

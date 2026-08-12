@@ -44,7 +44,7 @@ name: Multitable Recovery-Flag Containment Check
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
 #      this covers env_file AND compose YAML/override merges, not just a directory's top-level `.env*`
-#      files — and the two flags are verdicted against that rendered, fully-resolved config.
+#      files — and the four flags are verdicted against that rendered, fully-resolved config.
 #
 # Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: a flag active (=true/1) anywhere
 # — running env OR rendered compose config — fails the job; a missing expected container, a broken/

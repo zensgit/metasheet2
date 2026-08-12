@@ -18,7 +18,7 @@
 |---|---|---|---|---|
 | 1 | `b4da2fae82` | containment helper 强制 `meta_links.foreign_record_id` **无任何 FK** 不变量（conrelid/conkey/attnum，不看名/目标/ON DELETE）+ 变异；workflow 注释与 SHA/sentinel 同步 | Fable5 | 真库三态：干净 PASS / NO ACTION FAIL / CASCADE FAIL / 移除 PASS；变异证承重 |
 | 2 | `5ba2f03823` | golden：authority substrate `'unavailable'`（出厂 DISABLED 姿态）⇒ recovery **fail-closed 零写** | Sonnet5 | 真实机制（强制 9 触发器 DISABLED）+ **正控**（ENABLE 时同场景四表真被改）+ 变异（去守卫→完整破坏性写入放行 RED） |
-| 3 | `9f325a34f8` | 平台写路径 40001 → 可重试 409（admin-users 6 处）；AuthService 有界重试 + 注册不静默丢角色 + 回填不伪造内存权限 | Sonnet5 | 4 新测试 + 4 变异 RED（含「注册成功但无角色」bug 钉死）；复用既有判别函数非新造 |
+| 3 | `9f325a34f8` | 平台写路径 40001 → 可重试 409（admin-users 6 处）；AuthService 有界重试 + 回填不伪造内存权限；**注册路径改为诚实抛可重试错（不再假报注册成功）** | Sonnet5 | 4 新测试 + 4 变异 RED（含「注册成功但无角色」bug 钉死）；复用既有判别函数非新造。**口径收窄（REQUEST_CHANGES 3 轮）：本 commit 只消除了「假报成功」——`createUser()` 已提交的用户/别名/权限仍残留、角色写失败不整体回滚 ⇒ 真正的注册原子性（同事务）留 O-2，见 §7** |
 | 4 | `92bbf77829` | **两接口拆分** `preliminaryFullRead`(不取锁)/`finalLockedFullRead`(锁证据绑定)（owner 已裁形状，此前只交付行为半边）| Sonnet5 | 行为保持 56/56·148/148·70/70·tsc 干净；真库 drift guard；**advisor 复核后自纠**「arity 非对称编译保证」过强声明，改以真库测试为护栏 |
 | 5 | `f439500a05` | golden：automation lock/unlock marker operation 可被选作 `anchorOperationId`；空 op 密封不留幻影 endpoint | Fable5 | 幻影锚前提经查已被 operation-ledger 空 op 跳过消解（未造第二道同类闸）；G1/G2 + 变异打 backstop RED |
 | 6 | `820fe4bd4e` | **foreign-fence**：统一 fence 所有涉及 sheet（source+foreign）按 id 全序、任何行锁前一次取完 ⇒ foreign 写者不再把 recovery 误判 preview-drift | Opus5 | 构造竞态：source-only 6/6 abort→foreign fence 0/6；三类死锁正控 no-40P01；**强制 source-first→40P01 复现**（全序承重）；source-hunk cp-revert→生产 apply preview-drift |
@@ -48,7 +48,8 @@
 ## 4. 剩余开发（按相位）
 
 **O-2 启用加固（触发器 DISABLED 时打不到；启用前必做）**
-- **40001 全平台清扫**：本轮覆盖 admin-users + AuthService 代表性 + 注册数据完整性；剩余枚举写者（`directory/deprovision-*`、`invite-accept-writes`、`user-activate`(mapActivateError)、`attendance-admin`、`spreadsheet-permissions`、`permissions`、`roles`、`directory-sync`、`dingtalk-oauth`、`routes/auth.ts` 注册 handler 塌 500）。
+- **注册原子性（O-2，非默认关闭合并阻断）**：`createUser()` 先提交，`assignUserRoles()` 在另一事务有界重试；忙碌耗尽抛具名可重试错，但用户/别名/权限已存在、路由最终 500、再注册报「已存在」。O-2 正解 = 用户创建 + 角色写入**同事务** + 整事务有界重试 + 失败后四类数据归零验证 + 随后重试成功。
+- **40001 全平台清扫**：本轮覆盖 admin-users + AuthService 代表性路径；剩余枚举写者（`directory/deprovision-*`、`invite-accept-writes`、`user-activate`(mapActivateError)、`attendance-admin`、`spreadsheet-permissions`、`permissions`、`roles`、`directory-sync`、`dingtalk-oauth`、`routes/auth.ts` 注册 handler 塌 500）。
 - **foreign-fence 残余（可用性非死锁）**：共享查找表形状（FK KEY SHARE vs 行锁 FOR UPDATE），pre-existing 未拓宽；根治需围栏所有 link-in sheet（无界）或弱化记录锁（drift 检测改动）。
 - **饥饿/可用性**：写者持共享租约时 recovery 立即 busy ⇒ 持续普通写下 recovery 可能长期抢不到排他租约（非死锁）；需退避/优先级/维护窗口口径。
 
@@ -64,3 +65,13 @@
 ## 6. 安全边界重申
 
 flags 全 default-OFF · triggers 出厂 DISABLED · 无 flag 翻转 / 无 staging / 无生产开关 / 无 auto-merge。O-2 启用与 staging cutover 是独立 owner/ops 决策。
+
+## 7. 门后 REQUEST_CHANGES 轮次（2026-08-11/12，owner 三轮独立复核）
+
+独立终门（Opus，绑 `ad8d56c36f`）判 CLEAR 后，owner 逐轮独立复核（多为在真库/真环境复现），逐条闭合：
+
+- **轮 1（最终 head 专项，owner「你先审阅么」促成）**：终门绑旧 head，其后我 solo 推了 pin 修复（改 sealed-export 安全清单）+MD。补的独立门绑最终 head `67edb98443` = CLEAR，并独立判定 solo pin 修复为「正确维护非安全削弱」（新 pin==真文件 sha256/verifier `.cjs` 对 main 逐字节相同/只改一行/manifest 强制 exact-ID-set/pin 变异证承重）。收 2 条 P3 comment/doc drift（`56db337a2f`）。**教训：终门 verdict 是 head-scoped，gate 后再 solo 推 commit 必须重新独立审最终 head，不可用「转移」推理替代。**
+- **轮 2（3 P2 + 2 P3）**：① default-inertness 代码侧——containment env-check 从 2 flag 扩到 **4 flag**（+`MULTITABLE_HISTORY_CONTIGUITY_STRICT` +`MULTITABLE_ENABLE_WRITER_FENCE`）；② release gate——merge origin/main 追平（落后 0、merge-tree CLEAR、s6a-pin 仍匹配、CI 全绿）；③ 第三处 FK 注释（`multitable-cross-base-automation-delete-lock.test.ts:176`，前轮只扫 src 漏 test）；④ PR body 收口更新段。
+- **轮 3（1 P2 + 2 P3）**：① **4-flag containment 未被 CI 钉住**（owner 删 WRITER_FENCE 后 8/8 仍绿=假开关空转）⇒ 在 required 的 `multitable-recovery-schema-containment.test.mjs`（跑于 plugin-tests.yml:179 → test 20.x）补 **FLAGS 精确契约**：断言 `FLAGS` 集合恰等于四项 + 两处 `for f in $FLAGS` 循环均存在；**变异证：删任一 flag 或任一循环即红**（删 WRITER_FENCE → 9→8/1）；② line 47「the two flags」→「four flags」；③ 本 MD 更新 + 注册口径收窄（见 §1 commit 3 / §4）。
+
+**合并前仍待 owner/ops（非本轮开发能闭合）**：① staging/prod 容器核验 4 flag 均未启用（**最近 containment run 仍是 7-15 旧版本，须先跑 `target=both` 取 PASS**）；② 合并决定（安装 DISABLED 平台授权触发器 DDL = owner 保留的治理判断）+ 旧七 Draft superseded（#4446 先抽 resurrect 参考件）；③ O-2 启用相位（注册同事务原子性 + 40001 全平台清扫）。
