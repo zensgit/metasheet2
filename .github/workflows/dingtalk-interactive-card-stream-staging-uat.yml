@@ -9,7 +9,7 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 # EXECUTABLE: status | prepare | on | off
 #   status  = read-only values-free snapshot (booleans / counts / reason classes)
 #   prepare = transport Stream credentials (chmod-600 files), derive exactly one
-#             active corp-anchored DingTalk integration with >=2 linked local users,
+#             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
 #             atomically write the four credential/id env keys into
 #             docker/app.staging.env while FORCING Stream flag false, validate,
 #             restart backend only if needed

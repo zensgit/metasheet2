@@ -8,8 +8,8 @@
 # EXECUTABLE:
 #   status  — read-only snapshot (booleans / counts / reason classes / SHA only)
 #   prepare — transport Stream credentials via chmod-600 files, derive exactly
-#             one active DingTalk integration (nonempty corp_id + >=2 active
-#             linked local users), atomically write the four credential/id env
+#             one active integration for live DINGTALK_CORP_ID with >=2 active
+#             linked local users, atomically write the four credential/id env
 #             keys into docker/app.staging.env while FORCING Stream flag false,
 #             validate, and restart backend only if needed
 #   on      — recheck prerequisites + LOG_LEVEL info/debug, flip ONLY Stream
@@ -591,8 +591,9 @@ require_lifecycle_flags_off() {
 
 # --- directory anchor derivation (values-free counts; id only via secret file) --------
 run_directory_anchor_probe() {
-  # stdout JSON: {active_corp_anchored_count, linked_users, ready, integration_id?}
-  # integration_id is written ONLY when count==1 and linked>=2; callers must not log it.
+  # stdout JSON contains values-free total/configured/eligible counts.
+  # integration_id is written ONLY when the configured corp has exactly one
+  # eligible anchor (active integration + >=2 active linked local users).
   # Script is staged via chmod-600 temp file to avoid nested shell/node quoting hazards.
   local script_tmp out
   script_tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.anchor-probe.XXXXXX")"
@@ -603,12 +604,16 @@ const { Client } = require("pg");
 (async () => {
   const unknown = {
     active_corp_anchored_count: "unknown",
+    configured_corp_present: "unknown",
+    configured_corp_anchor_count: "unknown",
+    eligible_anchor_count: "unknown",
     linked_users: "unknown",
     ready: "unknown",
     integration_id: "",
   };
   const emit = (o) => process.stdout.write(JSON.stringify(o));
   const url = process.env.DATABASE_URL;
+  const configuredCorpId = String(process.env.DINGTALK_CORP_ID || "").trim();
   if (!url) { emit(unknown); return; }
   const c = new Client({ connectionString: url, connectionTimeoutMillis: 8000 });
   try {
@@ -618,6 +623,7 @@ const { Client } = require("pg");
     ];
     const r = await c.query(
       `SELECT i.id::text AS id,
+              i.corp_id,
               count(DISTINCT u.id)::int AS linked_users
          FROM directory_integrations i
          LEFT JOIN directory_accounts a
@@ -638,31 +644,27 @@ const { Client } = require("pg");
           AND i.corp_id IS NOT NULL
           AND length(trim(i.corp_id)) > 0
           AND lower(trim(i.corp_id)) <> ALL($1::text[])
-        GROUP BY i.id
+        GROUP BY i.id, i.corp_id
         ORDER BY i.id`,
       [placeholder],
     );
     const rows = r.rows || [];
-    if (rows.length === 0) {
-      emit({ active_corp_anchored_count: 0, linked_users: 0, ready: "false", integration_id: "" });
-      return;
-    }
-    if (rows.length !== 1) {
-      emit({
-        active_corp_anchored_count: rows.length,
-        linked_users: "unknown",
-        ready: "false",
-        integration_id: "",
-      });
-      return;
-    }
-    const linked = Number(rows[0].linked_users) || 0;
-    const ready = linked >= 2;
+    const configuredRows = configuredCorpId
+      ? rows.filter((row) => String(row.corp_id || "").trim() === configuredCorpId)
+      : [];
+    const eligibleRows = configuredRows.filter(
+      (row) => (Number(row.linked_users) || 0) >= 2,
+    );
+    const ready = configuredCorpId.length > 0 && eligibleRows.length === 1;
+    const linked = ready ? (Number(eligibleRows[0].linked_users) || 0) : "unknown";
     emit({
-      active_corp_anchored_count: 1,
+      active_corp_anchored_count: rows.length,
+      configured_corp_present: configuredCorpId.length > 0 ? "true" : "false",
+      configured_corp_anchor_count: configuredCorpId.length > 0 ? configuredRows.length : "unknown",
+      eligible_anchor_count: configuredCorpId.length > 0 ? eligibleRows.length : "unknown",
       linked_users: linked,
       ready: ready ? "true" : "false",
-      integration_id: ready ? String(rows[0].id || "") : "",
+      integration_id: ready ? String(eligibleRows[0].id || "") : "",
     });
   } catch {
     emit(unknown);
@@ -672,6 +674,9 @@ const { Client } = require("pg");
 })().catch(() => {
   process.stdout.write(JSON.stringify({
     active_corp_anchored_count: "unknown",
+    configured_corp_present: "unknown",
+    configured_corp_anchor_count: "unknown",
+    eligible_anchor_count: "unknown",
     linked_users: "unknown",
     ready: "unknown",
     integration_id: "",
@@ -681,7 +686,7 @@ NODE
   out="$(docker exec -i "$BACKEND_CONTAINER" node <"$script_tmp" 2>/dev/null || true)"
   rm -f "$script_tmp"
   if [[ -z "$out" ]]; then
-    printf '%s' '{"active_corp_anchored_count":"unknown","linked_users":"unknown","ready":"unknown","integration_id":""}'
+    printf '%s' '{"active_corp_anchored_count":"unknown","configured_corp_present":"unknown","configured_corp_anchor_count":"unknown","eligible_anchor_count":"unknown","linked_users":"unknown","ready":"unknown","integration_id":""}'
   else
     printf '%s' "$out"
   fi
@@ -701,23 +706,32 @@ derive_exact_integration_id_file() {
   # Never prints the id. Sets INTEGRATION_ID_FILE on success.
   # context: prepare|on (values-free fail messages only).
   local context="${1:-prepare}"
-  local probe count linked ready id_tmp id_val
+  local probe count configured_present configured_count eligible_count linked ready id_tmp id_val
   probe="$(run_directory_anchor_probe)"
   count="$(parse_probe_field "$probe" active_corp_anchored_count)"
+  configured_present="$(parse_probe_field "$probe" configured_corp_present)"
+  configured_count="$(parse_probe_field "$probe" configured_corp_anchor_count)"
+  eligible_count="$(parse_probe_field "$probe" eligible_anchor_count)"
   linked="$(parse_probe_field "$probe" linked_users)"
   ready="$(parse_probe_field "$probe" ready)"
   id_val="$(parse_probe_field "$probe" integration_id)"
 
   # Persist values-free counts for artifacts (never the id).
   ANCHOR_COUNT="$count"
+  CONFIGURED_CORP_PRESENT="$configured_present"
+  CONFIGURED_CORP_ANCHOR_COUNT="$configured_count"
+  ELIGIBLE_ANCHOR_COUNT="$eligible_count"
   ANCHOR_LINKED_USERS="$linked"
   ANCHOR_READY="$ready"
 
-  if [[ "$count" != "1" ]]; then
-    fail "action=${context} requires exactly one active DingTalk integration with nonempty corp_id (got active_corp_anchored_count=${count})"
+  if [[ "$configured_present" != "true" ]]; then
+    fail "action=${context} requires nonempty live DINGTALK_CORP_ID to bind the Stream app to a configured corp (presence=${configured_present})"
+  fi
+  if [[ "$eligible_count" != "1" ]]; then
+    fail "action=${context} requires exactly one eligible integration for configured corp (active_corp_anchored_count=${count} configured_corp_anchor_count=${configured_count} eligible_anchor_count=${eligible_count})"
   fi
   if [[ "$ready" != "true" || -z "$id_val" ]]; then
-    fail "action=${context} requires that single anchor to have >=2 active linked local users (linked_users=${linked} ready=${ready})"
+    fail "action=${context} requires the eligible configured-corp anchor to have >=2 active linked local users (linked_users=${linked} ready=${ready})"
   fi
   # UUID shape only — refuse garbage without printing value.
   if [[ ! "$id_val" =~ ^[0-9a-fA-F-]{36}$ ]]; then
@@ -731,7 +745,7 @@ derive_exact_integration_id_file() {
   INTEGRATION_ID_FILE="$id_tmp"
   # Drop shell copy immediately.
   unset id_val
-  log "derived exactly one corp-anchored integration with linked_users=${linked} (id path only; never logged)"
+  log "derived exactly one eligible configured-corp integration with linked_users=${linked} (id path only; never logged)"
 }
 
 require_live_stream_integration_id_matches_derived_anchor() {
@@ -1159,7 +1173,7 @@ require_stream_prerequisites_for_on() {
   fi
   # Keep helper available for shared prepare paths / explicit re-check callers.
   require_live_stream_integration_id_matches_derived_anchor "on"
-  log "stream prerequisites OK (credentials present; single anchor linked_users=${ANCHOR_LINKED_USERS}; live integration id digest matches derived anchor)"
+  log "stream prerequisites OK (credentials present; configured-corp eligible anchor linked_users=${ANCHOR_LINKED_USERS}; live integration id digest matches derived anchor)"
 }
 
 # --- artifact writers -----------------------------------------------------------------
@@ -1177,9 +1191,12 @@ write_status_artifact() {
   worker="$(probe_worker_state_from_logs)"
   classify_log_level
 
-  local probe count linked ready
+  local probe count configured_present configured_count eligible_count linked ready
   probe="$(run_directory_anchor_probe)"
   count="$(parse_probe_field "$probe" active_corp_anchored_count)"
+  configured_present="$(parse_probe_field "$probe" configured_corp_present)"
+  configured_count="$(parse_probe_field "$probe" configured_corp_anchor_count)"
+  eligible_count="$(parse_probe_field "$probe" eligible_anchor_count)"
   linked="$(parse_probe_field "$probe" linked_users)"
   ready="$(parse_probe_field "$probe" ready)"
 
@@ -1195,7 +1212,7 @@ write_status_artifact() {
   fi
 
   {
-    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v1"
+    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v2"
     echo "action=${ACTION}"
     echo "reason=${reason}"
     echo "deployed_sha=${live_sha}"
@@ -1207,8 +1224,11 @@ write_status_artifact() {
     echo "template_id_present=${tmpl}"
     echo "stream_integration_id_present=${integ}"
     echo "active_corp_anchored_integration_count=${count}"
-    echo "linked_local_users_for_anchor_count=${linked}"
-    echo "single_anchor_two_users_ready=${ready}"
+    echo "configured_corp_present=${configured_present}"
+    echo "configured_corp_anchor_count=${configured_count}"
+    echo "eligible_anchor_count=${eligible_count}"
+    echo "linked_local_users_for_eligible_anchor_count=${linked}"
+    echo "single_configured_corp_eligible_anchor_ready=${ready}"
     echo "lifecycle_flags_all_off=${lifecycle}"
     echo "log_level_ready=${LOG_LEVEL_READY}"
     echo "log_level_reason=${LOG_LEVEL_REASON}"
@@ -1218,14 +1238,16 @@ write_status_artifact() {
   } > "${OUTPUT_DIR}/stream-uat-status.txt"
 
   {
-    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v1"
+    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v2"
     echo "action=${ACTION}"
     echo "reason=${reason}"
     echo "stream_enabled=${stream_on}"
     echo "worker_state=${worker}"
     echo "stream_connected=${STREAM_CONNECTED_UNKNOWN}"
     echo "lifecycle_flags_all_off=${lifecycle}"
-    echo "single_anchor_two_users_ready=${ready}"
+    echo "configured_corp_present=${configured_present}"
+    echo "eligible_anchor_count=${eligible_count}"
+    echo "single_configured_corp_eligible_anchor_ready=${ready}"
     echo "backend_health=${health}"
   } > "${OUTPUT_DIR}/summary.txt"
 
@@ -1305,7 +1327,10 @@ action_prepare() {
     echo "prepare_forced_stream_off=true"
     echo "backend_restarted=${need_restart}"
     echo "active_corp_anchored_integration_count=${ANCHOR_COUNT}"
-    echo "linked_local_users_for_anchor_count=${ANCHOR_LINKED_USERS}"
+    echo "configured_corp_present=${CONFIGURED_CORP_PRESENT}"
+    echo "configured_corp_anchor_count=${CONFIGURED_CORP_ANCHOR_COUNT}"
+    echo "eligible_anchor_count=${ELIGIBLE_ANCHOR_COUNT}"
+    echo "linked_local_users_for_eligible_anchor_count=${ANCHOR_LINKED_USERS}"
   } >> "${OUTPUT_DIR}/summary.txt"
   log "action=prepare complete (stream forced OFF)"
 }
