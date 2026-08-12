@@ -7,9 +7,9 @@ import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
  * Global History — T6-1: the RECORD-VERSION restore preview-identity contract (mint + verify), per the T6
  * scoped-restore design-lock (SR-3). A record-version preview (T5-2) mints an identity that BINDS its
  * (record + targetVersion + strategy + the MASKED diff the actor saw + actor); the eventual restore execute
- * (T6-2) verifies it so "execution matches the preview". This module is the CONTRACT ONLY — it is NOT wired
- * into any route and writes nothing (the mint->preview and verify->execute wiring + the forward-revision write
- * are T6-2).
+ * (T6-2) verifies it so "execution matches the preview". This module owns the identity CONTRACT and writes
+ * nothing itself; the record-version and exact-anchor route adapters own mint/verify wiring and the eventual
+ * recovery writes.
  *
  * SCOPE LOCK (v1): this identity binds a SINGLE record-version restore — `{ sheetId, recordId, targetVersion }`.
  * A FIELD SUBSET of that record-version is NOT a separate scope — it is represented by the filtered `changesHash`:
@@ -529,4 +529,258 @@ export function verifyPitResetPreviewIdentity(token: string, expected: PitResetP
   if (payload.deleteScopeHash !== expected.deleteScopeHash) return { valid: false, reason: 'mismatch_deleteScopeHash' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
+}
+
+// ── W0-1 v3.7 L6-b: EXACT-ANCHOR recovery preview-identity (design-lock #4331 §1.3 / §9 item 6) ───────────────
+// The DESTRUCTIVE-recovery authority token. A recovery preview resolves an OPAQUE anchor to an EXACT causal
+// `anchorSeq` (the immutable `endpoint_seq` of a sealed operation, L6-a) under the active trust checkpoint (L5),
+// then FREEZES that resolution into this signed identity. Execute verifies it and reconstructs at the
+// TOKEN-BOUND `anchorSeq` — it NEVER recomputes `MAX(seq)` as authority (that mutable value is exactly the
+// non-anchor a wall-clock/`MAX` sample would drift on; v3.7 §0/P2-B). `type: 'exact-anchor-recovery-preview'`
+// keeps it DISJOINT from every T5/T6/T8 identity above (a revert/reset/config token can never drive it and vice
+// versa). Same stateless HS256 primitive + server secret (`getSecret`); signature defeats forgery, `exp` bounds
+// the window, and `scopeHash` defeats stale replay (the reconstructed set moved since preview → execute re-hash
+// diverges → reject → re-preview).
+
+/**
+ * Order-invariant, SERVER-KEYED (HMAC) hash of the reconstructed record set AT the anchor — the exact
+ * {recordId, exists, version} the preview computed via `reconstructRecordsAtSeq(anchorSeq)`. Binding this into
+ * the identity means the execute (which re-reconstructs at the TOKEN-BOUND anchorSeq and re-hashes) rejects if
+ * the set drifted, AND — the load-bearing safety property — reds if the execute recomputes the anchor as
+ * `MAX(seq)` instead of using the frozen `anchorSeq` (a later write advances MAX, so the reconstructed set and
+ * this hash diverge). HMAC (server key), not a plain sha256, so a token holder cannot brute-force the record
+ * set / version map out of the client-decodable JWT (no-oracle, same discipline as `hashLossSummary`). A
+ * deleted (exists:false) record contributes `null` for its version (it has none as of the anchor).
+ */
+export function hashAnchorRecoveryScope(records: Array<{ recordId: string; exists: boolean; version: number | null }>): string {
+  const canon = [...records]
+    .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0))
+    .map((r) => JSON.stringify([r.recordId, r.exists === true, r.exists && typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : null]))
+  return createHmac('sha256', getSecret()).update(JSON.stringify(canon)).digest('hex')
+}
+
+/** The recovery mode the preview was minted FOR. Bound into the signed identity (owner P1-1, 2026-07-17):
+ *  the destructive apply reads the mode from the VERIFIED CLAIMS, never from the execute request — a token
+ *  minted while previewing a non-destructive `revert` is structurally unusable to drive a `reset` (which
+ *  deletes `deletedAtAnchorLiveNow` ∪ `createdAfterAnchor` rows). The burn table only makes a token
+ *  at-most-once; it is THIS binding that pins WHAT the once is. */
+export type ExactAnchorRecoveryMode = 'revert' | 'reset'
+
+/**
+ * SERVER-KEYED hash of the v1 recovery-authorization basis (owner P1-2, 2026-07-17). Whole-sheet recovery is
+ * authorized by exactly one grant shape in v1 — the 4c-1 U-L8 FULL-READ gate (an actor who cannot read every
+ * record × field of the sheet is refused the whole surface; no partial scope exists yet). Binding a hash of
+ * that basis into the identity makes the AUTHORIZATION CONTRACT part of the signed token: the execute
+ * recomputes this hash from its OWN in-fence adjudication and compares — the token's echo is never the
+ * authority (the same discipline as the in-fence checkpoint re-resolution). A future partial-scope recovery
+ * mode versions the basis string, so a full-read-era token can never be presented to a partial-scope surface
+ * (or vice versa) — cross-contract replay is structurally dead, not checked.
+ */
+export function hashRecoveryAuthorizationScope(basis: { sheetId: string; actorId: string }): string {
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify(['recovery-auth-v1', 'full-read', basis.sheetId, basis.actorId]))
+    .digest('hex')
+}
+
+/**
+ * Deep-sort object keys (recursively) so property JSON is order-invariant. Arrays keep element order
+ * (option lists / validation rule lists are position-significant); object keys sort lexicographically.
+ */
+function deepSortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(deepSortKeys)
+  if (value && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = deepSortKeys(src[k])
+    return out
+  }
+  return value
+}
+
+/** Normalize a meta_fields.property blob to a plain object (jsonb row, JSON string, or empty). */
+function normalizeFieldProperty(property: unknown): Record<string, unknown> {
+  if (property && typeof property === 'object' && !Array.isArray(property)) {
+    return property as Record<string, unknown>
+  }
+  if (typeof property === 'string' && property.trim()) {
+    try {
+      const parsed = JSON.parse(property) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    } catch { /* ignore */ }
+  }
+  return {}
+}
+
+/**
+ * G-SCHEMA-BEFORE-FENCE (v3.7 §5) — SERVER-KEYED HMAC over the CURRENT field surface
+ * `{id, type, property}` for a sheet. Rows sorted by id; property keys deep-sorted. Bound into the
+ * preview identity so a post-preview retype (string→longText) or property-only edit refuses
+ * `schema-drift` at execute even when every historical scalar remains "valid" under the new type.
+ * HMAC (not plain sha256) keeps the client-decodable JWT from leaking the field map (same discipline
+ * as `hashAnchorRecoveryScope` / `hashRecoveryAuthorizationScope`).
+ */
+export function hashExactAnchorSchema(
+  fields: Array<{ id: string; type: string; property?: unknown }>,
+): string {
+  const canon = [...fields]
+    .map((f) => ({
+      id: String(f.id),
+      type: String(f.type ?? ''),
+      property: deepSortKeys(normalizeFieldProperty(f.property)),
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((f) => JSON.stringify([f.id, f.type, f.property]))
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify(['exact-anchor-schema-v1', canon]))
+    .digest('hex')
+}
+
+/**
+ * W0 L8 preview-freshness identity over both live records and the effective authoritative link
+ * relation. Record id/version alone cannot see a direct or legacy `meta_links` repair that does not
+ * bump `meta_records.version`; binding both surfaces prevents execute from applying a different link
+ * plan than preview. Duplicate edges remain duplicated in the canonical input so corruption cannot be
+ * normalized away. A domain bump makes every pre-link-binding token fail closed and require re-preview.
+ */
+export function hashExactAnchorLiveSet(
+  records: Array<{ recordId: string; version: number }>,
+  links: Array<{ fieldId: string; recordId: string; foreignRecordId: string }>,
+): string {
+  const recordCanon = [...records]
+    .map((r) => [String(r.recordId), r.version] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]))
+  const linkCanon = [...links]
+    .map((l) => [String(l.fieldId), String(l.recordId), String(l.foreignRecordId)] as const)
+    .sort((a, b) => {
+      for (let i = 0; i < 3; i++) {
+        if (a[i] < b[i]) return -1
+        if (a[i] > b[i]) return 1
+      }
+      return 0
+    })
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify(['exact-anchor-live-set-v2', recordCanon, linkCanon]))
+    .digest('hex')
+}
+
+export interface ExactAnchorRecoveryIdentityClaims {
+  sheetId: string
+  /** the OPAQUE recovery anchor: the sealed operation endpoint id (`meta_record_history_operations.operation_id`).
+   *  NOT the S1 user-action `batch_id` (L6-a finding #1 permanently decouples the two identities — this field
+   *  was previously named `anchorBatchId`, which was exactly that conflation; renamed with the P1 token-contract
+   *  fix). A History-Center batch selection reaches this via the ruling-⑤ resolver (batch → its sealed terminal
+   *  operation with MAX `endpoint_seq` on this sheet), server-side only. */
+  anchorOperationId: string
+  /** the FROZEN exact causal anchor — the sealed operation's `endpoint_seq` as a decimal bigint STRING (never a
+   *  Number). Reconstruction/execute bind this straight into `seq <= $::bigint`. */
+  anchorSeq: string
+  /** the active trust checkpoint covering the anchor (`trusted_since_seq <= anchorSeq`, L5). */
+  checkpointId: string
+  /** order-invariant HMAC over the reconstructed record set at `anchorSeq` (`hashAnchorRecoveryScope`). */
+  scopeHash: string
+  /** W0-1 L8: order-invariant HMAC over the LIVE record set {id, version} AND the effective
+   *  authoritative `meta_links` set at preview time (`hashExactAnchorLiveSet`). `scopeHash` binds the
+   *  ANCHOR AUTHORITY, while this binds PREVIEW FRESHNESS: record and relation drift between preview and
+   *  execute changes it, and the destructive apply refuses `preview-drift` in-fence. */
+  liveSetHash: string
+  /**
+   * G-SCHEMA-BEFORE-FENCE: SERVER-KEYED HMAC over CURRENT `{id,type,property}` field surface at preview
+   * (`hashExactAnchorSchema`). Recomputed under the apply fence; mismatch ⇒ `schema-drift` before writes.
+   * Required (hard cutover: missing ⇒ `pre_contract_token`; callers must re-preview under the current contract).
+   */
+  schemaHash: string
+  /** the actor the preview was minted for — a preview minted for A is unusable by B (no cross-actor replay). */
+  actorId: string
+  /** the recovery mode this preview authorizes — the apply obeys THIS, never a request-supplied mode (P1-1). */
+  mode: ExactAnchorRecoveryMode
+  /** `hashRecoveryAuthorizationScope` over the v1 full-read authorization basis (P1-2) — recomputed and
+   *  compared at execute from the execute's OWN fresh adjudication, never trusted from the token alone. */
+  authorizedScopeHash: string
+}
+
+export function mintExactAnchorRecoveryIdentity(claims: ExactAnchorRecoveryIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'exact-anchor-recovery-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ExactAnchorRecoveryVerifyResult {
+  valid: boolean
+  /**
+   * Failure taxonomy (NIT-1 precision):
+   * - `pre_contract_token` — missing/out-of-vocabulary `mode`, missing/empty `authorizedScopeHash`,
+   *   or missing/empty `schemaHash` (P1 / G-SCHEMA hard cutover; deliberate — an older-shape token must
+   *   never acquire destructive authority after deployment and instead requires a fresh preview).
+   * - `malformed_anchorSeq` — `anchorSeq` is not a decimal bigint string (must never reach `::bigint`).
+   * - `malformed_claims` — other required token-authority fields absent/empty (checkpointId /
+   *   anchorOperationId / scopeHash / liveSetHash).
+   * Execute collapses every `!valid` into `identity-invalid`; these labels are for diagnostics + unit pins.
+   */
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_actorId' | 'malformed_anchorSeq' | 'pre_contract_token' | 'malformed_claims'
+  /** the verified (signature-checked, sheet+actor-bound) claims — the caller reads the TOKEN-BOUND `anchorSeq`
+   *  and `checkpointId` from here; present ONLY when `valid`. */
+  claims?: ExactAnchorRecoveryIdentityClaims
+}
+
+/**
+ * Verify an exact-anchor recovery identity. JWT verification covers signature (any tampered claim — anchorSeq,
+ * checkpointId, scopeHash, schemaHash, anchorOperationId, mode, authorizedScopeHash — breaks it → `invalid`) +
+ * expiry. The per-claim checks bind the REPLAY axes computed FRESH at execute time: `sheetId` and `actorId`
+ * (a token for sheet A / actor A can never drive a recovery on sheet B / actor B). The token-authority fields
+ * (`anchorSeq`, `checkpointId`, `anchorOperationId`, `scopeHash`, `schemaHash`, `mode`, `authorizedScopeHash`)
+ * are returned in `claims` for the caller to use UNDER THE FENCE — the execute reconstructs at
+ * `claims.anchorSeq` and re-checks `claims.scopeHash` / `claims.schemaHash` against the live reconstruction;
+ * it does NOT recompute the anchor. `anchorSeq` is shape-validated as a decimal bigint string (fail-closed,
+ * never coerced) so a signed-but-garbage anchor cannot reach the `::bigint` bind.
+ */
+export function verifyExactAnchorRecoveryIdentity(
+  token: string,
+  expected: { sheetId: string; actorId: string },
+): ExactAnchorRecoveryVerifyResult {
+  let payload: Partial<ExactAnchorRecoveryIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ExactAnchorRecoveryIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'exact-anchor-recovery-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  // P1 + G-SCHEMA token contract (hard cutover): `mode` + `authorizedScopeHash` + `schemaHash` REQUIRED.
+  // Classified as `pre_contract_token` (not `malformed_anchorSeq`) so the fail-closed label matches the defect.
+  if (payload.mode !== 'revert' && payload.mode !== 'reset') {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  if (typeof payload.authorizedScopeHash !== 'string' || !payload.authorizedScopeHash) {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  if (typeof payload.schemaHash !== 'string' || !payload.schemaHash) {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  // Shape fail-closed: `anchorSeq` must be a decimal bigint string before any `::bigint` bind.
+  if (typeof payload.anchorSeq !== 'string' || !/^[0-9]+$/.test(payload.anchorSeq)) {
+    return { valid: false, reason: 'malformed_anchorSeq' }
+  }
+  // Remaining required token-authority fields — precise label, not collapsed into malformed_anchorSeq.
+  if (
+    typeof payload.checkpointId !== 'string' || !payload.checkpointId ||
+    typeof payload.anchorOperationId !== 'string' || !payload.anchorOperationId ||
+    typeof payload.scopeHash !== 'string' || !payload.scopeHash ||
+    typeof payload.liveSetHash !== 'string' || !payload.liveSetHash
+  ) {
+    return { valid: false, reason: 'malformed_claims' }
+  }
+  return {
+    valid: true,
+    claims: {
+      sheetId: payload.sheetId,
+      anchorOperationId: payload.anchorOperationId,
+      anchorSeq: payload.anchorSeq,
+      checkpointId: payload.checkpointId,
+      scopeHash: payload.scopeHash,
+      liveSetHash: payload.liveSetHash,
+      schemaHash: payload.schemaHash,
+      actorId: payload.actorId as string,
+      mode: payload.mode,
+      authorizedScopeHash: payload.authorizedScopeHash,
+    },
+  }
 }

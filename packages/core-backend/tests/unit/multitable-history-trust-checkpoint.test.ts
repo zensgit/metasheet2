@@ -87,8 +87,11 @@ describe('L5 anchor-covering retention (selectRetentionCoveringSeq) — P1-c', (
 })
 
 describe('L5 P3-2 strict-enablement precondition (pure)', () => {
-  test('the L6 seam is still OFF — reconstruction is not yet causal', () => {
-    expect(RECONSTRUCTION_CAUSALITY_LANDED).toBe(false)
+  test('the L6 seam is true — the L8 exact-anchor route wiring landed (owner ruling 2026-07-17)', () => {
+    // The seam flips to true ONLY in the same change that wires the legacy Revert/Reset routes onto the
+    // L8 exact-anchor apply (backstop removal + its consumers = one reviewable change). This golden pins
+    // the as-built state: wiring landed ⇒ causality landed. Runtime flags remain default-OFF.
+    expect(RECONSTRUCTION_CAUSALITY_LANDED).toBe(true)
   })
 
   test('both conditions unmet ⇒ canEnable false, both listed', () => {
@@ -98,9 +101,8 @@ describe('L5 P3-2 strict-enablement precondition (pure)', () => {
   })
 
   test('DISTINGUISHES the two conditions: active checkpoint present but reconstruction non-causal ⇒ ONLY reconstruction listed', () => {
-    // Proves the guard evaluates the checkpoint half independently (not a count-only guard). This is the
-    // real pre-L6 production shape: a sheet DOES have an active checkpoint, but L6 has not landed. The wired
-    // gate keys off exactly this: no_active_checkpoint absent ⇒ checkpoint-bearing ⇒ refuse.
+    // Proves the guard evaluates the checkpoint half independently (not a count-only guard) — the pure
+    // matrix still exercises the non-causal input even though the production seam constant is now true.
     const r = evaluateStrictEnablementPrecondition({ hasActiveCheckpoint: true, reconstructionIsCausal: false })
     expect(r.canEnable).toBe(false)
     expect(r.unmet).toEqual(['reconstruction_non_causal'])

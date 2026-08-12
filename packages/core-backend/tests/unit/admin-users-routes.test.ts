@@ -1706,6 +1706,44 @@ describe('admin-users routes', () => {
     expect(response.statusCode).toBe(200)
   })
 
+  // P23: same discriminator/mapping as the '/api/admin/users/:userId/roles/assign' coverage
+  // above, exercised on the sibling delegated-role route (this is the route the P23 write-up
+  // names directly — its user_roles write used to fall through to an unclassified 500 too).
+  it('maps a busy recovery authority lease to a retryable 409 on the delegated role-assign route', async () => {
+    state.authUser = { id: 'admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockImplementationOnce(async () => {
+        const error = new Error('METASHEET_RECOVERY_AUTHORITY_BUSY') as Error & { code: string }
+        error.code = '40001'
+        throw error
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'crm_operator' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
   it('blocks delegated role access when no department scope is configured', async () => {
     state.authUser = {
       id: 'crm-admin-1',
@@ -2539,6 +2577,51 @@ describe('admin-users routes', () => {
       resourceType: 'user-role',
       resourceId: 'user-1:attendance_admin',
     }))
+  })
+
+  // P23: user_roles is one of exact-anchor recovery's eight recovery-authority tables. While
+  // recovery holds its per-subject lease, an INSERT INTO user_roles fails fast with Postgres
+  // 40001 (RECOVERY_AUTHORITY_BUSY_MARKER). Before this slice the route's catch always mapped
+  // that (like every other error) to an unclassified 500 — mock the write throwing that exact
+  // shape (no real trigger needed) and assert the route now maps it to a retryable 409 using
+  // the SAME discriminator/code the multitable permission routes already use.
+  it('maps a busy recovery authority lease to a retryable 409 instead of an unclassified 500', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin'])
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ id: 'attendance_admin' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockImplementationOnce(async () => {
+        const error = new Error('METASHEET_RECOVERY_AUTHORITY_BUSY') as Error & { code: string }
+        error.code = '40001'
+        throw error
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+    // Not the unclassified fallback this route used to return for every error.
+    expect((response.body as Record<string, any>).error.code).not.toBe('ROLE_ASSIGN_FAILED')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('assigns platform admin and syncs legacy admin columns', async () => {
