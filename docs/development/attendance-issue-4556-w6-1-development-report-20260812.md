@@ -13,7 +13,7 @@
 > (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `c9005abe8c7d8efcabe0fdadd327635c3b4e121b`
+> `413271e2d7a14aa21a9c5be48001d9c15c432b5d`
 
 ## 0. Scope delivered
 
@@ -24,7 +24,7 @@ W6-3 UI, W6-4 whole-W6 closeout, W7 calculation cutover, or W8 closure.
 | Surface | Delivered behavior |
 | --- | --- |
 | Route | `GET /api/attendance/groups/:groupId/effective-policy` under `attendance:admin` |
-| Principal scope | Organization comes from the authenticated principal; client selectors cannot replace it |
+| Principal scope | Organization comes from the authenticated principal; query/body/header org selectors are byte-equality assertions only and cannot replace it |
 | Delegated admin | Active target-org membership is required after the route RBAC guard |
 | Transaction | The handler's post-guard platform-admin lookup, delegated membership check, aggregate reads, and FSER reads share one PostgreSQL `READ ONLY` transaction-bound query handle; `rbacGuard` performs its permitted middleware reads before that transaction |
 | Response | Exact-key, values-free aggregate with closed labels, domains, conflict codes, reason codes, and editor references |
@@ -32,7 +32,7 @@ W6-3 UI, W6-4 whole-W6 closeout, W7 calculation cutover, or W8 closure.
 | Conflict handling | Membership overlap is reported as a count and `conflict_action_required`; no winner is selected |
 | Runtime loading | Three plugin attendance libraries resolve through one closed-set, repo-root-anchored, symlink-rejecting resolver |
 | Compatibility | A fixed strict shift with zero persisted segment rows keeps the W3 legacy-envelope single-segment reading |
-| CI | Both W6 real-DB suites are in the attendance database run list and no-DB exclusion; the workflow provenance pin was mechanically recomputed after fresh-main catch-up and remained byte-identical |
+| CI | All three W6 real-DB suites are in the attendance database run list and no-DB exclusion; the workflow provenance pin was mechanically recomputed after adding the fixture matrix |
 
 ## 1. Implementation surfaces
 
@@ -60,7 +60,7 @@ W6-2 and is intentionally absent from this slice.
 | W6-R4 | The aggregate receives the existing FSER service. Caller and producer-key inventories reject a second derivation or producer-key spelling. |
 | W6-R5 | Import-graph and call-path guards reject calculation-writer consumption. Overlap fixtures require conflict reporting instead of choose-first/choose-latest behavior. |
 | W6-R6 | Runtime validators reject unknown labels, domains, conflict codes, reason codes, group types, rollout states, and editor-reference members. |
-| W6-R7 | Query parameters and state-bearing body fields are rejected before aggregate SQL. Labels use persisted facts plus rollout posture. |
+| W6-R7 | State-selecting query parameters and state-bearing body fields are rejected before aggregate SQL. An optional single query/body/header `orgId` is accepted only when it byte-equals the authenticated principal; mismatch or duplicate-query ambiguity is 403. Labels use persisted facts plus rollout posture. |
 | W6-R8 | Editor references use the ratified two-kind closed union and existing route/stage spellings. |
 | W6-R9 | The pre-anchor procedural violation remains recorded in the ratified lock. A separate owner instruction authorizes only this PR's Ready/squash merge after fresh checks and an exact-head 0 P1/P2 gate; it does not authorize W6-2/3/4 or runtime action. |
 
@@ -88,13 +88,13 @@ freeze was renewed. The final integration merge used
 `24794811b1c800402006b30d6e4fa9df670e124e` as the owner-authorized fresh base.
 The intervening main commit and the PR had zero changed-file overlap. The
 workflow file, no-DB exclusion, and attendance run list merged without semantic
-conflict. The complete sealed-export provenance JSON was mechanically
-recomputed from the resulting tree; it was byte-identical to the pinned file,
-including `evidenceFiles.pluginTestsWorkflow = be00b174108df71c67bdfd971af2098b00b0149cf6a08be45770d2f3b981e461`, so no
-pin-only diff was manufactured.
+conflict. Adding the third real-DB suite then changed the workflow bytes, so the
+complete sealed-export provenance JSON was mechanically recomputed from the
+resulting tree and now carries
+`evidenceFiles.pluginTestsWorkflow = b689c385336cdc7c05d77086f9b6b147f7f40b5d2d9c3c48a1593e6c561585d6`.
 
-The runtime implementation delta before the two report files is 32 files; the
-exact base-to-report-head delta is 34 files. No migration, feature flag,
+The runtime/test implementation delta before the two report files is 33 files;
+the exact base-to-report-head delta is 35 files. No migration, feature flag,
 rollout-state mutation, staging action, deployment action, or customer data is
 part of that delta.
 
@@ -125,6 +125,22 @@ older-head review is discovery evidence only. Evidence head
 
 Because those changes modify the reviewed head, no review result bound to
 `89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` transfers to the final gate.
+
+The first independent gate against later report head
+`a5738017edd2698db5fbda6a2aa73011ad5ba461` found two further technical P2s and
+one governance P2. Evidence head `413271e2d7a14aa21a9c5be48001d9c15c432b5d`
+closes the technical pair:
+
+- query/body/header organization selectors now share one byte-equal-or-403
+  rule, while unrelated state selectors retain typed 400 rejection;
+- a dedicated disposable PostgreSQL suite reproduces all eight §4.3 fixtures
+  from seeded rows with the canonical FSER and exact-key `toStrictEqual`.
+  That exercise also corrected the unpublished-only fixture to canonical FSER
+  semantics: `unpublishedManagedRows` carries the count while configured-group
+  `managedSets` remains limited to published different-key rows.
+
+The governance P2 is the ratified §7.2 delegated-non-member `403` text described
+below. This PR does not silently self-amend that lock.
 
 ## 5. Explicit residuals
 

@@ -9,12 +9,13 @@
 > Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `c9005abe8c7d8efcabe0fdadd327635c3b4e121b`
+> `413271e2d7a14aa21a9c5be48001d9c15c432b5d`
 
 ## 0. Evidence rules
 
-1. All database evidence used a newly created local PostgreSQL database and
-   synthetic fixtures only.
+1. Database evidence used a local migrated test database plus dedicated
+   disposable databases for the fixture matrix and overlap shape. All seeded
+   rows were synthetic; no production or customer data was used.
 2. Unit, database, wiring, provenance, type-check, GitHub CI, and independent
    review are separate evidence classes.
 3. A report from an older SHA is discovery evidence, not exact-head approval.
@@ -31,9 +32,9 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
-| Evidence head | `c9005abe8c7d8efcabe0fdadd327635c3b4e121b` |
+| Evidence head | `413271e2d7a14aa21a9c5be48001d9c15c432b5d` |
 | Database | Local PostgreSQL 15.17 |
-| Scratch database | `metasheet_w6_4849_codex_20260812_e` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
+| Database isolation | Local `metasheet_test` for the shared route suite; per-run `attendance_w6_matrix_*` and `attendance_w6agg_overlap_*` databases created and dropped by their suites |
 | Data | Synthetic only |
 | Runtime posture | No feature flag, rollout transition, deployment, staging, or soak |
 
@@ -94,12 +95,13 @@ DATABASE_URL="$ATTENDANCE_TEST_DATABASE_URL" \
   pnpm --filter @metasheet/core-backend exec vitest \
   --config vitest.integration.config.ts run \
   tests/integration/attendance-w6-group-effective-policy.db.test.ts \
+  tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts \
   tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts \
   --watch=false
 ```
 
-Result: migrations reached the current repository head; **2 files / 48 tests
-passed**.
+Result: the migration list reported **Applied: 314 / Pending: 0**, and the
+real-DB matrix passed: **3 files / 57 tests**.
 
 Observed real-DB legs include:
 
@@ -112,6 +114,10 @@ Observed real-DB legs include:
 - cross-org, selector-spoof, and inaccessible-group behavior, including the
   exact shared values-free `404` shape for missing and delegated-inaccessible
   groups;
+- byte-equal query/body/header org selector positive controls plus mismatched
+  and ambiguous selector 403 negatives before aggregate SQL;
+- all eight committed aggregate fixtures reproduced from seeded rows with the
+  canonical FSER and exact-key equality;
 - FSER byte-shape composition;
 - membership overlap count, boundedness, and no choose-first result.
 
@@ -121,11 +127,12 @@ Observed real-DB legs include:
 node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
 ```
 
-Result: **221 / 221 passed**.
+Result: **223 / 223 passed**.
 
-The count is the fresh-main count after PR #4804 and is not copied from the
-older #4849 branch. The W6 database suites are represented in both required
-places: no-DB exclusion and the executable attendance real-DB run list.
+The count is the fresh-main count after PR #4804 and the new fixture suite; it
+is not copied from the older #4849 branch. All three W6 database suites are
+represented in both required places: no-DB exclusion and the executable
+attendance real-DB run list.
 
 ### 2.4 Sealed-export provenance
 
@@ -136,8 +143,8 @@ node --test \
 
 Result: **1 / 1 passed**. A full call to `computePackageProvenancePinSet()`
 also produced JSON byte-identical to the checked-in pin file. The recomputed
-`pluginTestsWorkflow` SHA-256 remained
-`be00b174108df71c67bdfd971af2098b00b0149cf6a08be45770d2f3b981e461`.
+`pluginTestsWorkflow` SHA-256 is
+`b689c385336cdc7c05d77086f9b6b147f7f40b5d2d9c3c48a1593e6c561585d6`.
 
 ### 2.5 TypeScript
 
@@ -153,7 +160,7 @@ Result: **passed with zero diagnostics**.
 | --- | --- | --- |
 | Shared read-only transaction | Real PostgreSQL refuses two differently shaped writes with `25006`; normal aggregate reads pass | Does not claim repeatable-read isolation |
 | Auth and org order | Unit/app-assembly guards plus real-DB delegated and cross-org legs | Global middleware security is repository-level policy, not redefined by W6 |
-| Values-free exact shape | Recursive exact-key/value tests and real-DB response assertions | Internal count computation may read IDs |
+| Values-free exact shape | Recursive exact-key/value tests plus an eight-shape seeded real-DB fixture matrix | Internal count computation may read IDs |
 | Closed enums | Invalid-value unit legs fail closed | Adding a new enum is a future contract amendment |
 | FSER single source | Caller inventory and real FSER composition tests | W6 does not test or authorize FSER-4 member UI |
 | Resolver containment | Closed-file, unique-root, regular-file, symlink-component, and realpath tests | Closed set intentionally rejects unlisted libraries |
@@ -190,6 +197,14 @@ and the fresh local executions above. All final model
 gates must therefore rerun against the later exact PR head that includes this
 report; the earlier outcomes remain discovery evidence only.
 
+The next independent round at `a5738017edd2698db5fbda6a2aa73011ad5ba461`
+found three P2s: query-org mismatch returned generic 400, the eight fixture
+shapes lacked a seeded real-DB exact matrix, and ratified §7.2 still contradicted
+the normative 404 rule. Evidence head
+`413271e2d7a14aa21a9c5be48001d9c15c432b5d` closes the first two and carries
+fresh local execution for both. The third remains an owner-governed durable
+text correction, not an implementation decision.
+
 The same review found a governance contradiction in the ratified source:
 W6-R3 and endpoint §4.1 require missing and inaccessible groups to share one
 values-free `404`, but completion-skeleton §7.2 still says delegated non-member
@@ -200,10 +215,11 @@ P2.
 
 ## 5. Verdict boundary
 
-At the evidence head, the focused local matrix is green. The PR must remain
-Draft/HOLD until its report delta is committed, pushed, fresh GitHub checks are
-green, the ratified-lock contradiction above is durably resolved if a new gate
-continues to grade it P2, and the final independent gates report zero P1/P2.
+At evidence head `413271e2d7a14aa21a9c5be48001d9c15c432b5d`, the
+focused local matrix is green. The PR must remain Draft/HOLD until its report
+delta is committed, pushed, fresh GitHub checks are green, the ratified-lock
+contradiction above is durably resolved if a new gate continues to grade it P2,
+and the final independent gates report zero P1/P2.
 The owner's separate instruction then permits this PR only to become Ready and
 squash-merge, followed by an immediate stop at the exact merge SHA.
 
