@@ -9,11 +9,13 @@
 >
 > Pinned baseline: `origin/main@db74bd8667df1084797c97d872fe53ef845e3803`
 >
-> Ratified SHA: `2967da018ceea41b91098e14d4c15a57236eb5f8` (the merge commit of
-> PR 4771, which is where the original RATIFIED baseline landed on `main`; that
-> baseline remained byte-identical through `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`.
-> The §10 correction is a later PROPOSED delta and does not rewrite that
-> historical ratification.)
+> Ratified proposal SHA: `2967da018ceea41b91098e14d4c15a57236eb5f8`
+> (PR 4771, where the original PROPOSED design landed on `main`).
+>
+> Durable RATIFY-record merge: `ecf77d2433596bbdd8b67c312a37178dbc97f715`
+> (PR 4821). Its resulting lock blob remained byte-identical through
+> `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. The §10 correction is a later
+> PROPOSED delta and does not rewrite either historical record.
 >
 > Scope: issue #4556, W6 only (锁 §9.7 group effective-policy workspace 的
 > read-only 聚合面)
