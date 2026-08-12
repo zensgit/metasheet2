@@ -376,9 +376,11 @@ This correction is deliberately narrow:
 3. No runtime behavior changes here. W6-R3 and §4.1 already selected 404, and
    the W6-1 candidate is reviewed against that existing governing behavior.
 
-On 2026-08-12 the owner authorized this independent docs-only correction to
-merge as PROPOSED against exact baseline
-`979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. After merge, the exact correction
+On 2026-08-12 the owner initially authorized this independent docs-only
+correction to merge as PROPOSED against exact baseline
+`979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. After unrelated PR 4877 advanced
+`main`, the owner renewed the same narrow authorization against exact baseline
+`51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`. After merge, the exact correction
 SHA must be presented for a separate owner RATIFY. This authorization does not
 grant PR 4849 merge, W6-2/W6-3/W6-4, further runtime work, flags, deployment,
 staging, soak, production/customer data use, or closure of issue 4556.
