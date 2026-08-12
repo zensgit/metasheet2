@@ -15,8 +15,16 @@
  *     mount), the route sits behind the global authentication gate and the
  *     attendance audit/security middleware. Mounting the router directly (as
  *     guarantees 1-2 do, to stay DB-free) cannot prove that placement — this
- *     is a separate, narrow source-text guard over `index.ts` itself. See the
- *     describe block below for the full scope statement.
+ *     is a separate AST registration-site model over `index.ts` itself
+ *     (`tests/helpers/attendance-w6-index-assembly-order.ts`), not a
+ *     source-text guard. See the describe block below for the full scope
+ *     statement, including the honest (weaker) claim for the gate subject.
+ *  4. The client-input boundary at the top of the handler — org-identity is
+ *     derived only from the authenticated principal, and any query/body
+ *     `orgId` the client repeats must byte-equal it or the request is
+ *     refused before any aggregate SQL runs; every OTHER query/body key is
+ *     rejected outright (W6-R7). See the "client-input boundary" describe
+ *     block below — DB-free, same harness as guarantees 1-2.
  *
  * DB-free: `../../src/db/pg` is replaced with a spy transaction whose
  * client answers a small, closed set of SQL shapes for a `free_time` group
@@ -33,11 +41,16 @@ import * as ts from 'typescript'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 import {
-  enclosingFunctionLikeAt,
-  functionLikeLabel,
-  locateMarkers,
-  type AssemblyMarker,
+  buildAssemblyModel,
+  findThisMethodCalls,
+  sitesInMethod,
+  subjectState,
+  textMentions,
+  type AssemblyModel,
 } from '../helpers/attendance-w6-index-assembly-order'
+import { isApiPath } from '../../src/auth/api-path-policy'
+import { isWhitelisted, isPublicFormAuthBypass } from '../../src/auth/jwt-middleware'
+import { isOapiAllowlistRequest } from '../../src/multitable/oapi-read-allowlist'
 
 const queryMock = vi.fn()
 const transactionMock = vi.fn()
@@ -242,57 +255,282 @@ describe('post-guard platform-admin, membership, validation, and aggregate reads
  * where the real app registers the global gate, then the audit/security
  * middleware, and only after that the attendance routers.
  *
- * Scope, stated narrowly: this is a source-text guard over `index.ts`, over
- * four markers named as exact needles. It proves registration ORDER and
- * MULTIPLICITY (each marker occurs exactly once, and the three upstream
- * markers precede the route registration) and that all four calls are made
- * from the SAME method (so a marker relocated into a different method that
- * runs at a different time, or not at all on some path, cannot satisfy it by
- * merely appearing earlier in the file's text). It is not a runtime proof —
- * `MetaSheetServer` is too heavy to construct in a unit test (full plugin
- * loader, DB pool, etc.); `multitable-w11-bridge-wiring.guard.test.ts` is the
- * house's existing precedent for this exact shape.
+ * WHAT THIS PROVES, stated exactly (over `tests/helpers/attendance-w6-index
+ * -assembly-order.ts`'s AST registration-site model, never over raw text —
+ * see that module's docblock for the two bugs a prior text-offset version
+ * of this guard had):
+ *
+ *  - `attendanceAuditMiddleware`, `attendanceSecurityMiddleware`, and
+ *    `attendanceAdminRouter` are each registered by exactly ONE
+ *    unconditional `this.app.use(...)` call, all inside `setupMiddleware`,
+ *    and all three occur (in `setupMiddleware`'s own, sequentially-executed
+ *    statement order) after the one unconditional `this.app.use(...)` call
+ *    whose callback body calls `jwtAuthMiddleware`.
+ *  - The GATE subject's claim is WEAKER than the other three, and is only
+ *    ever stated that way: the other three are bare `this.app.use(S())`;
+ *    the gate is an anonymous arrow (`index.ts:1350`) whose body calls
+ *    `jwtAuthMiddleware` (`:1361`) only after three early returns
+ *    (`isWhitelisted` `:1351`, `isPublicFormAuthBypass` `:1352`,
+ *    `isOapiAllowlistRequest` `:1357`). This guard proves the ARROW is
+ *    registered unconditionally, exactly once, ahead of every subject site —
+ *    never that any given request reaches `jwtAuthMiddleware`. The "A7"
+ *    block below shrinks that gap with FIVE EXECUTED calls to the real
+ *    predicates on this route's real path, but the composition (registered
+ *    first AND this path routes into the gate) is argued, not executed as
+ *    one proof — only booting `MetaSheetServer` would execute it, and that
+ *    is out of reach for a unit test (full plugin loader, DB pool).
+ *  - Beyond `setupMiddleware`: nothing can call an instance method on
+ *    `MetaSheetServer` before its constructor has returned, and the
+ *    constructor calls `setupMiddleware()` — unconditionally, as its own
+ *    12th (of 15) statement — before doing anything else that could reach
+ *    `this.app` (asserted below: zero `this.app.<verb>` sites anywhere in
+ *    the constructor). So every OTHER place `this.app` is ever registered
+ *    on (`installGlobalErrorHandler`, `start`, and the plugin runtime's
+ *    computed `this.app[verb](...)` dispatch reachable through
+ *    `createCoreAPI`/`registerPluginRoute`) is necessarily dispatched after
+ *    `setupMiddleware` has already run to completion — EXCEPT the twelve
+ *    pinned pre-gate sites (they run inside `setupMiddleware`, before the
+ *    gate, by design) and whatever `installMetrics(this.app)` (`:1329`,
+ *    also pre-gate) itself registers, which this guard cannot see (residual
+ *    — it is pinned only as an opaque escape, below).
+ *
+ * NOT proven, named rather than implied:
+ *  - Nothing about `installMetrics`'s or `APIGateway`'s own internals (both
+ *    are pinned, opaque escapes — R2).
+ *  - Nothing about `attendanceAdminRouter`'s own sub-router internals
+ *    (bypassing `rbacGuard` inside it would be invisible here — R3; that is
+ *    `attendance-w6-call-path-closure.ts`'s domain).
+ *  - Subject membership is name-based (an identifier occurring in a site's
+ *    argument subtree), not symbol-resolved — a same-named import re-pointed
+ *    at a different module would satisfy every assertion here (R4). The
+ *    import-specifier pin below closes the cheap half of that gap.
+ *  - No request is ever issued and `MetaSheetServer` is never constructed
+ *    (R6) — this proves assembly order, a necessary but not sufficient
+ *    condition for the route being protected.
  */
 describe('the real app assembly (index.ts) registers this route behind the global gate and the attendance audit/security middleware', () => {
   const indexPath = join(__dirname, '../../src/index.ts')
   const indexText = readFileSync(indexPath, 'utf8')
   const indexSource = ts.createSourceFile(indexPath, indexText, ts.ScriptTarget.ES2022, true)
+  const model: AssemblyModel = buildAssemblyModel(indexSource)
+  const inSetup = sitesInMethod(model, 'setupMiddleware')
 
-  const MARKERS: readonly AssemblyMarker[] = [
-    { label: 'global authentication gate', needle: 'if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)' },
-    { label: 'attendance audit middleware', needle: 'this.app.use(attendanceAuditMiddleware())' },
-    { label: 'attendance security middleware', needle: 'this.app.use(attendanceSecurityMiddleware())' },
-    { label: 'aggregate route registration', needle: 'this.app.use(attendanceAdminRouter())' },
-  ]
+  const SUBJECTS = [
+    'jwtAuthMiddleware',
+    'attendanceAuditMiddleware',
+    'attendanceSecurityMiddleware',
+    'attendanceAdminRouter',
+  ] as const
 
-  const locations = locateMarkers(indexText, MARKERS)
-  const [gate, audit, security, route] = locations
+  describe('A1 — per-subject state: exactly one unconditional site, in setupMiddleware', () => {
+    it.each(SUBJECTS)('%s', (subject) => {
+      const { state, sites } = subjectState(model, subject)
+      expect(state).toBe('UNCONDITIONAL_SITE')
+      expect(sites).toHaveLength(1)
+      expect(sites[0].enclosingMethod).toBe('setupMiddleware')
+    })
 
-  it('non-vacuity: every marker is present exactly once', () => {
-    expect(locations.map((loc) => ({ label: loc.label, occurrences: loc.occurrences }))).toEqual(
-      MARKERS.map((marker) => ({ label: marker.label, occurrences: 1 })),
-    )
+    it('non-vacuity diagnostic: each subject also appears in the raw file text (guards against a subject name typo silently reading NO_SITE forever)', () => {
+      for (const subject of SUBJECTS) {
+        expect(textMentions(indexText, subject)).toBeGreaterThan(0)
+      }
+    })
   })
 
-  it('the global gate precedes the route registration', () => {
-    expect(gate.index).toBeGreaterThanOrEqual(0)
-    expect(route.index).toBeGreaterThan(gate.index)
+  it('A2 — the set of methods holding ANY this.app.<verb> registration site is exactly this frozen set', () => {
+    const byMethod = new Set(model.sites.map((s) => s.enclosingMethod))
+    expect([...byMethod].sort()).toEqual(['installGlobalErrorHandler', 'setupMiddleware', 'start'])
   })
 
-  it('the attendance audit middleware precedes the route registration', () => {
-    expect(audit.index).toBeGreaterThanOrEqual(0)
-    expect(route.index).toBeGreaterThan(audit.index)
+  it('A3 — ordering: the gate, audit, and security sites all precede the route site, in setupMiddleware\'s own sequential order', () => {
+    const ordinalOf = (subject: string) => {
+      const site = subjectState(model, subject).sites[0]
+      return inSetup.findIndex((s) => s.start === site.start)
+    }
+    const gate = ordinalOf('jwtAuthMiddleware')
+    const audit = ordinalOf('attendanceAuditMiddleware')
+    const security = ordinalOf('attendanceSecurityMiddleware')
+    const route = ordinalOf('attendanceAdminRouter')
+    expect(gate).toBeGreaterThanOrEqual(0)
+    expect(route).toBeGreaterThan(gate)
+    expect(route).toBeGreaterThan(audit)
+    expect(route).toBeGreaterThan(security)
   })
 
-  it('the attendance security middleware precedes the route registration', () => {
-    expect(security.index).toBeGreaterThanOrEqual(0)
-    expect(route.index).toBeGreaterThan(security.index)
+  // A4/A5 deliberately do NOT pin `line`: a benign one-line edit anywhere
+  // ABOVE one of these sites (a comment, a blank line, an unrelated
+  // registration lower in the file) would shift every subsequent line
+  // number and spuriously red a pin that has not actually changed in
+  // content or order. Position is already fully captured by ARRAY ORDER
+  // (these are the source-ordered `sites`/`escapes` lists) — pinning the
+  // numeric line on top of that buys no extra sensitivity to a real
+  // change and only buys fragility to an unrelated one. (Caught live: an
+  // early mutation of this guard pinned `line` here, and inserting an
+  // unrelated pre-gate site shifted eleven OTHER lines' numbers along with
+  // it, reding five assertions for what should have been one.)
+  it('A4 — app-object census: every OTHER read of this.app (assignment, computed dispatch, or escape) is exactly this frozen 6-entry list', () => {
+    expect(model.escapes.map((e) => ({ kind: e.kind, enclosingMethod: e.enclosingMethod, signature: e.signature }))).toEqual([
+      { kind: 'ASSIGN', enclosingMethod: 'constructor', signature: '= express()' },
+      { kind: 'ESCAPE', enclosingMethod: 'constructor', signature: 'createServer(...) arg0' },
+      { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'createCoreAPI', signature: '[methodLower](...)' },
+      { kind: 'COMPUTED_REGISTRATION', enclosingMethod: 'registerPluginRoute', signature: "[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](...)" },
+      { kind: 'ESCAPE', enclosingMethod: 'setupMiddleware', signature: 'installMetrics(...) arg0' },
+      { kind: 'ESCAPE', enclosingMethod: 'start', signature: 'new APIGateway(...) arg0' },
+    ])
   })
 
-  it('all four markers are registered from the SAME method — the real assembly block, not merely the same file', () => {
-    const enclosing = locations.map((loc) => enclosingFunctionLikeAt(indexSource, loc.index))
-    expect(enclosing.every((node) => node !== null)).toBe(true)
-    expect(enclosing.every((node) => node === enclosing[0])).toBe(true)
-    expect(functionLikeLabel(enclosing[0] as ts.Node)).toBe('setupMiddleware')
+  it('A5 — pre-gate prefix: the 12 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+    const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
+    const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
+    expect(prefix).toEqual([
+      { verb: 'use', unconditional: true, args: ['correlationIdMiddleware'] },
+      { verb: 'use', unconditional: true, args: ['cors()'] },
+      { verb: 'use', unconditional: true, args: ['"/api"', '<inline>'] },
+      { verb: 'use', unconditional: true, args: ['<inline>'] },
+      { verb: 'use', unconditional: true, args: ['"/api/attendance/import"', '<inline>'] },
+      { verb: 'use', unconditional: true, args: ['"/api/attendance/import"', 'express.json()'] },
+      { verb: 'use', unconditional: true, args: ['"/api/multitable/automation/webhooks"', 'automationWebhookJsonParser'] },
+      { verb: 'post', unconditional: false, args: ['"/api/approval/attachments/refs"', 'approvalAttachmentRefsJsonParser'] },
+      { verb: 'use', unconditional: true, args: ['express.json()'] },
+      { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
+      { verb: 'use', unconditional: true, args: ['requestMetricsMiddleware'] },
+      { verb: 'use', unconditional: true, args: ['<inline>'] },
+    ])
+  })
+
+  it('positive control (real code, no mutation): the approval-attachments pre-gate parser is the live CONDITIONAL witness — its own IfStatement guard is isApprovalAttachmentsEnabled(), proving the CONDITIONAL_SITE branch of the classifier actually discriminates on production source, not merely on a synthetic fixture', () => {
+    const site = inSetup.find((s) => s.argProjection.includes('approvalAttachmentRefsJsonParser'))
+    expect(site).toBeDefined()
+    expect(site!.unconditional).toBe(false)
+    expect(site!.blockingAncestorKind).toBe('IfStatement')
+  })
+
+  describe('the constructor: setupMiddleware() itself is invoked once, unconditionally, before anything else touches this.app', () => {
+    it('setupMiddleware() has exactly one call site: an unconditional statement of the constructor', () => {
+      const calls = findThisMethodCalls(indexSource, 'setupMiddleware')
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toMatchObject({ enclosingMethod: 'constructor', unconditional: true })
+    })
+
+    it('zero this.app.<verb> registration sites exist anywhere in the constructor', () => {
+      expect(sitesInMethod(model, 'constructor')).toEqual([])
+    })
+  })
+
+  it('import-specifier pin: each subject is imported from the module this guard assumes, so a same-named identifier re-pointed at a different module is caught here rather than silently satisfying A1 (R4 mitigation)', () => {
+    expect(indexText).toContain("import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'")
+    expect(indexText).toContain("import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'")
+    expect(indexText).toContain("import { attendanceAdminRouter } from './routes/attendance-admin'")
+  })
+
+  describe('A7 — the gate subject, behavioural shrink: which real predicate decides this exact route (real functions, real path, no fabricated request)', () => {
+    const PATH = `/api/attendance/groups/${GROUP}/effective-policy`
+
+    it('isApiPath: this path is API traffic (so the gate\'s final `if` branch is reachable at all)', () => {
+      expect(isApiPath(PATH)).toBe(true)
+    })
+
+    it('isWhitelisted: this path is NOT a declared gate exception (so the gate does not return early before reaching jwtAuthMiddleware)', () => {
+      expect(isWhitelisted(PATH)).toBe(false)
+    })
+
+    it('isPublicFormAuthBypass: a GET with no publicToken on this path is not the public-form bypass', () => {
+      expect(isPublicFormAuthBypass({ path: PATH, method: 'GET', query: {}, body: undefined })).toBe(false)
+    })
+
+    it('isOapiAllowlistRequest: this path is not on the OAPI read/write allowlist (mst_ token or not), so an API-token bearer does not skip the gate here either', () => {
+      expect(isOapiAllowlistRequest('GET', PATH, undefined)).toBe(false)
+      expect(isOapiAllowlistRequest('GET', PATH, 'Bearer mst_x')).toBe(false)
+    })
+  })
+
+  /**
+   * The classifier's own positive control (replaces the house precedent's
+   * "verified non-vacuous manually during PR development" docblock claim,
+   * which has no CI standing): drives `buildAssemblyModel` over small inline
+   * source STRINGS — never `index.ts` — and asserts the state each fixture
+   * must produce. This is what "prove it closes the fail-open evasions" was
+   * verified against live, mutating `index.ts` itself (see PR description /
+   * commit log for that one-time proof); these fixtures make the same
+   * shapes a permanent regression, independent of `index.ts`'s own drift.
+   */
+  describe('classifier state-space coverage (inline fixtures, not index.ts)', () => {
+    const wrap = (body: string) => `class C {\n  m() {\n${body}\n  }\n}\n`
+    const stateOf = (src: string, subject = 'S') => {
+      const f = ts.createSourceFile('fixture.ts', wrap(src), ts.ScriptTarget.ES2022, true)
+      return subjectState(buildAssemblyModel(f), subject).state
+    }
+
+    it('NO_SITE: absent entirely', () => {
+      expect(stateOf('    this.app.use(other())')).toBe('NO_SITE')
+    })
+
+    it('NO_SITE: present only inside a comment (the bug this guard replaces)', () => {
+      expect(stateOf('    // this.app.use(S())')).toBe('NO_SITE')
+    })
+
+    it('UNCONDITIONAL_SITE: bare statement', () => {
+      expect(stateOf('    this.app.use(S())')).toBe('UNCONDITIONAL_SITE')
+    })
+
+    it('UNCONDITIONAL_SITE: path-prefixed mount still names S in its arguments', () => {
+      expect(stateOf("    this.app.use('/x', S())")).toBe('UNCONDITIONAL_SITE')
+    })
+
+    it('UNCONDITIONAL_SITE: wrapped mount still names S in its arguments', () => {
+      expect(stateOf("    this.app.use('/x', wrap(S()))")).toBe('UNCONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: if (false)', () => {
+      expect(stateOf('    if (false) { this.app.use(S()) }')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: never-true env condition', () => {
+      expect(stateOf("    if (process.env.NEVER_SET === '1') { this.app.use(S()) }")).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: short-circuit && — the exact shape a "nearest enclosing statement" predicate gets wrong', () => {
+      expect(stateOf('    cond && this.app.use(S())')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: short-circuit ||', () => {
+      expect(stateOf('    cond || this.app.use(S())')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: nullish ??', () => {
+      expect(stateOf('    cond ?? this.app.use(S())')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: ternary', () => {
+      expect(stateOf('    cond ? this.app.use(S()) : null')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: deferred inside a callback (setImmediate)', () => {
+      expect(stateOf('    setImmediate(() => { this.app.use(S()) })')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: inside a try block', () => {
+      expect(stateOf('    try { this.app.use(S()) } catch (e) {}')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('CONDITIONAL_SITE: inside a loop', () => {
+      expect(stateOf('    for (const x of xs) { this.app.use(S()) }')).toBe('CONDITIONAL_SITE')
+    })
+
+    it('MULTIPLE_SITES: a second, earlier, differently-shaped mount — the existential-vs-universal bug this guard replaces', () => {
+      expect(stateOf("    this.app.use('/', S())\n    this.app.use(S())")).toBe('MULTIPLE_SITES')
+    })
+
+    it('MULTIPLE_SITES: aliased mount via a local const still names S at its OWN declaration site, so two sites both reach it once the alias is itself used a second time', () => {
+      // Documents the module's own residual (R5 in the design notes): a
+      // hoisted local (`const r = S(); this.app.use(r)`) does NOT reach S
+      // by this module's name-based argument search — `r` is what appears
+      // in the second call's arguments, not `S`. That specific evasion is
+      // NOT caught by subjectState; it would only be caught by a change to
+      // the pre-gate/full-site census (A4/A5 above) if it altered site
+      // shape or count. Recorded here as a fixture proving what the state
+      // machine does NOT claim, not as something it defends against.
+      expect(stateOf('    const r = S()\n    this.app.use(r)')).toBe('NO_SITE')
+    })
   })
 })
