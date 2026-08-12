@@ -699,6 +699,49 @@ test('stream flag rewrite removes candidate files before either failure exit', (
   )
 })
 
+test('env replacement stays atomic when staging env parent is root-owned', () => {
+  const source = read(REMOTE_SH)
+  const replace = actionBody(source, 'atomic_replace_staging_env', [
+    'atomic_upsert_env_keys_from_files',
+  ])
+  const upsert = actionBody(source, 'atomic_upsert_env_keys_from_files', [
+    'compose_staging_cmd_with_env_file',
+  ])
+  const setFlag = actionBody(source, 'atomic_set_stream_flag', ['recreate_backend_only'])
+
+  assert.match(replace, /if \[\[ -w "\$target_dir" \]\]/)
+  assert.match(replace, /docker inspect -f '\{\{\.Config\.Image\}\}' "\$BACKEND_CONTAINER"/)
+  assert.match(
+    replace,
+    /timeout 30s docker run --rm --pull never --network none --entrypoint \/bin\/sh/,
+  )
+  assert.match(replace, /type=bind,src=\$\{candidate\},dst=\/stream-uat-candidate,readonly/)
+  assert.match(replace, /type=bind,src=\$\{target_dir\},dst=\/stream-uat-target/)
+  assert.match(replace, /umask 077/)
+  assert.match(replace, /cleanup_and_exit\(\) \{ cleanup; exit "\$1"; \}/)
+  assert.match(replace, /trap "cleanup_and_exit 129" HUP/)
+  assert.match(replace, /trap "cleanup_and_exit 130" INT/)
+  assert.match(replace, /trap "cleanup_and_exit 143" TERM/)
+  const chownIdx = replace.indexOf('chown "${STREAM_UAT_TARGET_UID}:${STREAM_UAT_TARGET_GID}"')
+  const chmodIdx = replace.indexOf('chmod 600 "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"')
+  const renameIdx = replace.indexOf('mv -f "/stream-uat-target/${STREAM_UAT_TARGET_TMP}"')
+  assert.ok(chownIdx >= 0, 'helper must preserve the existing env owner/group')
+  assert.ok(chmodIdx > chownIdx, 'helper must set mode after ownership')
+  assert.ok(renameIdx > chmodIdx, 'helper must rename only after ownership and mode are final')
+  assert.match(
+    replace,
+    /mv -f "\/stream-uat-target\/\$\{STREAM_UAT_TARGET_TMP\}" "\/stream-uat-target\/\$\{STREAM_UAT_TARGET_NAME\}"/,
+  )
+  assert.match(replace, /previous env retained/)
+  assert.match(replace, /rm -f "\$candidate"/)
+  assert.match(upsert, /atomic_replace_staging_env "\$tmp"/)
+  assert.match(setFlag, /atomic_replace_staging_env "\$tmp"/)
+  assert.doesNotMatch(upsert, /mv -f "\$tmp" "\$STAGING_ENV_FILE"/)
+  assert.doesNotMatch(setFlag, /mv -f "\$tmp" "\$STAGING_ENV_FILE"/)
+  assert.doesNotMatch(replace, /sudo/)
+  assert.match(replace, /Rootless\/userns-remapped Docker fails closed/)
+})
+
 test('remote worker proofs use values-free log message classes only', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /DingTalk interactive-card Stream worker started/)
