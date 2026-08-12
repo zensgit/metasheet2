@@ -13,7 +13,7 @@
 > (the owner-authorized catch-up baseline after PR #4804)
 >
 > Implementation and test evidence head before this record-only report delta:
-> `39d9a969e4d36f6600a51b8cb7a527d39fce34cd`
+> `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
 
 ## 0. Scope delivered
 
@@ -110,6 +110,21 @@ material gaps. The evidence head closes them without widening the slice:
 - the runtime response validator now matches the OpenAPI UUID and positive
   managed-row-count constraints, and the platform-admin positive leg uses the
   real transaction-bound PostgreSQL role lookup rather than a legacy claim.
+
+A later independent review round against report head
+`89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` found two additional P2 gaps. That
+older-head review is discovery evidence only. Evidence head
+`7c72f60340e1994dc66ebaae631fd331dd2bbfa9` closes both:
+
+- a delegated caller without active target-organization membership now receives
+  the same exact values-free `404 NOT_FOUND` shape as a missing or inaccessible
+  group, while selector mismatch remains a distinct pre-SQL `403`;
+- six known indirect or computed DB-seam spellings now fail closed as static
+  findings instead of disappearing from all classification buckets. PostgreSQL
+  `READ ONLY` remains the structural mechanism of record.
+
+Because those changes modify the reviewed head, no review result bound to
+`89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` transfers to the final gate.
 
 ## 5. Explicit residuals
 

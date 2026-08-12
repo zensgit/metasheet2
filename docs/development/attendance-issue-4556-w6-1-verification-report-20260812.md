@@ -9,7 +9,7 @@
 > Fresh base: `origin/main@24794811b1c800402006b30d6e4fa9df670e124e`
 >
 > Implementation and test evidence head before this record-only report delta:
-> `39d9a969e4d36f6600a51b8cb7a527d39fce34cd`
+> `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
 
 ## 0. Evidence rules
 
@@ -31,9 +31,9 @@
 | --- | --- |
 | Repository | `zensgit/metasheet2` |
 | Base | `24794811b1c800402006b30d6e4fa9df670e124e` |
-| Evidence head | `39d9a969e4d36f6600a51b8cb7a527d39fce34cd` |
+| Evidence head | `7c72f60340e1994dc66ebaae631fd331dd2bbfa9` |
 | Database | Local PostgreSQL 15.17 |
-| Scratch database | `metasheet_w6_4849_codex_20260812_d` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
+| Scratch database | `metasheet_w6_4849_codex_20260812_e` on a local role; credentials were not recorded; the database was dropped after the run and absence was verified |
 | Data | Synthetic only |
 | Runtime posture | No feature flag, rollout transition, deployment, staging, or soak |
 
@@ -69,6 +69,12 @@ the real `isAdmin(userId, runQuery)` query returns true on the shared
 transaction handle, the membership query is skipped, and aggregate reads still
 run on that handle.
 
+The DML matrix also constructs six indirect or computed DB-seam spellings:
+local alias, destructured alias, element access, computed element access,
+`.call`, and `.apply`. Each now produces a fail-closed finding. A literal DML
+statement through an alias is independently rejected by both the seam
+classifier and the raw-text DML leg.
+
 The three net-new unit legs close the discovery-gate gaps: AST-derived resolver
 call coverage with dynamic-target refusal, UUID enforcement at every
 UUID-formatted response position, and rejection of a zero managed-set
@@ -100,7 +106,9 @@ Observed real-DB legs include:
   unlisted table on the shared read-only transaction;
 - delegated membership and platform-admin reads on the same transaction-bound
   query handle;
-- cross-org, selector-spoof, and inaccessible-group behavior;
+- cross-org, selector-spoof, and inaccessible-group behavior, including the
+  exact shared values-free `404` shape for missing and delegated-inaccessible
+  groups;
 - FSER byte-shape composition;
 - membership overlap count, boundedness, and no choose-first result.
 
@@ -167,6 +175,15 @@ The final exact-head outcomes will be recorded in a PR gate comment after fresh
 checks and independent gates complete, because only that comment can bind the
 SHA containing this report. Any P1/P2 requires a fix and a new exact-head gate;
 an older-head approval cannot transfer by wording alone.
+
+The first report-head review round at
+`89b3fff8cdd8d8b53a37277f6142ae83fb648fb4` produced two P2 findings: the
+delegated-inaccessible response differed from the ratified values-free `404`
+shape, and six indirect/computed DB-seam forms disappeared from the static
+classification. Evidence head `7c72f60340e1994dc66ebaae631fd331dd2bbfa9`
+contains the repairs and the fresh local executions above. All final model
+gates must therefore rerun against the later exact PR head that includes this
+report; the earlier outcomes remain discovery evidence only.
 
 ## 5. Verdict boundary
 
