@@ -11,6 +11,16 @@ name: Multitable Recovery-Flag Containment Check
 # READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + catalog-only database reads +
 # `docker inspect` + `docker compose config`. No writes, no restarts, no config edits.
 #
+# TWO MODES (`mode` fixed choice):
+#   • predeploy-flags — Leg 1 (running env) + Leg 3 (next-restart compose) FLAG checks only; Leg 2
+#     (live-DB schema) is skipped. Works on the CURRENTLY deployed image, BEFORE #4654's schema helper +
+#     trigger migrations exist — run this with target=both to obtain the pre-merge evidence that all four
+#     flags are OFF. Distinct PASS sentinel that explicitly states the schema was NOT verified.
+#   • postdeploy-full — the above PLUS Leg 2 (schema helper: 9 disabled triggers, 6 function fingerprints,
+#     no meta_links.foreign_record_id FK). Requires the deployed closeout image; run per-host AFTER deploy.
+#   The schema leg is gated by `if [ "$MODE" = "postdeploy-full" ]`: predeploy-flags skips it entirely, and
+#   postdeploy-full cannot bypass it (that guard is the only path to the schema check).
+#
 # `target` is a fixed `choice` input (staging | production | both) — NEVER free text. `choice` is a
 # UI-only guardrail (the REST API can still send an arbitrary string), so TARGET is re-validated with an
 # exact-match `case` (default branch fails closed) BEFORE the ssh call — that local check is the real
