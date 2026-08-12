@@ -42,6 +42,7 @@ const ALLOWED_RELATIVE_FILES = new Set([
   'packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',
   'packages/core-backend/tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
   'packages/core-backend/tests/integration/attendance-w6-group-effective-policy.db.test.ts',
+  'packages/core-backend/tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts',
   'packages/core-backend/tests/unit/attendance-group-fixed-schedule-effectiveness-service.test.ts',
   // this inventory test's own file (names the guarded strings for documentation)
   'packages/core-backend/tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts',
