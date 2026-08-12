@@ -1,15 +1,21 @@
 # Attendance Issue #4556 W6 Group Effective-Policy Read Aggregation Design Lock
 
 > Status: **RATIFIED** (W6-1 backend aggregate only) — see the ratification
-> record in §9. Every W6 slice beyond W6-1 remains **HOLD**.
+> record in §9. The narrow delegated-non-member status correction in §10 is
+> **PROPOSED** pending owner RATIFY of this correction's exact merged SHA.
+> Every W6 slice beyond W6-1 remains **HOLD**.
 >
 > Date: 2026-08-05 · Ratified: 2026-08-08
 >
 > Pinned baseline: `origin/main@db74bd8667df1084797c97d872fe53ef845e3803`
 >
-> Ratified SHA: `2967da018ceea41b91098e14d4c15a57236eb5f8` (the merge commit of
-> PR 4771, which is where this document landed on `main`; its content has been
-> byte-identical on `main` since that commit)
+> Ratified proposal SHA: `2967da018ceea41b91098e14d4c15a57236eb5f8`
+> (PR 4771, where the original PROPOSED design landed on `main`).
+>
+> Durable RATIFY-record merge: `ecf77d2433596bbdd8b67c312a37178dbc97f715`
+> (PR 4821). Its resulting lock blob remained byte-identical through
+> `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. The §10 correction is a later
+> PROPOSED delta and does not rewrite either historical record.
 >
 > Scope: issue #4556, W6 only (锁 §9.7 group effective-policy workspace 的
 > read-only 聚合面)
@@ -270,7 +276,7 @@ winner selection stays W7 and stays fail-closed per parent R2.
 - service + route per §4; real-DB legs in the existing attendance integration
   gate file set, fixture IDs file-namespaced;
 - matrix: every §4.3 fixture shape reproduced from seeded rows with exact-key
-  deepEqual; two-org isolation; delegated-non-member 403; spoofed org
+  deepEqual; two-org isolation; delegated-non-member 404; spoofed org
   selectors 403 before aggregate SQL; unknown group 404 shape parity; invalid enum
   negatives for every enum field;
 - mutation legs, each individually red: drop the auth guard; add a second
@@ -347,3 +353,36 @@ slice only**, Draft/HOLD, stopping after a fresh exact-head gate. W6-2 contract
 wiring, W6-3 UI, W6-4 verification, any merge, staging, soak, flag change,
 deployment, and closure of issue 4556 each remain separate, un-granted owner
 acts — §8's landing sequence is unchanged by this record.
+
+## 10. PROPOSED correction — delegated non-member status (2026-08-12)
+
+**Status: PROPOSED.** This section cannot ratify itself. The owner must RATIFY
+the exact merged SHA of this correction before PR 4849 can use it as final-gate
+authority.
+
+The RATIFIED W6-R3 and §4.1 require missing and inaccessible groups to share
+one values-free 404 shape. The former §7.2 matrix line instead required a 403
+for a delegated attendance admin without active target-org membership. That
+line contradicted the governing rule and the same document's endpoint
+contract.
+
+This correction is deliberately narrow:
+
+1. §7.2 now requires the delegated-non-member leg to return the shared
+   values-free 404 shape. Spoofed org selectors remain 403 before aggregate
+   SQL.
+2. The unpublished OpenAPI draft moves delegated non-membership out of the 403
+   description and into the shared inaccessible-group 404 description.
+3. No runtime behavior changes here. W6-R3 and §4.1 already selected 404, and
+   the W6-1 candidate is reviewed against that existing governing behavior.
+
+On 2026-08-12 the owner initially authorized this independent docs-only
+correction to merge as PROPOSED against exact baseline
+`979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. After unrelated PR 4877 advanced
+`main`, the owner renewed the same narrow authorization against exact baseline
+`51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`. After unrelated PR 4874 advanced
+`main` again, the owner renewed it against exact baseline
+`525f47e78ba0815a1f3c0e49aac10035bcbd2d14`. After merge, the exact correction
+SHA must be presented for a separate owner RATIFY. This authorization does not
+grant PR 4849 merge, W6-2/W6-3/W6-4, further runtime work, flags, deployment,
+staging, soak, production/customer data use, or closure of issue 4556.
