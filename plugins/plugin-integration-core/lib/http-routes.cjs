@@ -625,6 +625,13 @@ function stockPreparationPlmAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
+// Direct readonly table-action -> internal MVP persistence is a separately staged capability. It is
+// deliberately NOT implied by either source-run auto-persist flag: only the exact literal `true`
+// enables this manually-invoked admin write route, and a missing/malformed value stays fail-closed.
+function stockPreparationTableActionMvpPersistEnabled() {
+  return String(process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
 // Entity-level delivery containment. This negative gate is intentionally
 // independent from the dry-run route: an internal evaluation environment can
 // keep previews usable while refusing every C6 Apply before request parsing,
@@ -652,6 +659,29 @@ function assertStockPreparationPlmAutoPersistNoSteering(req) {
       400,
       'STOCK_PREPARATION_PLM_AUTOPERSIST_STEERING_NOT_ALLOWED',
       'an explicit tenantId (any carrier) or a query/params projectId is not allowed on the auto-persisting PLM source-run; the tenant and staging target derive from the authenticated principal and the business projectId rides only in the body',
+    )
+  }
+}
+
+// The table-action MVP route derives every physical scope from the authenticated principal and the
+// deployed action config. Reject all request carriers that could otherwise influence tenant,
+// workspace, or project selection before action lookup, source-system lookup, adapter creation, or
+// source I/O. The route parameter `actionId` and body `parameters.projectNo` are its only selectors.
+function assertStockPreparationTableActionMvpPersistNoSteering(req) {
+  const steeringKeys = [
+    'tenantId', 'workspaceId', 'projectId', 'targetProjectId', 'baseId', 'sheetId', 'objectId',
+    'syncRunId', 'snapshotBatchId', 'snapshotVersion',
+  ]
+  const steers = (src) => Boolean(src) && steeringKeys
+    .some((key) => `${src[key] ?? ''}`.trim() !== '')
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  const unsupportedParam = Object.keys(params).some((key) => key !== 'actionId')
+  if (steers(requestBody(req)) || Object.keys(query).length !== 0 || unsupportedParam || steers(params)) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED',
+      'tenantId, workspaceId, and projectId are derived from the authenticated principal and deployed action config',
     )
   }
 }
@@ -2675,8 +2705,12 @@ function createHandlers(services, options = {}) {
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
+    if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
     const system = await loadSystem(scopedInput(req, sourceScope))
+    if (options.requireActive === true && (!system || system.status !== 'active')) {
+      throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
+    }
     if (!system || system.kind !== action.source.kind) {
       throw new HttpRouteError(422, 'TABLE_ACTION_SOURCE_INVALID', `table action source must be ${action.source.kind}`, {
         actionId: action.actionId,
@@ -3697,17 +3731,26 @@ function createHandlers(services, options = {}) {
     // this route never calls the table-action Apply writer or any external writer.
     async tableActionMvpPersist(req, res) {
       requireAccess(req, 'admin')
+      if (!stockPreparationTableActionMvpPersistEnabled()) {
+        throw new HttpRouteError(
+          403,
+          'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED',
+          'table-action MVP persistence is disabled',
+        )
+      }
+      assertStockPreparationTableActionMvpPersistNoSteering(req)
+      const tenantId = resolveAuthUserTenantId(req)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
+      const parameters = normalizeActionParameters(body.parameters)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
       const prepared = await prepareStockPreparationMvpSnapshot({
         action,
-        parameters: body.parameters,
+        parameters,
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
       })
-      const tenantId = resolveAuthUserTenantId(req)
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
@@ -3723,7 +3766,7 @@ function createHandlers(services, options = {}) {
         projectId,
         syncRunId: `sync_${batchDigest}`,
         snapshotBatchId: `snapshot_${batchDigest}`,
-        snapshotVersion: 1,
+        allocateSnapshotVersion: true,
         sourceSystem: action.source.kind,
         sourceProjectNo: prepared.parameters.projectNo,
         expansionResult: prepared.expansionResult,

@@ -60,7 +60,7 @@
     "stockPreparationDecoder": "8868b8c51c7f96d81eb224c81d8d270b1dc79b1f7bca702b4e8b7849259b0c6a",
     "stockPreparationReadonlyIntake": "b91c57376947657a84fcec16b09e3a8ef6149b68f97498bdb2433f9aa1109bb6",
     "stockPreparationPlmSourcePersistBridge": "f67503e9d69418d0a50c525138fa958e5bde4b43f1ca60444ae847e02a70ab03",
-    "stockPreparationSyncRunPersist": "7aac454a24ec422ac4250eacbef092127e1ec02a901c46fbba4c48d71992fce8"
+    "stockPreparationSyncRunPersist": "d8e1f295d08ef4bdbbd0ab920f603230700f7c150ede7fbd54c4ac37eaf90058"
   },
   "dependencies": {
     "mssql": "^10.0.4",
@@ -70,7 +70,7 @@
     "pluginPackageJson": "19900cc7df6b75da92ce6f69e4932e4ce5a707930d58c32bd67ba27f8ffef401",
     "pnpmLock": "8ca98ceef0c84b821c4b20a0f0cf0b50b87dfb51a26b6a2d21a9912a1733680f",
     "pluginIndex": "c2a800452d175e2b00a476b3e0d3fab6f65e16031789b91a0304dd1dc45a0cee",
-    "pluginHttpRoutes": "1dcf763d4019bccb94eb9ee7a1bd62927b1cb5cc5721a820d0f4fef392fd3d58",
+    "pluginHttpRoutes": "20398fe6eeffd061b8bc210a645bab3103ef21d247d7b0953b4fe28813da88d6",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
     "s6aOnpremRunbook": "1f4ba2b7fadbad0acb97e18d13f2be7ad6071fa372ac44e0aa4e17995e94c410",
