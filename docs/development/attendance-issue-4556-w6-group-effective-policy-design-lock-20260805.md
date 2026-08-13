@@ -2,7 +2,9 @@
 
 > Status: **RATIFIED** (W6-1 backend aggregate only) — see the ratification
 > record in §9. The narrow delegated-non-member status correction in §10 is
-> **PROPOSED** pending owner RATIFY of this correction's exact merged SHA.
+> **RATIFIED** at its exact merged SHA
+> `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876); authorization source =
+> owner comment on issue #4556 (`issuecomment-5275343727`, 2026-08-13) — see §10.
 > Every W6 slice beyond W6-1 remains **HOLD**.
 >
 > Date: 2026-08-05 · Ratified: 2026-08-08
@@ -354,11 +356,26 @@ wiring, W6-3 UI, W6-4 verification, any merge, staging, soak, flag change,
 deployment, and closure of issue 4556 each remain separate, un-granted owner
 acts — §8's landing sequence is unchanged by this record.
 
-## 10. PROPOSED correction — delegated non-member status (2026-08-12)
+## 10. Correction — delegated non-member status (RATIFIED 2026-08-13)
 
-**Status: PROPOSED.** This section cannot ratify itself. The owner must RATIFY
-the exact merged SHA of this correction before PR 4849 can use it as final-gate
-authority.
+**Status: RATIFIED at exact merged SHA
+`1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876).** This section cannot
+ratify itself; a PR body is not its own authorization source. The authorization
+source is an **owner-authored comment on issue #4556**, posted by the owner
+(`zensgit`) on 2026-08-13T02:48:23Z:
+
+- comment: https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5275343727
+  (`issuecomment-5275343727`)
+
+That comment RATIFIES `1e0d451a25…` — approving ONLY the §10 delegated-non-member
+403→404 erratum and a docs-only ledger sync from fresh `main` — and this record
+merely references it (the authorization is not reproduced here as self-proof).
+The merged SHA's lineage was verified: sole parent
+`525f47e78ba0815a1f3c0e49aac10035bcbd2d14` (the last renewed baseline), docs-only
+(this design-lock plus the unpublished OpenAPI draft), and an ancestor of `main`.
+Per that comment the ratification is narrow: it authorizes no PR 4849 catch-up or
+merge, no W6-2/W6-3/W6-4, no runtime work, flags, deployment, staging, soak,
+production/customer data, or closure of issue 4556.
 
 The RATIFIED W6-R3 and §4.1 require missing and inaccessible groups to share
 one values-free 404 shape. The former §7.2 matrix line instead required a 403
