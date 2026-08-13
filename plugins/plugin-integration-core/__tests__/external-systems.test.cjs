@@ -312,6 +312,13 @@ async function main() {
   })
   assert.equal(publicAcceptanceGet.config.c6AcceptancePolicy, undefined,
     'public get omits the private K3 acceptance policy')
+  const publicAcceptanceList = await acceptanceRegistry.listExternalSystems({
+    tenantId: 'tenant_1',
+    kind: 'erp:k3-wise-webapi',
+  })
+  assert.equal(publicAcceptanceList.length, 1)
+  assert.equal(publicAcceptanceList[0].config.c6AcceptancePolicy, undefined,
+    'public list omits the private K3 acceptance policy')
   const adapterAcceptanceSystem = await acceptanceRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_k3_acceptance',

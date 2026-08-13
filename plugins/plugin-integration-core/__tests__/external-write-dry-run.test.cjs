@@ -954,6 +954,18 @@ async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
   )
   assert.equal(invalid.calls.test.length, 0, 'invalid persisted policy fails before target capability/network work')
 
+  const nonK3 = k3ExactTwoAcceptanceInput()
+  nonK3.input.targetSystem.kind = 'data-source:sql-write-gated'
+  nonK3.input.targetWriteProfile = {
+    ...nonK3.input.targetWriteProfile,
+    kind: 'data-source:sql-write-gated',
+  }
+  await assert.rejects(
+    () => dryRunExternalWrite(nonK3.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(nonK3.calls.test.length, 0, 'K3-only persisted policy fails closed on a non-K3 target')
+
   const { input, calls } = k3ExactTwoAcceptanceInput()
   const dryRun = await dryRunExternalWrite(input)
   delete input.targetSystem.config.acceptancePolicy
