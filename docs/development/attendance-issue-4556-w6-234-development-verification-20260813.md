@@ -97,8 +97,8 @@ not a paraphrase:
 | 2 | `7ee24fbfbaf4fddfe80178c29fb93acc0a63c5ec` | "the re-gate on 7ee24fbfba (code APPROVE, 0 P1/0 P2 ...)" (cited by `430107113c`) | P3: "FULL/EVERY" coverage claim still overclaimed — 14 of 22 raw stanzas pinned, 5 genuine positions drifted silently |
 | 3 | `430107113c75514c79f4e2b773c11bc27bbe6996` | "Gate NIT: the header understated coverage as 'pins 20 of 22 raw stanzas'..." (cited by `7a8d8b4c19`) | NIT: prose/comment count was off by one raw stanza (20→21); no test/behavior change |
 
-Final head `7a8d8b4c19f3e05a6624e0be9494e30b8bce708d` (= merge SHA
-`6700494a9a`'s tip) carries no further gate citation in this PR's own commit
+Final head `7a8d8b4c19f3e05a6624e0be9494e30b8bce708d` (identical tree to the
+squash merge `6700494a9a`) carries no further gate citation in this PR's own commit
 trail — consistent with the third round's finding being a NIT rather than a
 P1/P2 requiring a fourth round.
 
@@ -111,9 +111,10 @@ verdict. Per the coordinating session's own record, one independent gate round
 returned APPROVE for W6-3. **This claim is a process record, not an
 in-repo artifact**: this report did not find a grep-able commit-message or
 PR-comment trail for it, in contrast to W6-2's three self-documented rounds
-above (`gh pr view 4894 --json comments,reviews` returns zero GitHub PR
-review/comment records for either PR — the coordinating session's gates are
-run outside GitHub review objects). It is stated here as reported, not
+above (the only review object on either PR is a post-merge automated
+`chatgpt-codex-connector` bot comment on #4894 (`2026-08-13T15:29:53Z`); #4893
+carries zero, and neither PR holds a coordinating-session gate review/comment —
+those gates run outside GitHub review objects). It is stated here as reported, not
 independently reproduced.
 
 What *is* independently reproducible, and was reproduced fresh for this
@@ -141,7 +142,7 @@ account of it.
 | Requirement | Artifact | State |
 | --- | --- | --- |
 | §5.1 — one label chip per closed `SourceLabelV1` union, 1:1 bound, no free text | `apps/web/src/views/attendance/attendanceGroupEffectivePolicyLabels.ts` — `SOURCE_LABEL_TEXT: Record<AttendanceGroupEffectivePolicySourceLabelV1, ...>`; `attendanceGroupEffectivePolicyLabels.spec.ts` (39 cases, every union member of all 6 mirrored enums asserted to exact bilingual text) | PASS — re-run fresh: 39/39 (§5.1) |
-| §5.2 / OD-W6-7 — panel mounts inside the #4711 host, behind a default-OFF, **two-layer** gate; wildcard never matches | Master switch: `packages/core-backend/src/attendance/w6-group-effective-policy-panel-flag.ts` `isAttendanceGroupEffectivePolicyPanelMasterEnabled` (env `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED`, string `'true'` only). Org allowlist: `isOrgExactlyAllowlisted` (env `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ORGS`, exact-match split, `*` explicitly excluded — `'never treats a wildcard entry as a match'` case). Test: `packages/core-backend/tests/unit/attendance-w6-group-effective-policy-panel-flag.test.ts` | PASS — re-run fresh: 12/12 (§5.1) |
+| §5.2 / OD-W6-7 — panel mounts inside the #4711 host, behind a default-OFF, **two-layer** gate; wildcard never matches | Master switch: `packages/core-backend/src/attendance/w6-group-effective-policy-panel-flag.ts` `isAttendanceGroupEffectivePolicyPanelMasterEnabled` (env `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED`, `.trim().toLowerCase() === 'true'` — case-insensitive + whitespace-tolerant; only a truthy `'true'` enables, unset/anything-else ⇒ OFF). Org allowlist: `isOrgExactlyAllowlisted` (env `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ORGS`, exact-match split, `*` explicitly excluded — `'never treats a wildcard entry as a match'` case). Test: `packages/core-backend/tests/unit/attendance-w6-group-effective-policy-panel-flag.test.ts` | PASS — re-run fresh: 12/12 (§5.1) |
 | OD-W6-7 gate is load-bearing at the host, not just at the flag-predicate unit | `apps/web/tests/attendanceGroupContextHostEffectivePolicyGate.spec.ts` — `'gate OFF (default)'` asserts `[data-attendance-w6-effective-policy-panel]` is `null` and zero `/effective-policy` fetches | PASS — **mutation-proven fresh for this report**: forced `AttendanceGroupContextHost.vue`'s `showEffectivePolicyPanel` to `computed(() => true)` → the "gate OFF (default)" case reds (`expected <section ...> to be null`); restored via `cp` backup, `diff` clean, re-ran green (§5.5) |
 | Gate-OFF DOM/network behavior is byte-identical to pre-W6-3 | `apps/web/tests/attendanceGroupContextHost.spec.ts` — unmodified since PR #4729 (`git log --oneline -- <path>` shows no commit from the W6-3 merge), its exact `apiFetch`-call-count assertions still green with the panel mounted-but-gated | PASS, **scope-qualified**: DOM and network behavior of the attendance web surface are byte-identical gate-OFF. **Not** byte-identical: `buildFeaturePayload` in `packages/core-backend/src/routes/auth.ts` (~L310) now always emits one additional session-payload key, `attendanceGroupEffectivePolicyPanel: false` when the gate is OFF — read directly in this worktree. This is the same shape `approvalCanvasV2`/`approvalFwbWriteback` already introduced into the identical payload; no existing test asserts an exact `features` key set (`auth-login-routes`/`AuthService`/`auth-invite-routes`/`auth-runtime-config` re-run fresh in §5.1: 90/90, unaffected) |
 | §5.3 — every conflict row resolves through the existing #4711 builder or existing stage selector; no second navigation spelling | `attendanceGroupEffectivePolicyLabels.ts` — `group_context_route` resolves via the real, imported `buildAttendanceGroupRouteHref`; `group_stage` resolves to `ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO` (the existing groups-list section — a disclosed fidelity gap, not a second navigation spelling; see §6.2) | PASS, with a disclosed fidelity limitation (§6.2) — not a red-line violation: no caller-supplied section ID is minted |
