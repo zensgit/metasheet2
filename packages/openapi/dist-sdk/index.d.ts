@@ -6808,6 +6808,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/groups/{groupId}/effective-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Group effective-policy aggregate (values-free, read-only)
+         * @description W6 aggregate read model (design lock section 4). GET-only; org identity comes from the authenticated principal; a delegated attendance admin must also hold active membership in the target org. Unknown, cross-org, and inaccessible groups share one values-free 404 shape. The response never contains member lists, user IDs, punch values, or secrets (red line W6-R2).
+         */
+        get: operations["getAttendanceGroupEffectivePolicy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit-logs": {
         parameters: {
             query?: never;
@@ -16776,6 +16796,165 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        /**
+         * @description Closed source/effect label union (parent lock 5.1; OD-W6-3).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicySourceLabel: "effective" | "org_inherited" | "preview_only" | "needs_configuration" | "conflict_action_required";
+        /**
+         * @description Closed policy-domain union (OD-W6-4).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicyDomain: "basics" | "membership" | "schedule" | "segments" | "flex" | "rules" | "punch_method" | "request_posture";
+        /**
+         * @description Closed v1 conflict inventory (OD-W6-4).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicyConflictCode: "CALCULATION_GROUP_MEMBERSHIP_OVERLAP" | "FIXED_SCHEDULE_CONFIGURATION_CHANGED" | "FIXED_SCHEDULE_PENDING_APPLY" | "FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW" | "SCHEDULE_STRATEGY_INCOMPLETE" | "RULE_SOURCE_MISSING" | "TIMEZONE_MISSING";
+        /** @description Closed editor reference union (OD-W6-9). `group_context_route` reuses the #4711 closed route family; `group_stage` reuses the existing group-editor stage union. No caller-supplied section IDs (red line W6-R8). */
+        AttendanceGroupEffectivePolicyEditorRef: {
+            /** @enum {string} */
+            kind: "group_stage";
+            /** @enum {string} */
+            stage: "basics" | "people" | "schedule" | "policies";
+        } | {
+            /** @enum {string} */
+            kind: "group_context_route";
+            /** @enum {string} */
+            step: "schedule" | "calendar" | "rules";
+            /**
+             * @description Closed per-step table from the #4711 lock section 3.1: step=schedule allows shifts|assignments|advanced-scheduling; step=rules allows rule-sets; step=calendar allows none.
+             * @enum {string}
+             */
+            surface?: "shifts" | "assignments" | "advanced-scheduling" | "rule-sets";
+        };
+        AttendanceGroupEffectivePolicySourceRef: {
+            /**
+             * @description Closed configuration-source kinds (config IDs only, never user IDs).
+             * @enum {string}
+             */
+            kind: "shift" | "rule_set" | "fixed_schedule_config";
+            /** Format: uuid */
+            id: string;
+        };
+        /** @description Embedded verbatim from the existing FSER effectiveness service (single source, red line W6-R4). States, reason codes, coverage, and drift keys are the FSER lock's contract, unchanged; W6 adds no reason code and no second derivation. */
+        AttendanceGroupEffectivePolicyFixedSchedule: {
+            /** @enum {string} */
+            state: "not_configured" | "pending_apply" | "effective" | "configuration_changed";
+            reasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+            desired: {
+                /** Format: uuid */
+                shiftId: string;
+                /** Format: date */
+                startDate: string;
+                /** Format: date */
+                endDate: string | null;
+                revision: number;
+            } | null;
+            coverage: {
+                targetMembers: number;
+                matchingMembers: number;
+                missingMembers: number;
+                nonMemberTargets: number;
+                differentKeyRows: number;
+            };
+            drift: {
+                unconfiguredManagedRows: number;
+                unpublishedManagedRows: number;
+                /** @description Group-safe values only (FSER lock); never user IDs. */
+                managedSets: {
+                    /** Format: uuid */
+                    shiftId: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string | null;
+                    producerKey: string;
+                    rowCount: number;
+                }[];
+            };
+            /** Format: date-time */
+            evaluatedAt: string;
+        };
+        AttendanceGroupEffectivePolicyDomainSummary: {
+            label: components["schemas"]["AttendanceGroupEffectivePolicySourceLabel"];
+            /** @description Values-free reason codes; de-duplicated, contract order. */
+            reasonCodes: string[];
+            sourceRefs?: components["schemas"]["AttendanceGroupEffectivePolicySourceRef"][];
+            editorRef: components["schemas"]["AttendanceGroupEffectivePolicyEditorRef"];
+        };
+        AttendanceGroupEffectivePolicyConflict: {
+            code: components["schemas"]["AttendanceGroupEffectivePolicyConflictCode"];
+            domain: components["schemas"]["AttendanceGroupEffectivePolicyDomain"];
+            /** @enum {string} */
+            label: "conflict_action_required";
+            /** @description Count only; never user IDs (red line W6-R2). */
+            affectedUserCount?: number;
+            editorRef: components["schemas"]["AttendanceGroupEffectivePolicyEditorRef"];
+        };
+        AttendanceGroupEffectivePolicyResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                /** Format: uuid */
+                groupId: string;
+                /**
+                 * @description Existing CHECK-constrained group type union.
+                 * @enum {string}
+                 */
+                groupType: "fixed_shift" | "scheduled_shift" | "free_time";
+                /** @description IANA zone; null surfaces TIMEZONE_MISSING. */
+                timezone: string | null;
+                activeMemberCount: number;
+                managerPosture: {
+                    ownerCount: number;
+                    subOwnerCount: number;
+                };
+                /**
+                 * @description Read-only mirror of the org W4 rollout state.
+                 * @enum {string}
+                 */
+                calculationPosture: "legacy" | "shadow" | "eligible" | "authoritative" | "suspended";
+                domains: {
+                    membership: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"];
+                    schedule: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        strategy: "fixed_shift" | "scheduled_shift" | "free_time";
+                        fixedSchedule: components["schemas"]["AttendanceGroupEffectivePolicyFixedSchedule"] | null;
+                    };
+                    segments: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"];
+                    flex: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /**
+                         * @description W5 flex mode union (w5-flex-policy.ts), read-only.
+                         * @enum {string}
+                         */
+                        mode?: "strict" | "flex_required_duration";
+                    };
+                    rules: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        source: "org_default" | "group_rule_set";
+                    };
+                    punchMethod: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /**
+                         * @description OD-4556-9 keeps punch policy org-inherited in v1.
+                         * @enum {string}
+                         */
+                        source: "org_inherited";
+                    };
+                    requestPosture: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        overtime: "org_inherited";
+                        /** @enum {string} */
+                        makeupPunch: "org_inherited";
+                        /** @enum {string} */
+                        outdoor: "org_inherited";
+                    };
+                };
+                conflicts: components["schemas"]["AttendanceGroupEffectivePolicyConflict"][];
+                /** Format: date-time */
+                evaluatedAt: string;
+            };
+        };
     };
     responses: {
         /** @description Unauthorized - Missing or invalid JWT token */
@@ -17831,6 +18010,49 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getAttendanceGroupEffectivePolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Aggregate effective-policy read model */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttendanceGroupEffectivePolicyResponse"];
+                };
+            };
+            /** @description Typed validation failure. Any label/state/posture override input is rejected before aggregate SQL (red line W6-R7); malformed groupId is rejected after the transaction-bound authorization reads but before aggregate SQL. Enum-strict: unknown enum values are rejected, never defaulted (red line W6-R6). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated-but-unscoped principal or org-selector mismatch; issued before any aggregate SQL (red line W6-R3). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown, cross-org, or inaccessible group, including a delegated admin without active target-org membership; one shared values-free shape (red line W6-R3). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
 }

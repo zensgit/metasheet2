@@ -4617,3 +4617,52 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+
+  # --- W6-2 (#4556) group effective-policy aggregate ---
+  # Promoted from packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml
+  # per design-lock docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md §7.3.
+  # Verbatim content; do not hand-edit independently of the draft's governing document.
+  /api/attendance/groups/{groupId}/effective-policy:
+    get:
+      summary: Group effective-policy aggregate (values-free, read-only)
+      description: >
+        W6 aggregate read model (design lock section 4). GET-only; org identity
+        comes from the authenticated principal; a delegated attendance admin
+        must also hold active membership in the target org. Unknown,
+        cross-org, and inaccessible groups share one values-free 404 shape.
+        The response never contains member lists, user IDs, punch values, or
+        secrets (red line W6-R2).
+      operationId: getAttendanceGroupEffectivePolicy
+      tags: [attendance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Aggregate effective-policy read model
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceGroupEffectivePolicyResponse'
+        '400':
+          description: >
+            Typed validation failure. Any label/state/posture override input
+            is rejected before aggregate SQL (red line W6-R7); malformed
+            groupId is rejected after the transaction-bound authorization
+            reads but before aggregate SQL. Enum-strict: unknown enum values
+            are rejected, never defaulted (red line W6-R6).
+        '403':
+          description: >
+            Authenticated-but-unscoped principal or org-selector mismatch;
+            issued before any aggregate SQL (red line W6-R3).
+        '404':
+          description: >
+            Unknown, cross-org, or inaccessible group, including a delegated
+            admin without active target-org membership; one shared values-free
+            shape (red line W6-R3).
