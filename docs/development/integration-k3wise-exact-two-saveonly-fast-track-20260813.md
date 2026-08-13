@@ -10,6 +10,7 @@
 
 - 来源必须完整且未截断；
 - 必须精确读取并计划两行；
+- 两行的 K3 `FNumber`（trim + 大小写归一化后）必须互不相同；
 - 两行必须全部判定为 `add`；
 - `update`、`skip`、`held`、`failed` 必须全部为零；
 - K3 目标仍使用既有 Save-only profile；
@@ -28,8 +29,8 @@
 }
 ```
 
-该字段不会出现在 public create/get/list 回执中，普通 public config 更新在未提及它时会保留原值，且普通
-dry-run / Apply 请求不能注入或覆盖它。策略只有一个允许字段，行数和操作模式不能由请求调整。它不会启用 Apply、不会覆盖部署级
+该字段不会出现在 public create/get/list 回执中，普通 public config 更新在未提及它时会保留原值；任何设置或显式清空
+`c6AcceptancePolicy` 的请求都必须具备 `integration:admin`，且普通 dry-run / Apply 请求不能注入或覆盖它。策略只有一个允许字段，行数和操作模式不能由请求调整。它不会启用 Apply、不会覆盖部署级
 `INTEGRATION_C6_WRITE_APPLY_DISABLED`，也不会授予任何权限；它只会收紧 token 签发条件。
 
 SQL read-only 的 equality filter 与 lookup projection 继续使用已合并的服务端持久配置。lookup 对象、关联键、
@@ -89,4 +90,4 @@ realK3Calls=0
 entityServerMutations=0
 ```
 
-负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、策略在 token 后漂移，以及浏览器不渲染私密证据字段。
+负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、重复 `FNumber`、普通写入用户设置/清空私密策略、策略在 token 后漂移，以及浏览器不渲染私密证据字段。

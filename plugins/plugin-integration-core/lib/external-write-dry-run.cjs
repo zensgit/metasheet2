@@ -488,6 +488,22 @@ function keyFromRecord(record, keyFields) {
   return { key, missing }
 }
 
+function targetKeyIdentity(targetConfig, key) {
+  const canonicalKey = {}
+  for (const field of targetConfig.keyFields) {
+    let value = key[field]
+    if (
+      targetConfig.kind === K3_WISE_TARGET_KIND &&
+      field === 'FNumber' &&
+      typeof value === 'string'
+    ) {
+      value = value.trim().toLocaleLowerCase('en-US')
+    }
+    canonicalKey[field] = value
+  }
+  return hashJson(canonicalKey)
+}
+
 function writableDataFromRecord(record, writableFields) {
   const data = {}
   for (const field of writableFields) {
@@ -721,6 +737,7 @@ async function computeExternalWritePlan(input = {}) {
     writableFields: targetConfig.writableFields,
   }
 
+  const seenTargetKeyIdentities = new Set()
   for (const sourceRecord of sourceRead.records) {
     const transformed = transformRecord(sourceRecord, pipeline.fieldMappings || [])
     if (!transformed.ok) {
@@ -744,6 +761,26 @@ async function computeExternalWritePlan(input = {}) {
       continue
     }
 
+    const keyFingerprint = targetKeyIdentity(targetConfig, key)
+    if (seenTargetKeyIdentities.has(keyFingerprint)) {
+      counts.held += 1
+      counts.planned += 1
+      rowErrorTypes.push('duplicate_target_key')
+      planRows.push({
+        decision: 'held',
+        key,
+        keyFingerprint,
+        row: writeRowFromRecord(transformed.value, targetConfig),
+      })
+      rowFingerprints.push({
+        status: 'held',
+        reason: 'duplicate_target_key',
+        key: keyFingerprint,
+      })
+      continue
+    }
+    seenTargetKeyIdentities.add(keyFingerprint)
+
     const lookup = await dataSourceWrites.lookupByKey(
       targetConfig.dataSourceId,
       targetConfig.object,
@@ -764,12 +801,12 @@ async function computeExternalWritePlan(input = {}) {
     planRows.push({
       decision,
       key,
-      keyFingerprint: hashJson(key),
+      keyFingerprint,
       row: writeRow,
     })
     rowFingerprints.push({
       status: decision,
-      key: hashJson(key),
+      key: keyFingerprint,
       target: hashJson({
         key,
         data: writableDataFromRecord(transformed.value, targetConfig.writableFields),
@@ -1103,6 +1140,7 @@ module.exports = {
     normalizeTargetConfig,
     normalizeTestFailureInjectionConfig,
     normalizeServerBoundSqlEqualityFilters,
+    targetKeyIdentity,
     valuesEqual,
   },
 }

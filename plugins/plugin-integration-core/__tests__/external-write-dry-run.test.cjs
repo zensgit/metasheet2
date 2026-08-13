@@ -781,6 +781,7 @@ async function testAmbiguousTargetKeyHoldsAndDoesNotIssueToken() {
 
 async function testTruncatedSourceReadDoesNotIssueToken() {
   const { input } = baseInput({
+    input: { maxRows: 1 },
     sourceRead: () => ({ records: [{ code: 'P-001', name: 'Widget', status: 'new' }], done: false, nextCursor: 'next-page' }),
   })
   const result = await dryRunExternalWrite(input)
@@ -923,6 +924,46 @@ async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
   assert.equal(calls.updateRows.length, 0)
   assert.equal(apply.evidence.acceptancePolicy.ready, true)
   assert.equal(apply.evidence.acceptancePolicy.cleanupRequired, true)
+}
+
+async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    sourceRows: [
+      { code: ' MAT-001 ', name: 'Widget', status: 'new' },
+      { code: 'mat-001', name: 'Gadget', status: 'old' },
+    ],
+  })
+  input.pipeline.fieldMappings = input.pipeline.fieldMappings.map((mapping) => (
+    mapping.targetField === 'externalId'
+      ? { ...mapping, targetField: 'FNumber' }
+      : mapping
+  ))
+  input.targetSystem.config.keyFields = ['FNumber']
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null)
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.held, 1)
+  assert.equal(dryRun.evidence.acceptancePolicy.ready, false)
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('duplicate_target_key'))
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+  assert.equal(calls.lookupByKey.length, 1, 'the duplicate key is refused before a second target lookup')
+  assert.equal(input.tokenStore.map.size, 0, 'a duplicate target key never mints an Apply token')
+
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_REQUIRED',
+  )
+  assert.equal(calls.insertRows.length, 0, 'the duplicate-key plan cannot reach K3 Save')
+  assert.equal(calls.updateRows.length, 0)
 }
 
 async function testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality() {
@@ -1084,6 +1125,7 @@ async function main() {
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
   await testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan()
+  await testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply()
   await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
   await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()

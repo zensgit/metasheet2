@@ -147,6 +147,7 @@ const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
 ])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
+const { hasPrivateConfigMutation } = require('./external-systems.cjs')
 const { createRunLogger } = require('./run-log.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
@@ -2766,7 +2767,11 @@ function createHandlers(services, options = {}) {
 
     async externalSystemsUpsert(req, res) {
       requireAccess(req, 'write')
-      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, requestBody(req))), 201)
+      const body = requestBody(req)
+      if (hasPrivateConfigMutation(body.kind, body.config)) {
+        requireAccess(req, 'admin')
+      }
+      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
     },
 
     async externalSystemsGet(req, res) {

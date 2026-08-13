@@ -208,6 +208,14 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null
 }
 
+function hasPrivateConfigMutation(kind, config) {
+  if (!isPlainObject(config)) return false
+  const normalizedKind = typeof kind === 'string' ? kind.trim() : kind
+  const privateKeys = PRIVATE_CONFIG_KEYS_BY_KIND.get(normalizedKind)
+  if (!privateKeys) return false
+  return Array.from(privateKeys).some((key) => Object.prototype.hasOwnProperty.call(config, key))
+}
+
 function preservePrivateConfigOnPublicUpdate(kind, existingConfig, nextConfig) {
   const privateKeys = PRIVATE_CONFIG_KEYS_BY_KIND.get(kind)
   if (!privateKeys || !isPlainObject(existingConfig) || !isPlainObject(nextConfig)) {
@@ -566,6 +574,7 @@ module.exports = {
   ExternalSystemValidationError,
   ExternalSystemNotFoundError,
   ExternalSystemConflictError,
+  hasPrivateConfigMutation,
   __internals: {
     TABLE,
     VALID_ROLES,

@@ -673,6 +673,61 @@ async function testExternalSystemRoutes() {
     'external systems delete route registered',
   )
 
+  const privateConfigFixture = createMockServices()
+  const { routes: privateConfigRoutes } = mountRoutes(privateConfigFixture.services)
+  const privateConfigBodies = [
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } },
+    },
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+    {
+      id: 'sys_sql_private',
+      name: 'SQL private projection',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { lookupProjection: {} },
+    },
+    {
+      id: 'sys_k3_private_padded_kind',
+      name: 'K3 padded kind private policy',
+      kind: ' erp:k3-wise-webapi ',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+  ]
+  for (const body of privateConfigBodies) {
+    const blocked = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+      user: WRITE_USER,
+      body,
+    })
+    assertErrorResponse(blocked, [403])
+  }
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    0,
+    'integration:write cannot set or clear any private external-system config',
+  )
+  const adminPrivateUpdate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: privateConfigBodies[0],
+  })
+  assertOkResponse(adminPrivateUpdate, 201)
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    1,
+    'integration:admin can persist the trusted private config',
+  )
+
   let res = await invoke(routes, 'GET', '/api/integration/external-systems', {
     user: READ_USER,
     query: {
