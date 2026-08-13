@@ -7,12 +7,30 @@
  *   are proven equal by one mechanical comparison test (no hand-copied
  *   second list)."
  *
- * §7.3 bullet 2 says EVERY published closed enum, not just a sample. This
- * file covers the FULL closed-enum inventory of the promoted W6 group
- * effective-policy contract: SourceLabel, Domain, ConflictCode (the
- * original three), plus SourceRef.kind, FSER state, FSER reasonCodes,
- * editorRef stage/step/surface, calculationPosture, groupType, flex mode,
- * rules source, and conflicts[].label.
+ * §7.3 bullet 2 says EVERY published closed enum, not just a sample. The
+ * promoted schema block declares 22 raw `enum:` stanzas. This file pins 20
+ * of them, counted as 21 logical positions (`editorRef.kind`'s two
+ * one-value oneOf-branch stanzas — `[group_stage]` and
+ * `[group_context_route]` — are one logical two-value union, tested as one
+ * case, not two): the original three (SourceLabel, Domain, ConflictCode),
+ * SourceRef.kind, FSER state, FSER reasonCodes, editorRef
+ * kind/stage/step/surface, calculationPosture, groupType,
+ * `domains.schedule.strategy` (a SEPARATE runtime-checked position that
+ * happens to share the same value domain as `groupType`, not an alias for
+ * it), flex mode, rules source, conflicts[].label, `domains.punchMethod.source`,
+ * and all three `domains.requestPosture.{overtime,makeupPunch,outdoor}`
+ * fields.
+ *
+ * The ONE deliberate exclusion: the envelope's `ok: { type: boolean, enum:
+ * [true] }`. Unlike every field above, this is not a business value domain
+ * with alternatives an org or a user could be in — it is the boolean
+ * success/failure discriminator of the JSON envelope itself (this schema
+ * only describes the success shape; failures are separate 400/403/404
+ * responses, not `ok: false` bodies), the same structural tag every other
+ * MetaSheet response envelope in this OpenAPI file uses. It has no
+ * "TS contract" or "runtime enum" analogue to compare against beyond the
+ * single `envelope.ok !== true` check, which is a type/shape guard, not an
+ * enum-drift-prone value set.
  *
  * Three independent sources are read for real, never retyped by hand:
  *   1. OpenAPI — the promoted `packages/openapi/src/base.yml`. Read via
@@ -20,11 +38,16 @@
  *      js-yaml dependency), never a fixed top-level-only window: several of
  *      these enums are nested several levels deep, and some field NAMES
  *      collide elsewhere in the same schema with a DIFFERENT enum (e.g.
- *      `domains.rules.source` vs `domains.punchMethod.source`) — a window
- *      that isn't scoped through every intermediate key could silently
- *      extract the wrong sibling's enum and produce a false-passing test.
- *      `narrow()` below always descends schema -> ... -> field, so a
- *      same-named field elsewhere in the document is never in scope.
+ *      `domains.rules.source` vs `domains.punchMethod.source`; `groupType`
+ *      vs `domains.schedule.strategy`) — a window that isn't scoped through
+ *      every intermediate key could silently extract the wrong sibling's
+ *      enum and produce a false-passing test. `narrow()` below always
+ *      descends schema -> ... -> field, so a same-named field elsewhere in
+ *      the document is never in scope. `editorRef.kind` additionally needs
+ *      `narrowAll()`: its two legal values are declared as two SEPARATE
+ *      single-value stanzas (one per `oneOf` branch), so reading only the
+ *      first occurrence would silently drop the second branch's value —
+ *      `getOpenApiEnumUnion()` collects every occurrence and unions them.
  *   2. TS contract — either the frozen arrays exported by
  *      `w6-group-effective-policy-contract.ts` (SourceLabel, Domain,
  *      ConflictCode, SourceRef.kind, FSER reasonCodes — the last is itself
@@ -34,14 +57,28 @@
  *      flex mode, rules source, FSER state, editorRef stage) — the
  *      corresponding array in `w6-group-effective-policy-response-contract.ts`,
  *      exported by this PR for direct import instead of being hand-copied
- *      into this file. `editorRef.step`/`editorRef.surface` are derived
- *      mechanically from the already-exported `SCHEDULE_ROUTE_SURFACES`
- *      object (`Object.keys` / flattened `Object.values`), never retyped.
- *      `conflicts[].label` has no array anywhere (a single-value literal
- *      type, `'conflict_action_required'`, checked in the validator by
- *      direct `!==`) — per the "no distinct array to compare against" case,
- *      that one case is OpenAPI-vs-runtime only (2-way), documented as such
- *      inline, not padded out with a fabricated third leg.
+ *      into this file. `domains.schedule.strategy` reuses the same
+ *      `GROUP_TYPES` array `groupType` does (both positions are validated
+ *      against the identical set in the real validator — see
+ *      `w6-group-effective-policy-response-contract.ts`), but is still its
+ *      OWN case here because it is a distinct OpenAPI/runtime POSITION: a
+ *      drift only in the `domains.schedule.strategy` YAML stanza, or only
+ *      in the runtime check at that specific call site, would not be caught
+ *      by the `groupType` case, which never touches that field.
+ *      `editorRef.step`/`editorRef.surface` are derived mechanically from
+ *      the already-exported `SCHEDULE_ROUTE_SURFACES` object (`Object.keys`
+ *      / flattened `Object.values`), never retyped. `conflicts[].label`,
+ *      `editorRef.kind`, `domains.punchMethod.source`, and the three
+ *      `domains.requestPosture.*` fields have no array anywhere — each is a
+ *      literal type (`conflicts[].label`/`punchMethod.source`/
+ *      `requestPosture.*` are single fixed strings; `editorRef.kind` is a
+ *      two-value discriminator with no reusable union array, only inline
+ *      `'group_stage' | 'group_context_route'` in the contract type),
+ *      checked in the validator by direct `===`/`!==`/`.includes()` against
+ *      a value with no declared-array counterpart. Per "no distinct array
+ *      to compare against", these six cases are OpenAPI-vs-runtime only
+ *      (2-way), documented as such inline, not padded out with a
+ *      fabricated third leg.
  *   3. Runtime service — NOT a second import of (2) under a different name.
  *      Every case probes the production response validator
  *      (`validateAttendanceGroupEffectivePolicyResponseV1`, the exact
@@ -113,12 +150,14 @@ function narrow(window: string, key: string): string {
   return rest.slice(0, end)
 }
 
-/** Extracts an `enum:` list (inline `[a, b]` or block `- a\n  - b` form)
- * from an already-narrowed window. Throws rather than returning an empty
- * array on a miss, so a broken extraction cannot silently pass as "the
- * empty set equals the empty set". */
+/** Extracts an `enum:` list (inline `[a, b]` form — either on its own line
+ * or embedded in a flow-style mapping like `{ type: string, enum: [a, b] }`,
+ * used by the single-value `requestPosture.*` fields — or block `- a\n  - b`
+ * form) from an already-narrowed window. Throws rather than returning an
+ * empty array on a miss, so a broken extraction cannot silently pass as
+ * "the empty set equals the empty set". */
 function extractEnum(window: string): string[] {
-  const inline = /^[ \t]*enum:[ \t]*\[([^\]]*)\][ \t]*$/m.exec(window)
+  const inline = /enum:[ \t]*\[([^\]]*)\]/.exec(window)
   if (inline) {
     const values = inline[1]
       .split(',')
@@ -151,6 +190,35 @@ function getOpenApiEnum(yamlText: string, schemaName: string, path: readonly str
   let window = narrow(yamlText, schemaName)
   for (const key of path) window = narrow(window, key)
   return extractEnum(window)
+}
+
+/** Like `narrow()`, but returns EVERY occurrence of `<key>:` in `window`
+ * (each one's own bounded sub-block), not just the first. Needed for
+ * `editorRef.kind`: its two legal values are declared as two separate
+ * single-value `enum:` stanzas, one per `oneOf` branch — a plain `narrow()`
+ * would silently see only the first and miss the second. */
+function narrowAll(window: string, key: string): string[] {
+  const results: string[] = []
+  let remaining = window
+  while (true) {
+    const re = new RegExp(`\\n( *)${key}:(?=[ \\t\\n]|$)`)
+    const m = re.exec(remaining)
+    if (!m) break
+    const sub = narrow(remaining, key)
+    results.push(sub)
+    remaining = remaining.slice(m.index + 1 + sub.length)
+  }
+  if (results.length === 0) throw new Error(`narrowAll: key not found — ${key}`)
+  return results
+}
+
+/** Unions the `enum:` values across every occurrence of `<key>` under a
+ * schema — the multi-occurrence counterpart of `getOpenApiEnum`, used only
+ * for `editorRef.kind`. */
+function getOpenApiEnumUnion(yamlText: string, schemaName: string, key: string): string[] {
+  const schemaWindow = narrow(yamlText, schemaName)
+  const occurrences = narrowAll(schemaWindow, key)
+  return [...new Set(occurrences.flatMap((w) => extractEnum(w)))]
 }
 
 /** A minimally-shaped, fully closed-shape valid response (matches the
@@ -274,6 +342,11 @@ describe('W6-2 enum parity: OpenAPI base.yml <-> TS contract <-> runtime validat
     contractValues: readonly string[]
     probe: (candidate: string) => ResponseT
     twoWayOnly?: true
+    /** Override for the OpenAPI extraction — only `editorRef.kind` needs
+     * this (union across two separate oneOf-branch stanzas via
+     * `getOpenApiEnumUnion`); every other case uses the default
+     * `getOpenApiEnum(yamlText, schemaName, path)` sequential narrow. */
+    getOpenApiValues?: (yamlText: string) => string[]
   }
 
   const CASES: readonly Case[] = [
@@ -410,6 +483,25 @@ describe('W6-2 enum parity: OpenAPI base.yml <-> TS contract <-> runtime validat
       },
     },
     {
+      // Same value domain and same TS array as `groupType` above, but a
+      // DISTINCT OpenAPI stanza (`domains.schedule.strategy`, not
+      // `data.groupType`) and a DISTINCT runtime call site
+      // (`GROUP_TYPES.includes(scheduleValue.strategy...)` vs
+      // `GROUP_TYPES.includes(d.groupType...)`). The `groupType` case never
+      // touches `strategy`, so a drift confined to this position alone
+      // (either the YAML stanza or this specific runtime check) would go
+      // unnoticed without a dedicated case — this is that case.
+      enumName: 'domains.schedule.strategy',
+      schemaName: 'AttendanceGroupEffectivePolicyResponse',
+      path: ['domains', 'schedule', 'strategy'],
+      contractValues: GROUP_TYPES,
+      probe: (candidate) => {
+        const response = buildBaseResponse()
+        response.data.domains.schedule.strategy = candidate
+        return response
+      },
+    },
+    {
       enumName: 'domains.flex.mode',
       schemaName: 'AttendanceGroupEffectivePolicyResponse',
       path: ['domains', 'flex', 'mode'],
@@ -450,11 +542,88 @@ describe('W6-2 enum parity: OpenAPI base.yml <-> TS contract <-> runtime validat
         return response
       },
     },
+    {
+      enumName: 'domains.punchMethod.source',
+      schemaName: 'AttendanceGroupEffectivePolicyResponse',
+      path: ['domains', 'punchMethod', 'source'],
+      // Single fixed value in v1 (OD-4556-9), checked in the validator by
+      // direct `!==` — no array anywhere to import, same shape as
+      // `conflicts[].label` above.
+      contractValues: ['org_inherited'],
+      twoWayOnly: true,
+      probe: (candidate) => {
+        const response = buildBaseResponse()
+        response.data.domains.punchMethod.source = candidate
+        return response
+      },
+    },
+    {
+      enumName: 'domains.requestPosture.overtime',
+      schemaName: 'AttendanceGroupEffectivePolicyResponse',
+      path: ['domains', 'requestPosture', 'overtime'],
+      contractValues: ['org_inherited'],
+      twoWayOnly: true,
+      probe: (candidate) => {
+        const response = buildBaseResponse()
+        response.data.domains.requestPosture.overtime = candidate
+        return response
+      },
+    },
+    {
+      enumName: 'domains.requestPosture.makeupPunch',
+      schemaName: 'AttendanceGroupEffectivePolicyResponse',
+      path: ['domains', 'requestPosture', 'makeupPunch'],
+      contractValues: ['org_inherited'],
+      twoWayOnly: true,
+      probe: (candidate) => {
+        const response = buildBaseResponse()
+        response.data.domains.requestPosture.makeupPunch = candidate
+        return response
+      },
+    },
+    {
+      enumName: 'domains.requestPosture.outdoor',
+      schemaName: 'AttendanceGroupEffectivePolicyResponse',
+      path: ['domains', 'requestPosture', 'outdoor'],
+      contractValues: ['org_inherited'],
+      twoWayOnly: true,
+      probe: (candidate) => {
+        const response = buildBaseResponse()
+        response.data.domains.requestPosture.outdoor = candidate
+        return response
+      },
+    },
+    {
+      // The discriminator of the EditorRef `oneOf` union. Declared as two
+      // SEPARATE single-value stanzas in OpenAPI (one per branch) — see
+      // `getOpenApiEnumUnion` — and checked in the parser by two literal
+      // `===` comparisons, with no reusable array on either side. Like
+      // `punchMethod.source`, this is genuinely pinnable with the same
+      // 2-way construction already used elsewhere in this file, so it is
+      // pinned rather than left out as "structural": unlike the envelope's
+      // `ok: [true]` (excluded — see the file header), `kind` is a real
+      // business discriminator (which downstream UI navigation shape
+      // applies), not a fixed protocol tag.
+      enumName: 'EditorRef.kind (discriminator, union of both oneOf branches)',
+      schemaName: 'AttendanceGroupEffectivePolicyEditorRef',
+      path: ['kind'],
+      contractValues: ['group_stage', 'group_context_route'],
+      twoWayOnly: true,
+      getOpenApiValues: (yamlText) => getOpenApiEnumUnion(yamlText, 'AttendanceGroupEffectivePolicyEditorRef', 'kind'),
+      probe: (candidate) => {
+        const asGroupStage = buildBaseResponse()
+        asGroupStage.data.domains.membership.editorRef = { kind: candidate, stage: 'people' }
+        if (validateAttendanceGroupEffectivePolicyResponseV1(asGroupStage).ok) return asGroupStage
+        const asContextRoute = buildBaseResponse()
+        asContextRoute.data.domains.membership.editorRef = { kind: candidate, step: 'schedule' }
+        return asContextRoute
+      },
+    },
   ] as const
 
-  for (const { enumName, schemaName, path, contractValues, probe, twoWayOnly } of CASES) {
+  for (const { enumName, schemaName, path, contractValues, probe, twoWayOnly, getOpenApiValues } of CASES) {
     describe(`${enumName} (OpenAPI components.schemas.${schemaName}${path.length ? '.' + path.join('.') : ''})`, () => {
-      const openapiValues = getOpenApiEnum(yamlText, schemaName, path)
+      const openapiValues = getOpenApiValues ? getOpenApiValues(yamlText) : getOpenApiEnum(yamlText, schemaName, path)
       const contractSet = [...contractValues].sort()
       const openapiSet = [...openapiValues].sort()
 
