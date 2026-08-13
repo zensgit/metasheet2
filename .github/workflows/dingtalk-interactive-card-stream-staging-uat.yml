@@ -1,0 +1,353 @@
+name: DingTalk Interactive Card Stream Staging UAT
+
+run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
+
+# Staging-only MINIMAL controlled ops lane for DingTalk interactive-card Stream UAT.
+# One dispatch = ONE action. Stream stays OFF except explicit action=on.
+# Lifecycle flags are NEVER written by this lane.
+#
+# EXECUTABLE: status | prepare | on | off
+#   status  = read-only values-free snapshot (booleans / counts / reason classes)
+#   prepare = transport Stream credentials (chmod-600 files), derive exactly one
+#             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
+#             atomically write the four credential/id env keys into
+#             docker/app.staging.env while FORCING Stream flag false, validate,
+#             restart backend only if needed
+#   on      = recheck prerequisites + LOG_LEVEL info/debug, flip ONLY Stream flag
+#             true, restart backend, prove worker_started only (values-free).
+#             Does NOT prove SDK connected (connect resolves + retries forever);
+#             stream_connected stays unknown until real callback UAT.
+#   off     = fail-safe Stream flag false + backend restart + worker stop proof
+#
+# Exact deployed FULL 40-char lowercase SHA required for prepare/on/off.
+# Secrets (prepare only): STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID /
+#   _CLIENT_SECRET / _TEMPLATE_ID — demoted + file transport; never argv/env
+#   persistence beyond the materialize window. Integration id is derived on host.
+#
+# Does NOT implement human U1–U13 clicks. U12/U13 (connect/callback + flag-off
+# human proofs) remain human-gated after action=on; this lane never claims connected.
+#
+# STAGING ONLY + shared concurrency with attendance-staging-window-runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'status (read-only) | prepare (creds + force Stream OFF) | on (Stream ON) | off (fail-safe Stream OFF)'
+        required: true
+        type: choice
+        # Quote 'on'/'off' — YAML 1.1 bare on/off become booleans.
+        options: [status, prepare, 'on', 'off']
+        default: status
+      deploy_sha:
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for prepare/on/off; optional for status exact-match reporting.'
+        required: false
+        default: ''
+
+# Share the attendance staging runner concurrency group so compose/env races
+# cannot interleave on the same staging stack.
+concurrency:
+  group: attendance-staging-window-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs and embedded scripts
+        env:
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          # Intentionally NO Stream secrets here — presence is checked only in
+          # Run remote action after demoting env → non-exported shell vars + unset
+          # (bash -n and other children must not inherit raw secret env).
+        run: |
+          set -euo pipefail
+          case "$ACTION" in status|prepare|on|off) ;; *)
+            echo "invalid action: $ACTION" >&2; exit 2
+          ;; esac
+
+          # prepare/on/off require exact full SHA.
+          if [[ "$ACTION" == "prepare" || "$ACTION" == "on" || "$ACTION" == "off" ]]; then
+            if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=${ACTION}, got: '$DEPLOY_SHA'" >&2
+              exit 2
+            fi
+          fi
+
+          if [[ -n "$DEPLOY_SHA" && ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "deploy_sha must be empty or the FULL 40-char lowercase commit SHA, got: '$DEPLOY_SHA'" >&2
+            exit 2
+          fi
+
+          bash -n scripts/ops/dingtalk-interactive-card-stream-staging-uat-remote.sh
+          echo "inputs and embedded scripts OK"
+
+      - name: Run pipeline self-test (contract suite)
+        run: node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
+
+      - name: Sync runner scripts to deploy host
+        id: sync
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          runner_dir="/tmp/dingtalk-stream-uat-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          tar -czf - \
+            scripts/ops/dingtalk-interactive-card-stream-staging-uat-remote.sh \
+          | ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null \
+              -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
+
+      - name: Run remote action
+        id: remote
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          STAGING_DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || 'metasheet2-dingtalk-staging' }}
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
+          # prepare secrets are materialized INSIDE this step under EXIT trap —
+          # never via a prior step secrets_dir output (cross-step leak / cancel).
+          # status/on/off do not receive credential secrets.
+          STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID || '' }}
+          STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET || '' }}
+          STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID || '' }}
+        run: |
+          set -euo pipefail
+          # --- SECRET DEMOTE (builtins only; no external child before unset) -------------
+          # GHA injects secrets as exported env for this step. Copy into non-exported
+          # shell variables, then unset the exported names so mktemp/ssh/scp/bash -n
+          # children never inherit raw secret env. Presence checks + printf use the
+          # shell vars only; those are unset immediately after materialize writes.
+          _STREAM_CLIENT_ID="${STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID-}"
+          _STREAM_CLIENT_SECRET="${STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET-}"
+          _STREAM_TEMPLATE_ID="${STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID-}"
+          unset STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID
+          # --- end secret demote; external commands allowed after this point ------------
+
+          ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
+            value="${pair#*=}"
+            if [[ ! "$value" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
+              echo "refusing unsafe characters in ${pair%%=*}: '$value'" >&2
+              exit 2
+            fi
+          done
+          remote_output_dir="/tmp/dingtalk-stream-uat-out-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="dingtalk-interactive-card-stream-staging-uat-${ACTION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          mkdir -p output/stream-uat
+
+          # Per-run cleanup targets only. NEVER touch persistent ~/.metasheet2 overrides.
+          CLEAN_LOCAL_SECRETS_DIR=""
+          CLEAN_REMOTE_SECRETS_DIR=""
+          CLEAN_REMOTE_RUNNER_DIR="${RUNNER_DIR}"
+          CLEAN_REMOTE_OUTPUT_DIR="${remote_output_dir}"
+          # OUTPUT_COLLECTED gates whether trap may remove remote_output_dir before scp.
+          OUTPUT_COLLECTED=0
+
+          cleanup_stream_uat_ephemeral_paths() {
+            # Wipe local secret temp dir + per-run remote dirs.
+            # Does not delete persistent stream-uat backups / lifecycle overrides.
+            set +e
+            if [[ -n "${CLEAN_LOCAL_SECRETS_DIR:-}" && -d "${CLEAN_LOCAL_SECRETS_DIR}" ]]; then
+              rm -rf "${CLEAN_LOCAL_SECRETS_DIR}"
+            fi
+            if [[ -n "${DEPLOY_USER:-}" && -n "${DEPLOY_HOST:-}" ]]; then
+              remote_rm=""
+              if [[ -n "${CLEAN_REMOTE_SECRETS_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_SECRETS_DIR}"
+              fi
+              if [[ -n "${CLEAN_REMOTE_RUNNER_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_RUNNER_DIR}"
+              fi
+              if [[ "${OUTPUT_COLLECTED}" == "1" && -n "${CLEAN_REMOTE_OUTPUT_DIR:-}" ]]; then
+                remote_rm="${remote_rm} ${CLEAN_REMOTE_OUTPUT_DIR}"
+              fi
+              if [[ -n "${remote_rm// /}" ]]; then
+                # shellcheck disable=SC2086
+                ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+                  "bash -o pipefail -c 'rm -rf ${remote_rm}'" >/dev/null 2>&1
+              fi
+            fi
+            set -e
+          }
+
+          exit_after_stream_uat_cleanup() {
+            local signal_rc="$1"
+            trap - EXIT HUP INT TERM
+            cleanup_stream_uat_ephemeral_paths
+            exit "$signal_rc"
+          }
+
+          trap cleanup_stream_uat_ephemeral_paths EXIT
+          trap 'exit_after_stream_uat_cleanup 129' HUP
+          trap 'exit_after_stream_uat_cleanup 130' INT
+          trap 'exit_after_stream_uat_cleanup 143' TERM
+
+          remote_secrets_dir=""
+          stream_client_id_export=""
+          stream_client_secret_export=""
+          stream_template_id_export=""
+          if [[ "$ACTION" == "prepare" ]]; then
+            # Traps are installed before any secret materialization (mktemp/write/chmod).
+            if [[ -z "${_STREAM_CLIENT_ID}" || -z "${_STREAM_CLIENT_SECRET}" || -z "${_STREAM_TEMPLATE_ID}" ]]; then
+              echo "prepare requires STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID/CLIENT_SECRET/TEMPLATE_ID (checked in Run remote action only); never log secret" >&2
+              unset _STREAM_CLIENT_ID _STREAM_CLIENT_SECRET _STREAM_TEMPLATE_ID
+              exit 2
+            fi
+            secrets_dir="$(mktemp -d "${RUNNER_TEMP}/stream-uat-secrets.XXXXXX")"
+            CLEAN_LOCAL_SECRETS_DIR="${secrets_dir}"
+            chmod 700 "$secrets_dir"
+            umask 077
+            # Exact secret bytes from non-exported shell vars — printf '%s' preserves payload.
+            printf '%s' "${_STREAM_CLIENT_ID}" > "${secrets_dir}/client.id"
+            printf '%s' "${_STREAM_CLIENT_SECRET}" > "${secrets_dir}/client.secret"
+            printf '%s' "${_STREAM_TEMPLATE_ID}" > "${secrets_dir}/template.id"
+            # Drop shell-held secret values as soon as files are written.
+            unset _STREAM_CLIENT_ID _STREAM_CLIENT_SECRET _STREAM_TEMPLATE_ID
+            chmod 600 "${secrets_dir}/client.id" "${secrets_dir}/client.secret" "${secrets_dir}/template.id"
+            for f in client.id client.secret template.id; do
+              [[ -s "${secrets_dir}/${f}" ]] || { echo "secret file empty after materialize: ${f}" >&2; exit 2; }
+            done
+            remote_secrets_dir="${RUNNER_DIR}/.stream-uat-secrets"
+            CLEAN_REMOTE_SECRETS_DIR="${remote_secrets_dir}"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; mkdir -p ${remote_secrets_dir}; chmod 700 ${remote_secrets_dir}'"
+            scp $ssh_opts \
+              "${secrets_dir}/client.id" \
+              "${secrets_dir}/client.secret" \
+              "${secrets_dir}/template.id" \
+              "$DEPLOY_USER@$DEPLOY_HOST:${remote_secrets_dir}/"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/client.id ${remote_secrets_dir}/client.secret ${remote_secrets_dir}/template.id'"
+            stream_client_id_export="export STREAM_CLIENT_ID_FILE='${remote_secrets_dir}/client.id'"
+            stream_client_secret_export="export STREAM_CLIENT_SECRET_FILE='${remote_secrets_dir}/client.secret'"
+            stream_template_id_export="export STREAM_TEMPLATE_ID_FILE='${remote_secrets_dir}/template.id'"
+          else
+            unset _STREAM_CLIENT_ID _STREAM_CLIENT_SECRET _STREAM_TEMPLATE_ID
+          fi
+
+          remote_script="set -euo pipefail
+          export ACTION='${ACTION}'
+          export DEPLOY_SHA='${DEPLOY_SHA}'
+          export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
+          export DEPLOY_PATH='${DEPLOY_PATH}'
+          export OUTPUT_DIR='${remote_output_dir}'
+          export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
+          ${stream_client_id_export}
+          ${stream_client_secret_export}
+          ${stream_template_id_export}
+          rm -rf '${remote_output_dir}'
+          mkdir -p '${remote_output_dir}'
+          set +e
+          bash '${RUNNER_DIR}/dingtalk-interactive-card-stream-staging-uat-remote.sh'
+          remote_action_rc=\$?
+          set -e
+          # Best-effort in-script secret wipe; EXIT trap also removes secrets/runner.
+          if [[ -n '${remote_secrets_dir}' ]]; then rm -rf '${remote_secrets_dir}'; fi
+          exit \"\${remote_action_rc}\""
+          escaped_script="$(printf '%s' "$remote_script" | sed "s/'/'\\\\''/g")"
+
+          set +e
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "bash -o pipefail -c '${escaped_script}'" 2>&1 \
+            | tee output/stream-uat/ssh.log
+          rc=${PIPESTATUS[0]}
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/stream-uat/ 2>&1 \
+            | tee -a output/stream-uat/ssh.log
+          scp_rc=${PIPESTATUS[0]}
+          # Mark collected so EXIT trap may remove remote_output_dir (per-run only).
+          OUTPUT_COLLECTED=1
+          # Explicit cleanup (also covered by trap). NEVER touch persistent overrides.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${RUNNER_DIR}'" \
+            >> output/stream-uat/ssh.log 2>&1
+          set -e
+
+          if [[ "$rc" == "0" && "$scp_rc" != "0" ]]; then
+            rc="$scp_rc"
+          fi
+          echo "remote_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
+          ARTIFACT_NAME: ${{ steps.remote.outputs.artifact_name }}
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## DingTalk Interactive Card Stream Staging UAT"
+            echo ""
+            echo "- Action: \`${ACTION}\`"
+            echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
+            echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
+            echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
+            echo ""
+            echo "**Executable:** status / prepare / on / off."
+            echo "prepare forces Stream OFF after writing credentials + derived integration id."
+            echo "on flips ONLY Stream flag true after prerequisite + LOG_LEVEL checks; proves worker_started only."
+            echo "stream_connected is always unknown here (SDK connect resolves + retries forever; not log-proven)."
+            echo "off is fail-safe Stream OFF + worker stop proof."
+            echo "Lifecycle flags are never written by this lane."
+            echo "Does not implement human U1–U13 clicks; U12/U13 remain human-gated."
+            echo "Artifacts are values-free (booleans / counts / reason classes / SHA only)."
+            if [[ -f output/stream-uat/summary.txt ]]; then
+              echo ""
+              echo '```text'
+              cat output/stream-uat/summary.txt
+              echo '```'
+            fi
+            if [[ -f output/stream-uat/stream-uat-status.txt ]]; then
+              echo ""
+              echo "### Status (values-free)"
+              echo '```text'
+              cat output/stream-uat/stream-uat-status.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.remote.outputs.artifact_name || format('dingtalk-interactive-card-stream-staging-uat-{0}-{1}-{2}', inputs.action, github.run_id, github.run_attempt) }}
+          retention-days: 30
+          path: output/stream-uat
+
+      - name: Fail on remote error
+        if: steps.remote.outputs.remote_rc != '0'
+        run: exit 1

@@ -21,6 +21,7 @@ import {
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
 import { evaluateUserAuthenticationGate } from './user-activation'
+import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
 export interface User {
   id: string
@@ -67,6 +68,40 @@ export interface AuthConfig {
 
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
 const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:write'] as const
+
+// P23: user_roles is one of exact-anchor recovery's eight recovery-authority tables. A write
+// that lands while recovery holds the per-subject lease fails fast with Postgres SQLSTATE
+// 40001 (see recovery-authorization-stability.ts's isRecoveryAuthorityBusyError /
+// RECOVERY_AUTHORITY_BUSY_MARKER — reused here, not re-derived). That is transient and
+// retryable, so assignUserRoles below retries it a bounded number of times in-process before
+// giving up. USER_ROLE_ASSIGNMENT_RETRY_LIMIT is the total number of INSERT attempts (not
+// "retries after the first"); the backoff is small because assignUserRoles is also reached
+// from the read-path backfill in resolveRbacProfile, so a busy lease must not add much
+// latency to every authenticated request for a user missing attendance permissions.
+export const USER_ROLE_ASSIGNMENT_RETRY_LIMIT = 3
+const USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS = 20
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Thrown by assignUserRoles when every retry against a recovery-authority-busy (40001) write
+ * is exhausted. Named and exported so callers (and tests) can distinguish "role assignment is
+ * retryable-failed" from every other error assignUserRoles used to swallow unconditionally.
+ */
+export class UserRoleAssignmentRecoveryBusyError extends Error {
+  readonly code = 'USER_ROLE_ASSIGNMENT_RECOVERY_BUSY'
+  readonly retryable = true
+
+  constructor(readonly userId: string, readonly roleIds: readonly string[], cause: unknown) {
+    super('User role assignment did not persist: recovery authority lease is busy')
+    this.name = 'UserRoleAssignmentRecoveryBusyError'
+    if (cause !== undefined) {
+      ;(this as { cause?: unknown }).cause = cause
+    }
+  }
+}
 
 export class AuthService {
   private config: AuthConfig
@@ -415,6 +450,13 @@ export class AuthService {
       return newUser
     } catch (error) {
       this.logger.error('Registration error', error instanceof Error ? error : undefined)
+      // P23: the user row may already be committed (createUser succeeded) while role
+      // assignment could not persist after bounded retries. Re-throw so the caller (the
+      // registration route in routes/auth.ts, which wraps this call in its own try/catch)
+      // sees a failure instead of a fabricated success with a missing role — never swallow
+      // this one to `null` alongside the ordinary "email already exists" case. Every other
+      // error keeps the existing swallow-to-null behavior.
+      if (error instanceof UserRoleAssignmentRecoveryBusyError) throw error
       return null
     }
   }
@@ -611,8 +653,24 @@ export class AuthService {
     }
 
     if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
-      await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
-      permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+      // P23: this call is NOT inside a try today, and assignUserRoles can now throw
+      // (UserRoleAssignmentRecoveryBusyError) instead of always swallowing. resolveRbacProfile
+      // is reached from every getUserById/getUserByIdentifier read (login, verifyToken, ...),
+      // so an uncaught throw here would turn a transient recovery-busy lease into "user not
+      // found" for an otherwise-valid session on every authenticated request. Contain the
+      // failure locally: only merge the backfilled attendance permissions into the in-memory
+      // result once assignUserRoles has confirmed they persisted. If it did not persist, the
+      // permissions must not appear in the returned value even though this is a best-effort
+      // backfill — do not fabricate unpersisted permissions.
+      try {
+        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
+        permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+      } catch (error) {
+        this.logger.warn(
+          'Attendance self-service role backfill did not persist; omitting unpersisted permissions',
+          error instanceof Error ? error : undefined,
+        )
+      }
     }
 
     return { role, permissions }
@@ -703,19 +761,33 @@ export class AuthService {
 
   private async assignUserRoles(userId: string, roleIds: string[]): Promise<void> {
     if (roleIds.length === 0) return
-    try {
-      const pool = poolManager.get()
-      for (const roleId of roleIds) {
-        await pool.query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId]
-        )
+    const pool = poolManager.get()
+    for (let attempt = 1; ; attempt++) {
+      try {
+        for (const roleId of roleIds) {
+          await pool.query(
+            `INSERT INTO user_roles (user_id, role_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [userId, roleId]
+          )
+        }
+        invalidateUserPerms(userId)
+        return
+      } catch (error) {
+        if (isRecoveryAuthorityBusyError(error)) {
+          if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
+            // Bounded retries exhausted — do NOT silently warn-and-swallow like every other
+            // error here: the caller must learn roles were not persisted (P23 requirement).
+            throw new UserRoleAssignmentRecoveryBusyError(userId, roleIds, error)
+          }
+          await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
+          continue
+        }
+        // Unrelated errors keep the pre-existing behavior: warn and swallow.
+        this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
+        return
       }
-      invalidateUserPerms(userId)
-    } catch (error) {
-      this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
     }
   }
 

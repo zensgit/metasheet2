@@ -22,6 +22,19 @@ const { getPath, isBlank } = require('../transform-engine.cjs')
 const ADAPTER_KIND = 'data-source:sql-readonly'
 const WATERMARK_CURSOR_PREFIX = 'dswm1:'
 const WATERMARK_TYPES = new Set(['updated_at', 'monotonic_id'])
+const LOOKUP_PROJECTION_MAX_ROWS = 3
+const LOOKUP_PROJECTION_CONFIG_KEYS = new Set([
+  'baseObject',
+  'lookupObject',
+  'localKey',
+  'foreignKey',
+  'fields',
+  'maxRows',
+])
+const LOOKUP_PROJECTION_FIELD_ALIASES = Object.freeze(['FNumber', 'FName'])
+const FORBIDDEN_PROPERTY_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+const SQL_OBJECT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/
 
 // `requiredString` / `optionalString` are kept local (contracts.cjs only exposes them under
 // `__internals`); mirrors the staging adapter's approach.
@@ -43,6 +56,192 @@ function optionalString(value) {
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function isStrictPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function snapshotAllowedObject(value, field, allowedKeys) {
+  if (!isStrictPlainObject(value)) {
+    throw new AdapterValidationError(`${field} must be a plain object`, { field })
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  const keys = Reflect.ownKeys(descriptors)
+  const out = Object.create(null)
+  for (const key of keys) {
+    if (typeof key !== 'string' || !allowedKeys.has(key)) {
+      throw new AdapterValidationError(`${field} contains an unsupported field`, { field })
+    }
+    const descriptor = descriptors[key]
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new AdapterValidationError(`${field} fields must be data properties`, { field })
+    }
+    out[key] = descriptor.value
+  }
+  return out
+}
+
+function requiredSqlIdentifier(value, field, { qualified = false } = {}) {
+  const patternMatches = typeof value === 'string' && (qualified ? SQL_OBJECT_PATTERN : SQL_IDENTIFIER_PATTERN).test(value)
+  const containsForbiddenSegment = patternMatches && value.split('.').some((segment) => FORBIDDEN_PROPERTY_KEYS.has(segment))
+  if (!patternMatches || containsForbiddenSegment) {
+    throw new AdapterValidationError(`${field} must be a SQL identifier`, { field })
+  }
+  return value
+}
+
+function normalizeLookupProjection(value) {
+  if (value === undefined || value === null) return null
+  const config = snapshotAllowedObject(value, 'config.lookupProjection', LOOKUP_PROJECTION_CONFIG_KEYS)
+  const fields = snapshotAllowedObject(
+    config.fields,
+    'config.lookupProjection.fields',
+    new Set(LOOKUP_PROJECTION_FIELD_ALIASES),
+  )
+  if (!LOOKUP_PROJECTION_FIELD_ALIASES.every((alias) => Object.prototype.hasOwnProperty.call(fields, alias))) {
+    throw new AdapterValidationError('config.lookupProjection.fields must define the required projection aliases', {
+      field: 'config.lookupProjection.fields',
+    })
+  }
+
+  const maxRows = config.maxRows === undefined ? LOOKUP_PROJECTION_MAX_ROWS : config.maxRows
+  if (typeof maxRows !== 'number' || !Number.isInteger(maxRows) || maxRows <= 0 || maxRows > LOOKUP_PROJECTION_MAX_ROWS) {
+    throw new AdapterValidationError('config.lookupProjection.maxRows must be an integer from 1 to 3', {
+      field: 'config.lookupProjection.maxRows',
+    })
+  }
+
+  const normalized = {
+    baseObject: requiredSqlIdentifier(config.baseObject, 'config.lookupProjection.baseObject', { qualified: true }),
+    lookupObject: requiredSqlIdentifier(config.lookupObject, 'config.lookupProjection.lookupObject', { qualified: true }),
+    localKey: requiredSqlIdentifier(config.localKey, 'config.lookupProjection.localKey'),
+    foreignKey: requiredSqlIdentifier(config.foreignKey, 'config.lookupProjection.foreignKey'),
+    fields: Object.freeze(Object.fromEntries(LOOKUP_PROJECTION_FIELD_ALIASES.map((alias) => [
+      alias,
+      requiredSqlIdentifier(fields[alias], `config.lookupProjection.fields.${alias}`),
+    ]))),
+    maxRows,
+  }
+  if (normalized.baseObject === normalized.lookupObject) {
+    throw new AdapterValidationError('config.lookupProjection lookup object must differ from the base object', {
+      field: 'config.lookupProjection.lookupObject',
+    })
+  }
+  if (new Set(Object.values(normalized.fields)).size !== LOOKUP_PROJECTION_FIELD_ALIASES.length) {
+    throw new AdapterValidationError('config.lookupProjection source fields must be distinct', {
+      field: 'config.lookupProjection.fields',
+    })
+  }
+  if (LOOKUP_PROJECTION_FIELD_ALIASES.includes(normalized.localKey)) {
+    throw new AdapterValidationError('config.lookupProjection local key conflicts with a projection alias', {
+      field: 'config.lookupProjection.localKey',
+    })
+  }
+  return Object.freeze(normalized)
+}
+
+function isNonBlankLookupKey(value) {
+  if (typeof value === 'string') return value.trim() !== ''
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isNonBlankProjectionString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function assertLookupProjectionReadRequest(projection, request) {
+  if (!projection) return
+  if (request.object !== projection.baseObject) {
+    throw new AdapterValidationError('lookup projection is bound to a different source object', {
+      field: 'object',
+    })
+  }
+  if (request.limit > projection.maxRows) {
+    throw new AdapterValidationError('lookup projection read limit exceeds the server-bound maximum', {
+      field: 'limit',
+    })
+  }
+  if (hasOwnKeys(request.watermark) || hasOwnKeys(request.watermarkConfig)) {
+    throw new AdapterValidationError('lookup projection does not support watermark reads', {
+      field: 'watermark',
+    })
+  }
+}
+
+function coarseLookupProjectionError(message, field = 'config.lookupProjection') {
+  return new AdapterValidationError(message, { field })
+}
+
+function projectionScalarIdentity(value) {
+  return JSON.stringify([typeof value, value])
+}
+
+async function applyLookupProjection({ api, dataSourceId, principal, projection, records }) {
+  const enriched = []
+  const seenLocalKeys = new Set()
+  const seenMaterialCodes = new Set()
+  for (const record of records) {
+    if (!isStrictPlainObject(record)) {
+      throw coarseLookupProjectionError('lookup projection base row is invalid')
+    }
+    for (const alias of LOOKUP_PROJECTION_FIELD_ALIASES) {
+      if (Object.prototype.hasOwnProperty.call(record, alias)) {
+        throw coarseLookupProjectionError('lookup projection output alias collides with the base row')
+      }
+    }
+    const localValue = record[projection.localKey]
+    if (!isNonBlankLookupKey(localValue)) {
+      throw coarseLookupProjectionError('lookup projection base key is missing or invalid')
+    }
+    const localIdentity = projectionScalarIdentity(localValue)
+    if (seenLocalKeys.has(localIdentity)) {
+      throw coarseLookupProjectionError('lookup projection base keys must be unique')
+    }
+    seenLocalKeys.add(localIdentity)
+
+    let result
+    try {
+      result = await api.select(
+        dataSourceId,
+        projection.lookupObject,
+        {
+          limit: 2,
+          offset: 0,
+          where: { [projection.foreignKey]: localValue },
+        },
+        principal,
+      )
+    } catch {
+      throw coarseLookupProjectionError('lookup projection read failed')
+    }
+    if (result && result.error) {
+      throw coarseLookupProjectionError('lookup projection read failed')
+    }
+    const lookupRows = Array.isArray(result && result.data) ? result.data : []
+    if (lookupRows.length !== 1 || !isStrictPlainObject(lookupRows[0])) {
+      throw coarseLookupProjectionError('lookup projection did not resolve exactly one row')
+    }
+
+    const lookupRow = lookupRows[0]
+    const projected = {}
+    for (const alias of LOOKUP_PROJECTION_FIELD_ALIASES) {
+      const value = lookupRow[projection.fields[alias]]
+      if (!isNonBlankProjectionString(value)) {
+        throw coarseLookupProjectionError('lookup projection required field is missing or invalid')
+      }
+      projected[alias] = value
+    }
+    const materialCodeIdentity = projected.FNumber.trim().toLocaleLowerCase('en-US')
+    if (seenMaterialCodes.has(materialCodeIdentity)) {
+      throw coarseLookupProjectionError('lookup projection material codes must be unique')
+    }
+    seenMaterialCodes.add(materialCodeIdentity)
+    enriched.push({ ...record, ...projected })
+  }
+  return enriched
 }
 
 function hasOwnKeys(value) {
@@ -334,6 +533,9 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
   // The integration row carries only the reference to the data source — NEVER its credentials.
   const dataSourceId = requiredString(config.dataSourceId, 'config.dataSourceId')
   const schema = optionalString(config.schema)
+  // Optional projection is system-config-bound. A read request cannot choose or override its
+  // lookup object, keys, projected fields, or row bound.
+  const lookupProjection = normalizeLookupProjection(config.lookupProjection)
 
   return {
     async testConnection() {
@@ -372,6 +574,7 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
 
     async read(input = {}) {
       const request = normalizeReadRequest(input)
+      assertLookupProjectionReadRequest(lookupProjection, request)
       const api = getDataSourcesApi(context)
       const watermarkPlan = buildWatermarkReadPlan(request)
       const offset = watermarkPlan ? null : parseOffsetCursor(request.cursor)
@@ -381,17 +584,30 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
       const effectiveWhere = combineWhereClauses(where, watermarkPlan && watermarkPlan.where)
       if (effectiveWhere) selectOptions.where = effectiveWhere
       if (watermarkPlan) selectOptions.orderBy = watermarkPlan.orderBy
-      const result = await api.select(
-        dataSourceId,
-        request.object,
-        selectOptions,
-        principal
-      )
+      let result
+      try {
+        result = await api.select(
+          dataSourceId,
+          request.object,
+          selectOptions,
+          principal
+        )
+      } catch (error) {
+        if (lookupProjection) throw coarseLookupProjectionError('lookup projection base read failed')
+        throw error
+      }
       if (result && result.error) {
+        if (lookupProjection) throw coarseLookupProjectionError('lookup projection base read failed')
         throw result.error instanceof Error ? result.error : new Error(String(result.error))
       }
       const rows = Array.isArray(result && result.data) ? result.data : []
-      const records = rows.map((row) => (isPlainObject(row) ? { ...row } : row))
+      if (lookupProjection && rows.length > request.limit) {
+        throw coarseLookupProjectionError('lookup projection base read exceeded the server-bound row limit')
+      }
+      const baseRecords = rows.map((row) => (isPlainObject(row) ? { ...row } : row))
+      const records = lookupProjection
+        ? await applyLookupProjection({ api, dataSourceId, principal, projection: lookupProjection, records: baseRecords })
+        : baseRecords
       const fullPage = records.length >= request.limit
       const nextCursor = watermarkPlan && fullPage
         ? buildNextWatermarkCursor({ mode: watermarkPlan.mode, config: watermarkPlan.config, records })
@@ -411,6 +627,10 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
             watermarkField: watermarkPlan.config.field,
           } : { offset }),
           count: records.length,
+          ...(lookupProjection ? {
+            lookupProjectionApplied: true,
+            lookupProjectionRows: records.length,
+          } : {}),
         },
       })
     },
@@ -441,6 +661,11 @@ const DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA = {
       maxRowsPerPage: 10000,
       noRawSql: true,
       dryRunFriendly: true,
+      serverBoundLookupProjection: {
+        requestConfigurable: false,
+        maxRowsPerPage: LOOKUP_PROJECTION_MAX_ROWS,
+        exactLookupMatchRequired: true,
+      },
     },
     write: {
       supported: false,

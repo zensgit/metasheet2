@@ -378,6 +378,49 @@ function valuesEqual(left, right) {
   return false
 }
 
+const SQL_READONLY_SOURCE_KIND = 'data-source:sql-readonly'
+const SQL_EQUALITY_FILTER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/
+
+// C6 never accepts source predicates from the request. For the SQL read-only source, the only
+// predicate surface is the already persisted pipeline options. Keep the accepted language equal
+// to the adapter's structured equality contract and normalize key order so dry-run/apply revisions
+// bind the same server-side decision without exposing keys or values in evidence/errors.
+function normalizeServerBoundSqlEqualityFilters(pipeline, sourceSystem) {
+  if (!sourceSystem || sourceSystem.kind !== SQL_READONLY_SOURCE_KIND) return undefined
+  const sourceOptions = pipeline && pipeline.options && pipeline.options.source
+  if (!isPlainObject(sourceOptions) || !isPlainObject(sourceOptions.filters)) {
+    throw new ExternalWriteDryRunError(
+      422,
+      'C6_WRITE_SOURCE_FILTERS_REQUIRED',
+      'persisted SQL read-only source equality filters are required',
+    )
+  }
+  const entries = Object.entries(sourceOptions.filters)
+  if (entries.length === 0) {
+    throw new ExternalWriteDryRunError(
+      422,
+      'C6_WRITE_SOURCE_FILTERS_REQUIRED',
+      'persisted SQL read-only source equality filters are required',
+    )
+  }
+  const normalized = {}
+  for (const [key, value] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+    if (typeof key !== 'string' ||
+        key === '__proto__' ||
+        !SQL_EQUALITY_FILTER_IDENTIFIER_PATTERN.test(key)) {
+      throw new ExternalWriteDryRunError(422, 'C6_WRITE_SOURCE_FILTERS_INVALID', 'persisted SQL read-only source equality filters are invalid')
+    }
+    if (value !== null && !['string', 'number', 'boolean'].includes(typeof value)) {
+      throw new ExternalWriteDryRunError(422, 'C6_WRITE_SOURCE_FILTERS_INVALID', 'persisted SQL read-only source equality filters are invalid')
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new ExternalWriteDryRunError(422, 'C6_WRITE_SOURCE_FILTERS_INVALID', 'persisted SQL read-only source equality filters are invalid')
+    }
+    normalized[key] = value
+  }
+  return normalized
+}
+
 function keyFromRecord(record, keyFields) {
   const key = {}
   const missing = []
@@ -417,18 +460,35 @@ function classifyExisting({ existingRows, targetRecord, writableFields }) {
   return allEqual ? 'skip' : 'update'
 }
 
-async function readSourceRows({ sourceAdapter, object, maxRows }) {
+async function readSourceRows({ sourceAdapter, object, maxRows, filters }) {
   const records = []
   let cursor = null
   let pagesRead = 0
   let complete = false
   while (records.length < maxRows && pagesRead < MAX_PAGES) {
     pagesRead += 1
-    const read = await sourceAdapter.read({
+    const readRequest = {
       object,
       limit: Math.min(DEFAULT_PAGE_SIZE, maxRows - records.length),
       cursor,
-    })
+    }
+    if (filters !== undefined) readRequest.filters = filters
+    let read
+    try {
+      read = await sourceAdapter.read(readRequest)
+    } catch (error) {
+      // SQL drivers commonly echo identifiers and rejected literal values in their errors.
+      // Persisted equality filters are private server-side configuration, so never let a
+      // filtered-read driver error escape into HTTP responses or Apply run evidence.
+      if (filters !== undefined) {
+        throw new ExternalWriteDryRunError(
+          502,
+          'C6_WRITE_SOURCE_READ_FAILED',
+          'persisted SQL read-only source read failed',
+        )
+      }
+      throw error
+    }
     const pageRecords = Array.isArray(read && read.records) ? read.records : []
     records.push(...pageRecords.slice(0, Math.max(0, maxRows - records.length)))
     if ((read && read.done === true) || !(read && read.nextCursor)) {
@@ -456,6 +516,7 @@ function buildRevision(input) {
       systemId: input.pipeline.sourceSystemId,
       object: input.pipeline.sourceObject,
       kind: input.sourceKind,
+      filters: input.sourceFilters || null,
     },
     target: {
       systemId: input.pipeline.targetSystemId,
@@ -551,6 +612,7 @@ function validatePlannerInput(input = {}, phase = 'dry-run') {
 
 async function computeExternalWritePlan(input = {}) {
   const pipeline = validatePlannerInput(input, input.phase || 'dry-run')
+  const sourceFilters = normalizeServerBoundSqlEqualityFilters(pipeline, input.sourceSystem)
   const profile = resolveTargetWriteProfile(input)
   const targetConfig = normalizeTargetConfig(input.targetSystem, profile)
   const testFailureInjection = normalizeTestFailureInjectionConfig(input.testFailureInjection, {
@@ -574,6 +636,7 @@ async function computeExternalWritePlan(input = {}) {
     sourceAdapter: input.sourceAdapter,
     object: pipeline.sourceObject,
     maxRows,
+    filters: sourceFilters,
   })
   const counts = {
     sourceRows: sourceRead.records.length,
@@ -655,6 +718,7 @@ async function computeExternalWritePlan(input = {}) {
   const revision = buildRevision({
     pipeline,
     sourceKind: input.sourceSystem && input.sourceSystem.kind,
+    sourceFilters,
     targetConfig,
     targetCapabilityState,
     testFailureInjection,
@@ -670,6 +734,7 @@ async function computeExternalWritePlan(input = {}) {
     dataSourceWrites,
     targetCapabilityState,
     sourceKind: input.sourceSystem && input.sourceSystem.kind,
+    sourceFilters,
     sourceRead,
     counts,
     rowErrorTypes,
@@ -953,6 +1018,7 @@ module.exports = {
     consumeDryRunToken,
     normalizeTargetConfig,
     normalizeTestFailureInjectionConfig,
+    normalizeServerBoundSqlEqualityFilters,
     valuesEqual,
   },
 }

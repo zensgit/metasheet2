@@ -174,8 +174,32 @@ function actionDeprovisionApplyBody(source) {
 function actionDeprovisionRestoreBody(source) {
   const start = source.indexOf('action_deprovision_restore()')
   assert.notEqual(start, -1, 'action_deprovision_restore() must exist')
+  // Empty-fetch abort recovery follows restore; fall back to main for older snapshots.
+  let end = source.indexOf('\naction_deprovision_empty_fetch_abort_recovery()', start)
+  if (end === -1) {
+    end = source.indexOf('\n# --- main', start)
+  }
+  assert.notEqual(end, -1, 'empty_fetch_abort_recovery or main marker after restore')
+  return source.slice(start, end)
+}
+
+function actionDeprovisionEmptyFetchAbortRecoveryBody(source) {
+  const start = source.indexOf('action_deprovision_empty_fetch_abort_recovery()')
+  assert.notEqual(start, -1, 'action_deprovision_empty_fetch_abort_recovery() must exist')
+  // Sync-failure-before-deprovision recovery follows empty_fetch; fall back to main.
+  let end = source.indexOf('\naction_deprovision_sync_failure_before_deprovision_recovery()', start)
+  if (end === -1) {
+    end = source.indexOf('\n# --- main', start)
+  }
+  assert.notEqual(end, -1, 'sync_failure recovery or main marker after empty_fetch_abort_recovery')
+  return source.slice(start, end)
+}
+
+function actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source) {
+  const start = source.indexOf('action_deprovision_sync_failure_before_deprovision_recovery()')
+  assert.notEqual(start, -1, 'action_deprovision_sync_failure_before_deprovision_recovery() must exist')
   const end = source.indexOf('\n# --- main', start)
-  assert.notEqual(end, -1, 'main marker after restore')
+  assert.notEqual(end, -1, 'main marker after sync_failure_before_deprovision_recovery')
   return source.slice(start, end)
 }
 
@@ -363,6 +387,7 @@ test('workflow bootstrap/human-bootstrap/alias/pending/deprovision secret transp
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export STAGING_OWNER_ADMIN_PASSWORD=/)
   assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID=/)
   assert.doesNotMatch(yaml, /export CANARY_LOGIN_PASSWORD='/)
   // bootstrap/human-bootstrap/alias/pending/deprovision share the canary secret transport gate.
   assert.match(
@@ -380,6 +405,7 @@ test('workflow Validate inputs does not receive canary login secrets (no child i
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_IDENTIFIER, undefined)
   assert.equal(validate.env.LIFECYCLE_CANARY_LOGIN_PASSWORD, undefined)
   assert.equal(validate.env.STAGING_OWNER_ADMIN_PASSWORD, undefined)
+  assert.equal(validate.env.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID, undefined)
   // No secret presence checks in this step (they launch after bash -n otherwise).
   assert.doesNotMatch(validate.run, /ATTENDANCE_ADMIN_JWT/)
   assert.doesNotMatch(validate.run, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
@@ -449,6 +475,7 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
       '_CANARY_PASS="${LIFECYCLE_CANARY_LOGIN_PASSWORD-}"',
       '_STAGING_OWNER_PASS="${STAGING_OWNER_ADMIN_PASSWORD-}"',
       '_CANARY_SUBJECT="${LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID-}"',
+      '_CANARY_SENTINEL="${LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID-}"',
     ],
     'only demote assignments (builtins) before secret env unset — no external commands; no JWT',
   )
@@ -513,8 +540,46 @@ test('workflow materializes secrets inside Run remote action under EXIT trap (no
   // Local+remote secret cleanup; never echo secret values.
   assert.match(runBody, /rm -rf "\$\{CLEAN_LOCAL_SECRETS_DIR\}"/)
   assert.match(runBody, /rm -rf '\$\{remote_secrets_dir\}'|rm -rf \$\{remote_rm\}/)
-  assert.doesNotMatch(runBody, /echo\s+[\"']?\$\{?(_CANARY_PASS|_STAGING_OWNER_PASS|STAGING_OWNER_ADMIN_PASSWORD)/)
+  assert.doesNotMatch(runBody, /echo\s+[\"']?\$\{?(_CANARY_PASS|_STAGING_OWNER_PASS|_CANARY_SENTINEL|STAGING_OWNER_ADMIN_PASSWORD)/)
   assert.doesNotMatch(runBody, /cat\s+[\"']?\$\{?secrets_dir\}.*password/)
+})
+
+test('workflow requires the explicit sentinel only for deprovision apply', () => {
+  const doc = loadYaml(read(WORKFLOW))
+  const remote = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
+  assert.ok(remote?.env && remote?.run)
+  assert.match(
+    String(remote.env.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID),
+    /inputs\.action == 'deprovision'.*inputs\.bootstrap_confirmation == 'DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED'.*secrets\.LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID/,
+  )
+  assert.match(remote.run, /sentinel_apply=0/)
+  assert.match(
+    remote.run,
+    /\"\$ACTION\" == \"deprovision\" && \"\$BOOTSTRAP_CONFIRMATION\" == \"DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED\"/,
+  )
+  assert.match(remote.run, /if \[\[ \"\$sentinel_apply\" == \"1\" && -z \"\$\{_CANARY_SENTINEL\}\" \]\]/)
+  assert.match(remote.run, /export CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.doesNotMatch(remote.run, /export LIFECYCLE_CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID=/)
+})
+
+test('deprovision restore and recovery paths never depend on the apply-only sentinel', () => {
+  const source = read(REMOTE_SH)
+  const restoreAndRecovery = [
+    actionDeprovisionRestoreBody(source),
+    actionDeprovisionEmptyFetchAbortRecoveryBody(source),
+    actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source),
+  ]
+  for (const body of restoreAndRecovery) {
+    assert.doesNotMatch(body, /CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE/)
+    assert.doesNotMatch(body, /require_canary_sentinel_directory_account_id_file/)
+    assert.doesNotMatch(body, /prove_dedicated_subject_deprovision_precondition/)
+  }
+
+  const mutatedRestore = restoreAndRecovery[0].replace(
+    'require_canary_directory_account_id_file "deprovision"',
+    'require_canary_directory_account_id_file "deprovision"\n  require_canary_sentinel_directory_account_id_file',
+  )
+  assert.throws(() => assert.doesNotMatch(mutatedRestore, /require_canary_sentinel_directory_account_id_file/))
 })
 
 test('workflow cleanup never deletes persistent .metasheet2 overrides', () => {
@@ -2890,10 +2955,22 @@ test('deprovision apply phase: subject, source disable confirm, exact run ledger
   const all = actionDeprovisionBody(source)
   assert.match(source, /DEPROVISION_SOURCE_CONFIRMATION="DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED"/)
   assert.match(source, /DEPROVISION_RESTORE_CONFIRMATION="DINGTALK_SOURCE_REACTIVATED_CONFIRMED"/)
+  assert.match(
+    source,
+    /DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION="DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED"/,
+  )
+  assert.match(
+    source,
+    /DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION="DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED"/,
+  )
   assert.match(all, /DEPROVISION_SOURCE_CONFIRMATION|DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED/)
   assert.match(all, /DEPROVISION_RESTORE_CONFIRMATION|action_deprovision_restore/)
+  assert.match(all, /DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION|action_deprovision_empty_fetch_abort_recovery/)
+  assert.match(all, /DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION|action_deprovision_sync_failure_before_deprovision_recovery/)
   assert.match(all, /action_deprovision_apply/)
   assert.match(all, /action_deprovision_restore/)
+  assert.match(all, /action_deprovision_empty_fetch_abort_recovery/)
+  assert.match(all, /action_deprovision_sync_failure_before_deprovision_recovery/)
   assert.match(body, /require_canary_directory_account_id_file "deprovision"/)
   assert.match(body, /run_deprovision_sync_preview_subject_gate/)
   assert.ok(
@@ -2936,6 +3013,1473 @@ test('deprovision restore phase: source reactivated confirm, rehire, resolved, a
   // Rehire mode is on the restore helper (not the action body).
   assert.match(source, /"mode": "rehire"/)
   assert.match(source, /run_deprovision_rehire_restore\(\)/)
+})
+
+// --- empty_directory_fetch safe-abort recovery (run_bound, no ledger) -----------------
+
+test('empty_fetch abort recovery: staging-only, never writes lifecycle env flags', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(source)
+  const all = actionDeprovisionBody(source)
+  assert.match(source, /DEPROVISION_EMPTY_FETCH_ABORT_RECOVERY_CONFIRMATION/)
+  assert.match(source, /DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED/)
+  assert.match(all, /empty_fetch_abort_recovery/)
+  assert.match(all, /action_deprovision_empty_fetch_abort_recovery/)
+  assert.match(body, /lifecycle_env_write=false/)
+  assert.match(body, /transition_applied=false/)
+  assert.doesNotMatch(body, /write_lifecycle_override/)
+  assert.doesNotMatch(body, /recreate_backend_only/)
+  assert.doesNotMatch(body, /establish_alias_off_rollback_baseline/)
+  assert.doesNotMatch(body, /arm_alias_exit_rollback_guard/)
+  // Must not enter rehire/ledger restore path.
+  assert.doesNotMatch(body, /run_deprovision_rehire_restore/)
+  assert.doesNotMatch(body, /run_or_resume_deprovision_rehire_restore/)
+  assert.doesNotMatch(body, /load_deprovision_apply_state/)
+  assert.doesNotMatch(body, /reconcile_run_journal_to_ledger_bound/)
+})
+
+test('flags-OFF directory sync requires explicit deprovisionApplied=false, not missing/null', () => {
+  const body = runDirectorySyncForSubjectBody(read(REMOTE_SH))
+  assert.match(body, /applied_s = "true" if applied is True else \("false" if applied is False else "unknown"\)/)
+  assert.match(body, /require_applied == "false" and applied is not False/)
+  assert.match(body, /deprovision_applied_not_false_on_sync/)
+})
+
+test('empty_fetch abort recovery binds exact journal run_bound + empty_directory_fetch + zero ledger + intact graph', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(source)
+  assert.match(body, /load_run_bound_empty_fetch_abort_journal/)
+  assert.match(body, /prove_exact_run_empty_fetch_safe_abort/)
+  assert.match(body, /prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_pre"/)
+  assert.match(body, /prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"/)
+  assert.match(body, /prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_pre"/)
+  assert.match(body, /assert_subject_user_access_state "activated" "true" "empty_fetch_abort_recovery_pre"/)
+  assert.match(body, /run_directory_sync_for_subject "empty_fetch_abort_recovery" "false"/)
+  assert.match(body, /SYNC_DEPROVISION_APPLIED" != "false"/)
+  assert.match(body, /SUBJECT_ACTIVE" != "true"/)
+  assert.match(body, /prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_post"/)
+  assert.match(body, /post_graph_snapshot" != "\$pre_graph_snapshot"/)
+  assert.match(body, /phase=empty_fetch_abort_recovery/)
+  assert.match(body, /aborted_reason_required=empty_directory_fetch/)
+  assert.match(body, /deprovision_applied_required=false/)
+  assert.match(body, /journal_phase_required=run_bound/)
+  assert.match(body, /journal left intact/)
+  assert.match(body, /zero_ledger_final_ok=/)
+  assert.match(body, /safe_abort_source_recovery_complete=true/)
+  assert.match(body, /canary_access_rollback_complete=false/)
+
+  // Helper contracts: phase/applied/abortedReason exactness.
+  assert.match(source, /state\.get\("phase"\) != "run_bound"/)
+  assert.match(source, /state\.get\("deprovision_applied"\) is not False/)
+  assert.match(source, /aborted\.strip\(\) != "empty_directory_fetch"/)
+  assert.match(source, /ledger_event_present_for_exact_run/)
+  assert.match(source, /grant_not_enabled/)
+  assert.match(source, /membership_not_active/)
+  assert.match(source, /user_not_activated/)
+})
+
+test('empty_fetch zero-ledger proof is exact SQL scope — rejects list/limit/latest inference', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_zero_deprovision_ledger_for_exact_run()')
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\n# Access-graph intact proof WITHOUT effect ledger', start)
+  assert.notEqual(end, -1)
+  const body = source.slice(start, end)
+  // Exact Postgres four-key scope + effects join; no status filter.
+  assert.match(body, /FROM directory_deprovision_events e/)
+  assert.match(body, /LEFT JOIN directory_deprovision_effects fx/)
+  assert.match(body, /e\.run_id = \$1::uuid/)
+  assert.match(body, /e\.integration_id = \$2::uuid/)
+  assert.match(body, /e\.local_user_id = \$3/)
+  assert.match(body, /e\.directory_account_id = \$4::uuid/)
+  assert.match(body, /count\(DISTINCT e\.id\)::int AS event_count/)
+  assert.match(body, /count\(fx\.id\)::int AS effect_count/)
+  assert.match(body, /eventCount !== 0/)
+  assert.match(body, /effectCount !== 0/)
+  assert.doesNotMatch(body, /status\s*=\s*['"]applied['"]|status:\s*["']applied["']/)
+  // Must not use paginated admin list / limit / latest-run inference.
+  assert.doesNotMatch(body, /\/api\/admin\/directory\/deprovision\/events/)
+  assert.doesNotMatch(body, /limit["']?\s*[:=]\s*["']?50|limit=50/)
+  assert.doesNotMatch(body, /urlencode|urllib\.request/)
+  assert.doesNotMatch(body, /\bORDER BY\b|\border by\b/)
+  assert.doesNotMatch(body, /items\[0\]|latest_run|getLatest|order by created/i)
+  // Production comments may forbid "latest" in prose; that is intentional and allowed.
+  assert.match(body, /No limit\/order\/latest inference|no list\/limit/i)
+  assert.match(body, /docker exec -i/)
+  assert.match(body, /CANARY_DIRECTORY_ACCOUNT_ID_FILE/)
+  assert.match(body, /CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE/)
+  assert.doesNotMatch(body, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+})
+
+test('MUTATION: safe-abort ledger proof may not fall back to the recovery sync run pin', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_zero_deprovision_ledger_for_exact_run()')
+  const end = source.indexOf('\n# Access-graph intact proof WITHOUT effect ledger', start)
+  const body = source.slice(start, end)
+  const mutated = body.replaceAll('CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE', 'CANARY_SUBJECT_SYNC_RUN_ID_FILE')
+  assert.match(body, /CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE/)
+  assert.doesNotMatch(body, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+  assert.match(mutated, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+})
+
+test('empty_fetch abort recovery clears journal only after final post-sync proofs and zero-ledger recheck', () => {
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(read(REMOTE_SH))
+  const preGraph = body.indexOf('prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_pre"')
+  const preLedger = body.indexOf('prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_pre"')
+  const sync = body.indexOf('run_directory_sync_for_subject "empty_fetch_abort_recovery" "false"')
+  const postActive = body.indexOf('SUBJECT_ACTIVE" != "true"')
+  const postGraph = body.indexOf('prove_intact_access_graph_no_ledger "empty_fetch_abort_recovery_post"')
+  const drift = body.indexOf('post_graph_snapshot" != "$pre_graph_snapshot"')
+  const flagsOff = body.indexOf('lifecycle flags must remain OFF after recovery sync')
+  const finalLedger = body.indexOf(
+    'prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"',
+  )
+  const clear = body.indexOf('clear_deprovision_apply_state')
+  const summary = body.indexOf('phase=empty_fetch_abort_recovery')
+  assert.ok(preLedger > 0 && preGraph > preLedger, 'pre zero-ledger before pre graph / sync')
+  assert.ok(sync > preGraph, 'pre graph before flags-OFF sync')
+  assert.ok(postActive > sync && postGraph > postActive, 'post account+graph after sync')
+  assert.ok(drift > postGraph && flagsOff > drift, 'drift+flags proofs after post graph')
+  assert.ok(finalLedger > flagsOff, 'final zero-ledger recheck after all post-sync proofs')
+  assert.ok(clear > finalLedger, 'clear only after final zero-ledger recheck')
+  assert.ok(summary > clear, 'summary after clear')
+  // Explicit load-bearing markers for mutation detectors.
+  assert.match(body, /FINAL proof gate: re-prove exact no-ledger AFTER flags-OFF sync/)
+  assert.match(body, /IMMEDIATELY before clear/)
+})
+
+test('MUTATION: moving clear_deprovision_apply_state before final proofs turns red', () => {
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(read(REMOTE_SH))
+  const clear = body.indexOf('clear_deprovision_apply_state')
+  const finalLedger = body.indexOf(
+    'prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"',
+  )
+  assert.ok(clear > finalLedger, 'production clear must follow final zero-ledger recheck')
+  // Move clear to the top of the action body — must break the order contract.
+  const mutated =
+    body.slice(0, body.indexOf('{') + 1) +
+    '\n  clear_deprovision_apply_state\n' +
+    body.slice(body.indexOf('{') + 1).replace('clear_deprovision_apply_state', 'true # cleared early')
+  let failed = false
+  try {
+    const mClear = mutated.indexOf('clear_deprovision_apply_state')
+    const mFinal = mutated.indexOf(
+      'prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"',
+    )
+    assert.ok(mClear > mFinal, 'clear only after final zero-ledger recheck')
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: removing final pre-clear zero-ledger recheck turns red', () => {
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(read(REMOTE_SH))
+  assert.match(body, /empty_fetch_abort_recovery_final_pre_clear/)
+  const mutated = body.replace(
+    'prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"',
+    'true # final zero-ledger recheck removed',
+  )
+  let failed = false
+  try {
+    const finalLedger = mutated.indexOf(
+      'prove_zero_deprovision_ledger_for_exact_run "empty_fetch_abort_recovery_final_pre_clear"',
+    )
+    const clear = mutated.indexOf('clear_deprovision_apply_state')
+    assert.ok(finalLedger > 0 && clear > finalLedger)
+    assert.match(mutated, /empty_fetch_abort_recovery_final_pre_clear/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: reintroducing paginated list limit=50 into zero-ledger proof turns red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_zero_deprovision_ledger_for_exact_run()')
+  const end = source.indexOf('\n# Access-graph intact proof WITHOUT effect ledger', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace(
+    'FROM directory_deprovision_events e',
+    'FROM directory_deprovision_events e /* limit=50 */',
+  ).replace(
+    'docker exec -i',
+    'curl -fsS "$STAGING_API_BASE_URL/api/admin/directory/deprovision/events?limit=50" # docker exec -i',
+  )
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /limit["']?\s*[:=]\s*["']?50|limit=50/)
+    assert.doesNotMatch(mutated, /\/api\/admin\/directory\/deprovision\/events/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('clear_deprovision_apply_state log is context-neutral (not restore-only)', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('clear_deprovision_apply_state()')
+  const end = source.indexOf('\n# Compat name used by older comments/tests', start)
+  const body = source.slice(start, end)
+  assert.match(body, /cleared recovery journal/)
+  assert.doesNotMatch(body, /successful restore/)
+})
+
+test('MUTATION: empty_fetch recovery writing lifecycle flags turns red', () => {
+  const body = actionDeprovisionEmptyFetchAbortRecoveryBody(read(REMOTE_SH))
+  const mutated = body.replace(
+    'lifecycle_env_write=false',
+    'lifecycle_env_write=true\n  write_lifecycle_override "false" "false" "true"',
+  )
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /write_lifecycle_override/)
+    assert.match(mutated, /lifecycle_env_write=false/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('FUNCTIONAL: empty_fetch recovery refuses wrong journal phase and leaves journal intact', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-phase-'))
+  const stateDir = join(home, '.metasheet2', 'lifecycle-canary', 'subject-state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(stateDir, { recursive: true })
+  const stateFile = join(stateDir, 'lifecycle-canary-employee.apply-state.json')
+  const sec = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-sec-'))
+  const u = '11111111-1111-4111-8111-111111111111'
+  const i = '22222222-2222-4222-8222-222222222222'
+  const a = '33333333-3333-4333-8333-333333333333'
+  const run = '44444444-4444-4444-8444-444444444444'
+  writeFileSync(
+    stateFile,
+    JSON.stringify({
+      schema: 'lifecycle-canary-deprovision-apply-state-v4',
+      phase: 'ledger_bound',
+      subject_key: 'lifecycle-canary-employee',
+      local_user_id: u,
+      integration_id: i,
+      directory_account_id: a,
+      sync_run_id: run,
+      sync_users_deactivated: 1,
+      sync_accounts_deactivated: 1,
+      sync_deprovision_candidates: 1,
+      deprovision_applied: true,
+      event_id: '55555555-5555-4555-8555-555555555555',
+      effect_count: 3,
+      effects: [],
+    }),
+  )
+  chmodSync(stateFile, 0o600)
+  writeFileSync(join(sec, 'subject.local-user-id'), u)
+  writeFileSync(join(sec, 'subject.integration-id'), i)
+  writeFileSync(join(sec, 'directory-account.id'), a)
+  chmodSync(join(sec, 'subject.local-user-id'), 0o600)
+  chmodSync(join(sec, 'subject.integration-id'), 0o600)
+  chmodSync(join(sec, 'directory-account.id'), 0o600)
+
+  const script = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+set +e
+load_run_bound_empty_fetch_abort_journal
+rc=$?
+set -e
+printf 'rc=%s note=%s exists=%s\\n' "$rc" "\${SAFE_ABORT_JOURNAL_NOTE:-unset}" "$([[ -f "$4" ]] && echo yes || echo no)"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: home,
+        RUN_STAMP: 'contract-empty-fetch-phase',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /rc=1 /)
+  assert.match(r.stdout, /exists=yes/)
+  assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).phase, 'ledger_bound')
+  rmSync(home, { recursive: true, force: true })
+  rmSync(sec, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: empty_fetch recovery accepts run_bound applied=false journal and refuses applied=true', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-ok-'))
+  const stateDir = join(home, '.metasheet2', 'lifecycle-canary', 'subject-state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(stateDir, { recursive: true })
+  const stateFile = join(stateDir, 'lifecycle-canary-employee.apply-state.json')
+  const sec = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-ok-sec-'))
+  const u = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const i = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const a = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  const run = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const base = {
+    schema: 'lifecycle-canary-deprovision-apply-state-v4',
+    phase: 'run_bound',
+    subject_key: 'lifecycle-canary-employee',
+    local_user_id: u,
+    integration_id: i,
+    directory_account_id: a,
+    sync_run_id: run,
+    sync_users_deactivated: 0,
+    sync_accounts_deactivated: 1,
+    sync_deprovision_candidates: 0,
+    event_id: null,
+    effect_count: null,
+    effects: null,
+  }
+  writeFileSync(stateFile, JSON.stringify({ ...base, deprovision_applied: false }))
+  chmodSync(stateFile, 0o600)
+  writeFileSync(join(sec, 'subject.local-user-id'), u)
+  writeFileSync(join(sec, 'subject.integration-id'), i)
+  writeFileSync(join(sec, 'directory-account.id'), a)
+  for (const f of ['subject.local-user-id', 'subject.integration-id', 'directory-account.id']) {
+    chmodSync(join(sec, f), 0o600)
+  }
+
+  const harnessEnv = {
+    ...process.env,
+    ACTION: 'deprovision',
+    OUTPUT_DIR: home,
+    RUN_STAMP: 'contract-empty-fetch-ok',
+    LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+  }
+  const okScript = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+load_run_bound_empty_fetch_abort_journal
+printf 'ok phase=%s run_file=%s\\n' "$JOURNAL_PHASE" "$([[ -s "\${CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE:-}" ]] && echo yes || echo no)"
+`
+  const ok = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', okScript, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout)
+  assert.match(ok.stdout, /ok phase=run_bound run_file=yes/)
+  assert.ok(existsSync(stateFile), 'eligible journal must remain until final clear')
+
+  writeFileSync(stateFile, JSON.stringify({ ...base, deprovision_applied: true }))
+  chmodSync(stateFile, 0o600)
+  const badScript = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+set +e
+load_run_bound_empty_fetch_abort_journal
+rc=$?
+set -e
+printf 'rc=%s exists=%s\\n' "$rc" "$([[ -f "$4" ]] && echo yes || echo no)"
+`
+  const bad = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', badScript, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.equal(bad.status, 0, bad.stderr + bad.stdout)
+  assert.match(bad.stdout, /rc=1 /)
+  assert.match(bad.stdout, /exists=yes/)
+  assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).deprovision_applied, true)
+  rmSync(home, { recursive: true, force: true })
+  rmSync(sec, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: empty_fetch exact-run proof requires completed+applied=false+empty_directory_fetch', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-run-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const runFile = join(sec, 'subject.sync-run-id')
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  writeFileSync(runFile, runId)
+  chmodSync(jwt, 0o600)
+  chmodSync(integ, 0o600)
+  chmodSync(runFile, 0o600)
+
+  const serverSource = `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+RUN = ${JSON.stringify(runId)}
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send_json(self, code, payload):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if not self.path.endswith("/runs/" + RUN):
+            self.send_json(404, {"ok": False})
+            return
+        self.send_json(200, {
+            "ok": True,
+            "data": {
+                "run": {
+                    "id": RUN,
+                    "status": "completed",
+                    "stats": {
+                        "deprovisionApplied": False,
+                        "deprovisionAbortedReason": "empty_directory_fetch",
+                        "deprovisionUsersDeactivatedCount": 0,
+                        "deprovisionGrantsDisabledCount": 0,
+                        "deprovisionMembershipDeactivationAttemptedCount": 0,
+                        "accountsDeactivatedCount": 1,
+                    },
+                }
+            },
+        })
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('empty-fetch run server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`empty-fetch run server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE="$5"
+prove_exact_run_empty_fetch_safe_abort
+printf 'ok=%s note=%s\\n' "$SAFE_ABORT_RUN_OK" "$SAFE_ABORT_RUN_NOTE"
+`
+    const r = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, runFile],
+      {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          ACTION: 'deprovision',
+          OUTPUT_DIR: home,
+          RUN_STAMP: 'contract-empty-fetch-run',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(r.status, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /ok=true note=ok/)
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: zero-ledger exact SQL proof fails closed when event_count>0 (no list API)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-ledger-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const user = join(sec, 'subject.local-user-id')
+  const integ = join(sec, 'subject.integration-id')
+  const runFile = join(sec, 'subject.sync-run-id')
+  const acct = join(sec, 'directory-account.id')
+  const userId = '99999999-8888-4777-8666-555555555555'
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const accountId = '12121212-3434-4656-8878-909090909090'
+  writeFileSync(user, userId)
+  writeFileSync(integ, integrationId)
+  writeFileSync(runFile, runId)
+  writeFileSync(acct, accountId)
+  for (const f of [user, integ, runFile, acct]) chmodSync(f, 0o600)
+
+  // Mock docker exec path used by exact SQL helper: emit event_count=1 effect_count=2.
+  const script = `
+set -euo pipefail
+source "$1"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$2"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$3"
+CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE="$4"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() {
+  if [[ "\$1" == "exec" ]]; then
+    # Consume payload stdin; never hit network/admin list.
+    cat >/dev/null
+    printf 'false|ledger_event_present_for_exact_run|1|2'
+    return 0
+  fi
+  return 125
+}
+set +e
+prove_zero_deprovision_ledger_for_exact_run "contract_event_present"
+rc=\$?
+set -e
+printf 'rc=%s note=%s events=%s effects=%s\\n' "\$rc" "\$SAFE_ABORT_LEDGER_NOTE" "\$SAFE_ABORT_LEDGER_EVENT_COUNT" "\$SAFE_ABORT_LEDGER_EFFECT_COUNT"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, user, integ, runFile, acct],
+    {
+      encoding: 'utf8',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: home,
+        RUN_STAMP: 'contract-empty-fetch-ledger',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /rc=1 /)
+  assert.match(r.stdout, /ledger_event_present_for_exact_run/)
+  assert.match(r.stdout, /events=1 effects=2/)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: zero-ledger exact SQL proof accepts event_count=0 and effect_count=0', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-ledger-ok-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const user = join(sec, 'subject.local-user-id')
+  const integ = join(sec, 'subject.integration-id')
+  const runFile = join(sec, 'subject.sync-run-id')
+  const acct = join(sec, 'directory-account.id')
+  writeFileSync(user, '99999999-8888-4777-8666-555555555555')
+  writeFileSync(integ, '11111111-2222-4333-8444-555555555555')
+  writeFileSync(runFile, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+  writeFileSync(acct, '12121212-3434-4656-8878-909090909090')
+  for (const f of [user, integ, runFile, acct]) chmodSync(f, 0o600)
+
+  const script = `
+set -euo pipefail
+source "$1"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$2"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$3"
+CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE="$4"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() {
+  if [[ "\$1" == "exec" ]]; then
+    cat >/dev/null
+    printf 'true|ok|0|0'
+    return 0
+  fi
+  return 125
+}
+prove_zero_deprovision_ledger_for_exact_run "contract_zero_ok"
+printf 'ok=%s note=%s events=%s effects=%s\\n' "\$SAFE_ABORT_LEDGER_OK" "\$SAFE_ABORT_LEDGER_NOTE" "\$SAFE_ABORT_LEDGER_EVENT_COUNT" "\$SAFE_ABORT_LEDGER_EFFECT_COUNT"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, user, integ, runFile, acct],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: home,
+        RUN_STAMP: 'contract-empty-fetch-ledger-ok',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /ok=true note=ok events=0 effects=0/)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: zero-ledger proof keeps the abort run pin after a distinct recovery sync run exists', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-empty-fetch-run-pin-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const user = join(sec, 'subject.local-user-id')
+  const integ = join(sec, 'subject.integration-id')
+  const abortRun = join(sec, 'subject.safe-abort-sync-run-id')
+  const recoveryRun = join(sec, 'subject.sync-run-id')
+  const acct = join(sec, 'directory-account.id')
+  const abortRunId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  writeFileSync(user, '99999999-8888-4777-8666-555555555555')
+  writeFileSync(integ, '11111111-2222-4333-8444-555555555555')
+  writeFileSync(abortRun, abortRunId)
+  writeFileSync(recoveryRun, 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff')
+  writeFileSync(acct, '12121212-3434-4656-8878-909090909090')
+  for (const f of [user, integ, abortRun, recoveryRun, acct]) chmodSync(f, 0o600)
+
+  const script = `
+set -euo pipefail
+source "$1"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$2"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$3"
+CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE="$4"
+CANARY_SUBJECT_SYNC_RUN_ID_FILE="$5"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$6"
+EXPECTED_ABORT_RUN_ID="$7"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() {
+  local payload
+  payload="$(cat)"
+  if [[ "$payload" == *"$EXPECTED_ABORT_RUN_ID"* ]]; then
+    printf 'true|ok|0|0'
+  else
+    printf 'false|wrong_run_pin|0|0'
+  fi
+}
+prove_zero_deprovision_ledger_for_exact_run "contract_distinct_run_pin"
+printf 'ok=%s note=%s\\n' "$SAFE_ABORT_LEDGER_OK" "$SAFE_ABORT_LEDGER_NOTE"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, user, integ, abortRun, recoveryRun, acct, abortRunId],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: home,
+        RUN_STAMP: 'contract-empty-fetch-distinct-run-pin',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /ok=true note=ok/)
+  rmSync(home, { recursive: true, force: true })
+})
+
+// --- sync_failure_before_deprovision recovery (run_bound, zero ledger) ---------------
+
+test('sync_failure_before_deprovision recovery: staging-only, never writes lifecycle env flags', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source)
+  const all = actionDeprovisionBody(source)
+  assert.match(source, /DEPROVISION_SYNC_FAILURE_BEFORE_DEPROVISION_RECOVERY_CONFIRMATION/)
+  assert.match(source, /DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED/)
+  assert.match(all, /sync_failure_before_deprovision_recovery/)
+  assert.match(all, /action_deprovision_sync_failure_before_deprovision_recovery/)
+  assert.match(body, /lifecycle_env_write=false/)
+  assert.match(body, /transition_applied=false/)
+  assert.match(body, /end_to_end_restore_claimed=false/)
+  assert.doesNotMatch(body, /write_lifecycle_override/)
+  assert.doesNotMatch(body, /recreate_backend_only/)
+  assert.doesNotMatch(body, /establish_alias_off_rollback_baseline/)
+  assert.doesNotMatch(body, /arm_alias_exit_rollback_guard/)
+  // Must not enter rehire/ledger restore path or empty_fetch path.
+  assert.doesNotMatch(body, /run_deprovision_rehire_restore/)
+  assert.doesNotMatch(body, /run_or_resume_deprovision_rehire_restore/)
+  assert.doesNotMatch(body, /load_deprovision_apply_state/)
+  assert.doesNotMatch(body, /reconcile_run_journal_to_ledger_bound/)
+  assert.doesNotMatch(body, /load_run_bound_empty_fetch_abort_journal/)
+  assert.doesNotMatch(body, /prove_exact_run_empty_fetch_safe_abort/)
+})
+
+test('sync_failure_before_deprovision recovery binds exact failed run + observed class + zero ledger + intact graph', () => {
+  const source = read(REMOTE_SH)
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source)
+  assert.match(body, /load_run_bound_sync_failure_before_deprovision_journal/)
+  assert.match(body, /prove_exact_run_sync_failure_before_deprovision/)
+  assert.match(body, /prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_pre"/)
+  assert.match(body, /prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_final_pre_clear"/)
+  assert.match(body, /prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_pre"/)
+  assert.match(body, /assert_subject_user_access_state "activated" "true" "sync_failure_before_deprovision_recovery_pre"/)
+  assert.match(body, /run_directory_sync_for_subject "sync_failure_before_deprovision_recovery" "false"/)
+  assert.match(body, /SYNC_DEPROVISION_APPLIED" != "false"/)
+  assert.match(body, /SUBJECT_ACTIVE" != "true"/)
+  assert.match(body, /prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_post"/)
+  assert.match(body, /post_graph_snapshot" != "\$pre_graph_snapshot"/)
+  assert.match(body, /phase=sync_failure_before_deprovision_recovery/)
+  assert.match(body, /run_status_required=failed/)
+  assert.match(body, /journal_deprovision_applied_required=false/)
+  assert.match(body, /journal_phase_required=run_bound/)
+  assert.match(body, /error_class_required=duplicate_provider_corp_external_key/)
+  assert.match(body, /error_constraint_required=idx_directory_accounts_provider_corp_external_key/)
+  assert.match(body, /no_mutation_proven_by_zero_ledger_and_access_graph=true/)
+  assert.match(body, /journal left intact/)
+  assert.match(body, /zero_ledger_final_ok=/)
+  assert.match(body, /exact_run_final_ok=/)
+  assert.match(body, /sync_failure_before_deprovision_source_recovery_complete=true/)
+  assert.match(body, /canary_access_rollback_complete=false/)
+  assert.match(body, /end_to_end_restore_claimed=false/)
+  // Journal binds deprovision_applied=false; run proof does not claim absent stats alone prove it.
+  assert.match(body, /deprovision_applied=false is proven here|journal-bound/)
+  assert.match(body, /Does not alone prove deprovision_applied=false|journal binds deprovision_applied=false/)
+
+  // Helper contracts: failed status + exact single-constraint allowlist (no alternates/heuristics).
+  assert.match(source, /subject\.failed-sync-run-id/)
+  assert.match(source, /CANARY_FAILED_SYNC_RUN_ID_FILE/)
+  assert.match(source, /status != "failed"/)
+  assert.match(source, /deprovision_applied_true/)
+  assert.match(source, /error_class_not_allowlisted/)
+  assert.match(source, /duplicate_provider_corp_external_key/)
+  assert.match(source, /idx_directory_accounts_provider_corp_external_key/)
+  // Extract classify_error only — literals must live inside the function body.
+  const classifyStart = source.indexOf('def classify_error(msg):')
+  assert.notEqual(classifyStart, -1, 'classify_error must exist')
+  const classifyEnd = source.indexOf('\ntry:', classifyStart)
+  assert.notEqual(classifyEnd, -1)
+  const classifyBody = source.slice(classifyStart, classifyEnd)
+  // Load-bearing: exact observed constraint literal is inside classify_error itself.
+  assert.match(
+    classifyBody,
+    /exact_constraint = "idx_directory_accounts_provider_corp_external_key"/,
+  )
+  assert.match(classifyBody, /exact_signature =/)
+  assert.match(classifyBody, /duplicate key value violates unique constraint/)
+  assert.match(classifyBody, /exact_error_class = "duplicate_provider_corp_external_key"/)
+  assert.match(classifyBody, /if exact_signature not in m/)
+  assert.doesNotMatch(classifyBody, /idx_directory_accounts_provider_null_corp_external_key/)
+  assert.doesNotMatch(classifyBody, /idx_user_external_identities/)
+  // No bare provider_external_key alternate (corp index name is the only allowed index token).
+  assert.doesNotMatch(
+    classifyBody,
+    /idx_directory_accounts_provider_external_key"|provider_null_corp|provider_external_key"/,
+  )
+  assert.doesNotMatch(classifyBody, /if "provider" in m and "external_key"/)
+  assert.doesNotMatch(classifyBody, /if "provider" in m and "corp" in m/)
+  assert.match(source, /Absent\/null\/false stats do NOT alone prove deprovision_applied=false/)
+})
+
+test('sync_failure recovery clears journal only after final zero-ledger + exact run identity', () => {
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(read(REMOTE_SH))
+  const preGraph = body.indexOf('prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_pre"')
+  const preLedger = body.indexOf('prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_pre"')
+  const sync = body.indexOf('run_directory_sync_for_subject "sync_failure_before_deprovision_recovery" "false"')
+  const postActive = body.indexOf('SUBJECT_ACTIVE" != "true"')
+  const postGraph = body.indexOf('prove_intact_access_graph_no_ledger "sync_failure_before_deprovision_recovery_post"')
+  const drift = body.indexOf('post_graph_snapshot" != "$pre_graph_snapshot"')
+  const flagsOff = body.indexOf('lifecycle flags must remain OFF after recovery sync')
+  const finalLedger = body.indexOf(
+    'prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_final_pre_clear"',
+  )
+  const finalRun = body.lastIndexOf('prove_exact_run_sync_failure_before_deprovision')
+  const clear = body.indexOf('clear_deprovision_apply_state')
+  const summary = body.indexOf('phase=sync_failure_before_deprovision_recovery')
+  assert.ok(preLedger > 0 && preGraph > preLedger, 'pre zero-ledger before pre graph / sync')
+  assert.ok(sync > preGraph, 'pre graph before flags-OFF sync')
+  assert.ok(postActive > sync && postGraph > postActive, 'post account+graph after sync')
+  assert.ok(drift > postGraph && flagsOff > drift, 'drift+flags proofs after post graph')
+  assert.ok(finalLedger > flagsOff, 'final zero-ledger recheck after all post-sync proofs')
+  assert.ok(finalRun > finalLedger, 'final exact-run identity after final zero-ledger')
+  assert.ok(clear > finalRun, 'clear only after final exact-run identity recheck')
+  assert.ok(summary > clear, 'summary after clear')
+  assert.match(body, /FINAL proof gate: re-prove exact no-ledger AND exact failed-run identity AFTER/)
+  assert.match(body, /IMMEDIATELY before clear/)
+})
+
+test('MUTATION: sync_failure recovery moving clear before final proofs turns red', () => {
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(read(REMOTE_SH))
+  const clear = body.indexOf('clear_deprovision_apply_state')
+  const finalLedger = body.indexOf(
+    'prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_final_pre_clear"',
+  )
+  assert.ok(clear > finalLedger, 'production clear must follow final zero-ledger recheck')
+  const mutated =
+    body.slice(0, body.indexOf('{') + 1) +
+    '\n  clear_deprovision_apply_state\n' +
+    body.slice(body.indexOf('{') + 1).replace('clear_deprovision_apply_state', 'true # cleared early')
+  let failed = false
+  try {
+    const mClear = mutated.indexOf('clear_deprovision_apply_state')
+    const mFinal = mutated.indexOf(
+      'prove_zero_deprovision_ledger_for_exact_run "sync_failure_before_deprovision_recovery_final_pre_clear"',
+    )
+    assert.ok(mClear > mFinal, 'clear only after final zero-ledger recheck')
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: sync_failure recovery writing lifecycle flags turns red', () => {
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(read(REMOTE_SH))
+  const mutated = body.replace(
+    'lifecycle_env_write=false',
+    'lifecycle_env_write=true\n  write_lifecycle_override "false" "false" "true"',
+  )
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /write_lifecycle_override/)
+    assert.match(mutated, /lifecycle_env_write=false/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: sync_failure recovery claiming end-to-end restore turns red', () => {
+  const body = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(read(REMOTE_SH))
+  const mutated = body.replaceAll('end_to_end_restore_claimed=false', 'end_to_end_restore_claimed=true')
+  let failed = false
+  try {
+    assert.match(mutated, /end_to_end_restore_claimed=false/)
+    assert.doesNotMatch(mutated, /end_to_end_restore_claimed=true/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('MUTATION: collapsing failed-run pin into recovery sync run pin turns red', () => {
+  const source = read(REMOTE_SH)
+  const loadStart = source.indexOf('load_run_bound_sync_failure_before_deprovision_journal()')
+  assert.notEqual(loadStart, -1)
+  const loadEnd = source.indexOf('\nprove_exact_run_sync_failure_before_deprovision()', loadStart)
+  assert.notEqual(loadEnd, -1)
+  const loadBody = source.slice(loadStart, loadEnd)
+  assert.match(loadBody, /subject\.failed-sync-run-id/)
+  assert.match(loadBody, /CANARY_FAILED_SYNC_RUN_ID_FILE=/)
+  // May mention recovery sync filename in comments, but must not assign that pin.
+  assert.doesNotMatch(loadBody, /CANARY_SUBJECT_SYNC_RUN_ID_FILE\s*=/)
+  assert.doesNotMatch(loadBody, /sec\s*\/\s*["']subject\.sync-run-id["']/)
+
+  const proveStart = source.indexOf('prove_exact_run_sync_failure_before_deprovision()')
+  const proveEnd = source.indexOf('\n# Prove zero deprovision ledger', proveStart)
+  const proveBody = source.slice(proveStart, proveEnd)
+  assert.match(proveBody, /CANARY_FAILED_SYNC_RUN_ID_FILE/)
+  assert.doesNotMatch(proveBody, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+  assert.doesNotMatch(proveBody, /CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE/)
+
+  const zeroStart = source.indexOf('prove_zero_deprovision_ledger_for_exact_run()')
+  const zeroEnd = source.indexOf('\n# Access-graph intact proof WITHOUT effect ledger', zeroStart)
+  const zeroBody = source.slice(zeroStart, zeroEnd)
+  assert.match(zeroBody, /CANARY_FAILED_SYNC_RUN_ID_FILE/)
+  assert.match(zeroBody, /CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE/)
+  assert.doesNotMatch(zeroBody, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+
+  // Mutation: force zero-ledger to use recovery sync pin — must turn red.
+  const mutated = zeroBody
+    .replaceAll('CANARY_FAILED_SYNC_RUN_ID_FILE', 'CANARY_SUBJECT_SYNC_RUN_ID_FILE')
+    .replaceAll('CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE', 'CANARY_SUBJECT_SYNC_RUN_ID_FILE')
+  let failed = false
+  try {
+    assert.doesNotMatch(mutated, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+    assert.match(mutated, /CANARY_FAILED_SYNC_RUN_ID_FILE|CANARY_SAFE_ABORT_SYNC_RUN_ID_FILE/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+
+  // Mutation on exact-run proof: bind recovery sync pin instead of failed pin — red.
+  const mutatedProve = proveBody.replaceAll(
+    'CANARY_FAILED_SYNC_RUN_ID_FILE',
+    'CANARY_SUBJECT_SYNC_RUN_ID_FILE',
+  )
+  failed = false
+  try {
+    assert.doesNotMatch(mutatedProve, /CANARY_SUBJECT_SYNC_RUN_ID_FILE/)
+    assert.match(mutatedProve, /CANARY_FAILED_SYNC_RUN_ID_FILE/)
+  } catch {
+    failed = true
+  }
+  assert.equal(failed, true)
+})
+
+test('empty_fetch recovery remains distinct from sync_failure recovery', () => {
+  const source = read(REMOTE_SH)
+  const emptyBody = actionDeprovisionEmptyFetchAbortRecoveryBody(source)
+  const failBody = actionDeprovisionSyncFailureBeforeDeprovisionRecoveryBody(source)
+  assert.match(emptyBody, /empty_directory_fetch/)
+  assert.match(emptyBody, /load_run_bound_empty_fetch_abort_journal/)
+  assert.doesNotMatch(emptyBody, /load_run_bound_sync_failure_before_deprovision_journal/)
+  assert.doesNotMatch(emptyBody, /prove_exact_run_sync_failure_before_deprovision/)
+  assert.match(failBody, /load_run_bound_sync_failure_before_deprovision_journal/)
+  assert.match(failBody, /prove_exact_run_sync_failure_before_deprovision/)
+  assert.doesNotMatch(failBody, /empty_directory_fetch/)
+  assert.doesNotMatch(failBody, /load_run_bound_empty_fetch_abort_journal/)
+  // Shared helpers only for zero-ledger / intact graph — not for journal load / run proof.
+  assert.match(emptyBody, /prove_zero_deprovision_ledger_for_exact_run/)
+  assert.match(failBody, /prove_zero_deprovision_ledger_for_exact_run/)
+  assert.match(emptyBody, /prove_intact_access_graph_no_ledger/)
+  assert.match(failBody, /prove_intact_access_graph_no_ledger/)
+})
+
+test('FUNCTIONAL: sync_failure journal load accepts run_bound applied=false and refuses applied=true', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-ok-'))
+  const stateDir = join(home, '.metasheet2', 'lifecycle-canary', 'subject-state')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(stateDir, { recursive: true })
+  const stateFile = join(stateDir, 'lifecycle-canary-employee.apply-state.json')
+  const sec = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-ok-sec-'))
+  const u = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const i = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const a = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  const run = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const base = {
+    schema: 'lifecycle-canary-deprovision-apply-state-v4',
+    phase: 'run_bound',
+    subject_key: 'lifecycle-canary-employee',
+    local_user_id: u,
+    integration_id: i,
+    directory_account_id: a,
+    sync_run_id: run,
+    sync_users_deactivated: 0,
+    sync_accounts_deactivated: 0,
+    sync_deprovision_candidates: 0,
+    event_id: null,
+    effect_count: null,
+    effects: null,
+  }
+  writeFileSync(stateFile, JSON.stringify({ ...base, deprovision_applied: false }))
+  chmodSync(stateFile, 0o600)
+  writeFileSync(join(sec, 'subject.local-user-id'), u)
+  writeFileSync(join(sec, 'subject.integration-id'), i)
+  writeFileSync(join(sec, 'directory-account.id'), a)
+  for (const f of ['subject.local-user-id', 'subject.integration-id', 'directory-account.id']) {
+    chmodSync(join(sec, f), 0o600)
+  }
+
+  const harnessEnv = {
+    ...process.env,
+    ACTION: 'deprovision',
+    OUTPUT_DIR: home,
+    RUN_STAMP: 'contract-sync-fail-ok',
+    LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+  }
+  const okScript = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+load_run_bound_sync_failure_before_deprovision_journal
+printf 'ok phase=%s run_file=%s\\n' "$JOURNAL_PHASE" "$([[ -s "\${CANARY_FAILED_SYNC_RUN_ID_FILE:-}" ]] && echo yes || echo no)"
+`
+  const ok = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', okScript, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout)
+  assert.match(ok.stdout, /ok phase=run_bound run_file=yes/)
+  assert.ok(existsSync(stateFile), 'eligible journal must remain until final clear')
+  assert.ok(existsSync(join(sec, 'subject.failed-sync-run-id')))
+  assert.equal(readFileSync(join(sec, 'subject.failed-sync-run-id'), 'utf8'), run)
+
+  writeFileSync(stateFile, JSON.stringify({ ...base, deprovision_applied: true }))
+  chmodSync(stateFile, 0o600)
+  const badScript = `
+set -euo pipefail
+source "$1"
+export HOME="$2"
+CANARY_APPLY_STATE_DIR="$3"
+CANARY_APPLY_STATE_FILE="$4"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$5/subject.local-user-id"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$5/subject.integration-id"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$5/directory-account.id"
+SUBJECT_OWNER_USERNAME=lifecycle-canary-employee
+set +e
+load_run_bound_sync_failure_before_deprovision_journal
+rc=$?
+set -e
+printf 'rc=%s exists=%s\\n' "$rc" "$([[ -f "$4" ]] && echo yes || echo no)"
+`
+  const bad = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', badScript, 'bash', REMOTE_SH, home, stateDir, stateFile, sec],
+    { encoding: 'utf8', env: harnessEnv },
+  )
+  assert.equal(bad.status, 0, bad.stderr + bad.stdout)
+  assert.match(bad.stdout, /rc=1 /)
+  assert.match(bad.stdout, /exists=yes/)
+  assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).deprovision_applied, true)
+  rmSync(home, { recursive: true, force: true })
+  rmSync(sec, { recursive: true, force: true })
+})
+
+test('FUNCTIONAL: sync_failure exact-run proof accepts exact observed English error class', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-run-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const runFile = join(sec, 'subject.failed-sync-run-id')
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  writeFileSync(runFile, runId)
+  chmodSync(jwt, 0o600)
+  chmodSync(integ, 0o600)
+  chmodSync(runFile, 0o600)
+
+  // Observed live-journal English error (exact constraint only).
+  const observedError =
+    'duplicate key value violates unique constraint "idx_directory_accounts_provider_corp_external_key"'
+
+  const serverSource = `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+RUN = ${JSON.stringify(runId)}
+ERR = ${JSON.stringify(observedError)}
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send_json(self, code, payload):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if not self.path.endswith("/runs/" + RUN):
+            self.send_json(404, {"ok": False})
+            return
+        # Absent deprovisionApplied stats: run proof still accepts (journal binds applied=false).
+        self.send_json(200, {
+            "ok": True,
+            "data": {
+                "run": {
+                    "id": RUN,
+                    "status": "failed",
+                    "errorMessage": ERR,
+                    "stats": {},
+                }
+            },
+        })
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('sync-fail run server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`sync-fail run server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_FAILED_SYNC_RUN_ID_FILE="$5"
+prove_exact_run_sync_failure_before_deprovision
+printf 'ok=%s note=%s class=%s\\n' "$FAILED_SYNC_RUN_OK" "$FAILED_SYNC_RUN_NOTE" "$FAILED_SYNC_ERROR_CLASS"
+`
+    const r = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, runFile],
+      {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          ACTION: 'deprovision',
+          OUTPUT_DIR: home,
+          RUN_STAMP: 'contract-sync-fail-run',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(r.status, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /ok=true note=ok class=duplicate_provider_corp_external_key/)
+    // Values-free: raw constraint detail / errorMessage must never appear in proof output.
+    assert.doesNotMatch(r.stdout, /duplicate key value violates|DETAIL:|secret|aaaaaaaa-bbbb/)
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: sync_failure error-class allowlist refuses sibling/null/generic/23505-without-exact', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-allowlist-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  chmodSync(jwt, 0o600)
+  chmodSync(integ, 0o600)
+
+  // Distinct run UUIDs → distinct error messages on one loopback server.
+  // Case labels are opaque (case-N): values-free asserts target raw message tokens only,
+  // never the case label (a label like null_corp_index would false-positive /null_corp/).
+  const cases = [
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-111111111111',
+      name: 'case-1',
+      refuseTokens: [
+        /idx_user_external_identities_provider_corp_union/,
+        /duplicate key value violates unique constraint "idx_user_external_identities/,
+      ],
+      errorMessage:
+        'duplicate key value violates unique constraint "idx_user_external_identities_provider_corp_union"',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-222222222222',
+      name: 'case-2',
+      refuseTokens: [
+        /idx_directory_accounts_provider_null_corp_external_key/,
+        /duplicate key value violates unique constraint "idx_directory_accounts_provider_null_corp/,
+      ],
+      errorMessage:
+        'duplicate key value violates unique constraint "idx_directory_accounts_provider_null_corp_external_key"',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-333333333333',
+      name: 'case-3',
+      refuseTokens: [/duplicate key on provider and external_key for directory account/],
+      errorMessage: 'duplicate key on provider and external_key for directory account',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-444444444444',
+      name: 'case-4',
+      refuseTokens: [/23505 unique_violation detail=Key already exists/],
+      errorMessage: 'error: 23505 unique_violation detail=Key already exists',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-555555555555',
+      name: 'case-5',
+      refuseTokens: [
+        /idx_directory_accounts_provider_external_key"/,
+        /duplicate key value violates unique constraint "idx_directory_accounts_provider_external_key"/,
+      ],
+      errorMessage:
+        'duplicate key value violates unique constraint "idx_directory_accounts_provider_external_key"',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-666666666666',
+      name: 'case-6',
+      refuseTokens: [/idx_directory_accounts_provider_corp_external_key_v2/],
+      errorMessage:
+        'duplicate key value violates unique constraint "idx_directory_accounts_provider_corp_external_key_v2"',
+    },
+    {
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-777777777777',
+      name: 'case-7',
+      refuseTokens: [/while idx_directory_accounts_provider_corp_external_key remains valid/],
+      errorMessage:
+        'duplicate key value violates unique constraint "some_other_constraint" while idx_directory_accounts_provider_corp_external_key remains valid',
+    },
+  ]
+
+  const byRun = Object.fromEntries(cases.map((c) => [c.runId, c.errorMessage]))
+  const serverSource = `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+BY_RUN = ${JSON.stringify(byRun)}
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send_json(self, code, payload):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        run_id = self.path.rsplit("/", 1)[-1]
+        err = BY_RUN.get(run_id)
+        if err is None:
+            self.send_json(404, {"ok": False})
+            return
+        self.send_json(200, {
+            "ok": True,
+            "data": {
+                "run": {
+                    "id": run_id,
+                    "status": "failed",
+                    "errorMessage": err,
+                    "stats": {},
+                }
+            },
+        })
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('sync-fail allowlist server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`sync-fail allowlist server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    for (const c of cases) {
+      const runFile = join(sec, `subject.failed-sync-run-id.${c.name}`)
+      writeFileSync(runFile, c.runId)
+      chmodSync(runFile, 0o600)
+      const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_FAILED_SYNC_RUN_ID_FILE="$5"
+set +e
+prove_exact_run_sync_failure_before_deprovision
+rc=$?
+set -e
+printf 'case=%s rc=%s ok=%s note=%s class=%s\\n' "$6" "$rc" "$FAILED_SYNC_RUN_OK" "$FAILED_SYNC_RUN_NOTE" "$FAILED_SYNC_ERROR_CLASS"
+`
+      const r = spawnSync(
+        'bash',
+        ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, runFile, c.name],
+        {
+          encoding: 'utf8',
+          timeout: 10000,
+          env: {
+            ...process.env,
+            ACTION: 'deprovision',
+            OUTPUT_DIR: home,
+            RUN_STAMP: `contract-sync-fail-allowlist-${c.name}`,
+            LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+          },
+        },
+      )
+      assert.equal(r.status, 0, `${c.name}: ${r.stderr}\n${r.stdout}`)
+      assert.match(r.stdout, new RegExp(`case=${c.name} rc=1 `), c.name)
+      assert.match(r.stdout, /note=error_class_not_allowlisted/, c.name)
+      assert.doesNotMatch(r.stdout, /ok=true/, c.name)
+      // Values-free: stdout must not echo the raw sibling constraint / message tokens.
+      // Assert against those production-message tokens only — never against the case label.
+      for (const token of c.refuseTokens) {
+        assert.doesNotMatch(r.stdout, token, `${c.name} must not echo ${token}`)
+      }
+      assert.doesNotMatch(r.stdout, /DETAIL:/, c.name)
+    }
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: sync_failure exact-run proof refuses completed empty_directory_fetch', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-refuse-empty-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const jwt = join(sec, 'admin.jwt')
+  const integ = join(sec, 'subject.integration-id')
+  const runFile = join(sec, 'subject.failed-sync-run-id')
+  const integrationId = '11111111-2222-4333-8444-555555555555'
+  const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  writeFileSync(jwt, 'test-token')
+  writeFileSync(integ, integrationId)
+  writeFileSync(runFile, runId)
+  for (const f of [jwt, integ, runFile]) chmodSync(f, 0o600)
+
+  const serverSource = `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+RUN = ${JSON.stringify(runId)}
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send_json(self, code, payload):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        self.send_json(200, {
+            "ok": True,
+            "data": {
+                "run": {
+                    "id": RUN,
+                    "status": "completed",
+                    "stats": {
+                        "deprovisionApplied": False,
+                        "deprovisionAbortedReason": "empty_directory_fetch",
+                    },
+                }
+            },
+        })
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_port, flush=True)
+s.serve_forever()
+`
+  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('sync-fail refuse server did not start')), 5000)
+    server.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`sync-fail refuse server exited ${code}`))
+    })
+    server.stdout.once('data', (chunk) => {
+      clearTimeout(timer)
+      resolve(String(chunk).trim())
+    })
+  })
+  try {
+    const script = `
+set -euo pipefail
+source "$1"
+STAGING_API_BASE_URL="http://127.0.0.1:$2"
+CANARY_ADMIN_JWT_FILE="$3"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$4"
+CANARY_FAILED_SYNC_RUN_ID_FILE="$5"
+set +e
+prove_exact_run_sync_failure_before_deprovision
+rc=$?
+set -e
+printf 'rc=%s ok=%s note=%s\\n' "$rc" "$FAILED_SYNC_RUN_OK" "$FAILED_SYNC_RUN_NOTE"
+`
+    const r = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, port, jwt, integ, runFile],
+      {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          ACTION: 'deprovision',
+          OUTPUT_DIR: home,
+          RUN_STAMP: 'contract-sync-fail-refuse-empty',
+          LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        },
+      },
+    )
+    assert.equal(r.status, 0, r.stderr + r.stdout)
+    assert.match(r.stdout, /rc=1 /)
+    assert.match(r.stdout, /note=run_not_failed/)
+  } finally {
+    server.kill('SIGTERM')
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('FUNCTIONAL: zero-ledger proof keeps failed-run pin after a distinct recovery sync run exists', () => {
+  const home = mkdtempSync(join(tmpdir(), 'lifecycle-canary-sync-fail-run-pin-'))
+  const sec = join(home, 'secrets')
+  const { mkdirSync, chmodSync } = awaitImportFs()
+  mkdirSync(sec, { recursive: true })
+  const user = join(sec, 'subject.local-user-id')
+  const integ = join(sec, 'subject.integration-id')
+  const failedRun = join(sec, 'subject.failed-sync-run-id')
+  const recoveryRun = join(sec, 'subject.sync-run-id')
+  const acct = join(sec, 'directory-account.id')
+  const failedRunId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  writeFileSync(user, '99999999-8888-4777-8666-555555555555')
+  writeFileSync(integ, '11111111-2222-4333-8444-555555555555')
+  writeFileSync(failedRun, failedRunId)
+  writeFileSync(recoveryRun, 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff')
+  writeFileSync(acct, '12121212-3434-4656-8878-909090909090')
+  for (const f of [user, integ, failedRun, recoveryRun, acct]) chmodSync(f, 0o600)
+
+  const script = `
+set -euo pipefail
+source "$1"
+CANARY_SUBJECT_LOCAL_USER_ID_FILE="$2"
+CANARY_SUBJECT_INTEGRATION_ID_FILE="$3"
+CANARY_FAILED_SYNC_RUN_ID_FILE="$4"
+CANARY_SUBJECT_SYNC_RUN_ID_FILE="$5"
+CANARY_DIRECTORY_ACCOUNT_ID_FILE="$6"
+EXPECTED_FAILED_RUN_ID="$7"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() {
+  local payload
+  payload="$(cat)"
+  if [[ "$payload" == *"$EXPECTED_FAILED_RUN_ID"* ]]; then
+    printf 'true|ok|0|0'
+  else
+    printf 'false|wrong_run_pin|0|0'
+  fi
+}
+prove_zero_deprovision_ledger_for_exact_run "contract_distinct_failed_run_pin"
+printf 'ok=%s note=%s\\n' "$SAFE_ABORT_LEDGER_OK" "$SAFE_ABORT_LEDGER_NOTE"
+`
+  const r = spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', script, 'bash', REMOTE_SH, user, integ, failedRun, recoveryRun, acct, failedRunId],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'deprovision',
+        OUTPUT_DIR: home,
+        RUN_STAMP: 'contract-sync-fail-distinct-run-pin',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+      },
+    },
+  )
+  assert.equal(r.status, 0, r.stderr + r.stdout)
+  assert.match(r.stdout, /ok=true note=ok/)
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('workflow validates empty-fetch abort recovery confirmation for action=deprovision', () => {
+  const yaml = read(WORKFLOW)
+  assert.match(yaml, /DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED/)
+  assert.match(
+    yaml,
+    /DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED\|DINGTALK_SOURCE_REACTIVATED_CONFIRMED\|DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED\|DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED/,
+  )
+  // Secret paths for deprovision still cover recovery (same action).
+  assert.match(
+    yaml,
+    /\(inputs\.action == 'pending' \|\| inputs\.action == 'deprovision'\) && secrets\.LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID/,
+  )
+  assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_IDENTIFIER/)
+  assert.match(yaml, /LIFECYCLE_CANARY_LOGIN_PASSWORD/)
+  assert.match(yaml, /CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_DIRECTORY_ACCOUNT_ID=/)
+  assert.doesNotMatch(yaml, /export LIFECYCLE_CANARY_LOGIN_PASSWORD=/)
 })
 
 test('deprovision ledger requires exact sync run.id equality (load-bearing)', () => {
@@ -3158,12 +4702,17 @@ test('workflow pending/deprovision phase confirmations and honest claims', () =>
   assert.match(yaml, /PENDING_SSO_ACTIVATE/)
   assert.match(yaml, /DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED/)
   assert.match(yaml, /DINGTALK_SOURCE_REACTIVATED_CONFIRMED/)
+  assert.match(yaml, /DINGTALK_EMPTY_FETCH_ABORT_SOURCE_RE_ADDED_CONFIRMED/)
+  assert.match(yaml, /DINGTALK_SYNC_FAILURE_BEFORE_DEPROVISION_SOURCE_RE_ADDED_CONFIRMED/)
   assert.match(yaml, /directory-account\.id/)
   assert.match(yaml, /NOT_EXECUTED/)
   assert.match(yaml, /restore phase|RESTORE/)
+  assert.match(yaml, /empty-fetch abort recovery|EMPTY_FETCH_ABORT/)
+  assert.match(yaml, /sync-failure-before-deprovision recovery|SYNC_FAILURE_BEFORE_DEPROVISION/)
   assert.doesNotMatch(yaml, /docs may still say NOT EXECUTABLE|follow-up to refresh docs/i)
-  assert.match(yaml, /exactly one total directory account/)
+  assert.match(yaml, /exactly two total directory accounts \(owned target \+ explicit sentinel\)/)
   assert.match(yaml, /reserves and journals the exact sync run UUID before env\/HTTP/)
+  assert.match(yaml, /Never claims end-to-end restore|never claims end-to-end restore/)
 })
 
 
@@ -4292,7 +5841,7 @@ test('MUTATION: deleting the pre-POST resolved probe makes the resume golden red
   })
 })
 
-test('R5: dedicated subject precondition requires one-account manual integration and exact effects', () => {
+test('R5: dedicated subject precondition requires exact target+sentinel integration and exact effects', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /prove_dedicated_subject_deprovision_precondition/)
   const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
@@ -4302,10 +5851,19 @@ test('R5: dedicated subject precondition requires one-account manual integration
   assert.match(body, /policy_not_mark_inactive/)
   assert.match(body, /integration_not_manual_only/)
   assert.match(body, /integration_automation_not_disabled/)
-  assert.match(body, /integration_not_single_account/)
+  assert.match(body, /integration_not_exact_target_and_sentinel/)
   assert.match(body, /count\(\*\)::int AS n/)
   assert.match(body, /count\(\*\) FILTER \(WHERE id = \$2\)::int AS target_n/)
+  assert.match(body, /count\(\*\) FILTER \(WHERE id = \$3\)::int AS sentinel_n/)
+  assert.match(body, /Number\(radius\.rows\[0\]\?\.n\) !== 2/)
   assert.match(body, /WHERE integration_id = \$1/)
+  assert.match(body, /target_sentinel_ids_not_distinct/)
+  assert.match(body, /sentinel_provider_not_dingtalk/)
+  assert.match(body, /sentinel_not_same_integration_corp/)
+  assert.match(body, /!sentinelCorp \|\| !targetCorp \|\| sentinelCorp !== targetCorp/)
+  assert.match(body, /sentinel_not_active/)
+  assert.match(body, /sentinel_name_not_owned/)
+  assert.match(body, /sentinel_must_be_unlinked/)
   assert.match(body, /not_globally_clear/)
   assert.match(body, /dingtalk_grant_not_enabled/)
   assert.match(body, /target_org_membership_not_active/)
@@ -4315,13 +5873,22 @@ test('R5: dedicated subject precondition requires one-account manual integration
   assert.match(body, /user_id = \$1 AND org_id = \$2/)
 })
 
-test('MUTATION: dropping the one-account integration radius guard turns red', () => {
+test('MUTATION: dropping the exact target+sentinel integration radius guard turns red', () => {
   const source = read(REMOTE_SH)
   const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
   const end = source.indexOf('\nvalidate_mode_name()', start)
   const body = source.slice(start, end)
-  const mutated = body.replace('Number(radius.rows[0]?.n) !== 1', 'false')
-  assert.throws(() => assert.match(mutated, /Number\(radius\.rows\[0\]\?\.n\) !== 1/))
+  const mutated = body.replace('Number(radius.rows[0]?.n) !== 2', 'false')
+  assert.throws(() => assert.match(mutated, /Number\(radius\.rows\[0\]\?\.n\) !== 2/))
+})
+
+test('MUTATION: accepting a linked sentinel turns the sentinel contract red', () => {
+  const source = read(REMOTE_SH)
+  const start = source.indexOf('prove_dedicated_subject_deprovision_precondition()')
+  const end = source.indexOf('\nvalidate_mode_name()', start)
+  const body = source.slice(start, end)
+  const mutated = body.replace('if (s.has_linked_user === true)', 'if (false)')
+  assert.throws(() => assert.match(mutated, /if \(s\.has_linked_user === true\)/))
 })
 
 test('MUTATION: dropping dedicated precondition before env write turns red', () => {
@@ -4719,6 +6286,7 @@ test('workflow exports only safe remote env keys (no raw secret values)', () => 
   assert.match(yaml, /export CANARY_LOGIN_PASSWORD_FILE=/)
   assert.match(yaml, /export STAGING_OWNER_ADMIN_PASSWORD_FILE=/)
   assert.match(yaml, /export CANARY_DIRECTORY_ACCOUNT_ID_FILE=/)
+  assert.match(yaml, /export CANARY_SENTINEL_DIRECTORY_ACCOUNT_ID_FILE=/)
 })
 
 // --- human-bootstrap: fixed separate human platform admin -----------------------------

@@ -7,7 +7,8 @@
 #
 # Governing document:
 #   docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md
-#   (sections 4.1-4.4; decision points OD-W6-1..9 are OPEN)
+#   (sections 4.1-4.4; decisions OD-W6-1..9 are RATIFIED in section 9;
+#   the delegated-non-member status correction in section 10 is PROPOSED)
 #
 # Wiring plan (W6-2, blocked on owner RATIFY): move the `paths` and
 # `components` content into src/paths/attendance.yml + src/base.yml, rebuild
@@ -59,12 +60,12 @@ paths:
             are rejected, never defaulted (red line W6-R6).
         '403':
           description: >
-            Authenticated-but-unscoped principal, org-selector mismatch, or
-            delegated admin without active target-org membership; issued
-            before any aggregate SQL (red line W6-R3).
+            Authenticated-but-unscoped principal or org-selector mismatch;
+            issued before any aggregate SQL (red line W6-R3).
         '404':
           description: >
-            Unknown, cross-org, or inaccessible group; one shared values-free
+            Unknown, cross-org, or inaccessible group, including a delegated
+            admin without active target-org membership; one shared values-free
             shape (red line W6-R3).
 
 components:

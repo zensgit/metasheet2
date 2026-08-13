@@ -53,8 +53,11 @@ import * as ts from 'typescript'
  * "commented out" and "deleted" are the same state by construction, not by
  * a special case that could itself be wrong.
  *
- * NOT collected, named rather than silently missed (the property-identity
- * problem does not converge past this point — see the design note above
+ * NOT collected BY `buildAssemblyModel` (the site/escape layer) — but round 4's
+ * UNKNOWN census (`buildThisPartition`) now classifies every one of the shapes
+ * below as UNKNOWN and asserts UNKNOWN empty, so they are NO LONGER silent
+ * residuals of the overall guard; the list is retained as this layer's own
+ * boundary, which round 4 backstops (see the property-identity design note above
  * `isThisAppElementAccess` and `bindingElementSourceName`):
  *  - a NON-literal bracket index on `this` (`this[computedExpr]`) — this
  *    module cannot decide whether `computedExpr` evaluates to `'app'`
@@ -589,13 +592,15 @@ export function textMentions(text: string, needle: string): number {
 // Round 4 — the FOUR-BUCKET partition with an UNKNOWN census (owner-specified).
 //
 // Rounds 1-3 enumerated wrapper/alias shapes and never converged. This closes
-// the class by COMPLEMENT: every `this` use in the file is placed in exactly
-// one of {SITE, ESCAPE, SAFE, UNKNOWN}, and UNKNOWN is asserted empty. A shape
-// nobody enumerated lands in UNKNOWN by default and reds, rather than slipping
-// through. SAFE is NOT a set of property names — it is a FROZEN census of exact
-// OCCURRENCES keyed by (enclosing symbol + AST path + access shape), never by
-// line/column, so an unrelated insert elsewhere does not false-red, while a
-// duplicate / move / re-context of a safe access mints a new key -> UNKNOWN.
+// the class by COMPLEMENT: every `this` use in the TARGET-METHOD SCOPE
+// (setupMiddleware + constructor subtrees — not the whole file) is placed in
+// exactly one of {SITE, ESCAPE, SAFE, UNKNOWN}, and UNKNOWN is asserted empty. A
+// shape nobody enumerated lands in UNKNOWN by default and reds, rather than
+// slipping through. SAFE is NOT a set of property names — it is a FROZEN census
+// of exact OCCURRENCES keyed by (enclosing symbol + ANCESTOR-KIND path + access
+// shape + per-base-key occurrence ordinal), never by line/column or child
+// ordinal, so an unrelated insert (even in the same method) does not false-red,
+// while a duplicate / re-context of a safe access mints a new key -> UNKNOWN.
 // ---------------------------------------------------------------------------
 
 export type ThisBucket = 'SITE' | 'ESCAPE' | 'SAFE' | 'UNKNOWN'
@@ -691,10 +696,19 @@ function findTargetMethods(source: ts.SourceFile, scopeSymbols: ReadonlySet<stri
  *     instance (P3-1: this is NOT function-like, so `isFunctionLike` alone
  *     walked past it and mis-reported instance-bound; the census caught it, but
  *     the classification door must own its own property).
- *  Expressed as a COMPLEMENT (a boundary is fine only if it is an arrow) so any
- *  new `this`-rebinding construct fails closed to UNKNOWN by default. Note the
- *  slight over-conservatism: a `this` inside a class field's COMPUTED NAME is
- *  actually the outer `this`, yet is forced UNKNOWN here — fail-closed, safe. */
+ *  Expressed as a COMPLEMENT (a boundary is fine only if it is an arrow). This is
+ *  NOT total over every `this`-rebinding construct: an ENUM-MEMBER initializer
+ *  (`enum E { A = this.x }`) also rebinds `this` yet is none of the three kinds
+ *  above, so it is classified by SHAPE rather than forced UNKNOWN. That residual
+ *  is still fail-closed — it is over-inclusive (a bare/app read there becomes a
+ *  phantom SITE that cannot hide a real registration; a `.name` read gets a
+ *  novel ancestor-kind key absent from the frozen census -> UNKNOWN) and a
+ *  `this`-valued non-numeric enum member does not survive `tsc`, so it cannot
+ *  reach shipped `index.ts`. Do NOT read this rule as "any new construct fails
+ *  closed to UNKNOWN"; read it as "known rebinding boundaries do, and the
+ *  census/SITE layers backstop the rest." Note the slight over-conservatism: a
+ *  `this` inside a class field's COMPUTED NAME is actually the outer `this`, yet
+ *  is forced UNKNOWN here — fail-closed, safe. */
 function isThisRebindingBoundary(node: ts.Node): boolean {
   if (ts.isArrowFunction(node)) return false
   return (

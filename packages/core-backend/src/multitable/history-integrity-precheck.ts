@@ -467,10 +467,11 @@ export async function precheckSheetHistoryIntegrity(
     // UNCONDITIONALLY (owner P2, 2026-07-16: an earlier draft exempted `no_active_checkpoint`, which let an
     // operator flip strict on and have every checkpoint-LESS sheet walk straight into the strict comparator —
     // a production bypass that existed to keep test fixtures convenient; tests that need the comparator call
-    // `precheckSheetHistoryIntegrityStrict` directly instead). With RECONSTRUCTION_CAUSALITY_LANDED=false,
-    // (b) is unmet for EVERY sheet, so the production strict path refuses fail-closed until L6 lands —
-    // "migration/backfill presence alone never enables recovery" (design lock §3). The Revert/Reset routes
-    // inherit this refusal through this single entry.
+    // `precheckSheetHistoryIntegrityStrict` directly instead). RECONSTRUCTION_CAUSALITY_LANDED is true after
+    // the L8 route wiring (owner ruling 2026-07-17: seam flip + Revert/Reset wiring = one reviewable change).
+    // Strict-on still refuses sheets WITHOUT an active trust checkpoint; runtime flags stay default-OFF
+    // ("migration/backfill presence alone never enables recovery", design lock §3). The Revert/Reset routes
+    // inherit this gate through this single entry.
     const enablement = await checkStrictEnablementPrecondition(query, sheetId)
     if (!enablement.canEnable) {
       return { ok: false, reason: 'strict_enablement_unmet' }
