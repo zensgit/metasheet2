@@ -176,6 +176,12 @@ describe('blueprint mutations — real production surfaces', () => {
         client: {
           query: async (sql: string, params?: unknown[]) => {
             queries.push([sql, ...(params ?? [])])
+            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
+            // contract the real driver gives `assertConnectionIsIdleV1`'s own
+            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
+            if (sql === 'SAVEPOINT w4c5_idle_probe') {
+              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+            }
             if (
               String(sql).includes('FROM attendance_import_jobs') &&
               String(sql).includes('id = $1') &&

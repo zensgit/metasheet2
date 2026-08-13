@@ -25,6 +25,12 @@ function fakeClient(rolloutState: 'shadow' | 'suspended' | null): AttendanceW4Tr
     calls,
     async query(sqlText: string, params: unknown[] = []) {
       calls.push({ sqlText, params })
+      // This is a freshly-acquired (idle) connection — the SAME affirmative-proof contract the
+      // real driver gives `assertConnectionIsIdleV1`'s own `SAVEPOINT w4c5_idle_probe`
+      // (SQLSTATE 25P01, no active transaction).
+      if (sqlText === 'SAVEPOINT w4c5_idle_probe') {
+        throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+      }
       if (sqlText.includes('FROM users WHERE id = $1')) return { rows: [{ ok: 1 }] }
       if (sqlText.includes('FROM user_orgs WHERE user_id = $1')) return { rows: [{ ok: 1 }] }
       if (sqlText.startsWith('SELECT state, scope FROM attendance_calculation_rollout_state')) {
