@@ -23,8 +23,11 @@
  *
  * DESIGN — two enforcement layers per invariant (repo doctrine: gate the MECHANISM, and a mutation
  * must be able to redden it — feedback_gate_the_mechanism_not_the_claim.md):
- *   (a) this module pre-validates every §7.3 authoritative invariant it can and refuses with a
- *       PRODUCT CODE (never a raw SQLSTATE) — the mutatable layer;
+ *   (a) this module pre-validates every §7.3 authoritative invariant it can on the normal
+ *       (live/scheduled completed+review) write path and refuses with a PRODUCT CODE rather than a raw
+ *       SQLSTATE — the mutatable layer. Two documented exceptions where a raw 23505 is still reachable
+ *       are named in "Concurrency notes" below (concurrent DIRECT `appendAuthoritativeLegacyBaselineV1`;
+ *       concurrent same-op reversal) — neither is on a production path (INERT) and neither corrupts;
  *   (b) the DB CHECK constraints / triggers installed by the W4C-0 durable-storage migration are
  *       the backstop, each proven separately by a raw-insert leg that bypasses (a).
  *
@@ -34,14 +37,40 @@
  * mirrors the four existing private copies byte-for-byte (same domain-separated hash); the four are
  * intentionally left un-rewired (that is a separate, non-inert refactor).
  *
- * OPEN SEAM for D2/D3 (named, not resolved here): the legacy_baseline fingerprint is caller-supplied
- * (`preimage.compatibilityFingerprint`) on purpose — self-computing it here is the import-kernel trap
- * (kernel :907-909 binds the frozen preimage fingerprint, not a recomputed one). Today ONLY the
- * import/rollback/ops paths freeze a `compatibilityFingerprint`; the live/scheduled boundary has no
- * producer. D2 (live_punch) must supply one — deterministically, over the parent's legacy daily
- * projection — before it can call the completed path on an active legacy parent, or `PREIMAGE_INVALID`
- * fails closed. The at-most-one-baseline-per-record existence read makes cross-path fingerprint values
- * inconsequential for uniqueness, but the live path still needs SOME frozen source.
+ * OPEN SEAMS / D2 obligations (named, not resolved here):
+ *  1. legacy_baseline fingerprint is caller-supplied (`preimage.compatibilityFingerprint`) on purpose
+ *     — self-computing it here is the import-kernel trap (kernel :907-909 binds the frozen preimage
+ *     fingerprint, not a recomputed one). Today ONLY the import/rollback/ops paths freeze a
+ *     `compatibilityFingerprint`; the live/scheduled boundary has no producer. D2 (live_punch) must
+ *     supply one — deterministically, over the parent's legacy daily projection — before it can call
+ *     the completed path on an active legacy parent, or `PREIMAGE_INVALID` fails closed. Cross-path
+ *     fingerprint values are inconsequential for uniqueness (see the existence-read note below), but
+ *     the live path still needs SOME frozen source.
+ *  2. PARENT-STATE ASYMMETRY (F6): the completed path moves the parent pointer/visibility and the
+ *     reversal path restores/retires it, but `writeReviewRow` writes ONLY the calc row and NEVER
+ *     touches `attendance_records`. §7.5 requires a FRESH authoritative review to leave the parent
+ *     `legacy_untracked`/pointer-null/retired/`review_placeholder` so ordinary readers see no
+ *     fabricated zero-minute row. Deciding fresh-vs-existing review is a BOUNDARY concern, so the
+ *     core deliberately does not touch the parent here — but D2/D3 MUST install that retired/
+ *     `review_placeholder` state in the SAME transaction for a fresh authoritative review, unlike the
+ *     completed/reversal paths which self-manage the parent. This asymmetry is the footgun; it is a
+ *     named D2 obligation, not an ambient concern. (The invariant-5 test installs that precondition by
+ *     fixture; it proves the "later completed needs no baseline" branch, not the boundary's install.)
+ *
+ * Concurrency notes:
+ *  - The completed/review path is idempotent under CONCURRENT same-(org,entrypoint,operation_id)
+ *    retries: a SAVEPOINT catches `uq_arc_operation` (23505) and re-runs the replay lookup, returning
+ *    replay/`REPLAY_CONFLICT` (never a raw SQLSTATE) — see `writeAuthoritativeSegmentCalculationV1`.
+ *  - The exported `appendAuthoritativeLegacyBaselineV1` existence read is a plain `SELECT … LIMIT 1`
+ *    (no `FOR UPDATE`); at-most-one-baseline-per-record is only guaranteed when it runs UNDER the
+ *    parent `FOR UPDATE` lock (as it does inside `writeCompletedRow`). Two concurrent DIRECT appends
+ *    could each compute version=1 and the loser trips `uq_arc_record_version` — no corruption (the
+ *    index holds; exactly one baseline), but a raw 23505 on that direct-use path. No production path
+ *    calls the helper directly (INERT).
+ *  - `writeAuthoritativeReversalV1` carries an operation_id too; a concurrent same-op reversal would
+ *    trip `uq_arc_operation` raw. Reversal is NOT an idempotent-replay contract in §7.3 (its callers —
+ *    import-rollback/ops-retirement — serialize via their own upstream operation registries), so it is
+ *    intentionally not savepoint-wrapped here.
  *
  * Defensive guards: `LINEAGE_SELF_REFERENCE` and `LINEAGE_NOT_STRICTLY_LOWER` are unreachable via the
  * public API with valid inputs (fresh id; supersedes/restores are always a strictly-lower baseline or
@@ -115,6 +144,16 @@ function fail(
 }
 
 const HEX64 = /^[0-9a-f]{64}$/
+
+/** True iff `error` is a Postgres unique_violation (23505) on the named constraint. */
+function isUniqueViolationOnConstraintV1(error: unknown, constraint: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '23505' &&
+    (error as { constraint?: unknown }).constraint === constraint
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Shared column helpers.
@@ -463,6 +502,20 @@ function assertPreimageProjection(projection: AttendanceAuthoritativePreimagePro
   }
 }
 
+function preimageProjectionsEqualV1(
+  a: AttendanceAuthoritativePreimageProjectionV1,
+  b: AttendanceAuthoritativePreimageProjectionV1,
+): boolean {
+  return (
+    a.status === b.status &&
+    a.firstInAt === b.firstInAt &&
+    a.lastOutAt === b.lastOutAt &&
+    a.workMinutes === b.workMinutes &&
+    a.lateMinutes === b.lateMinutes &&
+    a.earlyLeaveMinutes === b.earlyLeaveMinutes
+  )
+}
+
 // ---------------------------------------------------------------------------
 // (2) normal `calculation` (§7.3/§7.5/§7.8) — the live/scheduled authoritative write. Completed →
 // set_active + pointer move + segments; review_required → hidden all-NULL placeholder (no
@@ -601,18 +654,43 @@ export async function writeAuthoritativeSegmentCalculationV1(
     context: input.context,
   })
 
-  if (input.calculation.outcome === 'review_required') {
-    return await writeReviewRow(trx, input, {
-      semanticInputFingerprint,
-      provenanceFingerprint,
-      sourceDefinitionFingerprint,
+  const fp: FingerprintTripleV1 = { semanticInputFingerprint, provenanceFingerprint, sourceDefinitionFingerprint }
+
+  // §7.3 concurrent-retry idempotency. `retryReplayLookup` above only catches a retry whose winner
+  // already COMMITTED before this call. Two concurrent same-(org,entrypoint,operation_id) writers
+  // that do not contend on one parent row (different records, or the review path which never moves
+  // the pointer) both pass that lookup and both insert — the loser then trips `uq_arc_operation`.
+  // `lockParent`'s FOR UPDATE only serializes writers on the SAME parent row, so it does not cover
+  // this. A SAVEPOINT lets the loser roll back its partial writes (a bare constraint failure poisons
+  // the whole txn) and re-run the lookup so §7.3's "retries return the existing calculation" holds
+  // instead of a raw SQLSTATE reaching the caller.
+  const savepoint = 'attendance_w4_auth_calc_op'
+  await trx.query(`SAVEPOINT ${savepoint}`)
+  try {
+    const written =
+      input.calculation.outcome === 'review_required'
+        ? await writeReviewRow(trx, input, fp)
+        : await writeCompletedRow(trx, input, parent, fp)
+    await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
+    return written
+  } catch (error) {
+    if (!isUniqueViolationOnConstraintV1(error, 'uq_arc_operation')) throw error
+    await trx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+    const afterConflict = await retryReplayLookup(trx, {
+      orgId: input.orgId,
+      entrypoint: input.entrypoint,
+      operationId: input.operationId,
+      recordId: input.recordId,
+      payloadFingerprint: input.payloadFingerprint,
     })
+    if (afterConflict !== null) {
+      return Object.freeze({ kind: 'replay' as const, calculationId: afterConflict.calculationId })
+    }
+    // The unique index proved a row exists, but this txn's snapshot cannot see it (e.g. a
+    // SERIALIZABLE caller whose snapshot predates the winner's commit). Surface §7.3's idempotency
+    // outcome as a product code, never the raw 23505.
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.REPLAY_CONFLICT, 409)
   }
-  return await writeCompletedRow(trx, input, parent, {
-    semanticInputFingerprint,
-    provenanceFingerprint,
-    sourceDefinitionFingerprint,
-  })
 }
 
 interface FingerprintTripleV1 {
@@ -693,6 +771,16 @@ async function writeCompletedRow(
   const segmentCount = input.calculation.segments.length
   if (segmentCount < 1 || segmentCount > 3) {
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.EXPECTED_COUNT_INVALID, 422)
+  }
+  // §7.3 line 1414 "non-negative minutes": pre-validate with a product code, symmetric with the
+  // baseline (`assertPreimageProjection`) and reversal paths, so a negative-minute projection cannot
+  // leak the raw `chk_arc_projected_minutes` SQLSTATE (23514) to the caller.
+  if (
+    !Number.isSafeInteger(projection.workedMinutes) || projection.workedMinutes < 0 ||
+    !Number.isSafeInteger(projection.lateMinutes) || projection.lateMinutes < 0 ||
+    !Number.isSafeInteger(projection.earlyLeaveMinutes) || projection.earlyLeaveMinutes < 0
+  ) {
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
   }
 
   const id = crypto.randomUUID()
@@ -915,6 +1003,24 @@ export async function writeAuthoritativeReversalV1(
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.REVERSAL_EFFECT_INVALID, 422)
   }
   assertPreimageProjection(input.frozenTarget.projection)
+  // F5 (defensive): for a present preimage the reversal RESTORES that exact frozen parent state, and
+  // the pointer is moved to `preimage` (owner/visibility/projection) — while the immutable row's
+  // projection_effect + projected fields come from `frozenTarget`. §7.3 lines 1449-1451 permit the
+  // row's effect to diverge from the *pointed-to earlier calc*, but NOT from the reversal's own
+  // preimage: a caller supplying a frozenTarget inconsistent with its own preimage would write a
+  // mislabeled immutable row (e.g. effect=set_active while the parent is restored to a retired
+  // preimage) that no DB CHECK covers — the §7.5 pointer trigger validates only the pointed-to
+  // earlier calc. The real callers derive both from one source, so this only rejects inconsistency.
+  if (input.preimage.posture === 'present') {
+    const consistent =
+      input.frozenTarget.visibilityState === input.preimage.visibilityState &&
+      input.frozenTarget.visibilityReason === input.preimage.visibilityReason &&
+      (input.preimage.projection === null ||
+        preimageProjectionsEqualV1(input.frozenTarget.projection, input.preimage.projection))
+    if (!consistent) {
+      fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.REVERSAL_EFFECT_INVALID, 422)
+    }
+  }
 
   const parent = await lockParent(trx, input.orgId, input.recordId)
   if (parent.currentCalculationId !== input.supersedesCalculationId) {

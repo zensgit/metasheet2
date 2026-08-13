@@ -220,6 +220,18 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
     expect((caught as AttendanceW4AuthoritativeCalculationError).code).toBe(code)
   }
 
+  // F4: a DB-backstop leg must pin WHICH constraint/trigger refused, not merely that SOME error was
+  // thrown (feedback_not_this_error_is_not_an_outcome_assertion). Postgres sets `.constraint` for
+  // unique/check violations and puts the trigger's RAISE text in `.message`.
+  function dbErrorInfo(caught: unknown): { code: string | null; constraint: string | null; message: string } {
+    const e = caught as { code?: unknown; constraint?: unknown; message?: unknown }
+    return {
+      code: typeof e?.code === 'string' ? e.code : null,
+      constraint: typeof e?.constraint === 'string' ? e.constraint : null,
+      message: typeof e?.message === 'string' ? e.message : String(caught),
+    }
+  }
+
   async function calcRow(id: string): Promise<Record<string, unknown> | undefined> {
     const { rows } = await pool.query(
       `SELECT * FROM attendance_record_calculations WHERE id = $1::uuid`,
@@ -319,17 +331,20 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).constraint).toBe('uq_arc_baseline')
     })
 
     it('SAME-TXN atomicity (§7.3): a failure in the calc step after the baseline write leaves NEITHER row', async () => {
-      // Active legacy parent + a completed calc whose projection carries a negative minute → the calc
-      // INSERT trips chk_arc_projected_minutes AFTER the baseline is appended in the same txn. If the
-      // baseline were written on a separate/auto-committing connection it would survive; it must not.
+      // Active legacy parent + a completed calc whose projection carries an INVALID status ('bogus').
+      // The core does not pre-validate the status enum (unlike minutes, F2), so the baseline is
+      // appended first and the calc INSERT then trips chk_arc_projected_status (23514) IN the same
+      // txn. If the baseline were written on a separate/auto-committing connection it would survive
+      // the rollback; it must not. A negative-minute projection can no longer serve here — F2 now
+      // rejects it BEFORE the baseline append.
       const org = `org-b5-${RUN}`
       const recordId = await insertLegacyActiveParent(org)
       const bad = completedCalculation(1)
-      ;(bad.dailyProjection as { workedMinutes: number }).workedMinutes = -1
+      ;(bad.dailyProjection as { status: string }).status = 'not_a_real_status'
       let caught: unknown
       try {
         await withTxn((client) =>
@@ -339,6 +354,21 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
         caught = error
       }
       expect(caught).toBeTruthy()
+      expect(String((caught as { constraint?: unknown }).constraint ?? (caught as Error).message)).toContain('chk_arc_projected_status')
+      // Neither the baseline nor the failed calc survived the same-txn rollback.
+      expect(await countCalcs(recordId)).toBe(0)
+    })
+
+    it('NEGATIVE (product code, F3): a baseline with a negative projected minute is refused with BASELINE_PROJECTION_INVALID', async () => {
+      const org = `org-b6-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const badProjection = { ...LEGACY_PROJECTION, workMinutes: -1 }
+      await expectProductCode(
+        withTxn((client) =>
+          appendAuthoritativeLegacyBaselineV1(asTrx(client), { ...baselineInput(org, recordId), projection: badProjection }),
+        ),
+        CODES.BASELINE_PROJECTION_INVALID,
+      )
       expect(await countCalcs(recordId)).toBe(0)
     })
   })
@@ -367,10 +397,10 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
           projected_daily_fingerprint, actor_id, correlation_id)
        VALUES ($1::uuid, $2, $3::uuid, $4, 'legacy_baseline', 'authoritative', 'live', 'raw', 1, NULL,
-               $5, $5, $5, '{"posture":"unsupported","sourceSchemaVersion":1,"reason":"legacy_v1","sourceFingerprint":null}'::jsonb,
+               $5::text, $5::text, $5::text, '{"posture":"unsupported","sourceSchemaVersion":1,"reason":"legacy_v1","sourceFingerprint":null}'::jsonb,
                '{"schemaVersion":1}'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{"schemaVersion":1}'::jsonb,
                'append', 'legacy_shadow', 'baseline', 'legacy_projection_baseline', 'none', 0, 'normal',
-               420, 0, 0, $5, 'raw-actor', $6)`,
+               420, 0, 0, $5::text, 'raw-actor', $6)`,
       [uuid(), org, recordId, version, fp, `raw-${RUN}`],
     )
   }
@@ -434,7 +464,46 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).message).toContain('W4C0_SEGMENT_COUNT')
+    })
+
+    it('NEGATIVE (product code, F2): a completed projection with a negative minute is refused with COMPLETED_SHAPE_INVALID, not a raw 23514', async () => {
+      const org = `org-c5-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const bad = completedCalculation(1)
+      ;(bad.dailyProjection as { workedMinutes: number }).workedMinutes = -5
+      await expectProductCode(
+        withTxn((client) => writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation: bad }))),
+        CODES.COMPLETED_SHAPE_INVALID,
+      )
+      expect(await countCalcs(recordId)).toBe(0)
+    })
+
+    it('NEGATIVE (product code, F3): a completed write on an active legacy parent with an ABSENT preimage is refused with PREIMAGE_INVALID', async () => {
+      const org = `org-c6-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      await expectProductCode(
+        withTxn((client) => writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, preimage: { posture: 'absent' } }))),
+        CODES.PREIMAGE_INVALID,
+      )
+      expect(await countCalcs(recordId)).toBe(0)
+    })
+
+    it('N1: the frozen segment_snapshot round-trips REAL ordered content, not always []', async () => {
+      const org = `org-n1-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const orderedSegments = [
+        { segmentIndex: 0, status: 'normal', expectedStartAt: '2026-03-02T01:00:00.000Z', workedMinutes: 240 },
+        { segmentIndex: 1, status: 'late', expectedStartAt: '2026-03-02T05:00:00.000Z', workedMinutes: 240 },
+      ]
+      const context = { timezone: TZ, workDate: WORK_DATE, segments: orderedSegments }
+      const result = await withTxn((client) =>
+        writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, context: context as never })),
+      )
+      if (result.kind !== 'completed') throw new Error('expected completed')
+      const row = await calcRow(result.calculationId)
+      // Array order is preserved (only object keys are canonicalized); the ordered array round-trips.
+      expect(row?.segment_snapshot).toEqual(orderedSegments)
     })
   })
 
@@ -483,7 +552,7 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).constraint).toBe('uq_arc_record_version')
     })
   })
 
@@ -531,7 +600,83 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).constraint).toBe('uq_arc_operation')
+    })
+  })
+
+  // =========================================================================
+  // Invariant 2 (F1) — CONCURRENT retry idempotency: two same-(org,entrypoint,operation_id) writers
+  // that do not contend on one parent row both pass the pre-lock replay lookup + version pre-check;
+  // the loser must resolve to a §7.3 product-code outcome (replay / REPLAY_CONFLICT), never a raw
+  // 23505. Constructed 2-connection race: A writes but does NOT commit → B's replay lookup sees
+  // nothing → B blocks on the unique index → A commits → B recovers via the SAVEPOINT catch.
+  // =========================================================================
+  describe('§7.3 invariant 2 (F1) — concurrent retry idempotency', () => {
+    async function settled(promise: Promise<unknown>): Promise<{ done: boolean }> {
+      const marker = { done: false }
+      promise.then(() => { marker.done = true }, () => { marker.done = true })
+      return marker
+    }
+
+    it('F1: concurrent same-op writes on DIFFERENT records — the loser returns REPLAY_CONFLICT (product code), never a raw 23505', async () => {
+      const org = `org-f1a-${RUN}`
+      const recordA = await insertLegacyActiveParent(org)
+      const recordB = await insertLegacyActiveParent(org)
+      const operationId = uuid()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        const aResult = await writeAuthoritativeSegmentCalculationV1(asTrx(a), segmentInput({ orgId: org, recordId: recordA, operationId }))
+        expect(aResult.kind).toBe('completed')
+        await b.query('BEGIN')
+        const bPromise = writeAuthoritativeSegmentCalculationV1(asTrx(b), segmentInput({ orgId: org, recordId: recordB, operationId }))
+        const bMarker = await settled(bPromise)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        expect(bMarker.done).toBe(false) // B is blocked on A's uncommitted unique insert
+        await a.query('COMMIT') // unblock B
+        let bError: unknown
+        try {
+          await bPromise
+        } catch (error) {
+          bError = error
+        }
+        await b.query('COMMIT').catch(() => undefined)
+        // The op-id is bound to record A; B's DIFFERENT record → REPLAY_CONFLICT, not a raw SQLSTATE.
+        expect(bError).toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
+        expect((bError as AttendanceW4AuthoritativeCalculationError).code).toBe(CODES.REPLAY_CONFLICT)
+      } finally {
+        a.release()
+        b.release()
+      }
+    })
+
+    it('F1: concurrent same-op REVIEW writes on the SAME record — the loser returns the winner\'s calc (replay), never a raw 23505', async () => {
+      const org = `org-f1b-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const operationId = uuid()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        const aResult = await writeAuthoritativeSegmentCalculationV1(asTrx(a), segmentInput({ orgId: org, recordId, operationId, calculation: reviewCalculation() }))
+        expect(aResult.kind).toBe('review')
+        await b.query('BEGIN')
+        const bPromise = writeAuthoritativeSegmentCalculationV1(asTrx(b), segmentInput({ orgId: org, recordId, operationId, calculation: reviewCalculation() }))
+        const bMarker = await settled(bPromise)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        expect(bMarker.done).toBe(false) // B is blocked on A's parent FOR UPDATE lock
+        await a.query('COMMIT')
+        const bResult = await bPromise
+        await b.query('COMMIT').catch(() => undefined)
+        expect(bResult.kind).toBe('replay')
+        if (aResult.kind === 'review' && bResult.kind === 'replay') {
+          expect(bResult.calculationId).toBe(aResult.calculationId)
+        }
+      } finally {
+        a.release()
+        b.release()
+      }
     })
   })
 
@@ -599,7 +744,7 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).constraint).toBe('chk_arc_review_shape')
     })
   })
 
@@ -620,9 +765,11 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
         writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
           supersedesCalculationId: second.calculationId,
           reversedRow: reversed as Record<string, unknown>,
+          // The frozen target of a RESTORE is the restored state (first), and must match the preimage
+          // the pointer is moved to (F5). It is NOT the reversed calc's (second's) state.
           preimage: presentPointerPreimage(first, projectionOf(firstRow as Record<string, unknown>)),
           restoresCalculationId: first,
-          frozenTarget: { visibilityState: 'active', visibilityReason: 'active', projection: projectionOf(reversed as Record<string, unknown>), dailyFingerprint: String((reversed as Record<string, unknown>).projected_daily_fingerprint) },
+          frozenTarget: { visibilityState: 'active', visibilityReason: 'active', projection: projectionOf(firstRow as Record<string, unknown>), dailyFingerprint: String((firstRow as Record<string, unknown>).projected_daily_fingerprint) },
           outcomeReasonCode: 'import_rollback_reversal',
           mergePolicy: 'reversal',
         })),
@@ -712,14 +859,60 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
             supersedesCalculationId: first,
             reversedRow: reversed as Record<string, unknown>,
-            preimage: presentPointerPreimage(bogus), // pointer == bogus so restores-match passes
+            // pointer == bogus so restores-match passes; frozenTarget ≡ preimage (default projection)
+            // so F5 passes and the lineage check on the missing restores target is reached.
+            preimage: presentPointerPreimage(bogus),
             restoresCalculationId: bogus, // ... but no such calc exists → lineage target missing
-            frozenTarget: { visibilityState: 'active', visibilityReason: 'active', projection: projectionOf(reversed as Record<string, unknown>), dailyFingerprint: String((reversed as Record<string, unknown>).projected_daily_fingerprint) },
+            frozenTarget: { visibilityState: 'active', visibilityReason: 'active', projection: LEGACY_PROJECTION, dailyFingerprint: HEX_A },
             outcomeReasonCode: 'import_rollback_reversal',
             mergePolicy: 'reversal',
           })),
         ),
         CODES.LINEAGE_TARGET_MISSING,
+      )
+    })
+
+    it('NEGATIVE (product code, F3): a reversal whose outcome reason and frozen visibility reason are inconsistent is refused with REVERSAL_EFFECT_INVALID', async () => {
+      const org = `org-x7-${RUN}`
+      const { recordId, calcId: first } = await seedFirstCompleted(org)
+      const reversed = await calcRow(first)
+      await expectProductCode(
+        withTxn((client) =>
+          writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
+            supersedesCalculationId: first,
+            reversedRow: reversed as Record<string, unknown>,
+            preimage: { posture: 'absent' },
+            restoresCalculationId: null,
+            // operator_retirement reason with an import_rollback visibility reason: inconsistent.
+            frozenTarget: { visibilityState: 'retired', visibilityReason: 'import_rollback', projection: projectionOf(reversed as Record<string, unknown>), dailyFingerprint: String((reversed as Record<string, unknown>).projected_daily_fingerprint) },
+            outcomeReasonCode: 'operator_retirement',
+            mergePolicy: 'retire',
+          })),
+        ),
+        CODES.REVERSAL_EFFECT_INVALID,
+      )
+    })
+
+    it('NEGATIVE (product code, F5): a present preimage whose frozen target visibility diverges from the preimage is refused with REVERSAL_EFFECT_INVALID', async () => {
+      const org = `org-x8-${RUN}`
+      const { recordId, calcId: first } = await seedFirstCompleted(org)
+      const reversed = await calcRow(first)
+      const bogus = uuid()
+      await expectProductCode(
+        withTxn((client) =>
+          writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
+            supersedesCalculationId: first,
+            reversedRow: reversed as Record<string, unknown>,
+            // preimage says the parent is being restored to an ACTIVE state (pointer==bogus so
+            // restores-match passes), but the frozen target claims RETIRED → mislabeled row (F5).
+            preimage: presentPointerPreimage(bogus, LEGACY_PROJECTION),
+            restoresCalculationId: bogus,
+            frozenTarget: { visibilityState: 'retired', visibilityReason: 'import_rollback', projection: LEGACY_PROJECTION, dailyFingerprint: HEX_A },
+            outcomeReasonCode: 'import_rollback_reversal',
+            mergePolicy: 'reversal',
+          })),
+        ),
+        CODES.REVERSAL_EFFECT_INVALID,
       )
     })
 
@@ -732,7 +925,7 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).constraint).toBe('chk_arc_reversal_supersedes')
     })
   })
 
@@ -750,7 +943,7 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).message).toContain('W4C0_LINEAGE')
     })
   })
 
@@ -772,7 +965,7 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       } catch (error) {
         caught = error
       }
-      expect(caught).toBeTruthy()
+      expect(dbErrorInfo(caught).message).toContain('W4C0_IMMUTABLE')
     })
   })
 
@@ -861,9 +1054,9 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
           projected_daily_fingerprint, actor_id, correlation_id)
        VALUES ($1::uuid, $2, $3::uuid, 900, 'calculation', 'authoritative', 'live', 'raw', 1, $4::uuid,
-               $5, $5, $5, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
+               $5::text, $5::text, $5::text, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
                '[]'::jsonb, '[]'::jsonb, '{"schemaVersion":1}'::jsonb, 'append', 'segment_authoritative',
-               'completed', 'calculated', 'set_active', $6, 'normal', 480, 0, 0, $5, 'raw', $7)`,
+               'completed', 'calculated', 'set_active', $6, 'normal', 480, 0, 0, $5::text, 'raw', $7)`,
       [id, org, recordId, uuid(), HEX_A, claimed, `raw-${RUN}`],
     )
     for (let i = 0; i < children; i += 1) {
@@ -921,9 +1114,9 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           outcome, outcome_reason_code, projection_effect, expected_segment_count, projected_status,
           projected_work_minutes, projected_late_minutes, projected_early_leave_minutes, projected_daily_fingerprint, actor_id, correlation_id)
        VALUES ($1::uuid, $2, $3::uuid, 903, 'reversal', 'authoritative', 'import_rollback', 'raw', 1, $4::uuid,
-               $5, $5, $5, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
+               $5::text, $5::text, $5::text, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
                '[]'::jsonb, '[]'::jsonb, '{"schemaVersion":1}'::jsonb, 'reversal', 'segment_authoritative',
-               'reversed', 'import_rollback_reversal', 'set_retired', 0, 'normal', 480, 0, 0, $5, 'raw', $6)`,
+               'reversed', 'import_rollback_reversal', 'set_retired', 0, 'normal', 480, 0, 0, $5::text, 'raw', $6)`,
       [uuid(), org, recordId, uuid(), HEX_A, `raw-${RUN}`],
     )
   }
@@ -939,9 +1132,9 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           projected_status, projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
           projected_daily_fingerprint, actor_id, correlation_id)
        VALUES ($1::uuid, $2, $3::uuid, $7, 'reversal', 'authoritative', 'import_rollback', 'raw', 1, $4::uuid, $8::uuid,
-               $5, $5, $5, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
+               $5::text, $5::text, $5::text, '{"posture":"resolved_v2","value":{}}'::jsonb, '{"tz":"x"}'::jsonb, '[]'::jsonb,
                '[]'::jsonb, '[]'::jsonb, '{"schemaVersion":1}'::jsonb, 'reversal', 'segment_authoritative',
-               'reversed', 'import_rollback_reversal', 'set_retired', 0, 'normal', 480, 0, 0, $5, 'raw', $6)`,
+               'reversed', 'import_rollback_reversal', 'set_retired', 0, 'normal', 480, 0, 0, $5::text, 'raw', $6)`,
       [uuid(), org, recordId, supersedes, HEX_A, `raw-${RUN}`, version, uuid()],
     )
   }
