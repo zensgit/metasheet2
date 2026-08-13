@@ -1,0 +1,42 @@
+name: SSH Host-Key Pin Contract
+
+# Security regression guard for the SSH host-key-pinning sweep (2026-08-12).
+# Asserts that every workflow SSHing to the production deploy host verifies the
+# host identity (StrictHostKeyChecking=yes + fail-closed DEPLOY_KNOWN_HOSTS) and
+# that NO workflow reintroduces StrictHostKeyChecking=no in an executable line.
+#
+# Hermetic (no DB, no pnpm install): checkout + setup-node + `node --test`, the
+# same shape as data-source-exposure-inventory.yml. Deliberately standalone so it
+# does NOT edit plugin-tests.yml and therefore does NOT perturb the sealed-export
+# s6a package-provenance pin.
+#
+# Path filter is intentionally the whole workflows dir: the sweep test scans every
+# workflow, so any workflow edit (which could add a new SSH call site) must re-run
+# this guard.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: ssh host-key pin contract (fail-closed known_hosts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Assert all production SSH workflows pin the deploy-host identity
+        run: node --test scripts/ops/ssh-hostkey-pin-family-contract.test.mjs
