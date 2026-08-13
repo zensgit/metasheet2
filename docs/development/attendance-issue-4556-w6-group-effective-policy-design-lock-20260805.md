@@ -3,8 +3,9 @@
 > Status: **RATIFIED** (W6-1 backend aggregate only) — see the ratification
 > record in §9. The narrow delegated-non-member status correction in §10 is
 > **RATIFIED** at its exact merged SHA
-> `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876); authorization source =
-> owner comment on issue #4556 (`issuecomment-5275343727`, 2026-08-13) — see §10.
+> `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876); authorization = an
+> owner-confirmed decision recorded through a DISCLOSED assistant relay
+> (issue #4556 comment `issuecomment-5275343727`) — see §10.
 > Every W6 slice beyond W6-1 remains **HOLD**.
 >
 > Date: 2026-08-05 · Ratified: 2026-08-08
@@ -361,11 +362,18 @@ acts — §8's landing sequence is unchanged by this record.
 **Status: RATIFIED at exact merged SHA
 `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876).** This section cannot
 ratify itself; a PR body is not its own authorization source. The authorization
-source is an **owner-authored comment on issue #4556**, posted by the owner
-(`zensgit`) on 2026-08-13T02:48:23Z:
+is an **owner-confirmed decision recorded through a DISCLOSED assistant relay** —
+NOT a comment authored from the owner's own client:
 
-- comment: https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5275343727
-  (`issuecomment-5275343727`)
+- issue #4556 comment `issuecomment-5275343727` (2026-08-13T02:48:23Z) carries
+  the owner's verbatim RATIFY text and openly discloses that the assistant posted
+  it under the owner's account at the owner's explicit `代贴` instruction;
+  https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5275343727
+- owner first-person confirmation: **PENDING** — the owner is to post a
+  first-person confirmation from their own GitHub client, referencing
+  `5275343727`; this record will cite that second comment once it exists. Until
+  then the posting attribution rests on account-attribution + the relay
+  disclosure, not on an independent owner-client act.
 
 That comment RATIFIES `1e0d451a25…` — approving ONLY the §10 delegated-non-member
 403→404 erratum and a docs-only ledger sync from fresh `main` — and this record
