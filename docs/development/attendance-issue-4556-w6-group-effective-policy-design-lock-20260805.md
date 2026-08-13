@@ -3,9 +3,10 @@
 > Status: **RATIFIED** (W6-1 backend aggregate only) — see the ratification
 > record in §9. The narrow delegated-non-member status correction in §10 is
 > **RATIFIED** at its exact merged SHA
-> `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876); authorization = an
-> owner-confirmed decision recorded through a DISCLOSED assistant relay
-> (issue #4556 comment `issuecomment-5275343727`) — see §10.
+> `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876); authorization was
+> recorded by the disclosed relay in issue #4556 comment
+> `issuecomment-5275343727` and confirmed in the owner's subsequent first-person
+> comment `issuecomment-5276809425` — see §10.
 > Every W6 slice beyond W6-1 remains **HOLD**.
 >
 > Date: 2026-08-05 · Ratified: 2026-08-08
@@ -362,18 +363,23 @@ acts — §8's landing sequence is unchanged by this record.
 **Status: RATIFIED at exact merged SHA
 `1e0d451a25ccf5b66a6b96cd992233e0f74e8d16` (PR 4876).** This section cannot
 ratify itself; a PR body is not its own authorization source. The authorization
-is an **owner-confirmed decision recorded through a DISCLOSED assistant relay** —
-NOT a comment authored from the owner's own client:
+record keeps the relay and its later confirmation distinct:
 
 - issue #4556 comment `issuecomment-5275343727` (2026-08-13T02:48:23Z) carries
   the owner's verbatim RATIFY text and openly discloses that the assistant posted
   it under the owner's account at the owner's explicit `代贴` instruction;
   https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5275343727
-- owner first-person confirmation: **PENDING** — the owner is to post a
-  first-person confirmation from their own GitHub client, referencing
-  `5275343727`; this record will cite that second comment once it exists. Until
-  then the posting attribution rests on account-attribution + the relay
-  disclosure, not on an independent owner-client act.
+- issue #4556 comment `issuecomment-5276539330` is a second disclosed assistant
+  relay confirming the same decision and scope; it is retained as provenance but
+  is not treated as independent owner-client evidence;
+  https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5276539330
+- issue #4556 comment `issuecomment-5276809425` (2026-08-13T06:30:12Z) is the
+  owner's subsequent first-person confirmation that `5275343727` completely and
+  accurately represents the owner's decision and that its scope is not expanded;
+  https://github.com/zensgit/metasheet2/issues/4556#issuecomment-5276809425
+
+The first-person confirmation closes the prior posting-attribution residual. It
+does not broaden the RATIFY or authorize any later gated action.
 
 That comment RATIFIES `1e0d451a25…` — approving ONLY the §10 delegated-non-member
 403→404 erratum and a docs-only ledger sync from fresh `main` — and this record
