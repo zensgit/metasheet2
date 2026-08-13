@@ -6,11 +6,19 @@
  * exact-key closure legs (extra key / missing key).
  *
  * Every reject fixture below differs from a VALID baseline by exactly ONE
- * field, so each leg maps to exactly one guard in
- * `validateFrozenAttendanceContextV7DraftV1` — required for the mutation
- * self-check recorded in the PR body to be meaningful (a two-defect fixture
- * would stay red under either guard's removal, making mutation "load-bearing"
- * look true when it isn't).
+ * field — required for the mutation self-check recorded in the PR body to
+ * be meaningful (a two-defect fixture would stay red under either guard's
+ * removal, making mutation "load-bearing" look true when it isn't). That
+ * single-field discipline does NOT mean every leg maps to exactly one
+ * guard, though: guards 2/3/4/5/6 in
+ * `validateFrozenAttendanceContextV7DraftV1` are each sole coverage for
+ * their own leg (verified by mutation — see the PR body's mutation table),
+ * but guard 1 (exact-key closure) is sole coverage for the "extra key" leg
+ * and the null/undefined non-object-input legs, while its "missing key"
+ * leg is independently caught by the downstream field-level checks too
+ * (deleting `timezone` still fails `isNonEmptyStringV1(ctx.timezone)` even
+ * with guard 1 disabled) — defense-in-depth on that one leg, recorded
+ * honestly rather than folded into a uniform claim.
  *
  * This module is not imported by any production path (W7-R9 byte-inert).
  * Deleting both files leaves every other suite green; v1's own golden test
