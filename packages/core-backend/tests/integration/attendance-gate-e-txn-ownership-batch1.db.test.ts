@@ -68,6 +68,39 @@ function wrap(client: Client): AttendanceW4TransactionClientV1 {
   }
 }
 
+/**
+ * §D4 state 4's "cleanup FAILURE" leg (distinct from the plain "cleanup happened" leg below):
+ * intercepts `assertConnectionIsIdleV1`'s own two teardown statements
+ * (`ROLLBACK TO SAVEPOINT w4c5_idle_probe` / `RELEASE SAVEPOINT w4c5_idle_probe`,
+ * w4c0-identity.ts ~L1393-1394) and REJECTS them WITHOUT ever sending them to the real
+ * connection — simulating a transient failure (dropped connection, statement timeout) on
+ * exactly those two statements, never on anything else (the probe's own `SAVEPOINT`, or any
+ * application query). Production wraps both teardown statements in `.catch(() => undefined)`,
+ * so the injected failure must be fully absorbed: the caller must still see the product code
+ * `W4C0_CONNECTION_NOT_IDLE`, never the injected error and never a raw SQLSTATE. Because the
+ * wrapper prevents the REAL teardown from ever running, the `w4c5_idle_probe` savepoint is
+ * still genuinely DEFINED on the connection afterward — the test proves the injection was
+ * real (not vacuous) by having the caller's own `RELEASE SAVEPOINT` SUCCEED at that point
+ * (contrast with the "cleanup happened" test, where the same statement FAILS 3B001) — and only
+ * THEN rolls back, which is what actually removes the leftover savepoint (`ROLLBACK` ends the
+ * whole transaction block, taking every savepoint defined within it, regardless of whether it
+ * was ever explicitly released).
+ */
+function wrapWithTeardownFailure(client: Client): AttendanceW4TransactionClientV1 {
+  return {
+    query: async (sqlText: string, params?: unknown[]) => {
+      if (
+        sqlText === 'ROLLBACK TO SAVEPOINT w4c5_idle_probe' ||
+        sqlText === 'RELEASE SAVEPOINT w4c5_idle_probe'
+      ) {
+        throw new Error('injected teardown failure (synthetic, never sent to the real connection)')
+      }
+      const result = await client.query(sqlText, params)
+      return { rows: (result.rows ?? []) as Array<Record<string, unknown>> }
+    },
+  }
+}
+
 describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (real DB, four-state)', () => {
   let pool: Pool
 
@@ -179,7 +212,7 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
       }
     })
 
-    it('4. cleanup: on refusal the idle probe has already RELEASEd its own savepoint — a caller RELEASE afterward fails 3B001, and the connection is fully usable once the caller rolls back', async () => {
+    it('4a. cleanup succeeded: on refusal the idle probe has already RELEASEd its own savepoint — a caller RELEASE afterward fails 3B001, and the connection is fully usable once the caller rolls back', async () => {
       const client = await openClient()
       try {
         await client.query('BEGIN')
@@ -197,6 +230,29 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
         // connection silently answering something else.
         await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
         await client.query('ROLLBACK')
+        await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        await client.end()
+      }
+    })
+
+    it("4b. cleanup FAILED (the probe's own teardown rejects): the caller still sees the product code, never the injected error or a raw SQLSTATE; the leftover savepoint (proven still defined, since teardown never ran) is removed once the caller rolls back its own txn, and the connection is usable again", async () => {
+      const client = await openClient()
+      try {
+        await client.query('BEGIN')
+        await client.query('SELECT 1')
+        await expect(
+          runAttendanceResultOperationTransactionV1(wrapWithTeardownFailure(client), async () => 'should-not-run'),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' }) // never the injected error
+        // Proves the injection was real, not vacuous: because `wrapWithTeardownFailure` prevented
+        // the REAL `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` from ever reaching PostgreSQL,
+        // `w4c5_idle_probe` is STILL genuinely defined — a caller-issued RELEASE now SUCCEEDS
+        // (the opposite of 4a's 3B001, where cleanup had genuinely already removed it).
+        await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe')).resolves.toBeDefined()
+        await client.query('ROLLBACK')
+        // `ROLLBACK` ends the whole transaction block, taking the leftover savepoint with it
+        // regardless of whether it was ever explicitly released — the connection is fully usable.
         await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
@@ -269,7 +325,7 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
       }
     })
 
-    it('4. cleanup: on refusal the idle probe has already RELEASEd its own savepoint — a caller RELEASE afterward fails 3B001, and the connection is fully usable once the caller rolls back', async () => {
+    it('4a. cleanup succeeded: on refusal the idle probe has already RELEASEd its own savepoint — a caller RELEASE afterward fails 3B001, and the connection is fully usable once the caller rolls back', async () => {
       const client = await openClient()
       try {
         await client.query('BEGIN')
@@ -281,6 +337,25 @@ describeDb('Gate E (#4844) batch 1 — transaction-ownership idle precondition (
           code: '3B001',
         })
         await expect(client.query('SELECT 1')).rejects.toMatchObject({ code: '25P02' })
+        await client.query('ROLLBACK')
+        await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        await client.end()
+      }
+    })
+
+    it("4b. cleanup FAILED (the probe's own teardown rejects): the caller still sees the product code, never the injected error or a raw SQLSTATE; the leftover savepoint (proven still defined, since teardown never ran) is removed once the caller rolls back its own txn, and the connection is usable again", async () => {
+      const client = await openClient()
+      try {
+        await client.query('BEGIN')
+        await client.query('SELECT 1')
+        await expect(
+          dispatchAttendanceResultEventOutboxV1(wrapWithTeardownFailure(client), { emit: vi.fn() }),
+        ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' }) // never the injected error
+        // Proves the injection was real: the leftover savepoint is still genuinely defined, so a
+        // caller-issued RELEASE now SUCCEEDS (the opposite of 4a's 3B001).
+        await expect(client.query('RELEASE SAVEPOINT w4c5_idle_probe')).resolves.toBeDefined()
         await client.query('ROLLBACK')
         await expect(client.query('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] })
       } finally {

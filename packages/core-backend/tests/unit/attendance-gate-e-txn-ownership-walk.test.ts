@@ -25,6 +25,7 @@ import * as ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import {
   discoverBeginSitesV1,
+  independentDiscoverBeginCallSitesV1,
   TXN_OWNERSHIP_ALLOWLIST_V1,
   type BeginSiteV1,
 } from '../helpers/attendance-txn-ownership-walk'
@@ -104,6 +105,45 @@ describe('Gate E (#4844) transaction-ownership guard — walk the exported table
         expect(key).not.toMatch(/:\d+:\d+/) // not a "line:col"-shaped fragment
         expect(key.split('//').length).toBeGreaterThanOrEqual(3) // fn // ancestor-path // BEGIN // #n
       }
+    })
+
+    it("P2-c backstop: the classifier's site COUNT agrees with an INDEPENDENT, type-agnostic collector — a BEGIN call the classifier's AttendanceW4TransactionClientV1 type-name gate cannot see would otherwise be INVISIBLE (not even UNKNOWN), the exact defect class the F1 guard's independentThisStarts exists to catch", () => {
+      let independentTotal = 0
+      for (const file of fileNames) {
+        const path = join(ATTENDANCE_SRC_DIR, file)
+        const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.ES2022, true)
+        independentTotal += independentDiscoverBeginCallSitesV1(source).length
+      }
+      // Reference-independent completeness (P2-c): if this ever drops below `sites.length`, the
+      // classifier is reporting MORE sites than even the broad, type-agnostic walk can find —
+      // impossible unless the classifier double-counts. If it ever RISES above `sites.length`,
+      // some BEGIN call the classifier's type gate did not recognize as a caller-connection
+      // parameter is invisible to the whole rest of this file's UNKNOWN-empty discipline.
+      expect(independentTotal).toBe(sites.length)
+    })
+  })
+
+  describe("P2-c backstop, load-bearing (synthetic fixture): a BEGIN call on a receiver typed something OTHER than AttendanceW4TransactionClientV1 is invisible to the narrow classifier but IS found by the independent collector — proving the count cross-check above is not vacuous", () => {
+    const OTHER_TYPE_DECL = 'interface SomeOtherPoolClient { query(sqlText: string, params?: unknown[]): Promise<{ rows: unknown[] }> }\n'
+
+    it('the classifier finds ZERO sites (the receiver is not AttendanceW4TransactionClientV1-typed) while the independent walker finds ONE — the mismatch this guard is built to catch', () => {
+      const src =
+        `${OTHER_TYPE_DECL}export async function fixtureFnOtherType(connection: SomeOtherPoolClient): Promise<void> {\n` +
+        `  await connection.query('BEGIN', [])\n}\n`
+      const source = ts.createSourceFile('fixture-other-type.ts', src, ts.ScriptTarget.ES2022, true)
+
+      const classified = discoverBeginSitesV1(source, 'fixture-other-type.ts', [])
+      const independent = independentDiscoverBeginCallSitesV1(source)
+
+      expect(classified).toEqual([]) // invisible to the narrow, type-gated classifier
+      expect(independent).toHaveLength(1) // found by the broad, type-agnostic walk
+      expect(independent[0]).toMatchObject({
+        enclosingFunction: 'fixtureFnOtherType',
+        receiverName: 'connection',
+      })
+      // This is exactly the count mismatch (0 !== 1) the real-tree cross-check above asserts
+      // does NOT happen today — if it ever did, that assertion reds.
+      expect(classified.length).not.toBe(independent.length)
     })
   })
 

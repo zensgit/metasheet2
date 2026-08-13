@@ -2181,6 +2181,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-decision-trace-w5-0.db.test.ts',
   'tests/integration/attendance-expiry-service.test.ts',
   'tests/integration/attendance-files-acl.test.ts',
+  'tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts',
   'tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts',

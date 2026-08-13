@@ -292,3 +292,68 @@ export function discoverBeginSitesV1(
 
   return out
 }
+
+// ---------------------------------------------------------------------------
+// Independent, DELIBERATELY BROADER collector — the P2-c backstop.
+//
+// `discoverBeginSitesV1` only ever LOOKS at BEGIN calls on a receiver identifier that is the
+// NAME of a parameter whose declared type is exactly `AttendanceW4TransactionClientV1`
+// (`connectionParams`'s type-name gate). That gate is exactly right for CLASSIFYING a site's
+// ownership — but it means a `BEGIN` issued on a receiver typed something else (a raw `PoolClient`
+// parameter, an untyped parameter, a locally-narrowed alias) is not merely UNKNOWN, it is
+// INVISIBLE: `discoverBeginSitesV1` never produces a `BeginSiteV1` for it at all, so it cannot
+// even reach the UNKNOWN bucket the rest of this guard's fail-closed discipline relies on.
+//
+// This mirrors the exact defect class the F1 guard's own `independentThisStarts` exists to catch
+// (its doc comment: "so a pruning bug in the builder cannot hide behind a self-consistent-but-
+// incomplete `part.all`" — P2-c). The fix there was an INDEPENDENT, un-pruned reference walk the
+// test compares the classified set against, member-by-member. This is that walk for THIS domain:
+// every `<Identifier>.query(<string-literal-like matching BEGIN|START TRANSACTION>, ...)` call
+// inside ANY exported function's own scope — with NO type gate on the receiver at all — so a
+// differently-typed or untyped BEGIN site is found here even though `discoverBeginSitesV1` would
+// never see it. The guard test asserts the two walks' site COUNTS agree on the real tree; a
+// mismatch means `discoverBeginSitesV1`'s type gate just went blind to something this broader
+// walk still sees, and that mismatch is itself the failure — not merely "some future improvement".
+// ---------------------------------------------------------------------------
+
+export interface IndependentBeginCallSiteV1 {
+  readonly enclosingFunction: string
+  readonly receiverName: string
+  readonly statementText: string
+}
+
+/** Same BEGIN/START-TRANSACTION text match as `matchBeginCall`, but with NO receiver-identity or
+ *  receiver-TYPE constraint at all: any `<Identifier>.query(...)` qualifies. */
+function matchBeginCallAnyReceiver(call: ts.CallExpression): { receiverName: string; text: string } | null {
+  const callee = call.expression
+  if (!ts.isPropertyAccessExpression(callee)) return null
+  if (callee.name.text !== 'query') return null
+  if (!ts.isIdentifier(callee.expression)) return null
+  const arg0 = call.arguments[0]
+  if (!arg0 || !ts.isStringLiteralLike(arg0)) return null
+  if (!BEGIN_STATEMENT_PATTERN.test(arg0.text)) return null
+  return { receiverName: callee.expression.text, text: arg0.text }
+}
+
+/**
+ * Every `BEGIN`/`START TRANSACTION` `.query(...)` call inside ANY exported function's own scope
+ * (same closure-boundary pruning as the classifier — see `collectOwnScopeCalls`), with NO type
+ * gate on the receiver. Independent of `connectionParams`/`matchBeginCall` entirely: it re-derives
+ * "every exported function" itself rather than reusing a shared helper's OUTPUT, so a bug in
+ * `exportedFunctionDeclarations` cannot silently agree with itself on both sides of the
+ * comparison the guard test makes.
+ */
+export function independentDiscoverBeginCallSitesV1(source: ts.SourceFile): IndependentBeginCallSiteV1[] {
+  const out: IndependentBeginCallSiteV1[] = []
+  for (const stmt of source.statements) {
+    if (!ts.isFunctionDeclaration(stmt) || !stmt.name || !stmt.body || !hasExportModifier(stmt)) continue
+    const fn = stmt
+    const fnName = fn.name!.text
+    const calls = collectOwnScopeCalls(fn, (c) => matchBeginCallAnyReceiver(c) !== null)
+    for (const { node } of calls) {
+      const match = matchBeginCallAnyReceiver(node)!
+      out.push({ enclosingFunction: fnName, receiverName: match.receiverName, statementText: match.text })
+    }
+  }
+  return out
+}
