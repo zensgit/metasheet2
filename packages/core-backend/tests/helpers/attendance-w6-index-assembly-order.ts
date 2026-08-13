@@ -679,21 +679,35 @@ function findTargetMethods(source: ts.SourceFile, scopeSymbols: ReadonlySet<stri
   return targets
 }
 
-/** True iff the `this` at `node` binds to `target`'s instance `this` — i.e.
- *  EVERY function boundary strictly between `node` and `target` is an
- *  `ArrowFunction` (arrows do not rebind `this`). Any non-arrow function-like or
- *  class static block on the path rebinds `this`, so the value is not provably
- *  the assembly instance and the caller fails closed to UNKNOWN. Expressed as a
- *  COMPLEMENT (all boundaries are arrows) rather than an enumeration of
- *  rebinding kinds, so object-literal methods, accessors, class expressions and
- *  static blocks are covered without listing them (P2-a fix). */
+/** True iff the `this` at `node` binds to `target`'s instance `this` — i.e. NO
+ *  `this`-rebinding boundary lies strictly between `node` and `target`. A
+ *  boundary rebinds `this` unless it is an `ArrowFunction` (arrows do not rebind).
+ *  The rebinding boundaries are:
+ *   - a non-arrow function-like (function decl/expr, object-literal or class
+ *     method, get/set accessor, constructor);
+ *   - a class static block;
+ *   - a class field / static-field `PropertyDeclaration` — its initializer's
+ *     `this` is the (nested) instance being constructed, NOT the assembly
+ *     instance (P3-1: this is NOT function-like, so `isFunctionLike` alone
+ *     walked past it and mis-reported instance-bound; the census caught it, but
+ *     the classification door must own its own property).
+ *  Expressed as a COMPLEMENT (a boundary is fine only if it is an arrow) so any
+ *  new `this`-rebinding construct fails closed to UNKNOWN by default. Note the
+ *  slight over-conservatism: a `this` inside a class field's COMPUTED NAME is
+ *  actually the outer `this`, yet is forced UNKNOWN here — fail-closed, safe. */
+function isThisRebindingBoundary(node: ts.Node): boolean {
+  if (ts.isArrowFunction(node)) return false
+  return (
+    ts.isFunctionLike(node) ||
+    ts.isClassStaticBlockDeclaration(node) ||
+    ts.isPropertyDeclaration(node)
+  )
+}
+
 function thisBindsToTarget(node: ts.Node, target: ts.Node): boolean {
   let current: ts.Node | undefined = node.parent
   while (current && current !== target) {
-    const rebinds =
-      (ts.isFunctionLike(current) && !ts.isArrowFunction(current)) ||
-      ts.isClassStaticBlockDeclaration(current)
-    if (rebinds) return false
+    if (isThisRebindingBoundary(current)) return false
     current = current.parent
   }
   return current === target

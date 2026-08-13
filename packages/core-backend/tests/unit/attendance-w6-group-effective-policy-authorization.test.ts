@@ -1174,8 +1174,10 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
     const indexText = readFileSync(indexPath, 'utf8')
     const source = ts.createSourceFile(indexPath, indexText, ts.ScriptTarget.ES2022, true)
     const part = buildThisPartition(source, FROZEN_SAFE_KEYS, SCOPE)
-    // sanity: the frozen literal is exactly what a one-shot derivation yields today
-    expect(new Set(deriveSafeCensus(source, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
+
+    it('sanity: the frozen literal is exactly what a one-shot derivation yields today (P3-2: inside an it() so a benign census drift reds THIS test, not the whole file — the behavioral security suites keep reporting)', () => {
+      expect(new Set(deriveSafeCensus(source, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
+    })
 
     it('UNKNOWN is EMPTY — every this-use in the assembly scope is provably classified', () => {
       expect(part.unknown).toEqual([])
@@ -1246,6 +1248,30 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
       expect(mpart.safe.length).toBe(FROZEN_SAFE_COUNT)
       expect(mpart.unknown).toEqual([])
+    })
+
+    it('P3-1 LOAD-BEARING: a `this` in a class FIELD INITIALIZER (not function-like) is rebound -> UNKNOWN by the RULE — the classification door owns its own property, not just the census', () => {
+      // A class field initializer rebinds `this` to the nested instance, yet is
+      // NOT function-like, so `isFunctionLike` alone walked past it. Inject a
+      // class-expr field-init `this.app.use(...)` into setupMiddleware: with the
+      // PropertyDeclaration boundary it is `rebound-this` UNKNOWN; without it, it
+      // would classify by shape (.app -> SITE), so this asserts on the SHAPE to
+      // prove the RULE (not the census) produces the rebound classification.
+      const marker = 'private setupMiddleware(): void {'
+      expect(indexText).toContain(marker)
+      const mutated = indexText.replace(
+        marker,
+        marker + "\n    const __D = class { x = this.app.use('/__p3a__', () => {}) }; void __D;",
+      )
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      const mIndep = independentThisStarts(msrc, SCOPE)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      // the field-init `this` is in T (independent walk grew by exactly one)…
+      expect(mIndep.length).toBe(independentThisStarts(source, SCOPE).length + 1)
+      expect(mpart.total).toBe(mIndep.length)
+      // …and is bucketed rebound-this (UNKNOWN), NOT promoted to a SITE
+      expect(mpart.unknown.some((o) => o.shape === 'rebound-this')).toBe(true)
+      expect(mpart.site.length).toBe(part.site.length) // no new SITE minted
     })
   })
 
