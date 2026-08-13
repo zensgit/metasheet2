@@ -287,6 +287,68 @@ async function main() {
   assert.equal(clearedProjectionSystem.config.lookupProjection, null,
     'trusted-admin explicit null clears the private lookup projection')
 
+  // --- 4c. K3 exact-two acceptance policy is private, persisted adapter configuration ---
+  const acceptanceDb = createMockDb()
+  const acceptanceRegistry = createExternalSystemRegistry({
+    db: acceptanceDb,
+    credentialStore,
+    idGenerator: () => 'sys_k3_acceptance',
+  })
+  const c6AcceptancePolicy = { profile: 'k3-test-only-exact-two-add-v1' }
+  const publicAcceptanceCreate = await acceptanceRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'private-k3-acceptance',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { baseUrl: 'https://k3.example.invalid', c6AcceptancePolicy },
+    status: 'active',
+  })
+  assert.equal(publicAcceptanceCreate.config.baseUrl, 'https://k3.example.invalid')
+  assert.equal(publicAcceptanceCreate.config.c6AcceptancePolicy, undefined,
+    'public create response omits the complete K3 acceptance policy')
+  const publicAcceptanceGet = await acceptanceRegistry.getExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+  })
+  assert.equal(publicAcceptanceGet.config.c6AcceptancePolicy, undefined,
+    'public get omits the private K3 acceptance policy')
+  const adapterAcceptanceSystem = await acceptanceRegistry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+  })
+  assert.deepEqual(adapterAcceptanceSystem.config.c6AcceptancePolicy, c6AcceptancePolicy,
+    'private adapter load retains the persisted K3 acceptance policy exactly')
+  await acceptanceRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+    name: 'private-k3-acceptance-renamed',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { baseUrl: 'https://k3.example.invalid' },
+    status: 'active',
+  })
+  const preservedAcceptanceSystem = await acceptanceRegistry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+  })
+  assert.deepEqual(preservedAcceptanceSystem.config.c6AcceptancePolicy, c6AcceptancePolicy,
+    'public config round-trip cannot accidentally erase the hidden K3 acceptance policy')
+  await acceptanceRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+    name: 'private-k3-acceptance-renamed',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { baseUrl: 'https://k3.example.invalid', c6AcceptancePolicy: null },
+    status: 'active',
+  })
+  const clearedAcceptanceSystem = await acceptanceRegistry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    id: 'sys_k3_acceptance',
+  })
+  assert.equal(clearedAcceptanceSystem.config.c6AcceptancePolicy, null,
+    'trusted-admin explicit null clears the private K3 acceptance policy')
+
   // --- 5. Credential clear writes NULL ----------------------------------
   const cleared = await registry.upsertExternalSystem({
     tenantId: 'tenant_1',

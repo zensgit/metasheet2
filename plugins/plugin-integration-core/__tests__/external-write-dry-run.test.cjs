@@ -864,6 +864,112 @@ function fakeWriteProfile() {
   }
 }
 
+function k3ExactTwoAcceptanceInput(overrides = {}) {
+  const fixture = baseInput({
+    test: () => ({ success: true, capabilityState: { ok: true } }),
+    lookupByKey: () => ({ data: [], metadata: {} }),
+    ...overrides,
+  })
+  fixture.input.targetWriteProfile = {
+    ...fakeWriteProfile(),
+    kind: 'erp:k3-wise-webapi',
+  }
+  fixture.input.targetSystem = {
+    id: 'target_1',
+    kind: 'erp:k3-wise-webapi',
+    config: {
+      dataSourceId: 'k3-save-only',
+      object: 'material',
+      keyFields: ['externalId'],
+      writableFields: ['name', 'status'],
+      acceptancePolicy: {
+        profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+      },
+    },
+  }
+  return fixture
+}
+
+async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.canApply, true)
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 2)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.skip, 0)
+  assert.equal(dryRun.counts.held, 0)
+  assert.equal(dryRun.counts.failed, 0)
+  assert.deepEqual(dryRun.evidence.acceptancePolicy, {
+    profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+    expectedRows: 2,
+    ready: true,
+    cleanupRequired: true,
+  })
+
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two',
+  })
+  assert.equal(apply.status, 'succeeded')
+  assert.equal(apply.counts.written, 2)
+  assert.equal(apply.counts.add, 2)
+  assert.equal(apply.counts.update, 0)
+  assert.equal(calls.insertRows.length, 2, 'two-row acceptance performs exactly two isolated Save calls')
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(apply.evidence.acceptancePolicy.ready, true)
+  assert.equal(apply.evidence.acceptancePolicy.cleanupRequired, true)
+}
+
+async function testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality() {
+  for (const fixture of [
+    k3ExactTwoAcceptanceInput({
+      lookupByKey: ({ key }) => key.externalId === 'P-002'
+        ? { data: [{ externalId: 'P-002', name: 'old', status: 'old' }] }
+        : { data: [] },
+    }),
+    k3ExactTwoAcceptanceInput({ sourceRows: [{ code: 'P-001', name: 'Widget', status: 'new' }] }),
+  ]) {
+    const result = await dryRunExternalWrite(fixture.input)
+    assert.equal(result.status, 'not_applyable')
+    assert.equal(result.canApply, false)
+    assert.equal(result.dryRunToken, null)
+    assert.equal(result.evidence.acceptancePolicy.ready, false)
+    assert.ok(result.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+    assert.equal(fixture.calls.insertRows.length, 0)
+    assert.equal(fixture.calls.updateRows.length, 0)
+  }
+}
+
+async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
+  const invalid = k3ExactTwoAcceptanceInput()
+  invalid.input.targetSystem.config.acceptancePolicy.extra = true
+  await assert.rejects(
+    () => dryRunExternalWrite(invalid.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(invalid.calls.test.length, 0, 'invalid persisted policy fails before target capability/network work')
+
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  delete input.targetSystem.config.acceptancePolicy
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+    'removing the persisted policy after dry-run invalidates the revision before write',
+  )
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
 function fakeProfileInput(overrides = {}) {
   return baseInput({
     test: () => ({ success: true, capabilityState: { ok: true } }),
@@ -965,6 +1071,9 @@ async function main() {
   await testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite()
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
+  await testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan()
+  await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
+  await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
   await testTruncatedSourceReadDoesNotIssueToken()
   await testRejectsNonC6Target()

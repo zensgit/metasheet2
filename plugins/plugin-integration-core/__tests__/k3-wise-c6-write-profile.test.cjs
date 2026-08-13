@@ -282,6 +282,16 @@ test('the flat planner config derives from the customer profile: key + schema-kn
   assert.equal(cfg.object, 'material')
 })
 
+test('the private K3 acceptance policy is carried into the flat planner config', () => {
+  const policy = { profile: 'k3-test-only-exact-two-add-v1' }
+  const cfg = deriveK3WiseC6PlannerTargetConfig({
+    system: k3TargetSystem({ config: { c6AcceptancePolicy: policy } }),
+    object: 'material',
+    fieldMappings: pipelineFixture().fieldMappings,
+  })
+  assert.deepEqual(cfg.acceptancePolicy, policy)
+})
+
 test('REVIEW P2: a mapped target the write cannot carry is REFUSED, never silently dropped', () => {
   assert.throws(
     () => deriveK3WiseC6PlannerTargetConfig({

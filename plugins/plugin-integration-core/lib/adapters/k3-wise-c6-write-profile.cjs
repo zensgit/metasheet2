@@ -193,6 +193,11 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
     object: objectId,
     keyFields: [keyField],
     writableFields,
+    // Private trusted-admin policy. The generic planner validates the exact closed shape and
+    // binds its normalized form into the dry-run revision; requests cannot supply this field.
+    ...(system && system.config && system.config.c6AcceptancePolicy !== undefined
+      ? { acceptancePolicy: system.config.c6AcceptancePolicy }
+      : {}),
   }
 }
 
