@@ -1,4 +1,4 @@
-import { pool } from '../db/pg'
+import { pool, query } from '../db/pg'
 import { metrics } from '../metrics/metrics'
 import { Logger } from '../core/logger'
 import { isDatabaseSchemaError } from '../utils/database-errors'
@@ -16,10 +16,10 @@ const TTL_MS = parseInt(process.env.RBAC_CACHE_TTL_MS || '60000', 10)
 let rbacDegraded = false
 const allowDegradation = process.env.RBAC_OPTIONAL === '1'
 
-export async function isAdmin(userId: string): Promise<boolean> {
-  if (!pool) return false
+export async function isAdmin(userId: string, runQuery: typeof query = query): Promise<boolean> {
+  if (runQuery === query && !pool) return false
   try {
-    const { rows } = await pool.query('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1', [userId, 'admin'])
+    const { rows } = await runQuery('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1', [userId, 'admin'])
     return rows.length > 0
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {

@@ -1,45 +1,45 @@
 {
   "ok": true,
   "data": {
-    "groupId": "a4556006-0005-4000-8000-000000000001",
+    "groupId": "a4556006-0008-4000-8000-000000000001",
     "groupType": "fixed_shift",
     "timezone": "Asia/Shanghai",
-    "activeMemberCount": 10,
+    "activeMemberCount": 12,
     "managerPosture": { "ownerCount": 1, "subOwnerCount": 0 },
     "calculationPosture": "legacy",
     "domains": {
       "membership": {
-        "label": "conflict_action_required",
-        "reasonCodes": ["CALCULATION_GROUP_MEMBERSHIP_OVERLAP"],
+        "label": "effective",
+        "reasonCodes": [],
         "editorRef": { "kind": "group_stage", "stage": "people" }
       },
       "schedule": {
-        "label": "effective",
+        "label": "conflict_action_required",
         "strategy": "fixed_shift",
-        "reasonCodes": [],
+        "reasonCodes": ["UNPUBLISHED_MANAGED_ROW"],
         "sourceRefs": [
-          { "kind": "shift", "id": "a4556006-0005-4000-8000-000000000101" },
-          { "kind": "fixed_schedule_config", "id": "a4556006-0005-4000-8000-000000000102" }
+          { "kind": "shift", "id": "a4556006-0008-4000-8000-000000000101" },
+          { "kind": "fixed_schedule_config", "id": "a4556006-0008-4000-8000-000000000102" }
         ],
         "fixedSchedule": {
           "state": "effective",
-          "reasonCodes": ["EFFECTIVE"],
+          "reasonCodes": ["UNPUBLISHED_MANAGED_ROW", "EFFECTIVE"],
           "desired": {
-            "shiftId": "a4556006-0005-4000-8000-000000000101",
+            "shiftId": "a4556006-0008-4000-8000-000000000101",
             "startDate": "2026-08-01",
-            "endDate": "2026-08-31",
+            "endDate": null,
             "revision": 1
           },
           "coverage": {
-            "targetMembers": 10,
-            "matchingMembers": 10,
+            "targetMembers": 12,
+            "matchingMembers": 12,
             "missingMembers": 0,
             "nonMemberTargets": 0,
             "differentKeyRows": 0
           },
           "drift": {
             "unconfiguredManagedRows": 0,
-            "unpublishedManagedRows": 0,
+            "unpublishedManagedRows": 3,
             "managedSets": []
           },
           "evaluatedAt": "2026-08-05T00:00:00.000Z"
@@ -49,7 +49,7 @@
       "segments": {
         "label": "effective",
         "reasonCodes": [],
-        "sourceRefs": [{ "kind": "shift", "id": "a4556006-0005-4000-8000-000000000101" }],
+        "sourceRefs": [{ "kind": "shift", "id": "a4556006-0008-4000-8000-000000000101" }],
         "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
       },
       "flex": {
@@ -82,11 +82,10 @@
     },
     "conflicts": [
       {
-        "code": "CALCULATION_GROUP_MEMBERSHIP_OVERLAP",
-        "domain": "membership",
+        "code": "FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW",
+        "domain": "schedule",
         "label": "conflict_action_required",
-        "affectedUserCount": 2,
-        "editorRef": { "kind": "group_stage", "stage": "people" }
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "assignments" }
       }
     ],
     "evaluatedAt": "2026-08-05T00:00:00.000Z"

@@ -713,6 +713,22 @@ export default defineConfig({
       // so the no-DB job cannot skip-green it, and the whole file is explicitly run in
       // plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
+      // #4556 W6-1 group effective-policy aggregate: real-DB route integration (happy path,
+      // W6-R1 zero-write row-count/xmin snapshot, W6-R3 authorization ordering, W6-R4 FSER
+      // fidelity, and the read-only-transaction structural backstop) requires real PostgreSQL;
+      // excluded here so the no-DB job cannot skip-green it, and the whole file is explicitly
+      // run in plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
+      // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
+      // reproduced from seeded rows against a dedicated disposable PostgreSQL database
+      // with canonical FSER. Excluded from no-DB collection and whole-file wired below.
+      'tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts',
+      // #4556 W6-R5 membership-overlap counter: seeding a genuine overlap requires temporarily
+      // dropping attendance_calc_group_memberships_no_overlap, so this suite runs against its
+      // own dedicated ephemeral database rather than the shared metasheet_test one. Still
+      // DATABASE_URL-gated (it derives its scratch connection from the same env var) and still
+      // needs the two-point wiring: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
