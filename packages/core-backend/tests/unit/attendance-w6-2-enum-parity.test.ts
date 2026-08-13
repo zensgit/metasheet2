@@ -8,11 +8,12 @@
  *   second list)."
  *
  * §7.3 bullet 2 says EVERY published closed enum, not just a sample. The
- * promoted schema block declares 22 raw `enum:` stanzas. This file pins 20
- * of them, counted as 21 logical positions (`editorRef.kind`'s two
- * one-value oneOf-branch stanzas — `[group_stage]` and
- * `[group_context_route]` — are one logical two-value union, tested as one
- * case, not two): the original three (SourceLabel, Domain, ConflictCode),
+ * promoted schema block declares 22 raw `enum:` stanzas. This file pins 21
+ * of them (1 deliberate exclusion — the envelope `ok:[true]` structural
+ * success/failure discriminator, which has no value domain), expressed as 20
+ * logical cases (`editorRef.kind`'s two one-value oneOf-branch stanzas —
+ * `[group_stage]` and `[group_context_route]` — are one logical two-value
+ * union, tested as one case, not two): the original three (SourceLabel, Domain, ConflictCode),
  * SourceRef.kind, FSER state, FSER reasonCodes, editorRef
  * kind/stage/step/surface, calculationPosture, groupType,
  * `domains.schedule.strategy` (a SEPARATE runtime-checked position that
