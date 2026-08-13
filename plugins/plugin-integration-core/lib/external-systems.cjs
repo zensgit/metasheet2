@@ -18,6 +18,8 @@ const INSTANCE_DIGEST_KEY = crypto.randomBytes(32)
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
 
 const TABLE = 'integration_external_systems'
+const SQL_READONLY_SOURCE_KIND = 'data-source:sql-readonly'
+const PRIVATE_SQL_READONLY_CONFIG_KEYS = new Set(['lookupProjection'])
 const VALID_ROLES = new Set(['source', 'target', 'bidirectional'])
 const VALID_STATUSES = new Set(['active', 'inactive', 'error'])
 
@@ -114,6 +116,13 @@ function scopeWhere({ tenantId, workspaceId }) {
 
 function rowToPublicExternalSystem(row, credentialFingerprint = null) {
   if (!row) return null
+  const sanitizedConfig = sanitizeIntegrationPayload(row.config ?? {})
+  const publicConfig = sanitizedConfig && typeof sanitizedConfig === 'object' && !Array.isArray(sanitizedConfig)
+    ? { ...sanitizedConfig }
+    : {}
+  if (row.kind === SQL_READONLY_SOURCE_KIND) {
+    for (const key of PRIVATE_SQL_READONLY_CONFIG_KEYS) delete publicConfig[key]
+  }
   return {
     id: row.id,
     tenantId: row.tenant_id,
@@ -122,7 +131,10 @@ function rowToPublicExternalSystem(row, credentialFingerprint = null) {
     name: row.name,
     kind: row.kind,
     role: row.role,
-    config: sanitizeIntegrationPayload(row.config ?? {}),
+    // SQL lookup-projection object/column identifiers are trusted-admin configuration. They stay
+    // available only through getExternalSystemForAdapter(); public create/get/list responses omit
+    // the whole private subtree rather than redacting individual values or exposing its shape.
+    config: publicConfig,
     capabilities: row.capabilities ?? {},
     status: row.status,
     lastTestedAt: row.last_tested_at ?? null,
@@ -192,6 +204,19 @@ function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null
+}
+
+function preservePrivateConfigOnPublicUpdate(kind, existingConfig, nextConfig) {
+  if (kind !== SQL_READONLY_SOURCE_KIND || !isPlainObject(existingConfig) || !isPlainObject(nextConfig)) {
+    return nextConfig
+  }
+  const merged = { ...nextConfig }
+  for (const key of PRIVATE_SQL_READONLY_CONFIG_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(nextConfig, key) && Object.prototype.hasOwnProperty.call(existingConfig, key)) {
+      merged[key] = existingConfig[key]
+    }
+  }
+  return merged
 }
 
 async function maybeEncryptCredentials(credentialStore, credentials) {
@@ -270,8 +295,11 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       // Preserve stored config/capabilities when the caller did not explicitly
       // provide them. A status-only or name-only update must not wipe stored
       // connection config (baseUrl, orgId, etc.) or capability flags.
-      // Explicit null/empty-object still replaces (caller opted in).
+      // Explicit null/empty-object still replaces public config. Private SQL lookup-projection
+      // keys are the exception: public reads omit them, so their absence on update means preserve;
+      // a trusted-admin caller clears one explicitly with `{ lookupProjection: null }`.
       if (input.config === undefined) updateRow.config = existing.config
+      else updateRow.config = preservePrivateConfigOnPublicUpdate(existing.kind, existing.config, updateRow.config)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
