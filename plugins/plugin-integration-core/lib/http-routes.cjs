@@ -1,5 +1,7 @@
 'use strict'
 
+const crypto = require('node:crypto')
+
 // ---------------------------------------------------------------------------
 // HTTP routes — plugin-integration-core
 //
@@ -52,6 +54,7 @@ const ROUTES = [
   ['POST', '/api/integration/pipelines/:id/external-write/apply', 'pipelinesExternalWriteApply'],
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
+  ['POST', '/api/integration/table-actions/:actionId/mvp-persist', 'tableActionMvpPersist'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', 'tableActionLargeBomExpansionJobStart'],
   ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', 'tableActionLargeBomExpansionJobGet'],
@@ -253,6 +256,7 @@ const {
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
@@ -727,6 +731,7 @@ function publicRunInput(body = {}) {
 }
 
 const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
+const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
@@ -3685,6 +3690,52 @@ function createHandlers(services, options = {}) {
         policyStore: context.storage,
         conflictPolicyReview: body.conflictPolicyReview,
       }))
+    },
+
+    // Re-run the approved readonly table action and commit its expansion directly
+    // into the MetaSheet-internal MVP snapshot tables. Raw rows stay in-process;
+    // this route never calls the table-action Apply writer or any external writer.
+    async tableActionMvpPersist(req, res) {
+      requireAccess(req, 'admin')
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      const prepared = await prepareStockPreparationMvpSnapshot({
+        action,
+        parameters: body.parameters,
+        sourceAdapter,
+        recordsApi: getMultitableRecordsApi(),
+      })
+      const tenantId = resolveAuthUserTenantId(req)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
+      const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
+      const batchScope = `${stableScope}\n${prepared.revision}`
+      const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
+      const result = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        lockTenantId: tenantId,
+        projectId,
+        syncRunId: `sync_${batchDigest}`,
+        snapshotBatchId: `snapshot_${batchDigest}`,
+        snapshotVersion: 1,
+        sourceSystem: action.source.kind,
+        sourceProjectNo: prepared.parameters.projectNo,
+        expansionResult: prepared.expansionResult,
+        readPlan: action.source.readPlan,
+      })
+      return sendOk(res, {
+        status: result.persisted ? 'created' : 'skipped_existing',
+        persisted: result.persisted === true,
+        created: result.created,
+        source: prepared.evidence,
+        evidence: result.evidence,
+      }, result.persisted ? 201 : 200)
     },
 
     async tableActionApply(req, res) {

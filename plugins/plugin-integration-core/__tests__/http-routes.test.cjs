@@ -4720,6 +4720,96 @@ async function testTableActionRoutes() {
   )
 }
 
+async function testTableActionMvpPersistRoute() {
+  const store = createInMemoryMvpPersistStore()
+  const adapterCalls = []
+  const sourceCalls = []
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        return createTableActionSourceAdapter(tableActionPlmData(), sourceCalls)
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(services, {
+    recordsApi: store.recordsApi,
+    provisioningApi: store.provisioningApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] },
+  })
+
+  assert.ok(
+    registered.includes('POST /api/integration/table-actions/:actionId/mvp-persist'),
+    'MVP persist route is registered',
+  )
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot persist an internal MVP snapshot')
+  assert.equal(adapterCalls.length, 0, 'authorization fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'authorization failure writes nothing')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, projectId: 'tenant_evil:integration-core' },
+  })
+  assert.equal(res.statusCode, 400, 'client-supplied target steering is rejected')
+  assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID')
+  assert.equal(adapterCalls.length, 0, 'invalid input fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'invalid input writes nothing')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.status, 'created')
+  assert.equal(res.body.data.persisted, true)
+  assert.ok(store.writes.length > 0, 'the approved expansion reaches the internal MVP write sink')
+  assert.ok(sourceCalls.length > 0, 'the source is re-read immediately before persistence')
+  assert.ok(store.findObjectSheetCalls.length > 0, 'the route resolves internal MVP target sheets')
+  for (const call of store.findObjectSheetCalls) {
+    assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'physical target derives from the authenticated tenant')
+  }
+  assert.equal(deepStringIncludes(store.writes, 'P-001'), true, 'positive control: the project value reaches the internal sink')
+  for (const forbidden of ['P-001', 'A-001', 'Assembly']) {
+    assert.equal(deepStringIncludes(res.body, forbidden), false, `values-free response hides ${forbidden}`)
+  }
+
+  const writesBeforeReplay = store.writes.length
+  const readsBeforeReplay = sourceCalls.length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'skipped_existing')
+  assert.equal(res.body.data.persisted, false)
+  assert.ok(sourceCalls.length > readsBeforeReplay, 'an exact replay re-reads the source')
+  assert.equal(store.writes.length, writesBeforeReplay, 'an exact replay creates or patches no internal rows')
+}
+
 async function testLargeBomBackgroundExpansionJobRoutes() {
   const records = createTableActionRecordsApi()
   const calls = []
@@ -8612,6 +8702,7 @@ async function main() {
   await testFieldOptionsSyncRoute()
   await testFieldOptionsSyncDisableMissing()
   await testTableActionRoutes()
+  await testTableActionMvpPersistRoute()
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
