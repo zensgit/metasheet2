@@ -45,11 +45,13 @@ export type AttendanceW7ContextSourcePostureStateV1 =
  * (`w4c3a-rollout-control.ts:85-93`). Everything not listed is illegal.
  *
  * OD-W7-4 (open) asks whether a `group_authoritative` org may fall back
- * directly to a *legacy* source; that is a DIFFERENT machine's decision (the
- * legacy fallback, if ruled (b) some day, is not a pair of THIS machine,
- * whose states don't include "legacy" at all — see the states list above).
- * This table is therefore not conditional on OD-W7-4 either way; recorded
- * here as stated, not inferred.
+ * directly to a *legacy* source. `off` is this machine's own
+ * legacy-sourcing state (§4.2's ladder starts there), so a (b) ruling on
+ * OD-W7-4 would most plausibly ADD an edge INTO `off` from
+ * `group_authoritative` or `suspended` — this table is not a closure claim
+ * over that still-open decision. It records only the seven pairs §4.2/§5.2/
+ * §5.3 fix as stated today; an OD-W7-4 (b) ruling is an amendment to this
+ * table, not something this table already anticipates.
  */
 export const ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_LEGAL_TRANSITIONS_V1: ReadonlyArray<
   readonly [AttendanceW7ContextSourcePostureStateV1, AttendanceW7ContextSourcePostureStateV1]

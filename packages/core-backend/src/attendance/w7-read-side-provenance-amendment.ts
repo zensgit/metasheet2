@@ -19,16 +19,10 @@
  * Two distinct enum families are in play (design-lock §4.4, stated to avoid
  * a spelling-ownership ambiguity): (i) the W6-owned source-label union
  * (OD-W6-3(a), `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1`, defined
- * in the W6-1 contract module the W6 design lock's §1.2 file inventory
- * names — deliberately not spelled here as a literal filename: this file
- * lives under a root scanned by the existing
- * `tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts`
- * text-marker guard, which reds on ANY file under
- * `packages/core-backend/src/attendance/` containing a `w6-*.ts` module-name
- * substring, comment or not) — W7 ADOPTS those spellings verbatim and mints
- * none of its own for that family, so this file does not touch it; (ii)
- * THIS file's family — the W7-owned provenance values on the existing W4
- * detail/trace enums.
+ * in the W6-1 contract module the W6 design lock's own §1.2 file inventory
+ * names) — W7 ADOPTS those spellings verbatim and mints none of its own for
+ * that family, so this file does not touch it; (ii) THIS file's family —
+ * the W7-owned provenance values on the existing W4 detail/trace enums.
  *
  * The two `import type` lines below are compile-time-only anchors (fully
  * erased by `tsc`; zero runtime `require`, zero byte-inertness impact) that
@@ -139,10 +133,10 @@ type AssertTraceSourceKindSyncV1 = AssertUnionEqualV1<
 // `currentMembers` snapshot being updated.
 const _assertTraceSourceKindSyncV1: AssertTraceSourceKindSyncV1 = true
 
-// Referenced only to keep the compile-time guards above from being reported
-// as "declared but never used" under a future stricter tsconfig; both are
-// otherwise inert (never imported).
-export const __w7ReadSideProvenanceSyncGuardsV1 = Object.freeze({
-  projectionOwnerSync: _assertProjectionOwnerSyncV1,
-  traceSourceKindSync: _assertTraceSourceKindSyncV1,
-} as const)
+// `void` reference only, so a future stricter tsconfig's "declared but never
+// read" check cannot flag the two guard constants above; the type-level
+// assertion is the whole point of each — no runtime value is meant to be
+// consumed. Not exported: these are internal self-checks, not part of this
+// module's contract surface.
+void _assertProjectionOwnerSyncV1
+void _assertTraceSourceKindSyncV1

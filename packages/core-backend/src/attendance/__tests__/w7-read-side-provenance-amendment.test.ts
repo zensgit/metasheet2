@@ -9,11 +9,16 @@
  * (`../../services/AttendanceW4CalculationDetail.ts`) nor
  * `AttendanceDecisionTraceSourceKind`
  * (`../../services/AttendanceDecisionTrace.ts`) is edited by this PR. The
- * real compile-time drift guard lives in the source file itself
- * (`_assertProjectionOwnerSyncV1` / `_assertTraceSourceKindSyncV1`, checked
- * by `pnpm type-check`, which — unlike `vitest` — does NOT exclude this
- * `__tests__` directory, so this file's own assertions below are a runtime
- * echo of that compile-time guarantee, not a substitute for it).
+ * real compile-time drift guard lives in the SOURCE file, not here:
+ * `packages/core-backend/tsconfig.json`'s `exclude` list keeps every
+ * `.test.ts` file and everything under a `__tests__` directory out of
+ * `pnpm type-check`'s scope, so a type-level equality assertion placed in
+ * THIS file would never actually be checked by `tsc`.
+ * `_assertProjectionOwnerSyncV1` / `_assertTraceSourceKindSyncV1` therefore
+ * live in `../w7-read-side-provenance-amendment.ts` itself (which IS
+ * type-checked); this file's assertions below are runtime VALUE checks only
+ * — a weaker, complementary signal, not a substitute for the compile-time
+ * guarantee.
  */
 import { describe, expect, it } from 'vitest'
 import {
