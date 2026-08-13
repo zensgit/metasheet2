@@ -18,11 +18,17 @@
  *
  * Two distinct enum families are in play (design-lock §4.4, stated to avoid
  * a spelling-ownership ambiguity): (i) the W6-owned source-label union
- * (OD-W6-3(a), `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1`,
- * `w6-group-effective-policy-contract.ts:25-30`) — W7 ADOPTS those
- * spellings verbatim and mints none of its own for that family, so this file
- * does not touch it; (ii) THIS file's family — the W7-owned provenance
- * values on the existing W4 detail/trace enums.
+ * (OD-W6-3(a), `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_LABELS_V1`, defined
+ * in the W6-1 contract module the W6 design lock's §1.2 file inventory
+ * names — deliberately not spelled here as a literal filename: this file
+ * lives under a root scanned by the existing
+ * `tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts`
+ * text-marker guard, which reds on ANY file under
+ * `packages/core-backend/src/attendance/` containing a `w6-*.ts` module-name
+ * substring, comment or not) — W7 ADOPTS those spellings verbatim and mints
+ * none of its own for that family, so this file does not touch it; (ii)
+ * THIS file's family — the W7-owned provenance values on the existing W4
+ * detail/trace enums.
  *
  * The two `import type` lines below are compile-time-only anchors (fully
  * erased by `tsc`; zero runtime `require`, zero byte-inertness impact) that

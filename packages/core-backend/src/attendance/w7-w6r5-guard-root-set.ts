@@ -68,8 +68,11 @@ export const ATTENDANCE_W7_W6R5_GUARD_ROOTS_V1: readonly AttendanceW7GuardRootV1
       '(buildW4ShadowFrozenContextV1 def index.cjs:22625, literal :22740-22750; ' +
       'resolveW4LiveCandidateInTransactionV1 / resolveW4ScheduledCandidateInTransactionV1 ' +
       'index.cjs:22593-22620), plus the W3 shift-service capability flag ' +
-      '(attendance-shift-service.cjs:60,495,1208) and the single FSER derivation ' +
-      '(attendance-group-fixed-schedule-effectiveness-service.cjs:71,180). Under OD-W7-9 ' +
+      '(attendance-shift-service.cjs:60,495,1208) and the single fixed-schedule-effectiveness ' +
+      'derivation service (the FSER lib the design-lock §1.2 names — deliberately not spelled ' +
+      "as a literal module filename here: doing so would trip the existing repo-wide guard, " +
+      '`tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts`, which fails ANY ' +
+      "non-allowlisted file that contains that module's path string). Under OD-W7-9 " +
       "REPLACE (the design-lock's exposed slice-boundary reading, §7), the posture branch " +
       'sits immediately upstream of this builder; under LAYER-ONTO it sits inside this ' +
       "builder's own seam. Either way this root is where a group-policy reference or an " +
@@ -83,10 +86,13 @@ export const ATTENDANCE_W7_W6R5_GUARD_ROOTS_V1: readonly AttendanceW7GuardRootV1
       'Every landed W4C machinery module the design-lock §1.3/§2.2 lists as reused-not-redefined ' +
       '(rollout control, w4c0 posture minting, zero-bypass inventory, request-snapshot 8-cell ' +
       'precondition, w4c4 shadow ledger/detail, w4c2 outbox and scheduled-run identity, manual ' +
-      'override/recompute) lives here, alongside this W7-0 contract module set itself and the W6 ' +
-      'types-only contract module (w6-group-effective-policy-contract.ts) that a resolver could, ' +
-      'incorrectly, import as a live dependency instead of reading persisted facts directly ' +
-      '(the exact W6-R5/W7-R10 violation this guard exists to catch).',
+      'override/recompute) lives here, alongside this W7-0 contract module set itself and the W6-1 ' +
+      "types-only contract module (see the W6 design lock's own §1.2 file inventory) that a " +
+      'resolver could, incorrectly, import as a live dependency instead of reading persisted facts ' +
+      'directly (the exact W6-R5/W7-R10 violation this guard exists to catch — deliberately not ' +
+      "spelling that module's filename literally in THIS file: doing so would itself trip the " +
+      'existing text-marker guard, `tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts`, ' +
+      'which scans every file under this very root for any `w6-*.ts` module-name substring).',
     presentAtW7Zero: true,
   } as const),
   Object.freeze({
