@@ -39,6 +39,13 @@ export interface ProductFeatures {
    * previously persisted FWB action remains visible as read-only while the flag is off.
    */
   approvalFwbWriteback: boolean
+  /**
+   * W6-3 (#4556) OD-W6-7=(a) — group effective-policy panel gate. Mirrors the backend's two-layer
+   * default-OFF switch (master `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED` env AND a per-org
+   * exact allowlist — see `w6-group-effective-policy-panel-flag.ts`). No role/mode/plugin
+   * inference: OFF keeps `AttendanceGroupContextHost.vue` byte-identical to before this slice.
+   */
+  attendanceGroupEffectivePolicyPanel: boolean
   mode: ProductMode
 }
 
@@ -73,6 +80,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalAttachments: false,
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
+  attendanceGroupEffectivePolicyPanel: false,
   mode: 'platform',
 }
 
@@ -214,6 +222,12 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_fwb_writeback === 'boolean'
           ? featuresNode.approval_fwb_writeback
           : undefined,
+    attendanceGroupEffectivePolicyPanel:
+      typeof featuresNode.attendanceGroupEffectivePolicyPanel === 'boolean'
+        ? featuresNode.attendanceGroupEffectivePolicyPanel
+        : typeof featuresNode.attendance_group_effective_policy_panel === 'boolean'
+          ? featuresNode.attendance_group_effective_policy_panel
+          : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -334,6 +348,13 @@ function resolveFeatures(
     backend.approvalFwbWriteback,
   )
 
+  // W6-3 (#4556) OD-W6-7=(a): same default-OFF discipline — only an explicit backend/override
+  // boolean enables it; no admin/mode/plugin inference.
+  const attendanceGroupEffectivePolicyPanel = boolOrDefault(
+    override.attendanceGroupEffectivePolicyPanel,
+    backend.attendanceGroupEffectivePolicyPanel,
+  )
+
   return {
     attendance,
     workflow,
@@ -344,6 +365,7 @@ function resolveFeatures(
     approvalAttachments,
     approvalCanvasV2,
     approvalFwbWriteback,
+    attendanceGroupEffectivePolicyPanel,
     mode,
   }
 }
