@@ -2208,6 +2208,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts',
   'tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts',
   'tests/integration/attendance-w4c0-operation-registry.db.test.ts',
+  'tests/integration/attendance-w4c2-authoritative-calculation-core.db.test.ts',
   'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
   'tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts',
   'tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts',
