@@ -138,8 +138,14 @@ function validateSegmentV1(segment: unknown, index: number): boolean {
  * Contract-preview validator: `{v1-legacy, v2-legacy, v2-group_effective}`
  * accepted; everything else fail-closed. Guard order below is deliberately
  * ONE early-return per named W7-R5 negative, so each design-lock-named
- * reject category maps to exactly one guard (mutation-tested individually —
- * see the PR body):
+ * reject category maps to a guard. Mutation-tested individually in the PR
+ * body (each guard neutered, tests re-run, restored) — with one named
+ * exception: guard 1's "extra key" leg and null/undefined-input crash
+ * protection are load-bearing on guard 1 alone, but its "missing key" leg is
+ * independently caught by the field-level checks below too (deleting
+ * `timezone` still fails `isNonEmptyStringV1(ctx.timezone)` even with guard
+ * 1 disabled) — genuine defense-in-depth, not a gap, but not "guard 1 alone"
+ * either; recorded honestly rather than as a uniform claim:
  *
  *  1. exact-key closure (own keys === `V2_CONTEXT_KEYS`, no extra/missing);
  *  2. `schemaVersion` unknown (must be `1` or `2`);
