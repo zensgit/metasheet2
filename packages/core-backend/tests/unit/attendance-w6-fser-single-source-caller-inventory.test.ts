@@ -44,12 +44,25 @@ const ALLOWED_RELATIVE_FILES = new Set([
   'packages/core-backend/tests/integration/attendance-w6-group-effective-policy.db.test.ts',
   'packages/core-backend/tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts',
   'packages/core-backend/tests/unit/attendance-group-fixed-schedule-effectiveness-service.test.ts',
+  // W7-1a (#4556): the group-effective facts resolver's real-PG gate. It loads
+  // the FSER module to INJECT the exported PURE derivation
+  // (`deriveAttendanceGroupFixedScheduleEffectiveness`) into the resolver, in
+  // the same shape `w6-group-effective-policy-aggregate.ts` takes `deps.fser`.
+  // Injecting the real predicate rather than stubbing it is the point: a stub
+  // would make every `state === 'effective'` leg a test of the stub. The
+  // resolver under test defines NO second effectiveness predicate — which is
+  // what W6-R4 guards — and makes zero factory calls.
+  'packages/core-backend/tests/integration/attendance-w7-1a-resolver.db.test.ts',
   // this inventory test's own file (names the guarded strings for documentation)
   'packages/core-backend/tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts',
   // Names the module in a CLOSED FILE SET / a derived-domain floor list, not
   // as a caller. Both are guards over this same module.
   'packages/core-backend/tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts',
   'packages/core-backend/tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts',
+  // W7-1a (#4556): the W6-R5 preservation guard's curated classification data.
+  // It names the FSER module because that module is one of the 72 files under
+  // the guard's pinned roots — a scan-domain entry, not a caller.
+  'packages/core-backend/tests/unit/w7-w6r5-guard/classification.ts',
 ])
 
 /**
@@ -70,6 +83,19 @@ const ZERO_FACTORY_CALL_FILES = [
   'packages/core-backend/src/attendance/w6-group-effective-policy-aggregate.ts',
   'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
   'packages/core-backend/src/util/resolve-plugin-attendance-lib.ts',
+  // W7-1a (#4556): the group-effective facts resolver NAMES the FSER module and
+  // its derivation function in its header, to document that it composes the
+  // EXPORTED PURE derivation as an INJECTED dependency (`deps.deriveFixed-
+  // ScheduleEffectiveness`) rather than importing or re-implementing it — the
+  // same arrangement as `w6-group-effective-policy-aggregate.ts` above. It
+  // loads nothing from the FSER module and calls the factory zero times.
+  //
+  // What it DOES add, stated rather than implied: a second fact LOADER. FSER's
+  // own `loadEffectivenessFacts` is a private closure and its public wrappers
+  // read unlocked, so a resolver that must read under its own locks has to
+  // reissue those SELECTs. That is a duplicated read, not a duplicated
+  // PREDICATE — and the predicate is what W6-R4 makes singular.
+  'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-facts-resolver.ts',
 ]
 
 const FSER_REFERENCE_PATTERNS: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [

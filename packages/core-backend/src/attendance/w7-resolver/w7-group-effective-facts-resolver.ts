@@ -31,8 +31,15 @@
  * read under its own locks. So this module reissues those three SELECTs
  * verbatim INSIDE the lock and feeds them to the EXPORTED PURE derivation
  * `deriveAttendanceGroupFixedScheduleEffectiveness` (`:71`), which is
- * INJECTED rather than imported — the same shape
- * `w6-group-effective-policy-aggregate.ts` uses for `deps.fser`. Consequence
+ * INJECTED rather than imported — the same shape the landed W6-1 aggregate
+ * module uses for its own `deps.fser`. (That module is named here only by
+ * description, not by filename: the landed W6-R5 import-graph guard
+ * `tests/unit/attendance-w6-import-graph-no-calculation-consumer.test.ts`
+ * is a TEXT-marker scan over calculation-path files, and this file is
+ * correctly classified as one. Spelling the basename in a comment that exists
+ * to say "we do NOT import it" would trip that guard, and the right response
+ * to a tripwire firing on prose is to reword the prose, never to add an
+ * exemption that weakens the guard for every future file.) Consequence
  * that must not be glossed: this introduces a second *fact loader*, but NOT a
  * second effectiveness *predicate* — the predicate stays singular, which is
  * what W6-R4 and `tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts`
