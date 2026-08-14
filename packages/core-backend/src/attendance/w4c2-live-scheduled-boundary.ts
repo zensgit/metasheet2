@@ -697,25 +697,40 @@ async function lockShadowParentRecord(
  * in the same transaction — one atomic promotion. For a REVIEW outcome the placeholder is
  * preserved as-is, invisible to `visibility_state='active'` readers.
  *
- * DAILY-FIELD FIDELITY — [OWNER-CONFIRM] the specified state is NOT WRITABLE against the current
- * schema, disclosed here rather than silently papered over. §7.5's parent-state install calls for
- * every mutable W4-owned daily field to be NULL. `attendance_records.status`, `work_minutes`,
- * `late_minutes` and `early_leave_minutes` are `NOT NULL` columns (`status` additionally carries a
- * closed CHECK), so literal NULL is not writable for four of the six. What ships: the schema's own
- * neutral values for those four (`'normal'`, `0`, `0`, `0`) and genuine NULLs for the two nullable
- * instants (`first_in_at` / `last_out_at`). That is the minimum-fabrication row the schema admits,
- * and strictly less fabrication than the existing import-side precedent
- * (`ensureAuthoritativeParent`, which writes the REAL compatibility projection into its review
- * placeholder).
+ * DAILY-FIELD FIDELITY — what the LOCK requires, and what the daily columns therefore carry.
  *
- * WHY THIS IS AN OWNER ITEM AND NOT JUST A NOTE: the spec's stated rationale for NULL was "so
- * ordinary readers see no fabricated zero-minute row" — and what ships IS a fabricated
- * zero-minute row whose only concealment is `visibility_state='retired'`. Concealment therefore
- * rests entirely on visibility filtering, and visibility filtering is not yet universal (no read
- * ROUTE filters `visibility_state`; the canonical active-current host-port helper does, and the
- * D2 suite pins that one reader with a positive control). The owner should either confirm this
- * shape or authorize a nullability migration; a third option — widening the read side first — is
- * the same forward obligation the E5 suite already records.
+ * §7.5 (`attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md:1502-1505`) requires a
+ * FOUR-TUPLE of parent-state columns for a fresh authoritative review — `legacy_untracked` /
+ * pointer-null / `retired` / `review_placeholder` — plus the rationale clause "ordinary readers see
+ * no fabricated `normal` zero-minute row". The INSERT below satisfies that four-tuple exactly. The
+ * stronger phrasing "every mutable W4-owned daily field NULL" is the D2 build brief's own
+ * amplification of §7.5, NOT lock text — worth stating, because four of those six columns
+ * (`status`, `work_minutes`, `late_minutes`, `early_leave_minutes`) are `NOT NULL` (`status` with a
+ * closed CHECK on top), so literal NULL is not writable for them and the amplified form is not
+ * satisfiable against this schema at all. What ships is the schema's own neutral values for those
+ * four and genuine NULLs for the two nullable instants (`first_in_at` / `last_out_at`).
+ *
+ * FABRICATION, COMPARED HONESTLY: this row DOES fabricate `normal`/0/0/0, and it fabricates MORE
+ * than the import-side precedent, not less. `ensureAuthoritativeParent`
+ * (`w4c3a-canonical-import-kernel.ts:832-860`) writes the REAL supplied compatibility projection
+ * into its own `retired`/`review_placeholder` row — zero fabrication — because on the import path a
+ * real projection exists to write. The live authoritative path has none: a review outcome means the
+ * calculator produced no `dailyProjection`, and the day may have no prior legacy row at all. The
+ * schema's neutral values are what remains once NULL is unavailable and no true value exists.
+ *
+ * WHY THE RATIONALE CLAUSE STILL HOLDS (the part that actually matters): the fabricated values are
+ * never rendered to an ordinary reader, because every daily-VALUE surface filters visibility —
+ * records list/export, report + multitable sync, period/payroll summary, missed-punch candidates and
+ * comprehensive-hours all read through the `attendance_current_records` view
+ * (`… WHERE visibility_state = 'active'`), one route filters `r.visibility_state = 'active'`
+ * inline (`plugins/plugin-attendance/index.cjs:30197`), and anomaly listing / makeup facts /
+ * open-record attribution / DecisionTrace go through the canonical `w4c3c-active-current` helper.
+ * The one ordinary-permission read that touches the base table without a visibility predicate,
+ * `readAttendanceCalculationDetail`, selects ZERO daily columns (id, pointer, mode, owner,
+ * visibility state/reason) and is exactly the calculation-detail path §7.6:1526-1527 names as
+ * permitted to read retired parents. Leg 8 of the D2 suite pins the canonical helper with a
+ * positive control. So this needs no owner ruling and no nullability migration; it is recorded
+ * here as a disclosure, not a deviation.
  *
  * POISON-RACE: `ON CONFLICT (user_id, work_date, org_id) DO NOTHING` (the in-file idiom and the
  * actual unique key) so a concurrent creator resolves to a PRODUCT outcome, never a raw 23505

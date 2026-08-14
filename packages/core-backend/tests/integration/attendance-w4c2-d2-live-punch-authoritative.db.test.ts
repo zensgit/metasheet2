@@ -689,22 +689,27 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     expect(segments.rows[0].actual_in_at).not.toBeNull()
   })
 
+  // The ONE key set both outcomes must produce, spelled once so the completed and review
+  // assertions below cannot drift apart independently: `PreparedDailyProjectionV1`
+  // (`w4c0-write-boundary-types.ts:211-221`), nine camelCase members.
+  const PREPARED_DAILY_PROJECTION_KEYS_V1 = [
+    'earlyLeaveMinutes',
+    'firstInAt',
+    'lastOutAt',
+    'lateMinutes',
+    'meta',
+    'status',
+    'timezone',
+    'workDate',
+    'workedMinutes',
+  ]
+
   it('leg 10c [OWNER-CONFIRM]: the completed-case `record` has EXACTLY the PreparedDailyProjectionV1 key set (camelCase, nine keys) — not the legacy snake_case attendance_records row', async () => {
     const seed = await seedAuthoritativeOrg('g10c', { withShift: true })
     const { boundary } = makeBoundary()
     const result = await boundary.executeLivePunch(await buildPunchInput(seed))
     const record = ((result as { response: Record<string, unknown> }).response.record) as Record<string, unknown>
-    expect(Object.keys(record).sort()).toEqual([
-      'earlyLeaveMinutes',
-      'firstInAt',
-      'lastOutAt',
-      'lateMinutes',
-      'meta',
-      'status',
-      'timezone',
-      'workDate',
-      'workedMinutes',
-    ])
+    expect(Object.keys(record).sort()).toEqual(PREPARED_DAILY_PROJECTION_KEYS_V1)
     // Mutation B discriminator: the documented alternative (the raw persisted row) would carry
     // these snake_case members instead. Asserting their ABSENCE is what makes this leg
     // distinguish between the two candidate shapes rather than merely catch typos.
@@ -727,6 +732,31 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
       'shiftId',
       'workDate',
     ])
+  })
+
+  it('leg 10d [OWNER-CONFIRM]: the REVIEW-case `record` carries the SAME key set as the completed case, all-NULL — the same-key-set invariant the writer asserts in a comment, now gated', async () => {
+    // Closes the exact gap the independent gate found: the boundary's own comment promises the
+    // review acknowledgement is "an all-NULL acknowledgement in the SAME key set, so the wire
+    // shape does not change between outcomes", and NOTHING tested it — leg 10c seeds a shift and
+    // therefore only ever drives a COMPLETED outcome, and leg 10 is deliberately shape-agnostic.
+    // A renamed key in the review branch alone passed every other leg. This is also the exact
+    // surface §6.1's review half leaves open, where the PR promises drift is loud, not silent.
+    const seed = await seedAuthoritativeOrg('g10d')  // no shift => attribution unsupported => review
+    const { boundary } = makeBoundary()
+    const result = await boundary.executeLivePunch(await buildPunchInput(seed))
+    expect(result.kind).toBe('w4')
+    // Assert the outcome really is REVIEW, so this leg cannot silently become a second completed
+    // leg if the no-shift fixture ever starts resolving.
+    const calcs = await calcRows(seed.userId)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].outcome).toBe('review_required')
+
+    const record = ((result as { response: Record<string, unknown> }).response.record) as Record<string, unknown>
+    expect(Object.keys(record).sort()).toEqual(PREPARED_DAILY_PROJECTION_KEYS_V1)
+    // …and it is the ALL-NULL acknowledgement, not a partially-populated one.
+    for (const key of PREPARED_DAILY_PROJECTION_KEYS_V1) {
+      expect(record[key]).toBeNull()
+    }
   })
 
   it('leg 11b [the real P-A pin]: an AUTHORITATIVE punch invokes the injected applyLivePunchLegacy ZERO times — negative control: a SHADOW punch invokes it exactly once', async () => {
