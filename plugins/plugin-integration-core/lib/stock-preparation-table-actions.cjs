@@ -801,6 +801,49 @@ async function dryRunStockPreparationAction(input = {}) {
   }
 }
 
+// Internal handoff for the MVP snapshot committer. This deliberately returns the
+// value-bearing expansion only to the route module in-process; no HTTP handler
+// serializes it. The same bounded expansion and conflict checks as the visible
+// dry-run are recomputed immediately before the internal-only persist.
+async function prepareStockPreparationMvpSnapshot(input = {}) {
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const dryRun = await computeDryRun({
+    action,
+    parameters,
+    sourceAdapter: input.sourceAdapter,
+    recordsApi: input.recordsApi,
+    plannedAt: input.plannedAt,
+    runId: input.runId,
+    runOnlyReview: null,
+    tableScopeReview: null,
+  })
+  if (dryRun.expansion.status === 'not_found') {
+    throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
+  }
+  if (isLargeBomBoundedExpansion(dryRun.expansion)) {
+    throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_BOUNDED', 'source expansion requires the large-BOM workflow')
+  }
+  if (!dryRun.canApply || !dryRun.plan.valid) {
+    throw new StockPreparationTableActionError(409, 'STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY', 'source expansion is not ready for internal persistence')
+  }
+  return {
+    action,
+    parameters,
+    expansionResult: dryRun.expansion.rows,
+    revision: dryRun.revision,
+    evidence: evidenceForDryRun({
+      action,
+      parameters,
+      expansion: dryRun.expansion,
+      plan: dryRun.plan,
+      revision: dryRun.revision,
+      canApply: dryRun.canApply,
+      conflictPolicyReview: dryRun.conflictPolicyReview,
+    }),
+  }
+}
+
 // FOS-4b-3 (sandbox-only apply) — P0 gate. apply may run ONLY when sandbox mode is enabled AND the target
 // is in the sandbox allowlist, and NEVER against the production canonical stock-prep object. Fail-closed by
 // default: a missing/disabled policy, an unallowlisted target, or the prod canonical → 403. This is the
@@ -994,6 +1037,7 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,

@@ -5,8 +5,11 @@
  * - first-to-last arithmetic must never replace the per-segment sum
  *   (plannedMinutes leg below fails if breaks are counted);
  * - removing one segment from the sum changes plannedMinutes;
- * - dropping the org scope from the capability flag check flips org isolation;
- * - accepting more than one midnight crossing / overlapping segments must fail.
+ * - the capability projection stays values-safe (no org id leaks into the DTO);
+ * - accepting more than one midnight crossing / overlapping segments must fail;
+ * - #4556 Gate A / Option B: the shift service reads NO environment value for reference
+ *   authorization — a multi-segment reference is fail-closed unless the caller passes the
+ *   canonical posture (`referenceSegments: true`) resolved from the core port.
  */
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -316,13 +319,22 @@ describe('capability projection and org-scoped flag', () => {
     expect(JSON.stringify(capabilities)).not.toContain('org-a')
   })
 
-  it('does not let an env value claim W4 capability before the calculator exists', () => {
+  it('never consults the environment for authorization (the plugin env-gate is retired)', () => {
+    // #4556 Gate A / Option B: the plugin's own `isSegmentCalculationEnabled` env predicate
+    // (which wrongly accepted the '*' wildcard) has been deleted. The one source of truth for
+    // reference-writer authorization is now the core posture port, which callers resolve and
+    // pass as an explicit boolean. This unit proves the shift service reads NO environment value
+    // for that decision: a multi-segment reference with no explicit posture stays fail-closed
+    // regardless of the env, including the former wildcard-accept value.
     process.env[FLAG] = ' org-a , org-b '
-    expect(service.isSegmentCalculationEnabled('org-a')).toBe(false)
-    expect(service.isSegmentCalculationEnabled('org-b')).toBe(false)
-    expect(service.isSegmentCalculationEnabled('org-c')).toBe(false)
+    expect(() => service.assertSegmentCalculationAllowed({
+      orgId: 'org-a', shiftId: 'shift-x', segmentCount: 2, producer: 'attendance calculation',
+    })).toThrow(expect.objectContaining({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED }))
     process.env[FLAG] = '*'
-    expect(service.isSegmentCalculationEnabled('org-c')).toBe(false)
+    expect(() => service.assertSegmentCalculationAllowed({
+      orgId: 'org-c', shiftId: 'shift-x', segmentCount: 2, producer: 'attendance calculation',
+    })).toThrow(expect.objectContaining({ status: 422, code: ERR.MULTI_SEGMENT_CALCULATION_DISABLED }))
+    // The values-safe capability projection is pinned closed regardless of env, too.
     expect(service.buildShiftCapabilities('org-c').segmentCalculation).toMatchObject({
       enabled: false,
       authoritativeResults: false,

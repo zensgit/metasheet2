@@ -371,7 +371,8 @@ describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)',
       sourceProjectNo: `${SOURCE_PROJECT_NO}_same_batch`,
       syncRunId: `${SYNC_RUN_ID}_same_batch`,
       snapshotBatchId,
-      snapshotVersion: 1,
+      snapshotVersion: undefined,
+      allocateSnapshotVersion: true,
     })
     facade.armUnitOfWorkBarrier(2)
     const results = await Promise.all([
@@ -397,36 +398,30 @@ describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)',
     expect(projectRows.rows).toHaveLength(1)
   }, 30_000)
 
-  test('concurrent different batches for one project never duplicate its live row', async () => {
+  test('concurrent different batches atomically allocate unique monotonic versions and never duplicate the live project row', async () => {
     const projectId = `${PROJECT_ID}_same_project`
     const inputV1 = persistInput(facade, {
       projectId,
       sourceProjectNo: `${SOURCE_PROJECT_NO}_same_project`,
       syncRunId: `${SYNC_RUN_ID}_same_project_v1`,
       snapshotBatchId: `${SNAPSHOT_BATCH_ID}_same_project_v1`,
-      snapshotVersion: 1,
+      snapshotVersion: undefined,
+      allocateSnapshotVersion: true,
     })
     const inputV2 = persistInput(facade, {
       projectId,
       sourceProjectNo: `${SOURCE_PROJECT_NO}_same_project`,
       syncRunId: `${SYNC_RUN_ID}_same_project_v2`,
       snapshotBatchId: `${SNAPSHOT_BATCH_ID}_same_project_v2`,
-      snapshotVersion: 2,
+      snapshotVersion: undefined,
+      allocateSnapshotVersion: true,
     })
     facade.armUnitOfWorkBarrier(2)
     const outcomes = await Promise.allSettled([
       persistStockPreparationSyncRun(inputV1),
       persistStockPreparationSyncRun(inputV2),
     ])
-    const fulfilled = outcomes.filter((outcome) => outcome.status === 'fulfilled')
-    const rejected = outcomes.filter((outcome) => outcome.status === 'rejected')
-    expect(fulfilled.length).toBeGreaterThanOrEqual(1)
-    for (const outcome of rejected) {
-      expect(outcome.reason).toMatchObject({
-        status: 422,
-        code: 'PERSIST_VERSION_NOT_MONOTONIC',
-      })
-    }
+    expect(outcomes.every((outcome) => outcome.status === 'fulfilled')).toBe(true)
 
     const projectSheetId = sheetIds.get(PROJECT_OBJECT_ID)
     if (!projectSheetId) throw new Error('missing P4 project sheet id')
@@ -436,5 +431,14 @@ describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)',
       [projectSheetId, projectFields.projectId, projectId],
     )
     expect(projectRows.rows).toHaveLength(1)
+
+    const batchSheetId = sheetIds.get(BATCH_OBJECT_ID)
+    if (!batchSheetId) throw new Error('missing P4 batch sheet id')
+    const batchFields = await discoverPhysicalFields(batchSheetId, BATCH_OBJECT_ID)
+    const batchRows = await q(
+      'SELECT data ->> $1 AS version FROM meta_records WHERE sheet_id = $2 AND data ->> $3 = $4 ORDER BY (data ->> $1)::int',
+      [batchFields.snapshotVersion, batchSheetId, batchFields.projectId, projectId],
+    )
+    expect(batchRows.rows.map((row: { version: string }) => Number(row.version))).toEqual([1, 2])
   }, 30_000)
 })

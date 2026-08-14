@@ -8352,11 +8352,18 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
   if (!workContext || workContext.source === 'rule') return
   const shift = workContext.rule
+  // #4556 Gate A / Option B: this synchronous calculation read path has no write trx / port in
+  // hand, so it is pinned to the closed legacy posture (`referenceSegments: false`). That is
+  // byte-identical to the retired env-gate's production behaviour (the plugin master gate was
+  // OFF, so a multi-segment work context always failed closed here). Residual R4+: once an org
+  // is turned on via Gate C its reference writers will be admitted while this read path still
+  // fails closed on a multi-segment shift, until it is re-sourced from the port in a later slice.
   getAttendanceShiftService().assertSegmentCalculationAllowed({
     orgId,
     shiftId: shift?.id,
     segmentCount: shift?.segmentCount,
     producer: 'attendance calculation',
+    referenceSegments: false,
   })
 }
 
@@ -11099,6 +11106,7 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
     orgId: effectiveInput.orgId,
     shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_apply',
+    referenceSegments: await resolveReferenceSegmentsPostureForWrite(db, effectiveInput.orgId),
   })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, { lockTargets: true })
   if (!result.ok) return result
@@ -11158,6 +11166,7 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
     orgId: effectiveInput.orgId,
     shiftId: effectiveInput.shiftId,
     producer: 'fixed_schedule_rebuild',
+    referenceSegments: await resolveReferenceSegmentsPostureForWrite(db, effectiveInput.orgId),
   })
   const result = await buildAttendanceGroupFixedSchedulePlan(db, effectiveInput, {
     lockTargets: true,
@@ -14045,6 +14054,22 @@ let attendanceW4ActiveCurrentPort = null
 let w4RecordOperationBoundary = null
 let attendanceW4SegmentCalculationPortRef = null
 
+// #4556 Gate A / Option B cutover: the ONE seam every reference-producing writer consults to
+// learn whether an org's canonical posture admits a multi-segment shift reference. Resolves
+// the core posture port on the CALLER's write transaction (exact-org allowlist, wildcard
+// REFUSED, persisted rollout row required) and returns a strict boolean. An absent port is the
+// closed legacy posture (`referenceSegments: false`), so every writer stays fail-closed exactly
+// as before this cutover. The resolved boolean is passed explicitly to the shift-service guard;
+// the plugin no longer reads any environment predicate for reference-writer authorization, so
+// there is one source of truth. Mirrors the schedule-publication writer's established pattern.
+async function resolveReferenceSegmentsPostureForWrite(trx, orgId) {
+  const port = attendanceW4SegmentCalculationPortRef
+  const posture = port && typeof port.resolveOrgSegmentCalculationPosture === 'function'
+    ? await port.resolveOrgSegmentCalculationPosture(trx, orgId)
+    : { effectiveState: 'legacy', referenceSegments: false }
+  return posture.referenceSegments === true
+}
+
 function requireAttendanceActiveCurrentPort() {
   if (!attendanceW4ActiveCurrentPort) {
     throw new HttpError(
@@ -16361,6 +16386,10 @@ async function applyAutoShiftMatchingItems(db, {
   return db.transaction(async (trx) => {
     const applied = []
     const skipped = []
+    // #4556 Gate A / Option B: resolve the org's canonical posture ONCE for the whole apply
+    // (org is constant across items), hoisted above the per-item loop; every matched
+    // candidate's reference guard consumes this explicit boolean.
+    const autoMatchReferenceSegments = await resolveReferenceSegmentsPostureForWrite(trx, orgId)
     for (const item of items) {
       await acquireAttendanceScheduleAssignmentLock(trx, orgId, item.userId)
       const producerKey = buildAutoShiftMatchProducerKey(item.userId, item.workDate)
@@ -16434,6 +16463,7 @@ async function applyAutoShiftMatchingItems(db, {
         orgId,
         shiftId: item.candidateShiftId,
         producer: 'auto_shift_matching',
+        referenceSegments: autoMatchReferenceSegments,
       })
 
       const assignmentRows = await trx.query(
@@ -31619,6 +31649,7 @@ module.exports = {
         orgId,
         shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
         producer: 'shift_swap_final_approval',
+        referenceSegments: await resolveReferenceSegmentsPostureForWrite(client, orgId),
       })
 
       const settings = await getSettings(client)
@@ -31980,6 +32011,7 @@ module.exports = {
         orgId,
         shiftId: detail.target_shift_id,
         producer: 'schedule_dispatch_final_approval',
+        referenceSegments: await resolveReferenceSegmentsPostureForWrite(client, orgId),
       })
 
       await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget({
@@ -33279,6 +33311,7 @@ module.exports = {
         orgId: route.orgId,
         shiftId: input.targetShiftId,
         producer: 'schedule_dispatch_create',
+        referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, route.orgId),
       })
       await assertScheduleDispatchScopeAllowed(trx, route.orgId, {
         userId: route.actorId,
@@ -33552,6 +33585,7 @@ module.exports = {
         orgId: route.orgId,
         shiftRefs: [lockedRequesterSource.shiftId, lockedCounterpartySource.shiftId],
         producer: 'shift_swap_create',
+        referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, route.orgId),
       })
       if (lockedRequesterSource.userId !== route.actorId && !(await canAccessOtherUsers(route.actorId))) {
         throw new HttpError(403, 'FORBIDDEN', 'No access to create a shift-swap request for this requester')
@@ -38526,6 +38560,7 @@ module.exports = {
               orgId,
               shiftRefs: payload.shiftSequence,
               producer: 'rotation_rule_create',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             return trx.query(
               `INSERT INTO attendance_rotation_rules
@@ -38619,6 +38654,7 @@ module.exports = {
               orgId,
               shiftRefs: payload.shiftSequence,
               producer: 'rotation_rule_update',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             return trx.query(
               `UPDATE attendance_rotation_rules
@@ -38878,6 +38914,7 @@ module.exports = {
               orgId,
               shiftRefs: ruleRows[0]?.shift_sequence,
               producer: 'rotation_assignment_write',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
@@ -39021,6 +39058,7 @@ module.exports = {
               orgId,
               shiftRefs: ruleRows[0]?.shift_sequence,
               producer: 'rotation_assignment_write',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
@@ -39213,6 +39251,7 @@ module.exports = {
               orgId,
               shiftRefs: ruleRows[0]?.shift_sequence,
               producer: 'rotation_assignment_write',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
@@ -39364,6 +39403,7 @@ module.exports = {
               orgId,
               shiftRefs: ruleRows[0]?.shift_sequence,
               producer: 'rotation_assignment_write',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'rotation',
@@ -46650,6 +46690,7 @@ module.exports = {
               orgId,
               shiftId: payload.shiftId,
               producer: 'draft_assignment_create',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const replacementValidation = await validateTemporaryShiftReplacement(trx, { orgId, payload, temporary })
             if (!replacementValidation.ok) return { temporaryError: replacementValidation.error }
@@ -46837,6 +46878,7 @@ module.exports = {
               orgId,
               shiftId: payload.shiftId,
               producer: 'draft_assignment_update',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
@@ -47050,6 +47092,7 @@ module.exports = {
               orgId,
               shiftId: payload.shiftId,
               producer: 'assignment_create',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
@@ -47229,6 +47272,7 @@ module.exports = {
               orgId,
               shiftId: payload.shiftId,
               producer: 'assignment_update',
+              referenceSegments: await resolveReferenceSegmentsPostureForWrite(trx, orgId),
             })
             const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
               kind: 'shift',
