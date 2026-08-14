@@ -17,6 +17,11 @@
       <span aria-hidden="true">/</span>
       <span>{{ stepLabel }}</span>
     </header>
+    <AttendanceGroupEffectivePolicyPanel
+      v-if="showEffectivePolicyPanel"
+      :group-id="state.group.id"
+      :return-to="state.returnTo"
+    />
     <slot
       :group="state.group"
       :step="state.step"
@@ -30,7 +35,9 @@
 import { computed, toRef } from 'vue'
 import type { AttendanceGroupRouteContext } from '../../router/attendanceGroupContextRoute'
 import { useLocale } from '../../composables/useLocale'
+import { useFeatureFlags } from '../../stores/featureFlags'
 import { useAttendanceGroupRouteContext } from './useAttendanceGroupRouteContext'
+import AttendanceGroupEffectivePolicyPanel from './AttendanceGroupEffectivePolicyPanel.vue'
 
 const props = defineProps<{
   context: AttendanceGroupRouteContext | null
@@ -46,6 +53,12 @@ const { state, retry } = useAttendanceGroupRouteContext({
 })
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+
+// W6-3 (#4556) OD-W6-7=(a): default-OFF, two-layer gate (master env switch AND per-org exact
+// allowlist — see w6-group-effective-policy-panel-flag.ts). Gate-OFF: the panel component is never
+// rendered here, matching the pre-W6-3 DOM/network behavior byte-for-byte.
+const { hasFeature } = useFeatureFlags()
+const showEffectivePolicyPanel = computed(() => hasFeature('attendanceGroupEffectivePolicyPanel'))
 
 const stepLabel = computed(() => {
   if (state.value.kind !== 'ready') return ''

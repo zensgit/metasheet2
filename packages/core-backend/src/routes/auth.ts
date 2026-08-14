@@ -39,6 +39,7 @@ import { Logger } from '../core/logger'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
+import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { parseUserActivationStatus } from '../auth/user-activation'
@@ -303,6 +304,10 @@ function buildFeaturePayload(authUser: User) {
     // (default OFF) so the automation rule editor can offer the mapping UI only when execution is
     // actually enabled. Never inferred from admin/role/mode.
     approvalFwbWriteback: isFwbWritebackEnabled(),
+    // W6-3 (#4556) OD-W6-7=(a): the group effective-policy panel's default-OFF, two-layer gate
+    // (master env switch AND per-org exact allowlist — see w6-group-effective-policy-panel-flag.ts).
+    // Never inferred from role/mode/plugin state.
+    attendanceGroupEffectivePolicyPanel: isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1(authUser.tenantId),
     mode,
   }
 }

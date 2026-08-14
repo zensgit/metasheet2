@@ -590,6 +590,13 @@ export default defineConfig({
       // no-DB job cannot skip-green it; wired whole-file into the attendance
       // real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+      // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-mode result-write CORE's §7.3
+      // invariant matrix (version-uniqueness + lineage, retry idempotency, baseline + same-txn
+      // atomicity, supersedes-locked-current, review hidden-placeholder, reversal restore/retire,
+      // projection_effect/count, append-only) against real Postgres. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-authoritative-calculation-core.db.test.ts',
       // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
       // migration half: scheduled-run identity tables, the outbox discriminated union,
       // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB
@@ -680,6 +687,14 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       'tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts',
+      // Gate E (#4844) first batch: real-Postgres four-state acceptance (open-read-only-refuse,
+      // open-with-uncommitted-writes discriminating case, idle positive control, savepoint
+      // cleanup) for the two converted category-1 sites
+      // (`runAttendanceResultOperationTransactionV1` / `dispatchAttendanceResultEventOutboxV1`).
+      // DATABASE_URL-gated (describeDb); excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
+      // wiring).
+      'tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts',
       'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
       'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
       // OBS-1 (2026-08-07): the two W4C-3b suites below landed in #4716 with NEITHER wiring
@@ -713,6 +728,22 @@ export default defineConfig({
       // so the no-DB job cannot skip-green it, and the whole file is explicitly run in
       // plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts',
+      // #4556 W6-1 group effective-policy aggregate: real-DB route integration (happy path,
+      // W6-R1 zero-write row-count/xmin snapshot, W6-R3 authorization ordering, W6-R4 FSER
+      // fidelity, and the read-only-transaction structural backstop) requires real PostgreSQL;
+      // excluded here so the no-DB job cannot skip-green it, and the whole file is explicitly
+      // run in plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
+      // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
+      // reproduced from seeded rows against a dedicated disposable PostgreSQL database
+      // with canonical FSER. Excluded from no-DB collection and whole-file wired below.
+      'tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts',
+      // #4556 W6-R5 membership-overlap counter: seeding a genuine overlap requires temporarily
+      // dropping attendance_calc_group_memberships_no_overlap, so this suite runs against its
+      // own dedicated ephemeral database rather than the shared metasheet_test one. Still
+      // DATABASE_URL-gated (it derives its scratch connection from the same env var) and still
+      // needs the two-point wiring: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',

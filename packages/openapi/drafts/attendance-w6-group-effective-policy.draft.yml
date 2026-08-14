@@ -1,26 +1,36 @@
 # =============================================================================
-# W6 (#4556) group effective-policy aggregate — CONTRACT DRAFT (PROPOSED)
+# W6 (#4556) group effective-policy aggregate — CONTRACT DRAFT (PROMOTED)
 #
-# Status: PROPOSED / runtime HOLD. This file is intentionally OUTSIDE
-# packages/openapi/src/paths/ so tools/build.ts does not merge it into
-# dist/. It declares the W6 read contract only; there is no implementation.
+# Status: PROMOTED (W6-2). The `paths` and `components` content below has
+# been copied verbatim into packages/openapi/src/paths/attendance.yml and
+# packages/openapi/src/base.yml per the wiring plan that used to live here,
+# and IS now part of the built dist/ and generated SDK. This file itself
+# stays OUTSIDE packages/openapi/src/paths/ (tools/build.ts still does not
+# read it) — it is kept only as the historical PROPOSED record and because
+# tests/unit/attendance-w6-group-effective-policy-response-contract.test.ts
+# still reads its `AttendanceGroupEffectivePolicySourceRef.kind` enum as an
+# independent third face. Do not hand-edit this file's `paths:`/`components:`
+# body independently of packages/openapi/src/paths/attendance.yml +
+# packages/openapi/src/base.yml — they must stay in lockstep; treat the
+# `src/` copies as canonical going forward.
 #
 # Governing document:
 #   docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md
 #   (sections 4.1-4.4; decisions OD-W6-1..9 are RATIFIED in section 9;
-#   the delegated-non-member status correction in section 10 is PROPOSED)
+#   the delegated-non-member status correction in section 10 is RATIFIED;
+#   §7.3 is the W6-2 wiring gate this promotion satisfies)
 #
-# Wiring plan (W6-2, blocked on owner RATIFY): move the `paths` and
-# `components` content into src/paths/attendance.yml + src/base.yml, rebuild
-# dist, regenerate the SDK, and keep the required attendance OpenAPI contract
-# gate green. Until then this draft must stay out of the build; the W6-0
-# acceptance re-runs `pnpm --filter @metasheet/openapi build` and proves dist/
-# is byte-identical.
+# W6-2 mechanical promotion: the `paths` and `components` content below was
+# copied into src/paths/attendance.yml + src/base.yml, dist/ was rebuilt, the
+# SDK was regenerated, and the required attendance OpenAPI contract gate
+# (`git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts`
+# in plugin-tests.yml) now reflects the published path instead of asserting
+# it stays out.
 # =============================================================================
 x-metasheet-draft:
-  status: PROPOSED
+  status: PROMOTED
   wave: attendance-4556-w6
-  mergedIntoBuild: false
+  mergedIntoBuild: true
 
 paths:
   /api/attendance/groups/{groupId}/effective-policy:
@@ -53,10 +63,11 @@ paths:
                 $ref: '#/components/schemas/AttendanceGroupEffectivePolicyResponse'
         '400':
           description: >
-            Typed validation failure before scoped SQL, including any
-            label/state/posture override input (red line W6-R7) and malformed
-            groupId. Enum-strict: unknown enum values are rejected, never
-            defaulted (red line W6-R6).
+            Typed validation failure. Any label/state/posture override input
+            is rejected before aggregate SQL (red line W6-R7); malformed
+            groupId is rejected after the transaction-bound authorization
+            reads but before aggregate SQL. Enum-strict: unknown enum values
+            are rejected, never defaulted (red line W6-R6).
         '403':
           description: >
             Authenticated-but-unscoped principal or org-selector mismatch;
@@ -134,7 +145,13 @@ components:
         kind:
           type: string
           description: Closed configuration-source kinds (config IDs only, never user IDs).
-          enum: [shift, rule_set, fixed_schedule_config, schedule_group]
+          # AUTHORITY: `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1` in
+          # `packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts`.
+          # The runtime validator imports it and the exported TS `kind` union is derived
+          # from it. This YAML enum is a hand-kept third face; a unit test
+          # (`…-response-contract.test.ts`) parses this enum and asserts set-equality
+          # with that constant, so it reds if either side moves.
+          enum: [shift, rule_set, fixed_schedule_config]
         id:
           type: string
           format: uuid
@@ -174,7 +191,9 @@ components:
           properties:
             shiftId: { type: string, format: uuid }
             startDate: { type: string, format: date }
-            endDate: { type: string, format: date }
+            # Nullable by construction: the producer emits null for an
+            # open-ended managed row, and the underlying column is nullable.
+            endDate: { type: string, format: date, nullable: true }
             revision: { type: integer, minimum: 1 }
         coverage:
           type: object
@@ -203,7 +222,8 @@ components:
                 properties:
                   shiftId: { type: string, format: uuid }
                   startDate: { type: string, format: date }
-                  endDate: { type: string, format: date }
+                  # Nullable for the same reason as `desired.endDate` above.
+                  endDate: { type: string, format: date, nullable: true }
                   producerKey: { type: string }
                   rowCount: { type: integer, minimum: 1 }
         evaluatedAt:
