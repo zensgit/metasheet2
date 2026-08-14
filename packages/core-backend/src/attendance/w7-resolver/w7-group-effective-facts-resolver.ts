@@ -441,6 +441,26 @@ export async function resolveW7GroupEffectiveFactsInTransactionV1(
     })
   }
 
+  // The resolver's SUCCESS OUTPUT MUST BE A SUBSET OF op(i)'s ACCEPTED DOMAIN.
+  //
+  // `rounding_minutes` is `integer NOT NULL DEFAULT 5` with no CHECK, and the
+  // shift create/update schema accepts `z.number().int().min(0)`
+  // (`plugins/plugin-attendance/index.cjs:26092`), so `0` is both storable and
+  // authorable. But op(i)'s v2 shape requires `roundingMinutes >= 1` — the
+  // byte-identical predicate the LIVE v1 validator already carries
+  // (`../w4c1-segment-calculator.ts:359`).
+  //
+  // Without this gate the resolver returned `{ok: true}` for such a shift and
+  // its documented sole consumer then THREW `W7_CONTEXT_FACTS_INVALID`. That
+  // is worse than it sounds: on the v1 path the same shift degrades to a
+  // handled `review('input_schema_invalid')` (`../w4c1-segment-calculator.ts:849`),
+  // so W7 would have converted a gracefully-reviewed condition into a thrown
+  // one AND reported success on the way to it. The value is rejected on both
+  // paths either way; what is aligned here is the failure MODE and the
+  // resolver's contract that `ok: true` means op(i) will accept these facts.
+  const roundingMinutes = toNonNegativeInt(shiftRow.rounding_minutes)
+  if (roundingMinutes < 1) return { ok: false, reason: 'incomplete-policy' }
+
   const ruleFacts = await deps.loadOrgRuleFacts(trx, orgKey)
 
   const shiftTimezone =
@@ -463,7 +483,7 @@ export async function resolveW7GroupEffectiveFactsInTransactionV1(
       shiftId,
       isWorkday: input.isWorkday !== false,
       holidayKind: input.holidayKind ?? null,
-      roundingMinutes: toNonNegativeInt(shiftRow.rounding_minutes),
+      roundingMinutes,
       severeLateThresholdMinutes: ruleFacts.severeLateThresholdMinutes,
       absenceLateThresholdMinutes: ruleFacts.absenceLateThresholdMinutes,
       segments,

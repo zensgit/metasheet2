@@ -810,6 +810,45 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
       expect(await resolveWithGroup(flexGroupId)).toEqual({ ok: false, reason: 'incomplete-policy' })
     })
 
+    it('a legal `rounding_minutes = 0` shift fail-closes instead of handing op(i) facts it throws on', async () => {
+      // The resolver's success output must be a SUBSET of op(i)'s accepted
+      // domain. `rounding_minutes` is `integer NOT NULL DEFAULT 5` with no
+      // CHECK and the shift schema accepts `min(0)`, so 0 is reachable; op(i)
+      // requires `>= 1` (the same predicate the live v1 validator carries).
+      // Previously the resolver returned ok:true here and op(i) then THREW.
+      const result = await withClient(async (client) => {
+        await client.query('BEGIN')
+        try {
+          await client.query(`UPDATE attendance_shifts SET rounding_minutes = 0 WHERE id = $1 AND org_id = $2`, [
+            shiftId,
+            orgId,
+          ])
+          return await resolveW7GroupEffectiveFactsInTransactionV1(asTrx(client), deps(), {
+            orgId,
+            userId,
+            workDate: WORK_DATE,
+            timezone: 'UTC',
+            isWorkday: true,
+            holidayKind: null,
+          })
+        } finally {
+          await client.query('ROLLBACK')
+        }
+      })
+      expect(result).toEqual({ ok: false, reason: 'incomplete-policy' })
+    })
+
+    it('every ok:true fact set this suite can produce is accepted by op(i) (the subset invariant)', async () => {
+      // The general statement of the leg above: whatever the resolver calls a
+      // success, the boundary must mint. A fixture-specific assertion would
+      // not have caught the rounding case.
+      const result = await resolveFacts()
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(() => coreIssueGroupEffectiveContextV2(result.facts)).not.toThrow()
+      expect(result.facts.roundingMinutes).toBeGreaterThanOrEqual(1)
+    })
+
     it('FSER state !== effective fail-closes with incomplete-policy', async () => {
       const result = await withClient(async (client) => {
         await client.query('BEGIN')

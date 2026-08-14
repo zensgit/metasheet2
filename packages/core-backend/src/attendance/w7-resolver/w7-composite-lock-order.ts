@@ -53,8 +53,38 @@
  * BOTH LOCKS ARE SHARED. W7's resolver is a READER of both families. Shared
  * advisory locks still conflict with the exclusive locks the existing writers
  * take, so a concurrent membership transition or schedule-assignment write is
- * genuinely serialized against this helper; two concurrent W7 readers are not
- * serialized against each other, which is the intent.
+ * serialized against this helper — SUBJECT TO the org-spelling precondition
+ * immediately below, which is a real precondition and not a formality.
+ *
+ * KEY IDENTITY IS PINNED, not asserted. The two builders below are checked
+ * against the PRODUCTION spellings by
+ * `tests/unit/attendance-w7-1a-lock-keyspace-parity.test.ts`, two-sided: the
+ * builder's output must equal what the production site emits, AND the
+ * production source must still spell the family that way. Without that pin the
+ * real-DB contention suite proves only self-consistency — both of its
+ * connections build keys from these same builders, so renaming a family prefix
+ * left all 30 of its tests green when an independent gate tried it.
+ *
+ * OPEN ALIGNMENT ITEM FOR W7-1b — canonical vs raw org spelling.
+ * This helper is called with the CANONICALIZED `orgKey`
+ * (`parseCanonicalAttendanceRolloutOrgKeyV1` lower-cases UUIDs,
+ * `../w4c0-identity.ts:132`), whereas BOTH production writers key off the RAW
+ * org id: `../../services/AttendanceCalculationGroupMembership.ts:375` uses
+ * `input.orgId` verbatim, reached from `../../routes/attendance-admin.ts:772`
+ * where the org id is an unvalidated request string, and the plugin uses
+ * `String(orgId ?? '')`. A mixed-case org spelling would therefore produce two
+ * DIFFERENT advisory keys and no mutual exclusion.
+ *
+ * Why this is disclosed rather than fixed here: it is LATENT, not live.
+ * `org_id` is `text` on both `attendance_calculation_group_memberships` and
+ * `attendance_groups`, so a non-canonical spelling fails every
+ * `WHERE org_id = $1` before it can commit anything — the divergent-key path
+ * cannot produce a conflicting write today. Fixing it means canonicalizing at
+ * the production writers, which is a change to landed W1/plugin code and
+ * outside a structurally-inert slice. It is recorded as a W7-1b alignment
+ * obligation: whichever slice first makes a group-authoritative org take these
+ * locks for real must either canonicalize at the writers or narrow this
+ * header's serialization claim to the canonical-spelling precondition.
  */
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 
