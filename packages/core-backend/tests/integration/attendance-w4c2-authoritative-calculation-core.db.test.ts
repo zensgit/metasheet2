@@ -335,27 +335,85 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
     })
 
     it('SAME-TXN atomicity (§7.3): a failure in the calc step after the baseline write leaves NEITHER row', async () => {
-      // Active legacy parent + a completed calc whose projection carries an INVALID status ('bogus').
-      // The core does not pre-validate the status enum (unlike minutes, F2), so the baseline is
-      // appended first and the calc INSERT then trips chk_arc_projected_status (23514) IN the same
-      // txn. If the baseline were written on a separate/auto-committing connection it would survive
-      // the rollback; it must not. A negative-minute projection can no longer serve here — F2 now
-      // rejects it BEFORE the baseline append.
+      // THIRD-GENERATION FAILURE TRIGGER (Gate D2 carry-forward, #4844).
+      //
+      // Generation 1 was a negative-minute projection; F2's minutes pre-check pre-empted it
+      // (rejects BEFORE the baseline append). Generation 2 was an invalid `projected_status`
+      // ('not_a_real_status'); §5.10.1's new status pre-check — landed in this same change,
+      // symmetric with F2 — now pre-empts THAT too. Both generations died the same way: a TS
+      // pre-check moved in front of them, silently converting this leg from "same-txn rollback"
+      // into "the pre-check's product-code path".
+      //
+      // Generation 3 is chosen to be STRUCTURALLY immune to that: `context_snapshot` must be a
+      // JSON ARRAY-free object but `segment_snapshot` must satisfy
+      // `chk_arc_segment_snapshot_array` (`jsonb_typeof(segment_snapshot) = 'array'`). The core
+      // derives `segment_snapshot` from `context.segments` — a field the core NEVER validates and
+      // structurally CANNOT validate with a product code without inspecting caller-frozen context
+      // internals it deliberately carries through verbatim (`insertResolvedAuthoritativeCalculation
+      // RowV1` passes `(context as {segments?}).segments ?? []` straight to the column). Handing it
+      // a non-array `segments` therefore reaches the INSERT, and it does so AFTER the baseline
+      // append (which happens earlier, in `writeCompletedRow`).
+      //
+      // The assertion below deliberately pins the RAW constraint name, not a product code: this
+      // leg's entire purpose is to prove same-txn rollback for a failure the TS layer does NOT
+      // pre-empt. If it ever starts surfacing an `AttendanceW4AuthoritativeCalculationError`
+      // instead, the leg has silently degraded again and must migrate a fourth time — do NOT
+      // "fix" it by adding a pre-check for this field.
       const org = `org-b5-${RUN}`
       const recordId = await insertLegacyActiveParent(org)
-      const bad = completedCalculation(1)
-      ;(bad.dailyProjection as { status: string }).status = 'not_a_real_status'
+      const badContext = { timezone: TZ, workDate: WORK_DATE, segments: { notAnArray: true } }
       let caught: unknown
       try {
         await withTxn((client) =>
-          writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation: bad })),
+          writeAuthoritativeSegmentCalculationV1(
+            asTrx(client),
+            segmentInput({ orgId: org, recordId, context: badContext as never }),
+          ),
         )
       } catch (error) {
         caught = error
       }
       expect(caught).toBeTruthy()
-      expect(String((caught as { constraint?: unknown }).constraint ?? (caught as Error).message)).toContain('chk_arc_projected_status')
+      // NOT a product code — the raw CHECK is what must fire here (see the note above).
+      expect(caught).not.toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
+      expect(String((caught as { constraint?: unknown }).constraint ?? (caught as Error).message)).toContain('chk_arc_segment_snapshot_array')
       // Neither the baseline nor the failed calc survived the same-txn rollback.
+      expect(await countCalcs(recordId)).toBe(0)
+    })
+
+    it('NEGATIVE (product code, Gate D2 §5.10.1): a completed projection with an out-of-domain projected_status is refused with COMPLETED_SHAPE_INVALID BEFORE the baseline append, not a raw chk_arc_projected_status 23514', async () => {
+      // Symmetric with F2's minutes check on the adjacent field. `projected_status` previously had
+      // no TS pre-check at all, so the DB CHECK was the only guard and it surfaced as a raw 23514.
+      const org = `org-b7-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const bad = completedCalculation(1)
+      ;(bad.dailyProjection as { status: string }).status = 'not_a_real_status'
+      await expectProductCode(
+        withTxn((client) =>
+          writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation: bad })),
+        ),
+        CODES.COMPLETED_SHAPE_INVALID,
+      )
+      // BEFORE the baseline append: zero rows, not an orphan baseline the caller's txn happened to
+      // roll back. A pre-check placed after the append would leave this at 1 inside the txn.
+      expect(await countCalcs(recordId)).toBe(0)
+    })
+
+    it("NEGATIVE (product code, Gate D2 §5.10.1): the pre-check's domain matches chk_arc_projected_status EXACTLY — 'off' is a legal AttendanceDailyStatusV1 but NOT a legal projected_status, and is refused with the product code", async () => {
+      // The eight-member calculator status union includes 'off'; the DB CHECK's domain (seven
+      // members) does not. A pre-check reusing the calculator constant would be WIDER than the
+      // constraint it fronts and 'off' would sail through to a raw 23514 — the exact leak this
+      // check exists to close. This leg reds if the two domains are ever re-aliased.
+      const org = `org-b8-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const bad = completedCalculation(1)
+      ;(bad.dailyProjection as { status: string }).status = 'off'
+      await expectProductCode(
+        withTxn((client) =>
+          writeAuthoritativeSegmentCalculationV1(asTrx(client), segmentInput({ orgId: org, recordId, calculation: bad })),
+        ),
+        CODES.COMPLETED_SHAPE_INVALID,
+      )
       expect(await countCalcs(recordId)).toBe(0)
     })
 
@@ -646,6 +704,13 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
         expect(bError).toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
         expect((bError as AttendanceW4AuthoritativeCalculationError).code).toBe(CODES.REPLAY_CONFLICT)
       } finally {
+        // Gate D2 carry-forward (#4844): an `expect(...)` between the two operations above throws
+        // straight into this `finally`, which previously returned a STILL-MID-TRANSACTION client
+        // to the shared pool — the next consumer inherits an open transaction (a known cross-test
+        // flake vector). Unconditional and idempotent: on the happy path the COMMIT already ran
+        // and this is a no-op warning.
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
         a.release()
         b.release()
       }
@@ -674,10 +739,178 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
           expect(bResult.calculationId).toBe(aResult.calculationId)
         }
       } finally {
+        // Gate D2 carry-forward (#4844) — see the sibling leg above for why this is unconditional.
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
         a.release()
         b.release()
       }
     })
+
+    it('F1 (Gate D2 carry-forward): an assertion throwing BETWEEN the two operations still returns CLEAN connections to the pool — the next consumer does not inherit an open transaction', async () => {
+      // The two race legs above `BEGIN` on raw pool clients and release them in `finally`. Before
+      // this change the only COMMIT was on the happy path, so an `expect(...)` throwing between
+      // the two operations jumped straight to `finally` and handed a MID-TRANSACTION client back
+      // to the shared pool — the next test to acquire it inherited an open transaction (a known
+      // cross-test flake vector). This leg reproduces that exact control flow deliberately and
+      // asserts the invariant the defensive ROLLBACK provides.
+      const org = `org-f1d-${RUN}`
+      const a = await pool.connect()
+      const b = await pool.connect()
+      let thrown: unknown
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // Dirty both transactions so an inherited one would be observable, then throw the way a
+        // failing assertion between the two operations would.
+        await a.query(`SELECT set_config('w4c2_d2.marker', $1, true)`, [org])
+        await b.query(`SELECT set_config('w4c2_d2.marker', $1, true)`, [org])
+        expect(org).toBe('deliberate-mismatch-to-jump-into-finally')
+      } catch (error) {
+        thrown = error
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+      expect(thrown).toBeTruthy() // the throw really happened (not a vacuous pass)
+
+      // Every connection now obtainable from the pool starts OUTSIDE a transaction. `BEGIN` on a
+      // connection that is already mid-transaction emits a "there is already a transaction in
+      // progress" WARNING rather than an error, so the discriminating probe is the transaction
+      // status itself: a clean connection's txid is not yet assigned and `set_config(...,true)`
+      // from the previous consumer must not still be visible.
+      for (let i = 0; i < 4; i += 1) {
+        const next = await pool.connect()
+        try {
+          const leaked = await next.query(`SELECT current_setting('w4c2_d2.marker', true) AS marker`)
+          expect(leaked.rows[0].marker === null || leaked.rows[0].marker === '').toBe(true)
+          const state = await next.query(`SELECT pg_current_xact_id_if_assigned() IS NULL AS idle`)
+          expect(state.rows[0].idle).toBe(true)
+        } finally {
+          next.release()
+        }
+      }
+    }, 60000)
+
+    it('F1 (Gate D2 carry-forward): the catch path RELEASES its savepoint after ROLLBACK TO — every savepoint the core acquires is balanced by a release on BOTH the success and the conflict path', async () => {
+      // WHAT THIS MEASURES, AND WHY IT IS A STATEMENT-STREAM ASSERTION RATHER THAN AN OUTCOME ONE
+      // (stated plainly rather than dressed up as an outcome leg): `ROLLBACK TO SAVEPOINT` undoes
+      // the subtransaction but does NOT release its slot, so without a matching `RELEASE SAVEPOINT`
+      // the catch path leaks one subtransaction per collision. The consequence — Postgres's
+      // per-backend 64-entry subxid cache overflowing into the SLRU, degrading OTHER backends'
+      // visibility checks — is a PERFORMANCE effect, not an error: measured directly on this
+      // schema, 200 un-released savepoints in one transaction complete fine and leave the
+      // connection fully usable. So a "batch fails past ~64" leg would be vacuous, and the
+      // subxact counters that would expose it (`pg_stat_get_backend_subxact`) do not exist on the
+      // Postgres 14 this project's CI pins. The discriminating instrument available here is the
+      // SQL the core actually issues, recorded at the client seam.
+      // The SAVEPOINT is only opened when the pre-lookup MISSES — i.e. the genuine 2-connection
+      // race, not a sequential retry (a committed winner is caught by `retryReplayLookup` before
+      // any savepoint exists). This reuses the same constructed interleave as the two race legs
+      // above and records the SQL the loser's client issues.
+      const org = `org-f1c-${RUN}`
+      const recordA = await insertLegacyActiveParent(org)
+      const recordB = await insertLegacyActiveParent(org)
+      const operationId = uuid()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      const statements: string[] = []
+      const recording = {
+        async query(sqlText: string, params?: unknown[]) {
+          if (typeof sqlText === 'string') statements.push(sqlText.trim())
+          return b.query(sqlText, (params ?? []) as unknown[])
+        },
+      } as unknown as AttendanceW4TransactionClientV1
+      try {
+        await a.query('BEGIN')
+        const aResult = await writeAuthoritativeSegmentCalculationV1(
+          asTrx(a),
+          segmentInput({ orgId: org, recordId: recordA, operationId }),
+        )
+        expect(aResult.kind).toBe('completed')
+        await b.query('BEGIN')
+        const bPromise = writeAuthoritativeSegmentCalculationV1(
+          recording,
+          segmentInput({ orgId: org, recordId: recordB, operationId }),
+        )
+        const bMarker = await settled(bPromise)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        expect(bMarker.done).toBe(false) // B is blocked on A's uncommitted unique insert
+        await a.query('COMMIT')
+        let bError: unknown
+        try {
+          await bPromise
+        } catch (error) {
+          bError = error
+        }
+        // The conflict path really was taken (not a plain replay that never opens a savepoint).
+        expect(bError).toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
+        expect((bError as AttendanceW4AuthoritativeCalculationError).code).toBe(CODES.REPLAY_CONFLICT)
+        const opened = statements.filter((s) => /^SAVEPOINT\s/i.test(s)).length
+        const rolledBack = statements.filter((s) => /^ROLLBACK TO SAVEPOINT\s/i.test(s)).length
+        const released = statements.filter((s) => /^RELEASE SAVEPOINT\s/i.test(s)).length
+        expect(opened).toBe(1)
+        expect(rolledBack).toBe(1) // the catch path, not the success path
+        expect(released).toBe(opened) // BALANCED — this is the assertion the fix makes true
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    }, 60000)
+
+    it('F1 (Gate D2 carry-forward): a batch of ~80 same-op-id collisions inside ONE outer transaction all resolve to §7.3 product codes and leave the outer transaction healthy', async () => {
+      // The soak sibling of the statement-balance leg above. It does NOT claim to red on the
+      // missing RELEASE (see that leg for why the cliff is not observable here); it is the
+      // regression leg for the catch path itself under repetition.
+      const org = `org-f1c-${RUN}`
+      const recordId = await insertLegacyActiveParent(org)
+      const operationId = uuid()
+      const winner = await pool.connect()
+      const batch = await pool.connect()
+      try {
+        // Commit the winning row on its own connection so every batch attempt collides on
+        // `uq_arc_operation` and enters the SAVEPOINT catch path.
+        await winner.query('BEGIN')
+        const seeded = await writeAuthoritativeSegmentCalculationV1(
+          asTrx(winner),
+          segmentInput({ orgId: org, recordId, operationId, calculation: reviewCalculation() }),
+        )
+        await winner.query('COMMIT')
+        if (seeded.kind !== 'review') throw new Error('expected review')
+
+        await batch.query('BEGIN')
+        for (let i = 0; i < 80; i += 1) {
+          // A DIFFERENT record each time keeps the pre-lookup from short-circuiting into a plain
+          // replay on the same record; the op-id is bound to `recordId`, so each attempt must
+          // resolve through the catch path to REPLAY_CONFLICT (a product code, never a raw 23505).
+          const otherRecord = await insertLegacyActiveParent(org)
+          let caught: unknown
+          try {
+            await writeAuthoritativeSegmentCalculationV1(
+              asTrx(batch),
+              segmentInput({ orgId: org, recordId: otherRecord, operationId, calculation: reviewCalculation() }),
+            )
+          } catch (error) {
+            caught = error
+          }
+          expect(caught).toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
+          expect((caught as AttendanceW4AuthoritativeCalculationError).code).toBe(CODES.REPLAY_CONFLICT)
+        }
+        // The outer transaction is still healthy after 80 catch-path passes.
+        const alive = await batch.query('SELECT 1 AS ok')
+        expect(alive.rows[0].ok).toBe(1)
+        await batch.query('COMMIT')
+      } finally {
+        await winner.query('ROLLBACK').catch(() => undefined)
+        await batch.query('ROLLBACK').catch(() => undefined)
+        winner.release()
+        batch.release()
+      }
+    }, 120000)
   })
 
   // =========================================================================

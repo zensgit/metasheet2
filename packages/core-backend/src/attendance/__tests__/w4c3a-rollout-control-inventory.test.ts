@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
   ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1,
+  attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1,
   isAttendanceW4C2AuthoritativeEntrypointDeliveredV1,
   type AttendanceW4C2AuthoritativeEntrypointV1,
 } from '../w4c2-authoritative-delivery'
@@ -373,12 +374,19 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
   })
 
   // Independently counted by reading the boundary source at this PR's reviewed head: `live_punch`
-  // (inside `executeLivePunch`) has exactly 1 refusal call site; `scheduled` (inside
+  // (inside `executeLivePunch`) has exactly 0 refusal call sites — Gate D2 (#4844) shipped its
+  // authoritative writer and removed the one site it had; `scheduled` (inside
   // `executeScheduledRunInternal`, both its org-wide probe and its per-target loop — the SAME
-  // command kind per that module's own header) has exactly 2. Checked PER KEY against a
+  // command kind per that module's own header) still has exactly 2. Checked PER KEY against a
   // source-range-scoped count below (`attributeRefusalCallsV1`), never against a whole-file sum.
+  //
+  // WHY THE WEIGHT ITSELF MOVES (not just the declaration): this table is the "how many sites
+  // SHOULD exist while undelivered" side of the correspondence. `expectedByKeyV1()` reads it only
+  // for keys declared UNDELIVERED, so once `live_punch` is delivered its expected count is 0 by
+  // the delivery declaration alone. Leaving the weight at 1 would still break the cross-key
+  // aggregate leg below, which reads the raw weights directly.
   const REFUSAL_SITE_WEIGHT: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, number>> = Object.freeze({
-    live_punch: 1,
+    live_punch: 0,
     scheduled: 2,
   })
 
@@ -586,26 +594,45 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     expect(actualByKeyV1(counts)).toEqual(expectedByKeyV1())
   })
 
-  it('positive control: production declaration is fully undelivered and each function carries its exact expected count (live_punch=1, scheduled=2, total=3)', () => {
-    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false)
+  it('positive control (post Gate D2): live_punch is DELIVERED with zero refusal sites, scheduled is undelivered with exactly 2 (total=2)', () => {
+    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true)
     expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts } = attributeRefusalCallsV1(content)
-    expect(counts).toEqual({ executeLivePunch: 1, executeScheduledRunInternal: 2 })
-    expect(countRefusalCalls(content)).toBe(3)
+    // `executeLivePunch` no longer appears as a key at all — its writer branch contains no
+    // refusal call, and the attribution map only records functions that carry at least one.
+    expect(counts).toEqual({ executeScheduledRunInternal: 2 })
+    expect(countRefusalCalls(content)).toBe(2)
   })
 
-  it('drift guard is load-bearing (delivered-flip class): declaring "live_punch" delivered via the test seam while the boundary source is unchanged mismatches on that key specifically', () => {
-    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true })
+  it('Gate D2 delivery-flip coupling: exactly ONE authoritative entrypoint remains undelivered, and no refusal call is attributed to executeLivePunch', () => {
+    // The promotion gate reads this count and demands ZERO, so promotion to `authoritative` still
+    // refuses after D2 — the count moved 2 -> 1, not 2 -> 0.
+    expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts } = attributeRefusalCallsV1(content)
+    // The static half of the P-A obligation: the new authoritative writer branch contains no
+    // refusal call of ANY spelling this file's pattern matches. (The behavioural fall-through pin
+    // is the zero-invocation adapter spy in the D2 real-DB suite, not this assertion.)
+    expect(counts.executeLivePunch ?? 0).toBe(0)
+  })
+
+  it('drift guard is load-bearing (delivered-flip class): declaring "scheduled" delivered via the test seam while the boundary source is unchanged mismatches on that key specifically', () => {
+    // Retargeted from `live_punch` to `scheduled` by Gate D2 (#4844): this leg needs a key that
+    // is STILL undelivered in the shipped declaration AND still carries refusal sites in the
+    // source, so that overriding it to `true` produces the expected-0/actual-nonzero mismatch.
+    // `live_punch` can no longer serve — after D2 both its expected and actual counts are 0, so
+    // the override would be a no-op and the leg would assert nothing.
+    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ scheduled: true })
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts } = attributeRefusalCallsV1(content)
     const actual = actualByKeyV1(counts)
     const expected = expectedByKeyV1()
-    // live_punch declared delivered => expected drops to 0 for that key, but the boundary source
-    // still carries its 1 refusal call — mismatched on THAT key specifically, demonstrated here
+    // scheduled declared delivered => expected drops to 0 for that key, but the boundary source
+    // still carries its 2 refusal calls — mismatched on THAT key specifically, demonstrated here
     // directly rather than only asserted by the correspondence test above.
-    expect(expected.live_punch).toBe(0)
-    expect(actual.live_punch).toBe(1)
+    expect(expected.scheduled).toBe(0)
+    expect(actual.scheduled).toBe(2)
     expect(actual).not.toEqual(expected)
   })
 
@@ -613,10 +640,11 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts } = attributeRefusalCallsV1(content)
     const actual = actualByKeyV1(counts)
-    // A mutation of REFUSAL_SITE_WEIGHT that swaps the two keys' weights (live_punch<-2,
-    // scheduled<-1) preserves the aggregate SUM (3) the pre-fix, aggregate-only assertion
-    // checked — that old guard would have stayed green on exactly this edit, because add-to-one/
-    // remove-from-another leaves the total unchanged.
+    // A mutation of REFUSAL_SITE_WEIGHT that swaps the two keys' weights preserves the aggregate
+    // SUM the pre-fix, aggregate-only assertion checked — that old guard would have stayed green
+    // on exactly this edit, because add-to-one/remove-from-another leaves the total unchanged.
+    // Still discriminating after Gate D2 (#4844) moved the weights to {live_punch:0,scheduled:2}:
+    // the swap yields {live_punch:2,scheduled:0}, same sum (2), opposite per-key values.
     const swapped: Record<AttendanceW4C2AuthoritativeEntrypointV1, number> = {
       live_punch: REFUSAL_SITE_WEIGHT.scheduled,
       scheduled: REFUSAL_SITE_WEIGHT.live_punch,
