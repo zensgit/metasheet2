@@ -321,6 +321,18 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
     trx: AttendancePluginShapedTrxV1,
     args: AttendanceLivePunchLegacyArgsV1,
   ): Promise<Record<string, unknown>>
+  /**
+   * Gate D2 (#4556 / #4844): the `workDateResolution` the WIRE RESPONSE carries — the SAME
+   * derivation the legacy adapter uses for the same field (`deriveLegacyLivePunchAttributionV1`'s
+   * `punchWorkDateResolution`), so an authoritative punch's response field is shape-identical to a
+   * legacy punch's. Deliberately NOT `resolveLiveCandidate`: that call opts into
+   * `includeFullWinner`, which adds a `fullWinner` member the public response never carried, so
+   * reusing it would silently widen the contract.
+   */
+  deriveLivePunchWorkDateResolution(
+    trx: AttendancePluginShapedTrxV1,
+    args: AttendanceLivePunchLegacyArgsV1,
+  ): Promise<unknown>
   /** P03/P04 verbatim absence INSERT..SELECT (NOT EXISTS) for the given users. */
   applyScheduledAbsenceLegacy(
     trx: AttendancePluginShapedTrxV1,
@@ -837,6 +849,19 @@ function normalizeInstantIsoV1(value: string | Date | null): string | null {
 }
 
 /**
+ * Domain separator for the live-punch payload fingerprint below, terminated by a NUL.
+ *
+ * The NUL is written as the ESCAPE `\u0000`, never as a raw 0x00 byte in the source. A literal
+ * NUL makes `file(1)` classify this `.ts` as `data` and makes `grep`/`rg` treat it as binary and
+ * skip it SILENTLY — which would let this whole module drop out of any static audit that walks
+ * the tree (the repo's own DML / SELECT-inventory collectors read source text). The escape
+ * produces the IDENTICAL runtime string: `\u0000` is one code unit, byte-for-byte what the raw
+ * NUL encoded, so every digest derived from this domain is unchanged. Pinned by
+ * `__tests__/w4c2-live-punch-payload-fingerprint-domain.test.ts`, which asserts the exact code
+ * units AND a digest computed against an independent oracle, so a future edit here cannot move
+ * the fingerprint silently.
+ */
+/**
  * Deterministic payload identity for the core's retry-idempotency conflict check. The core reads
  * `input_provenance.payloadFingerprint` VERBATIM off the stored row on a retry, so this value
  * must (a) be derived only from the resolved command payload — never from a clock, a random id,
@@ -844,11 +869,14 @@ function normalizeInstantIsoV1(value: string | Date | null): string | null {
  * `inputProvenance.payloadFingerprint`. Omitting the embedded copy makes a genuine retry read
  * `null`, mismatch, and surface `REPLAY_CONFLICT` where §7.3 requires a replay.
  */
-function computeAuthoritativeLivePunchPayloadFingerprintV1(
+export const ATTENDANCE_W4C2_LIVE_PUNCH_PAYLOAD_FINGERPRINT_DOMAIN_V1 =
+  'metasheet2:attendance:w4c2:live-punch-authoritative-payload:v1\u0000'
+
+export function computeAuthoritativeLivePunchPayloadFingerprintV1(
   input: AttendanceLivePunchBoundaryInputV1,
 ): string {
   return sha256Hex(
-    'metasheet2:attendance:w4c2:live-punch-authoritative-payload:v1 '
+    ATTENDANCE_W4C2_LIVE_PUNCH_PAYLOAD_FINGERPRINT_DOMAIN_V1
     + canonicalAttendanceJsonV1({
       orgId: input.orgId,
       userId: input.userId,
@@ -1322,6 +1350,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
     // it into the SAME fail-closed gate keeps that state unreachable (the boundary simply does
     // not exist), instead of degrading at write time.
     typeof adapters.insertLivePunchEvent !== 'function' ||
+    typeof adapters.deriveLivePunchWorkDateResolution !== 'function' ||
     typeof adapters.applyScheduledAbsenceLegacy !== 'function' ||
     typeof adapters.resolveLiveCandidate !== 'function' ||
     typeof adapters.resolveScheduledCandidate !== 'function' ||
@@ -1774,58 +1803,52 @@ export function createAttendanceLiveScheduledBoundaryV1(
             },
           ])
 
-          // -- Step 8a: synthesize the `{event, record, workDateResolution}` caller response ---
-          // There is no legacy adapter `result` on this path, so the wire shape is built here.
-          // `record` for a COMPLETED outcome is mapped from the calculation's own
-          // `dailyProjection` (camelCase `PreparedDailyProjectionV1`). This is a CONFIRMED
-          // client-contract change from the snake_case `attendance_records` row the legacy
-          // adapter returns today; it ships as the specified default and is pinned by an exact
-          // key-set golden test so any drift — in either direction — is loud rather than silent.
-          // The documented alternative (re-SELECT the persisted row after the core call) is an
-          // owner decision, not a build-time one.
-          const authoritativeRecord = authoritativeCalculation.dailyProjection !== null
-            ? {
-                firstInAt: authoritativeCalculation.dailyProjection.firstInAt,
-                lastOutAt: authoritativeCalculation.dailyProjection.lastOutAt,
-                workedMinutes: authoritativeCalculation.dailyProjection.workedMinutes,
-                lateMinutes: authoritativeCalculation.dailyProjection.lateMinutes,
-                earlyLeaveMinutes: authoritativeCalculation.dailyProjection.earlyLeaveMinutes,
-                status: authoritativeCalculation.dailyProjection.status,
-                timezone: authoritativeCalculation.dailyProjection.timezone,
-                workDate: authoritativeCalculation.dailyProjection.workDate,
-                meta: authoritativeCalculation.dailyProjection.meta,
-              }
-            // Review outcome: an all-NULL acknowledgement in the SAME key set, so the wire shape
-            // does not change between outcomes. Whether a review should instead echo the
-            // preserved legacy columns is the second half of the same owner question.
-            : {
-                firstInAt: null,
-                lastOutAt: null,
-                workedMinutes: null,
-                lateMinutes: null,
-                earlyLeaveMinutes: null,
-                status: null,
-                timezone: null,
-                workDate: null,
-                meta: null,
-              }
+          // -- Step 8a: the caller response — PRESERVES THE EXISTING PUBLIC CONTRACT -----------
+          //
+          // `POST /api/attendance/punch` returns `{event, record, workDateResolution}` where
+          // `record` is the persisted `attendance_records` ROW in its snake_case DB shape (the
+          // published `AttendanceRecord` contract; the legacy adapter returns exactly that row
+          // from its own `RETURNING *` upsert). The authoritative path MUST return the same shape
+          // — field set and casing identical, only the VALUES differing (they now reflect the
+          // authoritative projection rather than the legacy one).
+          //
+          // An earlier revision of this branch mapped `record` from `calculation.dailyProjection`
+          // (camelCase `PreparedDailyProjectionV1`, nine fields, all-null for review). That was a
+          // BREAKING contract change: it renamed every field, dropped columns the published shape
+          // carries (`id`, `user_id`, `org_id`, `is_workday`, `source_batch_id`,
+          // `projection_owner`, `visibility_state`, `visibility_reason`, `created_at`,
+          // `updated_at`) and would have silently broken the mobile client, with only tests
+          // FREEZING the new shape rather than approving it. Owner ruling: preserve the contract.
+          // Any future protocol change is an independent RATIFY plus OpenAPI/SDK/client updates,
+          // not a side effect of delivering the authoritative writer.
+          //
+          // So: re-SELECT the row the core just wrote, INSIDE the same transaction and after the
+          // core's pointer UPDATE, and ship it verbatim. For a COMPLETED outcome this is the
+          // promoted `w4`/`active` row carrying the authoritative daily values; for a REVIEW
+          // outcome it is the parent as it stands (the create-if-absent placeholder, or the
+          // untouched legacy row when one already existed) — in both cases a REAL persisted row,
+          // never a synthesized acknowledgement.
+          const persistedParent = await trx.query(
+            `SELECT * FROM attendance_records WHERE id = $1::uuid AND org_id = $2`,
+            [authoritativeParent.id, envelope.orgId],
+          )
+          if (persistedParent.rows.length !== 1) {
+            // The row was locked FOR UPDATE by this transaction and the core wrote through it, so
+            // its absence here is a programming/DB-state error, not a business outcome.
+            boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
+          }
+          const authoritativeRecord = persistedParent.rows[0] as Record<string, unknown>
+
+          // The SAME derivation the legacy adapter uses for this same field — one spelling for
+          // both postures (see the adapter's own doc comment for why `resolveLiveCandidate`'s
+          // `fullWinner`-bearing result must NOT be substituted here).
+          const authoritativeWorkDateResolution =
+            await adapters.deriveLivePunchWorkDateResolution(pluginTrx, legacyPunchArgs)
+
           const authoritativeResponse = {
             event: authoritativeEvent,
             record: authoritativeRecord,
-            // [OWNER-CONFIRM, second half of the response-contract question] Populated explicitly
-            // from THIS transaction's own frozen resolution/attribution — never left undefined,
-            // and never sourced from the split event INSERT (which does not produce one). The
-            // legacy adapter returns the resolver's own `punchWorkDateResolution` object verbatim;
-            // the authoritative branch has no such object, so this closed projection is a SECOND,
-            // independent client-contract change alongside the `record` shape. Its exact key set
-            // is pinned by the same golden leg, so drift is loud.
-            workDateResolution: {
-              kind: authoritativeResolution.kind,
-              workDate: authoritativeResolution.workDate ?? null,
-              shiftId: authoritativeResolution.shiftId ?? null,
-              reasonCode: authoritativeResolution.reasonCode ?? null,
-              attributionPosture: authoritativeAttribution.posture,
-            },
+            workDateResolution: authoritativeWorkDateResolution,
           }
 
           await sealAttendanceResultOperationV1(trx, identity, {

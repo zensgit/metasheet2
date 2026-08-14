@@ -22478,6 +22478,27 @@ async function insertLivePunchEventV1(trx, args) {
   return rows[0]
 }
 
+/**
+ * Gate D2 (#4556 / #4844) — the live-punch `workDateResolution` the WIRE RESPONSE carries.
+ *
+ * This is the SAME derivation the legacy adapter uses for the same response field
+ * (`deriveLegacyLivePunchAttributionV1`, whose `punchWorkDateResolution` becomes
+ * `result.workDateResolution` below), exposed as its own injected seam so the authoritative
+ * branch can produce a byte-shape-identical field WITHOUT re-spelling it. Deliberately NOT the
+ * boundary's own `resolveLiveCandidate`: that call opts into `includeFullWinner`, which adds a
+ * `fullWinner` member the legacy response never carries — reusing it would silently widen the
+ * public response shape. One derivation, one spelling, for both postures.
+ */
+async function deriveLivePunchWorkDateResolutionV1(trx, args) {
+  const { punchWorkDateResolution } = await deriveLegacyLivePunchAttributionV1(trx, {
+    orgId: args.orgId,
+    userId: args.userId,
+    occurredAt: args.occurredAt instanceof Date ? args.occurredAt : new Date(args.occurredAt),
+    requestTimezone: args.requestTimezone,
+  })
+  return punchWorkDateResolution
+}
+
 async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
   const {
     userId,
@@ -24037,6 +24058,7 @@ module.exports = {
   // authoritative branch invokes it ZERO times (the P-A control-flow pin).
   __attendanceW4c2LivePunchAdaptersForTests: {
     insertLivePunchEventV1,
+    deriveLivePunchWorkDateResolutionV1,
     applyLivePunchProjectionLegacyV1,
     resolveW4LiveCandidateInTransactionV1,
     buildW4ShadowFrozenContextV1,
@@ -24778,6 +24800,11 @@ module.exports = {
               // the authoritative path's zero-invocation spy on `applyLivePunchLegacy` stays the
               // real control-flow pin. Same bytes as the legacy adapter's own event INSERT.
               insertLivePunchEvent: (trx, args) => insertLivePunchEventV1(trx, args),
+              // Gate D2 (#4556/#4844): the SAME `workDateResolution` derivation the legacy
+              // adapter uses for the same wire field, so the authoritative response carries a
+              // shape-identical value instead of a parallel spelling.
+              deriveLivePunchWorkDateResolution: (trx, args) =>
+                deriveLivePunchWorkDateResolutionV1(trx, args),
               applyScheduledAbsenceLegacy: (trx, args) =>
                 generateAbsenceRecords(trx, args.orgId, args.workDate, args.timezone, args.userIds),
               resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),

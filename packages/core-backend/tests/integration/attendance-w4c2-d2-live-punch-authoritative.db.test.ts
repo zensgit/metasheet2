@@ -39,6 +39,9 @@ import {
 } from '../../src/attendance/w4c2-live-scheduled-boundary'
 import { computeAttendanceImportRollbackPreimageFingerprintV1 } from '../../src/attendance/w4c3a-import-rollback'
 import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../../src/attendance/w4c3c-active-current'
+// The SAME recursive key-path instrument the legacy golden-response guard uses, so the
+// authoritative/legacy parity leg compares with the repo's existing tool rather than a new one.
+import { recursiveKeyPaths } from '../utils/attendance-w4c2-golden-response'
 import {
   projectedDailyFingerprintV1,
   writeAuthoritativeReversalV1,
@@ -59,6 +62,7 @@ function uuid(): string {
 
 type LivePunchAdapters = {
   insertLivePunchEventV1: (trx: AttendancePluginShapedTrxV1, args: unknown) => Promise<Record<string, unknown>>
+  deriveLivePunchWorkDateResolutionV1: (trx: AttendancePluginShapedTrxV1, args: unknown) => Promise<unknown>
   applyLivePunchProjectionLegacyV1: (
     trx: AttendancePluginShapedTrxV1,
     args: unknown,
@@ -153,6 +157,8 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
           spies.insertLivePunchEvent += 1
           return adapters.insertLivePunchEventV1(trx, args)
         },
+        deriveLivePunchWorkDateResolution: (trx, args) =>
+          adapters.deriveLivePunchWorkDateResolutionV1(trx, args),
         applyScheduledAbsenceLegacy: async () => [],
         resolveLiveCandidate: (trx, args) => adapters.resolveW4LiveCandidateInTransactionV1(trx, args),
         resolveScheduledCandidate: async () => ({ kind: 'unresolved' as const }),
@@ -689,58 +695,69 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     expect(segments.rows[0].actual_in_at).not.toBeNull()
   })
 
-  // The ONE key set both outcomes must produce, spelled once so the completed and review
-  // assertions below cannot drift apart independently: `PreparedDailyProjectionV1`
-  // (`w4c0-write-boundary-types.ts:211-221`), nine camelCase members.
-  const PREPARED_DAILY_PROJECTION_KEYS_V1 = [
-    'earlyLeaveMinutes',
-    'firstInAt',
-    'lastOutAt',
-    'lateMinutes',
+  /**
+   * The exact `attendance_records` COLUMN set the public punch contract's `record` carries — the
+   * snake_case DB-row shape, spelled once so the completed, review and legacy-parity assertions
+   * below cannot drift apart independently. It is NOT the authority: leg 10e recomputes the same
+   * set from a REAL legacy punch response produced in the same run and asserts equality, so a
+   * writer that drifts cannot be "fixed" by editing this list.
+   */
+  const ATTENDANCE_RECORD_ROW_KEYS_V1 = [
+    'created_at',
+    'current_calculation_id',
+    'early_leave_minutes',
+    'first_in_at',
+    'id',
+    'is_workday',
+    'last_out_at',
+    'late_minutes',
     'meta',
+    'org_id',
+    'projection_owner',
+    'source_batch_id',
     'status',
     'timezone',
-    'workDate',
-    'workedMinutes',
+    'updated_at',
+    'user_id',
+    'visibility_reason',
+    'visibility_state',
+    'work_date',
+    'work_minutes',
   ]
 
-  it('leg 10c [OWNER-CONFIRM]: the completed-case `record` has EXACTLY the PreparedDailyProjectionV1 key set (camelCase, nine keys) — not the legacy snake_case attendance_records row', async () => {
+  /** The camelCase members the RETRACTED mapped-projection shape carried. None may appear. */
+  const RETRACTED_MAPPED_PROJECTION_KEYS_V1 = [
+    'workedMinutes', 'firstInAt', 'lastOutAt', 'lateMinutes', 'earlyLeaveMinutes', 'workDate',
+  ]
+
+  it('leg 10c [CONTRACT]: the COMPLETED-case `record` is the persisted snake_case attendance_records ROW — the published AttendanceRecord contract — carrying the AUTHORITATIVE values, and no camelCase member of the retracted mapped shape', async () => {
     const seed = await seedAuthoritativeOrg('g10c', { withShift: true })
     const { boundary } = makeBoundary()
     const result = await boundary.executeLivePunch(await buildPunchInput(seed))
     const record = ((result as { response: Record<string, unknown> }).response.record) as Record<string, unknown>
-    expect(Object.keys(record).sort()).toEqual(PREPARED_DAILY_PROJECTION_KEYS_V1)
-    // Mutation B discriminator: the documented alternative (the raw persisted row) would carry
-    // these snake_case members instead. Asserting their ABSENCE is what makes this leg
-    // distinguish between the two candidate shapes rather than merely catch typos.
-    for (const legacyOnlyKey of ['first_in_at', 'work_minutes', 'user_id', 'is_workday', 'source_batch_id', 'id']) {
-      expect(Object.prototype.hasOwnProperty.call(record, legacyOnlyKey)).toBe(false)
-    }
-    expect(record.meta === null || typeof record.meta === 'object').toBe(true)
 
-    // SECOND HALF OF THE SAME OWNER QUESTION — `workDateResolution` is ALSO synthesized on this
-    // path (the legacy adapter returns the resolver's own `punchWorkDateResolution` verbatim; the
-    // authoritative branch has no such object and builds a closed projection instead). That is a
-    // second, independent client-contract change, so it is pinned here rather than left to leg
-    // 10's truthiness check.
-    const resolution = ((result as { response: Record<string, unknown> }).response
-      .workDateResolution) as Record<string, unknown>
-    expect(Object.keys(resolution).sort()).toEqual([
-      'attributionPosture',
-      'kind',
-      'reasonCode',
-      'shiftId',
-      'workDate',
-    ])
+    // Full DB-row column set, snake_case — NOT a nine-field camelCase projection.
+    expect(Object.keys(record).sort()).toEqual(ATTENDANCE_RECORD_ROW_KEYS_V1)
+    // Regression guard for the retracted shape specifically: asserting the ABSENCE of its
+    // members is what discriminates between the two candidate contracts, not just typos.
+    for (const retracted of RETRACTED_MAPPED_PROJECTION_KEYS_V1) {
+      expect(Object.prototype.hasOwnProperty.call(record, retracted)).toBe(false)
+    }
+
+    // It is the REAL persisted row the core just wrote, not a re-serialisation of the
+    // calculation: the promoted pointer/owner/visibility are on it, and the daily values are the
+    // AUTHORITATIVE ones (only the VALUES differ from a legacy punch, never the shape).
+    const parent = await parentRow(seed.userId)
+    expect(record.id).toBe(parent?.id)
+    expect(record.projection_owner).toBe('w4')
+    expect(record.visibility_state).toBe('active')
+    expect(record.current_calculation_id).toBe(parent?.current_calculation_id)
+    const calc = (await calcRows(seed.userId)).filter((r) => r.calculation_kind === 'calculation')[0]
+    expect(calc.outcome).toBe('completed')
+    expect(record.status).toBe(calc.projected_status)
   })
 
-  it('leg 10d [OWNER-CONFIRM]: the REVIEW-case `record` carries the SAME key set as the completed case, all-NULL — the same-key-set invariant the writer asserts in a comment, now gated', async () => {
-    // Closes the exact gap the independent gate found: the boundary's own comment promises the
-    // review acknowledgement is "an all-NULL acknowledgement in the SAME key set, so the wire
-    // shape does not change between outcomes", and NOTHING tested it — leg 10c seeds a shift and
-    // therefore only ever drives a COMPLETED outcome, and leg 10 is deliberately shape-agnostic.
-    // A renamed key in the review branch alone passed every other leg. This is also the exact
-    // surface §6.1's review half leaves open, where the PR promises drift is loud, not silent.
+  it('leg 10d [CONTRACT]: the REVIEW-case `record` is the persisted PLACEHOLDER row in the SAME snake_case column set — a real row, never a synthesized all-NULL acknowledgement', async () => {
     const seed = await seedAuthoritativeOrg('g10d')  // no shift => attribution unsupported => review
     const { boundary } = makeBoundary()
     const result = await boundary.executeLivePunch(await buildPunchInput(seed))
@@ -752,12 +769,104 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     expect(calcs[0].outcome).toBe('review_required')
 
     const record = ((result as { response: Record<string, unknown> }).response.record) as Record<string, unknown>
-    expect(Object.keys(record).sort()).toEqual(PREPARED_DAILY_PROJECTION_KEYS_V1)
-    // …and it is the ALL-NULL acknowledgement, not a partially-populated one.
-    for (const key of PREPARED_DAILY_PROJECTION_KEYS_V1) {
-      expect(record[key]).toBeNull()
+    // SAME column set as the completed case — the shape does not change between outcomes.
+    expect(Object.keys(record).sort()).toEqual(ATTENDANCE_RECORD_ROW_KEYS_V1)
+    for (const retracted of RETRACTED_MAPPED_PROJECTION_KEYS_V1) {
+      expect(Object.prototype.hasOwnProperty.call(record, retracted)).toBe(false)
     }
+    // ...and it is the PERSISTED placeholder, echoed truthfully: still retired, still unpointed.
+    const parent = await parentRow(seed.userId)
+    expect(record.id).toBe(parent?.id)
+    expect(record.projection_owner).toBe('legacy_untracked')
+    expect(record.current_calculation_id).toBeNull()
+    expect(record.visibility_state).toBe('retired')
+    expect(record.visibility_reason).toBe('review_placeholder')
   })
+
+  it('leg 10e [CONTRACT PARITY]: an AUTHORITATIVE punch response is SHAPE-IDENTICAL to a real LEGACY punch response — for BOTH the unresolved AND the resolved `workDateResolution` branch; only the VALUES differ', async () => {
+    // The owner ruling this leg enforces: tests only FREEZE a shape, they do not APPROVE it. So
+    // the authoritative response is compared against a REAL legacy response computed in this same
+    // run - not against a hand-copied key list that could be edited to match a drifting writer.
+    //
+    // BOTH resolution branches are compared, and that is load-bearing rather than thorough-for-
+    // its-own-sake. The legacy `workDateResolution` object's key set legitimately differs between
+    // its resolved and unresolved branches, so each side must be compared against its own
+    // counterpart. More importantly: an UNRESOLVED-only comparison is BLIND to the substitution
+    // this leg exists to catch. The boundary's freeze-step resolver opts into `includeFullWinner`,
+    // which adds a `fullWinner` member ONLY when a winner actually resolves - so swapping that
+    // object in for the legacy derivation leaves the unresolved shapes identical and reds nothing.
+    // Measured, not assumed: with only the unresolved pair, that exact substitution passed.
+    for (const withShift of [false, true]) {
+      const label = withShift ? 'resolved' : 'unresolved'
+
+      // --- a REAL legacy punch (org deliberately not allowlisted => legacy posture) ---
+      const legacyOrg = uuid()
+      const legacyUser = uuid()
+      await insertActiveUser(legacyUser, legacyOrg)
+      if (withShift) await insertShiftAndAssignment(legacyOrg, legacyUser)
+      const { boundary: legacyBoundary, spies: legacySpies } = makeBoundary()
+      const legacyResult = await legacyBoundary.executeLivePunch(
+        await buildPunchInput({ orgId: legacyOrg, userId: legacyUser }),
+      )
+      // `legacy_compat`, not `legacy`: `buildPunchInput` always supplies a stable `operationId`,
+      // so this takes the stable-ID legacy branch (claim + seal). Same closed adapter, same
+      // response bytes - the branch differs only in whether an operation row is written. Pinned
+      // exactly rather than accepted as "either legacy kind", so a posture drift reds here too.
+      expect(legacyResult.kind).toBe('legacy_compat')
+      expect(legacySpies.applyLivePunchLegacy).toBe(1)   // it really was the legacy adapter
+      const legacyResponse = (legacyResult as { response: Record<string, unknown> }).response
+
+      // --- the AUTHORITATIVE punch, same fixture shape ---
+      const authSeed = await seedAuthoritativeOrg(`g10e-${label}`, { withShift })
+      const { boundary: authBoundary } = makeBoundary()
+      const authResult = await authBoundary.executeLivePunch(await buildPunchInput(authSeed))
+      expect(authResult.kind).toBe('w4')
+      const authResponse = (authResult as { response: Record<string, unknown> }).response
+
+      // Top-level contract members.
+      expect(Object.keys(authResponse).sort()).toEqual(Object.keys(legacyResponse).sort())
+
+      // `record` and `event`: full column sets, identical. `meta` is a jsonb VALUE whose contents
+      // legitimately differ (the legacy path freezes attribution into it; the placeholder does
+      // not), so it is compared as a leaf - a field-set-and-casing assertion, not a value one.
+      for (const member of ['record', 'event'] as const) {
+        const auth = authResponse[member] as Record<string, unknown>
+        const legacy = legacyResponse[member] as Record<string, unknown>
+        expect(Object.keys(auth).sort()).toEqual(Object.keys(legacy).sort())
+      }
+      expect(Object.keys(authResponse.record as Record<string, unknown>).sort())
+        .toEqual(ATTENDANCE_RECORD_ROW_KEYS_V1)
+
+      // `workDateResolution`: RECURSIVE key-path parity, because a parallel spelling would most
+      // likely differ deeper than the top level (the retracted build shipped a flat 5-key
+      // projection where the contract carries a nested `evidenceSnapshot`). Same shared
+      // instrument the legacy golden-response helper uses.
+      expect(recursiveKeyPaths(authResponse.workDateResolution))
+        .toEqual(recursiveKeyPaths(legacyResponse.workDateResolution))
+      // Non-vacuity: a real nested resolution on both sides, of the KIND this iteration intends
+      // (so a fixture that silently stopped resolving cannot turn the resolved half into a second
+      // unresolved comparison).
+      expect(recursiveKeyPaths(authResponse.workDateResolution).length).toBeGreaterThan(3)
+      expect((authResponse.workDateResolution as Record<string, unknown>).kind)
+        .toBe(withShift ? 'resolved' : 'unresolved')
+      expect((legacyResponse.workDateResolution as Record<string, unknown>).kind)
+        .toBe(withShift ? 'resolved' : 'unresolved')
+
+      // ...and the VALUES do differ where they must: the authoritative row carries W4 bookkeeping,
+      // the legacy row does not. Shape identical, values authoritative - the whole point.
+      const authRecord = authResponse.record as Record<string, unknown>
+      const legacyRecord = legacyResponse.record as Record<string, unknown>
+      expect(legacyRecord.projection_owner).toBe('legacy_untracked')
+      expect(legacyRecord.visibility_state).toBe('active')
+      if (withShift) {
+        expect(authRecord.projection_owner).toBe('w4')       // promoted by the core
+        expect(authRecord.visibility_state).toBe('active')
+      } else {
+        expect(authRecord.projection_owner).toBe('legacy_untracked')
+        expect(authRecord.visibility_state).toBe('retired')  // the review placeholder
+      }
+    }
+  }, 60000)
 
   it('leg 11b [the real P-A pin]: an AUTHORITATIVE punch invokes the injected applyLivePunchLegacy ZERO times — negative control: a SHADOW punch invokes it exactly once', async () => {
     const authoritative = await seedAuthoritativeOrg('g11b-auth', { withShift: true })

@@ -421,6 +421,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
       // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
       insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
+      deriveLivePunchWorkDateResolution: unreached('deriveLivePunchWorkDateResolution') as never,
       applyScheduledAbsenceLegacy: async (trx, args) => {
         n += 1
         seenUserIds.push(...args.userIds)
@@ -1784,6 +1785,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       applyLivePunchLegacy: async () => { throw new Error('unreached') },
       // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
       insertLivePunchEvent: async () => { throw new Error('unreached') },
+      deriveLivePunchWorkDateResolution: async () => { throw new Error('unreached') },
       resolveLiveCandidate: async () => { throw new Error('unreached') },
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: async () => { throw new Error('unreached') },
@@ -2239,6 +2241,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
       // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
       insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
+      deriveLivePunchWorkDateResolution: unreached('deriveLivePunchWorkDateResolution') as never,
       // Zero-effect ("nobody absent") but the CALL ITSELF is the signal a
       // rejection leg must never produce — counted, never a real INSERT.
       applyScheduledAbsenceLegacy: async () => {
