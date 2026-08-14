@@ -1331,22 +1331,31 @@ describeIfDatabase('W4C-2 Gate D3 — authoritative scheduled writer (real DB)',
     await retireParent(orgId, userIds[1])
     const { boundary, spies } = makeBoundary()
     await boundary.executeScheduledRun(scheduledInput(orgId, userIds))
-    // Scoped BY NAME to the two savepoints the authoritative path opens. A bare `^SAVEPOINT ` count
-    // would be wrong, not merely noisy: `assertConnectionIsIdleV1` issues `SAVEPOINT
-    // w4c5_idle_probe` on every connection acquisition and deliberately does NOT release it on the
-    // path it expects (the probe is meant to FAIL on an idle connection), so an unscoped balance
-    // assertion is unsatisfiable by construction and would have to be weakened until it proved
-    // nothing. Measured, then scoped.
-    const NAMES = ['attendance_w4c2_scheduled_authoritative', 'attendance_w4_auth_calc_op'] as const
-    for (const name of NAMES) {
-      const opened = spies.statements.filter((s) => s === `SAVEPOINT ${name}`).length
-      const released = spies.statements.filter((s) => s === `RELEASE SAVEPOINT ${name}`).length
-      expect({ name, opened: opened > 0 }).toEqual({ name, opened: true })
-      expect({ name, released }).toEqual({ name, released: opened })
-    }
-    const rolledBack = spies.statements.filter(
-      (s) => s === 'ROLLBACK TO SAVEPOINT attendance_w4c2_scheduled_authoritative',
-    ).length
+    // SCOPED BY NAME to D3's OWN savepoint, for two separately-measured reasons.
+    //
+    // (1) A bare `^SAVEPOINT ` count would be wrong, not merely noisy: `assertConnectionIsIdleV1`
+    //     issues `SAVEPOINT w4c5_idle_probe` on every connection acquisition and deliberately does
+    //     NOT release it on the path it expects (the probe is meant to FAIL on an idle connection),
+    //     so an unscoped balance assertion is unsatisfiable by construction and would have to be
+    //     weakened until it proved nothing.
+    //
+    // (2) The CORE's own savepoint (`attendance_w4_auth_calc_op`) is deliberately NOT asserted
+    //     here, and including it would be a latent FALSE pin. Its catch path rethrows anything that
+    //     is not a `uq_arc_operation` unique violation WITHOUT rolling back or releasing
+    //     (`w4c2-authoritative-calculation-core.ts`: `if (!isUniqueViolationOnConstraintV1(...))
+    //     throw error`) — correct, because the caller's own `ROLLBACK TO` subsumes it, but it does
+    //     leave opened > released for that name whenever the core refuses with e.g.
+    //     COMPLETED_SHAPE_INVALID / EXPECTED_COUNT_INVALID / PREIMAGE_INVALID. THIS fixture never
+    //     drives that arm (its refusal happens in the seam, before the core is called), so an
+    //     assertion over the core's name would pass today and red the moment a future leg drove a
+    //     core-internal refusal — and the obvious "fix" would be to weaken it. The core's savepoint
+    //     balance is the core's own property, pinned in the core's own suite.
+    const NAME = 'attendance_w4c2_scheduled_authoritative'
+    const opened = spies.statements.filter((s) => s === `SAVEPOINT ${NAME}`).length
+    const released = spies.statements.filter((s) => s === `RELEASE SAVEPOINT ${NAME}`).length
+    expect(opened).toBeGreaterThan(0)
+    expect(released).toBe(opened)
+    const rolledBack = spies.statements.filter((s) => s === `ROLLBACK TO SAVEPOINT ${NAME}`).length
     // The contained target's rollback really happened (otherwise this leg would be a balance
     // assertion over the success path only).
     expect(rolledBack).toBe(1)

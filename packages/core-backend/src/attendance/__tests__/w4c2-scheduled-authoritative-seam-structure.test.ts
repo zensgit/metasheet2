@@ -58,6 +58,25 @@ function functionBody(content: string, name: string): string {
   throw new Error(`unbalanced braces locating ${name}`)
 }
 
+/**
+ * The source text of a TOP-LEVEL function declaration, from its `function` keyword to the first
+ * line that is exactly `}` at column 0.
+ *
+ * Deliberately separate from `functionBody` above: that one locates the body by finding the first
+ * `{` after the parameter list, which for a declaration whose return type is an object type
+ * (`: Promise<{ created: boolean }>`) lands on the RETURN-TYPE annotation and yields a two-word
+ * "body". Measured — the first form of the leg below reported `'{ created: boolean }'`. This
+ * line-based slice has no such failure mode for a top-level declaration.
+ */
+function topLevelDeclarationText(content: string, name: string): string {
+  const lines = content.split('\n')
+  const startIndex = lines.findIndex((line) => new RegExp(`^(?:export )?(?:async )?function ${name}\\b`).test(line))
+  expect(startIndex, `top-level function ${name} must exist`).toBeGreaterThan(-1)
+  const endOffset = lines.slice(startIndex).findIndex((line, i) => i > 0 && line === '}')
+  expect(endOffset, `top-level function ${name} must have a column-0 closing brace`).toBeGreaterThan(0)
+  return lines.slice(startIndex, startIndex + endOffset + 1).join('\n')
+}
+
 describe('W4C-2 Gate D3 — authoritative scheduled seam structure', () => {
   it('leg 6d — exactly ONE `kind: \'skip\'` construction site exists in the boundary, and it is lexically inside resolveAuthoritativeScheduledParentV1', () => {
     const content = read(BOUNDARY)
@@ -128,7 +147,47 @@ describe('W4C-2 Gate D3 — authoritative scheduled seam structure', () => {
     expect(failedOutcomeIndex).toBeGreaterThan(cancelIndex)
   })
 
-  it('leg 20 — D2/D1 carry-forwards are PRESENT on this base (verify, do NOT re-do): projected_status pre-check, RELEASE SAVEPOINT in the F1 catch path, and the widened locked read', () => {
+  it('leg 9 DISCHARGED BY CITATION — the placeholder poison race is D2\'s leg 13b on a seam D3 does not modify: the `ON CONFLICT DO NOTHING` clause and that leg are both still present', () => {
+    // WHAT THIS IS AND IS NOT. D3 does NOT re-run the placeholder poison race. It adds a SECOND
+    // CALL SITE to `insertAuthoritativeReviewPlaceholderParentV1` and changes nothing inside it, so
+    // the constructed two-connection race D2 already runs directly on that exported seam
+    // (`attendance-w4c2-d2-live-punch-authoritative.db.test.ts`, leg 13b) covers the D3 call site
+    // exactly as it covers the D2 one. Re-running it here would duplicate a leg, not add coverage.
+    //
+    // A citation is only worth anything if the cited thing still exists and the property it rests
+    // on is still in the code — so both are asserted mechanically rather than trusted, and BOTH
+    // halves are stated: this is a presence check, NOT a behavioural re-proof.
+    const helper = topLevelDeclarationText(read(BOUNDARY), 'insertAuthoritativeReviewPlaceholderParentV1')
+    expect(helper).toContain('ON CONFLICT (user_id, work_date, org_id) DO NOTHING')
+    // The scheduled seam calls that exact helper (a second call site, not a re-implementation), so
+    // no parallel placeholder writer slipped in alongside it.
+    const seam = topLevelDeclarationText(read(BOUNDARY), 'resolveAuthoritativeScheduledParentV1')
+    expect(seam).toContain('insertAuthoritativeReviewPlaceholderParentV1(trx, {')
+    expect(seam).not.toContain('INSERT INTO attendance_records')
+    // And the cited leg is still in the D2 suite under the title this citation names.
+    const d2Suite = fs.readFileSync(
+      path.join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        'tests',
+        'integration',
+        'attendance-w4c2-d2-live-punch-authoritative.db.test.ts',
+      ),
+      'utf8',
+    )
+    expect(d2Suite).toContain('leg 13b: a CONSTRUCTED two-connection race on the create-if-absent placeholder INSERT')
+  })
+
+  it('leg 20 — the D2/D1 carry-forwards this file can check STATICALLY are present (verify, do NOT re-do); the other two are covered by the core suite being green, not by this leg', () => {
+    // SCOPE, stated so the leg's title is not read as wider than its body. The brief names FOUR
+    // carry-forwards. Exactly two are statically checkable from here and are checked below (the
+    // `projected_status` pre-check and the `RELEASE SAVEPOINT` in the F1 catch path), plus the
+    // widened locked read D3 consumes. The other two — the third-generation SAME-TXN atomicity
+    // trigger and the defensive `ROLLBACK` before release in the two race tests — are covered by
+    // `attendance-w4c2-authoritative-calculation-core.db.test.ts` passing in the real-DB battery,
+    // which is a different kind of evidence and is NOT claimed here.
     const core = read(CORE)
     // (1) The projected_status product-code pre-check, symmetric with F2's minutes check.
     expect(core).toContain('AUTHORITATIVE_PROJECTED_STATUSES_V1')
