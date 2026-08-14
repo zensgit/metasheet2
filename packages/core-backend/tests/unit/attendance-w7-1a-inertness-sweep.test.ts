@@ -1,0 +1,334 @@
+/**
+ * W7-1a (#4556) STEP 5 — the structural-inertness sweep.
+ *
+ * W7-1a's byte-neutrality claim is STRUCTURAL and GREPPABLE, and this suite is
+ * what makes it a claim rather than an assertion: the posture resolver, the
+ * composite lock helper, the group-effective facts resolver and the core
+ * issuance module have ZERO production import sites and ZERO production call
+ * sites, so nothing in the production runtime graph reaches them. Combined
+ * with the posture table shipping EMPTY and the W7 allowlist env var being
+ * unset by default, nothing an org can do exercises this slice.
+ *
+ * The claim is head-scoped: it is a fact about the tree this suite runs on,
+ * not a promise about later ones. That is exactly why it is a test.
+ *
+ * "PRODUCTION" IS DEFINED MECHANICALLY BELOW, not by eyeball. A sweep whose
+ * exclusions are applied by judgement is a sweep that can be talked into any
+ * answer. And because a zero-hit grep with a wrong path is indistinguishable
+ * from a genuinely clean tree, every leg here carries a NEGATIVE CONTROL that
+ * plants a real violation and proves the leg reds.
+ *
+ * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner
+ * first-person confirmation).
+ */
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+
+const REPO_ROOT = path.resolve(__dirname, '../../../../')
+
+const W7_RESOLVER_DIR = 'packages/core-backend/src/attendance/w7-resolver'
+const POSTURE_TABLE = 'attendance_calculation_context_source_state'
+
+/** A probe that lives in PRODUCTION territory (under `src/`, not under the
+ *  resolver directory, not a test file) — so planting an import here is a real
+ *  violation of the inertness claim, not a staged one. */
+const PROBE_REL = 'packages/core-backend/src/attendance/w7-inertness-probe.ts'
+const PROBE_ABS = path.join(REPO_ROOT, PROBE_REL)
+
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+
+/**
+ * Mechanical exclusion rules. Anything NOT excluded is production.
+ *
+ *  - test material: `/__tests__/`, `/tests/`, `/test/`, `*.test.*`, `*.spec.*`
+ *  - type-only declarations: `*.d.ts`
+ *  - build output / vendored: `node_modules`, `dist`, `build`, `coverage`,
+ *    `.turbo`
+ *  - the W7 resolver directory ITSELF: its four modules import each other, and
+ *    counting those intra-module edges would make the claim unsatisfiable by
+ *    construction rather than false. The claim is "nothing OUTSIDE reaches
+ *    in", and that is what is measured.
+ */
+const EXCLUDED_SEGMENTS = ['node_modules', 'dist', 'build', 'coverage', '.turbo', '.git', '__tests__', 'tests', 'test']
+const EXCLUDED_MARKERS = ['.test.', '.spec.', '.d.ts']
+
+function isProductionSource(relPath: string): boolean {
+  if (relPath.startsWith(`${W7_RESOLVER_DIR}/`)) return false
+  const parts = relPath.split('/')
+  if (parts.some((segment) => EXCLUDED_SEGMENTS.includes(segment))) return false
+  const base = parts[parts.length - 1]
+  if (EXCLUDED_MARKERS.some((marker) => base.includes(marker))) return false
+  return SOURCE_EXTENSIONS.has(path.extname(base))
+}
+
+function trackedFiles(): string[] {
+  const raw = execFileSync('git', ['ls-files', '-z', '--cached'], {
+    cwd: REPO_ROOT,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return raw.toString('utf8').split('\0').filter((entry) => entry.length > 0)
+}
+
+/** Files the sweep actually inspects, PLUS any untracked probe planted by a
+ *  negative control (a freshly written file is not in `git ls-files`, and a
+ *  sweep that could not see it would be a sweep that cannot see a real
+ *  uncommitted violation either). */
+function productionFiles(): string[] {
+  const set = new Set(trackedFiles().filter(isProductionSource))
+  if (fs.existsSync(PROBE_ABS) && isProductionSource(PROBE_REL)) set.add(PROBE_REL)
+  return [...set].sort()
+}
+
+const SPECIFIER_RE = /(?:\bimport\s*\(|\brequire\s*\(|\bfrom\s+)\s*['"]([^'"]+)['"]/g
+
+/** Resolved relative import/require/dynamic-import targets — judged on what a
+ *  file LOADS, not on how the specifier is spelled. */
+function resolvedTargets(relPath: string): string[] {
+  const abs = path.join(REPO_ROOT, relPath)
+  const text = fs.readFileSync(abs, 'utf8')
+  const targets: string[] = []
+  for (const match of text.matchAll(SPECIFIER_RE)) {
+    const specifier = match[1]
+    if (!specifier.startsWith('.')) continue
+    const base = path.resolve(path.dirname(abs), specifier)
+    for (const candidate of [base, `${base}.ts`, `${base}.cjs`, `${base}.js`, `${base}.mjs`, `${base}.tsx`]) {
+      if (fs.existsSync(candidate) && fs.lstatSync(candidate).isFile()) {
+        targets.push(path.relative(REPO_ROOT, candidate).split(path.sep).join('/'))
+        break
+      }
+    }
+  }
+  return targets
+}
+
+/**
+ * Code text with block and line comments removed.
+ *
+ * WHY THIS IS NEEDED, stated rather than hidden: two legs below ask "does any
+ * production file NAME this table / this env var". A raw `includes()` answers
+ * a text question, not a behavioural one, and it reds on prose — the landed
+ * W7-0 contract module names the posture table in its header to say what shape
+ * the future row has, and the W7 posture resolver names the W4 env var in its
+ * header precisely to record that it does NOT reuse it. Both are documentation
+ * of a decision, not a read of a table or an environment variable. Matching
+ * over code-with-comments-stripped asks the question actually intended.
+ *
+ * This is a deliberately small stripper, not a parser: it removes block and
+ * line comments and is blind to comment-like text inside string literals. That
+ * is safe in the only direction that matters here — a string literal
+ * containing `//` would be under-stripped, i.e. the sweep stays STRICTER, never
+ * looser. The negative controls below plant real code and prove the legs still
+ * red through it.
+ */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+}
+
+function productionImportersOfResolver(): string[] {
+  return productionFiles()
+    .filter((rel) => resolvedTargets(rel).some((target) => target.startsWith(`${W7_RESOLVER_DIR}/`)))
+    .sort()
+}
+
+/** The exported runtime entry points. A production file naming any of these is
+ *  a call site even if it somehow obtained the symbol without a relative
+ *  import (re-export chain, barrel file, string-built specifier). */
+const W7_RUNTIME_SYMBOLS = [
+  'resolveAttendanceW7ContextSourcePostureV1',
+  'acquireAttendanceW7CompositeFactsLocksV1',
+  'resolveW7GroupEffectiveFactsInTransactionV1',
+  'coreIssueGroupEffectiveContextV2',
+  'coreRehydrateGroupEffectiveContextV2',
+  'isAttendanceW7ContextSourceOrgAllowlistedV1',
+] as const
+
+function productionCallSites(): Array<{ file: string; symbol: string }> {
+  const hits: Array<{ file: string; symbol: string }> = []
+  for (const rel of productionFiles()) {
+    const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+    for (const symbol of W7_RUNTIME_SYMBOLS) {
+      if (text.includes(symbol)) hits.push({ file: rel, symbol })
+    }
+  }
+  return hits
+}
+
+/** Production files whose CODE (comments stripped) names the posture table,
+ *  excluding the migration that creates it. */
+function postureTableCodeReferences(): string[] {
+  return productionFiles()
+    .filter((rel) => !rel.includes('/db/migrations/'))
+    .filter((rel) => stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')).includes(POSTURE_TABLE))
+    .sort()
+}
+
+afterEach(() => {
+  if (fs.existsSync(PROBE_ABS)) fs.unlinkSync(PROBE_ABS)
+})
+
+describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
+  it('the production file set is large and really contains known production modules', () => {
+    const files = productionFiles()
+    expect(files.length).toBeGreaterThan(300)
+    expect(files).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
+    expect(files).toContain('plugins/plugin-attendance/index.cjs')
+    // ...and really EXCLUDES test material, so the exclusions are not silently
+    // swallowing the whole tree.
+    expect(files).not.toContain('packages/core-backend/tests/unit/attendance-w7-1a-inertness-sweep.test.ts')
+    expect(files.some((f) => f.startsWith(`${W7_RESOLVER_DIR}/`))).toBe(false)
+  })
+
+  it('the four W7-1a modules exist at the paths this sweep is pointed at', () => {
+    // Guards the "wrong path, zero hits, looks clean" failure: if these paths
+    // were stale, every leg below would pass over nothing.
+    for (const file of [
+      'w7-composite-lock-order.ts',
+      'w7-context-source-posture-resolver.ts',
+      'w7-group-effective-context-issuance.ts',
+      'w7-group-effective-facts-resolver.ts',
+    ]) {
+      expect(fs.existsSync(path.join(REPO_ROOT, W7_RESOLVER_DIR, file)), `missing: ${file}`).toBe(true)
+    }
+  })
+
+  it('the resolver modules DO import each other — proving the resolver-path matcher works', () => {
+    // Positive control for `resolvedTargets` + the `startsWith` matcher: if the
+    // matcher were broken, it would report zero importers everywhere, and the
+    // inertness legs would pass for the wrong reason.
+    const issuance = `${W7_RESOLVER_DIR}/w7-group-effective-context-issuance.ts`
+    expect(resolvedTargets(issuance)).toContain(`${W7_RESOLVER_DIR}/w7-group-effective-facts-resolver.ts`)
+  })
+})
+
+describe('W7-1a structural inertness: zero production importers and call sites', () => {
+  it('ZERO production files import anything under w7-resolver/', () => {
+    expect(productionImportersOfResolver()).toEqual([])
+  })
+
+  it('ZERO production files name any W7-1a runtime entry point', () => {
+    expect(productionCallSites()).toEqual([])
+  })
+
+  it('NEGATIVE CONTROL: planting a production importer reds both legs', () => {
+    fs.writeFileSync(
+      PROBE_ABS,
+      [
+        "import { resolveAttendanceW7ContextSourcePostureV1 } from './w7-resolver/w7-context-source-posture-resolver'",
+        '',
+        'export const probe = resolveAttendanceW7ContextSourcePostureV1',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    // Anchor-hit check FIRST: an unseen probe and a dead sweep look identical.
+    expect(productionFiles(), 'probe never entered the swept set — dead sweep').toContain(PROBE_REL)
+
+    expect(productionImportersOfResolver()).toEqual([PROBE_REL])
+    expect(productionCallSites()).toEqual([
+      { file: PROBE_REL, symbol: 'resolveAttendanceW7ContextSourcePostureV1' },
+    ])
+  })
+
+  it('NEGATIVE CONTROL: a dynamic `await import()` is caught too, not only static imports', () => {
+    fs.writeFileSync(
+      PROBE_ABS,
+      [
+        'export async function probe(): Promise<unknown> {',
+        "  return import('./w7-resolver/w7-group-effective-facts-resolver')",
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    expect(productionFiles()).toContain(PROBE_REL)
+    expect(productionImportersOfResolver()).toEqual([PROBE_REL])
+  })
+})
+
+describe('W7-1a structural inertness: the posture table has no production reader or writer', () => {
+  it('ZERO production CODE outside the migration touches the posture table', () => {
+    // The resolver itself is excluded from `productionFiles()` (it lives under
+    // w7-resolver/), which is the point: it is the only module whose CODE names
+    // the table, and nothing production-side reaches it.
+    expect(postureTableCodeReferences()).toEqual([])
+  })
+
+  it('the only remaining mention of the posture table is PROSE in the W7-0 contract header', () => {
+    // Recorded explicitly rather than silently stripped: the landed W7-0
+    // contract module does name the table, in a doc comment, to say what shape
+    // the row will have. Pinning that here means the comment-stripping above
+    // cannot quietly hide a future CODE reference in the same file.
+    const contract = 'packages/core-backend/src/attendance/w7-context-source-posture-contract.ts'
+    const raw = fs.readFileSync(path.join(REPO_ROOT, contract), 'utf8')
+    expect(raw).toContain(POSTURE_TABLE)
+    expect(stripComments(raw)).not.toContain(POSTURE_TABLE)
+  })
+
+  it('the migration that creates the table exists, ships it EMPTY, and inserts nothing', () => {
+    const migration = path.join(
+      REPO_ROOT,
+      'packages/core-backend/src/db/migrations/zzzz20260814120000_w7_attendance_context_source_posture_state.ts',
+    )
+    expect(fs.existsSync(migration)).toBe(true)
+    const text = fs.readFileSync(migration, 'utf8')
+    expect(text).toContain(`CREATE TABLE IF NOT EXISTS ${POSTURE_TABLE}`)
+    // No seeding of any kind: an empty table is one of the three legs the
+    // inertness claim stands on, so a stray INSERT would silently remove it.
+    expect(text).not.toMatch(/INSERT\s+INTO/i)
+  })
+
+  it('NEGATIVE CONTROL: a production file naming the posture table reds the leg', () => {
+    fs.writeFileSync(
+      PROBE_ABS,
+      [`export const PROBE_SQL = 'SELECT state FROM ${POSTURE_TABLE}'`, ''].join('\n'),
+      'utf8',
+    )
+    expect(productionFiles()).toContain(PROBE_REL)
+    expect(postureTableCodeReferences()).toEqual([PROBE_REL])
+  })
+})
+
+describe('W7-1a structural inertness: the W7 env var is new, unset by default, and not the W4 one', () => {
+  it('the W7 allowlist env var is a NEW name, distinct from the W4 segment-calculation one', () => {
+    const resolver = fs.readFileSync(
+      path.join(REPO_ROOT, W7_RESOLVER_DIR, 'w7-context-source-posture-resolver.ts'),
+      'utf8',
+    )
+    expect(resolver).toContain("'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED'")
+    // Ruling 7: it must NOT READ the W4 variable. Asked of CODE, not of text:
+    // the module's header names the W4 variable deliberately, to record that it
+    // is not reused. A raw text ban would red on that sentence and would push
+    // the next author to delete the explanation rather than keep the property.
+    const code = stripComments(resolver)
+    expect(code).toContain("'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED'")
+    expect(code).not.toContain('ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED')
+    // ...and the header really does still carry the explanation, so this leg
+    // is proven to be stripping prose rather than passing because the prose
+    // was removed.
+    expect(resolver).toContain('ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED')
+
+    // POSITIVE CONTROL on the stripper itself: it must not eat real code.
+    expect(stripComments("const a = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED' // note")).toContain(
+      'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED',
+    )
+    expect(stripComments('/* ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED */')).not.toContain(
+      'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED',
+    )
+  })
+
+  it('nothing in the repo sets the W7 var by default (no CI/env/compose default entry)', () => {
+    const setters = trackedFiles()
+      .filter((rel) => /\.(ya?ml|env|sh|json|ts|cjs|mjs|js)$/.test(rel))
+      .filter((rel) => !rel.includes('/tests/') && !rel.includes('__tests__'))
+      .filter((rel) => !rel.startsWith(`${W7_RESOLVER_DIR}/`))
+      .filter((rel) => {
+        const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+        return /ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED\s*[:=]/.test(text)
+      })
+      .sort()
+    expect(setters).toEqual([])
+  })
+})
