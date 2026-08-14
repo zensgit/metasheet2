@@ -218,6 +218,115 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
   })
 })
 
+describe('W7-1a-M provenance widening — superseding plpgsql body fidelity', () => {
+  // The slice hand-carries ~500 lines of plpgsql into a new migration. Nothing
+  // else in the tree proves those bodies are the historical ones plus ONLY the
+  // derived substitutions: the catalogue rule is satisfied by the mere presence
+  // of `w4_group`, and the neighbouring import-rollback suite re-applies 0725 +
+  // 0731 in its own `beforeAll`, so it exercises the 0731 body, not this one.
+  //
+  // Deliberately a SOURCE-TEXT diff of the two migration FILES, not a `prosrc`
+  // comparison: the ambient catalogue body is order-dependent (sibling suites
+  // replay historical migrations), and importing a migration yields `up`/`down`
+  // functions rather than the SQL string.
+  const HISTORICAL = 'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts'
+  const WIDENING = 'packages/core-backend/src/db/migrations/zzzz20260815120000_w7_1am_provenance_domain_widening.ts'
+
+  /** The `$fn$ … $fn$` body of `name` within one migration section. */
+  function functionBody(section: string, name: string): string {
+    const at = section.indexOf(`CREATE OR REPLACE FUNCTION ${name}()`)
+    expect(at, `definition not found: ${name}`).toBeGreaterThan(-1)
+    const open = section.indexOf('$fn$', at)
+    const close = section.indexOf('$fn$', open + 4)
+    expect(open, `body open delimiter not found: ${name}`).toBeGreaterThan(-1)
+    expect(close, `body close delimiter not found: ${name}`).toBeGreaterThan(open)
+    return section.slice(open + 4, close)
+  }
+
+  function sections(relPath: string): { up: string; down: string } {
+    const source = fs.readFileSync(path.join(repoRoot, relPath), 'utf8')
+    const boundary = source.indexOf('export async function down(')
+    expect(boundary, `down() boundary not found in ${relPath}`).toBeGreaterThan(-1)
+    return { up: source.slice(0, boundary), down: source.slice(boundary) }
+  }
+
+  /** The complete, derived set of substitutions this slice applies. */
+  const SUBSTITUTIONS: ReadonlyArray<{ fn: string; from: string; to: string }> = [
+    {
+      fn: 'attendance_w4_records_pointer_guard',
+      from: "AND OLD.projection_owner = 'w4'",
+      to: "AND OLD.projection_owner IN ('w4', 'w4_group')",
+    },
+    {
+      fn: 'attendance_w4c3a_restore_witness_command_guard',
+      from: "->> 'projectionOwner' NOT IN ('legacy_untracked', 'w4')",
+      to: "->> 'projectionOwner' NOT IN ('legacy_untracked', 'w4', 'w4_group')",
+    },
+    {
+      fn: 'attendance_w4c3a_restore_witness_command_guard',
+      from: "(reversed.parent_preimage_snapshot ->> 'projectionOwner' = 'w4'",
+      to: "(reversed.parent_preimage_snapshot ->> 'projectionOwner' IN ('w4', 'w4_group')",
+    },
+  ]
+
+  const FUNCTIONS = [
+    'attendance_w4_records_pointer_guard',
+    'attendance_w4c3a_restore_witness_command_guard',
+  ] as const
+
+  function applySubstitutions(fn: string, body: string): string {
+    let out = body
+    for (const substitution of SUBSTITUTIONS.filter((s) => s.fn === fn)) {
+      const parts = out.split(substitution.from)
+      // Exactly one occurrence — the same guarantee the generator enforced.
+      expect(parts.length, `substitution matched ${parts.length - 1}x in ${fn}: ${substitution.from}`).toBe(2)
+      out = parts.join(substitution.to)
+    }
+    return out
+  }
+
+  it('up(): each superseding body is the historical body plus ONLY the derived substitutions', () => {
+    const historical = sections(HISTORICAL).up
+    const widened = sections(WIDENING).up
+    for (const fn of FUNCTIONS) {
+      const before = functionBody(historical, fn)
+      const after = functionBody(widened, fn)
+      expect(applySubstitutions(fn, before), `${fn} carries an unaccounted change`).toBe(after)
+    }
+  })
+
+  it('down(): each restored body is BYTE-IDENTICAL to the historical body', () => {
+    const historical = sections(HISTORICAL).up
+    const restored = sections(WIDENING).down
+    for (const fn of FUNCTIONS) {
+      expect(functionBody(restored, fn)).toBe(functionBody(historical, fn))
+    }
+  })
+
+  it('non-vacuity: the extraction is real and the diff actually discriminates', () => {
+    const historical = sections(HISTORICAL).up
+    const widened = sections(WIDENING).up
+    for (const fn of FUNCTIONS) {
+      const before = functionBody(historical, fn)
+      const after = functionBody(widened, fn)
+      // The bodies are substantial, and exactly one side is widened.
+      expect(before.length).toBeGreaterThan(500)
+      expect(before).not.toContain('w4_group')
+      expect(after).toContain('w4_group')
+      // Only ONE definition was captured, not a neighbour swallowed with it.
+      expect(before.split('CREATE OR REPLACE FUNCTION')).toHaveLength(1)
+      expect(after.split('CREATE OR REPLACE FUNCTION')).toHaveLength(1)
+      // Positive control: a one-character stray edit anywhere else in the body
+      // MUST break the equality this test rests on. `RAISE EXCEPTION` appears in
+      // both guards, so the anchor is real for each (asserted, not assumed).
+      expect(after, `no anchor to tamper with in ${fn}`).toContain('RAISE EXCEPTION')
+      const tampered = after.replace('RAISE EXCEPTION', 'RAISE  EXCEPTION')
+      expect(tampered).not.toBe(after)
+      expect(applySubstitutions(fn, before)).not.toBe(tampered)
+    }
+  })
+})
+
 describe('W7-1a-M provenance widening — domain semantics', () => {
   it('the widened owner domain is exactly the pre-widening set plus w4_group', () => {
     expect([...ATTENDANCE_PROJECTION_OWNERS_V1]).toEqual(['legacy_untracked', 'w4', 'w4_group'])

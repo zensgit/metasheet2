@@ -9,8 +9,17 @@
  * W7-1a-M replaces it again. Migration files are append-only history — the older
  * ones still contain the un-widened bodies forever — so scanning them would
  * force a blanket exemption for historical migrations, which is exactly the hole
- * that hides a missed point. `pg_constraint` / `pg_proc` on a migrated database
- * say what is actually live, and are complete by construction.
+ * that hides a missed point. The catalogue on a migrated database says what is
+ * actually live.
+ *
+ * SCOPE OF "the catalogue", stated precisely rather than as an adjective: the
+ * derivation below queries `pg_constraint`, `pg_proc`, `pg_trigger`,
+ * `pg_attrdef`, `pg_views`, `pg_indexes` and `pg_policies`. `pg_trigger` matters
+ * on its own account — a trigger's WHEN clause is the FIRING GATE for its
+ * function, so a WHEN clause that failed to fire for `w4_group` would bypass the
+ * pointer guard for exactly the new member, with the function body itself
+ * looking perfectly widened. Those clauses are legacy-polarity today, which is
+ * why they are correct, and they are now ledgered rather than assumed.
  *
  * INERT: nothing in this slice emits `w4_group`. The rows below are inserted BY
  * THIS TEST, never by production code.
@@ -52,6 +61,8 @@ type DbRule =
   | 'legacy_polarity'
   /** Mentions the column/field but no domain literal at all — value-agnostic. */
   | 'value_agnostic'
+  /** Writes a constant domain value; not a test, so it routes nothing. */
+  | 'write_side_emitter'
   /** The coupled pointer-null invariant; must be UNCHANGED. */
   | 'pointer_coupling_invariant'
 
@@ -72,6 +83,17 @@ const DB_LEDGER: ReadonlyArray<{ name: string; rule: DbRule; note?: string }> = 
   { name: 'attendance_w4c3a_witnessed_legacy_lineage_guard', rule: 'legacy_polarity' },
   { name: 'attendance_w4c3a_restore_witness_commit_guard', rule: 'value_agnostic' },
   { name: 'attendance_w4c3a_rollback_preimage_fingerprint', rule: 'value_agnostic' },
+  // Trigger WHEN clauses — the firing gate for the pointer guard. Legacy-polarity,
+  // so every non-legacy owner (the new member included) makes them fire exactly
+  // as they fire for `w4`.
+  { name: 'trg_ar_pointer_guard_ins', rule: 'legacy_polarity' },
+  { name: 'trg_ar_pointer_guard_upd', rule: 'legacy_polarity' },
+  // Column default: emits the legacy member for rows that name no owner.
+  { name: 'attendance_records.projection_owner.default', rule: 'write_side_emitter' },
+  // Canonical current-record view: projects the column through (Postgres expands
+  // the original `SELECT *`) and filters on visibility only — it never tests the
+  // owner, so it passes `w4_group` through unchanged.
+  { name: 'attendance_current_records', rule: 'value_agnostic' },
 ])
 
 function quotedW4(text: string): boolean {
@@ -83,6 +105,8 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
   const org = `w7-1am-org-${RUN}`
   let constraints: Array<{ name: string; def: string }> = []
   let functions: Array<{ name: string; src: string }> = []
+  /** Everything else in the catalogue that can carry the domain. */
+  let others: Array<{ name: string; def: string }> = []
   let migrationDb: Kysely<unknown> | undefined
 
   beforeAll(async () => {
@@ -122,6 +146,37 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
         ORDER BY p.proname`,
     )
     functions = functionRows.rows.map((row) => ({ name: String(row.name), src: String(row.src) }))
+
+    // Trigger WHEN clauses, column defaults, views, indexes and RLS policies.
+    // A trigger body can be perfectly widened and still never run, so the WHEN
+    // clause is derived as its own point rather than folded into the function.
+    const otherRows = await pool.query(
+      `SELECT t.tgname AS name, pg_get_triggerdef(t.oid) AS def
+         FROM pg_trigger t
+        WHERE NOT t.tgisinternal AND pg_get_triggerdef(t.oid) ILIKE '%projection_owner%'
+       UNION ALL
+       SELECT c.relname || '.' || a.attname || '.default' AS name,
+              pg_get_expr(d.adbin, d.adrelid) AS def
+         FROM pg_attrdef d
+         JOIN pg_class c ON c.oid = d.adrelid
+         JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+        WHERE a.attname = 'projection_owner'
+       UNION ALL
+       SELECT viewname AS name, definition AS def
+         FROM pg_views
+        WHERE schemaname = 'public' AND definition ILIKE '%projection_owner%'
+       UNION ALL
+       SELECT indexname AS name, indexdef AS def
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND indexdef ILIKE '%projection_owner%'
+       UNION ALL
+       SELECT policyname AS name, COALESCE(qual, '') || COALESCE(with_check, '') AS def
+         FROM pg_policies
+        WHERE schemaname = 'public'
+          AND (COALESCE(qual, '') || COALESCE(with_check, '')) ILIKE '%projection_owner%'
+       ORDER BY 1`,
+    )
+    others = otherRows.rows.map((row) => ({ name: String(row.name), def: String(row.def) }))
   }, 60000)
 
   afterAll(async () => {
@@ -140,12 +195,32 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
     expect(constraints.map((c) => c.name)).toContain('chk_ar_owner_pointer_pair')
     expect(functions.map((f) => f.name)).toContain('attendance_w4_records_pointer_guard')
     expect(functions.map((f) => f.name)).toContain('attendance_w4c3a_restore_witness_command_guard')
+    // The non-function, non-constraint catalogues are reached too — a trigger's
+    // WHEN clause gates whether its (widened) body ever runs.
+    expect(others.map((o) => o.name)).toContain('trg_ar_pointer_guard_ins')
+    expect(others.map((o) => o.name)).toContain('trg_ar_pointer_guard_upd')
+    expect(others.map((o) => o.name)).toContain('attendance_records.projection_owner.default')
+  })
+
+  it('the pointer-guard trigger WHEN clauses FIRE for w4_group (legacy-polarity)', () => {
+    for (const name of ['trg_ar_pointer_guard_ins', 'trg_ar_pointer_guard_upd']) {
+      const trigger = others.find((o) => o.name === name)
+      expect(trigger, `trigger not derived: ${name}`).toBeDefined()
+      const def = String(trigger?.def)
+      // `IS DISTINCT FROM 'legacy_untracked'` is true for every other member, so
+      // the guard fires for `w4_group` exactly as it fires for `w4`.
+      expect(def).toContain("IS DISTINCT FROM 'legacy_untracked'")
+      // Negative control: a `= 'w4'`-polarity WHEN clause would NOT fire for the
+      // new member, silently bypassing the guard for exactly it.
+      expect(quotedW4(def)).toBe(false)
+    }
   })
 
   it('every live catalogue object naming the domain is widened or has a satisfied rule', () => {
     const derived = [
       ...constraints.map((c) => ({ name: c.name, text: c.def })),
       ...functions.map((f) => ({ name: f.name, text: f.src })),
+      ...others.map((o) => ({ name: o.name, text: o.def })),
     ]
     const byName = new Map(DB_LEDGER.map((entry) => [entry.name, entry]))
     const violations: string[] = []
@@ -170,6 +245,12 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
         case 'value_agnostic':
           if (object.text.includes("'legacy_untracked'") || quotedW4(object.text)) {
             violations.push(`value_agnostic_failed: ${object.name}`)
+          }
+          break
+        case 'write_side_emitter':
+          // Not a test: it carries no comparison, so it routes nothing.
+          if (/[<>=]|IS DISTINCT|IN \(/.test(object.text.replace(/::text/g, ''))) {
+            violations.push(`write_side_emitter_failed: ${object.name}`)
           }
           break
         case 'pointer_coupling_invariant':

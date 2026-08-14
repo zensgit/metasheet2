@@ -32,8 +32,17 @@
  *
  * The two function bodies below are the historical bodies with ONLY the
  * substitutions named above applied; they were extracted mechanically from
- * zzzz20260731120000 rather than retyped, and the .db test diffs the resulting
- * `prosrc` against the pre-migration `prosrc` to prove nothing else moved.
+ * zzzz20260731120000 rather than retyped. That is ASSERTED, not just asserted in
+ * prose: `tests/unit/attendance-w7-1am-provenance-widening-completeness.test.ts`
+ * ("superseding plpgsql body fidelity") reads BOTH migration files off disk as
+ * TEXT, extracts each `$fn$…$fn$` body, and proves the body here equals the
+ * historical body with exactly the three named substitutions applied — each
+ * matching exactly once — and that `down()` restores the historical bodies
+ * byte-identically. A stray edit anywhere else in these ~500 lines reds it.
+ *
+ * The diff is deliberately source-text, NOT a comparison against the ambient
+ * `prosrc`: sibling suites replay historical migrations against the shared test
+ * database, so the "pre-migration" catalogue body is order-dependent.
  *
  * Historical migrations are NEVER edited: this file supersedes them, and the new
  * value enters via a zzzz migration as required.
