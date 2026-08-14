@@ -1,7 +1,8 @@
 /**
  * Repo guard — no source file may contain a raw NUL byte.
  *
- * WHY THIS EXISTS, and why it is repo-wide rather than per-file.
+ * WHY THIS EXISTS, and why it is a repository-level guard rather than a
+ * per-file fix (see SCOPE below for exactly which files it reaches).
  *
  * A literal `U+0000` inside a source file (typically typed into a string
  * literal instead of the escape `\u0000`) makes git classify the whole file as
@@ -34,10 +35,26 @@
  * inside a string literal without complaint. This test is the only mechanical
  * defence.
  *
- * SCOPE. The NUL leg covers EVERY tracked source file in the repository and
- * carries NO exclusions — measured, not assumed: at the time of writing all
- * 4151 tracked source files are clean, so the invariant can be stated
- * unconditionally. An exclusion list would be the first thing to rot.
+ * SCOPE — stated precisely, because an earlier draft of this paragraph
+ * overclaimed it as "EVERY tracked source file … NO exclusions".
+ *
+ * What the NUL leg actually covers: every tracked file whose extension is one
+ * of `.ts .tsx .js .cjs .mjs .sql .sh` — **4154** of the repository's 10954
+ * tracked files at the time of writing, all clean, which is why the leg needs
+ * no allowlist WITHIN that domain. The absence of exclusions is real; the
+ * "every source file" part was not.
+ *
+ * What sits OUTSIDE it, counted rather than hand-waved: **267 hand-authored
+ * files** — 242 `.vue`, 22 `.ps1`, 3 `.py` — plus non-source tracked files
+ * (docs, JSON, YAML, assets). A raw NUL in any of those would make that file
+ * binary to git and grep exactly as it did here, and this guard would not see
+ * it. The 7-extension domain is where THIS defect actually occurred (a string
+ * literal in a `.ts` module) and it is what shipped; widening it to `.vue`
+ * and the scripting extensions is a straightforward, deliberately deferred
+ * FOLLOW-UP, because widening a guard's domain is a behaviour change and this
+ * commit is text-only. Whoever widens it should re-measure first: the
+ * no-exclusions property above is a measured fact about the CURRENT domain,
+ * not a promise that a larger one is equally clean.
  *
  * WHY NOT BAN ALL C0 CONTROL BYTES REPO-WIDE. Because `0x01` is a deliberate,
  * pre-existing in-repo delimiter in three files that this guard does not own
@@ -138,7 +155,7 @@ describe('repo guard: source files contain no raw NUL byte', () => {
     expect(files).toContain('plugins/plugin-attendance/index.cjs')
   })
 
-  it('NO tracked source file contains a raw NUL byte (repo-wide, no exclusions)', () => {
+  it('NO tracked .ts/.tsx/.js/.cjs/.mjs/.sql/.sh file contains a raw NUL byte (no exclusions within that domain)', () => {
     expect(filesContainingRawNul(trackedSourceFiles())).toEqual([])
   })
 
