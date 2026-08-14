@@ -193,6 +193,11 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
     object: objectId,
     keyFields: [keyField],
     writableFields,
+    // Private trusted-admin policy. The generic planner validates the exact closed shape and
+    // binds its normalized form into the dry-run revision; requests cannot supply this field.
+    ...(system && system.config && system.config.c6AcceptancePolicy !== undefined
+      ? { acceptancePolicy: system.config.c6AcceptancePolicy }
+      : {}),
   }
 }
 
@@ -506,11 +511,21 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       } catch (error) {
         const code = error && error.details && error.details.code
         if (code === 'K3_WISE_READ_BUSINESS_ERROR') {
+          // Trusted planner flag only. Requests cannot set `policy.strictAbsence`. Exact-two
+          // add-only acceptance requires a true absence signal; the generic K3 business-error
+          // class also covers permission, acct/org, and locked-record refusals, so it must
+          // never mint an add / token / Save under that policy.
+          if (policy && policy.strictAbsence === true) {
+            throw new AdapterValidationError('K3 C6 strict-absence lookup cannot treat a business read error as missing', {
+              code: 'K3_WISE_READ_BUSINESS_ERROR',
+            })
+          }
           // DESIGN NOTE (first version, 1-3 rows, human-approved): K3 GetDetail reports a
           // NONEXISTENT material as a business-level failure — indistinguishable at the
-          // adapter from other business refusals. We treat it as "absent" so planning a NEW
-          // material (the primary use case) classifies as `add`. The Save at apply remains
-          // the authority: if K3 was actually unhappy, the Save fails and is dead-lettered.
+          // adapter from other business refusals. Without the strict-absence flag we treat it
+          // as "absent" so planning a NEW material (the primary use case) classifies as `add`.
+          // The Save at apply remains the authority: if K3 was actually unhappy, the Save
+          // fails and is dead-lettered.
           // KNOWN BOUND (review #4761 P2): the same business-error class also covers a
           // material that EXISTS but whose GetDetail fails for another reason (permission,
           // wrong acctId/sub-org, locked record) — such a row previews as `add` though the

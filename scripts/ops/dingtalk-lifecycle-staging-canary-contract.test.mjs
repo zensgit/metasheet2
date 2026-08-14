@@ -6209,7 +6209,7 @@ function awaitImportFs() {
 
 // --- docs / staging blockers ----------------------------------------------------------
 
-test('docs mark pending/deprovision executable but NOT EXECUTED; alias transient canary and bootstrap documented', () => {
+test('docs record server-side pending/deprovision canaries while browser checkpoints remain NOT EXECUTED', () => {
   const closeout = read(CLOSEOUT_DOC)
   const go = read(CANARY_GO_DOC)
   assert.doesNotMatch(closeout, /pending[^\n]*NOT EXECUTABLE|deprovision[^\n]*NOT EXECUTABLE/i)
@@ -6219,8 +6219,8 @@ test('docs mark pending/deprovision executable but NOT EXECUTED; alias transient
   assert.match(go, /Executable only as a transient canary/)
   assert.match(go, /Executable only as a two-phase transient canary/)
   assert.match(go, /NOT EXECUTED/)
-  assert.match(go, /dedicated one-account integration|single selected directory account/i)
-  assert.match(go, /pre-reserves|before.*env.*HTTP|before env\/HTTP/i)
+  assert.match(go, /explicit selected directory account plus the distinct active unlinked sentinel|target-plus-sentinel/i)
+  assert.match(go, /pre-reserves|before\*{0,2}\s+the env write and HTTP request|before env\/HTTP/i)
   assert.match(go, /alias/)
   assert.match(go, /bootstrap/)
   assert.match(go, /lifecycle-canary@staging\.invalid/)
@@ -6232,8 +6232,9 @@ test('docs mark pending/deprovision executable but NOT EXECUTED; alias transient
   assert.match(go, /collisions==0|collisions must be 0|collisions==0/i)
   assert.match(go, /ATTENDANCE_ADMIN_JWT/)
   assert.match(go, /never.*ATTENDANCE_ADMIN_JWT|not.*ATTENDANCE_ADMIN_JWT|mint.*password login/i)
-  // No invented successful pending/deprovision execution evidence.
-  assert.doesNotMatch(go, /pending admission[^\n]*\*\*(PASS|COMPLETE)|deprovision[^\n]*\*\*(PASS|COMPLETE)/i)
+  assert.match(go, /pending[^\n]*SERVER-SIDE PASS/i)
+  assert.match(go, /deprovision[^\n]*SERVER-SIDE PASS/i)
+  assert.match(go, /browser[^\n]*NOT_EXECUTED/i)
 })
 
 test('docs distinguish emergency off env-gate from OR-column fallback reintroduction', () => {
