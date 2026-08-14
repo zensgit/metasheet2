@@ -924,6 +924,8 @@ async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
   assert.equal(calls.updateRows.length, 0)
   assert.equal(apply.evidence.acceptancePolicy.ready, true)
   assert.equal(apply.evidence.acceptancePolicy.cleanupRequired, true)
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true, 'exact-two add-only binds strict absence into planner policy')
+  assert.equal(calls.lookupByKey.length, 6, 'apply preflights both add rows after the planner lookups')
 }
 
 async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply() {
@@ -1021,6 +1023,106 @@ async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
   )
   assert.equal(calls.insertRows.length, 0)
   assert.equal(calls.updateRows.length, 0)
+}
+
+async function testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      const error = new Error('K3 read business response failed')
+      error.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }
+      throw error
+    },
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.details && error.details.code === 'K3_WISE_READ_BUSINESS_ERROR',
+  )
+  assert.equal(input.tokenStore.map.size, 0, 'a generic K3 business-read error never mints a token under exact-two')
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true)
+}
+
+async function testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange() {
+  let lookups = 0
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      lookups += 1
+      if (lookups <= 4) return { data: [], metadata: {} }
+      return { data: [{ externalId: 'now-present' }], metadata: {} }
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(typeof dryRun.dryRunToken, 'string')
+  assert.equal(lookups, 2, 'dry-run plans two absent rows')
+
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
+      && error.details && error.details.reason === 'target_exists',
+  )
+  assert.equal(lookups, 6, 'apply recomputes two planner lookups then preflights both rows')
+  assert.equal(calls.insertRows.length, 0, 'a post-plan existence change refuses the whole batch with zero Save')
+  assert.equal(calls.updateRows.length, 0)
+  const leaked = JSON.stringify(calls) + JSON.stringify(dryRun.evidence)
+  assert.equal(leaked.includes('now-present'), false, 'preflight evidence stays values-free')
+}
+
+async function testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave() {
+  for (const fixture of [
+    {
+      reason: 'ambiguous_target_key',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { data: [{ externalId: 'a' }, { externalId: 'b' }], metadata: {} }
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          throw new Error('lookup exploded')
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { metadata: {} }
+        }
+      })(),
+    },
+  ]) {
+    const { input, calls } = k3ExactTwoAcceptanceInput({ lookupByKey: fixture.lookupByKey })
+    const dryRun = await dryRunExternalWrite(input)
+    await assert.rejects(
+      () => applyExternalWrite({
+        ...input,
+        dryRunToken: dryRun.dryRunToken,
+        applyUser: 'user_read',
+      }),
+      (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
+        && error.details && error.details.reason === fixture.reason,
+    )
+    assert.equal(calls.insertRows.length, 0, `preflight ${fixture.reason} performs zero Save`)
+    assert.equal(calls.updateRows.length, 0)
+  }
 }
 
 function fakeProfileInput(overrides = {}) {
@@ -1128,6 +1230,9 @@ async function main() {
   await testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply()
   await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
   await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
+  await testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent()
+  await testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange()
+  await testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
   await testTruncatedSourceReadDoesNotIssueToken()
   await testRejectsNonC6Target()

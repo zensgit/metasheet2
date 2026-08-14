@@ -560,6 +560,36 @@ function resolveAuthUserTenantId(req) {
   return tenantId
 }
 
+function collectExplicitTenantIds(req, input = {}) {
+  const body = requestBody(req)
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  return [input.tenantId, body && body.tenantId, query && query.tenantId, params && params.tenantId]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+}
+
+// Write-bearing C6 Apply and private adapter-config mutation derive tenant from the
+// authenticated principal only. Tenantless role:admin and any mismatched tenant carrier
+// fail closed. An explicit tenantId that equals the auth tenant is compatibility-only.
+function resolveAuthenticatedWriteTenantId(req, input = {}) {
+  const tenantId = resolveAuthUserTenantId(req)
+  for (const explicit of collectExplicitTenantIds(req, input)) {
+    if (explicit !== tenantId) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return tenantId
+}
+
+function scopedAuthenticatedWriteInput(req, input = {}) {
+  return {
+    ...input,
+    tenantId: resolveAuthenticatedWriteTenantId(req, input),
+    workspaceId: resolveWorkspaceId(req, input),
+  }
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -2770,6 +2800,7 @@ function createHandlers(services, options = {}) {
       const body = requestBody(req)
       if (hasPrivateConfigMutation(body.kind, body.config)) {
         requireAccess(req, 'admin')
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, body)), 201)
       }
       return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
     },
@@ -3530,8 +3561,9 @@ function createHandlers(services, options = {}) {
       if (c6WriteApplyDisabled()) {
         throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
       }
+      resolveAuthenticatedWriteTenantId(req)
       const body = normalizeC6WriteApplyBody(requestBody(req))
-      const scope = scopedInput(req, {
+      const scope = scopedAuthenticatedWriteInput(req, {
         id: requestParams(req).id,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3553,7 +3585,7 @@ function createHandlers(services, options = {}) {
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+      const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3567,7 +3599,7 @@ function createHandlers(services, options = {}) {
       // Peek first, then re-load WITH credentials only for kinds that actually build a target
       // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
       // for, so this does not widen credential exposure for them.
-      const targetSystemScope = scopedInput(req, {
+      const targetSystemScope = scopedAuthenticatedWriteInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -5230,6 +5262,8 @@ module.exports = {
     requireAccess,
     resolveTenantId,
     resolveAuthUserTenantId,
+    resolveAuthenticatedWriteTenantId,
+    scopedAuthenticatedWriteInput,
     scopedInput,
     sendError,
     inferHttpStatus,

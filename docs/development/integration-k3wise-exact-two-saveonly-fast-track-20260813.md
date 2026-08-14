@@ -33,6 +33,8 @@
 `c6AcceptancePolicy` 的请求都必须具备 `integration:admin`，且普通 dry-run / Apply 请求不能注入或覆盖它。策略只有一个允许字段，行数和操作模式不能由请求调整。它不会启用 Apply、不会覆盖部署级
 `INTEGRATION_C6_WRITE_APPLY_DISABLED`，也不会授予任何权限；它只会收紧 token 签发条件。
 
+Apply 与私密 `c6AcceptancePolicy` 变更的 tenant 只来自已认证主体。无 tenant 的 `role:admin`、以及 body/query/params 上与认证 tenant 不一致的 carrier，都在 registry / token / adapter / source / write I/O 之前失败。与认证 tenant 相同的显式 tenantId 仅作兼容，不能改写范围。Apply-disable 仍在 body 解析之前生效。
+
 SQL read-only 的 equality filter 与 lookup projection 继续使用已合并的服务端持久配置。lookup 对象、关联键、
 字段标识和过滤值不进入浏览器证据或公开回执。普通 dry-run / Apply 请求不能注入或覆盖这些配置。
 
@@ -56,6 +58,12 @@ acceptancePolicy.ready=true
 任何不匹配都返回 `not_applyable`，不签发 token，并加入固定错误类型
 `acceptance_policy_mismatch`。策略在 dry-run 与 Apply 之间被删除、替换或扩展字段时，revision 必须改变，
 Apply 在任何目标写入前失败。
+
+受控策略启用时，planner policy 会带上服务端派生的 `strictAbsence` 标志，请求不能开关它。此时泛化的
+`K3_WISE_READ_BUSINESS_ERROR` 不得解释为“目标不存在”；dry-run / Apply 失败关闭，不签发 token，也不调用 Save。
+未启用该策略时，仍保持既有“业务 miss → add”的预览语义。
+
+Apply 在任何 `insertRows` Save 之前，会对全部 add 行再用同一严格 lookup 做一次整批预检：任一行已存在、键歧义、lookup 抛错或返回畸形结构，整批拒绝且 Save 次数为零。这不是原子 K3 insert-only。K3 Save 仍是 upsert；planner lookup 与预检 / Save 之间仍有 TOCTOU 窗口。真实实体执行在 owner 接受、或 K3 提供 create-only 之前仍未授权。
 
 ## 页面交互
 
@@ -90,4 +98,4 @@ realK3Calls=0
 entityServerMutations=0
 ```
 
-负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、重复 `FNumber`、普通写入用户设置/清空私密策略、策略在 token 后漂移，以及浏览器不渲染私密证据字段。
+负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、重复 `FNumber`、普通写入用户设置/清空私密策略、策略在 token 后漂移、泛化 `K3_WISE_READ_BUSINESS_ERROR` 在受控策略下不得当缺席、planner lookup 之后目标变为已存在/歧义/lookup 失败则整批零 Save、无 tenant 的 `role:admin` 与跨 tenant carrier 在 Apply/私密策略变更上失败关闭，以及浏览器不渲染私密证据字段。

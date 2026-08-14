@@ -456,6 +456,24 @@ function normalizeExternalWriteAcceptancePolicy(targetConfig) {
   }
 }
 
+function isStrictAddOnlyAcceptance(acceptancePolicy) {
+  return Boolean(
+    acceptancePolicy
+    && acceptancePolicy.profile === K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE
+    && acceptancePolicy.operationMode === 'add-only',
+  )
+}
+
+function plannerWritePolicy(targetConfig, acceptancePolicy) {
+  return {
+    keyFields: targetConfig.keyFields,
+    writableFields: targetConfig.writableFields,
+    // Trusted semantic only. Derived from persisted acceptance policy; requests cannot
+    // enable, disable, or override this flag.
+    ...(isStrictAddOnlyAcceptance(acceptancePolicy) ? { strictAbsence: true } : {}),
+  }
+}
+
 function evaluateExternalWriteAcceptancePolicy(policy, counts, sourceRead) {
   if (!policy) return null
   const ready = sourceRead.complete === true &&
@@ -732,10 +750,7 @@ async function computeExternalWritePlan(input = {}) {
   const rowErrorTypes = []
   const rowFingerprints = []
   const planRows = []
-  const policy = {
-    keyFields: targetConfig.keyFields,
-    writableFields: targetConfig.writableFields,
-  }
+  const policy = plannerWritePolicy(targetConfig, configuredAcceptancePolicy)
 
   const seenTargetKeyIdentities = new Set()
   for (const sourceRecord of sourceRead.records) {
@@ -959,6 +974,40 @@ async function persistDeadLetters({ deadLetterStore, pipeline, revision, runId, 
   return persisted
 }
 
+async function preflightStrictAddOnlyLookups(plan, input = {}) {
+  const addRows = (plan.planRows || []).filter((row) => row && row.decision === 'add')
+  const reasons = []
+  for (const row of addRows) {
+    let lookup
+    try {
+      lookup = await plan.dataSourceWrites.lookupByKey(
+        plan.targetConfig.dataSourceId,
+        plan.targetConfig.object,
+        row.key,
+        plan.policy,
+        input.dataSourceOwnerPrincipal,
+      )
+    } catch (_error) {
+      reasons.push('lookup_error')
+      continue
+    }
+    if (!lookup || !Array.isArray(lookup.data)) {
+      reasons.push('lookup_error')
+      continue
+    }
+    const existingRows = lookup.data
+    if (existingRows.length === 1) reasons.push('target_exists')
+    else if (existingRows.length > 1) reasons.push('ambiguous_target_key')
+  }
+  if (reasons.length === 0) return
+  throw new ExternalWriteDryRunError(
+    409,
+    'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED',
+    'strict add-only preflight refused the batch',
+    { reason: reasons[0] },
+  )
+}
+
 async function applyExternalWrite(input = {}) {
   const applyUser = optionalString(input.applyUser)
   if (!applyUser) {
@@ -986,6 +1035,11 @@ async function applyExternalWrite(input = {}) {
   }
   if (!plan.canApply) {
     throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable')
+  }
+  if (isStrictAddOnlyAcceptance(plan.acceptancePolicy)) {
+    // Same strict lookup as planning, for every add row, before ANY insertRows. This is not
+    // an atomic K3 insert-only; Save remains upsert and a residual TOCTOU window remains.
+    await preflightStrictAddOnlyLookups(plan, input)
   }
 
   const counts = {
@@ -1136,7 +1190,9 @@ module.exports = {
     computeExternalWritePlan,
     consumeDryRunToken,
     evaluateExternalWriteAcceptancePolicy,
+    isStrictAddOnlyAcceptance,
     normalizeExternalWriteAcceptancePolicy,
+    plannerWritePolicy,
     normalizeTargetConfig,
     normalizeTestFailureInjectionConfig,
     normalizeServerBoundSqlEqualityFilters,

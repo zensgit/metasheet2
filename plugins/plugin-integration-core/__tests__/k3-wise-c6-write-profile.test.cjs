@@ -693,6 +693,83 @@ test('fail-closed capability: profile deselected between derive and plan -> unsa
   assert.equal(fetchPair.calls.length, 0, 'capability refusal must precede ALL network activity')
 })
 
+test('exact-two add-only: a generic K3 business-read error is not absence, so no token or Save', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const rows = [
+    { code: 'MAT-C6-A', name: 'One', spec: 'S1' },
+    { code: 'MAT-C6-B', name: 'Two', spec: 'S2' },
+  ]
+  await assert.rejects(
+    dryRunExternalWrite(c6Inputs({
+      rows,
+      fetchPair,
+      tokenStore,
+      targetOverrides: { config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } } },
+    })),
+    (error) => error && error.details && error.details.code === 'K3_WISE_READ_BUSINESS_ERROR',
+  )
+  assert.equal(
+    fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length,
+    0,
+    'strict absence never reaches Save',
+  )
+})
+
+test('without exact-two policy a generic K3 business-read error still classifies as add', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'MAT-C6-NEW', name: 'Brand new', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore,
+  }))
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.ok(dryRun.dryRunToken)
+  assert.equal(fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length, 0)
+})
+
+test('exact-two apply preflight refuses the batch when GetDetail changes after planner lookup', async () => {
+  const tokenStore = memoryStore()
+  const existing = {}
+  let getDetail = 0
+  const fetchPair = mockK3({ existing, echoOnly: true })
+  const originalImpl = fetchPair.impl
+  fetchPair.impl = async (url, init) => {
+    const parsed = new URL(url)
+    if (parsed.pathname.endsWith('/Material/GetDetail')) {
+      getDetail += 1
+      if (getDetail === 5) {
+        existing['MAT-C6-A'] = { FNumber: 'MAT-C6-A', FItemID: 8001, FName: 'One', FModel: 'S1' }
+      }
+    }
+    return originalImpl(url, init)
+  }
+  const rows = [
+    { code: 'MAT-C6-A', name: 'One', spec: 'S1' },
+    { code: 'MAT-C6-B', name: 'Two', spec: 'S2' },
+  ]
+  const targetOverrides = { config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } } }
+  const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }))
+  assert.equal(dryRun.status, 'ready')
+  assert.ok(dryRun.dryRunToken)
+  await assert.rejects(
+    applyExternalWrite({
+      ...c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }),
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'operator-1',
+    }),
+    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED',
+  )
+  assert.equal(
+    fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length,
+    0,
+    'preflight refuse performs zero Save',
+  )
+})
+
 test('lookup transport failure fails the dry-run closed (only the business-level miss maps to add)', async () => {
   const tokenStore = memoryStore()
   const calls = []
