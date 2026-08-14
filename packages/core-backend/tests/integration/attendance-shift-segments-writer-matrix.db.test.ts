@@ -126,14 +126,21 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return `w3wm-${tag}-${randomUUID().slice(0, 8)}`
   }
 
-  async function enableShadowPosture(orgId: string): Promise<void> {
-    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+  // Persist a `shadow` rollout-state row for an org (no env mutation). Factored out of
+  // enableShadowPosture so the Gate A lock-in describe can seed rows for orgs it reaches only
+  // via the wildcard — reusing the SAME INSERT text, so no new DML statement is introduced.
+  async function insertShadowRolloutRow(orgId: string): Promise<void> {
     await pool.query(
       `INSERT INTO attendance_calculation_rollout_state
          (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
        VALUES ($1, 'shadow', 'w4c3b-p12-test', 'TEST_FIXTURE', 'w4c3b-p12-test', 1, NULL)`,
       [orgId],
     )
+  }
+
+  async function enableShadowPosture(orgId: string): Promise<void> {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    await insertShadowRolloutRow(orgId)
   }
 
   async function mintToken(userId: string, tenantId?: string): Promise<string> {
@@ -1993,5 +2000,78 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       clientD2.release()
       clientW2.release()
     }
+  })
+
+  /**
+   * #4556 Gate A / Option B lock-in (real-PG, route-level, production writer chain).
+   *
+   * After the cutover the ONLY authorization for a multi-segment shift reference is the core
+   * canonical posture port (exact-org allowlist, wildcard REFUSED, persisted rollout row). One
+   * env value holds org A EXACTLY plus the wildcard `*`. Three orgs, one production writer route
+   * (`POST /api/attendance/assignments` -> the `assignment_create` reference guard):
+   *   - org A: exact env entry + a persisted `shadow` row => the guard admits the multi-segment
+   *     reference and the writer chain persists a row (200/201, non-vacuous);
+   *   - org B: no env entry and no row => typed 422 + zero writes (fail-closed baseline);
+   *   - org W: a persisted `shadow` row but reachable only via the wildcard `*` => STILL 422 +
+   *     zero writes — the wildcard is INERT, which is the security property this gate locks in.
+   *
+   * Mutation-provable against the private `isOrgExactlyAllowlisted` body (execution point
+   * `resolveSegmentCalculationPosture` consults, NOT the re-export wrapper):
+   *   - re-admit `*` (add `if (entries.includes('*')) return true`) => org W leg flips 422->201;
+   *     org A stays 201, org B stays 422 (still no row);
+   *   - force it to always return false => org A leg flips 201->422; org B and org W stay 422.
+   * Org B is the fail-closed baseline; it is NOT separately mutation-proven, because a no-row org
+   * resolves `legacy` regardless of the allowlist (POSTURE_TABLE has no non-legacy row for it).
+   */
+  describe('Gate A lock-in: exact-org allows, wildcard is inert', () => {
+    const orgA = randomUUID()
+    const orgB = randomUUID()
+    const orgW = randomUUID()
+    let tokenA = ''
+    let tokenB = ''
+    let tokenW = ''
+
+    beforeAll(async () => {
+      // Org A exact + wildcard. randomUUID() is already the canonical lower-case org key, so the
+      // env entry, the persisted row's org_id, and the request org header are byte-identical.
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = `${orgA},*`
+      await insertShadowRolloutRow(orgA)
+      await insertShadowRolloutRow(orgW)
+      tokenA = await mintToken(`${orgA}-admin`, orgA)
+      tokenB = await mintToken(`${orgB}-admin`, orgB)
+      tokenW = await mintToken(`${orgW}-admin`, orgW)
+    })
+
+    // Author a multi-segment shift (preview-only, always allowed) then drive the production
+    // active-assignment writer, whose reference guard resolves the port on its own write trx.
+    async function attemptMultiSegmentAssignment(token: string, orgId: string): Promise<HttpResponse> {
+      const shiftId = await createMultiShift(token, orgId, 'Gate A lock-in split')
+      return postJson('/api/attendance/assignments', token, orgId, {
+        userId: `${orgId}-worker`,
+        shiftId,
+        startDate: '2049-07-01',
+      })
+    }
+
+    it('org A (exact env entry + persisted shadow row) admits the multi-segment reference and persists a row', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenA, orgA)
+      expect(res.status, res.raw).toBe(201)
+      // Non-vacuous: the production writer chain ran to completion, not merely past the guard.
+      expect(await countRows('attendance_shift_assignments', orgA)).toBe(1)
+    })
+
+    it('org B (no env entry, no rollout row) fails closed with the typed 422 and zero writes', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenB, orgB)
+      expect(res.status, res.raw).toBe(422)
+      expect(codeOf(res)).toBe(GUARD_CODE)
+      expect(await countRows('attendance_shift_assignments', orgB)).toBe(0)
+    })
+
+    it('org W (persisted shadow row, reachable only via the wildcard) STILL fails closed — wildcard inert', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenW, orgW)
+      expect(res.status, res.raw).toBe(422)
+      expect(codeOf(res)).toBe(GUARD_CODE)
+      expect(await countRows('attendance_shift_assignments', orgW)).toBe(0)
+    })
   })
 })
