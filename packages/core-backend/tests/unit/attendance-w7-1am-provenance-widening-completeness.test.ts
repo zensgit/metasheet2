@@ -15,7 +15,9 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  ATTENDANCE_PROJECTION_OWNERS_SQL_LIST_V1,
   ATTENDANCE_PROJECTION_OWNERS_V1,
+  ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1,
   ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1,
   ATTENDANCE_TRACE_SOURCE_KINDS_V1,
   isAttendanceProjectionOwnerV1,
@@ -170,6 +172,39 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
     ).toBe(true)
   })
 
+  it('planted consumer: an exhaustive SWITCH arm is derived even though it names no field', () => {
+    // A `case 'w4':` line mentions neither the column nor an alias, and `'w4'` is
+    // an AMBIGUOUS member — so the anchor rule alone would make this whole
+    // consumer class invisible. This is the class that actually exists in
+    // `apps/web` for the trace family, where it was caught only because
+    // `policy_gate` happens to be distinctive. Owner-family switches have no such
+    // luck, hence the dedicated case-arm rule.
+    const planted = scanPlanted(
+      'planted-switch.ts',
+      [
+        'export function label(projectionOwner: string): string {',
+        '  switch (projectionOwner) {',
+        "    case 'w4':",
+        "      return 'W4 owned'",
+        '    default:',
+        "      return 'other'",
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const arms = planted.sites.filter((site) => site.text.startsWith('case '))
+    expect(arms.length).toBeGreaterThan(0)
+    // Negative control: the arm really does NOT name the field, so it could only
+    // have been derived by the case-arm rule.
+    expect(arms.every((site) => !/projection_owner|projectionOwner/.test(site.text))).toBe(true)
+    expect(
+      diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1).some(
+        (violation) => violation.kind === 'unledgered_site',
+      ),
+    ).toBe(true)
+  })
+
   it('planted consumer: a stale ledger entry (construct removed) REDS the diff', () => {
     const violations = diffProvenanceWideningV1(derivation, [
       ...W7_PROVENANCE_WIDENING_LEDGER_V1,
@@ -206,6 +241,27 @@ describe('W7-1a-M provenance widening — domain semantics', () => {
       expect(isAttendanceProjectionOwnerV1(novel)).toBe(false)
       expect(isAttendanceProjectionOwnerWithCalculationPointerV1(novel)).toBe(false)
     }
+  })
+
+  it('the SQL literal lists render exactly the widened members', () => {
+    // `w4c3a-import-rollback-boundary.ts` interpolates the second constant into a
+    // query, so its rendered text IS the deployed predicate. Pinned here because
+    // a malformed list would only surface at query time.
+    expect(ATTENDANCE_PROJECTION_OWNERS_SQL_LIST_V1).toBe("'legacy_untracked', 'w4', 'w4_group'")
+    expect(ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1).toBe("'w4', 'w4_group'")
+  })
+
+  it('the interpolated closure predicate appears verbatim in the boundary query', () => {
+    const source = fs.readFileSync(
+      path.join(repoRoot, 'packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts'),
+      'utf8',
+    )
+    expect(source).toContain(
+      'projection_owner IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1})',
+    )
+    // Negative control: the pre-widening spelling is gone, so this is not a
+    // substring that would match either way.
+    expect(source).not.toContain("projection_owner = 'w4'")
   })
 
   it('the web app trace source-kind copy is member-equal to the backend domain', () => {

@@ -88,7 +88,16 @@ const FAMILY_ANCHORS: Readonly<Record<W7ProvenanceFamily, readonly string[]>> = 
  * This cannot miss a closed member list: every list of a family's members
  * contains at least one distinctive member by construction. And it cannot miss
  * an ambiguous-literal PREDICATE, because a predicate must name what it tests.
+ *
+ * ONE EXCEPTION, and it is the important one: a `switch` arm names the value but
+ * NOT the subject — `case 'w4':` sits on a line that mentions neither the column
+ * nor an alias, so the rule above would make an exhaustive switch over the owner
+ * domain invisible. That is precisely the consumer class the `apps/web` finding
+ * proves exists in this codebase (it was caught there only because
+ * `policy_gate` happens to be distinctive). So a `case` arm carrying ANY member
+ * of the family — ambiguous ones included — is always a site.
  */
+const CASE_ARM = /^\s*case\s+['"]([a-z_0-9]+)['"]\s*:/
 const FAMILY_DISTINCTIVE_LITERALS: Readonly<Record<W7ProvenanceFamily, readonly string[]>> =
   Object.freeze({
     projection_owner: Object.freeze(['legacy_untracked', 'w4_group']),
@@ -264,8 +273,18 @@ export function deriveProvenanceWideningSurfaceV1(
         if (isCommentLine(text)) continue
         const hasWideningSymbol = symbols.some((symbol) => text.includes(symbol))
         const namesTarget = anchorTokens.some((token) => new RegExp(`\\b${token}\\b`).test(text))
+        // A `switch` arm names the value but never the subject — see CASE_ARM.
+        const caseArm = CASE_ARM.exec(text)
+        const isFamilyCaseArm =
+          caseArm !== null &&
+          (FAMILY_DISTINCTIVE_LITERALS[family] as readonly string[]).concat(
+            FAMILY_AMBIGUOUS_LITERALS[family] as readonly string[],
+          ).includes(caseArm[1])
         const isSite =
-          hasWideningSymbol || distinctive.test(text) || (ambiguous.test(text) && namesTarget)
+          hasWideningSymbol ||
+          distinctive.test(text) ||
+          isFamilyCaseArm ||
+          (ambiguous.test(text) && namesTarget)
         if (!isSite) continue
         const declaration = enclosingDeclaration(lines, i)
         sites.push({
@@ -506,9 +525,13 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'group_policy_snapshot\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'policy_gate\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'rule_live\',', rule: 'closed_set_member_list' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'audit\': return tr(\'Audit\', \'审计\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'group_policy_snapshot\': return tr(\'Group policy snapshot\', \'组策略快照\')', rule: 'exhaustive_switch_arm' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'ledger\': return tr(\'Ledger\', \'台账\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'policy_gate\': return tr(\'Policy gate\', \'策略开关\')', rule: 'exhaustive_switch_arm' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'record\': return tr(\'Record\', \'记录\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'rule_live\': return tr(\'Live rule\', \'活体规则\')', rule: 'exhaustive_switch_arm' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'snapshot\': return tr(\'Frozen snapshot\', \'冻结快照\')', rule: 'exhaustive_switch_arm' },
   { file: 'packages/core-backend/src/attendance/w4c0-write-boundary-types.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'SET current_calculation_id = $3::uuid, projection_owner = \'w4\',', rule: 'write_side_emitter' },

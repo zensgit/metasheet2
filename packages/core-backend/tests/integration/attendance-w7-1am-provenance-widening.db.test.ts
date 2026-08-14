@@ -17,11 +17,14 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
+import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
   ATTENDANCE_PROJECTION_OWNERS_V1,
+  ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1,
   ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1,
 } from '../../src/attendance/w7-provenance-domain'
+import { up as applyW7ProvenanceWidening } from '../../src/db/migrations/zzzz20260815120000_w7_1am_provenance_domain_widening'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -80,8 +83,27 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
   const org = `w7-1am-org-${RUN}`
   let constraints: Array<{ name: string; def: string }> = []
   let functions: Array<{ name: string; src: string }> = []
+  let migrationDb: Kysely<unknown> | undefined
 
   beforeAll(async () => {
+    // SHARED-DB REPLAY HAZARD (pre-existing, disclosed not introduced by W7-1a-M).
+    // Sibling suites re-run HISTORICAL migrations' `up()` against this same
+    // database — `attendance-w4c0-db-gates-e1.db.test.ts` calls
+    // `zzzz20260725120000.up()`, which `CREATE OR REPLACE`s the SHARED function
+    // `attendance_w4_records_pointer_guard` with its 2026-07-25 body. That
+    // silently reverts both W7-1a-M's widening AND zzzz20260731120000's
+    // witness-restore exception for whatever runs afterwards, so the live
+    // catalogue depends on suite ORDER rather than on migration order.
+    //
+    // Production is unaffected: migrations there apply in order and this slice's
+    // is last. Re-applying our own `up()` here (the same thing e1 does for its
+    // migration, and idempotent by construction) makes these assertions measure
+    // THIS migration's effect instead of the ambient order of the run.
+    migrationDb = new Kysely<unknown>({
+      dialect: new PostgresDialect({ pool: new Pool({ connectionString: dbUrl }) }),
+    })
+    await applyW7ProvenanceWidening(migrationDb)
+
     const constraintRows = await pool.query(
       `SELECT conname AS name, pg_get_constraintdef(oid) AS def
          FROM pg_constraint
@@ -103,6 +125,7 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
   }, 60000)
 
   afterAll(async () => {
+    await migrationDb?.destroy()
     await pool.end()
   })
 
@@ -222,6 +245,23 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
       expect(await evaluateInList(String(guard?.src), marker, owner)).toBe(true)
     }
     expect(await evaluateInList(String(guard?.src), marker, 'legacy_untracked')).toBe(false)
+  })
+
+  it('the interpolated closure predicate is valid SQL and selects exactly the pointer owners', async () => {
+    // `w4c3a-import-rollback-boundary.ts` builds its closure precondition by
+    // interpolating this list. Executing the same rendered fragment proves the
+    // text Postgres will actually parse, which no source-level check can.
+    const { rows } = await pool.query(
+      `SELECT v AS owner,
+              (v IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1})) AS hit
+         FROM unnest($1::text[]) AS v`,
+      [['legacy_untracked', 'w4', NEW_OWNER, 'w4_team']],
+    )
+    const hits = new Map(rows.map((row) => [String(row.owner), row.hit as boolean]))
+    expect(hits.get('w4')).toBe(true)
+    expect(hits.get(NEW_OWNER)).toBe(true)
+    expect(hits.get('legacy_untracked')).toBe(false)
+    expect(hits.get('w4_team')).toBe(false)
   })
 
   // -------------------------------------------------------------------------
