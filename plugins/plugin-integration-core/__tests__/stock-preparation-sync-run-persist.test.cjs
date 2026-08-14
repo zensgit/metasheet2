@@ -254,6 +254,97 @@ async function main() {
     assert.equal(logicalOf(recordsApi.createCalls[0]).projectId, 'proj_1')
   })
 
+  await run('atomic version allocation reuses stored version on exact replay and allocates max+1 for a changed batch', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const first = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ allocateSnapshotVersion: true }),
+    })
+    assert.equal(first.mode, 'created')
+    assert.equal(logicalOf(recordsApi.createCalls[0]).snapshotVersion, 1)
+
+    const createsBeforeReplay = recordsApi.createCalls.length
+    const replay = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ allocateSnapshotVersion: true }),
+    })
+    assert.equal(replay.mode, 'skipped_existing')
+    assert.equal(recordsApi.createCalls.length, createsBeforeReplay, 'exact replay writes nothing')
+
+    const changed = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({
+        allocateSnapshotVersion: true,
+        syncRunId: 'run_2',
+        snapshotBatchId: 'batch_2',
+        expansionResult: cleanExpansionResult().map((row) => ({ ...row, sourceVersion: 'V3' })),
+      }),
+    })
+    assert.equal(changed.mode, 'created')
+    const batchVersions = recordsApi.createCalls
+      .filter((call) => call.sheetId === BATCH_SHEET_ID)
+      .map((call) => logicalOf(call).snapshotVersion)
+    assert.deepEqual(batchVersions, [1, 2])
+  })
+
+  await run('atomic version allocation rejects an explicit snapshotVersion before provisioning or records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({ allocateSnapshotVersion: true, snapshotVersion: 7 }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_CONFIG_INVALID' && error.details.field === 'snapshotVersion',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  await run('atomic version allocation policy rejects non-boolean values before provisioning or records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({ allocateSnapshotVersion: 'true', snapshotVersion: undefined }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_CONFIG_INVALID' &&
+        error.details.field === 'allocateSnapshotVersion',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  await run('atomic version allocation fails closed when project history exhausts the safe integer range', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ snapshotVersion: Number.MAX_SAFE_INTEGER }),
+    })
+    const createsBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({
+          allocateSnapshotVersion: true,
+          syncRunId: 'run_after_max',
+          snapshotBatchId: 'batch_after_max',
+        }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'history_unprovable',
+    )
+    assert.equal(recordsApi.createCalls.length, createsBefore, 'exhaustion writes nothing')
+  })
+
   // ---- project-scope split: targetProjectId (staging) resolves sheets; business projectId must NOT ----
   await run('targetProjectId is required — omitting it fails closed with NO provisioning/records access', async () => {
     const recordsApi = makeRecordsApi()
@@ -749,7 +840,13 @@ async function main() {
       const recordsApi = makeRecordsApi()
       const provisioning = makeProvisioning()
       await assert.rejects(
-        () => persistStockPreparationSyncRun({ permission, recordsApi, provisioning, ...basePlanInputs() }),
+        () => persistStockPreparationSyncRun({
+          permission,
+          recordsApi,
+          provisioning,
+          ...basePlanInputs(),
+          allocateSnapshotVersion: 'malformed',
+        }),
         (error) =>
           error instanceof StockPreparationSyncRunPersistError &&
           error.status === 403 &&
