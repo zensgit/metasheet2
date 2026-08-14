@@ -155,8 +155,16 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-2',
     sharedHook: false,
     canonicalizedBy: 'W4C-2',
+    // Gate D2 (#4844) SPLIT `applyLivePunchProjectionLegacyV1`: its `attendance_events` INSERT
+    // moved verbatim into the new `insertLivePunchEventV1` seam (which the legacy adapter itself
+    // now calls, so the two paths are one writer), and the authoritative boundary branch calls
+    // that seam directly while skipping the `attendance_records` upsert. The DML is the SAME P01
+    // live-punch event insert under a new enclosing symbol — claimed here per-writer rather than
+    // registered as a new debt id, exactly as this entry's own header describes for renamed
+    // adapter-owned sites. A genuinely NEW event/record writer added to the plugin still fails CI.
     claims: (site) =>
       bySymbol(PLUGIN, /^applyLivePunchProjectionLegacyV1$/)(site) ||
+      bySymbol(PLUGIN, /^insertLivePunchEventV1$/)(site) ||
       bySymbol(PLUGIN, /^op$/)(site) ||
       bySymbol(PLUGIN, /^upsertAttendanceRecord$/)(site),
   },
@@ -589,6 +597,28 @@ const CURATED_DEBT_ENTRIES = [
         'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts',
         /^writeAuthoritativeReversalV1$/,
       )(site),
+  },
+  {
+    id: 'X07',
+    title: 'W4C-2 Gate D2 live_punch authoritative branch: the create-if-absent review-path parent placeholder INSERT on attendance_records (§7.5 F6 parent-state install).',
+    owningSlice: 'W4C-2',
+    sharedHook: false,
+    // Its own Gate-D2 marker, not the 'W4C-2' removed-by-adapter marker (pinned to the four
+    // legacy P01-P04 writers) and not Gate D1's. This is the canonical authoritative-path parent
+    // creator D2 adds, not a legacy site being canonicalized away.
+    canonicalizedBy: 'W4C-2-gate-d2',
+    // The ONLY business-bucket DML the D2 boundary branch adds: an `ON CONFLICT DO NOTHING`
+    // INSERT that installs the retired/`review_placeholder` parent when the day has no record
+    // yet, so the D1 core (whose `lockParent` fails RECORD_NOT_FOUND on an absent parent, and
+    // whose `writeReviewRow` never touches `attendance_records`) has a parent to write against.
+    // Every other write on that path belongs to an already-claimed owner: the punch event INSERT
+    // is P01's (via `insertLivePunchEventV1`), and the parent pointer/visibility move is X06's
+    // (the core's own `writeCompletedRow`). Claimed per-writer BY SYMBOL so a future
+    // attendance_records writer added to this boundary file cannot inherit the claim silently.
+    claims: bySymbol(
+      'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
+      /^insertAuthoritativeReviewPlaceholderParentV1$/,
+    ),
   },
   {
     id: 'X05',

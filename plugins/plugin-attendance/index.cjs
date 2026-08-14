@@ -24031,6 +24031,16 @@ module.exports = {
     // instead of asserting it in a comment.
     normalizeDateOnly,
   },
+  // Gate D2 (#4556 / #4844): the REAL split event-INSERT seam and the REAL legacy adapter, so
+  // the D2 boundary suite drives production bytes rather than a re-implementation. Exposing the
+  // legacy adapter here is what lets that suite wrap it in a call-count spy and prove the
+  // authoritative branch invokes it ZERO times (the P-A control-flow pin).
+  __attendanceW4c2LivePunchAdaptersForTests: {
+    insertLivePunchEventV1,
+    applyLivePunchProjectionLegacyV1,
+    resolveW4LiveCandidateInTransactionV1,
+    buildW4ShadowFrozenContextV1,
+  },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
     isPunchWithinShiftWindow,

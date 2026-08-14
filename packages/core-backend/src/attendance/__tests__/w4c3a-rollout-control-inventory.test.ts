@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
   ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1,
+  attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1,
   isAttendanceW4C2AuthoritativeEntrypointDeliveredV1,
   type AttendanceW4C2AuthoritativeEntrypointV1,
 } from '../w4c2-authoritative-delivery'
@@ -602,6 +603,18 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     // refusal call, and the attribution map only records functions that carry at least one.
     expect(counts).toEqual({ executeScheduledRunInternal: 2 })
     expect(countRefusalCalls(content)).toBe(2)
+  })
+
+  it('Gate D2 delivery-flip coupling: exactly ONE authoritative entrypoint remains undelivered, and no refusal call is attributed to executeLivePunch', () => {
+    // The promotion gate reads this count and demands ZERO, so promotion to `authoritative` still
+    // refuses after D2 — the count moved 2 -> 1, not 2 -> 0.
+    expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
+    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
+    const { counts } = attributeRefusalCallsV1(content)
+    // The static half of the P-A obligation: the new authoritative writer branch contains no
+    // refusal call of ANY spelling this file's pattern matches. (The behavioural fall-through pin
+    // is the zero-invocation adapter spy in the D2 real-DB suite, not this assertion.)
+    expect(counts.executeLivePunch ?? 0).toBe(0)
   })
 
   it('drift guard is load-bearing (delivered-flip class): declaring "scheduled" delivered via the test seam while the boundary source is unchanged mismatches on that key specifically', () => {
