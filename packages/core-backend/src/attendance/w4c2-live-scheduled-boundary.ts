@@ -66,10 +66,20 @@
  *  - effective `eligible`/`authoritative`: a legacy-only business time is
  *    rejected BEFORE any event/record/result/effect DML (the whole transaction
  *    rolls back, discarding the preflight claim).
- *  - effective `authoritative` write execution itself is NOT delivered by this
- *    slice: it fails closed before source DML (see
- *    `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED`); the state is unreachable in
- *    production (no rollout transition writer ships).
+ *  - effective `authoritative` (`live_punch` ONLY, Gate D2, #4844): the real
+ *    authoritative writer runs — split event INSERT (no legacy records upsert),
+ *    fail-closed retirement guard, create-if-absent review placeholder, then
+ *    `writeAuthoritativeSegmentCalculationV1` (the D1 core) owns the calc row,
+ *    the lineage, and the parent pointer. `scheduled` is STILL undelivered and
+ *    still fails closed at its two sites (see
+ *    `` `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` ``); D3 delivers it.
+ *    BYTE-NEUTRAL IN PRODUCTION regardless: `effectiveState==='authoritative'`
+ *    additionally requires an EXACT-org entry in
+ *    `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (wildcard never counts),
+ *    which is unset in production, so every production org collapses to
+ *    `legacy` and this branch is unreachable irrespective of DB contents. No
+ *    org goes authoritative without a separate, owner-actioned allowlist
+ *    change.
  *
  * Values-free discipline: closed codes only; no caller value in any error.
  */
@@ -145,6 +155,16 @@ import {
   type AttendanceW4ComparableDailyProjection,
 } from '../services/AttendanceW4CalculationDetail'
 import { isExpectedAttendanceShadowDifferenceV1 } from './w4c2-shadow-expected-differences'
+// Gate D2 (#4556 / #4844) — the authoritative live-punch writer's collaborators.
+import {
+  writeAuthoritativeSegmentCalculationV1,
+  type AttendanceAuthoritativeParentPreimageV1,
+} from './w4c2-authoritative-calculation-core'
+// The CANONICAL compatibility-fingerprint producer, shared byte-for-byte with import/rollback.
+// Never hand-rolled here, and never modeled on ops-retirement's separate 6-field
+// `dailyFingerprint` (a different, domainless digest — reconciling those two is out of scope).
+import { computeAttendanceImportRollbackPreimageFingerprintV1 } from './w4c3a-import-rollback'
+import { assertParentNotRetiredForAuthoritativePunchV1 } from './w4c3c-ops-retirement'
 
 // ---------------------------------------------------------------------------
 // Errors.
@@ -287,6 +307,20 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
     record: Record<string, unknown>
     workDateResolution: unknown
   }>
+  /**
+   * Gate D2 (#4556 / #4844): the SPLIT half of `applyLivePunchLegacy` — exactly its
+   * `attendance_events` `INSERT ... RETURNING *`, nothing else. The AUTHORITATIVE live-punch
+   * branch calls THIS (durable punch evidence + the wire `event`) and never the legacy adapter,
+   * because on that path the D1 core owns the `attendance_records` row and the legacy daily
+   * upsert must not run. Deliberately a SEPARATE injected seam rather than a `recordsUpsert`
+   * flag on `applyLivePunchLegacy`: the flag form would make the authoritative path's
+   * zero-invocation spy on `applyLivePunchLegacy` observe one call and destroy the control-flow
+   * pin that proves the writer branch returns before reaching the shadow adapter call site.
+   */
+  insertLivePunchEvent(
+    trx: AttendancePluginShapedTrxV1,
+    args: AttendanceLivePunchLegacyArgsV1,
+  ): Promise<Record<string, unknown>>
   /** P03/P04 verbatim absence INSERT..SELECT (NOT EXISTS) for the given users. */
   applyScheduledAbsenceLegacy(
     trx: AttendancePluginShapedTrxV1,
@@ -566,6 +600,18 @@ function isStrictInstant(value: unknown): boolean {
 
 interface ShadowTargetRow extends AttendanceW4ComparableDailyProjection {
   id: string
+  /**
+   * Gate D2 (#4556 / #4844) — parent-state columns the AUTHORITATIVE branch needs and the
+   * shadow branch ignores. They are read by the SAME single `FOR UPDATE` locked read (never a
+   * second lock/round-trip): the authoritative writer cannot build the §7.8 preimage, decide the
+   * F6 review-placeholder discriminator, or evaluate the retirement guard without them. The
+   * shadow path passes this row to `computeAttendanceW4ShadowDiff` as `legacyProjection`, which
+   * reads only the six named daily fields plus `workDate` — the extra members are inert there.
+   */
+  projectionOwner: 'legacy_untracked' | 'w4'
+  currentCalculationId: string | null
+  visibilityState: 'active' | 'retired'
+  visibilityReason: string
 }
 
 function approvedFactMinutes(
@@ -597,11 +643,18 @@ async function lockShadowParentRecord(
   // Section 8.2 step 5: class-11 final signed target key, then the parent row.
   const target = createVerifiedAttendanceCalculationTargetIdentityV1({ org, userId, workDate })
   await acquireAttendanceCalculationTargetLocks(client, [target])
+  // Gate D2 widened the projection list with the four parent-state columns (see
+  // `ShadowTargetRow`). `first_in_at`/`last_out_at` stay RAW `timestamptz` (never `::text`) so
+  // the authoritative compatibility fingerprint hashes exactly the instants it stores.
   const result = await client.query(
     `SELECT id::text AS id, work_date::text AS "workDate", status,
             first_in_at AS "firstInAt", last_out_at AS "lastOutAt",
             work_minutes AS "workMinutes", late_minutes AS "lateMinutes",
-            early_leave_minutes AS "earlyLeaveMinutes"
+            early_leave_minutes AS "earlyLeaveMinutes",
+            projection_owner AS "projectionOwner",
+            current_calculation_id::text AS "currentCalculationId",
+            visibility_state AS "visibilityState",
+            visibility_reason AS "visibilityReason"
        FROM attendance_records
       WHERE user_id = $1 AND org_id = $2 AND work_date = $3
       FOR UPDATE`,
@@ -618,7 +671,166 @@ async function lockShadowParentRecord(
     workMinutes: row.workMinutes === null ? null : Number(row.workMinutes),
     lateMinutes: row.lateMinutes === null ? null : Number(row.lateMinutes),
     earlyLeaveMinutes: row.earlyLeaveMinutes === null ? null : Number(row.earlyLeaveMinutes),
+    projectionOwner: row.projectionOwner === 'w4' ? 'w4' : 'legacy_untracked',
+    currentCalculationId:
+      typeof row.currentCalculationId === 'string' ? row.currentCalculationId : null,
+    visibilityState: row.visibilityState === 'retired' ? 'retired' : 'active',
+    visibilityReason: String(row.visibilityReason ?? ''),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Gate D2 (#4556 / #4844) — authoritative live-punch helpers.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create-if-absent review-path parent placeholder, in-txn under the target lock, BEFORE the core
+ * call. ALWAYS `legacy_untracked` / pointer NULL / `retired` / `review_placeholder` — never an
+ * outcome-conditional `active`.
+ *
+ * WHY `retired`, NOT `active` (this is the §7.5/F6 review-path parent-state install the D1 core
+ * header names as a D2 obligation): the core's `writeCompletedRow` baseline predicate is exactly
+ * `projectionOwner==='legacy_untracked' && visibilityState==='active'`. An `active` placeholder
+ * would trip it and demand a compatibility fingerprint for a projection that does not exist. A
+ * `retired`/`review_placeholder` placeholder makes the core skip the baseline entirely; for a
+ * COMPLETED outcome its own tail pointer UPDATE then flips the parent to `w4`/`active`/`active`
+ * in the same transaction — one atomic promotion. For a REVIEW outcome the placeholder is
+ * preserved as-is, invisible to `visibility_state='active'` readers.
+ *
+ * DAILY-FIELD FIDELITY — a schema constraint, disclosed rather than silently papered over: the
+ * spec calls for every mutable W4-owned daily field to be NULL. `attendance_records.status`,
+ * `work_minutes`, `late_minutes` and `early_leave_minutes` are `NOT NULL` columns (with a closed
+ * `status` CHECK), so literal NULL is not writable for those four. This inserts the schema's own
+ * neutral defaults for them and genuine NULLs for the two nullable instants
+ * (`first_in_at`/`last_out_at`), which is the minimum-fabrication row the schema admits — and
+ * strictly less fabrication than the existing import-side precedent, which writes the real
+ * compatibility projection into a review placeholder. The row is never reader-visible while it
+ * holds this state: hiding is done by `visibility_state='retired'`, not by NULL-ness.
+ *
+ * POISON-RACE: `ON CONFLICT (user_id, work_date, org_id) DO NOTHING` (the in-file idiom and the
+ * actual unique key) so a concurrent creator resolves to a PRODUCT outcome, never a raw 23505
+ * that poisons the whole transaction. Zero rows returned means this caller LOST the race; the
+ * caller must then re-`SELECT ... FOR UPDATE` and re-enter the full retirement/preimage
+ * resolution — the winner's row may be a legacy-ACTIVE row, not another placeholder.
+ *
+ * A plain `ON CONFLICT` (rather than the F1 SAVEPOINT form) is legal here ONLY because this is
+ * the FIRST DML the authoritative branch performs — Step 1's reject and Step 2's locked read are
+ * DML-free. If any future change moves other DML ahead of this INSERT, the SAVEPOINT form
+ * becomes MANDATORY, not a style preference.
+ */
+async function insertAuthoritativeReviewPlaceholderParentV1(
+  client: AttendanceW4TransactionClientV1,
+  input: Readonly<{ orgId: string; userId: string; workDate: string; timezone: string; isWorkday: boolean }>,
+): Promise<{ created: boolean }> {
+  const result = await client.query(
+    `INSERT INTO attendance_records (
+        org_id, user_id, work_date, timezone,
+        first_in_at, last_out_at,
+        work_minutes, late_minutes, early_leave_minutes, status,
+        is_workday, meta, source_batch_id,
+        projection_owner, current_calculation_id, visibility_state, visibility_reason,
+        created_at, updated_at
+      ) VALUES (
+        $1, $2, $3::date, $4,
+        NULL, NULL,
+        0, 0, 0, 'normal',
+        $5, '{}'::jsonb, NULL,
+        'legacy_untracked', NULL, 'retired', 'review_placeholder',
+        now(), now()
+      )
+      ON CONFLICT (user_id, work_date, org_id) DO NOTHING
+      RETURNING id::text AS id`,
+    [input.orgId, input.userId, input.workDate, input.timezone, input.isWorkday],
+  )
+  return { created: result.rows.length === 1 }
+}
+
+/**
+ * The §7.8 frozen write-before parent witness the D1 core validates against, plus the caller's
+ * `expectedCurrentCalculationId`.
+ *
+ * The compatibility fingerprint is LOAD-BEARING only for a present legacy-ACTIVE parent: the
+ * core stores it verbatim as the `legacy_baseline` row's `projected_daily_fingerprint` and fails
+ * `PREIMAGE_INVALID` when it is absent. It is computed for every present parent regardless (so
+ * neither owner fork leaves a latent landmine) via the CANONICAL
+ * `computeAttendanceImportRollbackPreimageFingerprintV1`, so the digest is byte-identical to the
+ * one import/rollback freezes over the same parent state — never a fourth hand-rolled copy.
+ *
+ * Instants are normalized to ISO before hashing AND the same normalized values are what the
+ * preimage stores, so the stored projection and the hashed projection are the same bytes.
+ */
+function buildAuthoritativeLivePunchPreimageV1(
+  parent: ShadowTargetRow,
+): { preimage: AttendanceAuthoritativeParentPreimageV1; expectedCurrentCalculationId: string | null } {
+  const projection = {
+    status: parent.status === null ? '' : String(parent.status),
+    firstInAt: normalizeInstantIsoV1(parent.firstInAt),
+    lastOutAt: normalizeInstantIsoV1(parent.lastOutAt),
+    workMinutes: Math.max(0, Math.trunc(parent.workMinutes ?? 0)),
+    lateMinutes: Math.max(0, Math.trunc(parent.lateMinutes ?? 0)),
+    earlyLeaveMinutes: Math.max(0, Math.trunc(parent.earlyLeaveMinutes ?? 0)),
+  }
+  const compatibilityFingerprint = computeAttendanceImportRollbackPreimageFingerprintV1({
+    projection,
+    projectionOwner: parent.projectionOwner,
+    currentCalculationId: parent.currentCalculationId,
+    visibilityState: parent.visibilityState,
+    visibilityReason: parent.visibilityReason,
+  })
+  return {
+    preimage: {
+      posture: 'present',
+      projectionOwner: parent.projectionOwner,
+      currentCalculationId: parent.currentCalculationId,
+      visibilityState: parent.visibilityState,
+      visibilityReason: parent.visibilityReason as 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement',
+      projection,
+      compatibilityFingerprint,
+    },
+    // Always the LOCKED actual, never a recomputed or assumed value; the core cross-checks it
+    // under its own `FOR UPDATE` re-lock and fails VERSION_CONFLICT on a mismatch.
+    expectedCurrentCalculationId: parent.currentCalculationId,
+  }
+}
+
+function normalizeInstantIsoV1(value: string | Date | null): string | null {
+  if (value === null || value === undefined) return null
+  const date = value instanceof Date ? value : new Date(value)
+  const ms = date.getTime()
+  if (!Number.isFinite(ms)) return null
+  return date.toISOString()
+}
+
+/**
+ * Deterministic payload identity for the core's retry-idempotency conflict check. The core reads
+ * `input_provenance.payloadFingerprint` VERBATIM off the stored row on a retry, so this value
+ * must (a) be derived only from the resolved command payload — never from a clock, a random id,
+ * or the operation id itself — and (b) be embedded in BOTH `input.payloadFingerprint` and
+ * `inputProvenance.payloadFingerprint`. Omitting the embedded copy makes a genuine retry read
+ * `null`, mismatch, and surface `REPLAY_CONFLICT` where §7.3 requires a replay.
+ */
+function computeAuthoritativeLivePunchPayloadFingerprintV1(
+  input: AttendanceLivePunchBoundaryInputV1,
+): string {
+  return sha256Hex(
+    'metasheet2:attendance:w4c2:live-punch-authoritative-payload:v1 '
+    + canonicalAttendanceJsonV1({
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      eventType: input.eventType,
+      occurredAt: input.occurredAtRaw ?? input.occurredAtResolved,
+      occurredAtResolved: input.occurredAtResolved,
+      timezone: input.timezone,
+      requestTimezone: input.requestTimezone,
+      source: input.source,
+      location: wireJson(input.location ?? null),
+      meta: wireJson(input.meta ?? null),
+      photoFileRef: input.photoFileRef,
+      isWorkday: input.isWorkday,
+      holidayKind: input.holidayKind,
+    }),
+  )
 }
 
 async function nextCalculationVersion(
@@ -1070,6 +1282,11 @@ export function createAttendanceLiveScheduledBoundaryV1(
   if (
     !adapters ||
     typeof adapters.applyLivePunchLegacy !== 'function' ||
+    // Gate D2: required, never optional — a host that provided the boundary but omitted the
+    // split event seam would make an authoritative punch lose its own durable evidence. Folding
+    // it into the SAME fail-closed gate keeps that state unreachable (the boundary simply does
+    // not exist), instead of degrading at write time.
+    typeof adapters.insertLivePunchEvent !== 'function' ||
     typeof adapters.applyScheduledAbsenceLegacy !== 'function' ||
     typeof adapters.resolveLiveCandidate !== 'function' ||
     typeof adapters.resolveScheduledCandidate !== 'function' ||
@@ -1264,16 +1481,335 @@ export function createAttendanceLiveScheduledBoundaryV1(
           return { kind: 'legacy_compat' as const, response: result }
         }
 
+        // Three-posture matrix: a business time only the legacy parser accepts.
+        // HOISTED above the authoritative branch by Gate D2 so both the authoritative reject
+        // (below, first thing in the branch) and the eligible reject (further down) read ONE
+        // predicate rather than two copies that could drift. Pure and DML-free (`isStrictInstant`
+        // is a try/catch around the strict instant parser), so hoisting it is behaviour-
+        // preserving for every other posture.
+        const legacyOnlyTime = input.occurredAtRaw !== null && !isStrictInstant(input.occurredAtRaw)
+
         // W4 posture. Distinguish effective shadow vs eligible vs authoritative
         // (still under the org rollout shared lock acquired above).
         if (posture.effectiveState === 'authoritative' || org.acceptedWritePosture === 'authoritative') {
-          // The authoritative live writer is NOT delivered by W4C-2; fail
-          // closed before any source DML (whole transaction rolls back).
-          boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', 503)
+          // ===================================================================
+          // Gate D2 (#4556 / #4844) — the AUTHORITATIVE live-punch writer.
+          //
+          // REPLACEMENT, NOT A DELETE. This branch body previously failed closed. Deleting it
+          // instead of replacing it would let an allowlisted authoritative org's punch fall
+          // through to the shadow `applyLivePunchLegacy` call below — a silent 503-to-legacy-
+          // projection conversion, fail-OPEN the instant the allowlist gains an authoritative
+          // entry. The branch body must always be a real writer, and it must `return`/throw
+          // before control can reach that call site (pinned behaviourally by the zero-invocation
+          // spy on the injected `applyLivePunchLegacy`).
+          //
+          // Deliberate deviation from §8.2's step-4-before-step-5 numbering: the parent lock is
+          // taken BEFORE the in-transaction W2 re-resolution here, because the retirement guard
+          // and the create-if-absent placeholder must both settle before ANY source DML (the
+          // split event INSERT included). Safe: the two orderings cannot interleave, because the
+          // org rollout SHARED advisory lock is held for the whole transaction on BOTH paths and
+          // a posture transition needs the EXCLUSIVE one — so every in-flight punch for an org
+          // sees the same posture, and a shadow punch can never be concurrent with an
+          // authoritative punch on the same parent row.
+          // ===================================================================
+
+          // -- Step 1: legacy-only business time is REJECTED, with ZERO DML ------------------
+          // The eligible reject below never evaluates on this path (it is gated on
+          // `effectiveState === 'eligible'`), so this is a genuinely new in-branch check, not a
+          // widened existing one. Authoritative may never be LOOSER than eligible: §12.3 requires
+          // effective eligible|authoritative to reject before event/request/result/effect DML.
+          // The whole transaction rolls back, discarding the preflight claim; no event row, no
+          // record row, no calculation row, and no `attendance.punched` outbox row (the enqueue
+          // is further down, after this point).
+          if (legacyOnlyTime) {
+            throw new AttendanceW4OperationError('W4_ATTRIBUTION_UNSUPPORTED')
+          }
+
+          // -- Step 2: the widened locked parent read (class-11 target lock + FOR UPDATE) ------
+          // Read-only. Also re-locked by the core's own `lockParent FOR UPDATE by id` inside the
+          // same transaction (a no-op re-lock); the boundary's advisory target lock precedes the
+          // row lock and the core takes no advisory lock, so there is no inversion.
+          let authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
+
+          // -- Step 3a: absent parent → create-if-absent review placeholder --------------------
+          // The FIRST DML this branch performs (Steps 1-2 are a throw and a SELECT), which is
+          // exactly what makes plain ON CONFLICT DO NOTHING legal here without a SAVEPOINT.
+          if (authoritativeParent === null) {
+            await insertAuthoritativeReviewPlaceholderParentV1(trx, {
+              orgId: envelope.orgId,
+              userId: input.userId,
+              workDate: input.workDate,
+              timezone: input.timezone,
+              isWorkday: input.isWorkday,
+            })
+            // ALWAYS re-read under the lock — never assume our own placeholder won. On a lost
+            // race the winner's row may be a legacy-ACTIVE row (compat fingerprint becomes
+            // load-bearing), another review placeholder, or a RETIRED row (refused below); this
+            // re-entry is what routes every one of those to the same resolution path.
+            authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
+            if (authoritativeParent === null) {
+              // Neither our INSERT nor a racer's produced a visible row under our own lock —
+              // a programming/DB-state error, not a business outcome.
+              boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
+            }
+          }
+
+          // -- Step 3b: DEFAULT-REFUSE retirement guard ---------------------------------------
+          // Runs before any FURTHER DML — before the split event INSERT and before the core call.
+          // (In the absent branch above the only preceding DML is our own placeholder INSERT,
+          // which either created a `review_placeholder` row that this guard admits, or wrote
+          // nothing at all; so no refusing case ever leaves a write behind.)
+          //
+          // The core is reason-BLIND: its `lockParent` SELECT omits `visibility_reason` and its
+          // completed-path pointer UPDATE reactivates the parent to `w4/active/active`
+          // UNCONDITIONALLY. The boundary is the only reason-aware reader, so the guard belongs
+          // here. It is also precisely the guard the Step-4 adapter split removes from this path:
+          // the legacy punch's own operator-retirement refusal lives inside the
+          // `attendance_records` upsert that the split drops.
+          //
+          // D2 default on the `import_rollback` fork is explicit REFUSE (never a bare completed
+          // that reactivates a rolled-back day); routing it through the governed preimage-freeze
+          // reactivation instead is an owner product call, not a build-time choice.
+          assertParentNotRetiredForAuthoritativePunchV1({
+            visibilityState: authoritativeParent.visibilityState,
+            visibilityReason: authoritativeParent.visibilityReason,
+          })
+
+          // -- Step 4: split event INSERT, then the shared compute ----------------------------
+          // The SPLIT half only: durable punch evidence + the wire `event`. The legacy daily
+          // `attendance_records` upsert is deliberately NOT run — the core owns that row on this
+          // path. `adapters.applyLivePunchLegacy` is never called from this branch.
+          const authoritativeEvent = await adapters.insertLivePunchEvent(pluginTrx, legacyPunchArgs)
+
+          const authoritativeNowIso = new Date().toISOString()
+          const authoritativeResolution = await adapters.resolveLiveCandidate(pluginTrx, {
+            orgId: envelope.orgId,
+            userId: input.userId,
+            occurredAt: input.occurredAtResolved,
+            // PRE-resolution timezone, anchor deliberately omitted — identical contract to the
+            // shadow branch's own call (see `resolveLiveCandidate`'s doc comment).
+            timezone: input.requestTimezone,
+          })
+          const authoritativeAttribution = attributionFromResolution(authoritativeResolution, {
+            orgId: envelope.orgId,
+            userId: input.userId,
+            source: 'live_resolution',
+            nowIso: authoritativeNowIso,
+          })
+          let authoritativeContext: FrozenAttendanceContextV1 | null = null
+          if (authoritativeAttribution.posture === 'resolved_v2') {
+            authoritativeContext = await adapters.buildShadowFrozenContext(pluginTrx, {
+              orgId: envelope.orgId,
+              userId: input.userId,
+              workDate: authoritativeAttribution.value.workDate,
+              shiftId: authoritativeAttribution.value.shiftId,
+              timezone: authoritativeResolution.fullWinner?.timezone ?? input.requestTimezone,
+              isWorkday: input.isWorkday,
+              holidayKind: input.holidayKind,
+            })
+          }
+          // Evidence is loaded AFTER the split INSERT so this punch is inside its own evidence
+          // set — otherwise a day's first check-in could never produce a completed segment.
+          const authoritativeEvidenceAnchorWorkDate =
+            authoritativeAttribution.posture === 'resolved_v2'
+              ? authoritativeAttribution.value.workDate
+              : input.workDate
+          const authoritativeEvidence = await loadLivePunchEvidence(
+            trx,
+            envelope.orgId,
+            input.userId,
+            authoritativeEvidenceAnchorWorkDate,
+          )
+          const authoritativeCalculated = calculateAttendanceSegmentsV1({
+            attribution: authoritativeAttribution,
+            context: authoritativeContext,
+            evidence: authoritativeEvidence,
+            approvedFacts: [],
+          })
+
+          // identityDrift override (canonical freeze semantics §4.2 candidate (i)), computed
+          // exactly as the shadow branch does. On the AUTHORITATIVE path this override is
+          // load-bearing rather than cosmetic: passing the raw calculator result through on a
+          // drifted punch would write a COMPLETED row and MOVE THE PARENT POINTER onto an
+          // attribution whose identity the operation never committed to.
+          const authoritativeInnerComparableFingerprint =
+            authoritativeAttribution.posture === 'resolved_v2'
+              ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({
+                  attribution: authoritativeAttribution,
+                  context: authoritativeContext,
+                })
+              : null
+          const authoritativeIdentityMismatch =
+            authoritativeAttribution.posture === 'resolved_v2' &&
+            (authoritativeAttribution.value.workDate !== input.workDate
+              || authoritativeAttribution.value.shiftId !== input.shiftId)
+          const authoritativeFingerprintMismatch =
+            authoritativeAttribution.posture === 'resolved_v2' &&
+            authoritativeInnerComparableFingerprint !== input.outerSourceDefinitionFingerprint
+          const authoritativeIdentityDrift =
+            authoritativeIdentityMismatch || authoritativeFingerprintMismatch
+          const authoritativeCalculation: AttendanceSegmentCalculationResultV1 =
+            authoritativeIdentityDrift
+              ? {
+                  outcome: 'review_required',
+                  outcomeReasonCode: 'context_mismatch',
+                  segments: [],
+                  dailyProjection: null,
+                }
+              : authoritativeCalculated
+
+          // -- Steps 5 & 6: preimage + expected pointer, and the payload fingerprint ----------
+          const authoritativeProvenanceRef: AttendanceInputProvenanceRefV1 = {
+            transport: 'live_event',
+            sourceRef: LIVE_SOURCE_REF,
+            artifactSha256: null,
+            normalizedCsvSha256: null,
+            convertedSheetName: null,
+          }
+          const authoritativePayloadFingerprint =
+            computeAuthoritativeLivePunchPayloadFingerprintV1(input)
+          const { preimage: authoritativePreimage, expectedCurrentCalculationId } =
+            buildAuthoritativeLivePunchPreimageV1(authoritativeParent)
+
+          // -- Step 7: the core owns the calc row, the lineage, and the parent pointer --------
+          const authoritativeWritten = await writeAuthoritativeSegmentCalculationV1(trx, {
+            orgId: envelope.orgId,
+            recordId: authoritativeParent.id,
+            entrypoint: 'live',
+            operationId: identity.id,
+            calculation: authoritativeCalculation,
+            attribution: authoritativeAttribution,
+            context: authoritativeContext,
+            evidence: authoritativeEvidence as unknown as readonly unknown[],
+            approvedFacts: [],
+            provenanceRef: authoritativeProvenanceRef,
+            // BOTH places: top-level for the core's own conflict check, and embedded so a
+            // genuine retry's `input_provenance.payloadFingerprint` read matches.
+            inputProvenance: {
+              ...authoritativeProvenanceRef,
+              payloadFingerprint: authoritativePayloadFingerprint,
+            },
+            payloadFingerprint: authoritativePayloadFingerprint,
+            preimage: authoritativePreimage,
+            expectedCurrentCalculationId,
+            sourceBatchId: null,
+            actorId: authorization.actorId,
+            correlationId: envelope.correlationId,
+          })
+
+          // Seal fingerprints are RECOMPUTED at the boundary over the same inputs the core
+          // hashed — the core's return shape is deliberately unchanged by D2. The tier arg MUST
+          // be `segment_authoritative`: copying the shadow builder's `legacy_shadow` would seal a
+          // fingerprint that does not match the persisted authoritative row.
+          const authoritativeSemanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
+            attribution: authoritativeAttribution,
+            context: authoritativeContext,
+            evidence: authoritativeEvidence,
+            approvedFacts: [],
+            manualOverride: null,
+            mergePolicy: 'append',
+            calculationTier: 'segment_authoritative',
+            engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+            snapshotSchemaVersion: 1,
+          })
+          const authoritativeProvenanceFingerprint =
+            computeAttendanceProvenanceFingerprintV1(authoritativeProvenanceRef)
+
+          // Outbox BEFORE seal (lock 8.2 steps 14-15), unconditional — byte-identical to the
+          // shadow path's own enqueue, which already fires for review outcomes today. Whether a
+          // review-only authoritative outcome SHOULD emit `attendance.punched` is an open product
+          // question; D2 changes nothing about it.
+          await enqueueAttendanceResultEventOutboxV1(trx, identity, [
+            {
+              eventKind: 'attendance.punched',
+              payload: {
+                userId: input.userId,
+                orgId: envelope.orgId,
+                workDate: input.workDate,
+                eventType: input.eventType,
+                occurredAt: input.occurredAtResolved,
+                timezone: input.timezone,
+              },
+              payloadSchemaVersion: 1,
+              businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+                kind: 'attendance.punched',
+                orgId: envelope.orgId,
+                operationId: identity.id,
+              }),
+            },
+          ])
+
+          // -- Step 8a: synthesize the `{event, record, workDateResolution}` caller response ---
+          // There is no legacy adapter `result` on this path, so the wire shape is built here.
+          // `record` for a COMPLETED outcome is mapped from the calculation's own
+          // `dailyProjection` (camelCase `PreparedDailyProjectionV1`). This is a CONFIRMED
+          // client-contract change from the snake_case `attendance_records` row the legacy
+          // adapter returns today; it ships as the specified default and is pinned by an exact
+          // key-set golden test so any drift — in either direction — is loud rather than silent.
+          // The documented alternative (re-SELECT the persisted row after the core call) is an
+          // owner decision, not a build-time one.
+          const authoritativeRecord = authoritativeCalculation.dailyProjection !== null
+            ? {
+                firstInAt: authoritativeCalculation.dailyProjection.firstInAt,
+                lastOutAt: authoritativeCalculation.dailyProjection.lastOutAt,
+                workedMinutes: authoritativeCalculation.dailyProjection.workedMinutes,
+                lateMinutes: authoritativeCalculation.dailyProjection.lateMinutes,
+                earlyLeaveMinutes: authoritativeCalculation.dailyProjection.earlyLeaveMinutes,
+                status: authoritativeCalculation.dailyProjection.status,
+                timezone: authoritativeCalculation.dailyProjection.timezone,
+                workDate: authoritativeCalculation.dailyProjection.workDate,
+                meta: authoritativeCalculation.dailyProjection.meta,
+              }
+            // Review outcome: an all-NULL acknowledgement in the SAME key set, so the wire shape
+            // does not change between outcomes. Whether a review should instead echo the
+            // preserved legacy columns is the second half of the same owner question.
+            : {
+                firstInAt: null,
+                lastOutAt: null,
+                workedMinutes: null,
+                lateMinutes: null,
+                earlyLeaveMinutes: null,
+                status: null,
+                timezone: null,
+                workDate: null,
+                meta: null,
+              }
+          const authoritativeResponse = {
+            event: authoritativeEvent,
+            record: authoritativeRecord,
+            // Populated explicitly from THIS transaction's own frozen resolution/attribution —
+            // never left undefined, and never sourced from the split event INSERT (which does
+            // not produce one).
+            workDateResolution: {
+              kind: authoritativeResolution.kind,
+              workDate: authoritativeResolution.workDate ?? null,
+              shiftId: authoritativeResolution.shiftId ?? null,
+              reasonCode: authoritativeResolution.reasonCode ?? null,
+              attributionPosture: authoritativeAttribution.posture,
+            },
+          }
+
+          await sealAttendanceResultOperationV1(trx, identity, {
+            responseSnapshot: wireJson(authoritativeResponse),
+            resolvedRecordId: authoritativeParent.id,
+            resolvedCalculationId: authoritativeWritten.calculationId,
+            resultSemanticFingerprint: authoritativeSemanticFingerprint,
+            resultProvenanceFingerprint: authoritativeProvenanceFingerprint,
+          })
+
+          // The P-A obligation: this `return` is what keeps control from reaching the shadow
+          // `applyLivePunchLegacy` call site below.
+          return {
+            kind: 'w4' as const,
+            response: authoritativeResponse,
+            shadow: {
+              calculationId: authoritativeWritten.calculationId,
+              outcome: authoritativeCalculation.outcome,
+              outcomeReasonCode: authoritativeCalculation.outcomeReasonCode,
+            },
+          }
         }
 
-        // Three-posture matrix: a business time only the legacy parser accepts.
-        const legacyOnlyTime = input.occurredAtRaw !== null && !isStrictInstant(input.occurredAtRaw)
         if (legacyOnlyTime && posture.effectiveState === 'eligible') {
           // Reject BEFORE event/request/result/effect DML: rollback discards
           // the preflight claim; no source row is ever written.

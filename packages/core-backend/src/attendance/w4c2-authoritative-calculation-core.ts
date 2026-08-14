@@ -10,16 +10,22 @@
  * authoritative deltas: `legacy_baseline` snapshotting, `supersedes`/`restores` lineage, the
  * parent-pointer/visibility move, preimage freezing, and reversal restore/retire.
  *
- * WHAT THIS IS NOT (INERT / byte-neutral, Gate D1): this module is NOT called by any production
- * path. The live/scheduled boundary still fails closed — it still refuses the authoritative write
- * with the boundary code `` `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` `` (backtick-quoted here on
- * purpose; this file must never spell that code as a `boundaryFail(...)` call, see the
- * correspondence guard `w4c3a-rollout-control-inventory.test.ts`). No `boundaryFail` site is
- * removed by this slice, `DECLARED_DELIVERED` stays `{live_punch:false, scheduled:false}`, and the
- * shadow path is untouched (byte-identical by absence from this diff). D2 wires `live_punch`, D3
- * wires `scheduled`; each removes a refusal site and flips its declaration in its own reviewed
- * change. Until then this core is exercised ONLY by its real-DB test suite
- * (`attendance-w4c2-authoritative-calculation-core.db.test.ts`).
+ * WHO CALLS THIS (updated by Gate D2, #4844 — this module is NO LONGER INERT): the live/scheduled
+ * boundary's `executeLivePunch` calls `writeAuthoritativeSegmentCalculationV1` on the effective-
+ * `authoritative` path. `scheduled` is STILL undelivered and still refuses with the boundary code
+ * `` `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` `` at its two remaining sites (backtick-quoted here
+ * on purpose; this file must never spell that code as a `boundaryFail(...)` call, see the
+ * correspondence guard `w4c3a-rollout-control-inventory.test.ts`); `DECLARED_DELIVERED` is
+ * `{live_punch:true, scheduled:false}`, and D3 wires `scheduled`.
+ *
+ * PRODUCTION REACHABILITY IS STILL ZERO, but for a different reason than in D1: the caller branch
+ * fires only for an org whose `effectiveState` resolves to `authoritative`, which additionally
+ * requires an EXACT-org entry in `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (wildcard never
+ * counts). That env is unset in production, so every production org collapses to `legacy` and this
+ * core is unreachable irrespective of DB contents — until a separate, owner-actioned allowlist
+ * change. Coverage: this module's own real-DB suite
+ * (`attendance-w4c2-authoritative-calculation-core.db.test.ts`) PLUS the D2 boundary suite
+ * (`attendance-w4c2-d2-live-punch-authoritative.db.test.ts`).
  *
  * DESIGN — two enforcement layers per invariant (repo doctrine: gate the MECHANISM, and a mutation
  * must be able to redden it — feedback_gate_the_mechanism_not_the_claim.md):
@@ -37,25 +43,32 @@
  * mirrors the four existing private copies byte-for-byte (same domain-separated hash); the four are
  * intentionally left un-rewired (that is a separate, non-inert refactor).
  *
- * OPEN SEAMS / D2 obligations (named, not resolved here):
- *  1. legacy_baseline fingerprint is caller-supplied (`preimage.compatibilityFingerprint`) on purpose
- *     — self-computing it here is the import-kernel trap (kernel :907-909 binds the frozen preimage
- *     fingerprint, not a recomputed one). Today ONLY the import/rollback/ops paths freeze a
- *     `compatibilityFingerprint`; the live/scheduled boundary has no producer. D2 (live_punch) must
- *     supply one — deterministically, over the parent's legacy daily projection — before it can call
- *     the completed path on an active legacy parent, or `PREIMAGE_INVALID` fails closed. Cross-path
- *     fingerprint values are inconsequential for uniqueness (see the existence-read note below), but
- *     the live path still needs SOME frozen source.
- *  2. PARENT-STATE ASYMMETRY (F6): the completed path moves the parent pointer/visibility and the
- *     reversal path restores/retires it, but `writeReviewRow` writes ONLY the calc row and NEVER
- *     touches `attendance_records`. §7.5 requires a FRESH authoritative review to leave the parent
- *     `legacy_untracked`/pointer-null/retired/`review_placeholder` so ordinary readers see no
- *     fabricated zero-minute row. Deciding fresh-vs-existing review is a BOUNDARY concern, so the
- *     core deliberately does not touch the parent here — but D2/D3 MUST install that retired/
- *     `review_placeholder` state in the SAME transaction for a fresh authoritative review, unlike the
- *     completed/reversal paths which self-manage the parent. This asymmetry is the footgun; it is a
- *     named D2 obligation, not an ambient concern. (The invariant-5 test installs that precondition by
- *     fixture; it proves the "later completed needs no baseline" branch, not the boundary's install.)
+ * CALLER SEAMS — the two D1 named as D2 obligations are now DISCHARGED for `live_punch`; both stay
+ * open for `scheduled` until D3:
+ *  1. [DISCHARGED for live_punch] legacy_baseline fingerprint is caller-supplied
+ *     (`preimage.compatibilityFingerprint`) on purpose — self-computing it here is the import-kernel
+ *     trap (kernel :907-909 binds the frozen preimage fingerprint, not a recomputed one). The
+ *     live/scheduled boundary now produces one for `live_punch` via the CANONICAL
+ *     `computeAttendanceImportRollbackPreimageFingerprintV1` (byte-identical to import/rollback,
+ *     never a fifth hand-rolled copy), frozen under the parent `FOR UPDATE` over the pre-
+ *     authoritative legacy projection. Without it the completed path on an active legacy parent
+ *     fails closed with `PREIMAGE_INVALID`. Cross-path fingerprint values are inconsequential for
+ *     uniqueness (see the existence-read note below).
+ *  2. [DISCHARGED for live_punch] PARENT-STATE ASYMMETRY (F6): the completed path moves the parent
+ *     pointer/visibility and the reversal path restores/retires it, but `writeReviewRow` writes ONLY
+ *     the calc row and NEVER touches `attendance_records`. §7.5 requires a FRESH authoritative review
+ *     to leave the parent `legacy_untracked`/pointer-null/retired/`review_placeholder` so ordinary
+ *     readers see no fabricated active row. Deciding fresh-vs-existing review is a BOUNDARY concern,
+ *     so the core still does not touch the parent here — the `live_punch` boundary installs that
+ *     state itself, create-if-absent, in the SAME transaction and BEFORE this core call.
+ *  3. [OPEN — D3 forward obligation] REASON-BLINDNESS: `lockParent` omits `visibility_reason` and
+ *     `writeCompletedRow`'s tail pointer UPDATE reactivates the parent to `w4/active/active`
+ *     UNCONDITIONALLY, so this core will happily reactivate an `operator_retirement`- or
+ *     `import_rollback`-retired parent. `live_punch` is covered because its boundary branch runs a
+ *     default-refuse retirement guard (`assertParentNotRetiredForAuthoritativePunchV1`) before
+ *     calling in. D3 MUST replicate that boundary guard for `scheduled`, or land the optional core
+ *     extension (lockParent returns `visibility_reason`; `writeCompletedRow` refuses promotion over a
+ *     retired parent whose reason is not `review_placeholder`) together with D3.
  *
  * Concurrency notes:
  *  - The completed/review path is idempotent under CONCURRENT same-(org,entrypoint,operation_id)
@@ -144,6 +157,27 @@ function fail(
 }
 
 const HEX64 = /^[0-9a-f]{64}$/
+
+/**
+ * The EXACT domain of the DB CHECK `chk_arc_projected_status` (migration
+ * `zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts`, its own
+ * `DAILY_STATUSES` constant). Spelled here rather than reused from
+ * `ATTENDANCE_DAILY_STATUSES_V1` (w4c1-segment-calculator) ON PURPOSE: that constant carries an
+ * EIGHTH member, `'off'`, which `chk_arc_projected_status` does NOT admit. Reusing it would make
+ * this pre-check WIDER than the constraint it fronts — a projected status of `'off'` would sail
+ * past TS and trip the raw 23514 anyway, which is precisely the leak this check exists to close.
+ * If the migration's domain ever changes, this list must change with it (and the F2-symmetric
+ * negative leg is what reddens if they diverge).
+ */
+const AUTHORITATIVE_PROJECTED_STATUSES_V1: ReadonlySet<string> = new Set([
+  'normal',
+  'late',
+  'early_leave',
+  'late_early',
+  'partial',
+  'absent',
+  'adjusted',
+])
 
 /** True iff `error` is a Postgres unique_violation (23505) on the named constraint. */
 function isUniqueViolationOnConstraintV1(error: unknown, constraint: string): boolean {
@@ -676,6 +710,13 @@ export async function writeAuthoritativeSegmentCalculationV1(
   } catch (error) {
     if (!isUniqueViolationOnConstraintV1(error, 'uq_arc_operation')) throw error
     await trx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+    // Gate D2 carry-forward (#4844): `ROLLBACK TO SAVEPOINT` UNDOES the subtransaction but does
+    // NOT release its slot — it stays on the transaction's subtransaction stack. The success path
+    // releases (above); this catch path did not, so a batch of same-operation-id collisions inside
+    // ONE outer transaction accumulated un-released savepoints and hit Postgres's practical
+    // ~64-subtransaction cliff long before any single operation's own retry budget suggested a
+    // problem. Released here, between the rollback and either the replay return or the throw.
+    await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
     const afterConflict = await retryReplayLookup(trx, {
       orgId: input.orgId,
       entrypoint: input.entrypoint,
@@ -780,6 +821,14 @@ async function writeCompletedRow(
     !Number.isSafeInteger(projection.lateMinutes) || projection.lateMinutes < 0 ||
     !Number.isSafeInteger(projection.earlyLeaveMinutes) || projection.earlyLeaveMinutes < 0
   ) {
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
+  }
+  // Gate D2 carry-forward (#4844), SYMMETRIC WITH F2 ABOVE: `projected_status` had no TS
+  // pre-check, so an out-of-domain status was guarded only by the DB CHECK `chk_arc_projected_
+  // status` and surfaced as a raw 23514 — the same leak F2 closed for minutes, on the adjacent
+  // field. Same product code, same position: BEFORE the baseline append, so a rejected write
+  // leaves zero rows behind rather than an orphan baseline rolled back by the caller's txn.
+  if (!AUTHORITATIVE_PROJECTED_STATUSES_V1.has(projection.status)) {
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
   }
 

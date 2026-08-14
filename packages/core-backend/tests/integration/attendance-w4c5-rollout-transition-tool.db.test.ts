@@ -633,14 +633,15 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(Object.values(byCode).filter((p) => p.applicable)).toHaveLength(11)
       expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.applicable).toBe(true)
       expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.count).toBe(0)
-      // This plan call runs under PRODUCTION-DEFAULT (undelivered) Gate D values — the override
-      // set for the drive-up above was reset in the `finally` block before this call — so the
-      // reporter must show the real shipped state: applicable, failing, both entrypoints
-      // undelivered.
+      // This plan call runs under PRODUCTION-DEFAULT Gate D values — the override set for the
+      // drive-up above was reset in the `finally` block before this call — so the reporter must
+      // show the real shipped state: applicable, still failing, with ONE entrypoint undelivered
+      // (`scheduled`). Gate D2 (#4844) delivered `live_punch`, dropping the count 2 -> 1; the
+      // gate itself still refuses promotion because it requires ZERO undelivered.
       expect(byCode.AUTHORITATIVE_ENTRYPOINTS_DELIVERED).toMatchObject({
         applicable: true,
         pass: false,
-        count: 2,
+        count: 1,
       })
 
       for (const statement of statements) {
@@ -919,7 +920,10 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     // untouched, reds (B).
     describe('Gate D test-seam hygiene: the describe-level afterEach backstop is load-bearing', () => {
       it('(A) sets the Gate D override and relies ENTIRELY on the surrounding afterEach to clear it (no explicit clear in this test)', () => {
-        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false) // sanity: starts clean
+        // Shipped state after Gate D2 (#4844): live_punch DELIVERED, scheduled still undelivered.
+        // The override below still differs from it on `scheduled`, which is what keeps (B)
+        // discriminating — an un-cleared override would leave `scheduled` reading `true` there.
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false) // sanity: starts clean
         __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true) // sanity: override is live
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(true)
@@ -927,7 +931,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       })
 
       it('(B) the override set by (A) has not leaked into this test — proves the afterEach backstop actually ran', () => {
-        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false)
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true)
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
       })
     })
@@ -1116,7 +1120,9 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(plan.legalPair).toBe(true)
       expect(plan.blocked).toBe(true)
       const authoritativePredicate = plan.predicates.find((p) => p.code === 'AUTHORITATIVE_ENTRYPOINTS_DELIVERED')
-      expect(authoritativePredicate).toMatchObject({ applicable: true, pass: false, count: 2 })
+      // count 2 -> 1 after Gate D2 (#4844) delivered `live_punch`; `scheduled` remains the one
+      // undelivered entrypoint, so the gate still refuses (it demands ZERO undelivered).
+      expect(authoritativePredicate).toMatchObject({ applicable: true, pass: false, count: 1 })
 
       const manifestPath = writeManifest(
         'gate-d-cli-promotion',

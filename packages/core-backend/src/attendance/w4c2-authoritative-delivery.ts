@@ -2,14 +2,20 @@
  * W4C-2 authoritative-entrypoint delivery declaration (Gate D closure, PR #4839 owner completion
  * gate, 20260810).
  *
- * BACKGROUND: `w4c2-live-scheduled-boundary.ts` fails closed with `W4C2_AUTHORITATIVE_MODE_NOT_
- * DELIVERED` (HTTP 503) at three call sites today — one inside `executeLivePunch` (the `live_
+ * BACKGROUND: `w4c2-live-scheduled-boundary.ts` ORIGINALLY failed closed with
+ * `W4C2_AUTHORITATIVE_MODE_NOT_
+ * DELIVERED` (HTTP 503) at three call sites — one inside `executeLivePunch` (the `live_
  * punch` command kind), two inside `executeScheduledRunInternal` (the `scheduled` command kind's
  * org-wide probe and its per-target loop; both are the SAME command kind per that module's own
- * header). Nothing today stops an org from being promoted to `authoritative` even though the
- * write it would need is undelivered — the owner's Gate D. This module is the single, static,
+ * header). Nothing stopped an org from being promoted to `authoritative` even though the
+ * write it would need was undelivered — the owner's Gate D. This module is the single, static,
  * closed-enumeration declaration the canonical transition boundary
  * (`w4c3a-rollout-control.ts`) reads to refuse that promotion.
+ *
+ * Gate D2 (#4556 / #4844) shipped the `live_punch` writer and removed its ONE refusal site, so
+ * TWO sites remain in that file today, both `scheduled`. The declaration below moved to
+ * `{live_punch:true, scheduled:false}` in that same reviewed change, which is exactly the
+ * lockstep the correspondence test requires.
  *
  * WHAT THIS MODULE DOES NOT DO: it does not probe, does not import, and has no runtime
  * dependency on `w4c2-live-scheduled-boundary.ts`. It is a LEAF — zero imports from any W4C-2/
@@ -38,19 +44,24 @@ export type AttendanceW4C2AuthoritativeEntrypointV1 =
   (typeof ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1)[number]
 
 /**
- * The shipped declaration. Both keys are `false` today: no authoritative writer exists for
- * either command kind, and `w4c2-live-scheduled-boundary.ts` fails closed at all three call
- * sites unconditionally. Flip a key to `true` ONLY in the same reviewed change that:
+ * The shipped declaration. Flip a key to `true` ONLY in the same reviewed change that:
  *   (a) ships a real writer for that command kind, and
  *   (b) removes every `boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', ...)` call site
  *       for that command kind in `w4c2-live-scheduled-boundary.ts` (`live_punch`: 1 site;
  *       `scheduled`: 2 sites — see the correspondence test for the exact count).
  * Never flip a key to `true` as a standalone change "to unblock rollout" — the correspondence
  * test exists precisely to fail that change.
+ *
+ * `live_punch` is `true` as of Gate D2 (#4556 / #4844): the boundary's `executeLivePunch` now
+ * carries the real authoritative writer and its single refusal call site is gone, so the
+ * correspondence guard's expected weight and the source's actual count moved 1 -> 0 in lockstep.
+ * `scheduled` stays `false` — `executeScheduledRunInternal` still fails closed at both of its
+ * sites; D3 delivers it. Promotion to the `authoritative` rollout state therefore still refuses
+ * (`w4c3a-rollout-control.ts` gates on the UNDELIVERED count, which is 1, not 0).
  */
 const DECLARED_DELIVERED: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, boolean>> =
   Object.freeze({
-    live_punch: false,
+    live_punch: true,
     scheduled: false,
   })
 

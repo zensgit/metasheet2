@@ -22431,6 +22431,53 @@ async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurred
   return { rule: context.rule, punchWorkDateResolution: resolution }
 }
 
+/**
+ * Gate D2 (#4556 / #4844) — the live-punch `attendance_events` INSERT, extracted verbatim from
+ * `applyLivePunchProjectionLegacyV1` below as its own injected boundary seam.
+ *
+ * WHY THIS EXISTS. `applyLivePunchProjectionLegacyV1` does TWO things: (1) this durable punch-
+ * evidence INSERT, and (2) the legacy daily `attendance_records` upsert. On the AUTHORITATIVE
+ * write path the D1 core owns the records row (its completed-path pointer UPDATE writes every
+ * daily field), so the boundary must drop (2) — but dropping the whole adapter would also drop
+ * (1), which would exclude the punch from its OWN evidence set: `loadLivePunchEvidence` reads
+ * `attendance_events` by `(user_id, org_id, work_date)`, so a day's first check-in could never
+ * produce a completed segment, every later recompute would be missing the punch, and the wire
+ * `event` would have no source. Splitting keeps (1) and drops only (2).
+ *
+ * WHY A SEPARATE SEAM RATHER THAN A `recordsUpsert:false` FLAG ON THE EXISTING ADAPTER: the
+ * P-A control-flow obligation (the authoritative branch must return before it can fall through
+ * to the shadow `applyLivePunchLegacy` call) is pinned by a ZERO-INVOCATION call-count spy on
+ * the injected `applyLivePunchLegacy`. A flag form would make that spy observe ONE invocation
+ * and degrade the pin to a weak assertion about a boolean argument. The authoritative branch
+ * never calls `applyLivePunchLegacy` at all.
+ *
+ * `applyLivePunchProjectionLegacyV1` calls THIS function for its own event INSERT, so the two
+ * paths are the same bytes by construction and cannot drift.
+ */
+async function insertLivePunchEventV1(trx, args) {
+  const { userId, orgId, workDate, eventType, source, location, meta, timezone } = args
+  const occurredAt = args.occurredAt instanceof Date ? args.occurredAt : new Date(args.occurredAt)
+  const rows = await trx.query(
+    `INSERT INTO attendance_events
+     (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+     RETURNING *`,
+    [
+      randomUUID(),
+      userId,
+      orgId,
+      workDate,
+      occurredAt,
+      eventType,
+      source,
+      timezone,
+      JSON.stringify(location ?? {}),
+      JSON.stringify(meta ?? {}),
+    ]
+  )
+  return rows[0]
+}
+
 async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
   const {
     userId,
@@ -22456,24 +22503,20 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
   })
   const settings = await getSettings(trx)
 
-  const event = await trx.query(
-    `INSERT INTO attendance_events
-     (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
-     RETURNING *`,
-    [
-      randomUUID(),
-      userId,
-      orgId,
-      workDate,
-      occurredAt,
-      eventType,
-      source,
-      timezone,
-      JSON.stringify(location ?? {}),
-      JSON.stringify(meta ?? {}),
-    ]
-  )
+  // Gate D2 split: the event INSERT is now the shared `insertLivePunchEventV1` seam above (same
+  // bytes, one owner) — the authoritative boundary branch calls it directly and skips the
+  // `attendance_records` upsert below, which the D1 core owns on that path.
+  const event = await insertLivePunchEventV1(trx, {
+    userId,
+    orgId,
+    workDate,
+    occurredAt,
+    eventType,
+    source,
+    location,
+    meta,
+    timezone,
+  })
 
   const protectedRecord = await loadAttendanceRecordForUpdate(trx, { userId, orgId, workDate })
   // Freeze work-date attribution on first resolved write; later corrections/recomputes
@@ -22586,7 +22629,7 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
     }
   }
 
-  return { event: event[0], record, workDateResolution: punchWorkDateResolution }
+  return { event, record, workDateResolution: punchWorkDateResolution }
 }
 
 // W4C-2: in-transaction W2 re-resolution (freeze step) — live channel. The opt-in
@@ -24720,6 +24763,11 @@ module.exports = {
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
+              // Gate D2 (#4556/#4844): the split event-INSERT seam the AUTHORITATIVE live-punch
+              // branch uses. Injected ALONGSIDE `applyLivePunchLegacy` (never as a flag on it) so
+              // the authoritative path's zero-invocation spy on `applyLivePunchLegacy` stays the
+              // real control-flow pin. Same bytes as the legacy adapter's own event INSERT.
+              insertLivePunchEvent: (trx, args) => insertLivePunchEventV1(trx, args),
               applyScheduledAbsenceLegacy: (trx, args) =>
                 generateAbsenceRecords(trx, args.orgId, args.workDate, args.timezone, args.userIds),
               resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),
@@ -24751,6 +24799,13 @@ module.exports = {
       'AttendanceW4RecomputeError',
       'AttendanceW4OpsRetirementError',
       'AttendanceW4RecordBoundaryError',
+      // Gate D2 (#4556/#4844): the authoritative result-write core's own product-coded errors
+      // (VERSION_CONFLICT / REPLAY_CONFLICT / COMPLETED_SHAPE_INVALID / PREIMAGE_INVALID / …)
+      // become caller-reachable the moment the live_punch authoritative branch calls the core.
+      // Without this entry they would fall through to a raw 500 instead of their own typed
+      // status — the exact "no raw SQLSTATE/untyped failure reaches the caller" doctrine this
+      // core was built to satisfy.
+      'AttendanceW4AuthoritativeCalculationError',
     ])
     const respondIfW4BoundaryError = (res, error) => {
       if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
