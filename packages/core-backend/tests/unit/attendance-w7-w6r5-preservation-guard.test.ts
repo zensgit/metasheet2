@@ -25,8 +25,9 @@
  *   Leg ii — transport ban, both route spellings.
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   ATTENDANCE_W7_W6R5_GUARD_ROOTS_V1,
@@ -50,10 +51,69 @@ const REPO_ROOT = path.resolve(__dirname, '../../../../')
 /** Probe path: under BOTH root 2 and root 3, a scannable extension, and
  *  outside every excluded segment — so it genuinely enters the walked domain.
  *  A probe under `__tests__/` or named `*.test.ts` would be a DEAD GATE
- *  (`isScannablePath` drops both), which is why the anchor-hit assertion below
- *  runs BEFORE any leg assertion. */
+ *  (`isScannablePath` drops both), which is why the anchor-hit assertions below
+ *  run BEFORE any leg assertion. */
 const PROBE_REL = 'packages/core-backend/src/attendance/w7-resolver/w7-guard-probe-helper.ts'
-const PROBE_ABS = path.join(REPO_ROOT, PROBE_REL)
+
+/** The module Leg (i) bans. The decoy tree below must contain a file at this
+ *  path for the probe's relative import to RESOLVE — Leg (i) matches resolved
+ *  paths, and an unresolvable specifier is silently skipped. */
+const BANNED_AGGREGATE_REL = ATTENDANCE_W7_BANNED_W6_MODULES_V1[0]
+
+/**
+ * Runs the REAL walk + REAL ban legs against an isolated temp tree that mirrors
+ * the repo-relative layout, instead of writing a probe into the real
+ * `packages/core-backend/src/` tree.
+ *
+ * WHY, stated rather than discovered later: a real file momentarily created
+ * under `src/` and then deleted RACES every other suite in this package that
+ * walks that tree, under `pool: 'forks'` full-suite parallelism. This is not
+ * hypothetical — the first version of this suite planted a real probe, and the
+ * full no-DB run went red because the sibling W7-1a inertness sweep had its own
+ * probe planted under `src/attendance/` at the same moment, so THIS suite's
+ * `unclaimed` legitimately contained two files. The landed W6-R5 import-graph
+ * guard already documents and solves exactly this
+ * (`attendance-w6-import-graph-no-calculation-consumer.test.ts`'s
+ * `withDecoyFile`), and this is the same remedy.
+ *
+ * It is exactly as discriminating: `walkAttendanceW7GuardDomain`,
+ * `resolvedRelativeModuleTargets` and both ban legs do only relative-path
+ * arithmetic plus `readFileSync`, so they cannot tell a mirrored root from the
+ * real one. What the mirror CANNOT prove — that `PROBE_REL` really is a path
+ * the real guard would walk — is proven separately, against the real root
+ * record and the real `isScannablePath`, in the anchor-hit assertions.
+ */
+function withDecoyTree(files: Record<string, string>, run: (decoyRoot: string) => void): void {
+  const decoyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'w7r10-decoy-'))
+  try {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(decoyRoot, rel)
+      fs.mkdirSync(path.dirname(abs), { recursive: true })
+      fs.writeFileSync(abs, content, 'utf8')
+    }
+    run(decoyRoot)
+  } finally {
+    fs.rmSync(decoyRoot, { recursive: true, force: true })
+  }
+}
+
+/** Anchor-hit check, run against the REAL root record and the REAL scannable
+ *  filter before any decoy leg: an unhit probe and a dead gate look identical,
+ *  and a probe path that the real guard would never walk proves nothing. */
+function assertProbePathIsInTheRealDomain(): void {
+  expect(isScannablePath(PROBE_REL), 'probe path is not scannable — dead gate').toBe(true)
+  const covering = ATTENDANCE_W7_W6R5_GUARD_ROOTS_V1.filter((entry) =>
+    PROBE_REL.startsWith(`${stripGlobSuffix(entry.root)}/`),
+  )
+  // It must be covered by root 2 AND root 3 — that is what makes it a probe of
+  // the nested region rather than of some arbitrary directory.
+  expect(covering.map((entry) => entry.root).sort()).toEqual(
+    [
+      'packages/core-backend/src/attendance/**',
+      'packages/core-backend/src/attendance/w7-resolver/**',
+    ].sort(),
+  )
+}
 
 function classifiedCalculationPath(): Set<string> {
   return new Set(ATTENDANCE_W7_CALCULATION_PATH_FILES_V1)
@@ -61,11 +121,15 @@ function classifiedCalculationPath(): Set<string> {
 
 /** Leg (i) over an explicit partition — parameterised so the positive control
  *  can run the same code against a mutated partition. */
-function referenceBanViolations(union: readonly string[], calcPath: ReadonlySet<string>): string[] {
+function referenceBanViolations(
+  union: readonly string[],
+  calcPath: ReadonlySet<string>,
+  root: string = REPO_ROOT,
+): string[] {
   const out: string[] = []
   for (const rel of union) {
     if (!calcPath.has(rel)) continue
-    const targets = resolvedRelativeModuleTargets(REPO_ROOT, rel)
+    const targets = resolvedRelativeModuleTargets(root, rel)
     if (targets.some((target) => ATTENDANCE_W7_BANNED_W6_MODULES_V1.includes(target))) out.push(rel)
   }
   return out.sort()
@@ -75,11 +139,15 @@ function referenceBanViolations(union: readonly string[], calcPath: ReadonlySet<
  *  names the route (either spelling, exactly as the repo writes it) AND
  *  contains an HTTP transport call — naming the route in a comment is not a
  *  consumption, and a `fetch` to something else is not this route. */
-function transportBanViolations(union: readonly string[], calcPath: ReadonlySet<string>): string[] {
+function transportBanViolations(
+  union: readonly string[],
+  calcPath: ReadonlySet<string>,
+  root: string = REPO_ROOT,
+): string[] {
   const out: string[] = []
   for (const rel of union) {
     if (!calcPath.has(rel)) continue
-    const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+    const text = fs.readFileSync(path.join(root, rel), 'utf8')
     const namesRoute = ATTENDANCE_W7_BANNED_W6_ROUTE_LITERALS_V1.some((literal) => text.includes(literal))
     if (!namesRoute) continue
     const callsOut = ATTENDANCE_W7_TRANSPORT_CALL_PATTERNS_V1.some((pattern) => pattern.test(text))
@@ -87,14 +155,6 @@ function transportBanViolations(union: readonly string[], calcPath: ReadonlySet<
   }
   return out.sort()
 }
-
-afterEach(() => {
-  // The probe is a file this suite CREATES, so removing it is the correct
-  // restore — there is no prior version to put back. `git checkout -- <file>`
-  // is never used here: its targeted form has erased declared fixes before,
-  // and for a created file it would not even be the right operation.
-  if (fs.existsSync(PROBE_ABS)) fs.unlinkSync(PROBE_ABS)
-})
 
 describe('W7-R10: W6-R5 preservation guard — derived domain', () => {
   it('Leg 0 (completeness): every walked file is claimed exactly once; unclaimed = 0', () => {
@@ -220,82 +280,133 @@ describe('W7-R10: W6-R5 preservation guard — derived domain', () => {
 })
 
 describe('W7-R10 positive control: ONE probe reds BOTH ban legs', () => {
+  const CONSUMER_PROBE = [
+    "import { buildAttendanceGroupEffectivePolicyAggregateV1 } from '../w6-group-effective-policy-aggregate'",
+    '',
+    'export async function probeGroupPolicy(): Promise<unknown> {',
+    '  void buildAttendanceGroupEffectivePolicyAggregateV1',
+    "  const res = await fetch('/api/attendance/groups/:groupId/effective-policy')",
+    '  return res',
+    '}',
+    '',
+  ].join('\n')
+
   it('plants an unclassified consumer, proves the anchor was hit, then reds Leg 0, Leg (ii) and Leg (i)', () => {
     // The probe is the bypass this criterion exists to catch: a helper that
     // imports the W6 aggregate AND calls its route over HTTP.
-    fs.writeFileSync(
-      PROBE_ABS,
-      [
-        "import { buildAttendanceGroupEffectivePolicyAggregateV1 } from '../w6-group-effective-policy-aggregate'",
-        '',
-        'export async function probeGroupPolicy(): Promise<unknown> {',
-        "  void buildAttendanceGroupEffectivePolicyAggregateV1",
-        "  const res = await fetch('/api/attendance/groups/:groupId/effective-policy')",
-        '  return res',
-        '}',
-        '',
-      ].join('\n'),
-      'utf8',
+    //
+    // ANCHOR-HIT CHECK FIRST, against the REAL root record and the REAL
+    // scannable filter. An unhit probe and a dead gate look identical.
+    assertProbePathIsInTheRealDomain()
+
+    withDecoyTree(
+      {
+        [PROBE_REL]: CONSUMER_PROBE,
+        // Present so the probe's relative import RESOLVES; Leg (i) matches
+        // resolved paths, and an unresolvable specifier is silently skipped —
+        // which would make this control pass while proving nothing.
+        [BANNED_AGGREGATE_REL]: 'export const buildAttendanceGroupEffectivePolicyAggregateV1 = 1\n',
+      },
+      (decoyRoot) => {
+        const { union, perRootScannableCounts } = walkAttendanceW7GuardDomain(decoyRoot)
+
+        // Second half of the anchor-hit check: the REAL walk really does pick
+        // this path up, and it lands inside root 3's own pre-dedupe walk.
+        expect(union, 'probe never entered the walked domain — dead gate, not a passing guard').toContain(
+          PROBE_REL,
+        )
+        expect(
+          perRootScannableCounts.get('packages/core-backend/src/attendance/w7-resolver/**') ?? 0,
+        ).toBeGreaterThan(0)
+
+        // ---- Leg 0 reds while the probe is UNCLASSIFIED. ----
+        const claimed = new Set<string>([
+          ...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1,
+          ...ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1.map((entry) => entry.relPath),
+        ])
+        expect(union.filter((rel) => !claimed.has(rel))).toContain(PROBE_REL)
+
+        // ---- Both ban legs red once the SAME probe is classified. ----
+        const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
+        expect(transportBanViolations(union, withProbe, decoyRoot)).toContain(PROBE_REL)
+        expect(referenceBanViolations(union, withProbe, decoyRoot)).toContain(PROBE_REL)
+
+        // ...and while it is UNCLASSIFIED, neither ban leg looks at it at all —
+        // which is the property that makes a `not_calculation_path`
+        // misclassification a real blind spot rather than a theoretical one.
+        const withoutProbe = new Set(ATTENDANCE_W7_CALCULATION_PATH_FILES_V1)
+        expect(transportBanViolations(union, withoutProbe, decoyRoot)).not.toContain(PROBE_REL)
+        expect(referenceBanViolations(union, withoutProbe, decoyRoot)).not.toContain(PROBE_REL)
+      },
     )
-
-    // ---- ANCHOR-HIT CHECK, MECHANIZED, BEFORE ANY LEG ASSERTION. ----
-    // An unhit probe and a dead gate look identical: both produce "the leg did
-    // not red". So prove the probe entered the scanned domain first.
-    expect(isScannablePath(PROBE_REL), 'probe path is not scannable — dead gate').toBe(true)
-    const { union, perRootScannableCounts } = walkAttendanceW7GuardDomain(REPO_ROOT)
-    expect(union, 'probe never entered the walked domain — dead gate, not a passing guard').toContain(PROBE_REL)
-    // It must also have landed inside root 3's own pre-dedupe walk.
-    expect(perRootScannableCounts.get('packages/core-backend/src/attendance/w7-resolver/**') ?? 0).toBeGreaterThan(4)
-
-    // ---- Leg 0 reds while the probe is UNCLASSIFIED. ----
-    const claimed = new Set<string>([
-      ...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1,
-      ...ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1.map((entry) => entry.relPath),
-    ])
-    const unclaimed = union.filter((rel) => !claimed.has(rel))
-    expect(unclaimed).toEqual([PROBE_REL])
-
-    // ---- Both ban legs red once the SAME probe is classified calculation_path. ----
-    const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
-    expect(transportBanViolations(union, withProbe)).toContain(PROBE_REL)
-    expect(referenceBanViolations(union, withProbe)).toContain(PROBE_REL)
   })
 
   it('the OpenAPI route spelling is caught too, not only the express one', () => {
     // Leg (ii) must match BOTH spellings. A probe carrying only the `{groupId}`
     // form proves the second literal is load-bearing rather than decorative.
-    fs.writeFileSync(
-      PROBE_ABS,
-      [
-        'export async function probeOpenApiSpelling(): Promise<unknown> {',
-        "  return fetch('/api/attendance/groups/{groupId}/effective-policy')",
-        '}',
-        '',
-      ].join('\n'),
-      'utf8',
+    assertProbePathIsInTheRealDomain()
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          'export async function probeOpenApiSpelling(): Promise<unknown> {',
+          "  return fetch('/api/attendance/groups/{groupId}/effective-policy')",
+          '}',
+          '',
+        ].join('\n'),
+      },
+      (decoyRoot) => {
+        const { union } = walkAttendanceW7GuardDomain(decoyRoot)
+        expect(union).toContain(PROBE_REL)
+        const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
+        expect(transportBanViolations(union, withProbe, decoyRoot)).toContain(PROBE_REL)
+        // ...and it must NOT trip the reference leg, so the two legs are proven
+        // independent rather than one leg firing for both probes.
+        expect(referenceBanViolations(union, withProbe, decoyRoot)).not.toContain(PROBE_REL)
+      },
     )
-    const { union } = walkAttendanceW7GuardDomain(REPO_ROOT)
-    expect(union).toContain(PROBE_REL)
-    const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
-    expect(transportBanViolations(union, withProbe)).toContain(PROBE_REL)
-    // ...and it must NOT trip the reference leg, so the two legs are proven
-    // independent rather than one leg firing for both probes.
-    expect(referenceBanViolations(union, withProbe)).not.toContain(PROBE_REL)
   })
 
   it('naming the route WITHOUT an HTTP call does not red Leg (ii) (the legs are not text tripwires)', () => {
-    fs.writeFileSync(
-      PROBE_ABS,
-      [
-        '// Documentation reference to /api/attendance/groups/:groupId/effective-policy',
-        'export const PROBE_DOC_ONLY = 1',
-        '',
-      ].join('\n'),
-      'utf8',
+    assertProbePathIsInTheRealDomain()
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          '// Documentation reference to /api/attendance/groups/:groupId/effective-policy',
+          'export const PROBE_DOC_ONLY = 1',
+          '',
+        ].join('\n'),
+      },
+      (decoyRoot) => {
+        const { union } = walkAttendanceW7GuardDomain(decoyRoot)
+        expect(union).toContain(PROBE_REL)
+        const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
+        expect(transportBanViolations(union, withProbe, decoyRoot)).not.toContain(PROBE_REL)
+      },
     )
-    const { union } = walkAttendanceW7GuardDomain(REPO_ROOT)
-    expect(union).toContain(PROBE_REL)
-    const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
-    expect(transportBanViolations(union, withProbe)).not.toContain(PROBE_REL)
+  })
+
+  it('an import that does NOT resolve to the banned module leaves Leg (i) green', () => {
+    // Negative control on Leg (i)'s resolution step: same import SHAPE, a
+    // different target. Without this, "Leg (i) fires" could just mean "the file
+    // contains the word import".
+    assertProbePathIsInTheRealDomain()
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          "import { something } from './w7-composite-lock-order'",
+          'export const probe = something',
+          '',
+        ].join('\n'),
+        'packages/core-backend/src/attendance/w7-resolver/w7-composite-lock-order.ts':
+          'export const something = 1\n',
+        [BANNED_AGGREGATE_REL]: 'export const buildAttendanceGroupEffectivePolicyAggregateV1 = 1\n',
+      },
+      (decoyRoot) => {
+        const { union } = walkAttendanceW7GuardDomain(decoyRoot)
+        expect(union).toContain(PROBE_REL)
+        const withProbe = new Set([...ATTENDANCE_W7_CALCULATION_PATH_FILES_V1, PROBE_REL])
+        expect(referenceBanViolations(union, withProbe, decoyRoot)).not.toContain(PROBE_REL)
+      },
+    )
   })
 })

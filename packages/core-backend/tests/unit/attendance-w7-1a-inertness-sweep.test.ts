@@ -23,19 +23,54 @@
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../')
 
 const W7_RESOLVER_DIR = 'packages/core-backend/src/attendance/w7-resolver'
 const POSTURE_TABLE = 'attendance_calculation_context_source_state'
 
-/** A probe that lives in PRODUCTION territory (under `src/`, not under the
- *  resolver directory, not a test file) — so planting an import here is a real
- *  violation of the inertness claim, not a staged one. */
+/** A probe path in PRODUCTION territory (under `src/`, not under the resolver
+ *  directory, not a test file) — so an import planted there is a real violation
+ *  of the inertness claim, not a staged one. The probe is written into an
+ *  ISOLATED MIRROR of this path, never into the real tree: see `withDecoyTree`. */
 const PROBE_REL = 'packages/core-backend/src/attendance/w7-inertness-probe.ts'
-const PROBE_ABS = path.join(REPO_ROOT, PROBE_REL)
+
+/**
+ * Runs the REAL sweep predicates against an isolated temp tree that mirrors the
+ * repo-relative layout, instead of writing a probe into the real `src/` tree.
+ *
+ * WHY, recorded rather than left to be rediscovered: a real file created under
+ * `src/` and then deleted RACES every sibling suite in this package that walks
+ * that tree, under `pool: 'forks'` full-suite parallelism. The first version of
+ * this suite planted a real probe and turned the sibling W7-R10 walk-the-table
+ * guard red, because that guard's `unclaimed` legitimately contained this
+ * suite's in-flight probe. The landed W6-R5 import-graph guard already
+ * documents and solves exactly this (`withDecoyFile` in
+ * `attendance-w6-import-graph-no-calculation-consumer.test.ts`); this is the
+ * same remedy.
+ *
+ * Exactly as discriminating: every predicate below does relative-path
+ * arithmetic plus `readFileSync`, so none can tell a mirrored root from the
+ * real one. What the mirror cannot show — that `PROBE_REL` is a path the real
+ * sweep would classify as production — is asserted separately against the real
+ * `isProductionSource`.
+ */
+function withDecoyTree(files: Record<string, string>, run: (decoyRoot: string) => void): void {
+  const decoyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'w7-inert-decoy-'))
+  try {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(decoyRoot, rel)
+      fs.mkdirSync(path.dirname(abs), { recursive: true })
+      fs.writeFileSync(abs, content, 'utf8')
+    }
+    run(decoyRoot)
+  } finally {
+    fs.rmSync(decoyRoot, { recursive: true, force: true })
+  }
+}
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
 
@@ -71,22 +106,17 @@ function trackedFiles(): string[] {
   return raw.toString('utf8').split('\0').filter((entry) => entry.length > 0)
 }
 
-/** Files the sweep actually inspects, PLUS any untracked probe planted by a
- *  negative control (a freshly written file is not in `git ls-files`, and a
- *  sweep that could not see it would be a sweep that cannot see a real
- *  uncommitted violation either). */
+/** The production files the real sweep inspects. */
 function productionFiles(): string[] {
-  const set = new Set(trackedFiles().filter(isProductionSource))
-  if (fs.existsSync(PROBE_ABS) && isProductionSource(PROBE_REL)) set.add(PROBE_REL)
-  return [...set].sort()
+  return trackedFiles().filter(isProductionSource).sort()
 }
 
 const SPECIFIER_RE = /(?:\bimport\s*\(|\brequire\s*\(|\bfrom\s+)\s*['"]([^'"]+)['"]/g
 
 /** Resolved relative import/require/dynamic-import targets — judged on what a
  *  file LOADS, not on how the specifier is spelled. */
-function resolvedTargets(relPath: string): string[] {
-  const abs = path.join(REPO_ROOT, relPath)
+function resolvedTargets(relPath: string, root: string = REPO_ROOT): string[] {
+  const abs = path.join(root, relPath)
   const text = fs.readFileSync(abs, 'utf8')
   const targets: string[] = []
   for (const match of text.matchAll(SPECIFIER_RE)) {
@@ -95,7 +125,7 @@ function resolvedTargets(relPath: string): string[] {
     const base = path.resolve(path.dirname(abs), specifier)
     for (const candidate of [base, `${base}.ts`, `${base}.cjs`, `${base}.js`, `${base}.mjs`, `${base}.tsx`]) {
       if (fs.existsSync(candidate) && fs.lstatSync(candidate).isFile()) {
-        targets.push(path.relative(REPO_ROOT, candidate).split(path.sep).join('/'))
+        targets.push(path.relative(root, candidate).split(path.sep).join('/'))
         break
       }
     }
@@ -126,9 +156,12 @@ function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
 }
 
-function productionImportersOfResolver(): string[] {
-  return productionFiles()
-    .filter((rel) => resolvedTargets(rel).some((target) => target.startsWith(`${W7_RESOLVER_DIR}/`)))
+function productionImportersOfResolver(
+  files: readonly string[] = productionFiles(),
+  root: string = REPO_ROOT,
+): string[] {
+  return files
+    .filter((rel) => resolvedTargets(rel, root).some((target) => target.startsWith(`${W7_RESOLVER_DIR}/`)))
     .sort()
 }
 
@@ -144,10 +177,13 @@ const W7_RUNTIME_SYMBOLS = [
   'isAttendanceW7ContextSourceOrgAllowlistedV1',
 ] as const
 
-function productionCallSites(): Array<{ file: string; symbol: string }> {
+function productionCallSites(
+  files: readonly string[] = productionFiles(),
+  root: string = REPO_ROOT,
+): Array<{ file: string; symbol: string }> {
   const hits: Array<{ file: string; symbol: string }> = []
-  for (const rel of productionFiles()) {
-    const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+  for (const rel of files) {
+    const text = fs.readFileSync(path.join(root, rel), 'utf8')
     for (const symbol of W7_RUNTIME_SYMBOLS) {
       if (text.includes(symbol)) hits.push({ file: rel, symbol })
     }
@@ -157,16 +193,15 @@ function productionCallSites(): Array<{ file: string; symbol: string }> {
 
 /** Production files whose CODE (comments stripped) names the posture table,
  *  excluding the migration that creates it. */
-function postureTableCodeReferences(): string[] {
-  return productionFiles()
+function postureTableCodeReferences(
+  files: readonly string[] = productionFiles(),
+  root: string = REPO_ROOT,
+): string[] {
+  return files
     .filter((rel) => !rel.includes('/db/migrations/'))
-    .filter((rel) => stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')).includes(POSTURE_TABLE))
+    .filter((rel) => stripComments(fs.readFileSync(path.join(root, rel), 'utf8')).includes(POSTURE_TABLE))
     .sort()
 }
-
-afterEach(() => {
-  if (fs.existsSync(PROBE_ABS)) fs.unlinkSync(PROBE_ABS)
-})
 
 describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
   it('the production file set is large and really contains known production modules', () => {
@@ -177,6 +212,7 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
     // ...and really EXCLUDES test material, so the exclusions are not silently
     // swallowing the whole tree.
     expect(files).not.toContain('packages/core-backend/tests/unit/attendance-w7-1a-inertness-sweep.test.ts')
+    expect(isProductionSource('packages/core-backend/tests/unit/anything.test.ts')).toBe(false)
     expect(files.some((f) => f.startsWith(`${W7_RESOLVER_DIR}/`))).toBe(false)
   })
 
@@ -212,39 +248,67 @@ describe('W7-1a structural inertness: zero production importers and call sites',
   })
 
   it('NEGATIVE CONTROL: planting a production importer reds both legs', () => {
-    fs.writeFileSync(
-      PROBE_ABS,
-      [
-        "import { resolveAttendanceW7ContextSourcePostureV1 } from './w7-resolver/w7-context-source-posture-resolver'",
-        '',
-        'export const probe = resolveAttendanceW7ContextSourcePostureV1',
-        '',
-      ].join('\n'),
-      'utf8',
+    // Anchor-hit check FIRST, against the REAL classifier: an unseen probe and
+    // a dead sweep look identical.
+    expect(isProductionSource(PROBE_REL), 'probe path is not production — dead sweep').toBe(true)
+
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          "import { resolveAttendanceW7ContextSourcePostureV1 } from './w7-resolver/w7-context-source-posture-resolver'",
+          '',
+          'export const probe = resolveAttendanceW7ContextSourcePostureV1',
+          '',
+        ].join('\n'),
+        // Present so the specifier RESOLVES — the importer leg matches resolved
+        // paths, and an unresolvable specifier is silently skipped.
+        [`${W7_RESOLVER_DIR}/w7-context-source-posture-resolver.ts`]:
+          'export const resolveAttendanceW7ContextSourcePostureV1 = 1\n',
+      },
+      (decoyRoot) => {
+        expect(productionImportersOfResolver([PROBE_REL], decoyRoot)).toEqual([PROBE_REL])
+        expect(productionCallSites([PROBE_REL], decoyRoot)).toEqual([
+          { file: PROBE_REL, symbol: 'resolveAttendanceW7ContextSourcePostureV1' },
+        ])
+      },
     )
-
-    // Anchor-hit check FIRST: an unseen probe and a dead sweep look identical.
-    expect(productionFiles(), 'probe never entered the swept set — dead sweep').toContain(PROBE_REL)
-
-    expect(productionImportersOfResolver()).toEqual([PROBE_REL])
-    expect(productionCallSites()).toEqual([
-      { file: PROBE_REL, symbol: 'resolveAttendanceW7ContextSourcePostureV1' },
-    ])
   })
 
   it('NEGATIVE CONTROL: a dynamic `await import()` is caught too, not only static imports', () => {
-    fs.writeFileSync(
-      PROBE_ABS,
-      [
-        'export async function probe(): Promise<unknown> {',
-        "  return import('./w7-resolver/w7-group-effective-facts-resolver')",
-        '}',
-        '',
-      ].join('\n'),
-      'utf8',
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          'export async function probe(): Promise<unknown> {',
+          "  return import('./w7-resolver/w7-group-effective-facts-resolver')",
+          '}',
+          '',
+        ].join('\n'),
+        [`${W7_RESOLVER_DIR}/w7-group-effective-facts-resolver.ts`]: 'export const x = 1\n',
+      },
+      (decoyRoot) => {
+        expect(productionImportersOfResolver([PROBE_REL], decoyRoot)).toEqual([PROBE_REL])
+      },
     )
-    expect(productionFiles()).toContain(PROBE_REL)
-    expect(productionImportersOfResolver()).toEqual([PROBE_REL])
+  })
+
+  it('NEGATIVE CONTROL on the matcher: an import of a DIFFERENT module leaves both legs green', () => {
+    // Without this, "the leg fired" could mean "the file contains the word
+    // import" rather than "it resolves into w7-resolver/".
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          "import { helper } from './w4c0-identity'",
+          'export const probe = helper',
+          '',
+        ].join('\n'),
+        'packages/core-backend/src/attendance/w4c0-identity.ts': 'export const helper = 1\n',
+        [`${W7_RESOLVER_DIR}/w7-context-source-posture-resolver.ts`]: 'export const x = 1\n',
+      },
+      (decoyRoot) => {
+        expect(productionImportersOfResolver([PROBE_REL], decoyRoot)).toEqual([])
+        expect(productionCallSites([PROBE_REL], decoyRoot)).toEqual([])
+      },
+    )
   })
 })
 
@@ -281,13 +345,22 @@ describe('W7-1a structural inertness: the posture table has no production reader
   })
 
   it('NEGATIVE CONTROL: a production file naming the posture table reds the leg', () => {
-    fs.writeFileSync(
-      PROBE_ABS,
-      [`export const PROBE_SQL = 'SELECT state FROM ${POSTURE_TABLE}'`, ''].join('\n'),
-      'utf8',
+    expect(isProductionSource(PROBE_REL), 'probe path is not production — dead sweep').toBe(true)
+    withDecoyTree(
+      { [PROBE_REL]: `export const PROBE_SQL = 'SELECT state FROM ${POSTURE_TABLE}'\n` },
+      (decoyRoot) => {
+        expect(postureTableCodeReferences([PROBE_REL], decoyRoot)).toEqual([PROBE_REL])
+      },
     )
-    expect(productionFiles()).toContain(PROBE_REL)
-    expect(postureTableCodeReferences()).toEqual([PROBE_REL])
+  })
+
+  it('NEGATIVE CONTROL on the comment stripper: the SAME table name in a comment does NOT red', () => {
+    withDecoyTree(
+      { [PROBE_REL]: `/* mentions ${POSTURE_TABLE} in prose */\nexport const X = 1\n` },
+      (decoyRoot) => {
+        expect(postureTableCodeReferences([PROBE_REL], decoyRoot)).toEqual([])
+      },
+    )
   })
 })
 
