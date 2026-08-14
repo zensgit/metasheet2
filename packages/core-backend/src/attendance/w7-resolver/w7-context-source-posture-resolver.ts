@@ -3,7 +3,7 @@
  *
  * Authority: `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md`
  * §4.2 (the two-part posture-read contract), §7 OD-W7-3(a), red line W7-R4.
- * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner first-person confirmation) —
+ * Ratified per #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner first-person confirmation) —
  * ruling 2 (OD-W7-1..8 = option (a)) and
  * ruling 7 (a NEW W7-specific allowlist env var, exact org,
  * `scope='synthetic_staging'`, no wildcard).

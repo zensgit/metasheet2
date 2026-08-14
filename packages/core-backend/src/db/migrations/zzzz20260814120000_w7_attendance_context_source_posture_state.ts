@@ -5,7 +5,7 @@ import { sql, type Kysely } from 'kysely'
  *
  * Authority: `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md`
  * §4.2 (two-part posture read), §7 OD-W7-3(a), red line W7-R4; ratified per
- * #4556 comments 5293034619 (ruling) + 5293478713 (owner first-person confirmation),
+ * #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner first-person confirmation),
  * ruling 2 (OD-W7-1..8 = option (a)).
  *
  * This is a SECOND, independent org-keyed posture — a sibling of the W4

@@ -18,7 +18,7 @@
  * from a genuinely clean tree, every leg here carries a NEGATIVE CONTROL that
  * plants a real violation and proves the leg reds.
  *
- * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner
+ * Ratified per #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner
  * first-person confirmation).
  */
 import { execFileSync } from 'node:child_process'

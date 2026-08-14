@@ -2,7 +2,7 @@
  * W7-1a (#4556) real-PG gate — posture resolver, group-effective facts
  * resolver, and the composite lock order.
  *
- * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner
+ * Ratified per #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner
  * first-person confirmation). The legs below are the ones that ratification
  * makes REQUIRED:
  *

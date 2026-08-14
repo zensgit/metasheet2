@@ -2,7 +2,7 @@
  * W7-1a (#4556) STEP 3 gate — the single core-owned group-effective V2
  * issuance boundary (design-lock red line W7-R1).
  *
- * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner
+ * Ratified per #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner
  * first-person confirmation) — ruling 10 (OD-W7-6 = (a)).
  *
  * ORIGIN and CONTENT are tested as SEPARATE proofs throughout, because

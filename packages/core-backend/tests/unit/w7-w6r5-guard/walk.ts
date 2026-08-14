@@ -163,8 +163,9 @@ export function walkAttendanceW7GuardDomain(repoRoot: string): AttendanceW7Guard
  * (`w6-group-effective-policy-contract.ts`,
  * `w6-group-effective-policy-response-contract.ts`). Whether a compile-erased
  * `import type` of those counts as a live dependency is an OPEN question that
- * the W7 ratification (#4556 comments 5293034619 (ruling) + 5293478713 (owner first-person confirmation))
- * did NOT rule on. Banning them
+ * the W7 ratification — #4556 comments 5293034619 (owner-directed disclosed
+ * relay) + 5293478713 (owner first-person confirmation) — did NOT rule on.
+ * Banning them
  * here would settle an unruled question by implementation; not banning them
  * leaves a narrower guard. The resolution actually taken is neither: the W7
  * resolver imports NOTHING from any W6 module at all, so the question stays

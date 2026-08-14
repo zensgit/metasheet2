@@ -13,7 +13,7 @@
  * every pinned root is real, so this is the first head at which the leg means
  * anything.
  *
- * Ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner
+ * Ratified per #4556 comments 5293034619 (owner-directed disclosed relay) + 5293478713 (owner
  * first-person confirmation) — ruling 9 (`w7-resolver/` subdirectory layout,
  * with the pre-dedupe nested-root count problem fixed first).
  *
