@@ -697,15 +697,25 @@ async function lockShadowParentRecord(
  * in the same transaction — one atomic promotion. For a REVIEW outcome the placeholder is
  * preserved as-is, invisible to `visibility_state='active'` readers.
  *
- * DAILY-FIELD FIDELITY — a schema constraint, disclosed rather than silently papered over: the
- * spec calls for every mutable W4-owned daily field to be NULL. `attendance_records.status`,
- * `work_minutes`, `late_minutes` and `early_leave_minutes` are `NOT NULL` columns (with a closed
- * `status` CHECK), so literal NULL is not writable for those four. This inserts the schema's own
- * neutral defaults for them and genuine NULLs for the two nullable instants
- * (`first_in_at`/`last_out_at`), which is the minimum-fabrication row the schema admits — and
- * strictly less fabrication than the existing import-side precedent, which writes the real
- * compatibility projection into a review placeholder. The row is never reader-visible while it
- * holds this state: hiding is done by `visibility_state='retired'`, not by NULL-ness.
+ * DAILY-FIELD FIDELITY — [OWNER-CONFIRM] the specified state is NOT WRITABLE against the current
+ * schema, disclosed here rather than silently papered over. §7.5's parent-state install calls for
+ * every mutable W4-owned daily field to be NULL. `attendance_records.status`, `work_minutes`,
+ * `late_minutes` and `early_leave_minutes` are `NOT NULL` columns (`status` additionally carries a
+ * closed CHECK), so literal NULL is not writable for four of the six. What ships: the schema's own
+ * neutral values for those four (`'normal'`, `0`, `0`, `0`) and genuine NULLs for the two nullable
+ * instants (`first_in_at` / `last_out_at`). That is the minimum-fabrication row the schema admits,
+ * and strictly less fabrication than the existing import-side precedent
+ * (`ensureAuthoritativeParent`, which writes the REAL compatibility projection into its review
+ * placeholder).
+ *
+ * WHY THIS IS AN OWNER ITEM AND NOT JUST A NOTE: the spec's stated rationale for NULL was "so
+ * ordinary readers see no fabricated zero-minute row" — and what ships IS a fabricated
+ * zero-minute row whose only concealment is `visibility_state='retired'`. Concealment therefore
+ * rests entirely on visibility filtering, and visibility filtering is not yet universal (no read
+ * ROUTE filters `visibility_state`; the canonical active-current host-port helper does, and the
+ * D2 suite pins that one reader with a positive control). The owner should either confirm this
+ * shape or authorize a nullability migration; a third option — widening the read side first — is
+ * the same forward obligation the E5 suite already records.
  *
  * POISON-RACE: `ON CONFLICT (user_id, work_date, org_id) DO NOTHING` (the in-file idiom and the
  * actual unique key) so a concurrent creator resolves to a PRODUCT outcome, never a raw 23505
@@ -1787,9 +1797,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
           const authoritativeResponse = {
             event: authoritativeEvent,
             record: authoritativeRecord,
-            // Populated explicitly from THIS transaction's own frozen resolution/attribution —
-            // never left undefined, and never sourced from the split event INSERT (which does
-            // not produce one).
+            // [OWNER-CONFIRM, second half of the response-contract question] Populated explicitly
+            // from THIS transaction's own frozen resolution/attribution — never left undefined,
+            // and never sourced from the split event INSERT (which does not produce one). The
+            // legacy adapter returns the resolver's own `punchWorkDateResolution` object verbatim;
+            // the authoritative branch has no such object, so this closed projection is a SECOND,
+            // independent client-contract change alongside the `record` shape. Its exact key set
+            // is pinned by the same golden leg, so drift is loud.
             workDateResolution: {
               kind: authoritativeResolution.kind,
               workDate: authoritativeResolution.workDate ?? null,

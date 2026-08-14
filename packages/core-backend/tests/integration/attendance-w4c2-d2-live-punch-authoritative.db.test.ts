@@ -38,6 +38,7 @@ import {
   type AttendanceW4LiveScheduledBoundaryV1,
 } from '../../src/attendance/w4c2-live-scheduled-boundary'
 import { computeAttendanceImportRollbackPreimageFingerprintV1 } from '../../src/attendance/w4c3a-import-rollback'
+import { loadActiveCurrentAttendanceRecordForDecisionTraceV1 } from '../../src/attendance/w4c3c-active-current'
 import {
   projectedDailyFingerprintV1,
   writeAuthoritativeReversalV1,
@@ -589,26 +590,49 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
   // Read-side invisibility (leg 8) and VERSION_CONFLICT (leg 9).
   // =========================================================================
 
-  it('leg 8: a review_placeholder parent is invisible to an active-only current-record read while the immutable review calc row remains readable in history', async () => {
+  it('leg 8: a review_placeholder parent is invisible through the CANONICAL active-current helper (the singular host-port read every ordinary surface goes through) while the immutable review calc row remains readable in history', async () => {
     const seed = await seedAuthoritativeOrg('g8')
     const { boundary } = makeBoundary()
-    expect((await boundary.executeLivePunch(await buildPunchInput(seed))).kind).toBe('w4')
-    const active = await pool.query(
-      `SELECT id FROM attendance_records WHERE user_id = $1 AND visibility_state = 'active'`,
-      [seed.userId],
-    )
-    expect(active.rows.length).toBe(0)
+    const input = await buildPunchInput(seed)
+    expect((await boundary.executeLivePunch(input)).kind).toBe('w4')
+
+    // Driven through `w4c3c-active-current`'s own exported helper, NOT a hand-written
+    // `visibility_state = 'active'` filter: asserting that a filter this test wrote filters is a
+    // tautology. This is the P20 singular helper the plugin's ordinary read surfaces resolve
+    // through, so a miss here is a miss for those surfaces.
+    const client = await pool.connect()
+    try {
+      const hidden = await loadActiveCurrentAttendanceRecordForDecisionTraceV1(
+        async (sqlText: string, params?: readonly unknown[]) =>
+          client.query(sqlText, (params ?? []) as unknown[]),
+        { orgId: seed.orgId, userId: seed.userId, workDate: input.workDate },
+      )
+      expect(hidden).toBeNull()
+      // POSITIVE CONTROL — the same helper DOES return a promoted (completed) parent, so the null
+      // above is the placeholder being hidden, not the helper being broken or mis-keyed.
+      const promotedSeed = await seedAuthoritativeOrg('g8-control', { withShift: true })
+      const promotedInput = await buildPunchInput(promotedSeed)
+      const { boundary: control } = makeBoundary()
+      expect((await control.executeLivePunch(promotedInput)).kind).toBe('w4')
+      const visible = await loadActiveCurrentAttendanceRecordForDecisionTraceV1(
+        async (sqlText: string, params?: readonly unknown[]) =>
+          client.query(sqlText, (params ?? []) as unknown[]),
+        { orgId: promotedSeed.orgId, userId: promotedSeed.userId, workDate: promotedInput.workDate },
+      )
+      expect(visible).not.toBeNull()
+    } finally {
+      client.release()
+    }
     expect((await calcRows(seed.userId)).length).toBe(1)
   })
 
-  it('leg 9: a parent pointer moved between the boundary read and the core call is refused with VERSION_CONFLICT (409) as a product code, never a raw SQLSTATE', async () => {
-    // Drive the seam directly: a first completed punch moves the pointer; a SECOND boundary call
-    // whose locked read is forced stale by a concurrent committed pointer move must be refused.
-    // Constructed by racing a raw pointer UPDATE in between using a separate connection is not
-    // possible under the boundary's own FOR UPDATE; instead we prove the guard at the core's own
-    // seam by pointing an authoritative write at a parent whose pointer moved after the read —
-    // reproduced here by a second punch on a record whose pointer was rewritten by a first punch
-    // while the operation id differs, and asserting the guard's own product code surfaces.
+  it('leg 9: `expectedCurrentCalculationId` is sourced from the LOCKED read, so a second authoritative punch supersedes the moved pointer instead of failing VERSION_CONFLICT', async () => {
+    // NOT a VERSION_CONFLICT leg: the boundary holds the parent `FOR UPDATE` from its own read
+    // through commit, so no writer can move the pointer in between and the 409 is unreachable
+    // from here by construction (the core's own stale-expectation refusal is proven at the core
+    // seam, in the D1 suite). What IS provable here — and is the §5.4 obligation — is that the
+    // expectation comes from that locked read rather than being assumed `null`: hardcoding it to
+    // `null` makes the SECOND punch below 409 instead of superseding.
     const seed = await seedAuthoritativeOrg('g9', { withShift: true })
     const { boundary } = makeBoundary()
     expect((await boundary.executeLivePunch(await buildPunchInput(seed))).kind).toBe('w4')
@@ -688,6 +712,21 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
       expect(Object.prototype.hasOwnProperty.call(record, legacyOnlyKey)).toBe(false)
     }
     expect(record.meta === null || typeof record.meta === 'object').toBe(true)
+
+    // SECOND HALF OF THE SAME OWNER QUESTION — `workDateResolution` is ALSO synthesized on this
+    // path (the legacy adapter returns the resolver's own `punchWorkDateResolution` verbatim; the
+    // authoritative branch has no such object and builds a closed projection instead). That is a
+    // second, independent client-contract change, so it is pinned here rather than left to leg
+    // 10's truthiness check.
+    const resolution = ((result as { response: Record<string, unknown> }).response
+      .workDateResolution) as Record<string, unknown>
+    expect(Object.keys(resolution).sort()).toEqual([
+      'attributionPosture',
+      'kind',
+      'reasonCode',
+      'shiftId',
+      'workDate',
+    ])
   })
 
   it('leg 11b [the real P-A pin]: an AUTHORITATIVE punch invokes the injected applyLivePunchLegacy ZERO times — negative control: a SHADOW punch invokes it exactly once', async () => {
