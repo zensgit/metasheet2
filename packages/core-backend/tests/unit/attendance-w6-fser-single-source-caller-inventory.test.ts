@@ -63,6 +63,13 @@ const ALLOWED_RELATIVE_FILES = new Set([
   // It names the FSER module because that module is one of the 72 files under
   // the guard's pinned roots — a scan-domain entry, not a caller.
   'packages/core-backend/tests/unit/w7-w6r5-guard/classification.ts',
+  // W7-1a (#4556): the query-parity pin. It names the FSER module because it
+  // READS that file's source text to compare the three SQL literals the W7
+  // resolver reissues against the originals — an inspection of the module, not
+  // a use of it. It never requires the module, never calls the factory, and
+  // never re-implements the derivation; it exists precisely to keep the
+  // reissued reads honest to FSER's.
+  'packages/core-backend/tests/unit/attendance-w7-1a-fser-query-parity.test.ts',
 ])
 
 /**
