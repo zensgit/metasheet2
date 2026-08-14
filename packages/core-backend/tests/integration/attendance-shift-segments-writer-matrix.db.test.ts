@@ -73,6 +73,12 @@ function requestJson(url: string, options: { method?: string; headers?: Record<s
 }
 
 const codeOf = (r: HttpResponse) => r.body?.error?.code
+// The typed 422's message embeds the `producer` of the guard that refused
+// ("... so <producer> cannot use a multi-segment shift", attendance-shift-service.cjs).
+// That makes the producer an observable ATTRIBUTION channel on the HTTP response: it
+// identifies WHICH reference guard fail-closed, not merely that some guard did. Used by
+// the P2-1 leg below to hold one specific writer site load-bearing on its own.
+const messageOf = (r: HttpResponse) => String(r.body?.error?.message ?? '')
 
 describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   let server: MetaSheetServerType | undefined
@@ -1579,6 +1585,63 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(state.rows[0].status).toBe('pending')
     expect(state.rows[0].publish_status).toBe('pending')
     expect(state.rows[0].finalized_at).toBeNull()
+    expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
+  })
+
+  /**
+   * #4556 Gate A / P2-1 — hold the `schedule_dispatch_final_approval` posture wiring
+   * (`index.cjs`, the `referenceSegments:` argument of its `assertShiftReferenceAllowed`
+   * call) load-bearing ON ITS OWN.
+   *
+   * Why the leg above cannot do it: forcing THAT ONE site fail-open (`referenceSegments: true`)
+   * leaves it green, because a SECOND fail-closed door downstream —
+   * `assertWorkContextSegmentCalculationAllowed` (hardcoded `referenceSegments: false`, one of
+   * this cutover's disclosed residual-R4 pinned-closed read paths) — refuses the same request
+   * and produces an identical `422` + identical error code. Classic 多道 fail-closed 门互相掩护:
+   * status and code are dominated, so neither can discriminate.
+   *
+   * What still discriminates, without opening the R4 door: WHICH producer refused. The typed
+   * 422's message names the refusing guard's `producer`. Correct behaviour ⇒ the dispatch
+   * final-approval guard refuses FIRST and the message names `schedule_dispatch_final_approval`.
+   * With that one site forced fail-open, the request survives it and is refused later by the
+   * calculation read path instead, whose message names `attendance calculation` — so this leg
+   * REDS while status/code stay 422/GUARD_CODE. Verified by executing exactly that mutation.
+   *
+   * Residual (disclosed in the PR body): this is an attribution-level proof, not a status-flip
+   * proof. A 200-vs-422 behavioural flip at this site remains impossible while the R4 door is
+   * pinned closed; closing P2-1 fully is therefore a BLOCKING precondition on the R4 slice,
+   * which is exactly what makes this site live.
+   */
+  it('P2-1: schedule-dispatch final approval 422 is attributed to ITS OWN guard, not to the covering R4 door', async () => {
+    const orgId = org('p21-dispatch-final-attribution')
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+
+    const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: `${orgId}-worker`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-06-10',
+      endDate: '2049-06-10',
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+
+    await injectSecondSegment(orgId, shiftId)
+    const approve = await postJson(`/api/attendance/requests/${requestId}/approve`, token, orgId, { comment: 'go' })
+    expect(approve.status, approve.raw).toBe(422)
+    expect(codeOf(approve)).toBe(GUARD_CODE)
+
+    // The load-bearing assertions: the refusal is attributed to the dispatch final-approval
+    // writer's own guard. If that site stops consuming the resolved posture, the refusal
+    // migrates to the calculation read path and both assertions fail.
+    expect(messageOf(approve), approve.raw).toContain('schedule_dispatch_final_approval')
+    expect(messageOf(approve), approve.raw).not.toContain('attendance calculation')
+
     expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
   })
 
