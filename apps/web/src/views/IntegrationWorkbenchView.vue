@@ -267,6 +267,9 @@
         :external-write-can-apply="externalWriteCanApply"
         :external-write-dry-run-result="externalWriteDryRunResult"
         :external-write-review-summary="externalWriteReviewSummary"
+        :external-write-acceptance-summary="externalWriteAcceptanceSummary"
+        :external-write-acceptance-ready="externalWriteAcceptanceReady"
+        :external-write-cleanup-required="externalWriteCleanupRequired"
         :external-write-dry-run-metrics="externalWriteDryRunMetrics"
         :external-write-dry-run-token="externalWriteDryRunToken"
         :external-write-evidence-text="externalWriteEvidenceText"
@@ -276,6 +279,7 @@
         :dry-run-external-write="dryRunExternalWrite"
         :apply-external-write="applyExternalWrite"
         v-model:external-write-accept-review="externalWriteAcceptReview"
+        v-model:external-write-accept-cleanup="externalWriteAcceptCleanup"
       />
 
       <IntegrationTableActionsPanel
@@ -809,6 +813,7 @@ const runningExternalWrite = ref<'dry-run' | 'apply' | ''>('')
 const externalWriteDryRunResult = ref<IntegrationExternalWriteDryRunResult | null>(null)
 const externalWriteApplyResult = ref<IntegrationExternalWriteApplyResult | null>(null)
 const externalWriteAcceptReview = ref(false)
+const externalWriteAcceptCleanup = ref(false)
 const tableActions = ref<IntegrationTableActionMetadata[]>([])
 const selectedTableActionId = ref('')
 const tableActionProjectNo = ref('')
@@ -1528,6 +1533,21 @@ const dryRunReadinessItems = computed(() => [
 // re-running an existing pipeline by pasting its ID must not be blocked by an unfilled builder. See #2232.
 const canRunPipeline = computed(() => savedPipelineId.value.trim() !== '')
 const externalWriteDryRunToken = computed(() => externalWriteDryRunResult.value?.dryRunToken || '')
+const K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE = 'k3-test-only-exact-two-add-v1'
+const externalWriteAcceptancePolicy = computed(() => {
+  const evidence = isRecord(externalWriteDryRunResult.value?.evidence) ? externalWriteDryRunResult.value?.evidence : null
+  const policy = evidence && isRecord(evidence.acceptancePolicy) ? evidence.acceptancePolicy : null
+  return policy?.profile === K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE ? policy : null
+})
+const externalWriteCleanupRequired = computed(() => externalWriteAcceptancePolicy.value?.cleanupRequired === true)
+const externalWriteAcceptanceReady = computed(() => externalWriteAcceptancePolicy.value?.ready === true)
+const externalWriteAcceptanceSummary = computed(() => {
+  const policy = externalWriteAcceptancePolicy.value
+  if (!policy) return ''
+  return policy.ready === true
+    ? '测试快车道门禁通过：精确 2 行、全部 add、无 update/skip/held/failed；Apply 后必须由 K3 管理员完成原生清理。'
+    : '测试快车道门禁未通过：必须精确 2 行且全部为 add；当前 token 不可用于 Apply。'
+})
 const externalWriteCanDryRun = computed(() => Boolean(
   savedPipelineId.value.trim()
   && runningExternalWrite.value === ''
@@ -1538,6 +1558,7 @@ const externalWriteCanApply = computed(() => Boolean(
   && externalWriteDryRunResult.value?.canApply === true
   && externalWriteDryRunToken.value
   && externalWriteAcceptReview.value
+  && (!externalWriteCleanupRequired.value || externalWriteAcceptCleanup.value)
   && auth.hasPermission('integration:write')
   && runningExternalWrite.value === ''
   && runningPipeline.value === '',
@@ -1585,6 +1606,13 @@ const externalWriteEvidenceText = computed(() => {
     revisionPresent: Boolean(result.revision),
     rowErrorTypes: valuesFreeTokenList(evidence.rowErrorTypes),
     errorTypes: valuesFreeTokenList(evidence.errorTypes),
+    acceptancePolicy: externalWriteAcceptancePolicy.value ? {
+      profile: K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+      ready: externalWriteAcceptanceReady.value,
+      expectedRows: 2,
+      operationMode: 'add-only',
+      cleanupRequired: externalWriteCleanupRequired.value,
+    } : undefined,
     sourceRead: sourceRead ? {
       complete: sourceRead.complete === true,
       truncated: sourceRead.truncated === true,
@@ -3399,6 +3427,7 @@ function resetExternalWriteReview(): void {
   externalWriteDryRunResult.value = null
   externalWriteApplyResult.value = null
   externalWriteAcceptReview.value = false
+  externalWriteAcceptCleanup.value = false
 }
 
 function externalWriteRequestSignature(pipelineId = savedPipelineId.value.trim()): string {
@@ -3421,6 +3450,7 @@ async function dryRunExternalWrite(): Promise<void> {
   externalWriteDryRunResult.value = null
   externalWriteApplyResult.value = null
   externalWriteAcceptReview.value = false
+  externalWriteAcceptCleanup.value = false
   try {
     const payload = currentScope()
     const result = await dryRunIntegrationExternalWrite(pipelineId, payload)
@@ -3468,6 +3498,10 @@ async function applyExternalWrite(): Promise<void> {
     setStatus('Apply 前必须确认已复核 dry-run counts / status / error token。', 'error')
     return
   }
+  if (externalWriteCleanupRequired.value && !externalWriteAcceptCleanup.value) {
+    setStatus('测试快车道 Apply 前必须确认 K3 管理员原生清理责任已就绪。', 'error')
+    return
+  }
   const requestSignature = externalWriteRequestSignature(pipelineId)
   runningExternalWrite.value = 'apply'
   externalWriteApplyResult.value = null
@@ -3484,6 +3518,7 @@ async function applyExternalWrite(): Promise<void> {
     externalWriteApplyResult.value = result
     externalWriteDryRunResult.value = null
     externalWriteAcceptReview.value = false
+    externalWriteAcceptCleanup.value = false
     pipelineResultText.value = JSON.stringify({
       action: 'external-write-apply',
       pipelineId,

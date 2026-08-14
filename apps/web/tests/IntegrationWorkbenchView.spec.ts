@@ -1390,6 +1390,100 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.querySelector('[data-testid="pipeline-result"]')?.textContent).not.toContain('dead-letter-secret')
   })
 
+  it('C6 fast track: requires exact-two acceptance and administrator cleanup acknowledgement', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const applyBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/pipelines/pipe_fast/external-write/dry-run') {
+        return jsonResponse({
+          pipelineId: 'pipe_fast',
+          status: 'ready',
+          canApply: true,
+          dryRunToken: 'fast-track-token-secret',
+          revision: 'rev-fast-track',
+          counts: { sourceRows: 2, planned: 2, add: 2, update: 0, skip: 0, held: 0, failed: 0 },
+          evidence: {
+            rowErrorTypes: [],
+            sourceRead: { complete: true, pagesRead: 1, truncated: false },
+            acceptancePolicy: {
+              profile: 'k3-test-only-exact-two-add-v1',
+              expectedRows: 2,
+              operationMode: 'add-only',
+              cleanupMode: 'k3-native-admin-required',
+              ready: true,
+              cleanupRequired: true,
+              privateValue: 'must-not-render',
+            },
+          },
+        })
+      }
+      if (url === '/api/integration/pipelines/pipe_fast/external-write/apply') {
+        applyBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({
+          pipelineId: 'pipe_fast',
+          status: 'succeeded',
+          dryRunRevision: 'rev-fast-track',
+          counts: { add: 2, update: 0, skip: 0, held: 0, failed: 0, written: 2 },
+          deadLetters: { attempted: 0, persisted: 0 },
+          evidence: { rowErrorTypes: [], dryRunTokenConsumed: true },
+          run: { id: 'run_fast', status: 'succeeded', provenanceEventsPersisted: 2 },
+        })
+      }
+      if (url.startsWith('/api/integration/runs?')) return jsonResponse([])
+      if (url.startsWith('/api/integration/dead-letters?')) return jsonResponse([])
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_fast'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="external-write-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    const acceptance = container.querySelector('[data-testid="external-write-acceptance-policy"]') as HTMLElement
+    expect(acceptance.dataset.ready).toBe('true')
+    expect(acceptance.textContent).toContain('精确 2 行')
+    expect(acceptance.textContent).toContain('K3 管理员')
+    expect(container.textContent).not.toContain('must-not-render')
+    expect(container.textContent).not.toContain('fast-track-token-secret')
+
+    const applyButton = container.querySelector('[data-testid="external-write-apply"]') as HTMLButtonElement
+    ;(container.querySelector('[data-testid="external-write-accept-review"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(applyButton.disabled).toBe(true)
+    ;(container.querySelector('[data-testid="external-write-accept-cleanup"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(applyButton.disabled).toBe(false)
+
+    applyButton.click()
+    await flushUi(10)
+    expect(applyBodies).toHaveLength(1)
+    expect(applyBodies[0]).toEqual({
+      tenantId: 'default',
+      workspaceId: null,
+      confirm: { dryRunToken: 'fast-track-token-secret' },
+    })
+    expect(container.querySelector('[data-testid="external-write-apply-result"]')?.textContent).toContain('written 2')
+  })
+
   it('C6-4: discards stale external-write dry-run results after pipeline id changes', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     let releaseDryRun: (() => void) | null = null

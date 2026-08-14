@@ -19,6 +19,10 @@ const TARGET_KIND = 'data-source:sql-write-gated'
 const C6_TEST_INJECTED_ROW_FAILURE = 'C6_TEST_INJECTED_ROW_FAILURE'
 const C6_TEST_FAILURE_INJECTION_CONFIG_INVALID = 'C6_TEST_FAILURE_INJECTION_CONFIG_INVALID'
 const C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET = 'C6_TEST_FAILURE_INJECTION_UNSAFE_TARGET'
+const K3_WISE_TARGET_KIND = 'erp:k3-wise-webapi'
+const K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE = 'k3-test-only-exact-two-add-v1'
+const K3_TEST_ONLY_EXACT_TWO_ADD_ROWS = 2
+const EXTERNAL_WRITE_ACCEPTANCE_POLICY_KEYS = new Set(['profile'])
 const CONSUMING_TOKEN_KEYS = new Set()
 const SAFE_WRITE_ERROR_CODES = new Set([
   'AdapterValidationError',
@@ -268,6 +272,7 @@ function normalizeTargetConfig(system, profile = SQL_WRITE_GATED_PROFILE) {
     object: requiredString(config.object, 'target.config.object'),
     keyFields: normalizeFieldList(config.keyFields, 'target.config.keyFields'),
     writableFields: normalizeFieldList(config.writableFields, 'target.config.writableFields'),
+    ...(config.acceptancePolicy !== undefined ? { acceptancePolicy: config.acceptancePolicy } : {}),
   }
 }
 
@@ -421,6 +426,72 @@ function normalizeServerBoundSqlEqualityFilters(pipeline, sourceSystem) {
   return normalized
 }
 
+// Optional, persisted acceptance policy for the smallest K3 write-bearing test. The policy is
+// configuration-only: it never grants Apply permission and it cannot weaken the deployment-level
+// Apply-disable gate. Its only effect is to make token issuance STRICTER by requiring one exact,
+// values-free plan shape. Keeping the profile name fixed avoids a caller-selectable row count or
+// operation mode becoming a new write-scope surface.
+function normalizeExternalWriteAcceptancePolicy(targetConfig) {
+  const raw = targetConfig && targetConfig.acceptancePolicy
+  if (raw === undefined || raw === null) return null
+  if (!isPlainObject(raw) || Object.keys(raw).some((key) => !EXTERNAL_WRITE_ACCEPTANCE_POLICY_KEYS.has(key))) {
+    throw new ExternalWriteDryRunError(
+      422,
+      'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+      'persisted external-write acceptance policy is invalid',
+    )
+  }
+  if (raw.profile !== K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE || targetConfig.kind !== K3_WISE_TARGET_KIND) {
+    throw new ExternalWriteDryRunError(
+      422,
+      'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+      'persisted external-write acceptance policy is invalid',
+    )
+  }
+  return {
+    profile: K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+    expectedRows: K3_TEST_ONLY_EXACT_TWO_ADD_ROWS,
+    operationMode: 'add-only',
+    cleanupMode: 'k3-native-admin-required',
+  }
+}
+
+function isStrictAddOnlyAcceptance(acceptancePolicy) {
+  return Boolean(
+    acceptancePolicy
+    && acceptancePolicy.profile === K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE
+    && acceptancePolicy.operationMode === 'add-only',
+  )
+}
+
+function plannerWritePolicy(targetConfig, acceptancePolicy) {
+  return {
+    keyFields: targetConfig.keyFields,
+    writableFields: targetConfig.writableFields,
+    // Trusted semantic only. Derived from persisted acceptance policy; requests cannot
+    // enable, disable, or override this flag.
+    ...(isStrictAddOnlyAcceptance(acceptancePolicy) ? { strictAbsence: true } : {}),
+  }
+}
+
+function evaluateExternalWriteAcceptancePolicy(policy, counts, sourceRead) {
+  if (!policy) return null
+  const ready = sourceRead.complete === true &&
+    sourceRead.truncated !== true &&
+    counts.sourceRows === policy.expectedRows &&
+    counts.planned === policy.expectedRows &&
+    counts.add === policy.expectedRows &&
+    counts.update === 0 &&
+    counts.skip === 0 &&
+    counts.held === 0 &&
+    counts.failed === 0
+  return {
+    ...policy,
+    ready,
+    cleanupRequired: true,
+  }
+}
+
 function keyFromRecord(record, keyFields) {
   const key = {}
   const missing = []
@@ -433,6 +504,22 @@ function keyFromRecord(record, keyFields) {
     }
   }
   return { key, missing }
+}
+
+function targetKeyIdentity(targetConfig, key) {
+  const canonicalKey = {}
+  for (const field of targetConfig.keyFields) {
+    let value = key[field]
+    if (
+      targetConfig.kind === K3_WISE_TARGET_KIND &&
+      field === 'FNumber' &&
+      typeof value === 'string'
+    ) {
+      value = value.trim().toLocaleLowerCase('en-US')
+    }
+    canonicalKey[field] = value
+  }
+  return hashJson(canonicalKey)
 }
 
 function writableDataFromRecord(record, writableFields) {
@@ -527,6 +614,7 @@ function buildRevision(input) {
       writableFields: input.targetConfig.writableFields,
       capabilityState: input.targetCapabilityState,
     },
+    acceptancePolicy: input.acceptancePolicy,
     testFailureInjection: revisionTestFailureInjection(input.testFailureInjection),
     fieldMappings: input.pipeline.fieldMappings || [],
     rowFingerprints: input.rowFingerprints,
@@ -546,7 +634,20 @@ function publicRowErrorTypes(rowErrors) {
   return Array.from(new Set(rowErrors.map((entry) => entry.errorCode || entry.reason || 'write_failed'))).sort()
 }
 
-function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken, testFailureInjection }) {
+// Keep public evidence to the fixed, values-free facts the workbench actually needs. In
+// particular, do not echo the private persisted policy object or any future trusted-admin
+// fields that may be added to it.
+function publicAcceptancePolicyEvidence(acceptancePolicy) {
+  if (!acceptancePolicy) return null
+  return {
+    profile: K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+    expectedRows: K3_TEST_ONLY_EXACT_TWO_ADD_ROWS,
+    ready: acceptancePolicy.ready === true,
+    cleanupRequired: acceptancePolicy.cleanupRequired === true,
+  }
+}
+
+function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken, testFailureInjection, acceptancePolicy }) {
   return {
     pipelineId: pipeline.id,
     targetKind: targetConfig.kind,
@@ -564,11 +665,12 @@ function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, 
     dryRunRevision: revision,
     canApply: canApply === true,
     dryRunTokenPresent: typeof dryRunToken === 'string' && dryRunToken.length > 0,
+    ...(acceptancePolicy ? { acceptancePolicy: publicAcceptancePolicyEvidence(acceptancePolicy) } : {}),
     testFailureInjection: publicTestFailureInjectionEvidence(testFailureInjection),
   }
 }
 
-function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents, testFailureInjection }) {
+function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, counts, revision, sourceRead, rowErrors, provenanceEvents, testFailureInjection, acceptancePolicy }) {
   return {
     pipelineId: pipeline.id,
     targetKind: targetConfig.kind,
@@ -587,6 +689,7 @@ function publicApplyEvidence({ pipeline, targetConfig, sourceKind, status, count
     },
     dryRunRevision: revision,
     dryRunTokenConsumed: true,
+    ...(acceptancePolicy ? { acceptancePolicy: publicAcceptancePolicyEvidence(acceptancePolicy) } : {}),
     testFailureInjection: publicTestFailureInjectionEvidence(testFailureInjection),
     provenanceEventCounts: provenanceEvents.reduce((acc, event) => {
       acc[event.eventType] = (acc[event.eventType] || 0) + 1
@@ -615,6 +718,7 @@ async function computeExternalWritePlan(input = {}) {
   const sourceFilters = normalizeServerBoundSqlEqualityFilters(pipeline, input.sourceSystem)
   const profile = resolveTargetWriteProfile(input)
   const targetConfig = normalizeTargetConfig(input.targetSystem, profile)
+  const configuredAcceptancePolicy = normalizeExternalWriteAcceptancePolicy(targetConfig)
   const testFailureInjection = normalizeTestFailureInjectionConfig(input.testFailureInjection, {
     pipeline,
     targetSystem: input.targetSystem,
@@ -646,11 +750,9 @@ async function computeExternalWritePlan(input = {}) {
   const rowErrorTypes = []
   const rowFingerprints = []
   const planRows = []
-  const policy = {
-    keyFields: targetConfig.keyFields,
-    writableFields: targetConfig.writableFields,
-  }
+  const policy = plannerWritePolicy(targetConfig, configuredAcceptancePolicy)
 
+  const seenTargetKeyIdentities = new Set()
   for (const sourceRecord of sourceRead.records) {
     const transformed = transformRecord(sourceRecord, pipeline.fieldMappings || [])
     if (!transformed.ok) {
@@ -674,6 +776,26 @@ async function computeExternalWritePlan(input = {}) {
       continue
     }
 
+    const keyFingerprint = targetKeyIdentity(targetConfig, key)
+    if (seenTargetKeyIdentities.has(keyFingerprint)) {
+      counts.held += 1
+      counts.planned += 1
+      rowErrorTypes.push('duplicate_target_key')
+      planRows.push({
+        decision: 'held',
+        key,
+        keyFingerprint,
+        row: writeRowFromRecord(transformed.value, targetConfig),
+      })
+      rowFingerprints.push({
+        status: 'held',
+        reason: 'duplicate_target_key',
+        key: keyFingerprint,
+      })
+      continue
+    }
+    seenTargetKeyIdentities.add(keyFingerprint)
+
     const lookup = await dataSourceWrites.lookupByKey(
       targetConfig.dataSourceId,
       targetConfig.object,
@@ -694,12 +816,12 @@ async function computeExternalWritePlan(input = {}) {
     planRows.push({
       decision,
       key,
-      keyFingerprint: hashJson(key),
+      keyFingerprint,
       row: writeRow,
     })
     rowFingerprints.push({
       status: decision,
-      key: hashJson(key),
+      key: keyFingerprint,
       target: hashJson({
         key,
         data: writableDataFromRecord(transformed.value, targetConfig.writableFields),
@@ -711,7 +833,14 @@ async function computeExternalWritePlan(input = {}) {
   if (sourceRead.truncated) {
     rowErrorTypes.push('source_read_truncated')
   }
-  const canApply = sourceRead.complete === true && counts.failed === 0 && counts.held === 0
+  const acceptancePolicy = evaluateExternalWriteAcceptancePolicy(configuredAcceptancePolicy, counts, sourceRead)
+  if (acceptancePolicy && acceptancePolicy.ready !== true) {
+    rowErrorTypes.push('acceptance_policy_mismatch')
+  }
+  const canApply = sourceRead.complete === true &&
+    counts.failed === 0 &&
+    counts.held === 0 &&
+    (!acceptancePolicy || acceptancePolicy.ready === true)
   if (canApply) {
     assertTestFailureInjectionPlanReady(testFailureInjection, planRows)
   }
@@ -721,6 +850,7 @@ async function computeExternalWritePlan(input = {}) {
     sourceFilters,
     targetConfig,
     targetCapabilityState,
+    acceptancePolicy,
     testFailureInjection,
     dryRunUser: input.dryRunUser,
     dataSourceOwnerPrincipal: input.dataSourceOwnerPrincipal,
@@ -743,6 +873,7 @@ async function computeExternalWritePlan(input = {}) {
     policy,
     canApply,
     revision,
+    acceptancePolicy,
     testFailureInjection,
     maxRows,
   }
@@ -781,6 +912,7 @@ async function dryRunExternalWrite(input = {}) {
       rowErrorTypes: plan.rowErrorTypes,
       dryRunToken,
       testFailureInjection: plan.testFailureInjection,
+      acceptancePolicy: plan.acceptancePolicy,
     }),
   }
 }
@@ -842,6 +974,40 @@ async function persistDeadLetters({ deadLetterStore, pipeline, revision, runId, 
   return persisted
 }
 
+async function preflightStrictAddOnlyLookups(plan, input = {}) {
+  const addRows = (plan.planRows || []).filter((row) => row && row.decision === 'add')
+  const reasons = []
+  for (const row of addRows) {
+    let lookup
+    try {
+      lookup = await plan.dataSourceWrites.lookupByKey(
+        plan.targetConfig.dataSourceId,
+        plan.targetConfig.object,
+        row.key,
+        plan.policy,
+        input.dataSourceOwnerPrincipal,
+      )
+    } catch (_error) {
+      reasons.push('lookup_error')
+      continue
+    }
+    if (!lookup || !Array.isArray(lookup.data)) {
+      reasons.push('lookup_error')
+      continue
+    }
+    const existingRows = lookup.data
+    if (existingRows.length === 1) reasons.push('target_exists')
+    else if (existingRows.length > 1) reasons.push('ambiguous_target_key')
+  }
+  if (reasons.length === 0) return
+  throw new ExternalWriteDryRunError(
+    409,
+    'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED',
+    'strict add-only preflight refused the batch',
+    { reason: reasons[0] },
+  )
+}
+
 async function applyExternalWrite(input = {}) {
   const applyUser = optionalString(input.applyUser)
   if (!applyUser) {
@@ -869,6 +1035,11 @@ async function applyExternalWrite(input = {}) {
   }
   if (!plan.canApply) {
     throw new ExternalWriteDryRunError(409, 'C6_WRITE_DRY_RUN_NOT_APPLYABLE', 'current dry-run is not applyable')
+  }
+  if (isStrictAddOnlyAcceptance(plan.acceptancePolicy)) {
+    // Same strict lookup as planning, for every add row, before ANY insertRows. This is not
+    // an atomic K3 insert-only; Save remains upsert and a residual TOCTOU window remains.
+    await preflightStrictAddOnlyLookups(plan, input)
   }
 
   const counts = {
@@ -998,6 +1169,7 @@ async function applyExternalWrite(input = {}) {
       rowErrors,
       provenanceEvents,
       testFailureInjection: plan.testFailureInjection,
+      acceptancePolicy: plan.acceptancePolicy,
     }),
   }
 }
@@ -1009,6 +1181,7 @@ module.exports = {
   __internals: {
     C6_WRITE_DRY_RUN_TOKEN_PREFIX,
     C6_TEST_INJECTED_ROW_FAILURE,
+    K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
     TARGET_KIND,
     SQL_WRITE_GATED_PROFILE,
     resolveTargetWriteProfile,
@@ -1016,9 +1189,14 @@ module.exports = {
     buildRevision,
     computeExternalWritePlan,
     consumeDryRunToken,
+    evaluateExternalWriteAcceptancePolicy,
+    isStrictAddOnlyAcceptance,
+    normalizeExternalWriteAcceptancePolicy,
+    plannerWritePolicy,
     normalizeTargetConfig,
     normalizeTestFailureInjectionConfig,
     normalizeServerBoundSqlEqualityFilters,
+    targetKeyIdentity,
     valuesEqual,
   },
 }

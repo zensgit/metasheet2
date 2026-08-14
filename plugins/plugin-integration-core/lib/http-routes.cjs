@@ -150,6 +150,7 @@ const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
 ])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
+const { hasPrivateConfigMutation } = require('./external-systems.cjs')
 const { createRunLogger } = require('./run-log.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
@@ -561,6 +562,36 @@ function resolveAuthUserTenantId(req) {
     throw new HttpRouteError(400, 'TENANT_REQUIRED', 'authenticated tenant context is required')
   }
   return tenantId
+}
+
+function collectExplicitTenantIds(req, input = {}) {
+  const body = requestBody(req)
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  return [input.tenantId, body && body.tenantId, query && query.tenantId, params && params.tenantId]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+}
+
+// Write-bearing C6 Apply and private adapter-config mutation derive tenant from the
+// authenticated principal only. Tenantless role:admin and any mismatched tenant carrier
+// fail closed. An explicit tenantId that equals the auth tenant is compatibility-only.
+function resolveAuthenticatedWriteTenantId(req, input = {}) {
+  const tenantId = resolveAuthUserTenantId(req)
+  for (const explicit of collectExplicitTenantIds(req, input)) {
+    if (explicit !== tenantId) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return tenantId
+}
+
+function scopedAuthenticatedWriteInput(req, input = {}) {
+  return {
+    ...input,
+    tenantId: resolveAuthenticatedWriteTenantId(req, input),
+    workspaceId: resolveWorkspaceId(req, input),
+  }
 }
 
 function resolveWorkspaceId(req, input = {}) {
@@ -2806,7 +2837,12 @@ function createHandlers(services, options = {}) {
 
     async externalSystemsUpsert(req, res) {
       requireAccess(req, 'write')
-      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, requestBody(req))), 201)
+      const body = requestBody(req)
+      if (hasPrivateConfigMutation(body.kind, body.config)) {
+        requireAccess(req, 'admin')
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, body)), 201)
+      }
+      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
     },
 
     async externalSystemsGet(req, res) {
@@ -3565,8 +3601,9 @@ function createHandlers(services, options = {}) {
       if (c6WriteApplyDisabled()) {
         throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
       }
+      resolveAuthenticatedWriteTenantId(req)
       const body = normalizeC6WriteApplyBody(requestBody(req))
-      const scope = scopedInput(req, {
+      const scope = scopedAuthenticatedWriteInput(req, {
         id: requestParams(req).id,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3588,7 +3625,7 @@ function createHandlers(services, options = {}) {
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+      const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3602,7 +3639,7 @@ function createHandlers(services, options = {}) {
       // Peek first, then re-load WITH credentials only for kinds that actually build a target
       // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
       // for, so this does not widen credential exposure for them.
-      const targetSystemScope = scopedInput(req, {
+      const targetSystemScope = scopedAuthenticatedWriteInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -5320,6 +5357,8 @@ module.exports = {
     requireAccess,
     resolveTenantId,
     resolveAuthUserTenantId,
+    resolveAuthenticatedWriteTenantId,
+    scopedAuthenticatedWriteInput,
     scopedInput,
     sendError,
     inferHttpStatus,

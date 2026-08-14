@@ -68,6 +68,12 @@ const ADMIN_USER = {
   permissions: ['integration:admin'],
 }
 
+const TENANTLESS_ADMIN = {
+  id: 'user_platform_admin',
+  roles: ['admin'],
+  permissions: ['integration:admin'],
+}
+
 function createMemoryStorage() {
   const map = new Map()
   return {
@@ -672,6 +678,94 @@ async function testExternalSystemRoutes() {
     registered.includes('DELETE /api/integration/external-systems/:id'),
     'external systems delete route registered',
   )
+
+  const privateConfigFixture = createMockServices()
+  const { routes: privateConfigRoutes } = mountRoutes(privateConfigFixture.services)
+  const privateConfigBodies = [
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } },
+    },
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+    {
+      id: 'sys_sql_private',
+      name: 'SQL private projection',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { lookupProjection: {} },
+    },
+    {
+      id: 'sys_k3_private_padded_kind',
+      name: 'K3 padded kind private policy',
+      kind: ' erp:k3-wise-webapi ',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+  ]
+  for (const body of privateConfigBodies) {
+    const blocked = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+      user: WRITE_USER,
+      body,
+    })
+    assertErrorResponse(blocked, [403])
+  }
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    0,
+    'integration:write cannot set or clear any private external-system config',
+  )
+  const adminPrivateUpdate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: privateConfigBodies[0],
+  })
+  assertOkResponse(adminPrivateUpdate, 201)
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    1,
+    'integration:admin can persist the trusted private config',
+  )
+  const privateCallsAfterAdmin = findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length
+  const tenantlessPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: TENANTLESS_ADMIN,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(tenantlessPrivate, [400, 403])
+  assert.equal(tenantlessPrivate.body.error.code, 'TENANT_REQUIRED')
+  const mismatchedPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(mismatchedPrivate, [403])
+  assert.equal(mismatchedPrivate.body.error.code, 'TENANT_MISMATCH')
+  const queryMismatchPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+    body: privateConfigBodies[0],
+  })
+  assertErrorResponse(queryMismatchPrivate, [403])
+  assert.equal(queryMismatchPrivate.body.error.code, 'TENANT_MISMATCH')
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    privateCallsAfterAdmin,
+    'tenantless or mismatched private-policy mutation never reaches the registry',
+  )
+  const sameTenantPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_1' },
+  })
+  assertOkResponse(sameTenantPrivate, 201)
+  const sameTenantCalls = findCalls(privateConfigFixture.calls, 'upsertExternalSystem')
+  const sameTenantCall = sameTenantCalls[sameTenantCalls.length - 1]
+  assert.equal(sameTenantCall[1].tenantId, 'tenant_1', 'explicit same-tenant carrier is compatibility-only')
 
   let res = await invoke(routes, 'GET', '/api/integration/external-systems', {
     user: READ_USER,
@@ -2068,6 +2162,51 @@ async function testPipelineExternalWriteApplyRoute() {
     if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
     else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
   }
+}
+
+async function testPipelineExternalWriteApplyDerivesTenantFromAuthenticatedPrincipal() {
+  const { calls, services } = createMockServices()
+  const { routes } = mountRoutes(services)
+  const applyPath = '/api/integration/pipelines/:id/external-write/apply'
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = 'true'
+  try {
+    const disabledTenantless = await invoke(routes, 'POST', applyPath, {
+      user: TENANTLESS_ADMIN,
+      params: { id: 'pipe_1' },
+      body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'must-not-parse-as-success' } },
+    })
+    assert.equal(disabledTenantless.statusCode, 403)
+    assert.equal(disabledTenantless.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'Apply-disable remains before tenant or body-driven I/O')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  const tenantless = await invoke(routes, 'POST', applyPath, {
+    user: TENANTLESS_ADMIN,
+    params: { id: 'pipe_1' },
+    body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'must-not-reach-token-store' } },
+  })
+  assert.equal(tenantless.statusCode, 400)
+  assert.equal(tenantless.body.error.code, 'TENANT_REQUIRED')
+  assert.equal(calls.length, 0, 'tenantless role:admin Apply fails before registry/token/adapter I/O')
+
+  for (const req of [
+    { user: WRITE_USER, params: { id: 'pipe_1' }, body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'ignored' } } },
+    { user: WRITE_USER, params: { id: 'pipe_1' }, query: { tenantId: 'tenant_other' }, body: { confirm: { dryRunToken: 'ignored' } } },
+    { user: WRITE_USER, params: { id: 'pipe_1', tenantId: 'tenant_other' }, body: { confirm: { dryRunToken: 'ignored' } } },
+  ]) {
+    const callsBefore = calls.length
+    const mismatched = await invoke(routes, 'POST', applyPath, req)
+    assert.equal(mismatched.statusCode, 403)
+    assert.equal(mismatched.body.error.code, 'TENANT_MISMATCH')
+    assert.equal(calls.length, callsBefore, 'mismatched tenant carrier fails before registry/token/adapter I/O')
+  }
+
+  if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
 }
 
 async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
@@ -8921,6 +9060,7 @@ async function main() {
   await testPipelineRoutes()
   await testPipelineExternalWriteDryRunRoute()
   await testPipelineExternalWriteApplyRoute()
+  await testPipelineExternalWriteApplyDerivesTenantFromAuthenticatedPrincipal()
   await testPipelineExternalWriteMultitableRoute()
   await testPipelineExternalWriteApplyTestFailureInjectionRoute()
   await testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance()
