@@ -680,6 +680,14 @@ export default defineConfig({
       'tests/integration/attendance-w4c3a-import-rollback.db.test.ts',
       'tests/integration/attendance-w4c3a-rollout-control.db.test.ts',
       'tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts',
+      // Gate E (#4844) first batch: real-Postgres four-state acceptance (open-read-only-refuse,
+      // open-with-uncommitted-writes discriminating case, idle positive control, savepoint
+      // cleanup) for the two converted category-1 sites
+      // (`runAttendanceResultOperationTransactionV1` / `dispatchAttendanceResultEventOutboxV1`).
+      // DATABASE_URL-gated (describeDb); excluded here so the no-DB job cannot skip-green it;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
+      // wiring).
+      'tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts',
       'tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts',
       'tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts',
       // OBS-1 (2026-08-07): the two W4C-3b suites below landed in #4716 with NEITHER wiring
