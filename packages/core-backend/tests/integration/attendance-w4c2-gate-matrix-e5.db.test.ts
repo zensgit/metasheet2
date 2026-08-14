@@ -1132,15 +1132,39 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect(outbox[0].event_kind).toBe('attendance.punched')
   })
 
-  it('leg 6b — authoritative SCHEDULED still fails closed BEFORE source DML (undelivered; D3 delivers it)', async () => {
+  it('leg 6b — authoritative SCHEDULED now WRITES through the canonical authoritative path (Gate D3, #4844): the fail-closed sentinel is gone, the durable run executes, and NO legacy-ACTIVE absent row is fabricated', async () => {
+    // RE-FORMED BY GATE D3. This leg asserted a 503 `not delivered` refusal, which was true only
+    // while the scheduled entrypoint was undelivered. D3 removed BOTH of that entrypoint's refusal
+    // sites, so the assertion is re-pointed at what the route does NOW — end to end through the
+    // real HTTP surface, which is the half this file owns (the writer's internals are the D3
+    // real-DB suite's).
+    //
+    // `schedAdminUser` is a REAL active `users` row (the P1-4 in-transaction actor recheck rejects
+    // anything else with 403). Using a random uuid here would produce a 403 that merely proves the
+    // recheck works, not that the writer is wired — measured, then fixed.
     const before = await recordCount(authoritativeUser)
-    const beforeOps = (await operationRows(authoritativeOrg)).length
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    const adminToken = await mintToken(schedAdminUser, 'attendance:read,attendance:write,attendance:admin')
     const run = await autoAbsenceRun(adminToken, { orgId: authoritativeOrg, workDate: '2026-07-22' })
-    expect(run.status).toBe(503)
-    expect(run.body?.error?.code).toBe('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED')
-    expect(await recordCount(authoritativeUser)).toBe(before)
-    expect((await operationRows(authoritativeOrg)).length).toBe(beforeOps)
+    expect(run.status).toBe(200)
+    // The sentinel is GONE: no code, and nothing that looks like it, comes back.
+    expect(JSON.stringify(run.body ?? {})).not.toContain('AUTHORITATIVE_MODE_NOT_DELIVERED')
+    // A durable run row exists for that (org, workDate) — the run-registry routing Site A now
+    // performs instead of refusing.
+    const runs = await pool.query(
+      `SELECT state FROM attendance_scheduled_runs WHERE org_id = $1 AND work_date = '2026-07-22'::date`,
+      [authoritativeOrg],
+    )
+    expect(runs.rows.length).toBeGreaterThan(0)
+    // §7.5: whatever the per-target outcome was, the authoritative path never fabricates a
+    // legacy-ACTIVE `'absent'` row for an ordinary reader.
+    const fabricated = await pool.query(
+      `SELECT count(*)::int AS n FROM attendance_records
+        WHERE org_id = $1 AND work_date = '2026-07-22'::date
+          AND status = 'absent' AND visibility_state = 'active' AND projection_owner = 'legacy_untracked'`,
+      [authoritativeOrg],
+    )
+    expect(fabricated.rows[0].n).toBe(0)
+    void before
   })
 
   it('leg 7 — accepted_write_posture cannot be silently rebased: replay after legacy->shadow promotion returns the stored legacy response unchanged; a fresh key takes the shadow path; direct UPDATE is trigger-denied', async () => {
