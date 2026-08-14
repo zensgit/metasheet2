@@ -227,6 +227,62 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
   }
 
   /**
+   * An OVERNIGHT shift (22:00 -> 06:00 local), which is what makes the open-record tie-break in
+   * `selectAmongMatchingCandidates` reachable: that branch requires a candidate that
+   * `isOvernight` AND whose `workDate` is strictly before the punch's `calendarWorkDate`.
+   */
+  async function insertOvernightShiftAndAssignment(orgId: string, userId: string): Promise<string> {
+    const shiftId = uuid()
+    // `is_overnight` must be set EXPLICITLY: the column defaults to `false`, and the resolver's
+    // `resolveOvernightFlag` honours an explicit flag over inferring one from the times, so a
+    // 22:00->06:00 shift left at the default builds an end-before-start absolute window and the
+    // candidate is rejected as MALFORMED_CANDIDATE_SHAPE before any tie-break runs.
+    await pool.query(
+      `INSERT INTO attendance_shifts (id, org_id, name, work_start_time, work_end_time, timezone, is_overnight)
+       VALUES ($1, $2, $3, '22:00', '06:00', $4, true)`,
+      [shiftId, orgId, `w4c2-d2-overnight-${RUN}`, TZ],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_segments
+         (org_id, shift_id, segment_index, start_time, start_day_offset, end_time, end_day_offset)
+       VALUES ($1, $2, 0, '22:00', 0, '06:00', 1)`,
+      [orgId, shiftId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status, assignment_kind)
+       VALUES ($1, $2, $3, $4, 0, '2026-05-01', NULL, true, 'published', 'regular')`,
+      [uuid(), orgId, userId, shiftId],
+    )
+    return shiftId
+  }
+
+  /** Runs the plugin's REAL wire-echo derivation on its own connection, outside any punch. */
+  async function deriveWorkDateResolutionOutOfBand(
+    seed: { orgId: string; userId: string },
+    occurredAtResolved: string,
+  ): Promise<Record<string, unknown>> {
+    const client = await pool.connect()
+    try {
+      const shaped: AttendancePluginShapedTrxV1 = {
+        __w4CanonicalTrx: true,
+        async query(sqlText: string, params?: unknown[]) {
+          const res = await client.query(sqlText, params ?? [])
+          return res.rows
+        },
+      }
+      return (await adapters.deriveLivePunchWorkDateResolutionV1(shaped, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        occurredAt: occurredAtResolved,
+        requestTimezone: TZ,
+      })) as Record<string, unknown>
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
    * An org + user seeded for authoritative punches. `withShift` decides whether the freeze step
    * can resolve a `resolved_v2` attribution at all (no shift => unsupported => review_required).
    */
@@ -866,6 +922,74 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
         expect(authRecord.visibility_state).toBe('retired')  // the review placeholder
       }
     }
+  }, 60000)
+
+  it('leg 10f [CONTRACT SEMANTICS]: the echoed `workDateResolution` is derived PRE-write — an OVERNIGHT completed check-in echoes PREVIOUS_NIGHT_CONTAINING_SHIFT, not the OPEN_PREVIOUS_NIGHT_RECORD the same derivation yields once this operation\'s own write exists', async () => {
+    // WHY THIS LEG EXISTS. Matching the legacy contract is not only field names and casing - it is
+    // SEMANTICS. The legacy path derives `workDateResolution` BEFORE its own `attendance_records`
+    // upsert. The resolver consults OPEN records (`w4c3c-active-current.ts:176-190`:
+    // `first_in_at IS NOT NULL AND last_out_at IS NULL`, through the `visibility_state='active'`
+    // view) as its HIGHEST-precedence tie-break (`selectAmongMatchingCandidates`, resolver
+    // `:397-425`). The core's completed-path pointer UPDATE writes exactly that shape for a
+    // check-in-only day - `first_in_at` set, `last_out_at` still null - and flips the row to
+    // `active`. So a derivation placed after the core call can observe the record THIS operation
+    // just created and echo a resolution the legacy path could never produce for the same punch.
+    //
+    // THE FIXTURE. An overnight shift (22:00 -> 06:00) and a check-in at 01:00 local. That makes
+    // the punch's `calendarWorkDate` the NEXT day while the winning candidate's own `workDate` is
+    // the previous one - the precise precondition the open-record branch requires
+    // (`candidate.workDate < calendarWorkDate && candidate.isOvernight`). Same shift, same work
+    // date, DIFFERENT `reasonCode`, plus an extra `openRecordWorkDate` member in the evidence.
+    const seed = await seedAuthoritativeOrg('g10f')
+    await insertOvernightShiftAndAssignment(seed.orgId, seed.userId)
+    // 2026-05-05T01:00 Asia/Shanghai (UTC+8) === 2026-05-04T17:00Z: calendar day 05-05, winning
+    // overnight candidate's work date 05-04.
+    const occurredAtResolved = '2026-05-04T17:00:00.000Z'
+
+    // (1) The PRE-write value, measured out-of-band before the punch exists at all.
+    const before = await deriveWorkDateResolutionOutOfBand(seed, occurredAtResolved)
+    expect(before.kind).toBe('resolved')
+    expect(before.reasonCode).toBe('PREVIOUS_NIGHT_CONTAINING_SHIFT')
+
+    // (2) The authoritative punch. It must COMPLETE, because only the completed path's pointer
+    // UPDATE writes the open record - a review outcome would leave the placeholder retired and
+    // this leg would be vacuous.
+    const { boundary } = makeBoundary()
+    const result = await boundary.executeLivePunch(
+      await buildPunchInput(seed, { occurredAtResolved, eventType: 'check_in' }),
+    )
+    expect(result.kind).toBe('w4')
+    const calc = (await calcRows(seed.userId)).filter((r) => r.calculation_kind === 'calculation')[0]
+    expect(calc.outcome).toBe('completed')
+    const parent = await parentRow(seed.userId)
+    expect(parent?.visibility_state).toBe('active')       // visible to the open-records view
+    expect(parent?.first_in_at).not.toBeNull()            // ...and it IS an open record now
+    expect(parent?.last_out_at).toBeNull()
+
+    // (3) The POST-write value, measured the same way once that row exists. This is the
+    // discriminator: it proves the two derivations genuinely DIFFER for this fixture, so the
+    // assertion in (4) is not vacuously true.
+    const after = await deriveWorkDateResolutionOutOfBand(seed, occurredAtResolved)
+    expect(after.kind).toBe('resolved')
+    expect(after.reasonCode).toBe('OPEN_PREVIOUS_NIGHT_RECORD')
+    expect(after.reasonCode).not.toBe(before.reasonCode)
+
+    // (4) THE ASSERTION: the response echoed the PRE-write value - what legacy would have echoed.
+    const echoed = ((result as { response: Record<string, unknown> }).response
+      .workDateResolution) as Record<string, unknown>
+    expect(echoed.reasonCode).toBe('PREVIOUS_NIGHT_CONTAINING_SHIFT')
+    expect(echoed.reasonCode).toBe(before.reasonCode)
+    // The identity half is UNCHANGED between the two derivations, which is exactly why a
+    // reasonCode-only assertion is the discriminating one here.
+    expect(echoed.workDate).toBe(before.workDate)
+    expect(echoed.shiftId).toBe(before.shiftId)
+    // Structural tell: the open-record branch adds `openRecordWorkDate` to its evidence snapshot.
+    // Its ABSENCE is a second, independent discriminator that does not rely on the reason string.
+    const evidence = echoed.evidenceSnapshot as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(evidence, 'openRecordWorkDate')).toBe(false)
+    expect(
+      Object.prototype.hasOwnProperty.call(after.evidenceSnapshot as Record<string, unknown>, 'openRecordWorkDate'),
+    ).toBe(true)
   }, 60000)
 
   it('leg 11b [the real P-A pin]: an AUTHORITATIVE punch invokes the injected applyLivePunchLegacy ZERO times — negative control: a SHADOW punch invokes it exactly once', async () => {

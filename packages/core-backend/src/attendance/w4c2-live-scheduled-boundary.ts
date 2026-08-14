@@ -1645,6 +1645,30 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // path. `adapters.applyLivePunchLegacy` is never called from this branch.
           const authoritativeEvent = await adapters.insertLivePunchEvent(pluginTrx, legacyPunchArgs)
 
+          // The WIRE-ECHO `workDateResolution`, derived HERE — before any write this operation
+          // makes to `attendance_records` — because that is where the legacy path derives it.
+          //
+          // ORDERING IS SEMANTIC, NOT COSMETIC. The resolver consults OPEN records
+          // (`w4c3c-active-current.ts:176-190`: `visibility_state='active'` via the current view,
+          // `first_in_at IS NOT NULL AND last_out_at IS NULL`) when it breaks ties between
+          // candidate shifts. The core's completed-path pointer UPDATE writes exactly that shape
+          // for a check-in-only day — `first_in_at` set, `last_out_at` still null, and it flips the
+          // row to `active` — so a derivation placed AFTER the core call can observe an open record
+          // THIS operation just created and echo a resolution the legacy path, which derives before
+          // its own upsert (`index.cjs`, `deriveLegacyLivePunchAttributionV1` ahead of
+          // `appendUpsert`), could never produce for the same punch. Only the echoed field is
+          // affected — the persisted calculation freezes `authoritativeResolution` below — but the
+          // owner's ruling is that the authoritative response matches the legacy contract,
+          // SEMANTICS included, not merely field names and casing.
+          //
+          // Placed adjacent to `authoritativeResolution` so both resolver reads observe the same
+          // pre-write state. (The preceding event INSERT is irrelevant to both: neither read
+          // touches `attendance_events`, and the create-if-absent placeholder cannot register as an
+          // open record — it is `retired`, so the current view excludes it, and its `first_in_at`
+          // is NULL either way.)
+          const authoritativeWorkDateResolution =
+            await adapters.deriveLivePunchWorkDateResolution(pluginTrx, legacyPunchArgs)
+
           const authoritativeNowIso = new Date().toISOString()
           const authoritativeResolution = await adapters.resolveLiveCandidate(pluginTrx, {
             orgId: envelope.orgId,
@@ -1839,12 +1863,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
           }
           const authoritativeRecord = persistedParent.rows[0] as Record<string, unknown>
 
-          // The SAME derivation the legacy adapter uses for this same field — one spelling for
-          // both postures (see the adapter's own doc comment for why `resolveLiveCandidate`'s
-          // `fullWinner`-bearing result must NOT be substituted here).
-          const authoritativeWorkDateResolution =
-            await adapters.deriveLivePunchWorkDateResolution(pluginTrx, legacyPunchArgs)
-
+          // `authoritativeWorkDateResolution` was derived in Step 4, BEFORE the core's writes —
+          // see the ordering note there. Deriving it here instead would let it observe the open
+          // record this operation's own pointer UPDATE just created.
           const authoritativeResponse = {
             event: authoritativeEvent,
             record: authoritativeRecord,
