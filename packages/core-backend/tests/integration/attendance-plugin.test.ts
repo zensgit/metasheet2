@@ -150,6 +150,15 @@ function createPluginDbForTest(pool: Pool) {
           const result = await client.query(sql, params as any[])
           return result.rows
         },
+        // #4556 Gate A / Option B: mirror the production plugin-context db adapter
+        // (`context.api.database.transaction` attaches `__rawClient: client`, src/index.ts).
+        // In-process writers that resolve the canonical segment-calculation posture port on
+        // their write trx (e.g. the auto-shift auto-write job) require this raw pg client seam;
+        // without it the port fails closed with `W4C3B_TRANSACTION_CLIENT_REQUIRED`. This fixture
+        // stood in for the production db before those writers were cut over to the port, so it
+        // never modelled `__rawClient`; add it so the mock stays faithful to the contract every
+        // production caller (`context.api.database`) already satisfies.
+        __rawClient: client,
       }
       try {
         await client.query('BEGIN')

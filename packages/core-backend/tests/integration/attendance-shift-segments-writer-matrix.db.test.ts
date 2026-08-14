@@ -73,6 +73,12 @@ function requestJson(url: string, options: { method?: string; headers?: Record<s
 }
 
 const codeOf = (r: HttpResponse) => r.body?.error?.code
+// The typed 422's message embeds the `producer` of the guard that refused
+// ("... so <producer> cannot use a multi-segment shift", attendance-shift-service.cjs).
+// That makes the producer an observable ATTRIBUTION channel on the HTTP response: it
+// identifies WHICH reference guard fail-closed, not merely that some guard did. Used by
+// the P2-1 leg below to hold one specific writer site load-bearing on its own.
+const messageOf = (r: HttpResponse) => String(r.body?.error?.message ?? '')
 
 describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   let server: MetaSheetServerType | undefined
@@ -126,14 +132,21 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     return `w3wm-${tag}-${randomUUID().slice(0, 8)}`
   }
 
-  async function enableShadowPosture(orgId: string): Promise<void> {
-    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+  // Persist a `shadow` rollout-state row for an org (no env mutation). Factored out of
+  // enableShadowPosture so the Gate A lock-in describe can seed rows for orgs it reaches only
+  // via the wildcard — reusing the SAME INSERT text, so no new DML statement is introduced.
+  async function insertShadowRolloutRow(orgId: string): Promise<void> {
     await pool.query(
       `INSERT INTO attendance_calculation_rollout_state
          (org_id, state, engine_version, reason_code, actor_id, version, prior_state)
        VALUES ($1, 'shadow', 'w4c3b-p12-test', 'TEST_FIXTURE', 'w4c3b-p12-test', 1, NULL)`,
       [orgId],
     )
+  }
+
+  async function enableShadowPosture(orgId: string): Promise<void> {
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+    await insertShadowRolloutRow(orgId)
   }
 
   async function mintToken(userId: string, tenantId?: string): Promise<string> {
@@ -1575,6 +1588,153 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
   })
 
+  /**
+   * #4556 Gate A / P2-1 — hold the `schedule_dispatch_final_approval` posture wiring
+   * (`index.cjs`, the `referenceSegments:` argument of its `assertShiftReferenceAllowed`
+   * call) load-bearing ON ITS OWN.
+   *
+   * Why the leg above cannot do it: forcing THAT ONE site fail-open (`referenceSegments: true`)
+   * leaves it green, because a SECOND fail-closed door downstream —
+   * `assertWorkContextSegmentCalculationAllowed` (hardcoded `referenceSegments: false`, one of
+   * this cutover's disclosed residual-R4 pinned-closed read paths) — refuses the same request
+   * and produces an identical `422` + identical error code. Classic 多道 fail-closed 门互相掩护:
+   * status and code are dominated, so neither can discriminate.
+   *
+   * What still discriminates, without opening the R4 door: WHICH producer refused. The typed
+   * 422's message names the refusing guard's `producer`. Correct behaviour ⇒ the dispatch
+   * final-approval guard refuses FIRST and the message names `schedule_dispatch_final_approval`.
+   * With that one site forced fail-open, the request survives it and is refused later by the
+   * calculation read path instead, whose message names `attendance calculation` — so this leg
+   * REDS while status/code stay 422/GUARD_CODE. Verified by executing exactly that mutation.
+   *
+   * Residual (disclosed in the PR body): this is an attribution-level proof, not a status-flip
+   * proof. A 200-vs-422 behavioural flip at this site remains impossible while the R4 door is
+   * pinned closed; closing P2-1 fully is therefore a BLOCKING precondition on the R4 slice,
+   * which is exactly what makes this site live.
+   */
+  it('P2-1: schedule-dispatch final approval 422 is attributed to ITS OWN guard, not to the covering R4 door', async () => {
+    const orgId = org('p21-dispatch-final-attribution')
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+
+    const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: `${orgId}-worker`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-06-10',
+      endDate: '2049-06-10',
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+
+    await injectSecondSegment(orgId, shiftId)
+    const approve = await postJson(`/api/attendance/requests/${requestId}/approve`, token, orgId, { comment: 'go' })
+    expect(approve.status, approve.raw).toBe(422)
+    expect(codeOf(approve)).toBe(GUARD_CODE)
+
+    // The load-bearing assertions: the refusal is attributed to the dispatch final-approval
+    // writer's own guard. If that site stops consuming the resolved posture, the refusal
+    // migrates to the calculation read path and both assertions fail.
+    expect(messageOf(approve), approve.raw).toContain('schedule_dispatch_final_approval')
+    expect(messageOf(approve), approve.raw).not.toContain('attendance calculation')
+
+    expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
+  })
+
+  /**
+   * #4556 Gate A / owner P1 — ROLLOUT-LOCK ORDER COUNTEREXAMPLE (deterministic, two real
+   * connections, real approval route).
+   *
+   * The hazard: the rollout TRANSITION path takes the rollout advisory lock EXCLUSIVE first and
+   * only then `SELECT ... FROM attendance_requests ... FOR UPDATE` (w4c3a-rollout-control.ts —
+   * exclusive at the top of the control transaction, request scan at `:948`). If the APPROVAL
+   * transaction were to take the request row lock FIRST and reach for the rollout SHARED lock
+   * only later (e.g. inside finalization, which is where this cutover wired a posture call),
+   * the two form a textbook wait cycle:
+   *     approval  holds request row   + waits rollout-shared
+   *     transition holds rollout-excl + waits request row
+   * PostgreSQL's detector fires and one side dies with SQLSTATE 40P01.
+   *
+   * This test pins the SAFE order by construction, against the production HTTP approval chain:
+   *   1. conn B opens a transaction and takes the rollout advisory lock EXCLUSIVE for the org
+   *      (same key builder the production code uses — not a hand-rolled key).
+   *   2. conn A fires the real approval route. It must block on the rollout SHARED lock
+   *      **before** it has taken any `attendance_requests` row lock.
+   *   3. conn B then takes `FOR UPDATE` on that very request row. This SUCCEEDS only because A
+   *      holds no row lock — it is the discriminating observation.
+   *   4. conn B commits (releasing exclusive); A then proceeds and completes.
+   *
+   * Load-bearing: hoisting the approval's posture resolution back BELOW the request row lock
+   * makes step 3 block on A while A waits on B ⇒ genuine deadlock, and the run dies with
+   * `40P01`. Verified by executing exactly that mutation.
+   */
+  it('P1: approval acquires the rollout lock BEFORE any request row lock (no deadlock vs a concurrent transition)', async () => {
+    const { buildAttendanceCalculationRolloutAdvisoryKey } = await import('../../src/attendance/w4c0-identity')
+    const orgId = randomUUID() // canonical rollout org key, so the port really takes the lock
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, { name: 'Lock order', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+
+    const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: `${orgId}-worker`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-08-01',
+      endDate: '2049-08-01',
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+
+    const advisoryKey = buildAttendanceCalculationRolloutAdvisoryKey(orgId as never).toString()
+    const connB = await pool.connect()
+    let approval: Promise<HttpResponse> | undefined
+    try {
+      // (1) transition-order connection: rollout EXCLUSIVE first.
+      await connB.query('BEGIN')
+      await connB.query('SELECT pg_advisory_xact_lock($1::bigint)', [advisoryKey])
+
+      // (2) approval, real route. Blocks on the rollout SHARED lock.
+      approval = postJson(`/api/attendance/requests/${requestId}/approve`, token, orgId, { comment: 'go' })
+      // Give the approval time to reach (and block on) the rollout lock.
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+
+      // (3) THE DISCRIMINATOR: the transition-order connection now takes the same request row.
+      // With the safe ordering the approval is parked on the advisory lock holding no row lock,
+      // so this returns promptly. With the inverted ordering this blocks on the approval while
+      // the approval waits on us -> 40P01.
+      await connB.query('SET LOCAL lock_timeout = \'20s\'')
+      const locked = await connB.query(
+        'SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+        [requestId],
+      )
+      expect(locked.rows).toHaveLength(1)
+
+      // (4) release the exclusive lock; the approval may now proceed.
+      await connB.query('COMMIT')
+    } catch (error) {
+      await connB.query('ROLLBACK').catch(() => undefined)
+      // Surface a deadlock explicitly rather than as an opaque failure.
+      const code = (error as { code?: string })?.code
+      throw new Error(`transition-order connection failed${code ? ` (SQLSTATE ${code})` : ''}: ${String(error)}`)
+    } finally {
+      connB.release()
+    }
+
+    const approveRes = await approval!
+    // The approval must NOT have died of a deadlock. Its own outcome may legitimately be a
+    // typed refusal, but never a 40P01-driven 500.
+    expect(approveRes.raw).not.toContain('40P01')
+    expect(approveRes.raw).not.toContain('deadlock')
+    expect([200, 201, 422]).toContain(approveRes.status)
+  })
+
   it('matrix: automatic matching apply returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-automatch')
     const token = await mintToken(`${orgId}-admin`, orgId)
@@ -1993,5 +2153,78 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       clientD2.release()
       clientW2.release()
     }
+  })
+
+  /**
+   * #4556 Gate A / Option B lock-in (real-PG, route-level, production writer chain).
+   *
+   * After the cutover the ONLY authorization for a multi-segment shift reference is the core
+   * canonical posture port (exact-org allowlist, wildcard REFUSED, persisted rollout row). One
+   * env value holds org A EXACTLY plus the wildcard `*`. Three orgs, one production writer route
+   * (`POST /api/attendance/assignments` -> the `assignment_create` reference guard):
+   *   - org A: exact env entry + a persisted `shadow` row => the guard admits the multi-segment
+   *     reference and the writer chain persists a row (200/201, non-vacuous);
+   *   - org B: no env entry and no row => typed 422 + zero writes (fail-closed baseline);
+   *   - org W: a persisted `shadow` row but reachable only via the wildcard `*` => STILL 422 +
+   *     zero writes — the wildcard is INERT, which is the security property this gate locks in.
+   *
+   * Mutation-provable against the private `isOrgExactlyAllowlisted` body (execution point
+   * `resolveSegmentCalculationPosture` consults, NOT the re-export wrapper):
+   *   - re-admit `*` (add `if (entries.includes('*')) return true`) => org W leg flips 422->201;
+   *     org A stays 201, org B stays 422 (still no row);
+   *   - force it to always return false => org A leg flips 201->422; org B and org W stay 422.
+   * Org B is the fail-closed baseline; it is NOT separately mutation-proven, because a no-row org
+   * resolves `legacy` regardless of the allowlist (POSTURE_TABLE has no non-legacy row for it).
+   */
+  describe('Gate A lock-in: exact-org allows, wildcard is inert', () => {
+    const orgA = randomUUID()
+    const orgB = randomUUID()
+    const orgW = randomUUID()
+    let tokenA = ''
+    let tokenB = ''
+    let tokenW = ''
+
+    beforeAll(async () => {
+      // Org A exact + wildcard. randomUUID() is already the canonical lower-case org key, so the
+      // env entry, the persisted row's org_id, and the request org header are byte-identical.
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = `${orgA},*`
+      await insertShadowRolloutRow(orgA)
+      await insertShadowRolloutRow(orgW)
+      tokenA = await mintToken(`${orgA}-admin`, orgA)
+      tokenB = await mintToken(`${orgB}-admin`, orgB)
+      tokenW = await mintToken(`${orgW}-admin`, orgW)
+    })
+
+    // Author a multi-segment shift (preview-only, always allowed) then drive the production
+    // active-assignment writer, whose reference guard resolves the port on its own write trx.
+    async function attemptMultiSegmentAssignment(token: string, orgId: string): Promise<HttpResponse> {
+      const shiftId = await createMultiShift(token, orgId, 'Gate A lock-in split')
+      return postJson('/api/attendance/assignments', token, orgId, {
+        userId: `${orgId}-worker`,
+        shiftId,
+        startDate: '2049-07-01',
+      })
+    }
+
+    it('org A (exact env entry + persisted shadow row) admits the multi-segment reference and persists a row', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenA, orgA)
+      expect(res.status, res.raw).toBe(201)
+      // Non-vacuous: the production writer chain ran to completion, not merely past the guard.
+      expect(await countRows('attendance_shift_assignments', orgA)).toBe(1)
+    })
+
+    it('org B (no env entry, no rollout row) fails closed with the typed 422 and zero writes', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenB, orgB)
+      expect(res.status, res.raw).toBe(422)
+      expect(codeOf(res)).toBe(GUARD_CODE)
+      expect(await countRows('attendance_shift_assignments', orgB)).toBe(0)
+    })
+
+    it('org W (persisted shadow row, reachable only via the wildcard) STILL fails closed — wildcard inert', async () => {
+      const res = await attemptMultiSegmentAssignment(tokenW, orgW)
+      expect(res.status, res.raw).toBe(422)
+      expect(codeOf(res)).toBe(GUARD_CODE)
+      expect(await countRows('attendance_shift_assignments', orgW)).toBe(0)
+    })
   })
 })
