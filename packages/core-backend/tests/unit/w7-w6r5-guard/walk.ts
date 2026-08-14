@@ -210,7 +210,7 @@ export function resolvedRelativeModuleTargets(repoRoot: string, relPath: string)
  * the repo instead of re-derived.
  *
  *  - express spelling:  `packages/core-backend/src/routes/attendance-admin.ts:1731`
- *  - OpenAPI spelling:  `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:25`
+ *  - OpenAPI spelling:  `packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml:36`
  */
 export const ATTENDANCE_W7_BANNED_W6_ROUTE_LITERALS_V1: readonly string[] = Object.freeze([
   '/api/attendance/groups/:groupId/effective-policy',

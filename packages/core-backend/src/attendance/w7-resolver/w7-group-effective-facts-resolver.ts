@@ -57,7 +57,7 @@ import { acquireAttendanceW7CompositeFactsLocksV1 } from './w7-composite-lock-or
 /**
  * The runtime overlap code. Deliberately the SAME string the W1 membership
  * writer throws (`../../services/AttendanceCalculationGroupMembership.ts:5-6`,
- * thrown `:541-547`): the gist storage constraint is date-dependent, so
+ * thrown `:543`): the gist storage constraint is date-dependent, so
  * runtime must re-check, and a caller distinguishing "storage said overlap"
  * from "calculation said overlap" would be distinguishing two spellings of
  * one fact (W7-R2).

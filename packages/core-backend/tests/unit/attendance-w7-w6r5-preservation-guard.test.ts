@@ -157,6 +157,18 @@ function transportBanViolations(
 }
 
 describe('W7-R10: W6-R5 preservation guard — derived domain', () => {
+  it('emits a regenerated classification body when EMIT_W7_CLASSIFICATION=1', () => {
+    // Regeneration recipe, so the next author who adds a file under a pinned
+    // root is not hand-editing 72 strings. Deliberately a no-op unless the env
+    // var is set: the emit itself must never be the thing that makes Leg 0
+    // pass. Mirrors `EMIT_ATTENDANCE_CORPUS` in
+    // `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`.
+    if (process.env.EMIT_W7_CLASSIFICATION !== '1') return
+    const { union } = walkAttendanceW7GuardDomain(REPO_ROOT)
+    // eslint-disable-next-line no-console
+    console.log(`\n${union.map((rel) => `  '${rel}',`).join('\n')}\n`)
+  })
+
   it('Leg 0 (completeness): every walked file is claimed exactly once; unclaimed = 0', () => {
     const { union } = walkAttendanceW7GuardDomain(REPO_ROOT)
     const claimed = new Set<string>([
@@ -168,7 +180,15 @@ describe('W7-R10: W6-R5 preservation guard — derived domain', () => {
     expect(
       unclaimed,
       'hard zero-bypass requires unclaimed=0: a file appeared under a pinned root that neither ' +
-        'classification list mentions. Classify it in tests/unit/w7-w6r5-guard/classification.ts.',
+        'classification list mentions. This is expected and fine when a file is ADDED — it is ' +
+        'announced rather than silently absorbed. To resolve: re-run ' +
+        '`EMIT_W7_CLASSIFICATION=1 pnpm --filter @metasheet/core-backend exec vitest run ' +
+        'tests/unit/attendance-w7-w6r5-preservation-guard.test.ts` and paste the printed body into ' +
+        'ATTENDANCE_W7_CALCULATION_PATH_FILES_V1 in tests/unit/w7-w6r5-guard/classification.ts — ' +
+        'unless the file genuinely cannot reach the frozen-context build path, in which case add it ' +
+        'to ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1 WITH A REASON and expect that reason to be ' +
+        'reviewed (it makes both ban legs inapplicable to that file). Same discipline as the ' +
+        'attendance CI corpus pin and the s6a hash pin.',
     ).toEqual([])
 
     // The claim side is bidirectional: a claim naming a file that is no longer

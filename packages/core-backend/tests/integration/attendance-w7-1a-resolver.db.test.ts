@@ -25,10 +25,16 @@
  * unmet rather than described as satisfied.
  */
 import { randomUUID } from 'node:crypto'
+import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import { ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1 } from '../../src/attendance/w7-context-source-posture-contract'
+import {
+  down as postureMigrationDown,
+  up as postureMigrationUp,
+} from '../../src/db/migrations/zzzz20260814120000_w7_attendance_context_source_posture_state'
 import { coreIssueGroupEffectiveContextV2 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
 import {
   ATTENDANCE_CALCULATION_GROUP_MEMBERSHIP_OVERLAP,
@@ -266,6 +272,109 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
   async function resolvePosture(org: string = orgId) {
     return withClient(async (client) => resolveAttendanceW7ContextSourcePostureV1(asTrx(client), org))
   }
+
+  // -------------------------------------------------------------------------
+  // STEP 0 — the posture-state table itself.
+  // -------------------------------------------------------------------------
+
+  describe('STEP 0: the OD-W7-3(a) posture-state table', () => {
+    /** Values inside a `CHECK (x = ANY (ARRAY['a'::text, ...]))` definition. */
+    function checkedValues(definition: string): string[] {
+      return [...definition.matchAll(/'([^']*)'::text/g)].map((match) => match[1]).sort()
+    }
+
+    async function constraintDef(name: string): Promise<string> {
+      const result = await pool.query(
+        `SELECT pg_get_constraintdef(oid) AS def
+           FROM pg_constraint
+          WHERE conrelid = $1::regclass AND conname = $2`,
+        [POSTURE_TABLE, name],
+      )
+      expect(result.rows, `constraint ${name} is missing`).toHaveLength(1)
+      return String(result.rows[0].def)
+    }
+
+    it('the state CHECK is exactly the TS state union — DERIVED from the constant, never re-spelled', () => {
+      // This is the pin the migration header claims. The expected list comes
+      // from the imported W7-0 constant, so editing either side alone reds:
+      // widening the CHECK without the constant, or the constant without the
+      // CHECK. 1a-M's provenance widening depends on this staying true.
+      expect([...ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1]).toHaveLength(5)
+      return constraintDef('chk_accss_state').then((definition) => {
+        expect(checkedValues(definition)).toEqual([...ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1].sort())
+      })
+    })
+
+    it('the scope CHECK pins synthetic_staging (OD-W7-8(a))', async () => {
+      const definition = await constraintDef('chk_accss_scope')
+      expect(definition).toContain('synthetic_staging')
+      expect(checkedValues(`${definition.replace(/=\s*'([^']*)'::text/, "= '$1'::text")}`)).not.toContain('production')
+    })
+
+    it('the CHECKs actually REJECT out-of-union values (a constraint definition is not behaviour)', async () => {
+      await expect(
+        pool.query(
+          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'authoritative', 'synthetic_staging')`,
+          [otherOrgId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      await expect(
+        pool.query(
+          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'production')`,
+          [otherOrgId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' })
+      // POSITIVE CONTROL: a well-formed row inserts, so the two rejections
+      // above are the CHECKs and not a broken INSERT.
+      await pool.query(
+        `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'synthetic_staging')`,
+        [otherOrgId],
+      )
+    })
+
+    it('org_id is the primary key, and the table SHIPS EMPTY apart from this suite’s own rows', async () => {
+      const pk = await pool.query(
+        `SELECT pg_get_constraintdef(oid) AS def
+           FROM pg_constraint
+          WHERE conrelid = $1::regclass AND contype = 'p'`,
+        [POSTURE_TABLE],
+      )
+      expect(String(pk.rows[0].def)).toBe('PRIMARY KEY (org_id)')
+
+      const foreign = await pool.query(
+        `SELECT count(*)::int AS n FROM ${POSTURE_TABLE} WHERE org_id <> ALL($1::text[])`,
+        [[orgId, otherOrgId]],
+      )
+      expect(Number(foreign.rows[0].n), 'the migration must ship the table EMPTY — it seeds nothing').toBe(0)
+    })
+
+    it('replays down/up (and a second up) without schema drift', async () => {
+      const migrationPool = new Pool({ connectionString: dbUrl, max: 2 })
+      const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
+      try {
+        await postureMigrationDown(db)
+        const gone = await migrationPool.query(`SELECT to_regclass($1)::text AS t`, [POSTURE_TABLE])
+        expect(gone.rows[0].t).toBeNull()
+
+        await postureMigrationUp(db)
+        await postureMigrationUp(db) // idempotent second up
+        const back = await migrationPool.query(`SELECT to_regclass($1)::text AS t`, [POSTURE_TABLE])
+        expect(back.rows[0].t).toBe(POSTURE_TABLE)
+
+        const definition = await migrationPool.query(
+          `SELECT pg_get_constraintdef(oid) AS def
+             FROM pg_constraint
+            WHERE conrelid = $1::regclass AND conname = 'chk_accss_state'`,
+          [POSTURE_TABLE],
+        )
+        expect(checkedValues(String(definition.rows[0].def))).toEqual(
+          [...ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1].sort(),
+        )
+      } finally {
+        await db.destroy()
+      }
+    })
+  })
 
   // -------------------------------------------------------------------------
   // Ruling 7 — the three REQUIRED controls.

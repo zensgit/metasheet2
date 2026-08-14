@@ -25,7 +25,9 @@
  *     `plugins/plugin-attendance/index.cjs` (`acquireAttendanceScheduleAssignmentLock`
  *     :10534 exclusive, `acquireAttendanceScheduleAssignmentReadLock` :10546
  *     shared, plus the `FOR SHARE OF a` rows in
- *     `loadPublishedCandidatesForWorkDateResolver` :15274).
+ *     `loadPublishedCandidatesForWorkDateResolver` (def :15274; the two
+ *     `FOR SHARE OF a` clauses at :15304 and :15350, both gated on its
+ *     `lockScheduleFacts` argument).
  *
  * ZERO production site takes both. So no pre-existing caller establishes a
  * reverse order that this helper would deadlock against — which is what makes

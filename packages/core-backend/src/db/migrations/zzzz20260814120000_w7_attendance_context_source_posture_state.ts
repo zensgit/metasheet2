@@ -37,10 +37,12 @@ import { sql, type Kysely } from 'kysely'
 
 /** Mirrors `ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1`
  *  (`packages/core-backend/src/attendance/w7-context-source-posture-contract.ts:28`).
- *  The TS constant and this CHECK are pinned to each other by
- *  `tests/integration/attendance-w7-context-source-posture-state.db.test.ts`,
- *  which derives the expected list from the TS constant rather than
- *  re-spelling it, so a one-sided edit reds. */
+ *  The TS constant and this CHECK are pinned to each other by the STEP 0 legs
+ *  in `tests/integration/attendance-w7-1a-resolver.db.test.ts`, which read
+ *  `pg_get_constraintdef` and compare it against the imported TS constant
+ *  rather than re-spelling the list, so a one-sided edit reds. Those legs also
+ *  prove the CHECKs REJECT out-of-union values (a constraint definition is not
+ *  behaviour) and replay this migration down/up without drift. */
 const CONTEXT_SOURCE_STATES = [
   'off',
   'group_shadow',

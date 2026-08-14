@@ -56,6 +56,16 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * makes a NEW file red Leg 0 instead of being silently absorbed. Regenerating
  * it is the same discipline as the s6a hash pin and the attendance CI corpus
  * pin — a new file under a pinned root is announced, then classified.
+ *
+ * REGENERATION RECIPE (do not hand-edit 72 strings):
+ *
+ *   EMIT_W7_CLASSIFICATION=1 pnpm --filter @metasheet/core-backend exec \
+ *     vitest run tests/unit/attendance-w7-w6r5-preservation-guard.test.ts
+ *
+ * prints the derived body, which is the value that belongs below. Paste it in
+ * the SAME commit that adds the file — and only after deciding the file really
+ * is on the calculation path, because pasting is the easy half and classifying
+ * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
   'packages/core-backend/src/attendance/w4c0-authorization.ts',
