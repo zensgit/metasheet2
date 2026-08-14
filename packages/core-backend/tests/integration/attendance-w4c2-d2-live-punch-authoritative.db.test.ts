@@ -32,6 +32,7 @@ import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-
 import {
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
+  insertAuthoritativeReviewPlaceholderParentV1,
   type AttendanceLivePunchBoundaryInputV1,
   type AttendancePluginShapedTrxV1,
   type AttendanceW4LiveScheduledBoundaryV1,
@@ -880,7 +881,64 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     expect(result.kind).toBe('w4')
   }, 30000)
 
-  it('leg 13b: two concurrent create-if-absent placeholder INSERTs resolve to a PRODUCT outcome (both punches succeed against ONE parent) — never a poisoned transaction from a raw 23505', async () => {
+  it('leg 13b: a CONSTRUCTED two-connection race on the create-if-absent placeholder INSERT resolves to a PRODUCT outcome — the loser gets zero rows back, never a raw 23505 that poisons its transaction', async () => {
+    // Driven at the exported seam ON PURPOSE. Through the boundary this race is already prevented
+    // one layer up by the class-11 advisory target lock (see leg 13c), so a boundary-level
+    // "concurrent punch" fixture CANNOT exercise the ON CONFLICT clause — removing the clause
+    // leaves such a leg green, which is exactly how an ineffective mutation masquerades as a
+    // passing test. This leg constructs the real interleave the clause exists for.
+    const seed = await seedAuthoritativeOrg('g13b-seam')
+    const workDate = '2026-05-06'
+    const a: PoolClient = await pool.connect()
+    const b: PoolClient = await pool.connect()
+    try {
+      await a.query('BEGIN')
+      await b.query('BEGIN')
+      const args = {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        workDate,
+        timezone: TZ,
+        isWorkday: true,
+      }
+      const first = await insertAuthoritativeReviewPlaceholderParentV1(
+        a as unknown as AttendanceW4TransactionClientV1,
+        args,
+      )
+      expect(first.created).toBe(true)
+
+      // B now races the SAME key while A is uncommitted: it blocks on the unique index.
+      const bPromise = insertAuthoritativeReviewPlaceholderParentV1(
+        b as unknown as AttendanceW4TransactionClientV1,
+        args,
+      )
+      const marker = { settled: false }
+      bPromise.then(() => { marker.settled = true }, () => { marker.settled = true })
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      expect(marker.settled).toBe(false) // genuinely blocked — the race is real, not sequential
+
+      await a.query('COMMIT')
+      const second = await bPromise
+      // The PRODUCT outcome: zero rows returned, no error. A bare INSERT would have raised 23505
+      // and poisoned B's transaction, making the follow-up query below fail with 25P02.
+      expect(second.created).toBe(false)
+      const stillUsable = await b.query('SELECT 1 AS ok')
+      expect(stillUsable.rows[0].ok).toBe(1)
+      await b.query('COMMIT')
+    } finally {
+      await a.query('ROLLBACK').catch(() => undefined)
+      await b.query('ROLLBACK').catch(() => undefined)
+      a.release()
+      b.release()
+    }
+    const { rows } = await pool.query(
+      'SELECT count(*)::int AS n FROM attendance_records WHERE user_id = $1 AND work_date = $2::date',
+      [seed.userId, workDate],
+    )
+    expect(rows[0].n).toBe(1)
+  }, 30000)
+
+  it('leg 13c: two concurrent authoritative punches for the SAME day serialize on the class-11 advisory target lock — one parent row, two calculations, and the loser re-enters the full resolution path rather than assuming it created the placeholder', async () => {
     const seed = await seedAuthoritativeOrg('g13b', { withShift: true })
     const inputA = await buildPunchInput(seed)
     const inputB = await buildPunchInput(seed, { occurredAtResolved: '2026-05-04T01:07:00.000Z' })

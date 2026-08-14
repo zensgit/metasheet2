@@ -747,12 +747,125 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       }
     })
 
-    it('F1 (Gate D2 carry-forward): a batch of ~80 same-op-id collisions inside ONE outer transaction completes without a subtransaction-nesting cliff — the catch path RELEASES its savepoint after ROLLBACK TO', async () => {
-      // `ROLLBACK TO SAVEPOINT` undoes the subtransaction but does NOT release its slot. Without a
-      // matching `RELEASE SAVEPOINT` in the catch path, every collision leaves one savepoint open
-      // on the outer transaction's subtransaction stack; Postgres degrades sharply past ~64 nested
-      // subtransactions. This drives 80 collisions through the catch path in ONE outer transaction
-      // and asserts the batch completes with every attempt resolving to a §7.3 product outcome.
+    it('F1 (Gate D2 carry-forward): an assertion throwing BETWEEN the two operations still returns CLEAN connections to the pool — the next consumer does not inherit an open transaction', async () => {
+      // The two race legs above `BEGIN` on raw pool clients and release them in `finally`. Before
+      // this change the only COMMIT was on the happy path, so an `expect(...)` throwing between
+      // the two operations jumped straight to `finally` and handed a MID-TRANSACTION client back
+      // to the shared pool — the next test to acquire it inherited an open transaction (a known
+      // cross-test flake vector). This leg reproduces that exact control flow deliberately and
+      // asserts the invariant the defensive ROLLBACK provides.
+      const org = `org-f1d-${RUN}`
+      const a = await pool.connect()
+      const b = await pool.connect()
+      let thrown: unknown
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // Dirty both transactions so an inherited one would be observable, then throw the way a
+        // failing assertion between the two operations would.
+        await a.query(`SELECT set_config('w4c2_d2.marker', $1, true)`, [org])
+        await b.query(`SELECT set_config('w4c2_d2.marker', $1, true)`, [org])
+        expect(org).toBe('deliberate-mismatch-to-jump-into-finally')
+      } catch (error) {
+        thrown = error
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+      expect(thrown).toBeTruthy() // the throw really happened (not a vacuous pass)
+
+      // Every connection now obtainable from the pool starts OUTSIDE a transaction. `BEGIN` on a
+      // connection that is already mid-transaction emits a "there is already a transaction in
+      // progress" WARNING rather than an error, so the discriminating probe is the transaction
+      // status itself: a clean connection's txid is not yet assigned and `set_config(...,true)`
+      // from the previous consumer must not still be visible.
+      for (let i = 0; i < 4; i += 1) {
+        const next = await pool.connect()
+        try {
+          const leaked = await next.query(`SELECT current_setting('w4c2_d2.marker', true) AS marker`)
+          expect(leaked.rows[0].marker === null || leaked.rows[0].marker === '').toBe(true)
+          const state = await next.query(`SELECT pg_current_xact_id_if_assigned() IS NULL AS idle`)
+          expect(state.rows[0].idle).toBe(true)
+        } finally {
+          next.release()
+        }
+      }
+    }, 60000)
+
+    it('F1 (Gate D2 carry-forward): the catch path RELEASES its savepoint after ROLLBACK TO — every savepoint the core acquires is balanced by a release on BOTH the success and the conflict path', async () => {
+      // WHAT THIS MEASURES, AND WHY IT IS A STATEMENT-STREAM ASSERTION RATHER THAN AN OUTCOME ONE
+      // (stated plainly rather than dressed up as an outcome leg): `ROLLBACK TO SAVEPOINT` undoes
+      // the subtransaction but does NOT release its slot, so without a matching `RELEASE SAVEPOINT`
+      // the catch path leaks one subtransaction per collision. The consequence — Postgres's
+      // per-backend 64-entry subxid cache overflowing into the SLRU, degrading OTHER backends'
+      // visibility checks — is a PERFORMANCE effect, not an error: measured directly on this
+      // schema, 200 un-released savepoints in one transaction complete fine and leave the
+      // connection fully usable. So a "batch fails past ~64" leg would be vacuous, and the
+      // subxact counters that would expose it (`pg_stat_get_backend_subxact`) do not exist on the
+      // Postgres 14 this project's CI pins. The discriminating instrument available here is the
+      // SQL the core actually issues, recorded at the client seam.
+      // The SAVEPOINT is only opened when the pre-lookup MISSES — i.e. the genuine 2-connection
+      // race, not a sequential retry (a committed winner is caught by `retryReplayLookup` before
+      // any savepoint exists). This reuses the same constructed interleave as the two race legs
+      // above and records the SQL the loser's client issues.
+      const org = `org-f1c-${RUN}`
+      const recordA = await insertLegacyActiveParent(org)
+      const recordB = await insertLegacyActiveParent(org)
+      const operationId = uuid()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      const statements: string[] = []
+      const recording = {
+        async query(sqlText: string, params?: unknown[]) {
+          if (typeof sqlText === 'string') statements.push(sqlText.trim())
+          return b.query(sqlText, (params ?? []) as unknown[])
+        },
+      } as unknown as AttendanceW4TransactionClientV1
+      try {
+        await a.query('BEGIN')
+        const aResult = await writeAuthoritativeSegmentCalculationV1(
+          asTrx(a),
+          segmentInput({ orgId: org, recordId: recordA, operationId }),
+        )
+        expect(aResult.kind).toBe('completed')
+        await b.query('BEGIN')
+        const bPromise = writeAuthoritativeSegmentCalculationV1(
+          recording,
+          segmentInput({ orgId: org, recordId: recordB, operationId }),
+        )
+        const bMarker = await settled(bPromise)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        expect(bMarker.done).toBe(false) // B is blocked on A's uncommitted unique insert
+        await a.query('COMMIT')
+        let bError: unknown
+        try {
+          await bPromise
+        } catch (error) {
+          bError = error
+        }
+        // The conflict path really was taken (not a plain replay that never opens a savepoint).
+        expect(bError).toBeInstanceOf(AttendanceW4AuthoritativeCalculationError)
+        expect((bError as AttendanceW4AuthoritativeCalculationError).code).toBe(CODES.REPLAY_CONFLICT)
+        const opened = statements.filter((s) => /^SAVEPOINT\s/i.test(s)).length
+        const rolledBack = statements.filter((s) => /^ROLLBACK TO SAVEPOINT\s/i.test(s)).length
+        const released = statements.filter((s) => /^RELEASE SAVEPOINT\s/i.test(s)).length
+        expect(opened).toBe(1)
+        expect(rolledBack).toBe(1) // the catch path, not the success path
+        expect(released).toBe(opened) // BALANCED — this is the assertion the fix makes true
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    }, 60000)
+
+    it('F1 (Gate D2 carry-forward): a batch of ~80 same-op-id collisions inside ONE outer transaction all resolve to §7.3 product codes and leave the outer transaction healthy', async () => {
+      // The soak sibling of the statement-balance leg above. It does NOT claim to red on the
+      // missing RELEASE (see that leg for why the cliff is not observable here); it is the
+      // regression leg for the catch path itself under repetition.
       const org = `org-f1c-${RUN}`
       const recordId = await insertLegacyActiveParent(org)
       const operationId = uuid()

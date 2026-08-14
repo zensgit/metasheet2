@@ -717,8 +717,18 @@ async function lockShadowParentRecord(
  * the FIRST DML the authoritative branch performs — Step 1's reject and Step 2's locked read are
  * DML-free. If any future change moves other DML ahead of this INSERT, the SAVEPOINT form
  * becomes MANDATORY, not a style preference.
+ *
+ * DEFENCE IN DEPTH, STATED HONESTLY: through the boundary the race is ALREADY prevented one layer
+ * up — `lockShadowParentRecord` takes the class-11 transaction-scoped advisory target lock on
+ * `(org, user, workDate)` BEFORE its read, so a second authoritative punch for the same day blocks
+ * there and finds the winner's row on its own read rather than reaching this INSERT at all
+ * (proven by the boundary-level concurrency leg, which observes ONE parent and TWO calculations
+ * with the ON CONFLICT clause removed). The clause is therefore NOT load-bearing for the current
+ * boundary call path; it is what keeps this helper safe for any caller that reaches it without
+ * that advisory lock. Its own behaviour is pinned by a direct two-connection leg on this exported
+ * seam — do not read the boundary-level leg as evidence for the clause.
  */
-async function insertAuthoritativeReviewPlaceholderParentV1(
+export async function insertAuthoritativeReviewPlaceholderParentV1(
   client: AttendanceW4TransactionClientV1,
   input: Readonly<{ orgId: string; userId: string; workDate: string; timezone: string; isWorkday: boolean }>,
 ): Promise<{ created: boolean }> {
