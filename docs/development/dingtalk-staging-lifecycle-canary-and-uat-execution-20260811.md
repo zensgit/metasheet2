@@ -1,9 +1,9 @@
-# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/12)
+# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/15)
 
-- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT PASS WITH BROWSER OAUTH NOT EXECUTED / DEPROVISION APPLY + RESTORE PASS / U1-U13 NOT EXECUTED**
-- Repository evidence head: `2bf058c2a4fd5abed76df347b3bfdb74dba148ee`
-- Lifecycle staging deploy SHA: `2bf058c2a4fd5abed76df347b3bfdb74dba148ee`
-- Production-readiness inventory deploy SHA: `24794811b1c800402006b30d6e4fa9df670e124e`
+- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / DEPROVISION-DENIAL BROWSER CHECKPOINT NOT EXECUTED / U1-U13 NOT EXECUTED**
+- Repository evidence head: `cc69791604f338a90e07dc07da8118a2d7a68188`
+- Lifecycle staging deploy SHA: `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`
+- Production-readiness inventory deploy SHA: `cc69791604f338a90e07dc07da8118a2d7a68188`
 - Owner instruction: keep all lifecycle flags OFF after every canary; do not convert missing real-enterprise evidence into PASS.
 
 This is a values-free execution record. It contains counts, booleans, reason enums, SHAs,
@@ -11,16 +11,73 @@ GitHub Actions run ids, timestamps, and non-secret synthetic operator labels. It
 omits passwords, tokens, real names, login identifiers, email addresses, phone numbers, DingTalk
 user ids, union ids, and corp-id values.
 
+## 0. 2026-08-15 authoritative closeout delta
+
+This section supersedes stale `NOT EXECUTED` statements below only where it names a newer, exact
+run or runtime observation. Historical run descriptions remain unchanged as provenance.
+
+1. Deprovision apply
+   [31778647232](https://github.com/zensgit/metasheet2/actions/runs/31778647232)
+   at deployed SHA `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1` again proved one exact
+   target, one event, three effects, generation present, disabled access graph, and flags returned
+   to OFF. Restore
+   [31778860419](https://github.com/zensgit/metasheet2/actions/runs/31778860419)
+   reversed the exact effect set, fully resolved the event, restored the active membership and
+   enabled grant, and kept all lifecycle flags OFF. Terminal status
+   [31779012880](https://github.com/zensgit/metasheet2/actions/runs/31779012880)
+   independently re-proved exact SHA, healthy backend, zero migrations, and mode OFF.
+2. PR [#4904](https://github.com/zensgit/metasheet2/pull/4904), merge
+   `cc69791604f338a90e07dc07da8118a2d7a68188`, added the guarded staging OAuth configuration
+   lane. Initial status
+   [31815170511](https://github.com/zensgit/metasheet2/actions/runs/31815170511), prepare
+   [31815302093](https://github.com/zensgit/metasheet2/actions/runs/31815302093), and final status
+   [31815447966](https://github.com/zensgit/metasheet2/actions/runs/31815447966) proved the exact
+   deployed SHA, healthy backend, all three lifecycle flags OFF, and exact client/corp/callback/
+   public-URL/CORS configuration without emitting secret values.
+3. The first real OAuth callbacks failed at DingTalk's `/v1.0/contact/users/me` with the bounded
+   permission class `403 missing Contact.User.Read`. After the enterprise administrator granted
+   `Contact.User.Read` and published the application version, the same endpoint succeeded. Two
+   unlinked DingTalk identities were then rejected with the expected fail-closed policy class;
+   one linked identity completed OAuth and established an authenticated session.
+4. A values-free database correlation tied that successful callback's `last_login_at` timestamp
+   to the fixed owned directory subject name `Lifecycle Canary Employee`, with an active linked
+   account and matching corp/provider identity. It emitted only
+   `is_lifecycle_canary_subject=true`, not provider identifiers or personal data. This proves the
+   pending subject's post-activation OAuth positive checkpoint and the same subject's
+   post-deprovision-restore OAuth positive checkpoint. It does **not** prove the browser denial
+   checkpoint while the subject was deprovisioned; that remains `NOT EXECUTED`.
+5. Final lifecycle status
+   [31817757706](https://github.com/zensgit/metasheet2/actions/runs/31817757706) reported exact
+   deployed SHA, healthy backend, zero pending migrations, mode OFF, and all three lifecycle flags
+   false after the real OAuth exercise.
+6. Staging Stream status
+   [31817945571](https://github.com/zensgit/metasheet2/actions/runs/31817945571) now reports all
+   three Stream credentials plus the integration anchor present, two configured-corp anchors with
+   exactly one eligible anchor and two linked local users, Stream OFF, worker disabled, and lifecycle
+   flags OFF.
+   This closes the former missing-configuration precondition only; U1-U13 and the real callback
+   corp-anchor remain `NOT EXECUTED` until an explicit owner-approved Stream window.
+7. Production read-only inventory
+   [31818159368](https://github.com/zensgit/metasheet2/actions/runs/31818159368) at exact deployed
+   SHA `cc69791604f338a90e07dc07da8118a2d7a68188` reports a ready two-linked-user directory
+   baseline and all four flags OFF, but zero password-capable alias administrators and no Stream
+   client secret/template/integration configuration. Production alias and Stream remain NO-GO.
+8. A staging values-free T2-Gate inventory reported three active corp-anchored integrations across
+   two distinct corp anchors, but only one corp with active directory accounts and zero cross-corp
+   overlap groups. Automatic sync and schedules were both zero. The post-fix two-corp UAT entry
+   criterion is therefore not met: a real second-enterprise member set and one real overlap person
+   remain external owner inputs. Transfer T3-T5 stays frozen; local DB fabrication is prohibited.
+
 ## 1. Environment boundary
 
 Two independently configured deployment roots were observed and must not be conflated:
 
 | Evidence lane | Deployed SHA | Purpose |
 |---|---|---|
-| Lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `2bf058c2a4fd5abed76df347b3bfdb74dba148ee` | Exact lifecycle status, deprovision apply/restore, and terminal OFF proof |
-| Production-readiness inventory (`DEPLOY_PATH`) | `2bf058c2a4fd5abed76df347b3bfdb74dba148ee` | Read-only DingTalk integration, account, Stream, and flag inventory |
+| Lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1` | Exact lifecycle status, deprovision apply/restore, OAuth correlation, and terminal OFF proof |
+| Production-readiness inventory (`DEPLOY_PATH`) | `cc69791604f338a90e07dc07da8118a2d7a68188` | Read-only DingTalk integration, account, Stream, and flag inventory |
 
-The matching code SHA is not used to infer shared runtime state between the two roots; each
+The differing code SHAs are not used to infer shared runtime state between the two roots; each
 runtime fact below is tied to its own workflow run and artifact. Production enablement remains a
 separate owner/ops decision.
 
@@ -156,8 +213,8 @@ backend, zero pending migrations, mode `off`, all three lifecycle flags `false`,
 | Order | Stage | Result | Durable evidence / reason |
 |---|---|---|---|
 | 1 | alias-only | **PASS, rolled back** | Hardened-deploy run `31529335625`; transient ON was proven by real password login and success required a return to exact OFF |
-| 2 | pending admission | **PASS for admit + SSO activate intent, rolled back; browser OAuth NOT EXECUTED** | Runs `31551343313` and `31551426867` used an explicit owned subject, never auto-selected it, and left lifecycle flags OFF |
-| 3 | deprovision | **PASS server-side, restored and rolled back; browser login/OAuth checkpoints NOT EXECUTED** | Apply run `31575411459` wrote one event and three effects for the explicit target; restore run `31575938536` reversed the exact effect set, restored the access graph, cleared the journal, and kept all lifecycle flags OFF |
+| 2 | pending admission | **PASS for admit + SSO activate intent; post-activation OAuth positive PASS; rolled back** | Runs `31551343313` and `31551426867` used an explicit owned subject and left lifecycle flags OFF; Section 0 ties the later successful real OAuth callback to that exact owned subject |
+| 3 | deprovision | **PASS server-side, restored and rolled back; post-restore OAuth positive PASS; apply-time browser denial NOT EXECUTED** | Apply/restore reruns `31778647232` / `31778860419` proved the exact event/effects and graph restoration; Section 0 proves restored-subject OAuth without claiming the missing apply-time browser denial |
 
 ### 4.1 Alias result
 
@@ -200,9 +257,10 @@ an account.
   `PENDING_SSO_ACTIVATE` intent to activate the same subject while lifecycle flags remained OFF.
 
 Both artifacts are values-free and report `subject_owned=true`, `subject_auto_selected=false`, and
-successful password-backed administrator login. They do **not** prove browser OAuth denial or
-post-activation browser OAuth success: both browser checkpoints remain `NOT_EXECUTED`. Pending
-production enablement therefore remains a separate NO-GO decision despite the server-side canary.
+successful password-backed administrator login. The later real callback and values-free subject
+correlation in Section 0 prove post-activation browser OAuth success for this exact subject. No
+pre-activation browser denial was executed. Pending production enablement therefore remains a
+separate NO-GO decision despite the staging positive checkpoint.
 
 ### 4.3 Deprovision attempts, recovery, and completed server-side cycle
 
@@ -211,20 +269,22 @@ would-deactivate accounts. A later browser inspection showed that the active int
 shared employee integration, so it is explicitly disqualified from destructive canary use.
 Deprovision cannot be proven by editing the local database or by selecting a real employee.
 
-The only other visible staging integration has a different corp anchor, zero accounts, and a
-failed most-recent sync. It cannot be repurposed as the dedicated integration for the authenticated
-corp without a separately authorized reconfiguration and valid source credentials.
+At that point, the only other visible staging integration had a different corp anchor, zero
+accounts, and a failed most-recent sync. It could not be repurposed as the dedicated integration
+for the authenticated corp without a separately authorized reconfiguration and valid source
+credentials.
 
-After Section 4.2 succeeds, an authorized operator must create/use a separate active DingTalk
-integration containing exactly the selected linked account plus one distinct active unlinked
-sentinel (all active and inactive account rows count), with scheduler, admission automation, and
-member-group projection disabled, using `mark_inactive`. Apply requires
+The completed cycle used a separate active DingTalk integration containing exactly the selected
+linked account plus one distinct active unlinked sentinel (all active and inactive account rows
+count), with scheduler, admission automation, and member-group projection disabled, using
+`mark_inactive`. Apply required
 `DINGTALK_SOURCE_DISABLED_DEDICATED_EXCLUSIVE_CONFIRMED`, which attests that the source is disabled
 and no other operator will sync or edit this dedicated integration until the lifecycle flags are
-proven OFF. The preview and exact target-plus-sentinel checks are not an atomic scope lock, so this exclusive
-window is mandatory. The apply sequence then requires an exact one-subject preview and planner result,
-persists a random sync run UUID before env/HTTP, transiently enables only deprovision, and starts
-the async sync with that UUID. A lost 202 or runner crash retains the exact recovery journal;
+proven OFF. The preview and exact target-plus-sentinel checks are not an atomic scope lock, so this
+exclusive window was mandatory and remains required for any rerun. The apply sequence used an exact
+one-subject preview and planner result, persisted a random sync run UUID before env/HTTP,
+transiently enabled only deprovision, and started the async sync with that UUID. A lost 202 or
+runner crash retains the exact recovery journal;
 retries cannot start a second provider pull with the same UUID. Recovery binds only that run's
 single event and exact membership/grant/user effect triple. Restore probes the exact event tuple,
 reverses it, verifies the exact effect set and access graph, and leaves all three flags OFF.
@@ -272,9 +332,11 @@ three effects, and a present generation. It then restored all flags to OFF while
 [Restore run 31575938536](https://github.com/zensgit/metasheet2/actions/runs/31575938536) synchronized
 the re-added source with deprovision OFF, reversed exactly three effects, proved the event fully
 resolved, restored one active membership and the enabled grant, cleared the journal, and left all
-three lifecycle flags OFF. The artifact deliberately reports password-login and OAuth browser
-checkpoints as `NOT_EXECUTED` and `end_to_end_restore_claimed=false`; this is a real provider sync and
-server-side access-graph apply/restore proof, not a fabricated browser acceptance result.
+three lifecycle flags OFF. The original artifact deliberately reports password-login and OAuth
+browser checkpoints as `NOT_EXECUTED` and `end_to_end_restore_claimed=false`; it remains the
+run-bound server-side proof. The later Section 0 callback independently proves the restored owned
+subject can log in through OAuth. The apply-time browser denial checkpoint was still not executed,
+so this record does not rewrite the original artifact or claim that missing negative checkpoint.
 
 ## 5. DingTalk directory readiness
 
@@ -298,7 +360,7 @@ completed successfully after the lifecycle restore against deployed SHA
 | all lifecycle/Stream flags OFF | `true` |
 | log level | ready (`LOG_LEVEL` missing; runtime default is `info`) |
 
-This fresh read-only inventory proves that the usable directory baseline and exact OFF state still
+This run-bound historical inventory proves that the usable directory baseline and exact OFF state
 held after the server-side pending and deprovision canaries recorded in Sections 4.2 and 4.3. It
 does not prove the omitted browser checkpoints and is not interactive-card readiness.
 
@@ -310,14 +372,15 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | Stream client id, client secret, card template id, and integration id are all absent from the runtime inventory |
-| U11-a real callback corp-anchor | **NOT EXECUTED** | No real card can be sent/clicked without the Stream/template configuration; no callback frame was captured |
+| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | Current staging inputs/anchor are ready per run `31817945571`, but Stream `prepare` and the separately approved `on` window have not run |
+| U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
 | P1 latest storage-health precondition | conditionally ready, recheck at UAT start | Latest observed `Attendance Remote Storage Health (Prod)` run [31453711071](https://github.com/zensgit/metasheet2/actions/runs/31453711071) was successful; the evidence pack requires a fresh check at the actual UAT start |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
-| P3 real corp + two linked users | directory subset ready only | Corp anchor and two linked users exist, but Stream app/template configuration is absent |
+| P3 real corp + two linked users | **READY for staging prepare** | Run `31817945571` reports exactly one eligible configured-corp anchor with two linked users and all Stream inputs present |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
 
-Runtime inventory details for the missing Stream prerequisites:
+Historical Stream inventory from run `31579935836` (superseded for staging readiness by
+`31817945571`):
 
 ```text
 client_id_present=false
@@ -327,20 +390,25 @@ integration_id_present=false
 credentials_ready=false
 ```
 
-Required external action: configure the four staging Stream/template inputs through the
-approved secret/configuration channel, re-confirm the ready log level at the controlled UAT
-window start, execute the canonical U1-U13 procedure with real human clicks, capture only values-free
-booleans/status enums, and turn the Stream flag back OFF after U13. Secrets must not be pasted
-into this document or chat.
+Those values are historical for run `31579935836`. Current staging status `31817945571` supersedes
+the missing-configuration diagnosis: credentials and the selected integration anchor are present,
+one eligible anchor has two linked users, Stream remains OFF, and the worker remains disabled.
+U1-U13 and the callback corp-anchor are still not executed.
+
+Required external action: with explicit owner approval, execute Stream `prepare` through the
+approved secret/configuration channel while forcing Stream OFF. After a fresh status proof, a
+separate owner GO may open the controlled `on` window for the canonical U1-U13 procedure and real
+human clicks. Capture only values-free booleans/status enums and execute `off` after U13. Secrets
+must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
 
 | Decision | Current verdict |
 |---|---|
 | production alias enable | **NO GO** until owner reviews staging evidence and separately authorizes production |
-| production pending enable | **NO GO**; server-side staging admit/activate passed, but browser OAuth checkpoints and owner GO remain incomplete |
-| production deprovision enable | **NO GO**; staging server-side apply/restore passed, but production still requires a separate owner GO and the remaining real-enterprise/browser acceptance evidence |
-| interactive-card Stream enable | **NO GO**; U1-U13/U11-a not executed |
+| production pending enable | **NO GO**; staging admit/activate and post-activation OAuth positive passed, but production readiness and owner GO remain incomplete |
+| production deprovision enable | **NO GO**; staging apply/restore and post-restore OAuth positive passed, but the apply-time browser denial checkpoint, production readiness, and separate owner GO remain incomplete |
+| interactive-card Stream enable | **NO GO for production**; staging configuration is ready, but U1-U13/U11-a are not executed and production Stream inputs remain absent |
 | Transfer T3-T5 | **FROZEN**; real two-corp T2-Gate remains separate and unexecuted |
 | lifecycle production-enable owner | **NOT ASSIGNED**; do not infer an owner from repository or staging access |
 | interactive-card UAT owner | **NOT ASSIGNED**; assign before provisioning the missing Stream/template inputs |
@@ -356,13 +424,15 @@ DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false
 
 ## 8. Next executable actions
 
-1. Complete the pending/deprovision browser login/OAuth checkpoints if production lifecycle
-   enablement is to be considered; do not infer them from the server-side results.
-2. Configure the staging Stream/template inputs, re-confirm the info/debug log level, execute U1-U13 and the
-   real callback corp-anchor procedure.
+1. Complete the remaining deprovision apply-time browser denial checkpoint if production lifecycle
+   enablement is to be considered; do not infer it from server-side access denial.
+2. With explicit owner approval, run staging Stream `prepare` while forcing Stream OFF, recheck
+   status, then separately authorize a short `on` window for U1-U13 and the real callback
+   corp-anchor; execute `off` immediately afterward.
 3. Record named owners and explicit production switch decisions. Any absent evidence remains
    `NOT EXECUTED`.
 
 The lifecycle code line and all three server-side staging canaries are closed with terminal OFF
-proof. Browser acceptance, production enablement, U1-U13, the real callback corp-anchor, and the
-remaining real-enterprise acceptance are not complete.
+proof. Post-activation and post-restore OAuth positives are complete for the exact owned subject;
+the deprovision apply-time browser denial, production enablement, U1-U13, the real callback
+corp-anchor, and the remaining real-enterprise acceptance are not complete.

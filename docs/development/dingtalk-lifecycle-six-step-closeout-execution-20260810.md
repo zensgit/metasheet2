@@ -1,11 +1,12 @@
 # DingTalk lifecycle six-step closeout execution
 
 - Date: 2026-08-10
-- Updated: 2026-08-12
-- Status: **CODE + ALIAS + SERVER-SIDE PENDING CANARIES COMPLETE / DEPROVISION DESTRUCTIVE APPLY-RESTORE + EXTERNAL GATES NOT EXECUTED**
-- Baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
+- Updated: 2026-08-15
+- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH COMPLETE / APPLY-TIME BROWSER DENIAL + U1-U13 + PRODUCTION GATES NOT EXECUTED**
+- Implementation baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
+- Repository evidence head: `origin/main @ cc69791604f338a90e07dc07da8118a2d7a68188`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
-- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status`, transient `alias -> off`, pending admit, SSO-activate intent, and two pre-ledger deprovision recoveries executed; destructive deprovision apply/restore not complete
+- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status`, transient `alias -> off`, pending admit, SSO-activate intent, pre-ledger recoveries, destructive deprovision apply/restore, and the owned subject's post-restore OAuth positive executed; terminal OFF re-proved
 
 ## 1. OPS-01 explicit compensation
 
@@ -72,8 +73,9 @@ DIRECTORY_PENDING_ACTIVATION_ENABLED=false
 DIRECTORY_DEPROVISION_ENABLED=false
 ```
 
-Merge is not an enablement instruction. The staging alias and server-side pending canaries were
-executed and returned to OFF. Browser OAuth and destructive deprovision apply/restore remain
+Merge is not an enablement instruction. The staging alias, pending, and destructive deprovision
+apply/restore canaries were executed and returned to OFF. The owned subject's post-activation and
+post-restore OAuth positives passed. The deprovision apply-time browser denial remains
 **NOT EXECUTED**. See `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
 
 ### 3.1 Staging operator lane (what is actually executable)
@@ -90,8 +92,8 @@ executed and returned to OFF. Browser OAuth and destructive deprovision apply/re
 | `preflight` | yes | readiness only; `migrations_pending_zero` must be **exactly `true`** (`unknown` fails — never treated as success) |
 | `off` | yes | **sole env write**: emergency clear of the three gates; previous-override backup + restore on restart/health/mode failure; backend health must be true after restart; exact mode `off` proven |
 | `alias` | yes (transient) | secret-backed password login before ON, during alias-only, and after required OFF rollback |
-| `pending` | yes (transient, **SERVER-SIDE PASS**) | explicit owned directory-account subject; admit + SSO activate intent executed; browser OAuth checkpoints remain `NOT_EXECUTED`; flags returned to OFF |
-| `deprovision` | yes (two-phase, **ATTEMPTED / NOT COMPLETE**) | empty-fetch and duplicate-sentinel failures stayed pre-ledger and were safely recovered; a second unique DingTalk sentinel is still required for destructive apply/restore |
+| `pending` | yes (transient, **PASS**) | explicit owned directory-account subject; admit + SSO activate intent and later exact-subject OAuth positive executed; flags returned to OFF |
+| `deprovision` | yes (two-phase, **SERVER-SIDE + POST-RESTORE OAUTH PASS**) | exact target+sentinel apply/restore completed; post-restore OAuth positive passed; apply-time browser denial remains `NOT EXECUTED` |
 
 `action=off` is an **emergency operational rollback of the env gate only**. Design lock Rev 4.2 §4.2 / §4.4 permanently forbids reintroducing OR-column fallback on `users.email` / `username` / `mobile` as a long-term design after T2b. OFF is not “canary stage 1 complete.”
 
@@ -110,19 +112,19 @@ The safe OFF baseline and transient alias canary are proven:
 9. [#4873](https://github.com/zensgit/metasheet2/pull/4873), merge commit `24794811b1c800402006b30d6e4fa9df670e124e`, hardened deprovision execution with a caller-reserved exact run id, recovery journal, exact ledger binding, and dedicated one-account/exclusive-window gates.
 10. [Attendance staging deploy 31528635839](https://github.com/zensgit/metasheet2/actions/runs/31528635839), [lifecycle status 31528753683](https://github.com/zensgit/metasheet2/actions/runs/31528753683), and [OFF preflight 31528911914](https://github.com/zensgit/metasheet2/actions/runs/31528911914) jointly proved the exact hardened deploy, healthy backend, zero pending migrations, and all three lifecycle flags OFF.
 11. [Lifecycle alias 31529335625](https://github.com/zensgit/metasheet2/actions/runs/31529335625) re-ran the three password-login legs against the hardened deploy, reported zero collisions, and finished in exact mode `off`. This supersedes the older deploy as the current alias proof.
-12. [Pending admit 31551343313](https://github.com/zensgit/metasheet2/actions/runs/31551343313) used an explicit owned subject, proved pending state, and rolled back to OFF. [SSO activate-intent 31551426867](https://github.com/zensgit/metasheet2/actions/runs/31551426867) activated it with lifecycle flags OFF. Browser OAuth checkpoints remain `NOT_EXECUTED`.
+12. [Pending admit 31551343313](https://github.com/zensgit/metasheet2/actions/runs/31551343313) used an explicit owned subject, proved pending state, and rolled back to OFF. [SSO activate-intent 31551426867](https://github.com/zensgit/metasheet2/actions/runs/31551426867) activated it with lifecycle flags OFF. The later 2026-08-15 execution record proves the exact owned subject's post-activation OAuth positive; no pre-activation browser denial was executed.
 13. [#4875](https://github.com/zensgit/metasheet2/pull/4875) added exact empty-fetch recovery. [Run 31555162698](https://github.com/zensgit/metasheet2/actions/runs/31555162698) proved zero ledger, unchanged access graph, active source, flags OFF, and cleared the safe-abort journal.
 14. [#4877](https://github.com/zensgit/metasheet2/pull/4877), merge `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`, added exact pre-deprovision sync-failure recovery. Staging [deploy 31559288370](https://github.com/zensgit/metasheet2/actions/runs/31559288370), recovery [31559371562](https://github.com/zensgit/metasheet2/actions/runs/31559371562), and read-only status [31559480395](https://github.com/zensgit/metasheet2/actions/runs/31559480395) prove the exact deployed SHA, zero ledger before and after recovery sync, unchanged access graph, cleared journal, zero pending migrations, and all lifecycle flags OFF. The recovery does not claim deprovision restore.
 
-The former image-tag/health-commit conflict is resolved. Alias and pending production enablement remain separate owner decisions. The dedicated canary application, subject, and manual integration now exist. Destructive deprovision still requires a second unique DingTalk sentinel so the provider fetch remains nonempty while the target is absent; an employee already present in another integration cannot be reused.
+The former image-tag/health-commit conflict is resolved. Alias and pending production enablement remain separate owner decisions. The dedicated canary application, subject, sentinel, and manual integration now exist. The later exact target+sentinel destructive apply/restore cycle is recorded in `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
 
 ### 3.3 Canary stages
 
 | Stage | Result | Required real proof |
 |---|---|---|
 | 1 | alias-only **PASS, rolled back** | password-login success against aliases + required `off` proof without OR-column fallback |
-| 2 | pending admission **SERVER-SIDE PASS; browser OAuth NOT EXECUTED** | explicit subject admit + SSO activate intent completed, then OFF proved |
-| 3 | deprovision **ATTEMPTED / NOT COMPLETE** | two pre-ledger failure classes were safely recovered; destructive sync→ledger→restore still needs a second unique source sentinel |
+| 2 | pending admission **PASS; post-activation OAuth positive PASS** | explicit subject admit + SSO activate intent completed, exact-subject OAuth succeeded, then OFF proved |
+| 3 | deprovision **SERVER-SIDE + POST-RESTORE OAUTH PASS; APPLY-TIME BROWSER DENIAL NOT EXECUTED** | exact target+sentinel sync→ledger→restore completed and restored-subject OAuth succeeded |
 
 ## 4. Owner and ops acceptance
 
@@ -131,15 +133,20 @@ Real enterprise evidence is unavailable in this development lane. Therefore thes
 - U1-U13 interactive-card acceptance;
 - U11-a real callback corp-anchor;
 - named owners and final production switch decisions;
-- pending browser OAuth and destructive deprovision/restore stages (alias and server-side pending staging canaries passed; production flags remain separate decisions);
+- deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, and pre-ledger recovery paths are complete per §3.2. The current terminal status independently proves runtime OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, and the exact-subject post-activation/post-restore OAuth positives are complete per §3.2 and the companion execution record. The current terminal status independently proves runtime OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
 ## 5. Transfer decision gate (T2-Gate)
 
 Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this lane:
+
+A values-free staging inventory on 2026-08-15 found two distinct active corp anchors, but only one
+corp with active directory accounts and zero cross-corp overlap groups. Automatic sync and
+schedules were both zero. The executable UAT therefore still lacks a real second-enterprise
+member set and overlap person; those inputs must not be fabricated in the local database.
 
 | T2-Gate verdict | Consequence |
 |---|---|
@@ -153,7 +160,7 @@ Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this
 
 ## 6. Test infrastructure lane
 
-Issue #4820 remains open for recurrence observation. [#4852](https://github.com/zensgit/metasheet2/pull/4852), merge commit `f0745831fe5385ccacf8fe6d6e5fd51174c02117`, added per-lane scratch DB provisioning and cleanup for the affected startup fail-closed real-DB suite. This closeout also used the lane-owned database `codex_ops01_comp2_20260810`. The mitigation does not change the lifecycle product verdict; future runtime evidence must not rely on a concurrently shared database.
+[#4852](https://github.com/zensgit/metasheet2/pull/4852), merge commit `f0745831fe5385ccacf8fe6d6e5fd51174c02117`, added per-lane scratch DB provisioning and cleanup for the affected startup fail-closed real-DB suite. After 20 consecutive successful main `plugin-tests` runs and five explicit independent `test (18.x)=success` job checks with no recurrence, issue [#4820](https://github.com/zensgit/metasheet2/issues/4820) was closed on 2026-08-15. Future runtime evidence must still use lane-owned databases.
 
 ## 7. Closure rule
 
@@ -169,4 +176,4 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
 | Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
 
-The staging alias and server-side pending canaries are complete and rolled back. Browser OAuth checkpoints, destructive deprovision/restore, U1-U13/corp-anchor, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Issue #4820 remains open for recurrence observation. None of those remaining gates is represented as PASS by this closeout.
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. The deprovision apply-time browser denial, U1-U13/corp-anchor, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
