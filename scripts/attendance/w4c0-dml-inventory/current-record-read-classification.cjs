@@ -11,6 +11,11 @@ function entry(relPath, enclosingSymbol, count, role) {
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'lockShadowParentRecord', 1, 'write_lock'),
+  // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-result-write CORE locks the exact base
+  // parent row FOR UPDATE before moving its pointer/visibility — it MUST read the base table (not
+  // the current view) to serialize the pointer move and to read the true projection_owner /
+  // current_calculation_id it supersedes. INERT: no production caller yet (D2/D3 wire it).
+  entry('packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', 'lockParent', 1, 'write_lock'),
   entry('packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', 'captureParentPreimages', 1, 'historical_preimage'),
   entry('packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', 'ensureAuthoritativeParent', 1, 'write_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', 'loadAuthorizationTargets', 1, 'rollback_authority'),

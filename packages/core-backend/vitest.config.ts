@@ -590,6 +590,13 @@ export default defineConfig({
       // no-DB job cannot skip-green it; wired whole-file into the attendance
       // real-DB step in plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts',
+      // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-mode result-write CORE's §7.3
+      // invariant matrix (version-uniqueness + lineage, retry idempotency, baseline + same-txn
+      // atomicity, supersedes-locked-current, review hidden-placeholder, reversal restore/retire,
+      // projection_effect/count, append-only) against real Postgres. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB
+      // step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-authoritative-calculation-core.db.test.ts',
       // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
       // migration half: scheduled-run identity tables, the outbox discriminated union,
       // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB
