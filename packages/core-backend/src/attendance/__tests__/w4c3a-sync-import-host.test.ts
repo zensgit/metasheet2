@@ -193,6 +193,12 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
         client: {
           query: async (text: string) => {
             sql.push(text)
+            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
+            // contract the real driver gives `assertConnectionIsIdleV1`'s own
+            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
+            if (text === 'SAVEPOINT w4c5_idle_probe') {
+              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+            }
             if (text.includes('attendance_calculation_rollout_state')) {
               return {
                 rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
@@ -243,7 +249,10 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
       ),
     ).rejects.toThrow('ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED')
     expect(released).toBe(1)
-    expect(sql[0]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
+    // Gate E (#4844): the idle-precondition probe's own SAVEPOINT is genuinely the FIRST
+    // statement issued on the connection, before the wrapper's BEGIN.
+    expect(sql[0]).toBe('SAVEPOINT w4c5_idle_probe')
+    expect(sql[1]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
     expect(sql.join('\n')).not.toMatch(
       /INSERT INTO attendance_import_batches|INSERT INTO attendance_import_items|COPY |attendance_import_jobs|attendance_import_legacy_execution_plan/i,
     )
@@ -553,6 +562,12 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
           client: {
             query: async (text: string) => {
               sql.push(text)
+              // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
+              // contract the real driver gives `assertConnectionIsIdleV1`'s own
+              // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
+              if (text === 'SAVEPOINT w4c5_idle_probe') {
+                throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+              }
               if (text.includes('attendance_calculation_rollout_state')) {
                 return {
                   rows: [{ state: 'authoritative', scope: 'synthetic_staging' }],
@@ -599,7 +614,10 @@ describe('W4C-3a P06 sync import host (unit/static)', () => {
           }),
         ),
       ).rejects.toThrow('ATTENDANCE_IMPORT_BATCH_LIMIT_EXCEEDED')
-      expect(sql[0]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      // Gate E (#4844): the idle-precondition probe's own SAVEPOINT is genuinely the FIRST
+      // statement issued on the connection, before the wrapper's BEGIN.
+      expect(sql[0]).toBe('SAVEPOINT w4c5_idle_probe')
+      expect(sql[1]).toContain('BEGIN ISOLATION LEVEL SERIALIZABLE')
       expect(sql.join('\n')).not.toMatch(
         /INSERT INTO attendance_import_(?:jobs|batches|items)|attendance_import_legacy_execution_plan|attendance_import_legacy_terminal/i,
       )
