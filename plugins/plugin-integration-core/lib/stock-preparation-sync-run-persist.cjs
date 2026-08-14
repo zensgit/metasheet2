@@ -530,11 +530,33 @@ async function persistStockPreparationSyncRun(input = {}) {
     provisioning: provisioningInput,
     targetProjectId: targetProjectIdInput,
     lockTenantId: lockTenantIdInput,
+    allocateSnapshotVersion: allocateSnapshotVersionInput,
     ...planInputs
   } = input
 
-  // 1. admin gate FIRST — fail-closed before ANY provisioning / records access.
+  // 1. admin gate FIRST — fail-closed before config validation, provisioning, or records access.
+  // Keeping authorization ahead of the internal allocation-policy parser prevents an unauthorized
+  // caller from using validation differences as a capability oracle.
   assertAdminPermission(permission)
+
+  if (allocateSnapshotVersionInput !== undefined && typeof allocateSnapshotVersionInput !== 'boolean') {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'allocateSnapshotVersion must be a boolean when supplied',
+      { field: 'allocateSnapshotVersion' },
+    )
+  }
+  const allocateSnapshotVersion = allocateSnapshotVersionInput === true
+  if (allocateSnapshotVersion && planInputs.snapshotVersion !== undefined && planInputs.snapshotVersion !== null) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'snapshotVersion cannot be supplied when atomic version allocation is enabled',
+      { field: 'snapshotVersion' },
+    )
+  }
+
   const provisioning = ensureProvisioning(
     provisioningInput ||
       (context && context.api && context.api.multitable && context.api.multitable.provisioning),
@@ -542,7 +564,14 @@ async function persistStockPreparationSyncRun(input = {}) {
 
   // 2. recompute the deterministic plan (the SAME body the admin previewed). It re-asserts the admin
   //    gate and validates every plan input, and it PERSISTS nothing.
-  const plan = planBomSnapshotSyncRun({ permission, ...planInputs })
+  // Atomic callers request server-side version allocation. A provisional v1 plan performs the same
+  // shape/bounds validation before records/provisioning access; the authoritative plan is rebuilt
+  // under the project lock below from either the existing batch version (exact replay) or max+1.
+  let plan = planBomSnapshotSyncRun({
+    permission,
+    ...planInputs,
+    ...(allocateSnapshotVersion ? { snapshotVersion: 1 } : {}),
+  })
 
   const projectId = optionalString(planInputs.projectId)
   if (!projectId) {
@@ -560,7 +589,7 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!snapshotBatchId) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshotBatchId is required', { field: BATCH_KEY_FIELD })
   }
-  const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
+  let snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
   assertPlanIdentityKeys(plan, snapshotLines)
 
   // H-3: explicit plan-size bound — fail before ANY provisioning / records access. See
@@ -638,6 +667,33 @@ async function persistStockPreparationSyncRun(input = {}) {
       throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
     if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
+
+    if (allocateSnapshotVersion) {
+      let allocatedVersion
+      if (existingBatch.length === 1) {
+        allocatedVersion = parseStrictVersion(
+          existingBatch[0] && existingBatch[0].data && existingBatch[0].data.snapshotVersion,
+        )
+        if (allocatedVersion === null) versionNotMonotonic('history_unprovable')
+      } else {
+        const maxVersion = await readProjectMaxBatchVersion(batchScoped, projectId)
+        if (maxVersion === null || maxVersion >= Number.MAX_SAFE_INTEGER) {
+          versionNotMonotonic('history_unprovable')
+        }
+        allocatedVersion = maxVersion + 1
+      }
+      plan = planBomSnapshotSyncRun({ permission, ...planInputs, snapshotVersion: allocatedVersion })
+      snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
+      assertPlanIdentityKeys(plan, snapshotLines)
+      if (snapshotLines.length > PERSIST_MAX_PLAN_LINES) {
+        throw new StockPreparationSyncRunPersistError(
+          422,
+          'PERSIST_PLAN_TOO_LARGE',
+          'planned snapshot line count exceeds the provable persist bound',
+          { field: 'snapshotLines', maxLines: PERSIST_MAX_PLAN_LINES },
+        )
+      }
+    }
 
     // The project preflight occurs before the first write. It both rejects duplicate project keys and
     // supplies the exact row (if any) that the final live-pointer upsert may patch.
