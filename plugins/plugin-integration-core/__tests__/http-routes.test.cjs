@@ -4859,6 +4859,259 @@ async function testTableActionRoutes() {
   )
 }
 
+async function testTableActionMvpPersistRoute() {
+  const previousGate = process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+  delete process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+  try {
+  const store = createInMemoryMvpPersistStore()
+  const adapterCalls = []
+  const sourceCalls = []
+  let sourceStatus = 'active'
+  let sourceData = tableActionPlmData()
+  let sourceReadError = null
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: sourceStatus,
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        const adapter = createTableActionSourceAdapter(sourceData, sourceCalls)
+        return {
+          async read(input) {
+            if (sourceReadError) throw sourceReadError
+            return adapter.read(input)
+          },
+        }
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(services, {
+    recordsApi: store.recordsApi,
+    provisioningApi: store.provisioningApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] },
+  })
+
+  assert.ok(
+    registered.includes('POST /api/integration/table-actions/:actionId/mvp-persist'),
+    'MVP persist route is registered',
+  )
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 403, 'MVP persist stays fail-closed while its dedicated gate is absent')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED')
+  assert.equal(adapterCalls.length, 0, 'disabled gate creates no source adapter')
+  assert.equal(sourceCalls.length, 0, 'disabled gate performs no source read')
+  assert.equal(store.writes.length, 0, 'disabled gate performs no internal write')
+
+  process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED = 'true'
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot persist an internal MVP snapshot')
+  assert.equal(adapterCalls.length, 0, 'authorization fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'authorization failure writes nothing')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, projectId: 'tenant_evil:integration-core' },
+  })
+  assert.equal(res.statusCode, 400, 'client-supplied target steering is rejected')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+  assert.equal(adapterCalls.length, 0, 'invalid input fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'invalid input writes nothing')
+
+  const sourceLookupsBeforeSteering = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: { id: 'platform_admin', roles: ['admin'], permissions: ['integration:admin'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    query: { tenantId: 'tenant_steered' },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 400, 'tenant steering is rejected before tenant or source resolution')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+  assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeSteering, 'steering performs zero source-system I/O')
+  assert.equal(adapterCalls.length, 0, 'steering creates no adapter')
+  assert.equal(sourceCalls.length, 0, 'steering performs no source read')
+  assert.equal(store.writes.length, 0, 'steering performs no internal write')
+
+  for (const [label, request] of [
+    ['query carrier', { query: { ignored: 'not-allowed' } }],
+    ['params carrier', { params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: 'workspace_steered' } }],
+    ['body carrier', { body: { parameters: { projectNo: 'P-001' }, snapshotVersion: 99 } }],
+  ]) {
+    const sourceLookupsBeforeCarrier = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+    const carrierRes = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+      ...request,
+    })
+    assert.equal(carrierRes.statusCode, 400, `${label} steering fails closed`)
+    assert.equal(carrierRes.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+    assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeCarrier, `${label} performs zero source-system I/O`)
+    assert.equal(sourceCalls.length, 0, `${label} performs zero source reads`)
+    assert.equal(store.writes.length, 0, `${label} performs zero internal writes`)
+  }
+
+  const sourceLookupsBeforeNestedInput = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001', tenantId: 'nested_steering' } },
+  })
+  assert.equal(res.statusCode, 400, 'unsupported nested parameters fail before source lookup')
+  assert.equal(res.body.error.code, 'TABLE_ACTION_PARAMETERS_INVALID')
+  assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeNestedInput, 'unsupported nested parameters perform zero source-system I/O')
+  assert.equal(sourceCalls.length, 0, 'unsupported nested parameters perform zero source reads')
+  assert.equal(store.writes.length, 0, 'unsupported nested parameters perform zero internal writes')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: { id: 'platform_admin', roles: ['admin'], permissions: ['integration:admin'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 400, 'tenantless admin is rejected before source resolution')
+  assert.equal(res.body.error.code, 'TENANT_REQUIRED')
+  assert.equal(adapterCalls.length, 0, 'tenantless admin creates no adapter')
+  assert.equal(sourceCalls.length, 0, 'tenantless admin performs no source read')
+  assert.equal(store.writes.length, 0, 'tenantless admin performs no internal write')
+
+  sourceStatus = 'inactive'
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 409, 'inactive source is not approved for the internal persist path')
+  assert.equal(res.body.error.code, 'TABLE_ACTION_SOURCE_NOT_ACTIVE')
+  assert.equal(adapterCalls.length, 0, 'inactive source fails before adapter creation')
+  assert.equal(sourceCalls.length, 0, 'inactive source performs no source read')
+  assert.equal(store.writes.length, 0, 'inactive source performs no internal write')
+  sourceStatus = 'active'
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.status, 'created')
+  assert.equal(res.body.data.persisted, true)
+  assert.ok(store.writes.length > 0, 'the approved expansion reaches the internal MVP write sink')
+  assert.ok(sourceCalls.length > 0, 'the source is re-read immediately before persistence')
+  assert.ok(store.findObjectSheetCalls.length > 0, 'the route resolves internal MVP target sheets')
+  for (const call of store.findObjectSheetCalls) {
+    assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'physical target derives from the authenticated tenant')
+  }
+  assert.equal(deepStringIncludes(store.writes, 'P-001'), true, 'positive control: the project value reaches the internal sink')
+  for (const forbidden of ['P-001', 'A-001', 'Assembly']) {
+    assert.equal(deepStringIncludes(res.body, forbidden), false, `values-free response hides ${forbidden}`)
+  }
+
+  const writesBeforeReplay = store.writes.length
+  const readsBeforeReplay = sourceCalls.length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'skipped_existing')
+  assert.equal(res.body.data.persisted, false)
+  assert.ok(sourceCalls.length > readsBeforeReplay, 'an exact replay re-reads the source')
+  assert.equal(store.writes.length, writesBeforeReplay, 'an exact replay creates or patches no internal rows')
+
+  sourceData = tableActionPlmData()
+  sourceData.DN_PDM_PartLibraryInfo[0].SysVer = 'V2'
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.status, 'created', 'a changed source revision creates a new immutable batch')
+  const batchVersionsAfterV2 = store.writes
+    .filter((write) => write.op === 'create' && Object.prototype.hasOwnProperty.call(write.data, 'snapshotVersion'))
+    .map((write) => write.data.snapshotVersion)
+  assert.deepEqual(batchVersionsAfterV2, [1, 2], 'changed revision receives the next project-scoped snapshot version')
+
+  sourceData = tableActionPlmData()
+  sourceData.DN_PDM_PartLibraryInfo[0].SysVer = 'V3'
+  const concurrent = await Promise.all([
+    invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+    }),
+    invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+    }),
+  ])
+  assert.deepEqual(concurrent.map((entry) => entry.statusCode).sort(), [200, 201], 'concurrent identical revision creates once and exact-replays once')
+  const finalBatchVersions = store.writes
+    .filter((write) => write.op === 'create' && Object.prototype.hasOwnProperty.call(write.data, 'snapshotVersion'))
+    .map((write) => write.data.snapshotVersion)
+  assert.deepEqual(finalBatchVersions, [1, 2, 3], 'concurrent persistence preserves unique monotonic snapshot versions')
+
+  const writesBeforeNotFound = store.writes.length
+  sourceData = {
+    DN_PDM_PathExAttrInfo: [],
+    DN_PDM_PathInfo: [],
+    DN_PDM_OrderHeadInfo: [],
+    DN_PDM_OrderDetailInfo: [],
+    DN_PDM_PartLibraryInfo: [],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  }
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 404, 'source not-found fails closed')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND')
+  assert.equal(store.writes.length, writesBeforeNotFound, 'source not-found performs no internal write')
+
+  const privateSourceFailure = 'PRIVATE_SOURCE_FAILURE_MUST_NOT_ESCAPE'
+  sourceReadError = new Error(privateSourceFailure)
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 409, 'source driver failure is coarse')
+  assert.equal(JSON.stringify(res.body).includes(privateSourceFailure), false, 'source driver failure hides private detail')
+  assert.equal(store.writes.length, writesBeforeNotFound, 'source driver failure performs no internal write')
+  } finally {
+    if (previousGate === undefined) delete process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+    else process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED = previousGate
+  }
+}
+
 async function testLargeBomBackgroundExpansionJobRoutes() {
   const records = createTableActionRecordsApi()
   const calls = []
@@ -7834,6 +8087,7 @@ function createInMemoryMvpPersistStore() {
   const writes = []
   const findObjectSheetCalls = []
   let seq = 0
+  let unitOfWorkTail = Promise.resolve()
   const sheetFor = (sheetId) => {
     if (!sheets.has(sheetId)) sheets.set(sheetId, new Map())
     return sheets.get(sheetId)
@@ -7866,7 +8120,15 @@ function createInMemoryMvpPersistStore() {
       return { id: recordId, sheetId, data: { ...data } }
     },
     async runStockPreparationPersistUnitOfWork(_input, operation) {
-      return operation(recordsApi)
+      const previous = unitOfWorkTail
+      let release
+      unitOfWorkTail = new Promise((resolve) => { release = resolve })
+      await previous
+      try {
+        return await operation(recordsApi)
+      } finally {
+        release()
+      }
     },
   }
   const provisioningApi = {
@@ -8751,6 +9013,7 @@ async function main() {
   await testFieldOptionsSyncRoute()
   await testFieldOptionsSyncDisableMissing()
   await testTableActionRoutes()
+  await testTableActionMvpPersistRoute()
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
