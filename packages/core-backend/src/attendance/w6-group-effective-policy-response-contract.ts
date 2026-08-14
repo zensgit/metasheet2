@@ -41,7 +41,17 @@ import {
 const FSER_POSITION_REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_FSER_REASON_CODES_V1)
 const DOMAIN_POSITION_REASON_CODES = new Set(ATTENDANCE_GROUP_EFFECTIVE_POLICY_DOMAIN_REASON_CODES_V1)
 
-const CALCULATION_POSTURES: readonly AttendanceGroupEffectivePolicyCalculationPostureV1[] = Object.freeze([
+// W6-2 (#4556) §7.3: these five closed sets have no separate hand-maintained
+// array in the TS contract module (`w6-group-effective-policy-contract.ts`)
+// — only an inline literal-union TYPE there. This file's own array IS the
+// concrete TS-side value for each, so each is exported (pure visibility
+// change, no behaviour change) for
+// `tests/unit/attendance-w6-2-enum-parity.test.ts` to import directly rather
+// than hand-copy. The runtime-behaviour leg stays independently meaningful:
+// it probes the actual validator functions below, which is a different
+// property than "does this array literal match" (a stray extra branch in
+// the `if` checks that use these arrays would drift the two apart).
+export const CALCULATION_POSTURES: readonly AttendanceGroupEffectivePolicyCalculationPostureV1[] = Object.freeze([
   'legacy',
   'shadow',
   'eligible',
@@ -49,16 +59,16 @@ const CALCULATION_POSTURES: readonly AttendanceGroupEffectivePolicyCalculationPo
   'suspended',
 ])
 
-const GROUP_TYPES: readonly AttendanceGroupEffectivePolicyGroupTypeV1[] = Object.freeze([
+export const GROUP_TYPES: readonly AttendanceGroupEffectivePolicyGroupTypeV1[] = Object.freeze([
   'fixed_shift',
   'scheduled_shift',
   'free_time',
 ])
 
-const FSER_STATES = Object.freeze(['not_configured', 'pending_apply', 'effective', 'configuration_changed'])
+export const FSER_STATES = Object.freeze(['not_configured', 'pending_apply', 'effective', 'configuration_changed'])
 
-const FLEX_MODES = Object.freeze(['strict', 'flex_required_duration'])
-const RULE_SOURCES = Object.freeze(['org_default', 'group_rule_set'])
+export const FLEX_MODES = Object.freeze(['strict', 'flex_required_duration'])
+export const RULE_SOURCES = Object.freeze(['org_default', 'group_rule_set'])
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /**
  * W6-R8: the #4711 closed step/surface table, re-declared here because the
@@ -78,7 +88,7 @@ export const SCHEDULE_ROUTE_SURFACES: Record<string, readonly string[] | null> =
   calendar: null,
   rules: ['rule-sets'],
 })
-const GROUP_STAGES = Object.freeze(['basics', 'people', 'schedule', 'policies'])
+export const GROUP_STAGES = Object.freeze(['basics', 'people', 'schedule', 'policies'])
 /**
  * The sourceRef `kind` set the validator gates payloads with — imported from
  * the contract module (also the source the exported TS `kind` type derives
