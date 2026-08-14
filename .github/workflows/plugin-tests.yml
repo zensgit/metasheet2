@@ -1368,6 +1368,7 @@ jobs:
             tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
             tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
             tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
+            tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts \
             tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
             tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
             tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
