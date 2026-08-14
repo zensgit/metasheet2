@@ -18,6 +18,10 @@ import {
 } from './w4c0-identity'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
+// W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the
+// closure precondition asks "does any pointer-owning row still reference this
+// batch"; spelled as `= 'w4'` it would have missed a `w4_group` row.
+import { ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1 } from './w7-provenance-domain'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import {
   AttendanceLegacyPlanEnqueueError,
@@ -659,7 +663,7 @@ async function legacyDeleteEligible(
        AND NOT EXISTS (
          SELECT 1 FROM attendance_records
           WHERE org_id = $1 AND source_batch_id = $2::uuid
-            AND (current_calculation_id IS NOT NULL OR projection_owner = 'w4')
+            AND (current_calculation_id IS NOT NULL OR projection_owner IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1}))
        )
        AND NOT EXISTS (
          SELECT 1 FROM attendance_import_rollback_closures

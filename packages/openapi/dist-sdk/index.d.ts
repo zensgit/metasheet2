@@ -15019,7 +15019,7 @@ export interface components {
             segments: components["schemas"]["AttendanceW4CalculationSegment"][];
             current: {
                 /** @enum {string} */
-                projectionOwner: "legacy_untracked" | "w4";
+                projectionOwner: "legacy_untracked" | "w4" | "w4_group";
                 /** @enum {string} */
                 visibilityState: "active" | "retired";
                 /** @enum {string} */

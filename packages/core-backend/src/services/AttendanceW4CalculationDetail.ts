@@ -4,6 +4,7 @@ import {
   validateFrozenContextShape,
 } from '../attendance/w4c1-segment-calculator'
 import type { FrozenAttendanceContextV1 } from '../attendance/w4c0-write-boundary-types'
+import { ATTENDANCE_PROJECTION_OWNERS_V1 } from '../attendance/w7-provenance-domain'
 
 export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
   'equal',
@@ -91,7 +92,10 @@ const CALCULATION_OUTCOME_REASONS = [
   'operator_retirement',
 ] as const
 const PROJECTION_EFFECTS = ['none', 'set_active', 'set_retired'] as const
-const PROJECTION_OWNERS = ['legacy_untracked', 'w4'] as const
+// W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the
+// closed set this route validates against is the widened live domain. `w4_group`
+// is ACCEPTED here; nothing emits it until W7-1b.
+const PROJECTION_OWNERS = ATTENDANCE_PROJECTION_OWNERS_V1
 const VISIBILITY_STATES = ['active', 'retired'] as const
 const VISIBILITY_REASONS = ['active', 'review_placeholder', 'import_rollback', 'operator_retirement'] as const
 const DAILY_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted', 'off'] as const

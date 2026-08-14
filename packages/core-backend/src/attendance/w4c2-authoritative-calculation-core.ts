@@ -102,6 +102,11 @@ import {
 } from './w4c0-fingerprints'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import {
+  isAttendanceProjectionOwnerV1,
+  isAttendanceProjectionOwnerWithCalculationPointerV1,
+  type AttendanceProjectionOwnerV1,
+} from './w7-provenance-domain'
+import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   type AttendanceCalculatedSegmentV1,
   type AttendanceSegmentCalculationResultV1,
@@ -428,7 +433,7 @@ export type AttendanceAuthoritativeParentPreimageV1 =
   | { readonly posture: 'absent' }
   | {
       readonly posture: 'present'
-      readonly projectionOwner: 'legacy_untracked' | 'w4'
+      readonly projectionOwner: AttendanceProjectionOwnerV1
       readonly currentCalculationId: string | null
       readonly visibilityState: 'active' | 'retired'
       readonly visibilityReason: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
@@ -592,7 +597,7 @@ export type WriteAuthoritativeSegmentCalculationResultV1 =
 
 interface LockedParentV1 {
   readonly currentCalculationId: string | null
-  readonly projectionOwner: 'legacy_untracked' | 'w4'
+  readonly projectionOwner: AttendanceProjectionOwnerV1
   readonly visibilityState: 'active' | 'retired'
   readonly timezone: string | null
 }
@@ -645,7 +650,14 @@ async function lockParent(
   return {
     currentCalculationId:
       typeof row.current_calculation_id === 'string' ? row.current_calculation_id : null,
-    projectionOwner: row.projection_owner === 'w4' ? 'w4' : 'legacy_untracked',
+    // W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the
+    // pre-widening fold collapsed EVERY non-`w4` string to `legacy_untracked`,
+    // which would have turned a `w4_group` row into a legacy one on read (silent
+    // downgrade). Membership is now tested against the live domain; anything
+    // outside it still folds to `legacy_untracked`, so no novel value is admitted.
+    projectionOwner: isAttendanceProjectionOwnerV1(row.projection_owner)
+      ? row.projection_owner
+      : 'legacy_untracked',
     visibilityState: row.visibility_state === 'retired' ? 'retired' : 'active',
     timezone: typeof row.timezone === 'string' ? row.timezone : null,
   }
@@ -840,7 +852,12 @@ async function writeCompletedRow(
   // version is allocated so the two never collide on `(record, version)`.
   let supersedesCalculationId: string | null = null
   let baselineCalculationId: string | null = null
-  if (parent.projectionOwner === 'w4' && parent.currentCalculationId !== null) {
+  // W7-1a-M: the first arm selects on pointer ownership, so `w4_group` supersedes
+  // its own current exactly as `w4` does instead of matching neither arm.
+  if (
+    isAttendanceProjectionOwnerWithCalculationPointerV1(parent.projectionOwner) &&
+    parent.currentCalculationId !== null
+  ) {
     supersedesCalculationId = parent.currentCalculationId
   } else if (parent.projectionOwner === 'legacy_untracked' && parent.visibilityState === 'active') {
     if (input.preimage.posture !== 'present' || input.preimage.projection === null) {
@@ -1137,7 +1154,7 @@ export async function writeAuthoritativeReversalV1(
   // Pointer (§7.5): present → restore the earlier calc/owner/visibility; absent → point at THIS
   // reversal row, set_retired. Optimistic on the exact reversed pointer.
   let pointerTarget: string | null
-  let owner: 'legacy_untracked' | 'w4'
+  let owner: AttendanceProjectionOwnerV1
   let visibilityState: 'active' | 'retired'
   let visibilityReason: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
   let daily: AttendanceAuthoritativePreimageProjectionV1

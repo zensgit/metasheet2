@@ -3,15 +3,25 @@
  * string values for the W7-owned provenance family on the existing W4
  * detail/trace enums (design-lock §4.4, §7 OD-W7-5).
  *
- * Status: PROPOSED / runtime HOLD. `OD-W7-0..10` are OPEN owner decisions —
- * see
- * `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md`
- * §9. These strings are RECORDED here only; neither live enum named below is
- * edited by this file. Widening either live closed set now would force
- * every exhaustive consumer listed under it to handle the new value — that
- * is exactly the "modifying a live enum consumed by an exhaustive check"
- * case W7-R9 rules out of W7-0. Wiring these values into the live closed
- * arrays/unions (and into every listed consumer) is W7-1's job.
+ * Status: RATIFIED and WIRED. `OD-W7-0..10` were ratified per #4556 comments
+ * 5293034619 + 5293478713, and W7-1a-M wired both recorded values into the live
+ * domains — see `./w7-provenance-domain.ts`, which imports the two constants
+ * below so the recorded spelling and the live spelling cannot drift.
+ *
+ * Historical note (the state this file was written in): these strings were
+ * RECORDED here only, and neither live enum named below was edited by this file,
+ * because widening a live closed set forces every exhaustive consumer to handle
+ * the new value — the "modifying a live enum consumed by an exhaustive check"
+ * case W7-R9 ruled out of W7-0. That wiring is W7-1a-M's job and is now done.
+ *
+ * CAUTION for readers: the per-target consumer inventories in the two section
+ * comments below are the W7-0 point-in-time lists. They are NOT the widening
+ * surface and were never complete — the ratification refused to enumerate the
+ * surface for exactly this reason, and the W7-1a-M derivation found live
+ * consumers absent from them (notably `apps/web`'s independent trace
+ * source-kind array + exhaustive switch, which target 2's note below asserts
+ * does not exist). The authoritative, mechanically derived surface is the
+ * ledger in `packages/core-backend/tests/utils/w7-provenance-widening-scan.ts`.
  *
  * Basis: built on the design-lock's recommended OD-W7-5 option (a) shape.
  * OD-W7-5 is OPEN — ratification pending, not assumed by this file.
@@ -89,13 +99,25 @@ export const ATTENDANCE_W7_READ_SIDE_PROVENANCE_AMENDMENT_V1 = Object.freeze({
   projectionOwner: Object.freeze({
     targetFile: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts',
     targetConst: 'PROJECTION_OWNERS',
-    currentMembers: Object.freeze(['legacy_untracked', 'w4'] as const),
+    // W7-1a-M landed the widening; this snapshot tracks the LIVE set, so it now
+    // includes the new member. The mutual-extends guards below stay meaningful:
+    // this list is written independently of `w7-provenance-domain.ts`'s array.
+    currentMembers: Object.freeze(['legacy_untracked', 'w4', 'w4_group'] as const),
     newValue: ATTENDANCE_W7_PROJECTION_OWNER_GROUP_VALUE_V1,
   }),
   traceSourceKind: Object.freeze({
     targetFile: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts',
     targetType: 'AttendanceDecisionTraceSourceKind',
-    currentMembers: Object.freeze(['record', 'snapshot', 'rule_live', 'ledger', 'audit', 'policy_gate'] as const),
+    // W7-1a-M widened the live union; snapshot follows (see the note above).
+    currentMembers: Object.freeze([
+      'record',
+      'snapshot',
+      'rule_live',
+      'ledger',
+      'audit',
+      'policy_gate',
+      'group_policy_snapshot',
+    ] as const),
     newValue: ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1,
   }),
 } as const)
