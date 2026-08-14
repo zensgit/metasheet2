@@ -1346,6 +1346,7 @@ jobs:
             tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts \
             tests/integration/attendance-w4c2-authoritative-calculation-core.db.test.ts \
             tests/integration/attendance-w4c2-d2-live-punch-authoritative.db.test.ts \
+            tests/integration/attendance-w4c2-d3-scheduled-authoritative.db.test.ts \
             tests/integration/attendance-w4c2-p2-remediation.db.test.ts \
             tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts \
             tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts \

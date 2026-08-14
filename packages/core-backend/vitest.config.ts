@@ -606,6 +606,15 @@ export default defineConfig({
       // the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB step in
       // plugin-tests.yml (two-point wiring).
       'tests/integration/attendance-w4c2-d2-live-punch-authoritative.db.test.ts',
+      // #4556 W4C-2 Gate D3 (#4844): the AUTHORITATIVE `scheduled` writer's real-Postgres matrix —
+      // the F6 placeholder + review/completed outcomes, the zero-invocation legacy-absence-adapter
+      // pin, the guard-first parent seam (skip vs write vs contained 409), and above all D3's
+      // PER-TARGET CONTAINMENT: rollback-to-savepoint completeness, the claimed-operation cancel
+      // that makes the commit legal, the terminal `failed` outcome, the batch continuing past a
+      // refusal, and the scope negatives that must still abort. DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it; wired whole-file into the attendance real-DB step in
+      // plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-w4c2-d3-scheduled-authoritative.db.test.ts',
       // W4C-2 P1-2 (#4556, PR #4617 amendment, RATIFIED, owner Bundle A) — the schema/
       // migration half: scheduled-run identity tables, the outbox discriminated union,
       // the append-only per-target outcome side table, and their gates (1, 9, 11, 12 DB

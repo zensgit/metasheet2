@@ -24093,6 +24093,17 @@ module.exports = {
     resolveW4LiveCandidateInTransactionV1,
     buildW4ShadowFrozenContextV1,
   },
+  // Gate D3 (#4556 / #4844): the SCHEDULED half of the same seam set — the REAL absence
+  // INSERT..SELECT the boundary drops on the authoritative branch (so the D3 suite can wrap it in a
+  // call-count spy and prove ZERO invocations), plus the REAL in-transaction W2 scheduled resolver
+  // and frozen-context builder the authoritative branch reuses. Same rationale as the live bag: the
+  // suite drives production bytes rather than a re-implementation. `activate` injects exactly these
+  // three functions into `legacyAdapters` (see the boundary construction below).
+  __attendanceW4c2ScheduledAdaptersForTests: {
+    generateAbsenceRecords,
+    resolveW4ScheduledCandidateInTransactionV1,
+    buildW4ShadowFrozenContextV1,
+  },
   __attendanceLivePunchWorkDateForTests: {
     getPunchShiftWindow,
     isPunchWithinShiftWindow,

@@ -373,22 +373,46 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     scheduled: 'executeScheduledRunInternal',
   })
 
-  // Independently counted by reading the boundary source at this PR's reviewed head: `live_punch`
-  // (inside `executeLivePunch`) has exactly 0 refusal call sites — Gate D2 (#4844) shipped its
-  // authoritative writer and removed the one site it had; `scheduled` (inside
-  // `executeScheduledRunInternal`, both its org-wide probe and its per-target loop — the SAME
-  // command kind per that module's own header) still has exactly 2. Checked PER KEY against a
-  // source-range-scoped count below (`attributeRefusalCallsV1`), never against a whole-file sum.
+  // Independently counted by reading the boundary source at this PR's reviewed head: BOTH keys now
+  // have exactly 0 refusal call sites. Gate D2 (#4844) shipped the `live_punch` authoritative writer
+  // and removed the one site it had; Gate D3 (#4844) shipped the `scheduled` authoritative writer
+  // and removed BOTH of its sites (the org-wide probe arm became a routing fall-through, the
+  // per-target arm became the writer). Checked PER KEY against a source-range-scoped count below
+  // (`attributeRefusalCallsV1`), never against a whole-file sum.
   //
   // WHY THE WEIGHT ITSELF MOVES (not just the declaration): this table is the "how many sites
   // SHOULD exist while undelivered" side of the correspondence. `expectedByKeyV1()` reads it only
-  // for keys declared UNDELIVERED, so once `live_punch` is delivered its expected count is 0 by
-  // the delivery declaration alone. Leaving the weight at 1 would still break the cross-key
-  // aggregate leg below, which reads the raw weights directly.
+  // for keys declared UNDELIVERED, so once a key is delivered its expected count is 0 by the
+  // delivery declaration ALONE — the weight is inert there. The weight edit is required by the
+  // re-formed legs below that read the raw weights directly, NOT by the P2 correspondence
+  // assertion. Do not read "P2 stays green" as evidence that the weight edit was the reason.
+  //
+  // THE HONEST STATE OF THIS DESCRIBE-BLOCK AFTER D3, stated where a reviewer will find it: with
+  // both entrypoints delivered and both actual counts 0, every leg that reads the REAL boundary
+  // content is now a ZERO-VERSUS-ZERO identity. "P2 green with the guard unedited" evidences that
+  // the declaration and the source agree AT ZERO; it no longer evidences anything about the
+  // boundary's behaviour. The discriminating power of this file lives entirely in the SYNTHETIC
+  // legs — the planted-decoy positive controls below, in both directions (a reintroduced refusal
+  // site inside a MAPPED function; a refusal site inside an UNMAPPED function; a refusal site
+  // inside no named function at all). The behavioural pins for the writers are the real-DB
+  // zero-invocation legacy-adapter spies and the probe-routing legs, not this file.
   const REFUSAL_SITE_WEIGHT: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, number>> = Object.freeze({
     live_punch: 0,
-    scheduled: 2,
+    scheduled: 0,
   })
+
+  /**
+   * The refusal code name assembled at RUNTIME from two literals, never spelled as one contiguous
+   * quoted token in this file's own source text — otherwise this test file itself turns up in the
+   * repo-wide "exactly one file" scan below (the exact self-match hazard `REFUSAL_CALL_PATTERN`'s
+   * own comment names). Every synthetic decoy in this block builds its source through this.
+   */
+  const SYNTHETIC_REFUSAL_CODE_NAME = ['W4C2', 'AUTHORITATIVE_MODE_NOT_DELIVERED'].join('_')
+
+  /** A refusal call in the EXACT strict form (`boundaryFail('...', 503)`, single quotes). */
+  function syntheticStrictRefusalCall(): string {
+    return `boundaryFail('${SYNTHETIC_REFUSAL_CODE_NAME}', 503)`
+  }
 
   // Exact literal call, not a loose substring: does not match the module header's own prose
   // mention of the bare code string (backticked, never inside a `boundaryFail(...)` call). Used
@@ -528,17 +552,45 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
   })
 
-  it('the exact refusal-call pattern occurs in exactly one git-tracked src file: the boundary itself', () => {
+  it('the exact refusal-call pattern occurs in ZERO git-tracked src files after Gate D3 — and the scanner that says so still detects a planted match (decoy positive control)', () => {
     const files = listGitTrackedFiles(ROOT).filter((absolute) =>
       path.relative(ROOT, absolute).split(path.sep).join('/').startsWith('packages/core-backend/src/'),
     )
     const matches = files
       .filter((absolute) => countRefusalCalls(fs.readFileSync(absolute, 'utf8')) > 0)
       .map((absolute) => path.relative(ROOT, absolute).split(path.sep).join('/'))
-    expect(matches).toEqual([BOUNDARY_RELATIVE_FILE])
+    // Both writers are delivered, so no source file carries the refusal call any more. Formerly
+    // this asserted `[BOUNDARY_RELATIVE_FILE]`; it is now an EMPTY read, and an empty read on its
+    // own is not evidence of absence — a scanner that reads nothing, or a pattern that matches
+    // nothing anywhere, produces exactly this result. The two controls below are what make it
+    // evidence.
+    expect(matches).toEqual([])
+    // (a) NON-VACUITY OF THE SWEEP: the file list is real and includes the boundary itself, so the
+    //     emptiness above came from reading real content, not from an empty/misrooted file list.
+    expect(files.length).toBeGreaterThan(0)
+    expect(
+      files.map((absolute) => path.relative(ROOT, absolute).split(path.sep).join('/')),
+    ).toContain(BOUNDARY_RELATIVE_FILE)
+    // (b) POSITIVE CONTROL ON THE SCANNER: plant the exact call form in a synthetic source and
+    //     prove `countRefusalCalls` still sees it. If a future edit breaks the pattern, THIS reds
+    //     instead of the empty assertion silently staying green forever.
+    const plantedSource = [
+      'function executeScheduledRunInternal(x) {',
+      `  ${syntheticStrictRefusalCall()}`,
+      '  return x',
+      '}',
+    ].join('\n')
+    expect(countRefusalCalls(plantedSource)).toBe(1)
+    // And the scanner is not so loose that any mention counts: the backtick-quoted spelling the
+    // boundary's own module header uses must NOT match.
+    expect(countRefusalCalls(`// see \`${SYNTHETIC_REFUSAL_CODE_NAME}\` in the header`)).toBe(0)
   })
 
-  it('attribution machinery negative control: every refusal call is either attributed or counted unattributed — none silently dropped', () => {
+  // VACUITY DISCLOSURE (Gate D3): on the REAL boundary content this conservation check is now
+  // 0 === 0, because there are no refusal calls left to conserve. It is kept because it costs
+  // nothing and reds if a site is ever reintroduced in a shape the attribution loop drops, but its
+  // discriminating power today lives in the synthetic legs below, not here.
+  it('attribution machinery negative control: every refusal call is either attributed or counted unattributed — none silently dropped (vacuous on real content after D3: 0 === 0)', () => {
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts, unattributedCount } = attributeRefusalCallsV1(content)
     const attributedTotal = Object.values(counts).reduce((sum, n) => sum + n, 0)
@@ -579,13 +631,32 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
   // status code, code hoisted into a const) — not every conceivable spelling. See the Gate D
   // docblock's "Disclosed scope" list above for what still evades this (backtick-quoted or
   // split/concatenated spellings, and any non-canonical spelling added to a DIFFERENT file).
-  it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (an unmapped/4th dispatch site in THIS file, single/double-quoted/any-status/const-hoisted, fails closed)', () => {
+  it('P3: no refusal call is attributed to a function outside the declared entrypoint mapping, and none is unattributed (vacuous on real content after D3 — carried by the synthetic UNMAPPED decoy below)', () => {
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts, unattributedCount } = attributeRefusalCallsV1(content)
     const knownFunctionNames = new Set(Object.values(KEY_TO_FUNCTION_NAME))
     const unrepresented = Object.keys(counts).filter((name) => !knownFunctionNames.has(name))
     expect(unrepresented).toEqual([])
     expect(unattributedCount).toBe(0)
+
+    // DECOY POSITIVE CONTROL (Gate D3). Both real assertions above are 0 === 0 now, so on their own
+    // they would stay green even if the "unmapped site fails closed" machinery were deleted
+    // outright. Plant a refusal call inside a named function that is NOT in `KEY_TO_FUNCTION_NAME`'s
+    // image and prove it lands in `unrepresented` — i.e. that a 4th dispatch site added to a
+    // function nobody mapped would be caught rather than silently ignored.
+    const unmappedSource = [
+      'function executeScheduledRunInternal(x) { return x }',
+      '',
+      'function someFutureUnmappedEntrypoint(y) {',
+      `  ${syntheticStrictRefusalCall()}`,
+      '  return y',
+      '}',
+    ].join('\n')
+    const decoy = attributeRefusalCallsV1(unmappedSource)
+    const decoyUnrepresented = Object.keys(decoy.counts).filter((name) => !knownFunctionNames.has(name))
+    expect(decoyUnrepresented).toEqual(['someFutureUnmappedEntrypoint'])
+    expect(decoy.counts.someFutureUnmappedEntrypoint).toBe(1)
+    expect(decoy.unattributedCount).toBe(0)
   })
 
   it('P2: declared-undelivered weight equals the ACTUAL per-key call count in the boundary file, key by key (not an aggregate — a single-key mismatch reds this even when the total is unchanged)', () => {
@@ -594,64 +665,88 @@ describe('Gate D: W4C2 authoritative-entrypoint delivery declaration <-> boundar
     expect(actualByKeyV1(counts)).toEqual(expectedByKeyV1())
   })
 
-  it('positive control (post Gate D2): live_punch is DELIVERED with zero refusal sites, scheduled is undelivered with exactly 2 (total=2)', () => {
+  it('positive control (post Gate D3): BOTH authoritative entrypoints are DELIVERED and the boundary carries zero refusal sites (total=0)', () => {
     expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true)
-    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
+    expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(true)
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts } = attributeRefusalCallsV1(content)
-    // `executeLivePunch` no longer appears as a key at all — its writer branch contains no
-    // refusal call, and the attribution map only records functions that carry at least one.
-    expect(counts).toEqual({ executeScheduledRunInternal: 2 })
-    expect(countRefusalCalls(content)).toBe(2)
+    // Neither entrypoint appears as a key at all — the attribution map only records functions that
+    // carry at least one refusal call, and after D3 neither writer branch does.
+    expect(counts).toEqual({})
+    expect(countRefusalCalls(content)).toBe(0)
+    // NON-VACUITY: the file really was read and really is the boundary (a misrooted path would
+    // also produce `{}` and `0` above).
+    expect(content.length).toBeGreaterThan(0)
+    expect(content).toContain('executeScheduledRunInternal')
+    expect(content).toContain('executeLivePunch')
   })
 
-  it('Gate D2 delivery-flip coupling: exactly ONE authoritative entrypoint remains undelivered, and no refusal call is attributed to executeLivePunch', () => {
-    // The promotion gate reads this count and demands ZERO, so promotion to `authoritative` still
-    // refuses after D2 — the count moved 2 -> 1, not 2 -> 0.
-    expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
+  it('Gate D3 delivery-flip coupling: ZERO authoritative entrypoints remain undelivered, so the W4C3A NOT_DELIVERED promotion refusal no longer fires', () => {
+    // Gate D's intended exit condition. The promotion gate reads this count and demands ZERO; it
+    // moved 2 -> 1 at D2 and 1 -> 0 here. Promotion is still gated by every OTHER rollout control
+    // plus the owner-actioned exact-org allowlist, which is what keeps this byte-neutral.
+    expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(0)
     const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
     const { counts } = attributeRefusalCallsV1(content)
-    // The static half of the P-A obligation: the new authoritative writer branch contains no
-    // refusal call of ANY spelling this file's pattern matches. (The behavioural fall-through pin
-    // is the zero-invocation adapter spy in the D2 real-DB suite, not this assertion.)
+    // The static half of the P-A obligation for BOTH writers: neither branch contains a refusal
+    // call of any spelling this file's pattern matches. (The behavioural fall-through pins are the
+    // zero-invocation adapter spies in the D2/D3 real-DB suites, not these assertions.)
     expect(counts.executeLivePunch ?? 0).toBe(0)
+    expect(counts.executeScheduledRunInternal ?? 0).toBe(0)
+    // The override seam still drives the count, so a future third entrypoint declared undelivered
+    // would move it off zero. Without this the assertion above could not distinguish "delivered"
+    // from "the counter is broken and always returns 0".
+    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ scheduled: false })
+    expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
   })
 
-  it('drift guard is load-bearing (delivered-flip class): declaring "scheduled" delivered via the test seam while the boundary source is unchanged mismatches on that key specifically', () => {
-    // Retargeted from `live_punch` to `scheduled` by Gate D2 (#4844): this leg needs a key that
-    // is STILL undelivered in the shipped declaration AND still carries refusal sites in the
-    // source, so that overriding it to `true` produces the expected-0/actual-nonzero mismatch.
-    // `live_punch` can no longer serve — after D2 both its expected and actual counts are 0, so
-    // the override would be a no-op and the leg would assert nothing.
-    __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ scheduled: true })
-    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
-    const { counts } = attributeRefusalCallsV1(content)
+  it('drift guard is load-bearing (delivered-flip class), driven over a SYNTHETIC source because no undelivered key remains: a declared-delivered key whose source still carries a refusal site mismatches on that key specifically', () => {
+    // RE-FORMED BY GATE D3. This leg needs a key that is declared delivered AND whose source range
+    // still carries refusal sites, so the expected-0/actual-nonzero mismatch is reachable. After D3
+    // NEITHER real key can serve — both are delivered and both actual counts are 0, so any override
+    // is a no-op and the leg would assert nothing (exactly the vacuity D2 retargeted away from, one
+    // gate later). The mismatch is therefore demonstrated over a SYNTHETIC boundary source in which
+    // `executeScheduledRunInternal` carries a REINTRODUCED refusal call — i.e. precisely the change
+    // this guard exists to catch: a writer regressed back to failing closed while the declaration
+    // still claims it delivered.
+    const reintroducedSource = [
+      'function executeLivePunch(x) { return x }',
+      '',
+      'function executeScheduledRunInternal(y) {',
+      `  ${syntheticStrictRefusalCall()}`,
+      '  return y',
+      '}',
+    ].join('\n')
+    const { counts } = attributeRefusalCallsV1(reintroducedSource)
     const actual = actualByKeyV1(counts)
-    const expected = expectedByKeyV1()
-    // scheduled declared delivered => expected drops to 0 for that key, but the boundary source
-    // still carries its 2 refusal calls — mismatched on THAT key specifically, demonstrated here
-    // directly rather than only asserted by the correspondence test above.
-    expect(expected.scheduled).toBe(0)
-    expect(actual.scheduled).toBe(2)
+    const expected = expectedByKeyV1() // shipped declaration: both delivered => both expected 0
+    expect(expected).toEqual({ live_punch: 0, scheduled: 0 })
+    expect(actual.scheduled).toBe(1)
     expect(actual).not.toEqual(expected)
+    // The mismatch is on THAT key specifically, not merely on the aggregate.
+    expect(actual.live_punch).toBe(expected.live_punch)
   })
 
-  it('P2 fix is load-bearing (cross-key class — the aggregate blind spot the old guard missed): a hand-maintained-weight swap across the two keys preserves the SUM but reds a per-key comparison', () => {
-    const content = fs.readFileSync(path.join(ROOT, BOUNDARY_RELATIVE_FILE), 'utf8')
-    const { counts } = attributeRefusalCallsV1(content)
-    const actual = actualByKeyV1(counts)
-    // A mutation of REFUSAL_SITE_WEIGHT that swaps the two keys' weights preserves the aggregate
-    // SUM the pre-fix, aggregate-only assertion checked — that old guard would have stayed green
-    // on exactly this edit, because add-to-one/remove-from-another leaves the total unchanged.
-    // Still discriminating after Gate D2 (#4844) moved the weights to {live_punch:0,scheduled:2}:
-    // the swap yields {live_punch:2,scheduled:0}, same sum (2), opposite per-key values.
-    const swapped: Record<AttendanceW4C2AuthoritativeEntrypointV1, number> = {
-      live_punch: REFUSAL_SITE_WEIGHT.scheduled,
-      scheduled: REFUSAL_SITE_WEIGHT.live_punch,
+  it('P2 fix is load-bearing (cross-key class — the aggregate blind spot the old guard missed), over SYNTHETIC weights: a swap preserves the SUM but reds a per-key comparison', () => {
+    // RE-FORMED BY GATE D3. The old form swapped the two REAL weights; after D3 both are 0, so the
+    // swap equals `actual` and `expect(actual).not.toEqual(swapped)` would FAIL — a vacuous
+    // assertion dressed as a guard. The class this leg exists to pin (an aggregate-only comparison
+    // cannot see an add-to-one/remove-from-another edit) is a property of the COMPARISON, so it is
+    // demonstrated over synthetic per-key counts, with the real weights asserted separately.
+    const syntheticActual: Record<AttendanceW4C2AuthoritativeEntrypointV1, number> = {
+      live_punch: 0,
+      scheduled: 2,
     }
-    const realAggregate = actual.live_punch + actual.scheduled
-    const swappedAggregate = swapped.live_punch + swapped.scheduled
-    expect(realAggregate).toBe(swappedAggregate) // the old aggregate-only check would stay green on this mutation
-    expect(actual).not.toEqual(swapped) // the new per-key check reds on the exact same mutation
+    const syntheticSwapped: Record<AttendanceW4C2AuthoritativeEntrypointV1, number> = {
+      live_punch: syntheticActual.scheduled,
+      scheduled: syntheticActual.live_punch,
+    }
+    const realAggregate = syntheticActual.live_punch + syntheticActual.scheduled
+    const swappedAggregate = syntheticSwapped.live_punch + syntheticSwapped.scheduled
+    expect(realAggregate).toBe(swappedAggregate) // the old aggregate-only check stays green on this edit
+    expect(syntheticActual).not.toEqual(syntheticSwapped) // the per-key check reds on the same edit
+    // And the SHIPPED weights are what D3 says they are, read from the real table rather than
+    // restated — so this leg still fails if someone edits the weights without editing the writers.
+    expect(REFUSAL_SITE_WEIGHT).toEqual({ live_punch: 0, scheduled: 0 })
   })
 })
