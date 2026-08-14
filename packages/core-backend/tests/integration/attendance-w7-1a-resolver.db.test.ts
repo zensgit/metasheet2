@@ -371,6 +371,28 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
           [...ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1].sort(),
         )
       } finally {
+        // RESTORE THE SHARED SCHEMA UNCONDITIONALLY.
+        //
+        // This leg is the one place in the suite that mutates schema rather
+        // than rows, and it does so on the SHARED database — in CI a single
+        // `metasheet_test` carries all 109 attendance files. `down()` is a
+        // DROP TABLE: if any assertion above throws between `down()` and the
+        // final `up()`, the table stays missing (or keeps a drifted CHECK) for
+        // whatever file runs next, and the failure surfaces somewhere
+        // unrelated. Observed exactly that during mutation testing: a failed
+        // replay left a drifted CHECK behind and redded an innocent leg on the
+        // following run.
+        //
+        // `up()` is idempotent (`CREATE TABLE IF NOT EXISTS`) and is proven so
+        // by the double-up above, so re-applying here is safe on both the
+        // success and failure paths. Errors are swallowed deliberately: this
+        // is cleanup, and letting it throw would mask the real assertion
+        // failure that sent us here.
+        try {
+          await postureMigrationUp(db)
+        } catch {
+          /* best-effort restore — never mask the original failure */
+        }
         await db.destroy()
       }
     })

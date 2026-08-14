@@ -14,8 +14,13 @@
  * order unconditionally — there is no parameter that reorders them.
  *
  * WHY AN ORDER HAD TO BE RULED AT ALL. The two families have never run
- * together on `main`. Census at `origin/main@ae26753b1e` (recorded here
- * because a future reader cannot re-derive "was this safe when it landed"):
+ * together on `main`. Census re-derived at `origin/main@cc69791604` (recorded
+ * here because a future reader cannot re-derive "was this safe when it
+ * landed"; first taken at `ae26753b1e`, re-run and UNCHANGED at
+ * `cc69791604` — the only commit between them, #4904, touches four dingtalk
+ * ops files and no advisory-lock site). A census is head-scoped like any other
+ * verdict: whoever rebases this slice must re-run the two greps below at the
+ * eventual base rather than inheriting this paragraph:
  *
  *   - membership timeline — exactly ONE production site,
  *     `../../services/AttendanceCalculationGroupMembership.ts:374-377`, which

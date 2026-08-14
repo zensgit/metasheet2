@@ -44,8 +44,20 @@
  * that must not be glossed: this introduces a second *fact loader*, but NOT a
  * second effectiveness *predicate* — the predicate stays singular, which is
  * what W6-R4 and `tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts`
- * actually guard. The three queries below are pinned byte-for-byte against
- * the FSER original by a test, so a one-sided edit reds.
+ * actually guard.
+ *
+ * The three queries below are pinned against the FSER originals by
+ * `tests/unit/attendance-w7-1a-fser-query-parity.test.ts`, so a one-sided edit
+ * reds. Stated precisely, because an earlier version of this sentence claimed
+ * a pin that did not exist: what is enforced is equality of the SQL token
+ * stream after whitespace normalisation, NOT byte equality. Byte equality is
+ * unachievable here — the two literals are nested at different depths (the
+ * FSER original inside a `.cjs` factory closure, this copy inside a TS
+ * function), so they differ in leading indentation and in nothing else. The
+ * normalised pin catches every divergence with behavioural content — a
+ * dropped `ORDER BY`, a changed predicate, a renamed column, an added or
+ * removed clause, or FSER moving underneath this module — and deliberately
+ * tolerates reindentation, which cannot change what the database does.
  */
 import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -286,6 +298,18 @@ export async function resolveW7GroupEffectiveFactsInTransactionV1(
       ORDER BY user_id ASC`,
     [orgKey, calculationGroupId],
   )
+  // The `ORDER BY` below mirrors FSER's and is pinned by the query-parity
+  // test, but its role is DETERMINISM, not correctness: an independent review
+  // probed the exported pure derivation directly across all 24 permutations of
+  // `managedRows` over 6 adversarial scenarios (duplicate matching rows,
+  // matching + value-mismatch for one user, foreign `producer_key`,
+  // unpublished + published, non-member target + missing member, plain
+  // effective) with a live negative control, and found it order-INSENSITIVE in
+  // every case — it is built from `Set`s, counts, boolean flags, a
+  // `REASON_ORDER.filter`, and a `buildManagedSets` that re-sorts explicitly.
+  // Recorded so a future reader does not mistake the clause for a load-bearing
+  // invariant, and does not delete it either: keeping it identical to FSER's
+  // is what makes the two readers reproducible against each other.
   const managedResult = await trx.query(
     `SELECT user_id, shift_id, start_date, end_date, publish_status, producer_key
        FROM attendance_shift_assignments

@@ -227,7 +227,34 @@ describe('W6-R4 repository inventory: the FSER derivation has exactly one caller
   })
 
   it('a decoy file referencing the FSER factory OUTSIDE the allowlist is caught (positive control on the detector itself)', () => {
-    const scratchPath = path.join(ROOT, 'packages/core-backend/src/attendance/zz-w6r4-decoy-scratch.ts')
+    // SCRATCH LOCATION IS LOAD-BEARING — do not move this back under
+    // `src/attendance/`.
+    //
+    // This decoy must be a REAL file inside the repository, because half of
+    // what it proves is that an UNTRACKED repo file is absent from the
+    // git-tracked domain (`listGitTrackedFiles`) — an assertion a `mkdtemp`
+    // path outside the repo would satisfy vacuously.
+    //
+    // But it previously lived at `src/attendance/zz-w6r4-decoy-scratch.ts`,
+    // which is inside the W7-R10 preservation guard's pinned root 2
+    // (`packages/core-backend/src/attendance/**`) and carries a scannable
+    // `.ts` extension. That guard's Leg 0 asserts `unclaimed = 0` against the
+    // REAL tree, so while this file existed — across a full `git ls-files`
+    // spawn — a concurrently scheduled run of
+    // `attendance-w7-w6r5-preservation-guard.test.ts` would see an
+    // unclassified file and red. Both suites are `tests/unit/*.test.ts` in the
+    // same vitest project under `pool: 'forks'`, so the interleaving is
+    // scheduler-dependent: an independent gate reproduced the red
+    // deterministically by planting the file, and could NOT reproduce it under
+    // parallelism — i.e. a latent nondeterministic red, which is worse than a
+    // reliable one.
+    //
+    // `tests/` is excluded by that guard's `isScannablePath` and is under no
+    // pinned root, so this location keeps both properties: still a real,
+    // untracked, in-repo file; no longer inside anybody's walked domain.
+    // Vitest does not collect it either — its name does not match
+    // `*.{test,spec}.*`.
+    const scratchPath = path.join(ROOT, 'packages/core-backend/tests/unit/zz-w6r4-decoy-scratch.ts')
     fs.writeFileSync(scratchPath, "export const decoy = 'createAttendanceGroupFixedScheduleEffectivenessService'\n")
     try {
       const files = listGitTrackedFiles(ROOT) // untracked scratch file — proves the git-tracked-only scope too
@@ -235,7 +262,7 @@ describe('W6-R4 repository inventory: the FSER derivation has exactly one caller
       // Directly exercise the detector against the untracked file to prove the PATTERN itself
       // would catch it if it were ever committed outside the allowlist.
       const offenders = findOffenders(ROOT, [scratchPath])
-      expect(offenders).toEqual([{ file: 'packages/core-backend/src/attendance/zz-w6r4-decoy-scratch.ts', label: 'factory call' }])
+      expect(offenders).toEqual([{ file: 'packages/core-backend/tests/unit/zz-w6r4-decoy-scratch.ts', label: 'factory call' }])
     } finally {
       fs.unlinkSync(scratchPath)
     }

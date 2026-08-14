@@ -99,6 +99,23 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV = 'ATTENDANCE_W7_CONTEXT
  * allowlist implementations can have them drift, and the read side and the
  * write side would then disagree about which orgs are in scope.
  */
+/*
+ * OPS FOOTGUN, documented deliberately rather than fixed here: entries are
+ * trimmed but NOT case-folded, while `orgKey` arrives already lower-cased by
+ * `parseUuidSyntax` (`../w4c0-identity.ts:132`). So an operator who writes the
+ * org UUID in upper case —
+ * `ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED=3F9A1C2E-…` — gets a silent `off`
+ * with no signal anywhere.
+ *
+ * It fails CLOSED, which is why this is a note and not a defect: the failure
+ * mode is "the org stays legacy", never "an unintended org is advertised".
+ * Not fixed in this slice because case-folding is the SAME open question Gate
+ * A deferred for the W4 allowlist (`isOrgExactlyAllowlisted`,
+ * `../w4c0-identity.ts:366`), and W7 quietly diverging from the W4 predicate's
+ * matching semantics would create two allowlists that disagree — the precise
+ * outcome the single-predicate discipline below exists to prevent. Whoever
+ * resolves it should resolve it for both, in one change.
+ */
 function isOrgExactlyAllowlisted(orgKey: string): boolean {
   const raw =
     typeof process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] === 'string'

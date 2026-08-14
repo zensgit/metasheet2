@@ -9,6 +9,7 @@
  * conflating them is the specific error W7-R1 calls out: a valid fingerprint
  * is content integrity, never origin.
  */
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 import type { AttendanceW7GroupEffectiveFactsV1 } from '../../src/attendance/w7-resolver/w7-group-effective-facts-resolver'
@@ -299,6 +300,113 @@ describe('W7-R1 operation (ii): rehydrate an already-frozen serialized context',
     // The resolver import is `import type` (compile-erased), so no runtime edge.
     expect(source).toContain("import type { AttendanceW7GroupEffectiveFactsV1 } from './w7-group-effective-facts-resolver'")
     expect(source).not.toMatch(/\btrx\b|\bpool\b|\.query\s*\(/)
+  })
+})
+
+describe('W7-R1 fingerprint: the domain separator is PINNED, not decorative', () => {
+  /**
+   * GOLDEN VECTOR. The expected digest was computed INDEPENDENTLY with
+   * python3 `hashlib` from the written spec — sha256(domain-utf8 ||
+   * canonical-payload-utf8), hex — never by calling the function under test.
+   * A digest harvested from the implementation would pin whatever the
+   * implementation happens to do, which is the tautology this exists to avoid.
+   *
+   * Why it is needed: every other fingerprint assertion in this file is
+   * SELF-REFERENTIAL (`compute(clone)` vs `compute(context)`, or a digest fed
+   * straight back into rehydration). An independent gate proved the domain
+   * separator could be replaced wholesale and the entire battery stayed green
+   * — a guard that can be neutered green is an untested guard.
+   *
+   * Forward-looking, and the real reason this matters: rehydration exists so a
+   * `frozen_prior` snapshot that crossed a DATABASE boundary can be re-admitted
+   * (W7-R6). Once W7-1b wires a producer, a domain that silently drifts between
+   * write and read makes every stored snapshot fail
+   * `W7_CONTEXT_FINGERPRINT_MISMATCH`. This pin is what keeps that from being
+   * discovered in production instead of here.
+   */
+  const GOLDEN_FIXTURE_CONTEXT = coreIssueGroupEffectiveContextV2(
+    facts({
+      orgId: 'org-w7-golden',
+      calculationGroupId: '22222222-2222-4222-8222-222222222222',
+      shiftId: '33333333-3333-4333-8333-333333333333',
+    }),
+  )
+  const GOLDEN_FINGERPRINT = '4b79ae1e47a0713602ac103f758390e00c4cf45e5a124b6ae5c675055b50fc21'
+
+  it('a fixed context produces the independently-computed golden digest', () => {
+    expect(computeAttendanceW7GroupEffectiveContextFingerprintV1(GOLDEN_FIXTURE_CONTEXT)).toBe(
+      GOLDEN_FINGERPRINT,
+    )
+  })
+
+  it('the domain separator literal is pinned by exact code units and length', () => {
+    // Read from source, so changing the constant reds here even if some future
+    // refactor stopped the golden above from covering it.
+    const source = readIssuanceModuleSource()
+    const match = source.match(/const W7_V2_FINGERPRINT_DOMAIN = '([^']*)'/)
+    expect(match, 'domain constant not found — the pin is pointing at nothing').not.toBeNull()
+
+    // The source must spell the terminator as the ESCAPE, never as a raw byte:
+    // a literal U+0000 makes the whole file binary to git/grep/the PR diff.
+    // (Repo-wide enforcement: tests/unit/source-files-no-raw-control-bytes.test.ts.)
+    expect(match?.[1]).toBe('metasheet.attendance.w7.frozen-context.v2\\u0000')
+    expect(source).not.toContain('\u0000')
+
+    // ...and the RUNTIME value is the 42-char name plus the single NUL.
+    const expectedDomain = `metasheet.attendance.w7.frozen-context.v2\u0000`
+    expect(expectedDomain).toHaveLength(42)
+    expect(expectedDomain.codePointAt(41)).toBe(0)
+  })
+
+  it('SENSITIVITY CONTROL: the golden really is a function of the domain', () => {
+    // Reproduces the construction from the spec and shows that changing ONLY
+    // the domain changes the digest. Without this, the golden could be passing
+    // for a reason unrelated to the domain (e.g. if the domain were dropped
+    // entirely and the digest happened to be pinned to the payload alone).
+    const payload = JSON.stringify([
+      2,
+      'group_effective',
+      'org-w7-golden',
+      '11111111-1111-4111-8111-111111111111',
+      '2026-08-14',
+      'Asia/Shanghai',
+      '33333333-3333-4333-8333-333333333333',
+      true,
+      null,
+      '22222222-2222-4222-8222-222222222222',
+      5,
+      60,
+      240,
+      [[0, '09:00', '18:00', 0, 0, 5, 5]],
+    ])
+
+    const withDomain = createHash('sha256')
+      .update(`metasheet.attendance.w7.frozen-context.v2\u0000`, 'utf8')
+      .update(payload, 'utf8')
+      .digest('hex')
+    expect(withDomain).toBe(GOLDEN_FINGERPRINT)
+
+    // Drop the NUL terminator only — one code unit — and the digest moves.
+    const withoutNul = createHash('sha256')
+      .update('metasheet.attendance.w7.frozen-context.v2', 'utf8')
+      .update(payload, 'utf8')
+      .digest('hex')
+    expect(withoutNul).not.toBe(GOLDEN_FINGERPRINT)
+
+    // Replace the domain wholesale — the exact mutation the gate used.
+    const otherDomain = createHash('sha256')
+      .update('REVIEW-MUTATION-DOMAIN-CHANGED', 'utf8')
+      .update(payload, 'utf8')
+      .digest('hex')
+    expect(otherDomain).not.toBe(GOLDEN_FINGERPRINT)
+  })
+
+  it('the golden fixture is a genuine minted context, not a hand-built stub', () => {
+    // Guards the fixture itself: if `facts()` drifted so the golden context
+    // stopped being what op(i) produces, the pin would be pinning a fiction.
+    expect(isCoreIssuedGroupEffectiveContextV2(GOLDEN_FIXTURE_CONTEXT)).toBe(true)
+    expect(GOLDEN_FIXTURE_CONTEXT.orgId).toBe('org-w7-golden')
+    expect(Object.getOwnPropertyNames(GOLDEN_FIXTURE_CONTEXT)).toHaveLength(14)
   })
 })
 
