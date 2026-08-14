@@ -849,6 +849,52 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
       expect(result.facts.roundingMinutes).toBeGreaterThanOrEqual(1)
     })
 
+    it('a legal `rounding_minutes = 0` shift fail-closes instead of emitting facts op(i) would THROW on', async () => {
+      // The resolver's `ok: true` must mean "op(i) will accept these facts".
+      // `rounding_minutes = 0` is legal at rest (`integer NOT NULL DEFAULT 5`,
+      // no CHECK) and authorable (`z.number().int().min(0)`), but op(i)'s v2
+      // shape requires `>= 1` — the byte-identical predicate the LIVE v1
+      // validator already carries (`w4c1-segment-calculator.ts:359`).
+      //
+      // Before this gate the resolver returned `ok: true` and op(i) then threw,
+      // converting what the v1 path handles as `review('input_schema_invalid')`
+      // into an exception, with a success report on the way to it.
+      const result = await withClient(async (client) => {
+        await client.query('BEGIN')
+        try {
+          await client.query(
+            `UPDATE attendance_shifts SET rounding_minutes = 0 WHERE id = $1 AND org_id = $2`,
+            [shiftId, orgId],
+          )
+          return await resolveW7GroupEffectiveFactsInTransactionV1(asTrx(client), deps(), {
+            orgId,
+            userId,
+            workDate: WORK_DATE,
+            timezone: 'UTC',
+            isWorkday: true,
+            holidayKind: null,
+          })
+        } finally {
+          await client.query('ROLLBACK')
+        }
+      })
+      expect(result).toEqual({ ok: false, reason: 'incomplete-policy' })
+    })
+
+    it('op(i) really would have rejected those facts — the gate above is not guarding a non-problem', async () => {
+      // Pins the reason the gate exists: hand op(i) the exact facts the
+      // ungated resolver would have emitted and confirm it throws. Without
+      // this, the `incomplete-policy` leg above could be pure ceremony.
+      const ok = await resolveFacts()
+      expect(ok.ok).toBe(true)
+      if (!ok.ok) return
+
+      expect(() => coreIssueGroupEffectiveContextV2({ ...ok.facts, roundingMinutes: 0 })).toThrow()
+      // POSITIVE CONTROL: the unmodified facts mint cleanly, so the throw above
+      // is attributable to `roundingMinutes` and nothing else.
+      expect(() => coreIssueGroupEffectiveContextV2(ok.facts)).not.toThrow()
+    })
+
     it('FSER state !== effective fail-closes with incomplete-policy', async () => {
       const result = await withClient(async (client) => {
         await client.query('BEGIN')
