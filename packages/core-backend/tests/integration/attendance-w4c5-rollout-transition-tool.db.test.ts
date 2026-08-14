@@ -635,13 +635,15 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(byCode.RETRYABLE_JOB_HAS_OPERATION_ROWS.count).toBe(0)
       // This plan call runs under PRODUCTION-DEFAULT Gate D values — the override set for the
       // drive-up above was reset in the `finally` block before this call — so the reporter must
-      // show the real shipped state: applicable, still failing, with ONE entrypoint undelivered
-      // (`scheduled`). Gate D2 (#4844) delivered `live_punch`, dropping the count 2 -> 1; the
-      // gate itself still refuses promotion because it requires ZERO undelivered.
+      // show the real shipped state. Gate D2 (#4844) delivered `live_punch` (count 2 -> 1) and
+      // Gate D3 (#4844) delivered `scheduled` (1 -> 0), so the predicate is now applicable AND
+      // PASSING with zero undelivered entrypoints. The predicate stays APPLICABLE — that is what
+      // keeps this assertion discriminating rather than degenerating into "the reporter dropped
+      // it": a reporter that stopped evaluating Gate D would show `applicable: false` and red here.
       expect(byCode.AUTHORITATIVE_ENTRYPOINTS_DELIVERED).toMatchObject({
         applicable: true,
-        pass: false,
-        count: 1,
+        pass: true,
+        count: 0,
       })
 
       for (const statement of statements) {
@@ -920,19 +922,25 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
     // untouched, reds (B).
     describe('Gate D test-seam hygiene: the describe-level afterEach backstop is load-bearing', () => {
       it('(A) sets the Gate D override and relies ENTIRELY on the surrounding afterEach to clear it (no explicit clear in this test)', () => {
-        // Shipped state after Gate D2 (#4844): live_punch DELIVERED, scheduled still undelivered.
-        // The override below still differs from it on `scheduled`, which is what keeps (B)
-        // discriminating — an un-cleared override would leave `scheduled` reading `true` there.
-        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false) // sanity: starts clean
-        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: true })
-        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true) // sanity: override is live
+        // RE-FORMED BY GATE D3 (#4844). The shipped declaration is now `{live_punch:true,
+        // scheduled:true}`, so the old `{live_punch:true, scheduled:true}` override became a NO-OP
+        // and (B) could no longer tell "the backstop ran" from "the override never did anything" —
+        // the pair would have stayed green with the afterEach deleted. The override must therefore
+        // differ from the shipped declaration; it is now the UNDELIVERED direction, which is
+        // guaranteed to differ for as long as any key is declared delivered at all.
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true) // sanity: starts clean
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(true)
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: false, scheduled: false })
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(false) // sanity: override is live
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
         // No clear here, deliberately — proving the afterEach above is what cleans this up.
       })
 
       it('(B) the override set by (A) has not leaked into this test — proves the afterEach backstop actually ran', () => {
+        // Both read `true` ONLY if the override was cleared: (A) left both keys overridden to
+        // `false`, which is the opposite of the shipped declaration on BOTH keys.
         expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('live_punch')).toBe(true)
-        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(false)
+        expect(isAttendanceW4C2AuthoritativeEntrypointDeliveredV1('scheduled')).toBe(true)
       })
     })
   })
@@ -1082,7 +1090,7 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       expect(await rolloutRow(orgId)).toBeNull()
     })
 
-    it('Gate D (owner completion gate, PR #4839, 20260810), driven through the actual CLI subprocess: a legal eligible -> authoritative promotion still refuses with AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED under production values — the test seam cannot cross the subprocess boundary, so this proves the CLI has no bypass and is display-only', async () => {
+    it('Gate D3 EXIT CONDITION (#4844), driven through the actual CLI subprocess: with BOTH entrypoints delivered a legal eligible -> authoritative promotion is no longer refused by Gate D — and the in-process test seam still cannot cross the subprocess boundary, so the CLI remains display-only with no bypass', async () => {
       const orgId = crypto.randomUUID()
       allow(orgId)
       const driveClient = await pool.connect()
@@ -1118,11 +1126,31 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
       const planResult = spawnCli(['plan', '--org', orgId, '--target', 'authoritative'])
       const plan = JSON.parse(planResult.stdout) as AttendanceRolloutTransitionPlanV1 & { planDigest: string }
       expect(plan.legalPair).toBe(true)
-      expect(plan.blocked).toBe(true)
+      expect(plan.blocked).toBe(false)
       const authoritativePredicate = plan.predicates.find((p) => p.code === 'AUTHORITATIVE_ENTRYPOINTS_DELIVERED')
-      // count 2 -> 1 after Gate D2 (#4844) delivered `live_punch`; `scheduled` remains the one
-      // undelivered entrypoint, so the gate still refuses (it demands ZERO undelivered).
-      expect(authoritativePredicate).toMatchObject({ applicable: true, pass: false, count: 1 })
+      // count 2 -> 1 after Gate D2 (#4844) delivered `live_punch`, and 1 -> 0 after Gate D3
+      // (#4844) delivered `scheduled`. The predicate stays APPLICABLE (it is keyed on
+      // `targetState === 'authoritative'`, not on the count), which is what keeps this assertion
+      // discriminating: a reporter that stopped evaluating Gate D would report `applicable:false`.
+      expect(authoritativePredicate).toMatchObject({ applicable: true, pass: true, count: 0 })
+
+      // THE PROPERTY THIS LEG STILL CARRIES, unchanged by the flip: the in-process delivery
+      // override is a module-level singleton in THIS process and cannot cross a subprocess
+      // boundary, so the CLI always reports the SHIPPED declaration. Declaring `scheduled`
+      // undelivered here must not move the subprocess's answer.
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: false })
+      try {
+        const seamPlan = JSON.parse(
+          spawnCli(['plan', '--org', orgId, '--target', 'authoritative']).stdout,
+        ) as AttendanceRolloutTransitionPlanV1
+        expect(seamPlan.predicates.find((p) => p.code === 'AUTHORITATIVE_ENTRYPOINTS_DELIVERED')).toMatchObject({
+          applicable: true,
+          pass: true,
+          count: 0,
+        })
+      } finally {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+      }
 
       const manifestPath = writeManifest(
         'gate-d-cli-promotion',
@@ -1150,10 +1178,12 @@ describeIfDatabase('W4C-5 operator transition tooling (real PostgreSQL)', () => 
         '--engine-version', 'w4c5-tool-test',
       ])
 
-      expect(applyResult.status).toBe(7)
-      expect(applyResult.stderr).toContain('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
-      await expect(rolloutRow(orgId)).resolves.toEqual(before)
-      await expect(eventCount(orgId)).resolves.toBe(beforeEvents)
+      // Gate D's exit condition, end to end through the real CLI: the promotion now APPLIES.
+      expect(applyResult.status).toBe(0)
+      expect(applyResult.stderr).not.toContain('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
+      await expect(rolloutRow(orgId)).resolves.toEqual({ state: 'authoritative', version: 4 })
+      await expect(eventCount(orgId)).resolves.toBe(beforeEvents + 1)
+      expect(before).toEqual({ state: 'eligible', version: 3 })
     })
 
     it('missing confirmation refuses with W4C5_TOOL_CONFIRMATION_REQUIRED before any DB access', async () => {

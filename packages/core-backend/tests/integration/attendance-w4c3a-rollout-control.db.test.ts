@@ -40,6 +40,7 @@ import {
 } from '../../src/attendance/w4c3b-request-snapshots'
 import {
   __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests,
+  attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1,
   ATTENDANCE_W4C2_AUTHORITATIVE_ENTRYPOINTS_V1,
 } from '../../src/attendance/w4c2-authoritative-delivery'
 
@@ -2388,7 +2389,12 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       it.each([
         ['P1', { live_punch: false, scheduled: true }],
         ['P2', { live_punch: true, scheduled: false }],
-        ['P3 (production default)', null],
+        // P3 ('production default', override `null`) was RETIRED by Gate D3 (#4844). It asserted
+        // that the SHIPPED declaration refuses, which was true only while an entrypoint was still
+        // undelivered. Both are delivered now, so the shipped default no longer refuses — that is
+        // Gate D's intended EXIT condition, not a regression. The exit condition has its own
+        // dedicated leg below (with the override control that keeps it non-vacuous); leaving P3
+        // here re-pinned as `null` would have been a test freezing a stale product state.
       ] as const)('%s: refuses with the values-free code and writes NOTHING when an entrypoint is undelivered', async (_label, override) => {
         const org = crypto.randomUUID()
         allow(org)
@@ -2441,7 +2447,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       it.each([
         ['R1', { live_punch: false, scheduled: true }],
         ['R2', { live_punch: true, scheduled: false }],
-        ['R3 (production default)', null],
+        // R3 retired by Gate D3 (#4844) for the same reason as P3 above — see that comment.
       ] as const)('%s: refuses with the values-free code and writes NOTHING when an entrypoint is undelivered', async (_label, override) => {
         const org = crypto.randomUUID()
         allow(org)
@@ -2488,6 +2494,53 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           client.release()
         }
       })
+    })
+
+    it('Gate D3 EXIT CONDITION (#4844): under the SHIPPED declaration — no override at all — the NOT_DELIVERED refusal no longer fires, and re-declaring either entrypoint undelivered brings it straight back', async () => {
+      // This replaces the retired P3/R3 "production default refuses" cases. Both entrypoints are
+      // delivered now, so the shipped default must NOT refuse — Gate D's whole purpose. Asserted
+      // with two controls so it can never degrade into "nothing happened":
+      //   (a) the undelivered COUNT the promotion gate reads is 0 under the shipped declaration;
+      //   (b) re-declaring EITHER key undelivered through the test seam restores the refusal, so a
+      //       silently-deleted gate would red here rather than pass as an "exit condition".
+      __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+      expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(0)
+      const shippedOrg = crypto.randomUUID()
+      allow(shippedOrg)
+      const client = await pool.connect()
+      try {
+        await advanceToEligible(client, shippedOrg)
+        // (a) the shipped default PROMOTES rather than refusing.
+        await transitionAttendanceCalculationRolloutV1(client as unknown as AttendanceW4TransactionClientV1, {
+          orgId: shippedOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+          targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
+          evidenceManifestSha256: hex64(`${shippedOrg}-d3-exit`), evidenceReferences: baseRefs(`${shippedOrg}-d3-exit`),
+          reasonCode: 'rollout_transition',
+        })
+        await expect(pool.query(
+          'SELECT state FROM attendance_calculation_rollout_state WHERE org_id = $1',
+          [shippedOrg],
+        )).resolves.toMatchObject({ rows: [{ state: 'authoritative' }] })
+
+        // (b) NON-VACUITY: the gate is still wired. Declare `scheduled` undelivered and the very
+        // same call shape refuses again on a fresh org.
+        const controlOrg = crypto.randomUUID()
+        allow(controlOrg)
+        await advanceToEligible(client, controlOrg)
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: false })
+        expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
+        await expect(
+          transitionAttendanceCalculationRolloutV1(client as unknown as AttendanceW4TransactionClientV1, {
+            orgId: controlOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
+            targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
+            evidenceManifestSha256: hex64(`${controlOrg}-d3-exit-ctl`), evidenceReferences: baseRefs(`${controlOrg}-d3-exit-ctl`),
+            reasonCode: 'rollout_transition',
+          }),
+        ).rejects.toMatchObject({ code: 'W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED' })
+      } finally {
+        __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests(null)
+        client.release()
+      }
     })
 
     it('positive control (gate 4): with BOTH entrypoints delivered, promotion AND resume still succeed — "it refuses" and "it is broken" are distinguishable', async () => {
