@@ -88,8 +88,12 @@ const DB_LEDGER: ReadonlyArray<{ name: string; rule: DbRule; note?: string }> = 
   // as they fire for `w4`.
   { name: 'trg_ar_pointer_guard_ins', rule: 'legacy_polarity' },
   { name: 'trg_ar_pointer_guard_upd', rule: 'legacy_polarity' },
-  // Column default: emits the legacy member for rows that name no owner.
-  { name: 'attendance_records.projection_owner.default', rule: 'write_side_emitter' },
+  // Column default: `'legacy_untracked'::text`. Ledgered as legacy-polarity
+  // rather than as an emitter on purpose — `write_side_emitter` is an
+  // ABSENCE-based rule (it passes anything carrying no comparison), so it would
+  // stay green if the default were ever changed to `'w4'::text`, whereas
+  // `legacy_polarity` names the value and violates.
+  { name: 'attendance_records.projection_owner.default', rule: 'legacy_polarity' },
   // Canonical current-record view: projects the column through (Postgres expands
   // the original `SELECT *`) and filters on visibility only — it never tests the
   // owner, so it passes `w4_group` through unchanged.
@@ -151,29 +155,41 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
     // A trigger body can be perfectly widened and still never run, so the WHEN
     // clause is derived as its own point rather than folded into the function.
     const otherRows = await pool.query(
+      // BOTH spellings everywhere, mirroring the constraint/proc queries above.
+      // The JSONB preimage is addressed as camelCase `->> 'projectionOwner'` —
+      // which is exactly how the two guards this slice widens already reach the
+      // domain — so a snake_case-only filter would miss a WHEN clause, view,
+      // index, policy or default written that way.
       `SELECT t.tgname AS name, pg_get_triggerdef(t.oid) AS def
          FROM pg_trigger t
-        WHERE NOT t.tgisinternal AND pg_get_triggerdef(t.oid) ILIKE '%projection_owner%'
+        WHERE NOT t.tgisinternal
+          AND (pg_get_triggerdef(t.oid) ILIKE '%projection_owner%'
+            OR pg_get_triggerdef(t.oid) ILIKE '%projectionOwner%')
        UNION ALL
        SELECT c.relname || '.' || a.attname || '.default' AS name,
               pg_get_expr(d.adbin, d.adrelid) AS def
          FROM pg_attrdef d
          JOIN pg_class c ON c.oid = d.adrelid
          JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
-        WHERE a.attname = 'projection_owner'
+        WHERE a.attname IN ('projection_owner', 'projectionOwner')
+           OR pg_get_expr(d.adbin, d.adrelid) ILIKE '%projection_owner%'
+           OR pg_get_expr(d.adbin, d.adrelid) ILIKE '%projectionOwner%'
        UNION ALL
        SELECT viewname AS name, definition AS def
          FROM pg_views
-        WHERE schemaname = 'public' AND definition ILIKE '%projection_owner%'
+        WHERE schemaname = 'public'
+          AND (definition ILIKE '%projection_owner%' OR definition ILIKE '%projectionOwner%')
        UNION ALL
        SELECT indexname AS name, indexdef AS def
          FROM pg_indexes
-        WHERE schemaname = 'public' AND indexdef ILIKE '%projection_owner%'
+        WHERE schemaname = 'public'
+          AND (indexdef ILIKE '%projection_owner%' OR indexdef ILIKE '%projectionOwner%')
        UNION ALL
        SELECT policyname AS name, COALESCE(qual, '') || COALESCE(with_check, '') AS def
          FROM pg_policies
         WHERE schemaname = 'public'
-          AND (COALESCE(qual, '') || COALESCE(with_check, '')) ILIKE '%projection_owner%'
+          AND ((COALESCE(qual, '') || COALESCE(with_check, '')) ILIKE '%projection_owner%'
+            OR (COALESCE(qual, '') || COALESCE(with_check, '')) ILIKE '%projectionOwner%')
        ORDER BY 1`,
     )
     others = otherRows.rows.map((row) => ({ name: String(row.name), def: String(row.def) }))
@@ -202,18 +218,45 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
     expect(others.map((o) => o.name)).toContain('attendance_records.projection_owner.default')
   })
 
-  it('the pointer-guard trigger WHEN clauses FIRE for w4_group (legacy-polarity)', () => {
-    for (const name of ['trg_ar_pointer_guard_ins', 'trg_ar_pointer_guard_upd']) {
-      const trigger = others.find((o) => o.name === name)
-      expect(trigger, `trigger not derived: ${name}`).toBeDefined()
-      const def = String(trigger?.def)
-      // `IS DISTINCT FROM 'legacy_untracked'` is true for every other member, so
-      // the guard fires for `w4_group` exactly as it fires for `w4`.
-      expect(def).toContain("IS DISTINCT FROM 'legacy_untracked'")
-      // Negative control: a `= 'w4'`-polarity WHEN clause would NOT fire for the
-      // new member, silently bypassing the guard for exactly it.
-      expect(quotedW4(def)).toBe(false)
-    }
+  it('the pointer guard actually FIRES for a w4_group row (behavioural, not textual)', async () => {
+    // A TEXT check on the WHEN clause is not enough: a rewrite such as
+    // `… AND NEW.projection_owner <> 'w4_group'` keeps the
+    // `IS DISTINCT FROM 'legacy_untracked'` substring and contains no `'w4'`,
+    // so it passes any text assertion while genuinely stopping the guard from
+    // firing for exactly the new member. The only assertion that discriminates
+    // is constructing the row the guard MUST refuse and requiring the refusal.
+    const { recordId, calcId } = await seedPointerOwningRecord()
+    await pool.query(
+      `UPDATE attendance_records
+          SET projection_owner = $2, current_calculation_id = $3::uuid,
+              status = 'normal', work_minutes = 480, late_minutes = 0, early_leave_minutes = 0,
+              visibility_state = 'active', visibility_reason = 'active'
+        WHERE id = $1::uuid`,
+      [recordId, NEW_OWNER, calcId],
+    )
+    // Daily-field drift against the pointed-at snapshot: the guard's own
+    // invariant. If the WHEN clause did not fire for `w4_group`, this is ADMITTED.
+    await expect(
+      pool.query(`UPDATE attendance_records SET work_minutes = 481 WHERE id = $1::uuid`, [recordId]),
+      'pointer guard did not fire for a w4_group row — the WHEN clause bypasses the new member',
+    ).rejects.toThrow(/W4C0_POINTER/)
+
+    // Positive control on the SAME assertion with the pre-existing member, so a
+    // green above cannot be "this UPDATE always fails for some other reason".
+    const control = await seedPointerOwningRecord()
+    await pool.query(
+      `UPDATE attendance_records
+          SET projection_owner = 'w4', current_calculation_id = $2::uuid,
+              status = 'normal', work_minutes = 480, late_minutes = 0, early_leave_minutes = 0,
+              visibility_state = 'active', visibility_reason = 'active'
+        WHERE id = $1::uuid`,
+      [control.recordId, control.calcId],
+    )
+    await expect(
+      pool.query(`UPDATE attendance_records SET work_minutes = 481 WHERE id = $1::uuid`, [
+        control.recordId,
+      ]),
+    ).rejects.toThrow(/W4C0_POINTER/)
   })
 
   it('every live catalogue object naming the domain is widened or has a satisfied rule', () => {
@@ -248,8 +291,11 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
           }
           break
         case 'write_side_emitter':
-          // Not a test: it carries no comparison, so it routes nothing.
-          if (/[<>=]|IS DISTINCT|IN \(/.test(object.text.replace(/::text/g, ''))) {
+          // Not a test: it carries no comparison operator, so it routes nothing.
+          // `LIKE` is deparsed by Postgres as `~~`, so both spellings are listed
+          // — an absence-based predicate has to name every comparison form it
+          // means to exclude.
+          if (/[<>=]|~~|~|IS DISTINCT|IS NOT DISTINCT|\bIN \(|\bLIKE\b|\bANY\b/.test(object.text)) {
             violations.push(`write_side_emitter_failed: ${object.name}`)
           }
           break
@@ -312,6 +358,10 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
   it('W4C3A_WITNESS coupled pointer disjunct (live text) puts w4_group on the NON-NULL side', async () => {
     const guard = functions.find((f) => f.name === 'attendance_w4c3a_restore_witness_command_guard')
     const marker = /->> 'projectionOwner' IN \(([^)]*)\)/
+    // Literal expectations FIRST: iterating the constant under test would go
+    // vacuously green if `w4_group` were ever dropped from that constant.
+    expect(await evaluateInList(String(guard?.src), marker, NEW_OWNER)).toBe(true)
+    expect(await evaluateInList(String(guard?.src), marker, 'w4')).toBe(true)
     for (const owner of ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1) {
       expect(await evaluateInList(String(guard?.src), marker, owner)).toBe(true)
     }
@@ -322,6 +372,9 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
   it('pointer-guard restore eligibility (live text) admits w4_group', async () => {
     const guard = functions.find((f) => f.name === 'attendance_w4_records_pointer_guard')
     const marker = /AND OLD\.projection_owner IN \(([^)]*)\)/
+    // Literal expectations FIRST — see the sibling leg above.
+    expect(await evaluateInList(String(guard?.src), marker, NEW_OWNER)).toBe(true)
+    expect(await evaluateInList(String(guard?.src), marker, 'w4')).toBe(true)
     for (const owner of ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1) {
       expect(await evaluateInList(String(guard?.src), marker, owner)).toBe(true)
     }
@@ -468,7 +521,28 @@ describeIfDatabase('W7-1a-M provenance widening — live catalogue + real Postgr
     expect(rows[0].projection_owner).toBe('legacy_untracked')
   })
 
-  it('NOVEL values are still refused everywhere — the domain did not open generally', async () => {
+  it('NOVEL values are refused BY THE CLOSED-SET CHECK specifically (not by the pair)', async () => {
+    // Each novel value is inserted WITH a valid pointer, so `chk_ar_owner_pointer_pair`
+    // is satisfied and cannot cover for the closed-set CHECK. An alternation over
+    // both constraint names would go green here purely on the pair — the repo's
+    // documented 门级非排他 shape — so the expected name is pinned exactly.
+    for (const novel of ['w4_team', 'w5', 'group', 'W4_GROUP', 'w4_group_x', '']) {
+      const { recordId, calcId } = await seedPointerOwningRecord()
+      await expect(
+        pool.query(
+          `UPDATE attendance_records
+              SET projection_owner = $2, current_calculation_id = $3::uuid
+            WHERE id = $1::uuid`,
+          [recordId, novel, calcId],
+        ),
+        `novel value must be refused by chk_ar_projection_owner: ${JSON.stringify(novel)}`,
+      ).rejects.toThrow(/chk_ar_projection_owner/)
+    }
+  })
+
+  it('NOVEL values are refused on the INSERT path too', async () => {
+    // Pointer NULL here, so this leg is the pair-or-CHECK one by construction;
+    // the leg above is what pins the CHECK individually.
     for (const novel of ['w4_team', 'w5', 'group', 'W4_GROUP', 'w4_group_x', '']) {
       await expect(
         pool.query(

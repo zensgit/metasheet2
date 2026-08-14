@@ -11,11 +11,17 @@
  * Why derivation is not "grep for the new value": the silent-downgrade folds
  * (`row.projection_owner === 'w4' ? 'w4' : 'legacy_untracked'`) contain NO
  * target string at all. So the anchor is the READER — a file that references the
- * column/field — and within an anchored file every line carrying a domain
- * literal OR a widening symbol is a derived site.
+ * family at all — and within an anchored file every line carrying a domain
+ * literal, a widening symbol, or a `case` arm is a derived site.
+ *
+ * A file counts as referencing the family if it names ANY member of the three
+ * lists this module already derives (field spellings, widening symbols,
+ * distinctive literals) — see `familyIsReferencedBy`. Anchoring on the field
+ * spellings alone left a consumer typed against the widened union, spelling no
+ * column name, completely invisible.
  *
  * SCOPE — source text only. The DB surface is derived SEPARATELY, from the live
- * catalogue (`pg_constraint` / `pg_proc`) in
+ * catalogue in
  * `tests/integration/attendance-w7-1am-provenance-widening.db.test.ts`. Migration
  * FILES are deliberately excluded from this scan: `attendance_w4_records_pointer_guard`
  * is defined in zzzz20260725120000 and then REPLACED by zzzz20260731120000, so
@@ -176,6 +182,33 @@ function listFiles(root: string, repoRoot: string, out: string[]): void {
 }
 
 /**
+ * FILE-LEVEL anchoring: does this file reference the family AT ALL?
+ *
+ * This gate short-circuits before any line rule, so anything it misses is
+ * invisible to the whole derivation. It therefore anchors on EVERY list this
+ * module already derives — the field/column spellings, the widening symbols,
+ * and the family's distinctive literals — rather than on the field spellings
+ * alone. That matters because four of the owner family's widening symbols do
+ * NOT contain any field spelling (`AttendanceProjectionOwnerV1`,
+ * `isAttendanceProjectionOwnerV1`,
+ * `isAttendanceProjectionOwnerWithCalculationPointerV1`,
+ * `ATTENDANCE_W7_PROJECTION_OWNER_GROUP_VALUE_V1` — capital `P`, or no trailing
+ * `S`), so a consumer typed against the union and spelling no column name used
+ * to evade the derivation entirely. The trace family had no such asymmetry,
+ * which is exactly what made the owner-family hole detectable.
+ *
+ * This is reuse, not enumeration: all three lists are derived from the widening
+ * itself, so the gate widens automatically whenever the widening does.
+ */
+function familyIsReferencedBy(family: W7ProvenanceFamily, source: string): boolean {
+  return (
+    FAMILY_ANCHORS[family].some((anchor) => source.includes(anchor)) ||
+    FAMILY_WIDENING_SYMBOLS[family].some((symbol) => source.includes(symbol)) ||
+    FAMILY_DISTINCTIVE_LITERALS[family].some((literal) => source.includes(literal))
+  )
+}
+
+/**
  * One taint hop: identifiers bound to a read of the column/field. Kept
  * FILE-LOCAL on purpose — a bare `owner` is far too generic to anchor globally.
  */
@@ -196,6 +229,27 @@ export function deriveAliasIdentifiersV1(source: string): string[] {
     }
   }
   return [...aliases].sort()
+}
+
+/**
+ * Second taint hop: `import { isAttendanceProjectionOwnerV1 as ownsPointer }`.
+ * The file-level gate sees the original symbol, but every CALL SITE then spells
+ * only the renamed local — so without this hop the file anchors and no line is
+ * ever a site. The renamed local is treated as a widening symbol FOR THAT FILE.
+ */
+export function deriveRenamedWideningSymbolsV1(
+  source: string,
+  symbols: readonly string[],
+): string[] {
+  const renamed = new Set<string>()
+  for (const symbol of symbols) {
+    const re = new RegExp(`\\b${symbol}\\s+as\\s+([A-Za-z_$][\\w$]*)`, 'g')
+    let m: RegExpExecArray | null
+    while ((m = re.exec(source)) !== null) {
+      if (m[1]) renamed.add(m[1])
+    }
+  }
+  return [...renamed].sort()
 }
 
 function literalRegex(members: readonly string[], isYaml: boolean): RegExp {
@@ -245,7 +299,7 @@ export function deriveProvenanceWideningSurfaceV1(
     const rel = path.relative(repoRoot, file).split(path.sep).join('/')
     const isYaml = /\.ya?ml$/.test(file)
     const families = (Object.keys(FAMILY_ANCHORS) as W7ProvenanceFamily[]).filter((family) =>
-      FAMILY_ANCHORS[family].some((anchor) => source.includes(anchor)),
+      familyIsReferencedBy(family, source),
     )
     if (families.length === 0) continue
     anchoredFileCount += 1
@@ -256,8 +310,20 @@ export function deriveProvenanceWideningSurfaceV1(
     for (const family of families) {
       const distinctive = literalRegex(FAMILY_DISTINCTIVE_LITERALS[family], isYaml)
       const ambiguous = literalRegex(FAMILY_AMBIGUOUS_LITERALS[family], isYaml)
-      const anchorTokens = family === 'projection_owner' ? aliasTokens : FAMILY_ANCHORS[family]
-      const symbols = FAMILY_WIDENING_SYMBOLS[family]
+      // The trace family's LINE-level anchors include the field spellings, not
+      // just the type names: a fold built only from AMBIGUOUS members
+      // (`k === 'record' ? 'record' : 'snapshot'`) names no type and carries no
+      // distinctive member, so without these it would evade the line rule inside
+      // an already-anchored file. The owner family is protected here only
+      // because `legacy_untracked` happens to be distinctive.
+      const anchorTokens =
+        family === 'projection_owner'
+          ? aliasTokens
+          : [...FAMILY_ANCHORS[family], 'source.kind', 'sourceKind', 'traceSourceKind']
+      const symbols = [
+        ...FAMILY_WIDENING_SYMBOLS[family],
+        ...deriveRenamedWideningSymbolsV1(source, FAMILY_WIDENING_SYMBOLS[family]),
+      ]
       const newValue = W7_NEW_VALUES_V1[family]
       // An `import` names a symbol; it does not gate, branch on, or emit a
       // value, so it is not a consumer site.
@@ -272,7 +338,13 @@ export function deriveProvenanceWideningSurfaceV1(
         if (inImportBlock || /^\s*import\b/.test(text)) continue
         if (isCommentLine(text)) continue
         const hasWideningSymbol = symbols.some((symbol) => text.includes(symbol))
-        const namesTarget = anchorTokens.some((token) => new RegExp(`\\b${token}\\b`).test(text))
+        // Evaluated over the enclosing DECLARATION, not the line. A fold's
+        // return expression names the value but not the subject — the subject is
+        // in the signature (`function foldKind(k: string): AttendanceDecisionTraceSourceKind`).
+        // Line-scoping this check is what let an ambiguous-member fold hide.
+        const namesTarget = anchorTokens.some((token) =>
+          new RegExp(`\\b${token.replace('.', '\\.')}\\b`).test(enclosingDeclaration(lines, i)),
+        )
         // A `switch` arm names the value but never the subject — see CASE_ARM.
         const caseArm = CASE_ARM.exec(text)
         const isFamilyCaseArm =
@@ -339,6 +411,13 @@ export type W7RuleName =
   | 'write_side_emitter'
   /** `?? 'legacy_untracked'` on a NOT NULL column: a null-default, not a fold. */
   | 'null_default'
+  /**
+   * An equality that SELECTS one named member (`env.source.kind === 'audit'`)
+   * rather than enumerating the set. Widening cannot change its verdict for any
+   * pre-existing value, and the new member correctly fails to be selected — a
+   * `group_policy_snapshot` env is not an `audit` env.
+   */
+  | 'single_member_selector'
   /** The recorded W7-0 snapshot of a live set (kept equal by the tsc sync guards). */
   | 'w7_0_recorded_snapshot'
   /**
@@ -449,6 +528,20 @@ function neutralPredicateHolds(rule: W7RuleName, site: W7DerivedSiteV1): boolean
       // `?? 'legacy_untracked'` fires only on SQL NULL (the column is NOT NULL);
       // it passes every real value through unchanged, so it cannot downgrade.
       return text.includes('??') && !hasComparison(text)
+    case 'single_member_selector': {
+      // Must be a POSITIVE equality naming exactly ONE member. A negation, or
+      // more than one member on the line, is an exclusion/enumeration and must
+      // be adjudicated as a real predicate instead.
+      const members = [
+        ...FAMILY_DISTINCTIVE_LITERALS[site.family],
+        ...FAMILY_AMBIGUOUS_LITERALS[site.family],
+      ].filter((member) => new RegExp(`['"\`]${member}['"\`]`).test(text))
+      return (
+        members.length === 1 &&
+        /===|==|\bIS NOT DISTINCT\b/.test(text) &&
+        !/!==|!=|\bNOT IN\b|\bIS DISTINCT\b/.test(text)
+      )
+    }
     case 'domain_definition':
       // Only the domain module may claim this rule, so it cannot be used to
       // excuse an un-widened consumer anywhere else in the tree.
@@ -522,9 +615,13 @@ export function diffProvenanceWideningV1(
  * edits above a site do not churn this list.
  */
 export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Object.freeze([
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'audit\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'group_policy_snapshot\',', rule: 'closed_set_member_list' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'ledger\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'policy_gate\',', rule: 'closed_set_member_list' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'record\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'rule_live\',', rule: 'closed_set_member_list' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'snapshot\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'audit\': return tr(\'Audit\', \'审计\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'group_policy_snapshot\': return tr(\'Group policy snapshot\', \'组策略快照\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'ledger\': return tr(\'Ledger\', \'台账\')', rule: 'exhaustive_switch_arm' },
@@ -532,6 +629,7 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'record\': return tr(\'Record\', \'记录\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'rule_live\': return tr(\'Live rule\', \'活体规则\')', rule: 'exhaustive_switch_arm' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'case \'snapshot\': return tr(\'Frozen snapshot\', \'冻结快照\')', rule: 'exhaustive_switch_arm' },
+  { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'const timelineEnv = parsed.basis.find((env) => env.source.kind === \'audit\' && env.source.ref === \'approval_records\')', rule: 'single_member_selector' },
   { file: 'packages/core-backend/src/attendance/w4c0-write-boundary-types.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'SET current_calculation_id = $3::uuid, projection_owner = \'w4\',', rule: 'write_side_emitter' },
@@ -543,8 +641,12 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: '} else if (parent.projectionOwner === \'legacy_untracked\' && parent.visibilityState === \'active\') {', rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: '\'legacy_untracked\', NULL, \'retired\', \'review_placeholder\',', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'kind: \'w4\' as const,', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'projectionOwner: isAttendanceProjectionOwnerV1(row.projectionOwner)', rule: 'widened_predicate' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId, rows: insertedRows, perUser }', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId: startOutcome.runId, rows: [], perUser: [] }', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { mode: \'w4\' as const, rows: [] as Array<{ user_id: string }> }', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '!isAttendanceProjectionOwnerV1(projectionOwner) ||', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '(isAttendanceProjectionOwnerWithCalculationPointerV1(projectionOwner) &&', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '(projectionOwner === \'legacy_untracked\' && currentCalculationId !== null) ||', rule: 'legacy_polarity' },
@@ -576,7 +678,6 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export const ATTENDANCE_PROJECTION_OWNERS_V1 = [', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export const ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1 =', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export const ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1 = [', rule: 'domain_definition' },
-  { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export const ATTENDANCE_PROJECTION_OWNER_WITHOUT_CALCULATION_POINTER_V1 = \'legacy_untracked\' as const', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export const ATTENDANCE_TRACE_SOURCE_KINDS_V1 = [', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export function isAttendanceProjectionOwnerV1(value: unknown): value is AttendanceProjectionOwnerV1 {', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'export function isAttendanceProjectionOwnerWithCalculationPointerV1(', rule: 'domain_definition' },
@@ -586,9 +687,13 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'return (ATTENDANCE_PROJECTION_OWNERS_V1 as readonly unknown[]).includes(value)', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'return (ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1 as readonly unknown[]).includes(value)', rule: 'domain_definition' },
   { file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts', text: 'return (ATTENDANCE_TRACE_SOURCE_KINDS_V1 as readonly unknown[]).includes(value)', rule: 'domain_definition' },
+  { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'audit\',', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'group_policy_snapshot\',', rule: 'w7_0_recorded_snapshot' },
+  { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'ledger\',', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'policy_gate\',', rule: 'w7_0_recorded_snapshot' },
+  { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'record\',', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'rule_live\',', rule: 'w7_0_recorded_snapshot' },
+  { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: '\'snapshot\',', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: 'currentMembers: Object.freeze([\'legacy_untracked\', \'w4\', \'w4_group\'] as const),', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: 'export const ATTENDANCE_W7_PROJECTION_OWNER_GROUP_VALUE_V1 = \'w4_group\' as const', rule: 'w7_0_recorded_snapshot' },
   { file: 'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts', text: 'export const ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1 = \'group_policy_snapshot\' as const', rule: 'w7_0_recorded_snapshot' },
@@ -597,13 +702,21 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'basis.push({ source: { kind: \'policy_gate\', ref: \'auto_absence_generation\' }, version: { posture: \'undeterminable\' } })', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'return { source: { kind: \'rule_live\', ref: \'none\' }, version: { posture: \'undeterminable\' } }', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'return { source: { kind: \'rule_live\', ref: rule.refKind }, version: { posture: \'current_live_no_history\' } }', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'audit\', ref: \'approval_records\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'policy_gate\', ref: \'ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'policy_gate\', ref: \'compTimeFromOvertime\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'policy_gate\', ref: \'overtimeSegmentation\' },', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'record\', ref: \'approval_assignments\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'rule_live\', ref: \'attendance_overtime_rules\' },', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'snapshot\', ref: \'approval_instances.metadata.approvalFlow\' },', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'snapshot\', ref: \'approval_instances.requester_snapshot\' },', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'audit\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'group_policy_snapshot\'', rule: 'closed_set_member_list' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'ledger\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'policy_gate\'', rule: 'closed_set_member_list' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'record\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'rule_live\'', rule: 'closed_set_member_list' },
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'snapshot\'', rule: 'closed_set_member_list' },
   { file: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', text: 'const PROJECTION_OWNERS = ATTENDANCE_PROJECTION_OWNERS_V1', rule: 'widened_predicate' },
   { file: 'packages/openapi/src/base.yml', text: 'projectionOwner: { type: string, enum: [legacy_untracked, w4, w4_group] }', rule: 'closed_set_member_list' },
   { file: 'scripts/attendance/execute-ops-retirement-cleanup.cjs', text: 'if (row.projection_owner != null && row.projection_owner !== \'legacy_untracked\') return true', rule: 'legacy_polarity' },

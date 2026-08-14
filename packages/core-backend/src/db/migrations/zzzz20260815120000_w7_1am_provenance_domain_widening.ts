@@ -7,8 +7,9 @@
  * was accepted before is still accepted with unchanged meaning.
  *
  * The widening surface was DERIVED, not enumerated: the DB half is derived from
- * the live catalogue (`pg_constraint` / `pg_proc`) on a migrated database, and
- * asserted point-by-point by
+ * the live catalogue on a migrated database — `pg_constraint`, `pg_proc`,
+ * `pg_trigger`, `pg_attrdef`, `pg_views`, `pg_indexes` and `pg_policies`, in both
+ * the snake_case and camelCase spellings — and asserted point-by-point by
  * `tests/integration/attendance-w7-1am-provenance-widening.db.test.ts`.
  * Deriving from migration TEXT would be wrong here — `attendance_w4_records_pointer_guard`
  * is defined twice in the tree (zzzz20260725120000 then REPLACED by

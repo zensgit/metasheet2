@@ -61,9 +61,6 @@ export const ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1 = [
 export type AttendanceProjectionOwnerWithCalculationPointerV1 =
   (typeof ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1)[number]
 
-/** The sole NULL-calculation-pointer member (semantic ruling, see file header). */
-export const ATTENDANCE_PROJECTION_OWNER_WITHOUT_CALCULATION_POINTER_V1 = 'legacy_untracked' as const
-
 /**
  * `'a', 'b'` — a ready-to-interpolate SQL literal list. Every member is a
  * compile-time constant from the array above (never user input), so this is a

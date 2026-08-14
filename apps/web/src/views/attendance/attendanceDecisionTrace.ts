@@ -63,8 +63,13 @@ export type AttendanceTraceConfidence = (typeof ATTENDANCE_TRACE_CONFIDENCES)[nu
 // bundle cannot import backend source, so this list is an INDEPENDENT copy of the
 // backend trace source-kind domain. It is widened here in lockstep, and the
 // backend completeness test asserts the two lists stay equal by membership.
-// This array is also the runtime acceptance gate below (`:284`-shaped check): an
-// unwidened copy would silently DROP a `group_policy_snapshot` basis entry.
+// This array is also the runtime acceptance gate in `parseBasisEnv` below. Its
+// failure mode is REJECT-WHOLE-RESPONSE, not drop-one-entry: `parseBasisEnv`
+// returns null for an unknown kind, `parseBasis` abandons the whole array on the
+// FIRST such entry, and `parseAttendanceDecisionTraceResponse` then returns null
+// — so an unwidened copy would make the entire decision trace fail to parse and
+// render as absent. Strictly worse than a dropped entry, which is why the copy
+// must stay member-equal to the backend domain.
 export const ATTENDANCE_TRACE_SOURCE_KINDS = [
   'record',
   'snapshot',

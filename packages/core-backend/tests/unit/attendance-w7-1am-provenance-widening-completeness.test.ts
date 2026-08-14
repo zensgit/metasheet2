@@ -52,8 +52,8 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
   it('non-vacuity: the derivation actually walked the tree', () => {
     expect(derivation.scannedFileCount).toBeGreaterThan(500)
     expect(derivation.anchoredFileCount).toBeGreaterThanOrEqual(10)
-    expect(derivation.sites.length).toBeGreaterThanOrEqual(80)
-    expect(W7_PROVENANCE_WIDENING_LEDGER_V1.length).toBeGreaterThanOrEqual(80)
+    expect(derivation.sites.length).toBeGreaterThanOrEqual(110)
+    expect(W7_PROVENANCE_WIDENING_LEDGER_V1.length).toBeGreaterThanOrEqual(100)
   })
 
   it('non-vacuity: the alias taint hop found real aliases', () => {
@@ -95,6 +95,7 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
       'legacy_polarity',
       'write_side_emitter',
       'null_default',
+      'single_member_selector',
       'domain_definition',
       'w7_0_recorded_snapshot',
     ]) {
@@ -203,6 +204,98 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
         (violation) => violation.kind === 'unledgered_site',
       ),
     ).toBe(true)
+  })
+
+  it('planted consumer: an un-widened consumer that names NO field spelling is still derived', () => {
+    // REGRESSION for the file-level anchor hole. Every other plant in this file
+    // spells `projection_owner`/`projectionOwner`, so all of them pre-satisfied
+    // the old anchor gate and none exercised this path. This one deliberately
+    // spells NEITHER: it is typed against the union, imports a predicate under a
+    // RENAMED local, folds silently, switches, and builds an un-widened SQL IN
+    // list. Four of the owner family's widening symbols do not contain any field
+    // spelling, so before the fix this derived ZERO sites while carrying a live
+    // silent downgrade of `w4_group` to `legacy_untracked`.
+    //
+    // `tsc` structurally cannot cover for this: a narrowing fold returns
+    // `'w4' | 'legacy_untracked'`, which is always assignable to the widened
+    // union, so widening can never make a narrowing consumer fail to compile.
+    const planted = scanPlanted(
+      'planted-unanchored.ts',
+      [
+        "import { isAttendanceProjectionOwnerWithCalculationPointerV1 as ownsPointer } from '../x'",
+        "import type { AttendanceProjectionOwnerV1 } from '../x'",
+        '',
+        'export function fold(raw: string): AttendanceProjectionOwnerV1 {',
+        "  return raw === 'w4' ? 'w4' : 'legacy_untracked'",
+        '}',
+        '',
+        'export function label(owner: AttendanceProjectionOwnerV1): string {',
+        '  switch (owner) {',
+        "    case 'w4':",
+        "      return 'W4'",
+        '    default:',
+        "      return 'legacy'",
+        '  }',
+        '}',
+        '',
+        'export function pointerOwned(owner: string): boolean {',
+        '  return ownsPointer(owner)',
+        '}',
+        '',
+        "export const SQL = `SELECT 1 WHERE owner IN ('w4', 'legacy_untracked')`",
+        '',
+      ].join('\n'),
+    )
+
+    // Negative control: the plant really does NOT name any field spelling, so it
+    // could only have been derived by the widened anchor set.
+    const source = planted.sites.map((site) => site.text).join('\n')
+    expect(/projection_owner|projectionOwner|PROJECTION_OWNERS/.test(source)).toBe(false)
+
+    expect(planted.sites.length).toBeGreaterThan(0)
+    expect(
+      diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1).some(
+        (violation) => violation.kind === 'unledgered_site',
+      ),
+    ).toBe(true)
+  })
+
+  it('planted consumer: an import-RENAMED widening symbol still anchors its call sites', () => {
+    // The rename hop on its own: the file anchors via the original symbol, but
+    // every call site spells only the local alias, so without the second taint
+    // hop the file anchored and no line was ever a site.
+    const planted = scanPlanted(
+      'planted-rename.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as isKnownOwner } from '../x'",
+        '',
+        'export function check(value: string): boolean {',
+        '  return isKnownOwner(value)',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const callSites = planted.sites.filter((site) => site.text.includes('isKnownOwner'))
+    expect(callSites.length).toBeGreaterThan(0)
+  })
+
+  it('planted consumer: an AMBIGUOUS-member trace fold is derived (no distinctive fallback)', () => {
+    // The owner family is protected here only by luck — `legacy_untracked` is
+    // distinctive. The trace family has no distinctive fallback member, so a
+    // fold between two ambiguous members carries no distinctive literal at all
+    // and evaded the line rule inside an already-anchored file.
+    const planted = scanPlanted(
+      'planted-trace-fold.ts',
+      [
+        'export function foldKind(k: string): AttendanceDecisionTraceSourceKind {',
+        "  return k === 'record' ? 'record' : 'snapshot'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const foldSites = planted.sites.filter((site) => site.text.includes('record'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    expect(foldSites.every((site) => !site.text.includes('group_policy_snapshot'))).toBe(true)
   })
 
   it('planted consumer: a stale ledger entry (construct removed) REDS the diff', () => {
