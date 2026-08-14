@@ -1645,6 +1645,96 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     expect(await countRows('attendance_shift_assignments', orgId)).toBe(0)
   })
 
+  /**
+   * #4556 Gate A / owner P1 — ROLLOUT-LOCK ORDER COUNTEREXAMPLE (deterministic, two real
+   * connections, real approval route).
+   *
+   * The hazard: the rollout TRANSITION path takes the rollout advisory lock EXCLUSIVE first and
+   * only then `SELECT ... FROM attendance_requests ... FOR UPDATE` (w4c3a-rollout-control.ts —
+   * exclusive at the top of the control transaction, request scan at `:948`). If the APPROVAL
+   * transaction were to take the request row lock FIRST and reach for the rollout SHARED lock
+   * only later (e.g. inside finalization, which is where this cutover wired a posture call),
+   * the two form a textbook wait cycle:
+   *     approval  holds request row   + waits rollout-shared
+   *     transition holds rollout-excl + waits request row
+   * PostgreSQL's detector fires and one side dies with SQLSTATE 40P01.
+   *
+   * This test pins the SAFE order by construction, against the production HTTP approval chain:
+   *   1. conn B opens a transaction and takes the rollout advisory lock EXCLUSIVE for the org
+   *      (same key builder the production code uses — not a hand-rolled key).
+   *   2. conn A fires the real approval route. It must block on the rollout SHARED lock
+   *      **before** it has taken any `attendance_requests` row lock.
+   *   3. conn B then takes `FOR UPDATE` on that very request row. This SUCCEEDS only because A
+   *      holds no row lock — it is the discriminating observation.
+   *   4. conn B commits (releasing exclusive); A then proceeds and completes.
+   *
+   * Load-bearing: hoisting the approval's posture resolution back BELOW the request row lock
+   * makes step 3 block on A while A waits on B ⇒ genuine deadlock, and the run dies with
+   * `40P01`. Verified by executing exactly that mutation.
+   */
+  it('P1: approval acquires the rollout lock BEFORE any request row lock (no deadlock vs a concurrent transition)', async () => {
+    const { buildAttendanceCalculationRolloutAdvisoryKey } = await import('../../src/attendance/w4c0-identity')
+    const orgId = randomUUID() // canonical rollout org key, so the port really takes the lock
+    const actorId = `${orgId}-admin`
+    await seedActiveIdentity(actorId, orgId)
+    const token = await mintToken(actorId, orgId)
+    const shiftId = (await createShiftViaApi(token, orgId, { name: 'Lock order', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
+    await seedDispatchFlow(token, orgId)
+    const scheduleGroupId = await seedScheduleGroup(orgId)
+
+    const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+      userId: `${orgId}-worker`,
+      targetScheduleGroupId: scheduleGroupId,
+      targetShiftId: shiftId,
+      startDate: '2049-08-01',
+      endDate: '2049-08-01',
+    })
+    expect(create.status, create.raw).toBe(201)
+    const requestId = create.body.data.request.id as string
+
+    const advisoryKey = buildAttendanceCalculationRolloutAdvisoryKey(orgId as never).toString()
+    const connB = await pool.connect()
+    let approval: Promise<HttpResponse> | undefined
+    try {
+      // (1) transition-order connection: rollout EXCLUSIVE first.
+      await connB.query('BEGIN')
+      await connB.query('SELECT pg_advisory_xact_lock($1::bigint)', [advisoryKey])
+
+      // (2) approval, real route. Blocks on the rollout SHARED lock.
+      approval = postJson(`/api/attendance/requests/${requestId}/approve`, token, orgId, { comment: 'go' })
+      // Give the approval time to reach (and block on) the rollout lock.
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+
+      // (3) THE DISCRIMINATOR: the transition-order connection now takes the same request row.
+      // With the safe ordering the approval is parked on the advisory lock holding no row lock,
+      // so this returns promptly. With the inverted ordering this blocks on the approval while
+      // the approval waits on us -> 40P01.
+      await connB.query('SET LOCAL lock_timeout = \'20s\'')
+      const locked = await connB.query(
+        'SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+        [requestId],
+      )
+      expect(locked.rows).toHaveLength(1)
+
+      // (4) release the exclusive lock; the approval may now proceed.
+      await connB.query('COMMIT')
+    } catch (error) {
+      await connB.query('ROLLBACK').catch(() => undefined)
+      // Surface a deadlock explicitly rather than as an opaque failure.
+      const code = (error as { code?: string })?.code
+      throw new Error(`transition-order connection failed${code ? ` (SQLSTATE ${code})` : ''}: ${String(error)}`)
+    } finally {
+      connB.release()
+    }
+
+    const approveRes = await approval!
+    // The approval must NOT have died of a deadlock. Its own outcome may legitimately be a
+    // typed refusal, but never a 40P01-driven 500.
+    expect(approveRes.raw).not.toContain('40P01')
+    expect(approveRes.raw).not.toContain('deadlock')
+    expect([200, 201, 422]).toContain(approveRes.status)
+  })
+
   it('matrix: automatic matching apply returns typed 422 with zero writes', async () => {
     const orgId = org('matrix-automatch')
     const token = await mintToken(`${orgId}-admin`, orgId)
