@@ -3,8 +3,8 @@
  * (OD-W7-1(a)).
  *
  * Authority: design-lock §4.1 (resolution input), §2 red lines W7-R1/W7-R2/
- * W7-R10; ratified per #4556 comment 5293034619 (owner-directed disclosed
- * relay; first-person confirmation pending) — rulings 5 (`fixed_shift` only),
+ * W7-R10; ratified per #4556 comments 5293034619 (ruling) + 5293478713 (owner first-person confirmation)
+ * — rulings 5 (`fixed_shift` only),
  * 6 (W1-vs-FSER mismatch fail-closes), 8 (composite lock order), 9
  * (`w7-resolver/` layout), 11 (`flex_required_duration` fail-closes).
  *

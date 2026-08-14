@@ -1,8 +1,8 @@
 /**
  * W7-1a (#4556) STEP 2 prerequisite — the ONE composite lock helper.
  *
- * Ruling 8 of #4556 comment 5293034619 (owner-directed disclosed relay;
- * first-person confirmation pending) fixes the order for the first code path
+ * Ruling 8 of #4556 comments 5293034619 (ruling) + 5293478713 (owner first-person confirmation)
+ * fixes the order for the first code path
  * that ever combines these two lock families:
  *
  *     membership timeline  →  schedule facts
