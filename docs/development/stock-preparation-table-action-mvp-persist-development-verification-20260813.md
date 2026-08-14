@@ -142,6 +142,18 @@ PASS
 真实 DB 测试受 `DATABASE_URL` 门控；它只在批准的 CI 数据库环境运行。未配置数据库时不会
 通过临时安装或连接客户环境伪造 PASS。
 
+### 2026-08-14 main 同步复验
+
+Draft PR 分支已同步至 `origin/main` 的 `f364c7f9b307b195aad68d5ea5b4c13466df80a8`。
+这三个新增 main 提交只涉及考勤与 OpenAPI 文件，与本交付的八个 stock-preparation 文件没有
+路径重叠；同步后重新执行了本节列出的七组插件测试、三项 `node --check` 与
+`git diff --check`，结果均为 PASS。
+
+本机未配置批准的 `DATABASE_URL`。真实数据库测试通过已有 Vitest 可执行文件启动后按设计
+跳过 4 项用例；没有清理或重装 `node_modules`，也没有连接实体/客户数据库。新 exact head
+的数据库并发结果由 GitHub 批准的 CI 环境提供，最终 head 与检查计数以 PR #4892 的
+values-free exact-head 回执为权威。
+
 ## 7. Provenance 与平台差异
 
 sealed-export pin 按 Git LF blob 字节计算。Windows `core.autocrlf=true` 的工作树是 CRLF，直接
@@ -162,8 +174,8 @@ PR #4892 在修复后必须：
 ## 9. 当前收尾结论
 
 - 测试环境只读数据库 dry-run：已由 #4437 独立验收完成；
-- table-action → 内部 MVP 快照：本报告覆盖的代码缺口已修复并完成本地定向验证，等待新
-  exact head 的 CI 与 owner 发布门；
+- table-action → 内部 MVP 快照：本报告覆盖的代码缺口已修复，并在同步最新 main 后完成
+  本地定向复验；exact-head CI 和技术审阅结论记录在 PR #4892，owner 发布门保持独立；
 - K3 exact-two Save-only：#4861 仍需 owner 在同一记录中给出真实管理员 identity、实际
   merged/deployed SHA、新 operationId、精确两次 Save-only 及 native cleanup/readback/停止条件。
 
