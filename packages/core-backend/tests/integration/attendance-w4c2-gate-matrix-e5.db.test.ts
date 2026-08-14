@@ -419,6 +419,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
       applyScheduledAbsenceLegacy: async (trx, args) => {
         n += 1
         seenUserIds.push(...args.userIds)
@@ -1117,7 +1119,9 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
 
     // The operation sealed against the real record + calculation, and the outbox row still fires
     // unconditionally (unchanged from the shadow path's own behaviour for a review outcome).
-    const ops = await operationRows(authoritativeOrg, 'live')
+    // No entrypoint filter: the operation-registry entrypoint is the COMMAND KIND
+    // (`live_punch`), not the calculation-row entrypoint (`live`) asserted above.
+    const ops = await operationRows(authoritativeOrg)
     expect(ops.length).toBe(1)
     expect(ops[0].state).toBe('completed')
     expect(ops[0].resolved_record_id).toBe(parents[0].id)
@@ -1129,13 +1133,13 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
 
   it('leg 6b — authoritative SCHEDULED still fails closed BEFORE source DML (undelivered; D3 delivers it)', async () => {
     const before = await recordCount(authoritativeUser)
-    const beforeOps = (await operationRows(authoritativeOrg, 'scheduled')).length
+    const beforeOps = (await operationRows(authoritativeOrg)).length
     const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
     const run = await autoAbsenceRun(adminToken, { orgId: authoritativeOrg, workDate: '2026-07-22' })
     expect(run.status).toBe(503)
     expect(run.body?.error?.code).toBe('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED')
     expect(await recordCount(authoritativeUser)).toBe(before)
-    expect((await operationRows(authoritativeOrg, 'scheduled')).length).toBe(beforeOps)
+    expect((await operationRows(authoritativeOrg)).length).toBe(beforeOps)
   })
 
   it('leg 7 — accepted_write_posture cannot be silently rebased: replay after legacy->shadow promotion returns the stored legacy response unchanged; a fresh key takes the shadow path; direct UPDATE is trigger-denied', async () => {
@@ -1778,6 +1782,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     let absenceCalls = 0
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: async () => { throw new Error('unreached') },
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: async () => { throw new Error('unreached') },
       resolveLiveCandidate: async () => { throw new Error('unreached') },
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: async () => { throw new Error('unreached') },
@@ -2231,6 +2237,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
       // Zero-effect ("nobody absent") but the CALL ITSELF is the signal a
       // rejection leg must never produce — counted, never a real INSERT.
       applyScheduledAbsenceLegacy: async () => {
