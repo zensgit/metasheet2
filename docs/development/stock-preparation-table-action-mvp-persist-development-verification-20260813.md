@@ -51,7 +51,8 @@ BOM 展开结果写入 MetaSheet 内部备料 MVP 快照表。原始数据库行
    `tenantId`、`workspaceId`、`projectId`、目标表/批次/版本等 steering 字段；
 4. 在 action/source lookup、adapter 创建和 source read 之前，从已认证主体派生 tenant；
    tenantless admin 直接失败；
-5. 只接受部署配置中的 SQL readonly source，且外部系统状态必须是 `active`；
+5. 只接受部署配置中已批准的只读 SQL source kind：`data-source:sql-readonly` 或
+   `bridge:legacy-sql-readonly`，且外部系统状态必须是 `active`；
 6. 重新读取、重新展开并执行 not-found、large-BOM、冲突和 not-ready fail-closed 检查；
 7. 只调用既有 `persistStockPreparationSyncRun` 写入认证 tenant 的内部 staging MVP 表。
 

@@ -2554,8 +2554,9 @@ function createHandlers(services, options = {}) {
 
   const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
   // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
-  // SQL db can still register read routes), but every stock-prep WRITE op fails closed without it —
-  // an unaudited confirm/generation/resolve is refused, not silently allowed.
+  // SQL db can still register read routes), but every W5b human-decision write fails closed without
+  // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
+  // persists instead carry their immutable run record inside the same unit of work.
   const stockPreparationAudit = services.stockPreparationAuditStore || null
   function requireStockPreparationAudit() {
     if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
