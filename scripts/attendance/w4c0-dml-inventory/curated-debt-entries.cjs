@@ -567,6 +567,30 @@ const CURATED_DEBT_ENTRIES = [
       ].includes(site.table),
   },
   {
+    id: 'X06',
+    title: 'W4C-2 Gate D1 authoritative-result-write CORE: the parent-pointer/visibility move on attendance_records for a completed or reversed authoritative calculation (§7.5). INERT — no production caller; D2 wires live_punch, D3 wires scheduled.',
+    owningSlice: 'W4C-2',
+    sharedHook: false,
+    // NOT the 'W4C-2' removed-by-adapter marker (that exact set is pinned to the four legacy P01-P04
+    // writers). This is the canonical authoritative WRITER Gate D1 adds, not a legacy site being
+    // canonicalized away — its own Gate-D1 marker.
+    canonicalizedBy: 'W4C-2-gate-d1',
+    // The only tracked business DML in this INERT core is the attendance_records UPDATE that moves
+    // the parent pointer/owner/visibility to the just-appended authoritative row (completed →
+    // set_active; reversal → restore/retire). The calc/segment INSERTs target the append-only
+    // immutable tables (not the business daily-row bucket). Claimed per-writer by symbol so a new
+    // attendance_records writer added to this file cannot inherit the claim silently.
+    claims: (site) =>
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts',
+        /^writeCompletedRow$/,
+      )(site) ||
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts',
+        /^writeAuthoritativeReversalV1$/,
+      )(site),
+  },
+  {
     id: 'X05',
     title: 'AttendanceExpiryService scheduled comp-time/leave-balance expiry sweep.',
     owningSlice: 'W4C-3b (unconfirmed)',
