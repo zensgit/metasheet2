@@ -139,7 +139,7 @@
 # any existing token).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4819).
+# Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
 npx vitest run \
   approval-canvas-commands \
   approval-form-commands \
@@ -150,6 +150,7 @@ npx vitest run \
   approval-version-dual-canvas \
   approval-flow-canvas-a11y \
   approval-canvas-inspector-a11y \
+  approval-form-palette-focus \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
