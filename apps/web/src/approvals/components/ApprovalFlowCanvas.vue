@@ -3,7 +3,7 @@
  * Canvas V2 flow surface (PR4 extract) — pure presentation.
  * Parent owns draft/history and all topology/command mutations.
  */
-import { FullScreen, Rank, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { Connection, FullScreen, Promotion, Rank, Share, User, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 import { ref, type CSSProperties } from 'vue'
 import type { ApprovalNode } from '../../types/approval'
 import type { GraphLayout, NodeLayout } from '../graphLayout'
@@ -43,6 +43,7 @@ const props = defineProps<{
   minimapWidth: number
   minimapHeight: number
   graphNodeLabel: (nodeKey: string) => string
+  canvasNodeSummary: (nodeKey: string) => string
   nodeTypeLabel: (type: string) => string
   canvasNodeByKey: (nodeKey: string) => ApprovalNode | undefined
   canMoveCanvasNode: (nodeKey: string) => boolean
@@ -66,6 +67,7 @@ const emit = defineEmits<{
   drop: [event: DragEvent, edgeKey: string]
   'toggle-edge-insert': [edgeKey: string]
   'edge-insert-approval': [edgeKey: string]
+  'edge-insert-cc': [edgeKey: string]
   'edge-insert-condition': [edgeKey: string]
   'edge-insert-parallel': [edgeKey: string]
 }>()
@@ -243,7 +245,22 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                   data-testid="approval-canvas-edge-insert-approval"
                   @click.stop="emit('edge-insert-approval', line.key)"
                 >
-                  审批
+                  <span class="template-authoring__canvas-edge-insert-icon is-approval" aria-hidden="true">
+                    <el-icon><User /></el-icon>
+                  </span>
+                  审批人
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-label="插入抄送节点"
+                  data-testid="approval-canvas-edge-insert-cc"
+                  @click.stop="emit('edge-insert-cc', line.key)"
+                >
+                  <span class="template-authoring__canvas-edge-insert-icon is-cc" aria-hidden="true">
+                    <el-icon><Promotion /></el-icon>
+                  </span>
+                  抄送人
                 </button>
                 <button
                   type="button"
@@ -252,7 +269,10 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                   data-testid="approval-canvas-edge-insert-condition"
                   @click.stop="emit('edge-insert-condition', line.key)"
                 >
-                  条件
+                  <span class="template-authoring__canvas-edge-insert-icon is-condition" aria-hidden="true">
+                    <el-icon><Share /></el-icon>
+                  </span>
+                  条件分支
                 </button>
                 <button
                   v-if="canInsertParallelOnEdge(line.key)"
@@ -262,7 +282,10 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                   data-testid="approval-canvas-edge-insert-parallel"
                   @click.stop="emit('edge-insert-parallel', line.key)"
                 >
-                  并行
+                  <span class="template-authoring__canvas-edge-insert-icon is-parallel" aria-hidden="true">
+                    <el-icon><Connection /></el-icon>
+                  </span>
+                  并行分支
                 </button>
               </div>
             </div>
@@ -276,12 +299,19 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
               }"
               :style="nodePosStyle(pos)"
               :data-canvas-node="pos.key"
+              :data-node-type="canvasNodeByKey(pos.key)?.type"
               data-testid="approval-canvas-node"
               :draggable="!readOnly && canMoveCanvasNode(pos.key)"
               @click="emit('select-node', pos.key)"
               @dragstart="emit('drag-start', $event, pos.key)"
               @dragend="emit('drag-end')"
             >
+              <div
+                class="template-authoring__canvas-node-kind"
+                :data-node-type="canvasNodeByKey(pos.key)?.type"
+              >
+                {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+              </div>
               <div
                 class="template-authoring__canvas-node-selector"
                 role="button"
@@ -294,13 +324,10 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                 @keydown.space.stop.prevent="emit('select-node', pos.key)"
                 @keydown="emit('node-keydown', $event, pos.key)"
               >
-                <strong>{{ graphNodeLabel(pos.key) }}</strong>
-                <span
-                  class="template-authoring__node-type"
-                  :data-node-type="canvasNodeByKey(pos.key)?.type"
-                >
-                  {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+                <span class="template-authoring__canvas-node-summary">
+                  {{ canvasNodeSummary(pos.key) }}
                 </span>
+                <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
               </div>
             </div>
           </div>
@@ -376,8 +403,8 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   max-width: 100%;
   overflow: auto;
   border: 1px solid var(--el-border-color);
-  border-radius: 6px;
-  background: var(--ms-bg-page);
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
 }
 .template-authoring__canvas-viewport:focus-visible {
   outline: 2px solid var(--el-color-primary-light-5);
@@ -400,14 +427,14 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas-node {
   box-sizing: border-box;
-  padding: 6px 10px;
+  padding: 0;
   border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--ms-bg-card);
   box-shadow: var(--el-box-shadow-lighter);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  overflow: hidden;
   cursor: default;
   font-size: 12px;
   min-height: 96px;
@@ -423,17 +450,64 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   border-style: dashed;
   border-color: var(--el-color-primary);
 }
+.template-authoring__canvas-node-kind {
+  flex: 0 0 auto;
+  padding: 6px 10px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  background: var(--el-fill-color-light);
+}
+.template-authoring__canvas-node-kind[data-node-type='start'],
+.template-authoring__canvas-node-kind[data-node-type='end'] {
+  background: var(--el-color-info-light-8);
+  color: var(--el-color-info-dark-2);
+}
+.template-authoring__canvas-node-kind[data-node-type='approval'] {
+  background: var(--el-color-primary-light-8);
+  color: var(--el-color-primary);
+}
+.template-authoring__canvas-node-kind[data-node-type='cc'] {
+  background: var(--el-color-success-light-8);
+  color: var(--el-color-success-dark-2);
+}
+.template-authoring__canvas-node-kind[data-node-type='condition'] {
+  background: var(--el-color-warning-light-8);
+  color: var(--el-color-warning-dark-2);
+}
+.template-authoring__canvas-node-kind[data-node-type='parallel'] {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+}
 .template-authoring__canvas-node-selector {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  border-radius: 4px;
+  flex: 1 1 auto;
+  padding: 8px 10px 10px;
   cursor: pointer;
   outline: none;
 }
 .template-authoring__canvas-node-selector:focus-visible {
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+  box-shadow: inset 0 0 0 2px var(--el-color-primary-light-5);
+}
+.template-authoring__canvas-node-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--el-text-color-regular);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.template-authoring__canvas-node-chevron {
+  flex: 0 0 auto;
+  color: var(--el-text-color-placeholder);
+  font-size: 16px;
+  line-height: 1;
 }
 .template-authoring__canvas-edge-insert {
   position: absolute;
@@ -441,16 +515,21 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   transform: translate(-50%, -50%);
 }
 .template-authoring__canvas-edge-insert-btn {
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  border: 1px solid var(--el-color-primary);
+  border: 1px solid var(--el-color-primary-light-5);
   background: var(--ms-bg-card);
   color: var(--el-color-primary);
-  font-size: 14px;
+  font-size: 18px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
+  box-shadow: var(--el-box-shadow-lighter);
+}
+.template-authoring__canvas-edge-insert.is-open .template-authoring__canvas-edge-insert-btn {
+  background: var(--el-color-primary);
+  color: var(--el-color-white);
 }
 .template-authoring__canvas-edge-insert-btn:focus-visible {
   outline: 2px solid var(--el-color-primary);
@@ -458,31 +537,59 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas-edge-insert-menu {
   position: absolute;
-  top: 26px;
+  top: 34px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 72px;
-  padding: 4px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: max-content;
+  padding: 10px 12px 8px;
   border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--ms-bg-card);
-  box-shadow: var(--el-box-shadow-lighter);
+  box-shadow: var(--el-box-shadow);
 }
 .template-authoring__canvas-edge-insert-menu button {
   border: 0;
   background: transparent;
-  padding: 4px 8px;
-  text-align: left;
+  padding: 0;
+  min-width: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
   cursor: pointer;
-  font-size: 12px;
-  border-radius: 4px;
+  font-size: 11px;
+  color: var(--el-text-color-regular);
+  border-radius: 6px;
 }
 .template-authoring__canvas-edge-insert-menu button:hover,
 .template-authoring__canvas-edge-insert-menu button:focus-visible {
-  background: var(--el-fill-color-light);
+  color: var(--el-color-primary);
+}
+.template-authoring__canvas-edge-insert-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-color-white);
+  font-size: 16px;
+}
+.template-authoring__canvas-edge-insert-icon.is-approval {
+  background: var(--el-color-warning);
+}
+.template-authoring__canvas-edge-insert-icon.is-cc {
+  background: var(--el-color-primary);
+}
+.template-authoring__canvas-edge-insert-icon.is-condition {
+  background: var(--el-color-success);
+}
+.template-authoring__canvas-edge-insert-icon.is-parallel {
+  background: var(--el-color-info);
 }
 .template-authoring__canvas-move-target {
   position: absolute;

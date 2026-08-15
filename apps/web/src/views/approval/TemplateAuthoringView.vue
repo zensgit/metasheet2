@@ -612,6 +612,7 @@
             :minimap-width="CANVAS_MINIMAP_W"
             :minimap-height="CANVAS_MINIMAP_H"
             :graph-node-label="graphNodeLabel"
+            :canvas-node-summary="canvasNodeCardSummary"
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
@@ -632,6 +633,7 @@
             @drop="onCanvasNodeDrop"
             @toggle-edge-insert="toggleEdgeInsertMenu"
             @edge-insert-approval="onEdgeInsertApproval"
+            @edge-insert-cc="onEdgeInsertCc"
             @edge-insert-condition="onEdgeInsertCondition"
             @edge-insert-parallel="onEdgeInsertParallel"
           />
@@ -1320,6 +1322,7 @@ import {
   addParallelBranch,
   adjacentLinearNodeMoveTarget,
   appendApprovalNode,
+  appendCcNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
@@ -1603,6 +1606,15 @@ const NODE_TYPE_LABELS: Record<string, string> = {
 }
 function nodeTypeLabel(type: string): string {
   return NODE_TYPE_LABELS[type] ?? type
+}
+
+function canvasNodeCardSummary(nodeKey: string): string {
+  const node = canvasNodeByKey(nodeKey)
+  if (!node) return '点击配置'
+  if (node.type === 'start') return '可设置提交人'
+  if (node.type === 'end') return '可设置抄送'
+  const lines = nodeConfigSummary(node)
+  return lines[0] || '点击配置'
 }
 
 // `assigneeSourceSummary` (single-source label) now lives in `../../approvals/assigneeSource` —
@@ -2173,6 +2185,9 @@ function onAddParallelBranch(nodeKey: string): void {
 function onInsertApprovalAfter(nodeKey: string): void {
   runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
 }
+function onInsertCcAfter(nodeKey: string): void {
+  runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'node', nodeKey })
+}
 function onInsertConditionAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
   canvasViewMode.value = 'canvas'
@@ -2441,6 +2456,12 @@ function onEdgeInsertApproval(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
   if (!source || !canInsertAfter(source)) return
   onInsertApprovalAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertCc(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertAfter(source)) return
+  onInsertCcAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertCondition(edgeKey: string): void {
