@@ -1055,6 +1055,7 @@ async function applyExternalWrite(input = {}) {
   const rowErrors = []
   const provenanceEvents = []
   const runId = optionalString(input.runId) || syntheticRunId(plan.pipeline, plan.revision)
+  const stopOnFirstWriteFailure = isStrictAddOnlyAcceptance(plan.acceptancePolicy)
   let writeOrdinal = 0
   for (const row of plan.planRows) {
     if (row.decision === 'skip') {
@@ -1133,6 +1134,11 @@ async function applyExternalWrite(input = {}) {
         eventType: 'target_write_failed',
         attrs: { decision: row.decision, errorCode },
       }))
+      // The exact-two K3 acceptance window is a supervised, rollback-bound exception.
+      // Once one Save fails, attempting its sibling would enlarge the partial-write set
+      // and violate the operation's fail-closed cleanup contract. Other C6 profiles retain
+      // their established row-isolation semantics and continue processing clean siblings.
+      if (stopOnFirstWriteFailure) break
     }
   }
   const status = applyStatus(counts)

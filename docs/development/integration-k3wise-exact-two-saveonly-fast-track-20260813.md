@@ -65,6 +65,8 @@ Apply 在任何目标写入前失败。
 
 Apply 在任何 `insertRows` Save 之前，会对全部 add 行再用同一严格 lookup 做一次整批预检：任一行已存在、键歧义、lookup 抛错或返回畸形结构，整批拒绝且 Save 次数为零。这不是原子 K3 insert-only。K3 Save 仍是 upsert；planner lookup 与预检 / Save 之间仍有 TOCTOU 窗口。真实实体执行在 owner 接受、或 K3 提供 create-only 之前仍未授权。
 
+精确两行策略还采用更严格的运行时停止条件：若第一条 Save 抛错，Apply 立即停止，不再尝试第二条 Save，回执只记录已尝试行的 values-free 失败计数。该行为仅适用于 `k3-test-only-exact-two-add-v1`；其他 C6 批次继续保持既有的逐行错误隔离语义。
+
 ## 页面交互
 
 工作台只展示状态、计数和固定策略信息，不展示 token、行值、目标 payload 或私密 lookup 配置。受控策略启用时：
@@ -98,4 +100,4 @@ realK3Calls=0
 entityServerMutations=0
 ```
 
-负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、重复 `FNumber`、普通写入用户设置/清空私密策略、策略在 token 后漂移、泛化 `K3_WISE_READ_BUSINESS_ERROR` 在受控策略下不得当缺席、planner lookup 之后目标变为已存在/歧义/lookup 失败则整批零 Save、无 tenant 的 `role:admin` 与跨 tenant carrier 在 Apply/私密策略变更上失败关闭，以及浏览器不渲染私密证据字段。
+负控覆盖：非 K3 目标、未知策略字段、非两行、出现 update、重复 `FNumber`、普通写入用户设置/清空私密策略、策略在 token 后漂移、泛化 `K3_WISE_READ_BUSINESS_ERROR` 在受控策略下不得当缺席、planner lookup 之后目标变为已存在/歧义/lookup 失败则整批零 Save、精确两行策略首条 Save 失败后不调用第二条 Save、普通 C6 策略仍隔离失败并继续干净兄弟行、无 tenant 的 `role:admin` 与跨 tenant carrier 在 Apply/私密策略变更上失败关闭，以及浏览器不渲染私密证据字段。
