@@ -46,10 +46,13 @@
  * `context_snapshot ->> 'selector' = 'group_effective'` — the same one
  * OD-W7-10(a) uses — and it is TOTAL: `selector` is a mandatory member of
  * both context schemas' closed key sets, so every persisted context carries
- * it. NO `??`/COALESCE default is applied anywhere in this module: a
- * non-null context missing `selector` is CORRUPTION and hard-fails
- * (`W7_COMPARE_CONTEXT_SELECTOR_MISSING`) — a default would fail OPEN, by
- * counting a group row as legacy or vice versa.
+ * it. NO `??`/COALESCE default is applied to the SELECTOR read anywhere in
+ * this module: a non-null context missing `selector` is CORRUPTION and
+ * hard-fails (`W7_COMPARE_CONTEXT_SELECTOR_MISSING`) — a default would fail
+ * OPEN, by counting a group row as legacy or vice versa. (The off-roster
+ * probe builder does normalize an absent `projected_status` COLUMN value to
+ * null — a driver-shape normalization of a nullable column, not a selector
+ * default; the probe parse then enforces the review/status pairing closed.)
  *
  * W7 group-resolution FAIL-CLOSE records have `context_snapshot IS NULL` (no
  * group context exists to persist) and are discriminated by the
