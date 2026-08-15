@@ -126,6 +126,11 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-composite-lock-order.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-context-source-posture-resolver.ts',
+  // W7-1b: the issuance seam. Classified `calculation_path` — the HONEST bucket,
+  // not a carve-out: this module IS the frozen-context build path, so both ban
+  // legs must apply to it. W7-1b is the slice where those legs stop being
+  // theoretical (1a was 零生产引用), which is exactly why the seam belongs here.
+  'packages/core-backend/src/attendance/w7-resolver/w7-frozen-context-issuance-seam.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-context-issuance.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-facts-resolver.ts',
   'packages/core-backend/src/attendance/w7-w6r5-guard-root-set.ts',
