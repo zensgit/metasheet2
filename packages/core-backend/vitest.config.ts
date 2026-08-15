@@ -779,6 +779,11 @@ export default defineConfig({
       // once both machines are on. Meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts',
+      // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
+      // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
+      // values against real CHECK constraints and deferred triggers, walks the
+      // rollout state machine per case, and drives the real route. Real PG only.
+      'tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.

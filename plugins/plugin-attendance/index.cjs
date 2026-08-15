@@ -35194,15 +35194,17 @@ module.exports = {
 	                r.work_date::text AS work_date,
 	                r.current_calculation_id::text AS current_calculation_id,
 	                current_calc.version AS current_calculation_version,
+	                current_calc.context_snapshot AS current_calculation_context,
 	                latest_calc.id::text AS latest_calculation_id,
-	                latest_calc.version AS latest_calculation_version
+	                latest_calc.version AS latest_calculation_version,
+	                latest_calc.context_snapshot AS latest_calculation_context
 	           FROM attendance_records r
 	           LEFT JOIN attendance_record_calculations current_calc
 	             ON current_calc.id = r.current_calculation_id
 	            AND current_calc.attendance_record_id = r.id
 	            AND current_calc.org_id = r.org_id
 	           LEFT JOIN LATERAL (
-	             SELECT c.id, c.version
+	             SELECT c.id, c.version, c.context_snapshot
 	               FROM attendance_record_calculations c
 	              WHERE c.attendance_record_id = r.id
 	                AND c.org_id = r.org_id
@@ -35224,6 +35226,12 @@ module.exports = {
 	          version: record.latest_calculation_version == null
 	            ? null
 	            : Number(record.latest_calculation_version),
+	          // W7-1b (OD-W7-10): the context travels WITH the id, from the SAME
+	          // posture-dependent choice. A second, inline copy of this selection
+	          // is exactly the drift the one-seam doctrine forbids elsewhere, and
+	          // reading `current_calc` unconditionally would read NULL for a
+	          // shadow org so the refusal would silently never fire.
+	          context: record.latest_calculation_context ?? null,
 	        }
 	      }
 	      return {
@@ -35231,6 +35239,7 @@ module.exports = {
 	        version: record.current_calculation_version == null
 	          ? null
 	          : Number(record.current_calculation_version),
+	        context: record.current_calculation_context ?? null,
 	      }
 	    }
 
@@ -35683,6 +35692,83 @@ module.exports = {
 	        assertW4c3cExpectedCalculation(prepared.state.record, prepared.commandPayload, posture)
         if (posture === 'legacy_projection_only') {
           throw new HttpError(409, 'W4C3C_RECOMPUTE_REQUIRES_W4_POSTURE', 'recompute requires shadow or authoritative posture')
+        }
+        // ------------------------------------------------------------------
+        // W7-1b — OD-W7-10(a). RATIFIED (ruling 4); scope confirmed to 1b by
+        // fork O-5. #4556 comments 5293034619 + 5293478713.
+        //
+        // Refuse `current_policy` recompute for any work date whose EXISTING
+        // frozen calculation's producer differs from the org's CURRENT W7 state.
+        //
+        // The ruled predicate is a COMPARISON OF TWO THINGS, so it is
+        // BIDIRECTIONAL. A fence that tested only the org's current state would
+        // be wrong twice: it would over-refuse a correctly-configured group org
+        // (bricking `current_policy` for it permanently) AND under-refuse the
+        // one case this decision exists for — a day frozen under a group source
+        // on an org since reverted to legacy.
+        //
+        // PLACEMENT: after the W4 posture 409 above, BEFORE the `current_policy`
+        // branch below — therefore before `buildW4ShadowFrozenContextV1` is
+        // called, exactly as the lock requires. It guards `current_policy` ONLY;
+        // `frozen_prior` is untouched (W7-R6 owns it and the lock explicitly
+        // keeps it out of this decision).
+        //
+        // ⚠️ THIS IS NOT THE §2.4 COHERENCE PRECONDITION and must never be
+        // merged with it. This compares the prior CALCULATION's producer against
+        // the W7 state — one state machine, ACROSS TIME. §2.4 compares the W7
+        // posture against the W4 WRITE POSTURE — two state machines, NOW. Each
+        // must stay singly deletable.
+        if (prepared.state.policy === 'current_policy') {
+          const expected = resolveW4c3cExpectedCalculation(prepared.state.record, posture)
+          const coreTrxForProducer = {
+            query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+          }
+          // `currentProducer` reads the POSTURE RESOLVER, never the seam.
+          // Calling the seam to answer a yes/no question would MINT A CONTEXT as
+          // a side effect — here, before the refusal whose entire purpose is to
+          // precede production.
+          const w7Arm =
+            attendanceW4SegmentCalculationPort
+            && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+              ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(
+                  coreTrxForProducer,
+                  prepared.orgId,
+                )
+              : null
+          const currentProducer = w7Arm && w7Arm.selectsGroupArm ? 'group' : 'legacy'
+          if (expected.id) {
+            const priorContext = expected.context
+            // NO `?? 'legacy'` DEFAULT — deliberately. `selector` is a member of
+            // v1's OWN key set and the legacy builder hard-codes it, so EVERY
+            // persisted context carries one and the comparison is total. A
+            // defaulting fallback would convert "context missing or unparseable"
+            // into "legacy", which is an ALLOW — i.e. it would fail OPEN. An
+            // absent or unreadable prior context is its own fail-closed refusal.
+            if (priorContext === null || typeof priorContext !== 'object') {
+              throw new HttpError(
+                409,
+                'W4C3C_RECOMPUTE_SOURCE_SUPERSEDED',
+                'recompute is refused: the existing frozen calculation cannot be attributed to a producer',
+              )
+            }
+            // Derived from the CALCULATION, never from the parent's
+            // `projection_owner`: that column is written ONLY on the
+            // authoritative path, so a SHADOW-posture org's parent stays
+            // `legacy_untracked` while its calculations carry a full group
+            // context — a parent-based predicate reads `legacy` there and ALLOWS
+            // a recompute the ruling refuses.
+            const priorProducer = priorContext.selector === 'group_effective' ? 'group' : 'legacy'
+            if (priorProducer !== currentProducer) {
+              // Values-free: no org id, user id, work date, policy value or
+              // context fragment. This surface is reachable by an ordinary admin
+              // caller, and the audit surface must not leak or fabricate values.
+              throw new HttpError(
+                409,
+                'W4C3C_RECOMPUTE_SOURCE_SUPERSEDED',
+                'recompute is refused: the existing frozen calculation was produced by a superseded source',
+              )
+            }
+          }
         }
         const port = attendanceW4SegmentCalculationPort
         if (!port || typeof port.appendRecomputeCalculation !== 'function') {
