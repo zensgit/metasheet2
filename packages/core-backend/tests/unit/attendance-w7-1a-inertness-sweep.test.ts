@@ -292,17 +292,38 @@ describe('W7-1a structural inertness: zero production importers and call sites',
     ])
   })
 
-  it('the W7-3 transition writer is itself unreachable: zero production importers, zero call sites', () => {
+  /**
+   * The separately-gated operator tool. It is the ONE thing allowed to reach the
+   * writer, exactly as `scripts/ops/attendance-w4c5-rollout-transition{,-lib}.ts`
+   * is the one thing allowed to reach the W4 transition boundary.
+   *
+   * SHIPPING THE TOOL IS NOT RUNNING IT: a `scripts/ops` CLI is invoked by an
+   * operator under its own owner ruling, never by the server process. That is
+   * why the leg below splits into TWO assertions instead of one relaxed list —
+   * the load-bearing claim is not "nothing names the writer", it is "no module
+   * in the SERVER RUNTIME GRAPH names the writer", and that stays exactly zero.
+   */
+  const W7_TRANSITION_OPERATOR_TOOL = [
+    'scripts/ops/attendance-w7-context-source-transition-lib.ts',
+    'scripts/ops/attendance-w7-context-source-transition.ts',
+  ]
+
+  it('the W7-3 transition writer is reachable ONLY from the separately-gated operator tool', () => {
     const files = productionFiles()
 
     // Anchor-hit check FIRST: an unhit sweep and a dead gate look identical.
     expect(files, 'the writer is not in the swept set — dead sweep').toContain(W7_TRANSITION_WRITER)
+    for (const tool of W7_TRANSITION_OPERATOR_TOOL) {
+      expect(files, `the operator tool is not in the swept set: ${tool}`).toContain(tool)
+    }
 
     const importers = files
       .filter((rel) => rel !== W7_TRANSITION_WRITER)
       .filter((rel) => resolvedTargets(rel).includes(W7_TRANSITION_WRITER))
       .sort()
-    expect(importers, 'a production module imports the W7 transition writer').toEqual([])
+    expect(importers, 'an unexpected module imports the W7 transition writer').toEqual(
+      [...W7_TRANSITION_OPERATOR_TOOL].sort(),
+    )
 
     const namers: Array<{ file: string; symbol: string }> = []
     for (const rel of files) {
@@ -312,7 +333,51 @@ describe('W7-1a structural inertness: zero production importers and call sites',
         if (code.includes(symbol)) namers.push({ file: rel, symbol })
       }
     }
-    expect(namers, 'a production module names a W7 transition writer entry point').toEqual([])
+    // ONLY THE CLI names a runtime entry point. The lib half imports the writer
+    // TYPE-ONLY (erased at compile time, zero runtime dependency — that is its
+    // documented design, and the reason it can be unit-tested with no database
+    // and no CJS/ESM interop dance), so it must appear as an importer above and
+    // NOT as a namer here. Asserting the exact set is what keeps that property
+    // pinned: a lib that started calling the writer would red.
+    expect(new Set(namers.map((hit) => hit.file))).toEqual(
+      new Set(['scripts/ops/attendance-w7-context-source-transition.ts']),
+    )
+  })
+
+  it('ZERO module in the SERVER RUNTIME GRAPH reaches the W7-3 writer — the load-bearing claim', () => {
+    // `packages/**` and `plugins/**` are what the server process loads. The
+    // operator tool lives under `scripts/` and is never imported by either, so
+    // the runtime graph cannot reach the writer even transitively through it.
+    const runtimeFiles = productionFiles().filter(
+      (rel) =>
+        (rel.startsWith('packages/') || rel.startsWith('plugins/')) &&
+        rel !== W7_TRANSITION_WRITER,
+    )
+
+    // NON-VACUITY: the runtime graph is large and really contains known modules.
+    expect(runtimeFiles.length).toBeGreaterThan(300)
+    expect(runtimeFiles).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
+    expect(runtimeFiles).toContain('plugins/plugin-attendance/index.cjs')
+
+    const reachers: string[] = []
+    for (const rel of runtimeFiles) {
+      if (resolvedTargets(rel).includes(W7_TRANSITION_WRITER)) {
+        reachers.push(rel)
+        continue
+      }
+      const code = stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'))
+      if (W7_TRANSITION_WRITER_ENTRY_POINTS.some((symbol) => code.includes(symbol))) {
+        reachers.push(rel)
+      }
+    }
+    expect(reachers, 'a server-runtime module reaches the W7 transition writer').toEqual([])
+
+    // ...and nothing in the runtime graph imports the operator tool either, so
+    // the tool cannot become a runtime path by being pulled in indirectly.
+    const toolImporters = runtimeFiles
+      .filter((rel) => resolvedTargets(rel).some((t) => W7_TRANSITION_OPERATOR_TOOL.includes(t)))
+      .sort()
+    expect(toolImporters, 'a server-runtime module imports the W7 operator tool').toEqual([])
   })
 
   it('NEGATIVE CONTROL on the writer-reachability leg: a planted caller is really detected', () => {
