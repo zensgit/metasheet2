@@ -807,6 +807,13 @@ export default defineConfig({
       // the server's own deadlock detector to return 40P01. Excluded here so the no-DB job
       // cannot skip-green it; whole-file run in plugin-tests.yml's attendance step.
       'tests/integration/attendance-w7-1a-resolver.db.test.ts',
+      // #4556 W7-2 (ratified per #4556 comments 5293034619 + 5293478713): the
+      // compare-window exit-criteria counters. Seeds shadow-ledger rows against the
+      // real CHECK matrix and the deferred segment-count trigger, and asserts
+      // transaction-scoped read semantics (T-C8) — meaningless without real
+      // PostgreSQL. Two-point wired: excluded from no-DB collection here,
+      // whole-file run in plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-2-compare-window-status.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
