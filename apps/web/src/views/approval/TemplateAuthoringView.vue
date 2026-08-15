@@ -2259,10 +2259,23 @@ const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(dr
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
-const canvasStageStyle = computed(() => ({
-  width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
-  height: `${Math.round(canvasLayout.value.height * canvasZoom.value)}px`,
-}))
+const canvasStageStyle = computed(() => {
+  const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
+  const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
+  const vpW = canvasViewportState.value.width
+  const vpH = canvasViewportState.value.height
+  return {
+    minWidth: '100%',
+    minHeight: vpH ? `${vpH}px` : '100%',
+    width: `${Math.max(vpW, scaledW)}px`,
+    height: `${Math.max(vpH, scaledH + 56)}px`,
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    boxSizing: 'border-box',
+    padding: '28px 16px 64px',
+  }
+})
 const canvasSurfaceStyle = computed(() => ({
   position: 'relative' as const,
   width: `${canvasLayout.value.width}px`,
@@ -3715,9 +3728,10 @@ pre {
 .template-authoring__canvas-workspace {
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  gap: 0;
   min-width: 0;
   width: 100%;
+  min-height: min(72vh, 760px);
 }
 .template-authoring__field-palette {
   display: flex;

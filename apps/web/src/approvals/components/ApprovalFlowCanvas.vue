@@ -189,8 +189,8 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                 v-for="line in canvasEdgeLines"
                 :key="line.key"
                 :d="line.path"
-                stroke="var(--el-border-color-darker)"
-                stroke-width="1.5"
+                stroke="var(--el-border-color)"
+                stroke-width="1.25"
                 fill="none"
                 marker-end="url(#approval-canvas-arrow)"
                 data-testid="approval-canvas-edge"
@@ -380,16 +380,27 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 
 <style scoped>
 .template-authoring__canvas-main {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .template-authoring__canvas-toolbar {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 8;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
   min-height: 32px;
-  margin-bottom: 8px;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--el-bg-color) 92%, transparent);
+  box-shadow: var(--el-box-shadow-lighter);
 }
 .template-authoring__canvas-zoom-label {
   min-width: 58px;
@@ -397,15 +408,18 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas-viewport-shell {
   position: relative;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
 }
 .template-authoring__canvas-viewport {
-  min-height: 360px;
-  max-height: min(66vh, 720px);
+  min-height: min(72vh, 720px);
+  height: 100%;
+  max-height: none;
   max-width: 100%;
   overflow: auto;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 0;
   background: var(--el-fill-color-lighter);
 }
 .template-authoring__canvas-viewport:focus-visible {
@@ -419,7 +433,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas {
   position: relative;
-  background: var(--ms-bg-page);
+  background: transparent;
   min-height: 200px;
 }
 .template-authoring__canvas-edges {
@@ -430,31 +444,38 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node {
   box-sizing: border-box;
   padding: 0;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
   background: var(--ms-bg-card);
-  box-shadow: var(--el-box-shadow-lighter);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   cursor: default;
   font-size: 12px;
-  min-height: 96px;
+  min-height: 76px;
+  height: 76px;
 }
 .template-authoring__canvas-node[draggable='true'] {
   cursor: grab;
 }
 .template-authoring__canvas-node.is-selected {
   border-color: var(--el-color-primary);
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-7);
+}
+.template-authoring__canvas-node.is-selected .template-authoring__canvas-node-kind[data-node-type='approval'] {
+  background: var(--el-color-primary);
+  color: var(--el-color-white);
 }
 .template-authoring__canvas-node.is-moving {
   border-style: dashed;
   border-color: var(--el-color-primary);
 }
 .template-authoring__canvas-node-kind {
-  flex: 0 0 auto;
-  padding: 6px 10px 4px;
+  flex: 0 0 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
   color: var(--el-text-color-primary);
@@ -484,10 +505,10 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node-selector {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
   flex: 1 1 auto;
-  padding: 8px 10px 10px;
+  padding: 0 12px;
   cursor: pointer;
   outline: none;
 }
@@ -498,12 +519,10 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--el-text-color-regular);
-  line-height: 1.35;
+  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
 }
 .template-authoring__canvas-node-chevron {
   flex: 0 0 auto;
@@ -624,7 +643,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-minimap {
   position: absolute;
   right: 12px;
-  bottom: 12px;
+  bottom: 56px;
   box-sizing: border-box;
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
@@ -652,9 +671,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   padding-left: 18px;
 }
 .template-authoring__hint {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
+  display: none;
 }
 .template-authoring__node-type {
   font-size: 11px;

@@ -167,17 +167,18 @@ defineExpose({
 
 <style scoped>
 .template-authoring__canvas-inspector {
-  flex: 0 0 400px;
-  width: 400px;
+  flex: 0 0 360px;
+  width: 360px;
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-left: 1px solid var(--el-border-color);
+  border-radius: 0;
   background: var(--el-bg-color);
   display: flex;
   flex-direction: column;
-  max-height: min(70vh, 720px);
+  max-height: none;
   overflow: hidden;
   scroll-margin-top: 164px;
 }
