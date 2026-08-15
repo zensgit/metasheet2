@@ -80,7 +80,7 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     published UAT template. MetaSheet showed it as pending for the linked local assignee. No
     controllable DingTalk message surface or human confirmation was available in the window, so
     card receipt, callback execution, corp-anchor fields, duplicate/non-assignee behavior, and the
-    remaining U1-U11 assertions were **NOT EXECUTED**. A pending MetaSheet approval is not delivery
+    remaining U1-U13 assertions were **NOT EXECUTED**. A pending MetaSheet approval is not delivery
     or callback evidence.
 11. The fail-safe
     [off 31856520796](https://github.com/zensgit/metasheet2/actions/runs/31856520796) completed with
@@ -431,7 +431,7 @@ must not be pasted into this document or chat.
 | production alias enable | **NO GO** until owner reviews staging evidence and separately authorizes production |
 | production pending enable | **NO GO**; staging admit/activate and post-activation OAuth positive passed, but production readiness and owner GO remain incomplete |
 | production deprovision enable | **NO GO**; staging apply/restore and post-restore OAuth positive passed, but the apply-time browser denial checkpoint, production readiness, and separate owner GO remain incomplete |
-| interactive-card Stream enable | **NO GO for production**; staging start/stop is proven, but the U1-U11/U11-a real-card matrix is not executed and production Stream inputs remain absent |
+| interactive-card Stream enable | **NO GO for production**; staging start/stop is proven, but the U1-U13/U11-a real-card matrix is not executed and production Stream inputs remain absent |
 | Transfer T3-T5 | **FROZEN**; real two-corp T2-Gate remains separate and unexecuted |
 | lifecycle production-enable owner | **NOT ASSIGNED**; do not infer an owner from repository or staging access |
 | interactive-card UAT owner | one staging window was owner-authorized; a synchronized real-time assignee/non-assignee operator is still **NOT ASSIGNED** for the remaining click matrix |
