@@ -1915,6 +1915,73 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       })
     })
 
+    it('P3-4 `pass !== true` is load-bearing: a resume plan BLOCKS on the unevaluated §5.3 artifact ALONE', async () => {
+      // THE GUARD THIS SLICE'S OWN FIX ROUND ADDED, AND DID NOT TEST.
+      //
+      // `blocked` and the writer's refusal loop were changed from `!pass` to
+      // `pass !== true` so that an APPLICABLE criterion which could not be
+      // evaluated (`pass: null`) blocks exactly as a failing one does. Nothing
+      // asserted that: loosening it to `pass === false` left 43/43 green,
+      // because every other blocked-assertion in the suite has a predicate with
+      // a REAL `false` carrying it.
+      //
+      // The only state where the distinction is observable is the resume plan:
+      // `RESUME_REPLAY_ARTIFACT` is `evaluated:false, pass:null` there (the plan
+      // has no evidence manifest), and with every other applicable criterion
+      // passing, `blocked` rests SOLELY on `null !== true`. Loosened, the plan
+      // would report "you may resume" while design-lock §5.3's mandatory
+      // offline-replay-artifact criterion was never evaluated at all.
+      //
+      // This escalates the day W7-1b flips `W7_STATE_PRODUCER_DELIVERED` to
+      // delivered: the override below stops being a test-only construction and
+      // becomes the shipped configuration.
+      const orgId = await preparedOrg()
+      await advanceToGroupAuthoritative(orgId) // leaves the delivery overrides SET
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(
+          asTrx(client),
+          input(orgId, {
+            expectedState: 'group_authoritative',
+            targetState: 'suspended',
+            expectedVersion: 4,
+          }),
+        )
+      })
+      expect((await stateRow(orgId))?.state, 'the org must be parked at suspended').toBe('suspended')
+
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId,
+          targetState: 'group_authoritative',
+        })
+        expect(plan.currentState).toBe('suspended')
+        expect(plan.legalPair, 'suspended -> group_authoritative must be the resume pair').toBe(true)
+        expect(plan.ladderRole).toBe('resume')
+
+        // 1. The criterion is applicable and honestly NOT evaluated.
+        expect(plan.predicates.find((p) => p.code === 'RESUME_REPLAY_ARTIFACT')).toMatchObject({
+          applicable: true,
+          evaluated: false,
+          pass: null,
+          count: null,
+        })
+
+        // 2. IT IS THE ONLY THING BLOCKING. This is what makes the leg
+        //    discriminating rather than incidentally green: if any other
+        //    applicable criterion carried a real `false`, `blocked` would stay
+        //    true under the loosened comparison and this leg would prove
+        //    nothing. Asserted as a positive equality on the offenders list.
+        const nonPassing = plan.predicates
+          .filter((predicate) => predicate.applicable && predicate.pass !== true)
+          .map((predicate) => predicate.code)
+          .sort()
+        expect(nonPassing).toEqual(['RESUME_REPLAY_ARTIFACT'])
+
+        // 3. ...and the plan therefore refuses.
+        expect(plan.blocked, 'an unevaluated mandatory criterion must BLOCK').toBe(true)
+      })
+    })
+
     it('the RESUME criterion is reported not-evaluated by the plan (which has no manifest) — not as a pass', async () => {
       // It is enforced at INPUT time by the resume-widened reference key set, so
       // the plan genuinely cannot certify it. Before the fix round both callers

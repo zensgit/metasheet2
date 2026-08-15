@@ -911,11 +911,20 @@ async function evaluatePredicates(
   // OD-W7-0..10, the 11 sub-rulings, the 执行序 and the 开工边界 and nothing
   // else; `git grep "package-ruled"` returns zero hits repo-wide; and the
   // sibling W7-1b PR #4911 states on the record that all nine of its §14
-  // O-forks, O-2 included, REMAIN OPEN. The phrase reached this file from the
-  // commissioning task text, which is an agent message and therefore never an
-  // owner-authored authorization source. The brief itself declined to
-  // recommend here: "No recommendation offered — it is the same question as
-  // O-2 and should receive one answer, not two."
+  // O-forks, O-2 included, REMAIN OPEN.
+  //
+  // WHAT THIS WAS, precisely: not an invention, but A STALE RELAY OF A
+  // SUPERSEDED APPROVAL. The phrase descended from an earlier
+  // conversation-level owner approval of the decision package; the later
+  // owner-confirmed #4556 ratification pair SUPERSEDES it. The durable
+  // canonical artifact — not the commissioning text that carried the older
+  // approval forward — is the authority. That is the sharper lesson, not a
+  // mitigation: a citation can be honestly relayed and still be wrong, because
+  // approval does not survive its own supersession, and only the ratified
+  // artifact says what is in force at this head.
+  //
+  // The brief itself declined to recommend here: "No recommendation offered —
+  // it is the same question as O-2 and should receive one answer, not two."
   //
   // So the honest status is: a coupling between two posture machines that
   // OD-W7-3(a)'s own consequence note calls independent has been introduced by
@@ -1404,10 +1413,22 @@ export async function transitionAttendanceW7ContextSourceV1(
       // and a test can seed exactly one failure and assert exactly one code.
       for (const predicate of evaluation.predicates) {
         // `pass !== true` mirrors `blocked` exactly: an applicable criterion the
-        // boundary could not evaluate must refuse, never proceed. Unreachable on
-        // this path today — the writer calls `evaluatePredicates` with all three
-        // gating flags `true`, after its own allowlist refusal — but the gate
-        // and the report must not be able to disagree even under a future edit.
+        // boundary could not evaluate must refuse, never proceed.
+        //
+        // UNREACHABLE ON ANY LIVE PATH TODAY, and stated with the evidence
+        // rather than as a claim: the writer calls `evaluatePredicates` with all
+        // three gating flags `true` (after its own allowlist refusal) and with
+        // `resumeEvidenceValidated: true`, so no applicable predicate can be
+        // `pass: null` here. Loosening THIS comparison to `pass === false`
+        // leaves the whole battery green — measured, not assumed. The
+        // `blocked` twin in the reporter is the one that is observable, and it
+        // IS pinned (see the P3-4 leg in the real-PG suite).
+        //
+        // Kept deliberately, on the same footing as the second
+        // `findLegalTransition` call this file already documents as
+        // redundant-but-retained: the gate and the report must not be able to
+        // disagree under a future edit that makes an unevaluated predicate
+        // reachable on the write path.
         if (predicate.applicable && predicate.pass !== true) {
           fail(PREDICATE_REFUSAL_CODES[predicate.code])
         }
