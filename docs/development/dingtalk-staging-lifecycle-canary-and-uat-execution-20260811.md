@@ -165,6 +165,20 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     [status 31865699179](https://github.com/zensgit/metasheet2/actions/runs/31865699179) proved Stream
     OFF, worker disabled, exact deployed SHA, healthy backend, and all lifecycle flags OFF. This
     advances U1 receipt only; U4/U11-a remain unexecuted.
+20. With the assignee waiting at the card action, a second bounded callback window used
+    [on 31866096022](https://github.com/zensgit/metasheet2/actions/runs/31866096022). The assignee
+    clicked approve on the DingTalk card. The MetaSheet approval detail for `AP-100012` then showed
+    `approved`, progress `1 / 1`, and a terminal approval, proving the real callback advanced the
+    approval (U4). The DingTalk card did not visibly change to its terminal copy, so U9 is not PASS;
+    without the values-free update-failure log this observation is not claimed as a completed U10
+    fault-injection proof. The callback's successful business outcome is consistent with passing the
+    corp gate, but U11-a remains pending until the required values-free corp-anchor log fields are
+    captured. Fail-safe
+    [off 31866293827](https://github.com/zensgit/metasheet2/actions/runs/31866293827) succeeded, and
+    terminal read-only
+    [status 31866437330](https://github.com/zensgit/metasheet2/actions/runs/31866437330) proved exact
+    deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, one
+    eligible configured-corp anchor, and all lifecycle flags OFF.
 
 ## 1. Environment boundary
 

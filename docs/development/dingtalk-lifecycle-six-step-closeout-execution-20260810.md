@@ -129,15 +129,17 @@ The former image-tag/health-commit conflict is resolved. Alias and pending produ
 ## 4. Owner and ops acceptance
 
 Controlled staging Stream windows ran, and `AP-100012` produced a real interactive-card delivery
-whose receipt the assignee confirmed. Human-click and callback evidence remain unavailable.
-Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
+whose receipt the assignee confirmed. The assignee subsequently clicked approve and the MetaSheet
+approval reached its terminal approved state. The DingTalk card did not visibly refresh, and the
+required values-free corp-anchor log has not yet been captured. Therefore the full matrix remains
+partial rather than simulated PASS:
 
-- U1-U13 interactive-card acceptance;
-- U11-a real callback corp-anchor;
+- U1 delivery and U4 real approve callback are PASS; U2-U3 and U5-U13 remain incomplete;
+- U9 terminal card display is not PASS, and U11-a real callback corp-anchor log remains pending;
 - named owners and final production switch decisions;
 - deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; the assignee later confirmed receipt, so U1 delivery is proven. A subsequent bounded callback window ended without a successful human click, leaving U4/U11-a and the broader matrix incomplete. Terminal run `31865699179` independently proves the lifecycle flags and Stream remain OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; the assignee confirmed receipt (U1) and a later bounded window processed the real approve callback to a terminal MetaSheet approval (U4). The card's terminal presentation did not visibly refresh, and the U11-a values-free corp-anchor log plus the broader matrix remain incomplete. Terminal run `31866437330` independently proves the lifecycle flags and Stream remain OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
@@ -178,4 +180,4 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
 | Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
 
-The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, and `31864532416`/`31864575172`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. The fourth window's fresh approval `AP-100012` completed automation with `deliveryKind=interactive_card`, but human receipt/click and the real callback corp-anchor remain unexecuted; the U1-U13 matrix is therefore partial, not PASS. Read-only run `31865023926` also proves the draft #4890 HTTPS gateway remains healthy and active with its pre-HTTPS backup retained; `https-off` remains an explicit owner-gated deployment action. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31866293827`/`31866437330`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. Approval `AP-100012` completed automation with `deliveryKind=interactive_card`; the assignee confirmed receipt (U1), and a later real card click advanced MetaSheet to terminal approved (U4). The DingTalk card did not visibly refresh, the U11-a values-free corp-anchor log is still missing, and the remaining U1-U13 matrix is incomplete; it is therefore partial, not PASS. Read-only run `31865023926` also proves the draft #4890 HTTPS gateway remains healthy and active with its pre-HTTPS backup retained; `https-off` remains an explicit owner-gated deployment action. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
