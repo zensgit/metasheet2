@@ -529,6 +529,18 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
       // witness plus the discriminants, not "not the legacy shape".
       expect(ctx.w7MirrorEffectiveState).toBe('group_authoritative')
       expect(ctx.w7MirrorSelectsGroupArm).toBe(true)
+      // FIXTURE PRECONDITION before the witness: an unresolvable candidate
+      // (e.g. a punch outside the seeded shift's viable window) nulls the
+      // context long before any origin-registry question arises — without
+      // this, that failure mode reports as "not a CORE-ISSUED V2 context",
+      // misdirecting at the registry/module-identity hazards. That exact
+      // misdirection cost a diagnosis round when this leg went red purely on
+      // wall-clock (see the full-day fixture note on insertShift).
+      expect(
+        (ctx.outerResolution as { kind?: string } | null)?.kind,
+        'FIXTURE PRECONDITION FAILED: the punch instant did not resolve to a candidate — ' +
+          'check the seeded shift window covers the full day before suspecting the seam',
+      ).toBe('resolved')
       expect(
         isCoreIssuedGroupEffectiveContextV2(ctx.outerContext),
         'the mirror must have hashed a CORE-ISSUED group-effective V2 context',
