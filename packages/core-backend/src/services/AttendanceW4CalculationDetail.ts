@@ -30,8 +30,12 @@ export type AttendanceW4ShadowDiffCode = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES
 // compare-window counters. NOTE for editors: comments in this file must stay
 // free of stray backticks and apostrophes — the DML-inventory read census
 // derives SQL-literal boundaries with a quote-parity scan over the whole file,
-// and an odd quote count above a query silently strips its predicate
-// fingerprint (observed while landing W7-2).
+// and an odd quote count above a query strips its predicate fingerprint. For
+// a CLASSIFIED site the census then reds loudly on count/predicate drift
+// (gate-probed while landing W7-2 — the earlier wording here said the strip
+// was silent, which the gate refuted at classified sites); an UNCLASSIFIED
+// site would lose its fingerprint without that backstop, so keep comments
+// quote-clean either way.
 const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>(
   ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1,
 )

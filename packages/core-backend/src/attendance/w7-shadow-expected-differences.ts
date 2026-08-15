@@ -276,12 +276,15 @@ export const ATTENDANCE_W7_EXPECTED_SHADOW_DIFFERENCES_V1: readonly AttendanceW7
 const ENTRY_INVALID = 'W7_SHADOW_EXPECTED_DIFFERENCE_ENTRY_INVALID'
 
 /** Matches an owner-authored artifact reference: an issue/PR/comment number
- *  (`#4556 …`) or a docs artifact filename (`….md`). A `ratifiedBy` naming
- *  this module itself is self-authorization and is rejected. */
+ *  (`#4556 …`, three-plus digits — a bare `#1` names nothing in this repo's
+ *  artifact space; gate P3-5) or a docs artifact filename (`….md`, with a
+ *  real basename). A `ratifiedBy` naming this module itself is
+ *  self-authorization and is rejected. This is a mechanical FLOOR — the
+ *  review of an entry's authority is B-1's owner step, not this regex. */
 function isPlausibleAuthorityArtifact(ratifiedBy: unknown): boolean {
   if (typeof ratifiedBy !== 'string' || ratifiedBy.trim().length === 0) return false
   if (ratifiedBy.includes('w7-shadow-expected-differences')) return false
-  return /#\d+/.test(ratifiedBy) || /\.md\b/.test(ratifiedBy)
+  return /#\d{3,}/.test(ratifiedBy) || /[\w-]+\.md\b/.test(ratifiedBy)
 }
 
 function parseRosterEntry(entry: AttendanceW7ExpectedShadowDifferenceEntryV1): AttendanceW7ShadowDifferenceProbeV1 {

@@ -87,10 +87,14 @@ function fail(code: string): never {
 /**
  * The writer-controlled `input_provenance` key every W7-2 group-shadow
  * comparison record carries (both the compare rows and the null-context
- * fail-close records). Written ONLY by the boundary's W7-2 recording helper;
- * also the partition key of the `uq_arc_operation` dedup index split (the W7
- * comparison record shares its producing operation with the served row it
- * compares against, so it lives in its own dedup partition).
+ * fail-close records). Written ONLY by the boundary's W7-2 recording helper.
+ * Its member `operationId` carries the PRODUCING operation — the comparison
+ * record's own `operation_id` column is NULL by design
+ * (`chk_arc_operation_id`'s marker disjunct), so `uq_arc_operation` and every
+ * operation-replay lookup are untouched by the dual-run; the marker's
+ * `operationId` is the identity key of `uq_arc_w7_comparison_identity`
+ * (one comparison record per producing operation), and its `shadowReason`
+ * member drives the `W7_GROUP_RESOLUTION_FAILCLOSE` counter.
  */
 export const ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1 = 'w7GroupShadowCompare'
 
@@ -174,12 +178,20 @@ function asCount(value: unknown): number {
 /** The shared in-window W7 compare-row filter fragment. `selector` is read
  *  with NO default (see the header); the totality of `selector` over non-null
  *  contexts is asserted separately and FIRST, so this fragment never silently
- *  partitions a selector-less corrupt row out of the group domain. */
+ *  partitions a selector-less corrupt row out of the group domain.
+ *
+ *  Gate P3-2: the writer-controlled marker (`$4`, bound — never interpolated,
+ *  gate P3-4) is a CONJUNCT here alongside the selector. Selector alone would
+ *  count `group_authoritative`-era W4 shadow rows (which legitimately carry a
+ *  group V2 context) as W7 compare rows in a window spanning the
+ *  `group_eligible -> group_authoritative` transition; the marker pins the
+ *  domain to rows the W7-2 comparison recorder wrote. */
 const W7_COMPARE_ROW_FILTER = `
       c.org_id = $1
       AND c.mode = 'shadow'
       AND r.work_date >= $2::date
       AND r.work_date <= $3::date
+      AND (c.input_provenance ? $4)
       AND c.context_snapshot IS NOT NULL
       AND (c.context_snapshot ->> 'selector') = 'group_effective'`
 
@@ -196,7 +208,7 @@ export async function readAttendanceW7CompareWindowStatusV1(
 ): Promise<AttendanceW7CompareWindowStatusV1> {
   const input = parseInput(rawInput)
   const { orgId, from, to } = input
-  const params = [orgId, from, to]
+  const params = [orgId, from, to, ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]
 
   // -------------------------------------------------------------------------
   // T-D2 totality gate FIRST: a non-null context with no `selector` member is
@@ -214,7 +226,9 @@ export async function readAttendanceW7CompareWindowStatusV1(
         AND r.work_date <= $3::date
         AND c.context_snapshot IS NOT NULL
         AND (c.context_snapshot ->> 'selector') IS NULL`,
-    params,
+    // Deliberately NOT marker-scoped: a selector-less non-null context is
+    // corruption on ANY shadow row in the window, W4 or W7.
+    [orgId, from, to],
   )
   if (asCount(selectorless.rows[0]?.n) !== 0) fail('W7_COMPARE_CONTEXT_SELECTOR_MISSING')
 
@@ -227,7 +241,7 @@ export async function readAttendanceW7CompareWindowStatusV1(
        JOIN attendance_records r
          ON r.id = c.attendance_record_id AND r.org_id = c.org_id
       WHERE ${W7_COMPARE_ROW_FILTER}
-        AND c.shadow_diff_code = ANY($4::text[])`,
+        AND c.shadow_diff_code = ANY($5::text[])`,
     [...params, [...ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1]],
   )
   const criticalCount = asCount(critical.rows[0]?.n)
@@ -289,7 +303,7 @@ export async function readAttendanceW7CompareWindowStatusV1(
         AND c.mode = 'shadow'
         AND r.work_date >= $2::date
         AND r.work_date <= $3::date
-        AND (c.input_provenance -> '${ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1}' ->> 'shadowReason') IS NOT NULL`,
+        AND (c.input_provenance -> $4 ->> 'shadowReason') IS NOT NULL`,
     params,
   )
   const failcloseCount = asCount(failclose.rows[0]?.n)

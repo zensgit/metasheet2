@@ -155,10 +155,19 @@ describeDb('W7-2 §3.5 — compare-window exit-criteria counters (real DB, seede
   async function insertShadowRow(spec: ShadowRowSpec): Promise<string> {
     const calculationId = randomUUID()
     const completed = spec.outcome === 'completed'
+    // W7 comparison records carry `operation_id NULL` and the producing
+    // operation in the marker (chk_arc_operation_id's marker disjunct);
+    // served-path rows carry their operation id as before.
     const inputProvenance =
       spec.w7Marker === undefined
         ? {}
-        : { [ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]: { schemaVersion: 1, shadowReason: spec.w7Marker.shadowReason } }
+        : {
+            [ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]: {
+              schemaVersion: 1,
+              operationId: randomUUID(),
+              shadowReason: spec.w7Marker.shadowReason,
+            },
+          }
     const shadowDiff = {
       schemaVersion: 1,
       code: spec.shadowDiffCode,
@@ -207,7 +216,7 @@ describeDb('W7-2 §3.5 — compare-window exit-criteria counters (real DB, seede
           spec.outcomeReasonCode,
           completed ? 1 : 0,
           `w7-2-corr-${calculationId}`,
-          randomUUID(),
+          spec.w7Marker === undefined ? randomUUID() : null,
           completed ? spec.projectedStatus ?? 'normal' : null,
           completed ? 480 : null,
           completed ? 0 : null,
@@ -309,6 +318,17 @@ describeDb('W7-2 §3.5 — compare-window exit-criteria counters (real DB, seede
       w7Marker: { shadowReason: null },
       outcome: 'completed', outcomeReasonCode: 'shadow_only',
       shadowDiffCode: 'equal',
+    })
+    // Gate P3-2 scenario: a `group_authoritative`-era W4 shadow row — it
+    // legitimately carries a group_effective V2 context but NO marker (the
+    // ordinary W4 shadow producer wrote it). Every W7 counter must exclude it:
+    // the marker conjunct, not the selector alone, is what pins the compare
+    // domain to rows the W7-2 comparison recorder wrote.
+    await insertShadowRow({
+      recordId: r3, orgId: orgMixed,
+      context: mintV2Context(orgMixed, u3, WORK_DATE) as unknown as Record<string, unknown>,
+      outcome: 'completed', outcomeReasonCode: 'shadow_only',
+      shadowDiffCode: 'work_minutes_mismatch', changedFields: ['workMinutes'],
     })
     // A W7 group-resolution FAIL-CLOSE record: null context, reason carried.
     await insertShadowRow({
@@ -443,13 +463,15 @@ describeDb('W7-2 §3.5 — compare-window exit-criteria counters (real DB, seede
   // -------------------------------------------------------------------------
   // T-C2 + T-D1 (seeded) + T-D3 — real counts over the mixed org.
   // -------------------------------------------------------------------------
-  it('T-C2/T-D1(seeded): counts are exact, and every counter counts ONLY the selector-discriminated W7 rows', async () => {
+  it('T-C2/T-D1(seeded): counts are exact, and every counter counts ONLY the marker+selector-discriminated W7 comparison records', async () => {
     const result = await status(orgMixed)
-    // T-D1: r1 and r2 each carry BOTH a W4 twin and a W7 row with the same
-    // code. A selector-blind implementation (mode='shadow' alone) would count
-    // 2 critical (W4 context_mismatch twin) and 4 off-roster rows.
+    // T-D1: r1 and r2 each carry BOTH a W4 twin and a W7 record with the same
+    // code, and r3 additionally carries the P3-2 group_authoritative-era W4
+    // row (group V2 context, NO marker). A marker-blind implementation would
+    // count that r3 row as a third off-roster diff; a selector/marker-blind
+    // one would count the W4 twins too.
     expect(predicate(result, 'W7_CRITICAL_SHADOW_DIFF').count).toBe(1)
-    expect(predicate(result, 'W7_OFF_ROSTER_DIFF').count).toBe(2) // r1 W7 + r2 W7; equal row excluded
+    expect(predicate(result, 'W7_OFF_ROSTER_DIFF').count).toBe(2) // r1 W7 + r2 W7; equal + unmarked-V2 rows excluded
     expect(predicate(result, 'W7_COMPARE_COVERAGE').count).toBe(3) // (u1,0105),(u2,0105),(u3,0105); fail-close has no context
     expect(predicate(result, 'W7_GROUP_RESOLUTION_FAILCLOSE').count).toBe(1)
     expect(predicate(result, 'W7_UNRESOLVED_INGRESS_REVIEW').count).toBe(0)
@@ -680,8 +702,14 @@ describeDb('W7-2 §3.5 — compare-window exit-criteria counters (real DB, seede
           calculationId, recordId, orgClean,
           hex64(`semantic:${calculationId}`), hex64(`provenance:${calculationId}`), hex64(`sourcedef:${calculationId}`),
           JSON.stringify({ posture: 'resolved_v2', value: { orgId: orgClean, userId: uTx, workDate: '2026-01-08', shiftId: randomUUID() } }),
-          JSON.stringify({ [ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]: { schemaVersion: 1, shadowReason: null } }),
-          `w7-2-corr-${calculationId}`, randomUUID(),
+          JSON.stringify({
+            [ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]: {
+              schemaVersion: 1,
+              operationId: randomUUID(),
+              shadowReason: null,
+            },
+          }),
+          `w7-2-corr-${calculationId}`, null,
           JSON.stringify({ schemaVersion: 1, code: 'context_mismatch', changedFields: ['context'], absoluteMinuteDelta: 0, segmentCount: 0 }),
           JSON.stringify(minted),
         ],

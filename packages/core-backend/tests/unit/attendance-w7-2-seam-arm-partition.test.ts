@@ -11,7 +11,11 @@
  * array reds without a database.
  */
 import { describe, it, expect } from 'vitest'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1 } from '../../src/attendance/w7-context-source-posture-contract'
+import { ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1 } from '../../src/attendance/w7-compare-window-status'
 import {
   ATTENDANCE_W7_GROUP_ARM_STATES_V1,
   ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1,
@@ -63,6 +67,29 @@ describe('W7-2 §3.1 — seam arm-state partition', () => {
     const widened = [...ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1, 'group_frozen_probation']
     expect(() => assertAttendanceW7ArmStatePartitionV1(widened)).toThrowError(
       'W7_ARM_STATE_PARTITION_INVALID',
+    )
+  })
+
+  it('gate P3-1 — the marker literal has exactly one TS definition, and the migration’s SQL copies match it byte-for-byte', () => {
+    // The migration necessarily spells the marker as SQL literals (a CHECK
+    // and an index predicate cannot bind a TS constant); this leg couples the
+    // two copies so a rename on either side reds here rather than only
+    // through a produced-row failure path.
+    const here = path.dirname(fileURLToPath(import.meta.url))
+    const migration = fs.readFileSync(
+      path.join(
+        here,
+        '../../src/db/migrations/zzzz20260815130000_w7_2_group_shadow_comparison_identity.ts',
+      ),
+      'utf8',
+    )
+    const literal = `input_provenance ? '${ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1}'`
+    const occurrences = migration.split(literal).length - 1
+    // The CHECK's marker disjunct, its exclusion in the operation-bearing
+    // disjunct, and the identity index predicate.
+    expect(occurrences).toBeGreaterThanOrEqual(3)
+    expect(migration).toContain(
+      `input_provenance -> '${ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1}' ->> 'operationId'`,
     )
   })
 })
