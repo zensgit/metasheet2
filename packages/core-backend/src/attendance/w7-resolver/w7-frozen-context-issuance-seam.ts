@@ -109,6 +109,34 @@ export function attendanceW7PostureSelectsGroupArmV1(
   return ATTENDANCE_W7_GROUP_ARM_STATES_V1.includes(effectiveState)
 }
 
+/**
+ * Answer "does the W7 posture select the group arm for this org" WITHOUT
+ * minting a context.
+ *
+ * This is the read the ruling-7 mirror gate needs (its W7 disjunct must be a
+ * REAL posture read, never an env read — re-deriving the two-part rule from the
+ * allowlist alone would reintroduce the exact allowlist-alone hole the ruling's
+ * inert negative controls exist to catch), and it is the read OD-W7-10's
+ * `currentProducer` needs for the same reason: calling the seam to answer a
+ * yes/no question would mint a context as a side effect.
+ *
+ * It is a plain unlocked `SELECT` (1a's posture resolver takes no locks) and it
+ * is deliberately NOT short-circuited on the allowlist env: a short-circuit
+ * would skip 1a's three hard throws for every non-allowlisted org, making a
+ * corrupt or ambiguous posture row indistinguishable from an unconfigured one —
+ * precisely the corruption-blindness 1a's resolver was built to prevent.
+ */
+export async function resolveAttendanceW7GroupArmSelectionV1(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<{ effectiveState: AttendanceW7ContextSourcePostureStateV1; selectsGroupArm: boolean }> {
+  const posture = await resolveAttendanceW7ContextSourcePostureV1(trx, orgId)
+  return {
+    effectiveState: posture.effectiveState,
+    selectsGroupArm: attendanceW7PostureSelectsGroupArmV1(posture.effectiveState),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types.
 // ---------------------------------------------------------------------------

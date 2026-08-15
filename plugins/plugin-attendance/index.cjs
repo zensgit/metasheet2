@@ -587,6 +587,14 @@ function __setAttendanceW4LivePunchPreBoundarySeamForTests(seam) {
   }
   attendanceW4LivePunchPreBoundarySeamForTests = typeof seam === 'function' ? seam : null
 }
+// W7-1b (#4556 comments 5293034619 + 5293478713): a module-scope REFERENCE cell
+// for the issuance seam, populated at `activate()` once the host port and the
+// plugin-owned deps are both in scope. The W7-R3 golden harness and the mirror
+// suites reach the SAME seam the production mirror calls — not a
+// re-implementation of it — which is the only way a golden can prove anything
+// about production bytes. The cell holds `null` until activate runs, so a suite
+// that forgets to activate gets a hard failure rather than a silent skip.
+const __attendanceW7IssuanceSeamRefForTests = { issueAttendanceFrozenContextV1: null }
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -24086,6 +24094,10 @@ module.exports = {
   // the D2 boundary suite drives production bytes rather than a re-implementation. Exposing the
   // legacy adapter here is what lets that suite wrap it in a call-count spy and prove the
   // authoritative branch invokes it ZERO times (the P-A control-flow pin).
+  // W7-1b (#4556): the PRODUCTION issuance seam, exposed so the W7-R3 golden
+  // harness and the mirror suites drive the same bytes the mirror does.
+  // Populated at activate(); `null` before that, deliberately.
+  __attendanceW7IssuanceSeamForTests: __attendanceW7IssuanceSeamRefForTests,
   __attendanceW4c2LivePunchAdaptersForTests: {
     insertLivePunchEventV1,
     deriveLivePunchWorkDateResolutionV1,
@@ -24828,11 +24840,83 @@ module.exports = {
       && typeof attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1 === 'function'
         ? attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1
         : null
+    // W7-1b (#4556 comments 5293034619 + 5293478713): the single shared
+    // frozen-context issuance seam, reached over the SAME host-port mechanism
+    // and with the SAME presence-guard discipline as
+    // `computeOuterSourceDefinitionFingerprintV1` above. It is folded into the
+    // `w4LiveScheduledBoundary` required-method conjunction below deliberately:
+    // a host that exposes `createLiveScheduledBoundary` but NOT this method must
+    // fail closed exactly the way every other missing required method already
+    // does, never silently take the legacy arm. Silently degrading to legacy is
+    // the one outcome the REPLACE cutover cannot tolerate, because it is
+    // indistinguishable from a correctly-configured legacy org.
+    const w4IssueFrozenContextV1 =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.issueAttendanceFrozenContextV1 === 'function'
+        ? attendanceW4SegmentCalculationPort.issueAttendanceFrozenContextV1
+        : null
+
+    /**
+     * W7-1b — call the seam with a PLUGIN-shaped transaction client.
+     *
+     * Two client shapes meet here and getting them backwards is silent:
+     *   - the W7 resolvers read a CORE-shaped client (`query()` -> `{ rows }`);
+     *   - `buildW4ShadowFrozenContextV1` reads a PLUGIN-shaped one
+     *     (`query()` -> row array, indexed directly as `rows[0]`).
+     * Passing the wrong shape does not throw — the builder simply reads
+     * `undefined` and returns `null`, which downstream looks exactly like "this
+     * org has no shift". So the adaptation happens HERE, once, and the legacy
+     * builder is handed the caller's own untouched client through a pre-bound
+     * thunk rather than being re-shaped inside the seam.
+     *
+     * `loadOrgRuleFacts` deliberately closes over the SAME plugin-shaped client
+     * and ignores the core-shaped one the resolver passes it: the org rule
+     * scalars are read by `loadDefaultRule`, a plugin-owned reader, and it must
+     * run inside the caller's transaction rather than on a second connection.
+     */
+    const issueW4FrozenContextViaW7SeamV1 = async (pluginTrx, args) => {
+      if (!w4IssueFrozenContextV1) {
+        // Unreachable while the boundary conjunction above holds; asserted
+        // rather than assumed, because a silent legacy fallback here would
+        // defeat the whole REPLACE cutover.
+        throw new HttpError(503, 'W7_ISSUANCE_SEAM_UNAVAILABLE', 'Attendance calculation host is not available.')
+      }
+      const coreTrx = {
+        query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
+      }
+      return w4IssueFrozenContextV1(
+        coreTrx,
+        {
+          deriveFixedScheduleEffectiveness:
+            attendanceGroupFixedScheduleEffectivenessServiceLib
+              .deriveAttendanceGroupFixedScheduleEffectiveness,
+          buildFixedScheduleProducerKey: buildAttendanceGroupFixedScheduleProducerKey,
+          loadOrgRuleFacts: async (_coreTrx, orgKey) => {
+            const rule = await loadDefaultRule(pluginTrx, orgKey)
+            return {
+              severeLateThresholdMinutes: Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+                ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+                : DEFAULT_RULE.severeLateThresholdMinutes,
+              absenceLateThresholdMinutes: Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+                ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+                : DEFAULT_RULE.absenceLateThresholdMinutes,
+            }
+          },
+          buildLegacyFrozenContext: (legacyArgs) =>
+            buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs),
+        },
+        args,
+      )
+    }
+    __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
+      issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
+
     const w4LiveScheduledBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
       && w4MergePolicyPure
       && w4ComputeOuterSourceDefinitionFingerprint
+      && w4IssueFrozenContextV1
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
@@ -29490,9 +29574,76 @@ module.exports = {
           // guarded block, still `null` under the identical conditions as before).
           let outerResolution = null
           let outerContext = null
+          // ---------------------------------------------------------------
+          // W7-1b RULING-7 MIRROR REWORK (#4556 comments 5293034619 +
+          // 5293478713). TWO independent changes, both required; either alone
+          // leaves a hole, and they have different mutations.
+          //
+          // (R7-a) THE GATE IS NOW A DISJUNCTION. It was solely
+          //   `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`, so the fingerprint
+          //   was `null` whenever that variable was unset — and any group arm
+          //   reachable in that configuration compared its in-transaction
+          //   fingerprint against `null`. The W7 disjunct is a REAL POSTURE
+          //   READ, never an env read: re-deriving the two-part rule from the
+          //   allowlist alone would reintroduce the allowlist-alone hole the
+          //   ruling's inert negative controls exist to catch.
+          //
+          //   The posture read is UNCONDITIONAL and is deliberately not
+          //   short-circuited on either env var. The reason is correctness, not
+          //   cost: short-circuiting would skip W7-1a's three hard throws
+          //   (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` / `_STATE_INVALID` /
+          //   `_SCOPE_INVALID`) for every non-allowlisted org, making a corrupt
+          //   posture row indistinguishable from an unconfigured one. It is a
+          //   plain unlocked SELECT.
+          //
+          // (R7-b) THE MIRROR ROUTES THROUGH THE SAME SEAM. It used to call
+          //   `buildW4ShadowFrozenContextV1` directly while the boundary's inner
+          //   arm froze whatever the seam selected. Two copies of the selection
+          //   logic is exactly the drift ruling 7 forbids: if the inner arm
+          //   froze a V2 group context while this block still built a V1 legacy
+          //   one, the two canonical JSONs differ and
+          //   `authoritativeFingerprintMismatch` / `fingerprintMismatch` fires on
+          //   EVERY punch of that org — `review_required`, `context_mismatch`,
+          //   zeroed segments. `computeAttendanceOuterComparableSourceDefinition
+          //   FingerprintV1` takes `context: unknown` and hashes it opaquely, so
+          //   a V2 context is accepted and simply hashes differently. Not
+          //   diagnostic — silent.
+          //
+          // LOCKING (§4.3). This block runs on `db`, the POOLED connection,
+          // outside any explicit transaction. W7-1a's
+          // `acquireAttendanceW7CompositeFactsLocksV1` takes
+          // `pg_advisory_xact_lock_shared`, whose scope is the ENCLOSING
+          // TRANSACTION; on an autocommit connection each lock is released at
+          // statement end and buys NO mutual exclusion at all. An "unlocked
+          // mirror path" is not available either: the facts resolver acquires
+          // those locks unconditionally as its step 1, before any fact read,
+          // and W7-1b may not edit that file. So the mirror opens its OWN SHORT
+          // READ TRANSACTION, and it is COMMITTED BEFORE `executeLivePunch`
+          // opens — a pooled connection held open across the boundary call would
+          // be a genuine self-deadlock. Both locks are taken SHARED on both
+          // paths, so the mirror does not block the same request's later
+          // boundary transaction.
+          //
+          // The mirror's observation is deliberately INDEPENDENT of the
+          // in-transaction freeze: its DISAGREEMENT with that freeze is the
+          // whole signal. Do not "strengthen" this into a lock shared with the
+          // freeze — that destroys the divergence detector.
+          // ---------------------------------------------------------------
+          const w7MirrorArmSelection =
+            attendanceW4SegmentCalculationPort
+            && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+              ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(
+                  { query: async (sqlText, params) => ({ rows: await db.query(sqlText, params ?? []) }) },
+                  orgId,
+                )
+              : null
+          const w7MirrorSelectsGroupArm = Boolean(w7MirrorArmSelection && w7MirrorArmSelection.selectsGroupArm)
           if (
             w4ComputeOuterSourceDefinitionFingerprint
-            && String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+            && (
+              String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+              || w7MirrorSelectsGroupArm
+            )
           ) {
             outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
               orgId,
@@ -29501,7 +29652,7 @@ module.exports = {
               timezone: requestTimezone,
             })
             if (outerResolution && outerResolution.kind === 'resolved') {
-              outerContext = await buildW4ShadowFrozenContextV1(db, {
+              const outerBuildArgs = {
                 orgId,
                 userId,
                 workDate: outerResolution.workDate,
@@ -29512,7 +29663,18 @@ module.exports = {
                     : requestTimezone,
                 isWorkday: context.isWorkingDay,
                 holidayKind: null,
-              })
+              }
+              // The seam call is wrapped in the mirror's own short READ
+              // transaction so the composite advisory locks have a real scope
+              // and are released at COMMIT. Read-only by construction: no DML,
+              // no `FOR UPDATE`, and it returns before the boundary opens.
+              const issued = await db.transaction(async (mirrorTrx) =>
+                issueW4FrozenContextViaW7SeamV1(mirrorTrx, {
+                  ...outerBuildArgs,
+                  purpose: 'mirror',
+                }),
+              )
+              outerContext = issued.context
               outerSourceDefinitionFingerprint = w4ComputeOuterSourceDefinitionFingerprint({
                 orgId,
                 userId,

@@ -45,10 +45,13 @@
  *     existing `__attendanceW4c2LivePunchAdaptersForTests` export. A harness
  *     that imports what it is measuring cannot be run at the base at all.
  *
- * The SEAM capture below is reached through an OPTIONAL, presence-guarded
- * plugin export. At the base that export does not exist and the seam legs
- * self-skip; at the 1b head it exists and the seam legs run. That is what lets
- * one byte-identical file serve both runs.
+ * THIS FILE DELIBERATELY CONTAINS NO SEAM LEG. A presence-guarded seam
+ * assertion here would be a skip-when-unreachable gate: at the 1b head a seam
+ * that failed to export would self-skip GREEN, which is the exact
+ * green-test-against-nothing shape this codebase has been burned by. The
+ * seam-vs-golden equality lives in
+ * `attendance-w7-1b-issuance-seam.db.test.ts`, which boots the real host,
+ * asserts the seam export is PRESENT unconditionally, and reads THESE vectors.
  *
  * ---------------------------------------------------------------------------
  * WHAT THE GREEN RESULT MEANS — AND WHAT IT DOES NOT
@@ -100,14 +103,6 @@ type PluginExports = {
       trx: { query: (sql: string, params?: unknown[]) => Promise<any> },
       args: Record<string, unknown>,
     ) => Promise<Record<string, unknown> | null>
-  }
-  /** OPTIONAL — W7-1b's issuance seam. Absent at the pre-1b base by
-   *  construction, which is what lets this one file serve both runs. */
-  __attendanceW7IssuanceSeamForTests?: {
-    issueAttendanceFrozenContextV1: (
-      trx: { query: (sql: string, params?: unknown[]) => Promise<any> },
-      args: Record<string, unknown>,
-    ) => Promise<{ arm: 'legacy' | 'group'; context: Record<string, unknown> | null }>
   }
 }
 function loadPlugin(): PluginExports {
@@ -466,126 +461,4 @@ describeDb('W7-1b — W7-R3 structural parity: legacy-arm golden equality (real 
     expect(Object.keys(captured).sort()).toEqual(Object.keys(vectors.entries).sort())
   })
 
-  // -------------------------------------------------------------------------
-  // The SEAM legs. Presence-guarded: absent at the base by construction.
-  // -------------------------------------------------------------------------
-
-  it('T-B2 (seam): with the posture table EMPTY the seam reproduces the base golden exactly', async () => {
-    const seam = loadPlugin().__attendanceW7IssuanceSeamForTests
-    if (!seam) {
-      // At the pre-1b base this export does not exist. Recorded, not silently
-      // skipped: the assertion below fixes what "absent" is allowed to mean, so
-      // a seam that merely failed to be exported at the 1b head cannot pass here.
-      expect(process.env.W7_1B_SEAM_REQUIRED).not.toBe('1')
-      return
-    }
-    const trx = pluginTrx(pool)
-    for (const f of Object.values(fixtures)) {
-      const issued = await seam.issueAttendanceFrozenContextV1(trx, {
-        orgId: f.orgId,
-        userId: f.userId,
-        workDate: f.workDate,
-        shiftId: f.shiftId,
-        timezone: 'Asia/Shanghai',
-        isWorkday: f.isWorkday,
-        holidayKind: f.holidayKind,
-        purpose: 'persist',
-      })
-      // Positive equality on the ARM, not "not group" — a `notEqual` cannot
-      // distinguish "took the legacy arm" from "failed for another reason".
-      expect(issued.arm, `${f.id}: arm`).toBe('legacy')
-      const golden = goldenFor(
-        issued.context,
-        frozenAttribution(f.orgId, f.userId, f.workDate, f.shiftId),
-      )
-      expect(golden.context, `${f.id}: seam-routed context bytes`).toBe(captured[f.id].context)
-      expect(golden.storageFingerprint, `${f.id}: seam-routed storage fingerprint`).toBe(
-        captured[f.id].storageFingerprint,
-      )
-      expect(
-        golden.outerComparableFingerprint,
-        `${f.id}: seam-routed outer fingerprint`,
-      ).toBe(captured[f.id].outerComparableFingerprint)
-    }
-  })
-
-  it('T-B3 (the paired POSITIVE control): a group-postured sibling org moves the golden, in the SAME run', async () => {
-    const seam = loadPlugin().__attendanceW7IssuanceSeamForTests
-    if (!seam) {
-      expect(process.env.W7_1B_SEAM_REQUIRED).not.toBe('1')
-      return
-    }
-    // Without this leg, "the golden did not move" is equally consistent with
-    // "the branch is correct", "the branch is dead code" and "the branch was
-    // never wired". The discriminator must be the SAME harness in the SAME run.
-    const priorAllowlist = process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
-    const sibling = fixtures.workday
-    const trx = pluginTrx(pool)
-    try {
-      await pool.query(
-        `INSERT INTO attendance_calculation_context_source_state (org_id, state, scope)
-         VALUES ($1, 'group_authoritative', 'synthetic_staging')`,
-        [sibling.orgId.toLowerCase()],
-      )
-      process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = sibling.orgId.toLowerCase()
-
-      const issued = await seam.issueAttendanceFrozenContextV1(trx, {
-        orgId: sibling.orgId,
-        userId: sibling.userId,
-        workDate: sibling.workDate,
-        shiftId: sibling.shiftId,
-        timezone: 'Asia/Shanghai',
-        isWorkday: sibling.isWorkday,
-        holidayKind: sibling.holidayKind,
-        purpose: 'persist',
-      })
-      // The group arm was SELECTED (this fixture has no effective group, so the
-      // facts resolver fail-closes and the context is null per O-9's review-out
-      // shape) — asserted as the positive equality on the arm.
-      expect(issued.arm).toBe('group')
-      const moved = goldenFor(
-        issued.context,
-        frozenAttribution(sibling.orgId, sibling.userId, sibling.workDate, sibling.shiftId),
-      )
-      expect(
-        moved.context,
-        'the group arm must NOT reproduce the legacy golden — if it does, the ' +
-          'branch is dead code and T-B2 is measuring nothing',
-      ).not.toBe(captured[sibling.id].context)
-
-      // And the NO-ROW sibling in the same run is still byte-identical, so the
-      // two halves are measured by ONE instrument.
-      const untouched = fixtures.multi_segment
-      const stillLegacy = await seam.issueAttendanceFrozenContextV1(trx, {
-        orgId: untouched.orgId,
-        userId: untouched.userId,
-        workDate: untouched.workDate,
-        shiftId: untouched.shiftId,
-        timezone: 'Asia/Shanghai',
-        isWorkday: untouched.isWorkday,
-        holidayKind: untouched.holidayKind,
-        purpose: 'persist',
-      })
-      expect(stillLegacy.arm).toBe('legacy')
-      expect(
-        goldenFor(
-          stillLegacy.context,
-          frozenAttribution(
-            untouched.orgId,
-            untouched.userId,
-            untouched.workDate,
-            untouched.shiftId,
-          ),
-        ).context,
-      ).toBe(captured[untouched.id].context)
-    } finally {
-      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
-      else process.env.ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED = priorAllowlist
-      await pool
-        .query('DELETE FROM attendance_calculation_context_source_state WHERE org_id = $1', [
-          sibling.orgId.toLowerCase(),
-        ])
-        .catch(() => undefined)
-    }
-  })
 })

@@ -110,6 +110,18 @@ import {
   computeAttendanceOuterSourceDefinitionFingerprintV1,
 } from './attendance/w4c2-live-scheduled-boundary'
 import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+// W7-1b (#4556 comments 5293034619 + 5293478713): the single shared issuance
+// seam. Exposed on the SAME host-port mechanism
+// `computeOuterSourceDefinitionFingerprintV1` already uses, including its
+// presence guard — a host that exposes `createLiveScheduledBoundary` but not
+// this method must fail closed the way `w4LiveScheduledBoundary` already does,
+// never silently take the legacy arm.
+import {
+  issueAttendanceFrozenContextV1,
+  resolveAttendanceW7GroupArmSelectionV1,
+  type AttendanceW7IssuanceDepsV1,
+  type AttendanceW7IssuanceInputV1,
+} from './attendance/w7-resolver/w7-frozen-context-issuance-seam'
 import {
   AttendanceW4IdentityError,
   acquireAttendanceCalculationRolloutLock,
@@ -2207,6 +2219,59 @@ export class MetaSheetServer {
                 computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
                   computeAttendanceOuterSourceDefinitionFingerprintV1(
                     input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
+                // W7-1b (#4556) — the ONE arm-selection seam, reachable from the
+                // CJS plugin. Every frozen-context producer routes through here;
+                // two copies of the selection rule is the drift ruling 3 forbids.
+                //
+                // The plugin injects its own deps because three of them live in
+                // plugin-owned modules the host cannot import (the FSER pure
+                // derivation, the canonical producer-key builder) and because the
+                // legacy builder takes a PLUGIN-shaped client while the W7
+                // resolvers take a CORE-shaped one — see the seam's own header.
+                // W7-1b — the ARM-SELECTION rule without issuance. The mirror's
+                // W7 disjunct and OD-W7-10's `currentProducer` both need to ask
+                // "group or legacy" WITHOUT minting a context as a side effect.
+                resolveAttendanceW7GroupArmSelectionV1: async (trx: unknown, orgId: string) => {
+                  try {
+                    return await resolveAttendanceW7GroupArmSelectionV1(
+                      trx as Parameters<typeof resolveAttendanceW7GroupArmSelectionV1>[0],
+                      orgId,
+                    )
+                  } catch (error) {
+                    // EXACTLY the precedent `resolveOrgSegmentCalculationPosture`
+                    // above already sets, and for the same reason. W7-1b makes
+                    // this read UNCONDITIONAL on the punch route, so an org whose
+                    // id is not a canonical rollout org key would newly throw on
+                    // every punch — a regression the pre-1b tree never had,
+                    // because the mirror only ran under the W4 env.
+                    //
+                    // Fail-closed and provably total: the posture table's primary
+                    // key IS the canonical org key, so an org whose id cannot be
+                    // canonicalised CANNOT have a posture row, and "does not
+                    // select the group arm" is the only answer consistent with the
+                    // data. The catch is narrowed to that ONE code — W7-1a's three
+                    // corruption throws (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` /
+                    // `_STATE_INVALID` / `_SCOPE_INVALID`) must still propagate,
+                    // which is the whole reason the read is not short-circuited.
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'off' as const, selectsGroupArm: false }
+                    }
+                    throw error
+                  }
+                },
+                issueAttendanceFrozenContextV1: (
+                  trx: unknown,
+                  deps: unknown,
+                  input: unknown,
+                ) =>
+                  issueAttendanceFrozenContextV1(
+                    trx as Parameters<typeof issueAttendanceFrozenContextV1>[0],
+                    deps as AttendanceW7IssuanceDepsV1,
+                    input as AttendanceW7IssuanceInputV1,
                   ),
                 buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
                   buildAttendanceRequestCreationAttributionSnapshotV1(
