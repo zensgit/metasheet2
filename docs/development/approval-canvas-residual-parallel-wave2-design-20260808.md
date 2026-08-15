@@ -45,4 +45,4 @@ Level 0: PR4 || PR5   (and continue babysit wave-1 #4815||#4816||#4817)
 
 ## Follow-on
 
-Wave-3 (`6fa2fbf6-w3`): promote residual canaries always-on + smoke honesty + additional polish lanes — see `approval-canvas-residual-parallel-wave3-design-20260808.md`.
+Wave-3 (`6fa2fbf6-w3`): promote residual canaries always-on + smoke honesty + additional polish lanes — see `approval-canvas-residual-parallel-wave3-design-20260808.md` (DONE #4823–#4826).

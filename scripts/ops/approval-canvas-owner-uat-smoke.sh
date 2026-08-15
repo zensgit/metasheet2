@@ -119,6 +119,8 @@ require_file "apps/web/tests/approval-form-authoring-history.test.ts"
 require_file "apps/web/tests/approval-version-dual-canvas.test.ts"
 require_file "apps/web/tests/approval-flow-canvas-a11y.test.ts"
 require_file "apps/web/tests/approval-canvas-inspector-a11y.test.ts"
+require_file "apps/web/tests/approval-form-palette-focus.test.ts"
+require_file "apps/web/tests/approval-g5c-authoring-scenarios.test.ts"
 
 # ---------------------------------------------------------------------------
 # 5) Optional focused vitest. Skippable via SKIP_TESTS=1.
@@ -137,6 +139,7 @@ else
       tests/approval-version-dual-canvas.test.ts \
       tests/approval-flow-canvas-a11y.test.ts \
       tests/approval-canvas-inspector-a11y.test.ts \
+      tests/approval-form-palette-focus.test.ts \
       --reporter=dot; then
       ok "focused vitest (history + g5c + residual) passed"
     else
