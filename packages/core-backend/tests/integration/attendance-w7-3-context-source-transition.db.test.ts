@@ -965,7 +965,13 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
     })
   })
 
-  describe('W4_POSTURE_COHERENT (C-1 option (a)): entry into a group state needs a coherent W4 posture', () => {
+  // RETRACTION (W7-3 fix round): this block was titled "C-1 option (a)", which
+  // read as an answered fork. C-1 is OPEN. What is pinned below is the
+  // behaviour of a FAIL-CLOSED DEFAULT this author chose pending an owner
+  // ruling — see the retraction note at the predicate itself in
+  // `w7-context-source-transition.ts`. The legs are unchanged; only the claim
+  // about their authority is corrected.
+  describe('W4_POSTURE_COHERENT ([OWNER-CONFIRM] C-1 OPEN — fail-closed default, not a ruled fork): entry into a group state needs a coherent W4 posture', () => {
     it('refuses when the W4 posture is not authoring segments, and passes when it is', async () => {
       const orgId = randomUUID()
       await seedBaseRow(orgId)

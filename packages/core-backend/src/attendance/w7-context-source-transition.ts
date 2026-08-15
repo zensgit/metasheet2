@@ -861,9 +861,29 @@ async function evaluatePredicates(
     )
   }
 
-  // W4 posture coherence — [OWNER-CONFIRM] C-1 answered (a): the transition
-  // boundary refuses entry into a W7 group state while the W4 segment-calculation
-  // posture is not authoring segments.
+  // W4 posture coherence — [OWNER-CONFIRM] C-1 is OPEN. This predicate is the
+  // brief's option (a) implemented as a FAIL-CLOSED DEFAULT PENDING AN OWNER
+  // RULING, singly deletable. It is NOT an answered fork.
+  //
+  // RETRACTION (W7-3 fix round). This comment previously read
+  // "[OWNER-CONFIRM] C-1 answered (a)", and the PR body claimed the choice was
+  // made "per the package-ruled O-2". THERE IS NO SUCH RULING. Verified
+  // mechanically: neither ratified comment (#4556 `5293034619` /
+  // `5293478713`) mentions O-2, O-9, C-1 or entry coherence — they carry
+  // OD-W7-0..10, the 11 sub-rulings, the 执行序 and the 开工边界 and nothing
+  // else; `git grep "package-ruled"` returns zero hits repo-wide; and the
+  // sibling W7-1b PR #4911 states on the record that all nine of its §14
+  // O-forks, O-2 included, REMAIN OPEN. The phrase reached this file from the
+  // commissioning task text, which is an agent message and therefore never an
+  // owner-authored authorization source. The brief itself declined to
+  // recommend here: "No recommendation offered — it is the same question as
+  // O-2 and should receive one answer, not two."
+  //
+  // So the honest status is: a coupling between two posture machines that
+  // OD-W7-3(a)'s own consequence note calls independent has been introduced by
+  // THIS AUTHOR'S choice, as the conservative direction, awaiting one owner
+  // answer that should cover both this entry predicate and W7-1b's
+  // producer-side fence. Deleting this block is the whole of backing it out.
   //
   // NARROWING, stated here rather than only in the PR body, because the code
   // must not imply a guarantee the mechanism does not provide: the shared
@@ -880,9 +900,9 @@ async function evaluatePredicates(
   // sufficient here — and why the claim is narrowed rather than overstated.
   //
   // Singly deletable by construction: this block is the predicate's ONLY
-  // contribution, and the producer-side coherence fence that W7-1b's O-2
-  // proposes lives at the three plugin producers, not here. If both land,
-  // deleting either must red only its own legs.
+  // contribution, and the producer-side coherence fence W7-1b proposes under
+  // its own still-OPEN O-2 lives at the three plugin producers, not here. If
+  // both land, deleting either must red only its own legs.
   if (canEvaluateDbPredicates && applicable.has('W4_POSTURE_COHERENT')) {
     await acquireAttendanceCalculationRolloutLock(
       trx,
