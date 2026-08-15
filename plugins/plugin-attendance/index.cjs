@@ -595,6 +595,12 @@ function __setAttendanceW4LivePunchPreBoundarySeamForTests(seam) {
 // about production bytes. The cell holds `null` until activate runs, so a suite
 // that forgets to activate gets a hard failure rather than a silent skip.
 const __attendanceW7IssuanceSeamRefForTests = { issueAttendanceFrozenContextV1: null }
+// Companion cell for the ARM-SELECTION read (the mirror gate's W7 disjunct).
+// Exposed separately from the seam because the two must stay distinguishable:
+// the inert negative controls assert an EXACT `effectiveState`, which the seam's
+// return value deliberately does not carry — four postures take the legacy arm,
+// so "the legacy arm ran" cannot discriminate `off` from `group_shadow`.
+const __attendanceW7ArmSelectionRefForTests = { resolveAttendanceW7GroupArmSelectionV1: null }
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -24098,6 +24104,7 @@ module.exports = {
   // harness and the mirror suites drive the same bytes the mirror does.
   // Populated at activate(); `null` before that, deliberately.
   __attendanceW7IssuanceSeamForTests: __attendanceW7IssuanceSeamRefForTests,
+  __attendanceW7ArmSelectionForTests: __attendanceW7ArmSelectionRefForTests,
   __attendanceW4c2LivePunchAdaptersForTests: {
     insertLivePunchEventV1,
     deriveLivePunchWorkDateResolutionV1,
@@ -24910,6 +24917,12 @@ module.exports = {
     }
     __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
       issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
+    __attendanceW7ArmSelectionRefForTests.resolveAttendanceW7GroupArmSelectionV1 =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+        ? (coreTrx, orgId) =>
+            attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, orgId)
+        : null
 
     const w4LiveScheduledBoundary =
       attendanceW4SegmentCalculationPort
@@ -29796,7 +29809,16 @@ module.exports = {
           // field-by-field against the freeze step's persisted `attribution_snapshot`.
           if (attendanceW4LivePunchPreBoundarySeamForTests) {
             await attendanceW4LivePunchPreBoundarySeamForTests({
+              // W7-1b: `outerSourceDefinitionFingerprint` and the resolved W7
+              // arm are handed through so ruling 7's control can assert BOTH of
+              // its conjuncts — "the group arm ran" AND "the outer fingerprint
+              // is non-null" — in ONE leg. Two passing tests do not prove the
+              // two can hold at once, which is the whole point of the ruling's
+              // conjunction. Test-only seam; production never installs it.
               orgId, userId, workDate, timezone, outerResolution, outerContext,
+              outerSourceDefinitionFingerprint,
+              w7MirrorSelectsGroupArm,
+              w7MirrorEffectiveState: w7MirrorArmSelection ? w7MirrorArmSelection.effectiveState : null,
             })
           }
           const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
