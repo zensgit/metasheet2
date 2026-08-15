@@ -743,6 +743,12 @@ export default defineConfig({
       // excluded here so the no-DB job cannot skip-green it, and the whole file is explicitly
       // run in plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
+      // #4556 W7-1a-M (ratified per #4556 comments 5293034619 + 5293478713): the DB half
+      // of the provenance-widening derive-and-diff. It reads the LIVE pg_constraint /
+      // pg_proc catalogue and round-trips a w4_group row, so it needs real PostgreSQL.
+      // Two-point wired: excluded from no-DB collection here, whole-file run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-1am-provenance-widening.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.

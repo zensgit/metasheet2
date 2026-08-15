@@ -558,7 +558,9 @@ components:
           additionalProperties: false
           required: [projectionOwner, visibilityState, visibilityReason, posture]
           properties:
-            projectionOwner: { type: string, enum: [legacy_untracked, w4] }
+            # W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713):
+            # response enum widened with w4_group. INERT — no producer emits it yet.
+            projectionOwner: { type: string, enum: [legacy_untracked, w4, w4_group] }
             visibilityState: { type: string, enum: [active, retired] }
             visibilityReason: { type: string, enum: [active, review_placeholder, import_rollback, operator_retirement] }
             posture: { type: string, enum: [shadow, authoritative, undeterminable] }

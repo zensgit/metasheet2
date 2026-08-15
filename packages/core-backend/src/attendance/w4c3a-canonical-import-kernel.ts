@@ -15,6 +15,10 @@ import {
 } from './w4c0-fingerprints'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
 import {
+  isAttendanceProjectionOwnerV1,
+  isAttendanceProjectionOwnerWithCalculationPointerV1,
+} from './w7-provenance-domain'
+import {
   verifyAttendanceImportAttributionSnapshotV1,
   verifyAttendanceImportPolicySourceFingerprintV1,
   type AttendanceImportPolicySourceProjectionV1,
@@ -364,10 +368,14 @@ function frozenPresentPreimage(row: QueryRow): Record<string, unknown> {
   const projectionOwner = String(row.projection_owner)
   const currentCalculationId =
     row.current_calculation_id === null ? null : String(row.current_calculation_id)
+  // W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): membership
+  // plus the pointer-coupling pair, widened together. `w4_group` inherits `w4`'s
+  // non-NULL calculation-pointer requirement.
   if (
-    (projectionOwner !== 'legacy_untracked' && projectionOwner !== 'w4') ||
+    !isAttendanceProjectionOwnerV1(projectionOwner) ||
     (projectionOwner === 'legacy_untracked' && currentCalculationId !== null) ||
-    (projectionOwner === 'w4' && currentCalculationId === null)
+    (isAttendanceProjectionOwnerWithCalculationPointerV1(projectionOwner) &&
+      currentCalculationId === null)
   ) {
     throw new Error('W4C3A_IMPORT_PREIMAGE_INVALID')
   }

@@ -134,6 +134,10 @@ import {
   computeAttendanceSourceDefinitionFingerprintV1,
   computeAttendanceOuterComparableSourceDefinitionFingerprintV1,
 } from './w4c1-fingerprints'
+import {
+  isAttendanceProjectionOwnerV1,
+  type AttendanceProjectionOwnerV1,
+} from './w7-provenance-domain'
 import type {
   AttendanceAttributionSnapshotV1,
   ApprovedAttendanceFactV1,
@@ -620,7 +624,7 @@ interface ShadowTargetRow extends AttendanceW4ComparableDailyProjection {
    * shadow path passes this row to `computeAttendanceW4ShadowDiff` as `legacyProjection`, which
    * reads only the six named daily fields plus `workDate` — the extra members are inert there.
    */
-  projectionOwner: 'legacy_untracked' | 'w4'
+  projectionOwner: AttendanceProjectionOwnerV1
   currentCalculationId: string | null
   visibilityState: 'active' | 'retired'
   visibilityReason: string
@@ -683,7 +687,13 @@ async function lockShadowParentRecord(
     workMinutes: row.workMinutes === null ? null : Number(row.workMinutes),
     lateMinutes: row.lateMinutes === null ? null : Number(row.lateMinutes),
     earlyLeaveMinutes: row.earlyLeaveMinutes === null ? null : Number(row.earlyLeaveMinutes),
-    projectionOwner: row.projectionOwner === 'w4' ? 'w4' : 'legacy_untracked',
+    // W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): same
+    // silent-downgrade fold as the authoritative core's locked read — membership
+    // now decides, so `w4_group` survives the read; unknown values still fold to
+    // `legacy_untracked`.
+    projectionOwner: isAttendanceProjectionOwnerV1(row.projectionOwner)
+      ? row.projectionOwner
+      : 'legacy_untracked',
     currentCalculationId:
       typeof row.currentCalculationId === 'string' ? row.currentCalculationId : null,
     visibilityState: row.visibilityState === 'retired' ? 'retired' : 'active',
