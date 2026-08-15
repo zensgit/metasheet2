@@ -155,6 +155,16 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     Stream and all lifecycle flags remained OFF. This is an honest pending operational state, not a
     production enablement: PR #4890 is still draft/unmerged, and no `https-off` mutation is
     authorized by this evidence record.
+19. After the assignee confirmed receipt of `AP-100012`, a bounded callback attempt used fresh
+    [status 31865394031](https://github.com/zensgit/metasheet2/actions/runs/31865394031), fresh
+    [storage health 31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905), and
+    [on 31865466339](https://github.com/zensgit/metasheet2/actions/runs/31865466339). No successful
+    human click was confirmed within the three-minute window; the MetaSheet approval center still
+    showed `AP-100012` as pending afterward. Timer-driven
+    [off 31865647626](https://github.com/zensgit/metasheet2/actions/runs/31865647626) and terminal
+    [status 31865699179](https://github.com/zensgit/metasheet2/actions/runs/31865699179) proved Stream
+    OFF, worker disabled, exact deployed SHA, healthy backend, and all lifecycle flags OFF. This
+    advances U1 receipt only; U4/U11-a remain unexecuted.
 
 ## 1. Environment boundary
 
@@ -460,10 +470,10 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **PARTIAL; NOT ACCEPTED** | The first three windows exposed and closed configuration/permission blockers. After `Card.Instance.Write` was published, the fourth window's `AP-100012` automation completed with `deliveryKind=interactive_card`. Assignee receipt, card-body inspection, callback, duplicate/non-assignee behavior, OA fallback, and the remaining human matrix are still unexecuted; a successful send alone is not U1 acceptance |
+| U1-U13 (including U3-a and U11-b) | **PARTIAL; NOT ACCEPTED** | The first three windows exposed and closed configuration/permission blockers. After `Card.Instance.Write` was published, the fourth window's `AP-100012` automation completed with `deliveryKind=interactive_card`; the assignee later confirmed real receipt, satisfying U1's delivery observation. Card-body inspection, callback, duplicate/non-assignee behavior, OA fallback, and the remaining human matrix are still unexecuted |
 | U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
-| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, and `31864532416`/`31864575172` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
-| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31864023183](https://github.com/zensgit/metasheet2/actions/runs/31864023183) was successful before Stream `on` |
+| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31865647626`/`31865699179` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
+| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
 | P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |

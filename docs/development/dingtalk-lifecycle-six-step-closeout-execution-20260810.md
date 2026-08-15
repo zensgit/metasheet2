@@ -128,8 +128,8 @@ The former image-tag/health-commit conflict is resolved. Alias and pending produ
 
 ## 4. Owner and ops acceptance
 
-Controlled staging Stream windows ran, and the latest window produced a real interactive-card
-delivery, but real DingTalk receipt and human-click evidence remain unavailable.
+Controlled staging Stream windows ran, and `AP-100012` produced a real interactive-card delivery
+whose receipt the assignee confirmed. Human-click and callback evidence remain unavailable.
 Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
 
 - U1-U13 interactive-card acceptance;
@@ -137,7 +137,7 @@ Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
 - named owners and final production switch decisions;
 - deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; receipt and click remain unverified, so the U1-U13 matrix is still partial and not accepted. Terminal run `31864575172` independently proves the lifecycle flags and Stream remain OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; the assignee later confirmed receipt, so U1 delivery is proven. A subsequent bounded callback window ended without a successful human click, leaving U4/U11-a and the broader matrix incomplete. Terminal run `31865699179` independently proves the lifecycle flags and Stream remain OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
