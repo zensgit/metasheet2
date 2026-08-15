@@ -60,6 +60,17 @@ describe('TemplateAuthoringView form palette focus-return (structural)', () => {
     expect(VIEW_SRC).toMatch(/@focusin="selectFormFieldFocus\(field\.localId\)"/)
   })
 
+  it('form designer uses grouped palette + preview without inventing field kinds', () => {
+    expect(VIEW_SRC).toMatch(/data-testid="approval-form-designer"/)
+    expect(VIEW_SRC).toMatch(/data-testid="approval-form-preview"/)
+    expect(VIEW_SRC).toMatch(/fieldPaletteGroups/)
+    expect(VIEW_SRC).toMatch(/点击或拖拽左侧控件至此处/)
+    expect(VIEW_SRC).not.toMatch(/金额/)
+    expect(VIEW_SRC).not.toMatch(/计算公式/)
+    expect(VIEW_SRC).not.toMatch(/控件组/)
+    expect(VIEW_SRC).not.toMatch(/approval-field-palette-attachment/)
+  })
+
   it('structural field mutations still go through form history (undo/redo safe)', () => {
     expect(VIEW_SRC).toMatch(/function applyFormFieldsStructural\s*\(/)
     expect(VIEW_SRC).toMatch(/pushFormSnapshot\(/)

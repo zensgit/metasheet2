@@ -306,6 +306,33 @@ export function appendApprovalNode(graph: ApprovalGraph, afterNodeKey: string, n
   }
 }
 
+function defaultCcConfig() {
+  return { targetType: 'user' as const, targetIds: [] as string[] }
+}
+
+/**
+ * Insert a shipped `cc` node on a linear segment (same single-out splice as approval).
+ * Does not invent handler/办理人 semantics.
+ */
+export function appendCcNode(graph: ApprovalGraph, afterNodeKey: string, name = '抄送'): ApprovalGraph {
+  const after = graph.nodes.find((n) => n.key === afterNodeKey)
+  if (!after) throw new Error(`appendCcNode: node ${afterNodeKey} not found`)
+  const outs = outEdges(graph, afterNodeKey)
+  if (outs.length !== 1) throw new Error(`appendCcNode: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+  const out = outs[0]
+  const newKey = uniqueKey('cc', nodeKeys(graph))
+  const eKeys = edgeKeys(graph)
+  const e1 = uniqueKey('edge', eKeys); eKeys.add(e1)
+  const newNode: ApprovalNode = { key: newKey, type: 'cc', name, config: defaultCcConfig() }
+  return {
+    nodes: [...graph.nodes.map(clone), newNode],
+    edges: graph.edges.map((edge) => {
+      if (edge.key !== out.key) return clone(edge)
+      return { ...clone(edge), source: newKey }
+    }).concat([{ key: e1, source: afterNodeKey, target: newKey }]),
+  }
+}
+
 /**
  * Insert a condition gateway on a linear segment. The original `after → target` edge keeps its
  * identity and becomes `after → condition`; the gateway then owns one configurable branch and
