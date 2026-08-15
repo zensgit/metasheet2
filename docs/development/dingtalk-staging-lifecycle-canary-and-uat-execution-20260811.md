@@ -113,6 +113,25 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     backend. A later retry requires owner authorization to generate and store the random per-
     integration link secret first; secret generation and another Stream window are not authorized
     by this evidence record.
+15. The owner then authorized generation of the random per-integration link secret and a third
+    Stream window. The staging admin UI generated and encrypted the secret for
+    `Staging DingTalk E4 HMR validation`, showed `密钥已生成`, and did not reveal its value. Fresh
+    [status 31862815372](https://github.com/zensgit/metasheet2/actions/runs/31862815372) and
+    [storage health 31862873263](https://github.com/zensgit/metasheet2/actions/runs/31862873263)
+    passed before
+    [on 31862904652](https://github.com/zensgit/metasheet2/actions/runs/31862904652). The artifacts
+    proved the same exact deployed SHA, healthy backend, one eligible anchor with two linked local
+    users, `worker_state=started`, and all lifecycle flags OFF.
+16. The operator created fresh approval `AP-100011` for `GH UI Smoke`. Its automation passed the
+    link-secret gate but DingTalk rejected the create-and-deliver request after 2699 ms because the
+    Stream application `dingn9htcox9lc12rxmc` lacked `Card.Instance.Write`. No card was sent, so no
+    U1-U13 or callback row advanced. Fail-safe
+    [off 31863021812](https://github.com/zensgit/metasheet2/actions/runs/31863021812) succeeded, and
+    terminal read-only
+    [status 31863057131](https://github.com/zensgit/metasheet2/actions/runs/31863057131) proved
+    `stream_enabled=false`, `worker_state=disabled`, `lifecycle_flags_all_off=true`, exact deployed
+    SHA match, and healthy backend. Another window requires owner-side DingTalk permission grant
+    and publication first; this record does not claim that external action is complete.
 
 ## 1. Environment boundary
 
@@ -418,10 +437,10 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | The first approved window created `AP-100009` without observable DingTalk receipt; the second created `AP-100010`, whose automation failed before send because the assignee integration had no approval-card link secret. Neither a MetaSheet pending row nor operational shutdown substitutes for the canonical human matrix |
+| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | The first approved window created `AP-100009` without observable DingTalk receipt; the second created `AP-100010`, whose automation failed before send because the assignee integration had no approval-card link secret; after that secret was generated, the third created `AP-100011`, which DingTalk rejected because the Stream application lacked `Card.Instance.Write`. Neither a MetaSheet pending row nor operational shutdown substitutes for the canonical human matrix |
 | U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
-| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224` and `31861138171`/`31861174400` prove clean operational stops and disabled worker; post-OFF OA fallback send and the human callback sequence were not executed |
-| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31860571244](https://github.com/zensgit/metasheet2/actions/runs/31860571244) was successful before Stream `on` |
+| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, and `31863021812`/`31863057131` prove clean operational stops and disabled worker; post-OFF OA fallback send and the human callback sequence were not executed |
+| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31862873263](https://github.com/zensgit/metasheet2/actions/runs/31862873263) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
 | P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
@@ -440,17 +459,16 @@ credentials_ready=false
 Those values are historical for run `31579935836`. Prepare run `31854315133` and post-status
 `31854359627` supersede the missing-configuration diagnosis. The later controlled window
 `31856025380 -> 31856520796 -> 31856563224` proved worker start followed by a safe return to OFF.
-U1-U13 and the callback corp-anchor remain unexecuted. The second controlled window established a
-more specific blocker: `AP-100010` failed before send because its assignee integration had no
-approval-card link secret. No receipt or callback assertion can be attempted until that
-configuration is owner-authorized and corrected.
+U1-U13 and the callback corp-anchor remain unexecuted. The owner-authorized random link-secret
+generation closed the second window's pre-send blocker without exposing the value. The third window
+then established the next external blocker: `AP-100011` reached DingTalk but the Stream application
+was denied because `Card.Instance.Write` was not enabled.
 
-Required external action: first obtain explicit owner approval to generate and store the random
-approval-card link secret on `Staging DingTalk E4 HMR validation` (the value must never be printed).
-Then schedule another short owner-approved Stream window when the linked assignee and non-assignee
-can operate DingTalk in real time. Execute the canonical U1-U13 procedure, capture only values-free
-booleans/status enums, and execute `off` before the window ends. Secrets must not be pasted into this
-document or chat.
+Required external action: in DingTalk Open Platform, grant and publish `Card.Instance.Write` for
+application `dingn9htcox9lc12rxmc`. Then schedule another short owner-approved Stream window when
+the linked assignee and non-assignee can operate DingTalk in real time. Execute the canonical
+U1-U13 procedure, capture only values-free booleans/status enums, and execute `off` before the
+window ends. Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
 
