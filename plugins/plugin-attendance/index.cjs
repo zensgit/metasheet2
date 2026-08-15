@@ -11311,16 +11311,20 @@ function toWorkDate(value, timeZone) {
 }
 
 function getZonedMinutes(value, timeZone) {
+  // `hourCycle: 'h23'` + the `24 -> 0` fold: same h24-midnight hazard as
+  // `getZonedParts` (older ICU renders midnight as '24' under `hour12: false`,
+  // which here returned 1440+ minutes for a midnight instant). `hour12` would
+  // take precedence over `hourCycle`, so it is replaced, not accompanied.
   const formatter = getCachedIntlDateTimeFormat(zonedMinutesFormatterCache, timeZone, 'en-GB', {
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   })
   if (!formatter) return value.getUTCHours() * 60 + value.getUTCMinutes()
   try {
     const text = formatter.format(value)
     const [hRaw, mRaw] = String(text).split(':')
-    const hour = Number(hRaw)
+    const hour = Number(hRaw) === 24 ? 0 : Number(hRaw)
     const minute = Number(mRaw)
     if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
       return value.getUTCHours() * 60 + value.getUTCMinutes()
@@ -12529,8 +12533,18 @@ async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
 }
 
 function getZonedParts(date, timeZone) {
+  // `hourCycle: 'h23'` — NOT `hour12: false` — and the `24 -> 0` fold below.
+  // Older ICU (the node 18/20 CI runners) resolves `hour12: false` to the
+  // h24 cycle, which formats midnight as hour '24' on the SAME calendar day;
+  // `getTimeZoneOffset` then overflows `Date.UTC(..., 24, ...)` into the next
+  // day and reports a +1440-minute offset, so `zonedTimeToUtc` lands every
+  // midnight wall time ONE DAY EARLY (observed live: a '00:00' shift start
+  // froze as workDate-1T00:00Z and the W4 strict rebuild refused the window).
+  // `hour12` takes precedence over `hourCycle` when both are present, so the
+  // fix must REPLACE it, not accompany it. Same idiom as core's
+  // `automation-timezone.ts`, which documents this exact V8/ICU hazard.
   const formatter = getCachedIntlDateTimeFormat(zonedPartsFormatterCache, timeZone, 'en-US', {
-    hour12: false,
+    hourCycle: 'h23',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -12563,6 +12577,10 @@ function getZonedParts(date, timeZone) {
     else if (part.type === 'minute') minute = Number(part.value)
     else if (part.type === 'second') second = Number(part.value)
   }
+  // Defensive h24 fold (belt to the `hourCycle` braces above): '24:xx' is the
+  // h24 rendering of 00:xx on the displayed calendar date (verified against
+  // real formatToParts output — the date part does NOT roll back).
+  if (hour === 24) hour = 0
   return { year, month, day, hour, minute, second }
 }
 
@@ -24164,6 +24182,11 @@ module.exports = {
   // canonical write-boundary transaction). Pass null to clear. Throws outside a test
   // runtime — see the setter's own guard.
   __setAttendanceW4LivePunchPreBoundarySeamForTests,
+  // W7-1b h24-midnight regression pin (see `getZonedParts`): exposed so a test
+  // can assert midnight wall times round-trip on the SAME calendar day. The CI
+  // node 18/20 matrix is the old-ICU oracle that makes the leg discriminating.
+  __buildZonedDateForTests: buildZonedDate,
+  __getZonedMinutesForTests: getZonedMinutes,
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,

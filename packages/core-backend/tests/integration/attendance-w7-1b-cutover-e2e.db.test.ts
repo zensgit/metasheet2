@@ -563,6 +563,31 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     }
   }
 
+  it('h24-midnight regression pin: zoned midnight wall times land on the SAME calendar day', () => {
+    // ROOT CAUSE of this suite's three CI-only reds (node 18/20, both legs,
+    // deterministic across four heads): older ICU resolves `hour12: false` to
+    // the h24 cycle, formatting midnight as hour '24'; the offset computation
+    // then overflowed `Date.UTC(..., 24, ...)` a day forward and every
+    // midnight wall time froze ONE DAY EARLY, so this suite's '00:00' shift
+    // produced an absoluteWindow starting on workDate-1, which the W4 strict
+    // rebuild refuses (fingerprint null -> review_required / legacy fallback).
+    // The CI node 18/20 matrix IS the old-ICU oracle: without the
+    // `hourCycle: 'h23'` + `24 -> 0` fix these assertions red exactly there
+    // while staying green on newer local runtimes.
+    const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      __buildZonedDateForTests: (d: string, t: string, tz: string) => Date | null
+      __getZonedMinutesForTests: (v: Date, tz: string) => number
+    }
+    const bzd = plugin.__buildZonedDateForTests
+    expect(bzd('2026-08-15', '00:00', 'UTC')?.toISOString()).toBe('2026-08-15T00:00:00.000Z')
+    expect(bzd('2026-08-15', '00:00', 'Asia/Shanghai')?.toISOString()).toBe('2026-08-14T16:00:00.000Z')
+    expect(bzd('2026-08-15', '00:00', 'America/New_York')?.toISOString()).toBe('2026-08-15T04:00:00.000Z')
+    // Non-midnight control: proves the pin is midnight-specific, not a tz bug.
+    expect(bzd('2026-08-15', '23:59', 'UTC')?.toISOString()).toBe('2026-08-15T23:59:00.000Z')
+    // The sibling in-class site: a midnight instant is minute 0, never 1440.
+    expect(plugin.__getZonedMinutesForTests(new Date('2026-08-15T00:00:00.000Z'), 'UTC')).toBe(0)
+  })
+
   it('T-M5 + T-R1: both machines ON => the group arm runs END TO END and the inner/outer fingerprints AGREE', async () => {
     await withEnv(BOTH_MACHINES_ENV(), async () => {
     // DIAGNOSTIC seam install — observation only, uninstalled in finally.
