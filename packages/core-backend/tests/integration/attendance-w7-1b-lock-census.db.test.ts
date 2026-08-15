@@ -166,6 +166,34 @@ const W7_EXCLUSIVE_KEY_TAKERS_V1 = Object.freeze([
 
 const read = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
 
+/**
+ * The smallest enclosing `function`/`const fn = ` block containing `needle`.
+ * Structure-derived (brace balance), never a fixed window — a fixed window both
+ * under-reads a long body and over-reads the next declaration.
+ */
+function enclosingFunctionContaining(source: string, needle: string): string | null {
+  const at = source.indexOf(needle)
+  if (at === -1) return null
+  const head = source.lastIndexOf('\nasync function ', at)
+  const head2 = source.lastIndexOf('\nfunction ', at)
+  const head3 = source.lastIndexOf('\nconst ', at)
+  const start = Math.max(head, head2, head3)
+  if (start === -1) return null
+  let depth = 0
+  let seen = false
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '{') {
+      depth += 1
+      seen = true
+    } else if (ch === '}') {
+      depth -= 1
+      if (seen && depth === 0) return source.slice(start, i + 1)
+    }
+  }
+  return source.slice(start)
+}
+
 describeDb('W7-1b — B9 composite-lock re-census over the seven-producer reality (real DB)', () => {
   let pool: Pool
   const orgId = randomUUID().toLowerCase()
@@ -253,13 +281,52 @@ describeDb('W7-1b — B9 composite-lock re-census over the seven-producer realit
     // This is the property that makes the opposite parent-lock orderings safe.
     // A counterparty that held a W7 key exclusively AND wanted the parent row
     // would close the cycle; none exists.
+    // ⚠️ EVALUATED PER TAKER. An earlier revision ran the `FOR UPDATE` criterion
+    // ONCE, outside this loop, against the W1 file only — where the regex is
+    // unconditionally false because that file contains zero `attendance_records`
+    // occurrences at all. Taker #2 (the plugin) was therefore never checked, and
+    // the leg's central claim was carried by a probe that could not fire. The
+    // invariant itself holds; the CHECK did not.
+    let takersChecked = 0
     for (const taker of W7_EXCLUSIVE_KEY_TAKERS_V1) {
       const source = read(taker.file)
       expect(source, `${taker.file} no longer spells ${taker.keyFamily}`).toContain(taker.keyFamily)
+      // Non-vacuity per taker: the file must be real and non-trivial, so a
+      // mis-typed path cannot pass by scanning an empty string.
+      expect(source.length, `${taker.file} is suspiciously small`).toBeGreaterThan(500)
+      // THE INVARIANT, per taker, evaluated over the ACQUIRING FUNCTION rather
+      // than the whole file.
+      //
+      // ⚠️ A file-wide regex is NOT a sound implementation of this at this
+      // granularity: `index.cjs` is ~50k lines, `attendance_records` appears
+      // throughout it, and "a `FOR UPDATE` within 400 characters of the string
+      // `attendance_records`" matches somewhere by coincidence without the two
+      // being the same statement, let alone inside the key-holding function.
+      // The first per-taker revision of this leg used exactly that and went red
+      // on a coincidence. Scoping to the acquiring function is the part that can
+      // be checked mechanically and soundly.
+      const acquiring = enclosingFunctionContaining(source, taker.keyFamily)
+      expect(acquiring, `could not locate the function acquiring ${taker.keyFamily}`).not.toBeNull()
+      expect(
+        /FOR\s+UPDATE/i.test(acquiring as string),
+        `${taker.file}: the function acquiring ${taker.keyFamily} EXCLUSIVELY also takes a row ` +
+          'lock — that is how a cycle closes against a producer’s parent-then-shared ordering',
+      ).toBe(false)
+      takersChecked += 1
     }
-    const w1 = read('packages/core-backend/src/services/AttendanceCalculationGroupMembership.ts')
-    // The W1 writer locks memberships, never attendance_records.
-    expect(/attendance_records[\s\S]{0,400}?FOR UPDATE/.test(w1), 'the W1 membership writer must not lock an attendance_records row').toBe(false)
+    // The loop must actually have run over every enumerated taker.
+    expect(takersChecked, 'the per-taker check did not cover the enumerated set').toBe(
+      W7_EXCLUSIVE_KEY_TAKERS_V1.length,
+    )
+    expect(W7_EXCLUSIVE_KEY_TAKERS_V1.length).toBeGreaterThanOrEqual(2)
+    // ⚠️ WHAT THIS LEG DOES NOT ESTABLISH, stated rather than implied: the
+    // invariant is really about the whole TRANSACTION that holds the exclusive
+    // key, which can span callers. This leg checks the ACQUIRING FUNCTION, which
+    // is the part a mechanical check can carry soundly. Whole-transaction
+    // reachability across callers was verified by hand at review time (all 19
+    // sites) and is NOT re-derived here — so a future caller that wrapped one of
+    // these acquisitions in a transaction that also locks a parent row would
+    // NOT be caught by this leg.
   })
 
   // -------------------------------------------------------------------------

@@ -520,6 +520,13 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
       expect(String((ctx.outerContext as Record<string, unknown>).calculationGroupId || '')).not.toBe('')
 
       // Conjunct (ii): and the outer fingerprint is NON-NULL in that same run.
+      // Type first: `typeof null === 'object'`, so asserting the shape alone
+      // turns "the mirror never ran" into a TypeError that reads like a
+      // producer type bug.
+      expect(
+        typeof ctx.outerSourceDefinitionFingerprint,
+        'ruling 7 conjunct (ii) FAILED: the mirror produced no fingerprint at all',
+      ).toBe('string')
       expect(ctx.outerSourceDefinitionFingerprint).toMatch(/^[0-9a-f]{64}$/)
     } finally {
       plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)

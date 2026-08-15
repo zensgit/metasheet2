@@ -116,13 +116,19 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   const w4OnlyOrg = randomUUID()
   const w4OnlyUser = randomUUID()
   const w4OnlyShift = randomUUID()
+  // SUSPENDED org, W4-AUTHORITATIVE so the punch actually reaches the boundary —
+  // that is what makes the BOUNDARY refusal reachable rather than theoretical.
+  const suspendedOrg = randomUUID()
+  const suspendedUser = randomUUID()
+  const suspendedShift = randomUUID()
+  const suspendedGroup = randomUUID()
   // W4-legacy + W7-group org — the §2.4 incoherence fixture (T-R9).
   const incoherentOrg = randomUUID()
   const incoherentUser = randomUUID()
   const incoherentShift = randomUUID()
   const incoherentGroup = randomUUID()
 
-  const allOrgs = () => [bothOrg, incoherentOrg, w4OnlyOrg]
+  const allOrgs = () => [bothOrg, incoherentOrg, w4OnlyOrg, suspendedOrg]
 
   const mintToken = async (userId: string): Promise<string> => {
     const res = await requestJson(
@@ -247,15 +253,26 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
-    // BOTH allowlists carry the both-machines org, EXACTLY. The W4 half is what
-    // makes the boundary's inner arm reachable at all (§1 Chain A).
-    // ⚠️ The env is installed PER TEST (see `withEnv`), not here. `beforeAll` is
-    // a per-FILE hook while `process.env` is per-WORKER, so a value set here can
-    // be changed by a neighbouring suite before this file's bodies run — which
-    // is precisely the CI-only failure this suite hit while passing in isolation.
-    // Only the ORIGINAL values are captured here, for restoration in afterAll.
-    delete process.env[W4_ENV]
-    delete process.env[W7_ENV]
+    // ⚠️ TWO MECHANISMS, BOTH REQUIRED — they guard different things.
+    //
+    // (1) BOOT-TIME REGISTRATION. Some attendance machinery is ENV-GATED AT
+    //     REGISTRATION rather than at call time (the outbox-drain gate at
+    //     index.cjs:50150 and its sibling sweep gate read the W4 allowlist
+    //     inside `activate()`), and registration happens once, during
+    //     `server.start()` below. So the allowlists MUST be set BEFORE that
+    //     call. A previous revision of this suite deleted them here in the name
+    //     of hermeticity — which booted those pieces UNREGISTERED, and no
+    //     per-test restore can reach a decision already made at registration.
+    //
+    // (2) PER-TEST HERMETICITY (see `withEnv`). `beforeAll` is a per-FILE hook
+    //     while `process.env` is per-WORKER, and several attendance suites in
+    //     the same run-list set or clear these same variables, so each leg still
+    //     installs and restores the values it needs.
+    //
+    // Doing only (2) breaks registration; doing only (1) leaves the premise at a
+    // neighbour's mercy. The earlier round mistook one for the other.
+    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`
+    process.env[W7_ENV] = `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`
 
     const repoRoot = path.join(HERE, '../../../../')
     const { MetaSheetServer: Server } = await import('../../src/index')
@@ -299,6 +316,16 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       [w4OnlyOrg, w4OnlyUser, w4OnlyShift],
     )
 
+    // SUSPENDED fixture: fully effective group AND W4-authoritative, so the only
+    // thing stopping a calculation is the suspension itself.
+    await insertActiveUser(suspendedUser, suspendedOrg)
+    await seedAuthoritativeRollout(suspendedOrg)
+    await seedShiftAndEffectiveGroup(suspendedOrg, suspendedUser, suspendedShift, suspendedGroup)
+    await pool.query(
+      `UPDATE ${POSTURE_TABLE} SET state = 'suspended' WHERE org_id = $1`,
+      [suspendedOrg.toLowerCase()],
+    )
+
     await insertActiveUser(incoherentUser, incoherentOrg)
     await seedLegacyRollout(incoherentOrg)
     await seedShiftAndEffectiveGroup(incoherentOrg, incoherentUser, incoherentShift, incoherentGroup)
@@ -328,7 +355,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       ])
       .catch(() => undefined)
     await pool
-      ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser, w4OnlyUser]])
+      ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser, w4OnlyUser, suspendedUser]])
       .catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
@@ -376,8 +403,8 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
 
   /** The allowlist state every punching leg needs, installed per test. */
   const BOTH_MACHINES_ENV = () => ({
-    [W4_ENV]: `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()}`,
-    [W7_ENV]: bothOrg.toLowerCase(),
+    [W4_ENV]: `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`,
+    [W7_ENV]: `${bothOrg.toLowerCase()},${suspendedOrg.toLowerCase()}`,
   })
 
   const punch = async (userId: string, orgId: string, eventType: 'check_in' | 'check_out') =>
@@ -510,6 +537,19 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       // T-B4: the mirror RAN and produced a real fingerprint over a LEGACY V1
       // context. A null here would mean the disjunction lost its W4 arm; a v2
       // context here would mean the seam mis-routed an org with no posture row.
+      //
+      // ⚠️ TYPE ASSERTED BEFORE SHAPE, deliberately. `typeof null === 'object'`,
+      // so a NULL fingerprint makes `.toMatch()` report
+      // "expects to receive a string, but got object" — a TypeError that reads
+      // like a producer type bug and completely hides the real condition (the
+      // mirror did not run). That is exactly how CI's T-B4 failure was first
+      // mis-read. The producing site is correctly typed `string | null`; the
+      // ambiguity was in the ASSERTION, so the assertion now names it.
+      expect(
+        typeof ctx.outerSourceDefinitionFingerprint,
+        'the mirror produced NO fingerprint (null) — it did not run, which means ' +
+          'the W4 allowlist was not visible at the time the mirror gate was evaluated',
+      ).toBe('string')
       expect(ctx.outerSourceDefinitionFingerprint).toMatch(/^[0-9a-f]{64}$/)
       expect((ctx.outerContext as Record<string, unknown>).schemaVersion).toBe(1)
       expect((ctx.outerContext as Record<string, unknown>).selector).toBe('legacy')
@@ -532,6 +572,72 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     } finally {
       plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
     }
+    })
+  }, 60_000)
+
+  it('OD-W7-4(a) BOUNDARY refusal: a suspended org punch is REFUSED and writes ZERO calculation rows', async () => {
+    // THE RATIONALE FOR `blocked` BEING A DISTINCT ARM. If the seam returned a
+    // null context instead, the calculator would turn it into a durable
+    // `review('missing_frozen_context')` ROW — a PRODUCED CALCULATION, which is
+    // precisely what suspension must prevent. So the assertion that matters is
+    // not just "the punch failed" but "nothing was written".
+    await withEnv(BOTH_MACHINES_ENV(), async () => {
+      const before = (await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_record_calculations c
+           JOIN attendance_records r ON r.id = c.attendance_record_id
+          WHERE r.user_id = $1`,
+        [suspendedUser],
+      )).rows[0].n
+      expect(Number(before)).toBe(0)
+
+      const res = await punch(suspendedUser, suspendedOrg, 'check_in')
+      // The EXACT closed code, never "a 4xx". The boundary maps its own error
+      // class, so this proves the BOUNDARY site refused — not the plugin one.
+      const code = String((res.body as { error?: { code?: string } } | undefined)?.error?.code ?? `<none:${res.status}>`)
+      expect(code, `body: ${res.raw}`).toBe('W4C2_W7_CONTEXT_SOURCE_SUSPENDED')
+
+      const after = (await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_record_calculations c
+           JOIN attendance_records r ON r.id = c.attendance_record_id
+          WHERE r.user_id = $1`,
+        [suspendedUser],
+      )).rows[0].n
+      expect(Number(after), 'a suspended org must produce NO calculation row — not even a review row').toBe(0)
+    })
+  }, 60_000)
+
+  it('OD-W7-4(a) PLUGIN-PRODUCER refusal: the same suspension is refused at the plugin producer with its own code', async () => {
+    // The SECOND refusal site. Deleting either one alone previously left the
+    // whole battery green, which is the untested-guard class this pair closes.
+    await withEnv(BOTH_MACHINES_ENV(), async () => {
+      const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+        __attendanceW7ProducerForTests?: {
+          issueW4FrozenContextForProducerV1:
+            | ((trx: unknown, args: Record<string, unknown>) => Promise<unknown>)
+            | null
+        }
+      }
+      const ref = plugin.__attendanceW7ProducerForTests
+      expect(typeof ref?.issueW4FrozenContextForProducerV1).toBe('function')
+      const trx = {
+        __w4CanonicalTrx: true,
+        query: async (sql: string, p?: unknown[]) => (await pool.query(sql, p)).rows,
+      }
+      let code: string | null = null
+      try {
+        await ref!.issueW4FrozenContextForProducerV1!(trx, {
+          orgId: suspendedOrg,
+          userId: suspendedUser,
+          workDate: '2026-06-02',
+          timezone: 'UTC',
+          isWorkday: true,
+          holidayKind: null,
+          shiftId: suspendedShift,
+        })
+      } catch (error) {
+        code = (error as { code?: string }).code ?? `<nocode:${String(error)}>`
+      }
+      expect(code).toBe('W7_CONTEXT_SOURCE_SUSPENDED')
     })
   }, 60_000)
 
