@@ -33,6 +33,7 @@ import {
   createVerifiedAttendanceCalculationTargetIdentityV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
+  isAttendanceCalculationOrgAllowlistedV1,
   parseCanonicalAttendanceOrgKeyV1,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -287,6 +288,81 @@ describe('resolveSegmentCalculationPosture return-shape matrix', () => {
     expect((await postureFor(ORG, { state: 'authoritative' })).effectiveState).toBe('legacy')
     process.env[ALLOWLIST_ENV] = `*,${ORG}`
     expect((await postureFor(ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+  })
+
+  /**
+   * #4899 residual R4 / P3-2 — the allowlist compare is ASCII CASE-FOLDED.
+   *
+   * `orgKey` arrives lower-cased from `parseUuidSyntax`, so before this change an
+   * upper-case env entry was a silent no-op. Folding is an owner-approved ADMISSION
+   * WIDENING, so the legs below prove both halves: the widening actually happened, and
+   * it widened by EXACTLY case — not into prefix/substring/wildcard matching.
+   */
+  describe('R4: allowlist entries are ASCII case-folded (admission widening)', () => {
+    // The file's shared `ORG` fixture is all-DIGIT hex (`5555…`), so `toUpperCase()` on it is a
+    // NO-OP and every leg below would be vacuously green against it. These fixtures are
+    // deliberately letter-bearing canonical v4 keys, and the invariant is asserted, not assumed.
+    const FOLD_ORG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const FOLD_OTHER = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+
+    it('HARNESS CONTROL: the fixtures really change under toUpperCase (else every leg is vacuous)', () => {
+      expect(FOLD_ORG.toUpperCase()).not.toBe(FOLD_ORG)
+      expect(FOLD_OTHER.toUpperCase()).not.toBe(FOLD_OTHER)
+      expect(FOLD_ORG).not.toBe(FOLD_OTHER)
+      // ...and the file's shared fixture is exactly the trap this control exists to catch.
+      expect(ORG.toUpperCase()).toBe(ORG)
+    })
+
+    it('an UPPER-CASE env entry now admits the lower-case org key (the widening)', async () => {
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+    })
+
+    it('mixed case and surrounding whitespace fold together', async () => {
+      const mixed = `${FOLD_ORG.slice(0, 18).toUpperCase()}${FOLD_ORG.slice(18)}`
+      expect(mixed).not.toBe(FOLD_ORG)
+      expect(mixed).not.toBe(FOLD_ORG.toUpperCase())
+      process.env[ALLOWLIST_ENV] = `  ${mixed} \t`
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+    })
+
+    it('NEGATIVE CONTROL: an UPPER-CASE entry for a DIFFERENT org still denies', async () => {
+      process.env[ALLOWLIST_ENV] = FOLD_OTHER.toUpperCase()
+      // If the fold had degenerated into a prefix/substring/normalizing match, this would admit.
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('legacy')
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+    })
+
+    it('NEGATIVE CONTROL: folding never lets a prefix, suffix, or wildcard entry match', async () => {
+      for (const entry of [
+        FOLD_ORG.slice(0, 20).toUpperCase(), // strict prefix
+        `${FOLD_ORG.toUpperCase()}-EXTRA`, // strict suffix extension
+        '*',
+        ' * ',
+        '.*',
+        '%',
+        'DEFAULT',
+        '',
+      ]) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          (await postureFor(FOLD_ORG, { state: 'authoritative' })).effectiveState,
+          `entry ${JSON.stringify(entry)} must not admit`,
+        ).toBe('legacy')
+      }
+      // POSITIVE CONTROL for this loop: the same machinery DOES admit the exact key,
+      // so the eight denials above are real rejections and not a broken harness.
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect((await postureFor(FOLD_ORG, { state: 'authoritative' })).effectiveState).toBe('authoritative')
+    })
+
+    it('the named export and the private predicate stay ONE predicate under folding', () => {
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+      process.env[ALLOWLIST_ENV] = '*'
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+    })
   })
 
   it('rejects an unknown persisted state and a non-synthetic scope', async () => {

@@ -362,12 +362,31 @@ const SEGMENT_CALCULATION_IMPLEMENTATION_CAPABILITY = true
 
 const SEGMENT_CALCULATION_ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 
-/** Exact org-only outer allowlist; `*` (wildcard) NEVER counts for W4 (section 9). */
+/**
+ * Exact org-only outer allowlist; `*` (wildcard) NEVER counts for W4 (section 9).
+ *
+ * ASCII CASE-FOLDED (#4899 residual R4, P3-2 — owner-approved). Entries are trimmed AND
+ * lower-cased before the exact compare, because `orgKey` arrives already lower-cased from
+ * `parseUuidSyntax` (`:132`). Before this change an operator who wrote the org UUID in upper
+ * case got a silent `off` with no diagnostic anywhere.
+ *
+ * THIS IS AN ADMISSION WIDENING, not a tidy-up. The admitted set grows from
+ * `{lower-case spellings of allowlisted org keys}` to `{all ASCII-case spellings}`. It is a
+ * strict superset: every entry admitted before is still admitted, plus the case variants.
+ * The widening is bounded by construction — `String.prototype.toLowerCase` is a per-character
+ * map, so it can only ever make two strings that differ in ASCII case compare equal; it can
+ * never turn a non-matching entry into a prefix/substring/wildcard match, and it never changes
+ * the length of an entry. `'*'`, `' * '`, `'.*'`, `'%'`, prefixes, and suffixes therefore still
+ * allowlist nothing (an org key can never equal any of them — the canonical parser rejects them
+ * outright). The W7 context-source predicate
+ * (`w7-resolver/w7-context-source-posture-resolver.ts`) is folded IDENTICALLY in the same
+ * change, so the two allowlists cannot drift in matching semantics.
+ */
 function isOrgExactlyAllowlisted(orgKey: string): boolean {
   const raw = typeof process.env[SEGMENT_CALCULATION_ALLOWLIST_ENV] === 'string'
     ? (process.env[SEGMENT_CALCULATION_ALLOWLIST_ENV] as string)
     : ''
-  const entries = raw.split(',').map((entry) => entry.trim()).filter(Boolean)
+  const entries = raw.split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean)
   return entries.includes(orgKey)
 }
 

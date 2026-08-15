@@ -8349,21 +8349,36 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
   return attendanceGroupFixedScheduleEffectivenessService
 }
 
-function assertWorkContextSegmentCalculationAllowed(orgId, workContext) {
+/**
+ * #4556 Gate A residual R4 — this door is no longer hardcoded closed.
+ *
+ * `referenceSegments` is the org's canonical posture bit (exact-org allowlist AND a persisted
+ * rollout row), RESOLVED BY THE CALLER via the same core port the 17 write-side sites use, and
+ * threaded in. It is deliberately NOT resolved here:
+ *
+ *  - this function is called from a SYNCHRONOUS work-context builder
+ *    (`resolveWorkContextFromPrefetch`), which has no client at all — resolution is
+ *    structurally impossible there, so threading is forced, not preferred; and
+ *  - resolving here would take the class-`00` rollout SHARED advisory lock at whatever point
+ *    the enclosing caller happens to run, which for the approval path is BELOW
+ *    `SELECT ... FROM attendance_requests ... FOR UPDATE`. That is precisely the wait cycle the
+ *    #4899 owner-P1 lock-order counterexample forbids (transition holds rollout-exclusive +
+ *    waits on the request row; approval holds the request row + waits on rollout-shared).
+ *    A caller may only pass a value it resolved ABOVE its row locks.
+ *
+ * Fail-closed default: anything other than `true` refuses a multi-segment work context, exactly
+ * as the pinned-closed version did. Callers that do not (yet) thread a resolved posture keep
+ * byte-identical behaviour — see `resolveWorkContext` for the enumerated residual set.
+ */
+function assertWorkContextSegmentCalculationAllowed(orgId, workContext, referenceSegments) {
   if (!workContext || workContext.source === 'rule') return
   const shift = workContext.rule
-  // #4556 Gate A / Option B: this synchronous calculation read path has no write trx / port in
-  // hand, so it is pinned to the closed legacy posture (`referenceSegments: false`). That is
-  // byte-identical to the retired env-gate's production behaviour (the plugin master gate was
-  // OFF, so a multi-segment work context always failed closed here). Residual R4+: once an org
-  // is turned on via Gate C its reference writers will be admitted while this read path still
-  // fails closed on a multi-segment shift, until it is re-sourced from the port in a later slice.
   getAttendanceShiftService().assertSegmentCalculationAllowed({
     orgId,
     shiftId: shift?.id,
     segmentCount: shift?.segmentCount,
     producer: 'attendance calculation',
-    referenceSegments: false,
+    referenceSegments: referenceSegments === true,
   })
 }
 
@@ -15193,6 +15208,31 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
   }
 }
 
+/**
+ * #4556 Gate A residual R4 — `options.referenceSegments` is an OPTIONAL, caller-resolved org
+ * posture bit forwarded to the segment-calculation read door below. It defaults to `false`
+ * (fail-closed, byte-identical to the pinned-closed behaviour) and is deliberately NOT resolved
+ * inside this function: doing so would take the class-`00` rollout SHARED advisory lock at each
+ * caller's arbitrary position relative to its own row locks, and several callers pass a real
+ * transaction that already holds row locks (see the lock-order rationale on
+ * `assertWorkContextSegmentCalculationAllowed`).
+ *
+ * WIRED in this slice — exactly one consumer, the request-decision approval path
+ * (`executeRequestDecisionInTransaction`, the `resolveWorkContext` call at ~`:37223`). Its value
+ * comes from the W4C-3b boundary's single resolve, taken under the rollout lock BEFORE any
+ * request row lock, and is the SAME value the finalization reference guards consume.
+ *
+ * OUT OF SCOPE for this slice (enumerated, not hand-waved): every other call site still passes
+ * nothing and therefore still fails closed on a multi-segment work context —
+ * `:14166`, `:15644`, `:17290`, `:21105`, `:22469`, `:22984`, `:24613`, `:28548`, `:29397`,
+ * `:29409`, `:35455`, `:40330`, `:40924`, plus the synchronous prefetch variant's callers
+ * `:18707`, `:28542`, `:29898`, `:30556`. The blocker is not effort: each one needs its own
+ * lock-order census in the #4899 sense (what locks does its caller already hold, and can the
+ * rollout SHARED lock be hoisted above them) before it may resolve a posture. Opening them
+ * without that census is how the owner-P1 deadlock gets re-introduced. This slice therefore
+ * opens the R4 door PARTIALLY — for the approval path that item 4 needs to be behaviourally
+ * coverable — and leaves the rest closed and named.
+ */
 async function resolveWorkContext(options) {
   const { db, orgId, userId, workDate, defaultRule, holidayOverride } = options
   const rule = defaultRule ?? await loadDefaultRule(db, orgId)
@@ -15214,7 +15254,7 @@ async function resolveWorkContext(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
-  assertWorkContextSegmentCalculationAllowed(orgId, context)
+  assertWorkContextSegmentCalculationAllowed(orgId, context, options.referenceSegments)
   // Step 5: layer calendarPolicy.overrides on top of profile/holiday. D4
   // pinned: only hit the DB when we actually have overrides to match, and
   // accept caller-provided overrides/scopeContext to avoid redundant
@@ -17917,6 +17957,12 @@ function resolveRotationInfoFromPrefetch(entries, workDate, shiftsById) {
   return null
 }
 
+/**
+ * #4556 Gate A residual R4 — SYNCHRONOUS variant. It has no db/trx at all, so resolving the
+ * posture here is structurally impossible: `options.referenceSegments` is the only channel, and
+ * it defaults to `false` (fail-closed). No caller threads it in this slice — see the enumerated
+ * out-of-scope list on `resolveWorkContext`.
+ */
 function resolveWorkContextFromPrefetch(options) {
   const { orgId, userId, workDate, defaultRule, prefetched } = options
   if (!prefetched || !workDate) return null
@@ -17949,7 +17995,7 @@ function resolveWorkContextFromPrefetch(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
-  assertWorkContextSegmentCalculationAllowed(orgId, context)
+  assertWorkContextSegmentCalculationAllowed(orgId, context, options.referenceSegments)
   // Step 5: apply calendarPolicy.overrides when the prefetch carries both
   // the policy list and the user's scope context. D5 pinned: when either
   // is missing (old fixtures that build prefetched manually), behave
@@ -31577,7 +31623,13 @@ module.exports = {
       return row
     }
 
-    async function finalizeShiftSwapRequest(client, { orgId, requestId, actorId }) {
+    // #4899 residual R4: `referenceSegments` is the org posture RESOLVED BY THE W4C-3b
+    // BOUNDARY, before this transaction took any request/assignment row lock, and passed
+    // down. Finalization must NOT re-resolve it: the boundary already holds the rollout
+    // SHARED advisory lock for the whole transaction, so a second resolve is a redundant
+    // lock-take plus SELECT — and it would sit BELOW the row locks, which is the ordering
+    // the #4899 owner-P1 counterexample forbids. Anything other than `true` fails closed.
+    async function finalizeShiftSwapRequest(client, { orgId, requestId, actorId, referenceSegments }) {
       const detail = await loadShiftSwapDetail(client, orgId, requestId, { forUpdate: true })
       if (!detail) {
         throw new HttpError(404, 'NOT_FOUND', 'Shift-swap request not found')
@@ -31660,7 +31712,7 @@ module.exports = {
         orgId,
         shiftRefs: [requesterSource.shiftId, counterpartySource.shiftId],
         producer: 'shift_swap_final_approval',
-        referenceSegments: await resolveReferenceSegmentsPostureForWrite(client, orgId),
+        referenceSegments: referenceSegments === true,
       })
 
       const settings = await getSettings(client)
@@ -31981,7 +32033,9 @@ module.exports = {
       return rows[0] ?? null
     }
 
-    async function finalizeScheduleDispatchRequest(client, { orgId, requestId, actorId, actorAccess }) {
+    // #4899 residual R4: see `finalizeShiftSwapRequest` — `referenceSegments` is the
+    // boundary-resolved posture bit, threaded down, never re-resolved here.
+    async function finalizeScheduleDispatchRequest(client, { orgId, requestId, actorId, actorAccess, referenceSegments }) {
       const detail = await loadScheduleDispatchDetail(client, orgId, requestId, { forUpdate: true })
       if (!detail) {
         throw new HttpError(400, 'SCHEDULE_DISPATCH_DETAIL_MISSING', 'Schedule-dispatch request detail is missing')
@@ -32022,7 +32076,7 @@ module.exports = {
         orgId,
         shiftId: detail.target_shift_id,
         producer: 'schedule_dispatch_final_approval',
-        referenceSegments: await resolveReferenceSegmentsPostureForWrite(client, orgId),
+        referenceSegments: referenceSegments === true,
       })
 
       await assertScheduleDispatchScopeAllowed(client, orgId, actorAccess, buildScheduleDispatchSchedulerScopeTarget({
@@ -36616,6 +36670,14 @@ module.exports = {
 
     async function executeRequestDecisionInTransaction(trx, state, operation) {
           const { route, expectedApprovalVersion, expectedApprovalNode } = state
+          // #4899 residual R4 — THE single posture value for this whole approval transaction.
+          // Resolved by the W4C-3b boundary under the class-`00` rollout SHARED advisory lock
+          // BEFORE `execute` (and therefore before the `FOR UPDATE` below), then handed to us
+          // on `operation`. Consumed by BOTH the finalization reference guards and the
+          // calculation read path, so neither re-resolves and neither re-takes the rollout
+          // lock beneath a row lock. Strict `=== true`: a boundary that did not resolve a
+          // posture (or an org outside the canonical W4 domain) is fail-closed.
+          const decisionReferenceSegments = operation?.referenceSegments === true
           const requesterId = route.actorId
           const requestId = route.requestId
           const action = route.action
@@ -36910,6 +36972,7 @@ module.exports = {
                 orgId,
                 fullAdmin: decisionAccess.fullAdmin,
               },
+              referenceSegments: decisionReferenceSegments,
             })
             nextMetadata.scheduleDispatchFinalization = {
               assignmentIds: [scheduleDispatchFinalization.assignment.id],
@@ -36925,6 +36988,7 @@ module.exports = {
               orgId,
               requestId,
               actorId: requesterId,
+              referenceSegments: decisionReferenceSegments,
             })
             nextMetadata.shiftSwapFinalization = {
               requesterReplacementAssignmentId: shiftSwapFinalization.requesterReplacement.id,
@@ -37193,6 +37257,10 @@ module.exports = {
               userId: requestRow.user_id,
               workDate: requestRow.work_date,
               defaultRule: baseRule,
+              // #4899 residual R4: the ONE wired consumer of the re-sourced calculation door.
+              // Same boundary-resolved value the finalization guards above consumed — resolved
+              // under the rollout SHARED lock before this transaction's first row lock.
+              referenceSegments: decisionReferenceSegments,
             })
             const timezone = context.rule.timezone
             if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
