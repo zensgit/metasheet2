@@ -91,6 +91,7 @@ import {
 import {
   ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1,
   ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1,
+  attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1,
   isAttendanceW7ContextSourceCompareEvidenceDeliveredV1,
   isAttendanceW7ContextSourceStateProducerDeliveredV1,
 } from './w7-context-source-delivery'
@@ -675,20 +676,55 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_PREDICATE_CODES_V1 = Object
 export type AttendanceW7ContextSourceTransitionPredicateCodeV1 =
   (typeof ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_PREDICATE_CODES_V1)[number]
 
+/**
+ * `evaluated` exists because the report was previously able to LIE.
+ *
+ * Before the W7-3 fix round this type had no `evaluated` and `pass` was a bare
+ * boolean, so a criterion the reporter never ran was emitted as
+ * `{applicable: false, pass: true}` — which an operator reads as "clean". That
+ * happens whenever `orgAllowlisted`/`rowResolvable`/`legalPair` is false and the
+ * DB-backed predicates are skipped, and it falsified this module's own claim
+ * that "the report and the gate cannot disagree about what was evaluated".
+ *
+ * The invariant now, enforced by construction in `notEvaluatedVerdict` /
+ * `evaluatedVerdict` below and asserted by a non-allowlisted-org leg in the
+ * real-PG suite:
+ *
+ *   `pass === null` **iff** `evaluated === false`.
+ *
+ * So "not evaluated" is representable and is never spelled as a pass. It is the
+ * same distinction this slice already insists on for the undelivered W7-2
+ * probes — "no producer yet" is a different claim from "evaluated to zero" —
+ * applied in the other direction.
+ */
 export type AttendanceW7ContextSourceTransitionPredicateV1 = Readonly<{
   code: AttendanceW7ContextSourceTransitionPredicateCodeV1
   applicable: boolean
-  pass: boolean
+  evaluated: boolean
+  pass: boolean | null
   count: number | null
 }>
 
-function passVerdict(
+/** A criterion this call actually ran. `pass` is a real verdict. */
+function evaluatedVerdict(
   code: AttendanceW7ContextSourceTransitionPredicateCodeV1,
-  applicable: boolean,
   pass: boolean,
   count: number | null,
 ): AttendanceW7ContextSourceTransitionPredicateV1 {
-  return Object.freeze({ code, applicable, pass, count })
+  return Object.freeze({ code, applicable: true, evaluated: true, pass, count })
+}
+
+/**
+ * A criterion this call did NOT run — either because the pair makes it
+ * inapplicable, or because an earlier always-applicable predicate
+ * (`ORG_ALLOWLISTED` / `CONTEXT_SOURCE_ROW_RESOLVABLE` / `LEGAL_TRANSITION_PAIR`)
+ * failed and there was nothing safe left to read. Never a pass.
+ */
+function notEvaluatedVerdict(
+  code: AttendanceW7ContextSourceTransitionPredicateCodeV1,
+  applicable: boolean,
+): AttendanceW7ContextSourceTransitionPredicateV1 {
+  return Object.freeze({ code, applicable, evaluated: false, pass: null, count: null })
 }
 
 const GROUP_PRODUCER_STATE_SET = new Set<AttendanceW7ContextSourcePostureStateV1>(
@@ -790,6 +826,14 @@ async function evaluatePredicates(
   orgAllowlisted: boolean,
   rowResolvable: boolean,
   legalPair: boolean,
+  /**
+   * Whether the caller has already validated the resume evidence references.
+   * The WRITER has (input-time `requireW7EvidenceReferences`, before any DB
+   * access); the read-only PLAN never sees an evidence manifest at all, so it
+   * passes `false` and the resume criterion is honestly reported as
+   * not-evaluated rather than as a pass it cannot justify.
+   */
+  resumeEvidenceValidated: boolean,
 ): Promise<PredicateEvaluation> {
   const applicable = new Set(attendanceW7ContextSourceApplicablePredicatesV1(from, to))
   const verdicts = new Map<
@@ -797,12 +841,12 @@ async function evaluatePredicates(
     AttendanceW7ContextSourceTransitionPredicateV1
   >()
 
-  verdicts.set('ORG_ALLOWLISTED', passVerdict('ORG_ALLOWLISTED', true, orgAllowlisted, null))
+  verdicts.set('ORG_ALLOWLISTED', evaluatedVerdict('ORG_ALLOWLISTED', orgAllowlisted, null))
   verdicts.set(
     'CONTEXT_SOURCE_ROW_RESOLVABLE',
-    passVerdict('CONTEXT_SOURCE_ROW_RESOLVABLE', true, rowResolvable, null),
+    evaluatedVerdict('CONTEXT_SOURCE_ROW_RESOLVABLE', rowResolvable, null),
   )
-  verdicts.set('LEGAL_TRANSITION_PAIR', passVerdict('LEGAL_TRANSITION_PAIR', true, legalPair, null))
+  verdicts.set('LEGAL_TRANSITION_PAIR', evaluatedVerdict('LEGAL_TRANSITION_PAIR', legalPair, null))
 
   let incompleteOperations = 0
   let unresolvedReviews = 0
@@ -821,22 +865,19 @@ async function evaluatePredicates(
     incompleteOperations = await countIncompleteOperationsV1(trx, orgId)
     verdicts.set(
       'INCOMPLETE_OPERATION',
-      passVerdict('INCOMPLETE_OPERATION', true, incompleteOperations === 0, incompleteOperations),
+      evaluatedVerdict('INCOMPLETE_OPERATION', incompleteOperations === 0, incompleteOperations),
     )
     unresolvedReviews = await countUnresolvedIngressReviewsV1(trx, orgId)
     verdicts.set(
       'UNRESOLVED_INGRESS_REVIEW',
-      passVerdict('UNRESOLVED_INGRESS_REVIEW', true, unresolvedReviews === 0, unresolvedReviews),
+      evaluatedVerdict('UNRESOLVED_INGRESS_REVIEW', unresolvedReviews === 0, unresolvedReviews),
     )
     const snapshotDefects = await readAttendanceRequestSnapshotDefectReportV1(trx, orgId)
     defectiveRequestSnapshots = snapshotDefects.totalDefectiveRequests
     defectiveRequestSnapshotsByCell = snapshotDefects.byCell
     verdicts.set(
       'DEFECTIVE_REQUEST_SNAPSHOT',
-      passVerdict(
-        'DEFECTIVE_REQUEST_SNAPSHOT',
-        true,
-        defectiveRequestSnapshots === 0,
+      evaluatedVerdict('DEFECTIVE_REQUEST_SNAPSHOT', defectiveRequestSnapshots === 0,
         defectiveRequestSnapshots,
       ),
     )
@@ -852,10 +893,7 @@ async function evaluatePredicates(
     suspendSourceWritersInFlight = await countIncompleteOperationsV1(trx, orgId)
     verdicts.set(
       'SUSPEND_SOURCE_WRITERS_SERIALIZED',
-      passVerdict(
-        'SUSPEND_SOURCE_WRITERS_SERIALIZED',
-        true,
-        suspendSourceWritersInFlight === 0,
+      evaluatedVerdict('SUSPEND_SOURCE_WRITERS_SERIALIZED', suspendSourceWritersInFlight === 0,
         suspendSourceWritersInFlight,
       ),
     )
@@ -916,7 +954,7 @@ async function evaluatePredicates(
     // and it is `'none'` for both `legacy` and `suspended`.
     verdicts.set(
       'W4_POSTURE_COHERENT',
-      passVerdict('W4_POSTURE_COHERENT', true, w4Posture.authorSegments === 'full', null),
+      evaluatedVerdict('W4_POSTURE_COHERENT', w4Posture.authorSegments === 'full', null),
     )
   }
 
@@ -924,6 +962,12 @@ async function evaluatePredicates(
   // applicable pairs — whether a producer is delivered is a fact about the
   // deployed code, not about this org's rows. Same placement rationale as the
   // W4 boundary's Gate D (`w4c3a-rollout-control.ts:1285-1289`).
+  // NOT the same fact as `attendanceW7ContextSourceUndeliveredStateProducerCountV1()`,
+  // which counts undelivered producers across ALL group states. This one is
+  // scoped to THIS transition's target, so it is 0 or 1 and answers "is the
+  // producer for the state we are entering wired". Kept inline deliberately, and
+  // said so, rather than swapped for the global helper: they would agree only
+  // when exactly one producer is undelivered.
   const undeliveredStateProducers = GROUP_PRODUCER_STATE_SET.has(to)
     ? isAttendanceW7ContextSourceStateProducerDeliveredV1(to)
       ? 0
@@ -932,18 +976,16 @@ async function evaluatePredicates(
   if (applicable.has('W7_STATE_PRODUCER_DELIVERED')) {
     verdicts.set(
       'W7_STATE_PRODUCER_DELIVERED',
-      passVerdict(
-        'W7_STATE_PRODUCER_DELIVERED',
-        true,
-        undeliveredStateProducers === 0,
+      evaluatedVerdict('W7_STATE_PRODUCER_DELIVERED', undeliveredStateProducers === 0,
         undeliveredStateProducers,
       ),
     )
   }
 
-  const undeliveredCompareEvidence = ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.filter(
-    (probe) => !isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe),
-  ).length
+  // NIT-1 (fix round): call the delivery module's OWN exported count instead of
+  // re-deriving the identical filter here. Two computations of one fact can
+  // drift, which is the duplication this file's header argues against elsewhere.
+  const undeliveredCompareEvidence = attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()
   for (const probe of ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1) {
     if (!applicable.has(probe)) continue
     const delivered = isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe)
@@ -952,23 +994,45 @@ async function evaluatePredicates(
     // criterion has no producer yet", which is not the same claim as "this
     // criterion evaluated to zero". A count is reported only once W7-2 lands
     // and supplies one.
-    verdicts.set(probe, passVerdict(probe, true, delivered, null))
+    verdicts.set(probe, evaluatedVerdict(probe, delivered, null))
   }
 
-  // Resume: satisfied by the widened evidence-reference key set (validated at
-  // input time, before any DB access), not by a DB count. Emitted so the
-  // reporter is total over the code set and so the plan shows WHY the resume
-  // pair carries a wider manifest.
+  // Resume (§5.3): satisfied by the widened evidence-reference key set, which is
+  // validated at INPUT time by `requireW7EvidenceReferences` before any DB
+  // access — not by a DB count. It is emitted so the reporter is total over the
+  // code set and so the plan shows WHY the resume pair carries a wider manifest.
+  //
+  // NOT A DEAD GUARD, and no longer dressed as a live one. Before the fix round
+  // this was hard-coded `pass: true` for BOTH callers, so its refusal code was
+  // structurally unreachable while sitting in the table looking enforceable. The
+  // truth is that the criterion is enforced at input time and its real refusal
+  // is `…_EVIDENCE_REFERENCE_INVALID` — which the resume legs DO assert (a
+  // 3-key reference set on the resume pair is refused). So: the writer, which
+  // has validated the references, reports a real `pass: true`; the plan, which
+  // has no manifest, reports `evaluated: false` rather than certifying something
+  // it cannot see. `PREDICATE_REFUSAL_CODES` now maps this code to the refusal
+  // that actually fires instead of to a string nothing can raise.
   if (applicable.has('RESUME_REPLAY_ARTIFACT')) {
-    verdicts.set('RESUME_REPLAY_ARTIFACT', passVerdict('RESUME_REPLAY_ARTIFACT', true, true, null))
+    verdicts.set(
+      'RESUME_REPLAY_ARTIFACT',
+      resumeEvidenceValidated
+        ? evaluatedVerdict('RESUME_REPLAY_ARTIFACT', true, null)
+        : notEvaluatedVerdict('RESUME_REPLAY_ARTIFACT', true),
+    )
   }
 
-  // Totality: every code appears exactly once, applicable or not. A
-  // non-applicable predicate is still emitted (`applicable: false, pass: true`),
-  // so the array is always all-N and a consumer never has to distinguish
-  // "absent" from "not evaluated".
+  // Totality: every code appears exactly once, evaluated or not, so the array is
+  // always all-N and a consumer never has to distinguish "absent" from "not
+  // evaluated".
+  //
+  // `applicable` comes from THE SHARED DERIVATION, not from whether this call
+  // happened to reach the predicate. That is what makes this module's claim
+  // above — the report and the gate cannot disagree about what was evaluated —
+  // actually true: a criterion that applies to this pair but could not be read
+  // is emitted as `applicable: true, evaluated: false, pass: null`, never as a
+  // pass.
   const predicates = ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_PREDICATE_CODES_V1.map(
-    (code) => verdicts.get(code) ?? passVerdict(code, false, true, null),
+    (code) => verdicts.get(code) ?? notEvaluatedVerdict(code, applicable.has(code)),
   )
 
   return Object.freeze({
@@ -982,7 +1046,13 @@ async function evaluatePredicates(
       undeliveredCompareEvidence,
       suspendSourceWritersInFlight,
     }),
-    blocked: predicates.some((predicate) => predicate.applicable && !predicate.pass),
+    // `pass !== true`, not `!pass`: an applicable criterion that could not be
+    // evaluated (`pass: null`) must BLOCK, exactly as a failing one does. Both
+    // spellings agree on every input reachable today — the collapse can only
+    // happen when one of the three always-applicable predicates already failed,
+    // so `blocked` was already true — which is why this correction is provably
+    // decision-neutral and changes only what the report SAYS.
+    blocked: predicates.some((predicate) => predicate.applicable && predicate.pass !== true),
   })
 }
 
@@ -1004,9 +1074,17 @@ const PREDICATE_REFUSAL_CODES: Readonly<
   INCOMPLETE_OPERATION: 'W7_CONTEXT_SOURCE_TRANSITION_INCOMPLETE_OPERATION',
   UNRESOLVED_INGRESS_REVIEW: 'W7_CONTEXT_SOURCE_TRANSITION_UNRESOLVED_REVIEW',
   DEFECTIVE_REQUEST_SNAPSHOT: 'W7_CONTEXT_SOURCE_TRANSITION_REQUEST_SNAPSHOT_DEFECTIVE',
-  W7_CRITICAL_SHADOW_DIFF: 'W7_CONTEXT_SOURCE_TRANSITION_COMPARE_EVIDENCE_NOT_DELIVERED',
-  W7_OFF_ROSTER_DIFF: 'W7_CONTEXT_SOURCE_TRANSITION_COMPARE_EVIDENCE_NOT_DELIVERED',
-  RESUME_REPLAY_ARTIFACT: 'W7_CONTEXT_SOURCE_TRANSITION_RESUME_ARTIFACT_MISSING',
+  // DISTINCT codes, one per probe. They shared a single
+  // `…_COMPARE_EVIDENCE_NOT_DELIVERED` string until the fix round, so no test
+  // could tell WHICH of the two compare criteria blocked a promotion — an
+  // assertion on the shared string proved only that one of them fired.
+  W7_CRITICAL_SHADOW_DIFF: 'W7_CONTEXT_SOURCE_TRANSITION_CRITICAL_SHADOW_DIFF_NOT_DELIVERED',
+  W7_OFF_ROSTER_DIFF: 'W7_CONTEXT_SOURCE_TRANSITION_OFF_ROSTER_DIFF_NOT_DELIVERED',
+  // The refusal that ACTUALLY fires for a resume without the widened reference
+  // set, raised at input time by `requireW7EvidenceReferences`. It previously
+  // mapped to `…_RESUME_ARTIFACT_MISSING`, a string no code path could ever
+  // raise; a dead entry in a closed refusal table reads as an enforced guard.
+  RESUME_REPLAY_ARTIFACT: 'W7_CONTEXT_SOURCE_TRANSITION_EVIDENCE_REFERENCE_INVALID',
   SUSPEND_SOURCE_WRITERS_SERIALIZED: 'W7_CONTEXT_SOURCE_TRANSITION_SOURCE_WRITERS_ACTIVE',
 })
 
@@ -1180,6 +1258,8 @@ async function buildContextSourcePlan(
     orgAllowlisted,
     rowResolvable,
     row !== undefined,
+    // The plan has no evidence manifest — see the parameter's doc comment.
+    false,
   )
 
   return Object.freeze({
@@ -1316,12 +1396,21 @@ export async function transitionAttendanceW7ContextSourceV1(
         orgAllowlisted,
         true,
         true,
+        // Phase 0 already validated the (resume-widened) reference set.
+        true,
       )
       // Each applicable failing predicate raises its OWN refusal code, in the
       // enumeration's order, so a caller can tell which criterion blocked it
       // and a test can seed exactly one failure and assert exactly one code.
       for (const predicate of evaluation.predicates) {
-        if (predicate.applicable && !predicate.pass) fail(PREDICATE_REFUSAL_CODES[predicate.code])
+        // `pass !== true` mirrors `blocked` exactly: an applicable criterion the
+        // boundary could not evaluate must refuse, never proceed. Unreachable on
+        // this path today — the writer calls `evaluatePredicates` with all three
+        // gating flags `true`, after its own allowlist refusal — but the gate
+        // and the report must not be able to disagree even under a future edit.
+        if (predicate.applicable && predicate.pass !== true) {
+          fail(PREDICATE_REFUSAL_CODES[predicate.code])
+        }
       }
 
       // PHASE 3 — the only two DML statements of the transition, in a fixed

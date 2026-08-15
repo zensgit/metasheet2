@@ -47,6 +47,7 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1,
   buildAttendanceCalculationRolloutAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   type AttendanceW4TransactionClientV1,
@@ -69,6 +70,7 @@ import {
 } from '../../src/attendance/w7-context-source-delivery'
 import {
   ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_PREDICATE_CODES_V1,
+  attendanceW7ContextSourceApplicablePredicatesV1,
   buildAttendanceW7ContextSourceAdvisoryKeyV1,
   __setW7ContextSourcePlanInsideTransactionForTests,
   planAttendanceW7ContextSourceTransitionV1,
@@ -273,6 +275,152 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
        VALUES ($1, $2, '2026-08-14', 'time_correction', 'pending', $3, '{}'::jsonb)`,
       [randomUUID(), randomUUID(), orgId],
     )
+  }
+
+  /**
+   * Seeds ONE non-terminal W4-contract import job — the durable in-flight
+   * evidence BOTH `countIncompleteOperationsV1` (INCOMPLETE_OPERATION) and the
+   * suspend contract's `SUSPEND_SOURCE_WRITERS_SERIALIZED` count.
+   *
+   * FIXTURE SHAPE MATCHES THE NAMED SCENARIO rather than merely satisfying the
+   * predicate's WHERE clause: the W4C-0 migration's own
+   * `attendance_w4_import_jobs_w4_guard` refuses any `w4_contract_version = 1`
+   * INSERT unless the session GUC `attendance.w4c3a_enqueue_job_id` names the
+   * row's own id (the enqueue seam), and `chk_aij_w4_shape` requires the full
+   * W4 identity column set. Both are satisfied here, on ONE pooled client, so
+   * this is a row the production enqueue path could actually produce — a bare
+   * stand-in would be counting rows that cannot exist.
+   *
+   * `w4_item_count` is 1, not 0: W4C-0's `chk_aij_w4_item_count` is
+   * `w4_item_count IS NULL OR w4_item_count >= 1`.
+   *
+   * THE PROOF VECTOR IS DERIVED BY THE DATABASE, not forged here.
+   * `chk_aij_w4_proof_vector` calls `attendance_w4_job_proof_vector_valid`,
+   * which requires each entry's `derivedOperationId` to equal
+   * `attendance_w4_uuidv5(ns, attendance_w4_item_name_bytes(root, ordinal, fp))`.
+   * The INSERT below computes it with those same shipped SQL functions, so the
+   * row is one the production enqueue path could really produce; writing a
+   * plausible-looking UUID by hand would just be defeating the check the row is
+   * supposed to satisfy. (Backticks are banned inside the SQL string itself —
+   * they terminate the enclosing JS template literal.)
+   *
+   * SCOPE NOTE, so the next reader is not surprised by what this fixture does
+   * NOT carry: this suite's ephemeral database applies W4C-0 only. The durable
+   * legacy-plan columns and the deferred
+   * `attendance_validate_import_legacy_plan_v1` chain validator arrive in a
+   * LATER migration (`zzzz20260730120000_w4c3a_durable_legacy_execution_plan`)
+   * that this scratch schema does not run, so no plan chain is required here.
+   * That is sufficient for a predicate whose whole question is "are there
+   * non-terminal v1 jobs for this org", and is deliberately not claimed as more.
+   */
+  async function seedIncompleteW4Job(orgId: string, status: 'queued' | 'running'): Promise<void> {
+    await withClient(async (client) => {
+      const jobId = randomUUID()
+      const batchId = randomUUID()
+      const fingerprint = '7'.repeat(64)
+      await client.query('BEGIN')
+      try {
+        await client.query(`SELECT set_config('attendance.w4c3a_enqueue_job_id', $1, true)`, [jobId])
+        await client.query(
+          `INSERT INTO attendance_import_jobs
+             (id, org_id, batch_id, created_by, status, payload, w4_contract_version, w4_entrypoint,
+              w4_batch_command_id, w4_source_kind, w4_source_ref, w4_actor_id, w4_actor_posture,
+              w4_command_fingerprint, w4_accepted_write_posture, w4_item_count,
+              w4_item_sequence_fingerprint, w4_item_set_fingerprint, w4_identity_proof_vector)
+           VALUES ($1, $2, $3, 'fixture', $4, '{}'::jsonb, 1, 'import_batch',
+                   $3, 'import_batch', 'batch:w73-fixture', 'fixture', 'delegated_import',
+                   $5, 'shadow', 1, $5, $5,
+                   -- THE DATABASE DERIVES THE PROOF VECTOR; this test does not
+                   -- forge one. See the helper doc comment above for why, and
+                   -- note the no-backticks rule for SQL inside a JS template
+                   -- literal.
+                   jsonb_build_array(jsonb_build_object(
+                     'ordinal', 0,
+                     'semanticFingerprint', $5::text,
+                     'commandFingerprint', $5::text,
+                     'derivedOperationId',
+                       attendance_w4_uuidv5(
+                         $6::uuid,
+                         attendance_w4_item_name_bytes($3::uuid, 0, $5::text)
+                       )::text
+                   )))`,
+          [jobId, orgId, batchId, status, fingerprint, ATTENDANCE_IMPORT_ITEM_NAMESPACE_V1],
+        )
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Seeds ONE unresolved legacy-ingress review — a record whose LATEST
+   * calculation carries `outcome_reason_code = 'legacy_time_ingress_not_authoritative'`,
+   * which is exactly what `countUnresolvedIngressReviewsV1` counts.
+   *
+   * Every value is chosen to satisfy the real W4C-0 constraint chain rather than
+   * to dodge it: `legacy_time_ingress_not_authoritative` forces
+   * `outcome='review_required'` (`chk_arc_outcome_reason_pair`), which forces
+   * `calculation_kind='calculation'` (`chk_arc_kind_outcome_pair`), which forces
+   * a non-null `operation_id` (`chk_arc_operation_id`); the snapshots are
+   * array-shaped where the CHECKs demand arrays; and the composite FK
+   * `(attendance_record_id, org_id)` is honoured by seeding the record first.
+   */
+  async function seedUnresolvedIngressReview(orgId: string): Promise<void> {
+    const recordId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_records (id, user_id, work_date, org_id)
+       VALUES ($1, $2, '2026-08-14', $3)`,
+      [recordId, randomUUID(), orgId],
+    )
+    await pool.query(
+      `INSERT INTO attendance_record_calculations (
+         id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
+         engine_version, snapshot_schema_version, operation_id, semantic_input_fingerprint,
+         provenance_fingerprint, attribution_snapshot, segment_snapshot, evidence_snapshot,
+         approved_facts_snapshot, input_provenance, merge_policy, calculation_tier, outcome,
+         outcome_reason_code, projection_effect, expected_segment_count, actor_id, correlation_id)
+       VALUES ($1, $2, $3, 1, 'calculation', 'shadow', 'live', 'w7-fixture', 1, $4,
+               $5, $6, '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+               'append', 'legacy_shadow', 'review_required',
+               'legacy_time_ingress_not_authoritative', 'none', 0, 'fixture', $7)`,
+      [randomUUID(), orgId, recordId, randomUUID(), 'a'.repeat(64), 'b'.repeat(64), randomUUID()],
+    )
+  }
+
+  /** Walks a prepared org all the way to `group_authoritative` through the REAL
+   *  writer, with every producer/compare declaration overridden. Returns the
+   *  row version so the caller can continue the ladder. */
+  async function advanceToGroupAuthoritative(orgId: string): Promise<number> {
+    __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests(
+      Object.fromEntries(
+        ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1.map((state) => [state, true]),
+      ) as never,
+    )
+    __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+      W7_CRITICAL_SHADOW_DIFF: true,
+      W7_OFF_ROSTER_DIFF: true,
+    })
+    const ladder: Array<[AttendanceW7ContextSourcePostureStateV1, AttendanceW7ContextSourcePostureStateV1]> = [
+      ['off', 'group_shadow'],
+      ['group_shadow', 'group_eligible'],
+      ['group_eligible', 'group_authoritative'],
+    ]
+    let version = 1
+    for (const [expectedState, targetState] of ladder) {
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(
+          asTrx(client),
+          input(orgId, { expectedState, targetState, expectedVersion: version }),
+        )
+      })
+      version += 1
+    }
+    expect((await stateRow(orgId))?.state, 'ladder walk to group_authoritative did not land').toBe(
+      'group_authoritative',
+    )
+    return version
   }
 
   /** Puts the org's W4 segment-calculation posture into `shadow`, so the
@@ -832,7 +980,15 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
     })
 
-    it('T-W4 bootstrap is permitted ONLY for allowlisted `off -> group_shadow` — each conjunct alone', async () => {
+    // P3-1 (fix round): this leg was titled "each conjunct alone", which
+    // over-claimed. `canBootstrap`'s own `orgAllowlisted` conjunct is
+    // UNFALSIFIABLE — its only caller runs after the boundary's
+    // `if (!orgAllowlisted) fail(...)`, so deleting that conjunct reds nothing.
+    // The title now says what the leg actually proves: the OUTER allowlist gate
+    // refuses first (門級 exclusivity), and the first-rung conjuncts are what
+    // `canBootstrap` itself contributes. The redundancy is documented at the
+    // helper rather than pretended away.
+    it('T-W4 bootstrap: refused by the OUTER allowlist gate, and separately by the first-rung conjuncts', async () => {
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({
         group_shadow: true,
         group_eligible: true,
@@ -917,7 +1073,10 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
             }),
           ),
         ).rejects.toMatchObject({
-          code: 'W7_CONTEXT_SOURCE_TRANSITION_COMPARE_EVIDENCE_NOT_DELIVERED',
+          // The FIRST compare probe in enumeration order. Distinct per probe
+          // since the fix round — a shared code proved only that one of the two
+          // fired, never which.
+          code: 'W7_CONTEXT_SOURCE_TRANSITION_CRITICAL_SHADOW_DIFF_NOT_DELIVERED',
         })
       })
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
@@ -1674,6 +1833,316 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         a.release()
         b.release()
       }
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // P2-1 (fix round) — the plan REPORT must not claim a pass it never evaluated.
+  // -------------------------------------------------------------------------
+  describe('plan report honesty: `applicable` comes from the derivation, and an unevaluated criterion is never a pass', () => {
+    it('a NON-allowlisted org reports the DB-backed criteria as applicable-but-not-evaluated, never pass', async () => {
+      // THE FIXTURE GAP THAT HID THIS: every other plan leg in this suite uses
+      // an allowlisted org, so the collapse branch
+      // (`canEvaluateDbPredicates === false`) was never exercised and the report
+      // was free to emit `applicable:false, pass:true` for four criteria it had
+      // skipped. An operator reads that as "clean".
+      const orgId = randomUUID()
+      createdOrgs.push(orgId)
+      await seedBaseRow(orgId)
+      await walkTo(orgId, 'group_shadow')
+      // Deliberately allowlisting a DIFFERENT org: "unset" and "set to someone
+      // else" are different failure modes.
+      process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = randomUUID()
+
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId,
+          targetState: 'group_eligible',
+        })
+        expect(plan.orgAllowlisted, 'the fixture failed to make the org non-allowlisted').toBe(false)
+
+        // 1. `applicable` is EXACTLY the shared derivation — the property the
+        //    module's own comment claims and previously did not have.
+        const derived = [...attendanceW7ContextSourceApplicablePredicatesV1('group_shadow', 'group_eligible')].sort()
+        const emittedApplicable = plan.predicates.filter((p) => p.applicable).map((p) => p.code).sort()
+        expect(emittedApplicable).toEqual(derived)
+
+        // 2. NOT ONE applicable criterion is reported as a pass without having
+        //    been evaluated. Asserted as a positive equality on the shape, per
+        //    predicate, rather than as a bulk "no bad ones".
+        const skipped = [
+          'W4_POSTURE_COHERENT',
+          'INCOMPLETE_OPERATION',
+          'UNRESOLVED_INGRESS_REVIEW',
+          'DEFECTIVE_REQUEST_SNAPSHOT',
+        ] as const
+        for (const code of skipped) {
+          const verdict = plan.predicates.find((predicate) => predicate.code === code)
+          expect(verdict, code).toMatchObject({
+            applicable: true,
+            evaluated: false,
+            pass: null,
+            count: null,
+          })
+        }
+
+        // 3. The invariant, over the WHOLE array: `pass === null` iff not evaluated.
+        for (const verdict of plan.predicates) {
+          expect(verdict.pass === null, `${verdict.code}: pass/evaluated disagree`).toBe(
+            verdict.evaluated === false,
+          )
+        }
+
+        // 4. Decision unchanged — the correction is report-only.
+        expect(plan.blocked).toBe(true)
+      })
+
+      // POSITIVE CONTROL: the same org, allowlisted, with a coherent W4 posture,
+      // reports those same four criteria as REALLY evaluated. Without this the
+      // assertions above would also pass if nothing were ever evaluated.
+      await seedCoherentW4Posture(orgId)
+      process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = orgId
+      process.env[W4_ENV] = orgId
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId,
+          targetState: 'group_eligible',
+        })
+        for (const code of ['W4_POSTURE_COHERENT', 'INCOMPLETE_OPERATION', 'UNRESOLVED_INGRESS_REVIEW', 'DEFECTIVE_REQUEST_SNAPSHOT'] as const) {
+          const verdict = plan.predicates.find((predicate) => predicate.code === code)
+          expect(verdict, code).toMatchObject({ applicable: true, evaluated: true, pass: true })
+        }
+      })
+    })
+
+    it('the RESUME criterion is reported not-evaluated by the plan (which has no manifest) — not as a pass', async () => {
+      // It is enforced at INPUT time by the resume-widened reference key set, so
+      // the plan genuinely cannot certify it. Before the fix round both callers
+      // hard-coded `pass: true` here, which made its refusal code structurally
+      // dead while it sat in the table looking enforced.
+      const orgId = await preparedOrg()
+      await advanceToGroupAuthoritative(orgId)
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(
+          asTrx(client),
+          input(orgId, {
+            expectedState: 'group_authoritative',
+            targetState: 'suspended',
+            expectedVersion: 4,
+          }),
+        )
+      })
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId,
+          targetState: 'group_authoritative',
+        })
+        expect(plan.predicates.find((p) => p.code === 'RESUME_REPLAY_ARTIFACT')).toMatchObject({
+          applicable: true,
+          evaluated: false,
+          pass: null,
+        })
+      })
+      // POSITIVE CONTROL: the WRITER, which has validated the widened reference
+      // set at input time, records a real pass — so "not evaluated" above is
+      // about the plan's missing manifest, not about a permanently dead entry.
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(
+          asTrx(client),
+          input(orgId, {
+            expectedState: 'suspended',
+            targetState: 'group_authoritative',
+            expectedVersion: 5,
+            evidenceReferences: RESUME_REFS,
+          }),
+        )
+      })
+      expect((await stateRow(orgId))?.state).toBe('group_authoritative')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // P2-3 (fix round) — every live predicate guard has its own seeded failure.
+  //
+  // The gate neutered INCOMPLETE_OPERATION, UNRESOLVED_INGRESS_REVIEW and
+  // SUSPEND_SOURCE_WRITERS_SERIALIZED to always-pass and the ENTIRE battery
+  // stayed green: three 未测守卫. These are the design-lock §4.2 entry criteria
+  // and the §5.3 suspend contract; nothing else in the machine enforces them.
+  // -------------------------------------------------------------------------
+  describe('P2-3 predicate guards: each seeded failure raises its OWN refusal code', () => {
+    async function prepareAtGroupShadow(): Promise<string> {
+      const orgId = await preparedOrg()
+      __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({
+        group_shadow: true,
+        group_eligible: true,
+      })
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: true,
+        W7_OFF_ROSTER_DIFF: true,
+      })
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+      })
+      return orgId
+    }
+
+    async function attemptPromotion(orgId: string): Promise<string> {
+      return withClient(async (client) => {
+        try {
+          await transitionAttendanceW7ContextSourceV1(
+            asTrx(client),
+            input(orgId, {
+              expectedState: 'group_shadow',
+              targetState: 'group_eligible',
+              expectedVersion: 2,
+            }),
+          )
+          return '<no throw>'
+        } catch (error) {
+          return codeOf(error)
+        }
+      })
+    }
+
+    it('INCOMPLETE_OPERATION: an in-flight W4 job blocks promotion with its own code', async () => {
+      const orgId = await prepareAtGroupShadow()
+      // POSITIVE CONTROL FIRST: with nothing seeded the promotion succeeds, so
+      // the refusal below is the seeded job and not an unrelated precondition.
+      expect(await attemptPromotion(orgId)).toBe('<no throw>')
+      expect((await stateRow(orgId))?.state).toBe('group_eligible')
+
+      const blocked = await prepareAtGroupShadow()
+      await seedIncompleteW4Job(blocked, 'queued')
+      expect(await attemptPromotion(blocked)).toBe(
+        'W7_CONTEXT_SOURCE_TRANSITION_INCOMPLETE_OPERATION',
+      )
+      expect((await stateRow(blocked))?.state, 'the refusal must leave the row unmoved').toBe(
+        'group_shadow',
+      )
+
+      // ...and the plan reports the real COUNT, not a boolean.
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId: blocked,
+          targetState: 'group_eligible',
+        })
+        expect(plan.predicates.find((p) => p.code === 'INCOMPLETE_OPERATION')).toMatchObject({
+          applicable: true,
+          evaluated: true,
+          pass: false,
+          count: 1,
+        })
+      })
+    })
+
+    it('UNRESOLVED_INGRESS_REVIEW: an unresolved legacy-ingress review blocks promotion with its own code', async () => {
+      const orgId = await prepareAtGroupShadow()
+      expect(await attemptPromotion(orgId)).toBe('<no throw>') // positive control
+
+      const blocked = await prepareAtGroupShadow()
+      await seedUnresolvedIngressReview(blocked)
+      expect(await attemptPromotion(blocked)).toBe('W7_CONTEXT_SOURCE_TRANSITION_UNRESOLVED_REVIEW')
+      expect((await stateRow(blocked))?.state).toBe('group_shadow')
+
+      await withClient(async (client) => {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          orgId: blocked,
+          targetState: 'group_eligible',
+        })
+        expect(plan.predicates.find((p) => p.code === 'UNRESOLVED_INGRESS_REVIEW')).toMatchObject({
+          applicable: true,
+          evaluated: true,
+          pass: false,
+          count: 1,
+        })
+      })
+    })
+
+    it('SUSPEND_SOURCE_WRITERS_SERIALIZED: an in-flight source writer blocks SUSPEND with its own code', async () => {
+      // §5.3 / W4C-5 §3 item 8: the org must be quiesced before the machine is
+      // parked, so that "changes no operation/source/result/pointer/job row" is
+      // a statement about a settled org rather than a race.
+      const clean = await preparedOrg()
+      await advanceToGroupAuthoritative(clean)
+      // POSITIVE CONTROL: quiesced org suspends.
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(
+          asTrx(client),
+          input(clean, {
+            expectedState: 'group_authoritative',
+            targetState: 'suspended',
+            expectedVersion: 4,
+          }),
+        )
+      })
+      expect((await stateRow(clean))?.state).toBe('suspended')
+
+      const busy = await preparedOrg()
+      await advanceToGroupAuthoritative(busy)
+      // Seeded AFTER the walk: the promotion legs would otherwise be blocked by
+      // INCOMPLETE_OPERATION, which is a DIFFERENT predicate on a different pair.
+      await seedIncompleteW4Job(busy, 'running')
+      const code = await withClient(async (client) => {
+        try {
+          await transitionAttendanceW7ContextSourceV1(
+            asTrx(client),
+            input(busy, {
+              expectedState: 'group_authoritative',
+              targetState: 'suspended',
+              expectedVersion: 4,
+            }),
+          )
+          return '<no throw>'
+        } catch (error) {
+          return codeOf(error)
+        }
+      })
+      expect(code).toBe('W7_CONTEXT_SOURCE_TRANSITION_SOURCE_WRITERS_ACTIVE')
+      expect((await stateRow(busy))?.state).toBe('group_authoritative')
+    })
+
+    it('the two compare probes have DISTINCT refusal codes — a test can tell which one blocked', async () => {
+      // They shared one string until the fix round, so an assertion on it proved
+      // only that ONE of the two fired. Each is now isolated by delivering the
+      // OTHER and asserting the survivor's own code.
+      const orgId = await preparedOrg()
+      __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({
+        group_shadow: true,
+        group_eligible: true,
+      })
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: true,
+        W7_OFF_ROSTER_DIFF: true,
+      })
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+      })
+
+      // Only OFF_ROSTER undelivered -> only its code.
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: true,
+        W7_OFF_ROSTER_DIFF: false,
+      })
+      expect(await attemptPromotion(orgId)).toBe(
+        'W7_CONTEXT_SOURCE_TRANSITION_OFF_ROSTER_DIFF_NOT_DELIVERED',
+      )
+
+      // Only CRITICAL_SHADOW undelivered -> only its code.
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: false,
+        W7_OFF_ROSTER_DIFF: true,
+      })
+      expect(await attemptPromotion(orgId)).toBe(
+        'W7_CONTEXT_SOURCE_TRANSITION_CRITICAL_SHADOW_DIFF_NOT_DELIVERED',
+      )
+
+      // POSITIVE CONTROL: both delivered -> the promotion runs.
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: true,
+        W7_OFF_ROSTER_DIFF: true,
+      })
+      expect(await attemptPromotion(orgId)).toBe('<no throw>')
+      expect((await stateRow(orgId))?.state).toBe('group_eligible')
     })
   })
 

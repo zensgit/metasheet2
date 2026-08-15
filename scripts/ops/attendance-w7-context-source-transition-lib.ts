@@ -322,6 +322,11 @@ export function computeAttendanceW7PlanDigestV1(
     predicates: plan.predicates.map((predicate) => ({
       code: predicate.code,
       applicable: predicate.applicable,
+      // `evaluated` is part of the digest deliberately: a plan in which a
+      // criterion went from "not evaluated" to a real verdict (or back) is a
+      // DIFFERENT plan, and `apply` must refuse a digest computed before that
+      // changed. Omitting it would let the two collapse to the same hash.
+      evaluated: predicate.evaluated,
       pass: predicate.pass,
       count: predicate.count,
     })),
