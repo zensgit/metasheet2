@@ -29623,9 +29623,8 @@ module.exports = {
           //   diagnostic — silent.
           //
           // LOCKING (§4.3). This block runs on `db`, the POOLED connection,
-          // outside any explicit transaction. W7-1a's
-          // `acquireAttendanceW7CompositeFactsLocksV1` takes
-          // `pg_advisory_xact_lock_shared`, whose scope is the ENCLOSING
+          // outside any explicit transaction. W7-1a's composite facts-lock
+          // helper takes `pg_advisory_xact_lock_shared`, whose scope is the ENCLOSING
           // TRANSACTION; on an autocommit connection each lock is released at
           // statement end and buys NO mutual exclusion at all. An "unlocked
           // mirror path" is not available either: the facts resolver acquires

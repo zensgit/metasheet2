@@ -758,6 +758,20 @@ export default defineConfig({
       // Two-point wired: excluded from no-DB collection here, whole-file run in
       // plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-w7-1am-provenance-widening.db.test.ts',
+      // #4556 W7-1b (ratified per #4556 comments 5293034619 + 5293478713): W7-R3
+      // structural parity. Runs the REAL production legacy frozen-context builder
+      // against real PostgreSQL over an eight-fixture corpus and compares the
+      // serialized artifacts to vectors captured at the pre-1b base. Meaningless
+      // without a database — the builder reads shift/segment/rule rows. Two-point
+      // wired: excluded from no-DB collection here, whole-file run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts',
+      // #4556 W7-1b: the issuance seam and ruling-7's mirror controls. Boots a real
+      // MetaSheetServer with the real plugin (so the seam under test is the one
+      // activate() wired into production) and drives a real punch route. Needs real
+      // PostgreSQL for the posture table, the W1 membership timeline and the
+      // fixed-schedule effectiveness fixture. Two-point wired as above.
+      'tests/integration/attendance-w7-1b-issuance-seam.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.

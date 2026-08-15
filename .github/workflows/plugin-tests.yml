@@ -1418,6 +1418,8 @@ jobs:
             tests/integration/attendance-shift-segments-migration.db.test.ts \
             tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
             tests/integration/attendance-w7-1am-provenance-widening.db.test.ts \
+            tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts \
+            tests/integration/attendance-w7-1b-issuance-seam.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 
