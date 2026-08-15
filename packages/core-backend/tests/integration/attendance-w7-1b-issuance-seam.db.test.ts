@@ -215,14 +215,23 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
     shiftId: string,
     name: string,
     segments: readonly { start: string; end: string; endDayOffset?: 0 | 1 }[],
+    // Wall-clock window of the SHIFT row. Legs that punch the real route at
+    // `new Date()` (T-M1 route) must use a FULL-DAY window: with 09:00-18:00
+    // Asia/Shanghai (+120min tail) the candidate stops resolving after
+    // 12:00 UTC, so the leg was green or red depending on the WALL CLOCK of
+    // the run — green in every CI run before 10:40 UTC, red at 13:22 UTC on
+    // both matrix legs with no code change. Time-of-day is not an input a
+    // test may depend on. The cutover e2e's fixtures are full-day for the
+    // same reason (safe at midnight since the h24 hourCycle fix).
+    workWindow: { start: string; end: string } = { start: '09:00', end: '18:00' },
   ): Promise<void> {
     await pool.query(
       `INSERT INTO attendance_shifts
          (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days,
           late_grace_minutes, early_grace_minutes, rounding_minutes, flex_mode)
-       VALUES ($1, $2, $3, 'Asia/Shanghai', '09:00', '18:00', false, '[0,1,2,3,4,5,6]'::jsonb,
+       VALUES ($1, $2, $3, 'Asia/Shanghai', $4, $5, false, '[0,1,2,3,4,5,6]'::jsonb,
                5, 7, 15, 'strict')`,
-      [shiftId, orgId, name],
+      [shiftId, orgId, name, workWindow.start, workWindow.end],
     )
     for (let i = 0; i < segments.length; i += 1) {
       await pool.query(
@@ -350,7 +359,15 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
       { start: '09:00', end: '12:00' },
       { start: '13:00', end: '18:00' },
     ])
-    await insertShift(groupOrg, groupShift, 'w7-1b group shift', [{ start: '09:00', end: '18:00' }])
+    // FULL-DAY window: this org's T-M1 route leg punches at `new Date()`, and
+    // its candidate must resolve at ANY wall-clock hour (see insertShift note).
+    await insertShift(
+      groupOrg,
+      groupShift,
+      'w7-1b group shift',
+      [{ start: '00:00', end: '23:59' }],
+      { start: '00:00', end: '23:59' },
+    )
     await insertActiveUser(groupUser, groupOrg)
     await seedEffectiveGroup(groupOrg, groupUser, groupShift, groupId)
     await insertShift(gapOrg, gapShift, 'w7-1b gap shift', [{ start: '09:00', end: '18:00' }])
