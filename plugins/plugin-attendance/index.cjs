@@ -8391,8 +8391,18 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
  *     (`legacy -> shadow -> eligible -> authoritative`) carrying evidence manifests and the
  *     full transition precondition set.
  * `referenceSegments` is chosen because it is the bit that answers what this door actually
- * asks — "may this org's scheduling data REFERENCE a multi-segment shift?" — and because it
- * matches the 17 write-side sites, so read and write admission cannot disagree for an org.
+ * asks — "may this org's scheduling data REFERENCE a multi-segment shift?" — and because it is
+ * the same bit the 17 write-side sites consume, so the two sides read ONE posture value out of
+ * ONE allowlist predicate rather than two that could drift apart in meaning.
+ *
+ * That is emphatically NOT a claim that read and write admission agree. They do not, and by
+ * design: this slice wires the resolved posture into exactly ONE read call site (the approval
+ * path), so for an ENABLED org the other read paths listed on `resolveWorkContext` still fail
+ * closed while its writers are admitted — and `buildShiftCapabilities` still reports
+ * `preview_only` in the shift DTO. The shared thing is the PREDICATE; read-side admission is
+ * deliberately narrower than write-side admission until the remaining call sites get their
+ * lock-order census.
+ *
  * A THIRD reading exists and is named rather than silently dropped: conjoin the door with
  * "the segment calculator has shipped" (`SEGMENT_CALCULATION_IMPLEMENTED`), which would open
  * it exactly when it produces correct numbers. It is NOT built here; it is the owner's to
@@ -8407,8 +8417,9 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
  * `attendance_records.work_minutes = 540`, while the shift DTO's `plannedMinutes` is 480
  * (R1: the 60-minute break is never payable time). This is DATA CORRUPTION — a durable wrong
  * row — not merely a wrong response. The owner's trade is outage versus corruption: a Gate-C
- * org whose users cannot be calculated at all (the pinned state, while Gate A already lets it
- * WRITE the reference) versus one whose records overstate worked time until W4C-1 lands. It is
+ * org whose users ASSIGNED A MULTI-SEGMENT SHIFT cannot be calculated (the pinned state, while
+ * Gate A already lets it WRITE the reference) versus one whose records overstate worked time
+ * until W4C-1 lands. It is
  * put to the owner in the PR body, not settled here, and deliberately NOT frozen by a test.
  * Unreachable today: no rollout row exists, so no org resolves anything but `legacy`.
  */
