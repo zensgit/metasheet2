@@ -161,6 +161,7 @@ describe('dingtalk work notification client', () => {
           requestNo: 'REQ-1',
           nodeName: '部门审批',
           statusText: '等待你处理',
+          actionsVisible: 'true',
           approveText: '同意',
           rejectText: '驳回',
           rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
@@ -223,7 +224,7 @@ describe('dingtalk work notification client', () => {
     )).rejects.toThrow('create-and-deliver rejected')
   })
 
-  it('B-4 sends the official card-instances update shape (statusText only, update-by-key)', async () => {
+  it('B-4 sends terminal status and retires the template action area by key', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       success: true,
       result: true,
@@ -235,6 +236,7 @@ describe('dingtalk work notification client', () => {
       {
         outTrackId: 'delivery-1',
         statusText: '已由 张审批 同意 · 2026/07/10 14:30',
+        actionsVisible: false,
       },
       { openApiBaseUrl: 'https://api.dingtalk.test/' },
     )
@@ -248,15 +250,36 @@ describe('dingtalk work notification client', () => {
       'Content-Type': 'application/json',
       'x-acs-dingtalk-access-token': 'app-access-token',
     })
-    // Values-free fence (B-2 §5 / B-4): the update carries statusText ONLY — no form values, no
-    // extra params can ride the terminal update.
+    // Values-free fence (B-2 §5 / B-4): only status and the closed action-visibility boolean ride
+    // the terminal update. The template binds both buttons to actionsVisible.
     expect(JSON.parse(String(init.body))).toEqual({
       outTrackId: 'delivery-1',
       cardData: {
         cardParamMap: {
           statusText: '已由 张审批 同意 · 2026/07/10 14:30',
+          actionsVisible: 'false',
         },
       },
+      cardUpdateOptions: { updateCardDataByKey: true },
+    })
+  })
+
+  it('B-4 retryable copy leaves the existing action visibility untouched', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateDingTalkInteractiveApprovalCard('token', {
+      outTrackId: 'delivery-1',
+      statusText: '当前账号无权处理该审批',
+    })
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      outTrackId: 'delivery-1',
+      cardData: { cardParamMap: { statusText: '当前账号无权处理该审批' } },
       cardUpdateOptions: { updateCardDataByKey: true },
     })
   })

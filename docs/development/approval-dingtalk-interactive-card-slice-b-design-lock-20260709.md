@@ -1,5 +1,13 @@
 # 审批钉钉互动卡 Slice B · DESIGN-LOCK — 2026-07-09
 
+> **UAT correction 2026-08-15:** a real terminal update changed `statusText` but left both action
+> buttons visible. B-4 therefore also owns the closed template parameter `actionsVisible`: sends
+> set it to `true`; only genuine terminal outcomes (`executed` / terminal `stale`) set it to
+> `false`. Retryable refusal copy does not alter it. The published template must bind both buttons'
+> visibility to this variable and default it to `true` for cards created before this sender change.
+> Publish that backward-compatible template revision before deploying the sender/update code;
+> code-only delivery is not U9 evidence.
+
 > Status: **RATIFIED THROUGH B-2**. B-1 is shipped; the B-2 implementation accompanies this revision.
 > It opens only because Slice A A-5 has PASS evidence in
 > `approval-dingtalk-one-tap-a5-verification-20260705.md` §4.1.
