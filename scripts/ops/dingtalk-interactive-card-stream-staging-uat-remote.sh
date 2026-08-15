@@ -1767,11 +1767,15 @@ action_observe() {
     local handled_line
     handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | tail -n 1)"
     case "$handled_line" in
-      *'(accepted)'*) handled_outcome="accepted" ;;
-      *'(duplicate)'*) handled_outcome="duplicate" ;;
-      *'(stale)'*) handled_outcome="stale" ;;
-      *'(operator_unresolved)'*) handled_outcome="operator_unresolved" ;;
-      *'(link_secret_unavailable)'*) handled_outcome="link_secret_unavailable" ;;
+      *'(executed delivery='*) handled_outcome="executed" ;;
+      *'(stale delivery='*) handled_outcome="stale" ;;
+      *'(rejected:'*) handled_outcome="rejected" ;;
+      *'(ignored_unsupported_action out_track_id='*) handled_outcome="ignored_unsupported_action" ;;
+      *'(delivery_not_found out_track_id='*) handled_outcome="delivery_not_found" ;;
+      *'(operator_unresolved:'*) handled_outcome="operator_unresolved" ;;
+      *'(link_secret_unavailable delivery='*) handled_outcome="link_secret_unavailable" ;;
+      *'(engine_rejected:'*) handled_outcome="engine_rejected" ;;
+      *'(wrapper_not_found delivery='*) handled_outcome="wrapper_not_found" ;;
       *) handled_outcome="other" ;;
     esac
   fi

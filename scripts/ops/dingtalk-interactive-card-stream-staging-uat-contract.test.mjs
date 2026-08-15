@@ -242,6 +242,20 @@ test('observe is read-only and emits values-free callback classes without raw lo
   assert.match(observe, /body_corp_id_present=/)
   assert.match(observe, /latest_callback_outcome=/)
   assert.match(observe, /card_update_failed_count=/)
+  for (const outcome of [
+    'executed',
+    'stale',
+    'rejected',
+    'ignored_unsupported_action',
+    'delivery_not_found',
+    'operator_unresolved',
+    'link_secret_unavailable',
+    'engine_rejected',
+    'wrapper_not_found',
+  ]) {
+    assert.match(observe, new RegExp(`handled_outcome="${outcome}"`))
+  }
+  assert.doesNotMatch(observe, /handled_outcome="(?:accepted|duplicate)"/)
   assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
   assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
 })
