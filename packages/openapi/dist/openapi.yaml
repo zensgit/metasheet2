@@ -790,6 +790,7 @@ components:
               enum:
                 - legacy_untracked
                 - w4
+                - w4_group
             visibilityState:
               type: string
               enum:

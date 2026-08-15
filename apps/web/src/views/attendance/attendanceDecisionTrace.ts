@@ -59,6 +59,17 @@ export type AttendanceTraceVersionPosture = (typeof ATTENDANCE_TRACE_VERSION_POS
 export const ATTENDANCE_TRACE_CONFIDENCES = ['grounded', 'partial', 'undeterminable'] as const
 export type AttendanceTraceConfidence = (typeof ATTENDANCE_TRACE_CONFIDENCES)[number]
 
+// W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the web
+// bundle cannot import backend source, so this list is an INDEPENDENT copy of the
+// backend trace source-kind domain. It is widened here in lockstep, and the
+// backend completeness test asserts the two lists stay equal by membership.
+// This array is also the runtime acceptance gate in `parseBasisEnv` below. Its
+// failure mode is REJECT-WHOLE-RESPONSE, not drop-one-entry: `parseBasisEnv`
+// returns null for an unknown kind, `parseBasis` abandons the whole array on the
+// FIRST such entry, and `parseAttendanceDecisionTraceResponse` then returns null
+// — so an unwidened copy would make the entire decision trace fail to parse and
+// render as absent. Strictly worse than a dropped entry, which is why the copy
+// must stay member-equal to the backend domain.
 export const ATTENDANCE_TRACE_SOURCE_KINDS = [
   'record',
   'snapshot',
@@ -66,6 +77,7 @@ export const ATTENDANCE_TRACE_SOURCE_KINDS = [
   'ledger',
   'audit',
   'policy_gate',
+  'group_policy_snapshot',
 ] as const
 export type AttendanceTraceSourceKind = (typeof ATTENDANCE_TRACE_SOURCE_KINDS)[number]
 
@@ -782,6 +794,8 @@ export function attendanceTraceSourceKindLabel(kind: AttendanceTraceSourceKind, 
     case 'ledger': return tr('Ledger', '台账')
     case 'audit': return tr('Audit', '审计')
     case 'policy_gate': return tr('Policy gate', '策略开关')
+    // W7-1a-M: exhaustive switch — a widened union without this arm fails tsc.
+    case 'group_policy_snapshot': return tr('Group policy snapshot', '组策略快照')
   }
 }
 

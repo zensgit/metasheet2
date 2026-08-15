@@ -1065,7 +1065,8 @@
                 "type": "string",
                 "enum": [
                   "legacy_untracked",
-                  "w4"
+                  "w4",
+                  "w4_group"
                 ]
               },
               "visibilityState": {

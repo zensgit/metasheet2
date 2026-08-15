@@ -4,11 +4,21 @@
  * `docs/development/attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md`
  * §4.4, §7 OD-W7-5.
  *
- * This module is not imported by any production path (W7-R9 byte-inert):
- * neither `PROJECTION_OWNERS`
+ * UPDATED BY W7-1a-M (ratified per #4556 comments 5293034619 + 5293478713).
+ * The W7-0-era statement below — that this module is imported by no production
+ * path and that neither live enum is edited — described W7-0 and no longer
+ * holds: W7-1a-M wired both recorded values into the live domains, so
+ * `../w7-provenance-domain.ts` now imports the two value constants and both
+ * `currentMembers` snapshots track the WIDENED live sets. The snapshots are
+ * still written independently of the domain module's arrays, so the
+ * mutual-extends `tsc` guards they feed remain real comparisons rather than
+ * tautologies.
+ *
+ * Historical W7-0 note: this module was imported by no production path (W7-R9
+ * byte-inert), and neither `PROJECTION_OWNERS`
  * (`../../services/AttendanceW4CalculationDetail.ts`) nor
  * `AttendanceDecisionTraceSourceKind`
- * (`../../services/AttendanceDecisionTrace.ts`) is edited by this PR. The
+ * (`../../services/AttendanceDecisionTrace.ts`) was edited by that PR. The
  * real compile-time drift guard lives in the SOURCE file, not here:
  * `packages/core-backend/tsconfig.json`'s `exclude` list keeps every
  * `.test.ts` file and everything under a `__tests__` directory out of
@@ -34,10 +44,13 @@ describe('W7-0 read-side provenance amendment: recorded values', () => {
     expect(ATTENDANCE_W7_PROJECTION_OWNER_GROUP_VALUE_V1).not.toBe('w4')
   })
 
-  it('trace source-kind new value is a fixed string, distinct from all six current values', () => {
+  it('trace source-kind new value is a fixed string, distinct from the six PRE-widening values', () => {
     expect(ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1).toBe('group_policy_snapshot')
-    const current = ['record', 'snapshot', 'rule_live', 'ledger', 'audit', 'policy_gate']
-    expect(current).not.toContain(ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1)
+    // The six members the union carried before W7-1a-M. Deliberately still the
+    // pre-widening list: the claim is that the new value COLLIDES WITH NONE of
+    // them, which is exactly why it could be added.
+    const preWidening = ['record', 'snapshot', 'rule_live', 'ledger', 'audit', 'policy_gate']
+    expect(preWidening).not.toContain(ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1)
   })
 
   it('bundled record targets exactly the two named modules/symbols, exact-key shape', () => {
@@ -45,13 +58,23 @@ describe('W7-0 read-side provenance amendment: recorded values', () => {
       projectionOwner: {
         targetFile: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts',
         targetConst: 'PROJECTION_OWNERS',
-        currentMembers: ['legacy_untracked', 'w4'],
+        // W7-1a-M widened the live set; the snapshot follows it.
+        currentMembers: ['legacy_untracked', 'w4', 'w4_group'],
         newValue: 'w4_group',
       },
       traceSourceKind: {
         targetFile: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts',
         targetType: 'AttendanceDecisionTraceSourceKind',
-        currentMembers: ['record', 'snapshot', 'rule_live', 'ledger', 'audit', 'policy_gate'],
+        // W7-1a-M widened the live union; the snapshot follows it.
+        currentMembers: [
+          'record',
+          'snapshot',
+          'rule_live',
+          'ledger',
+          'audit',
+          'policy_gate',
+          'group_policy_snapshot',
+        ],
         newValue: 'group_policy_snapshot',
       },
     })

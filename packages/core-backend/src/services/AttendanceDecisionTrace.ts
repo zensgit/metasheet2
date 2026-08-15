@@ -99,6 +99,14 @@ export interface AttendanceDecisionTraceVersion {
   snapshotVersion?: string
 }
 
+/**
+ * W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713) widened
+ * this live union with `'group_policy_snapshot'`. INERT: no basis builder in
+ * this file emits the new kind — the producer seam is W7-1b. Kept as an
+ * explicit literal union (not an alias of the backend domain array) so the W7-0
+ * mutual-extends sync guard in `../attendance/w7-read-side-provenance-amendment.ts`
+ * still compares two independently written member lists rather than itself.
+ */
 export type AttendanceDecisionTraceSourceKind =
   | 'record'
   | 'snapshot'
@@ -106,6 +114,7 @@ export type AttendanceDecisionTraceSourceKind =
   | 'ledger'
   | 'audit'
   | 'policy_gate'
+  | 'group_policy_snapshot'
 
 export interface AttendanceDecisionTraceSource {
   kind: AttendanceDecisionTraceSourceKind

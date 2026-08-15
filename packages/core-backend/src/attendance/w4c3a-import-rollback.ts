@@ -18,6 +18,11 @@ import {
 } from './w4c0-authorization'
 import { runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import { deriveAttendanceLegacyPlanReservationIdentitiesV1 } from './w4c3a-legacy-plan-processor'
+import {
+  isAttendanceProjectionOwnerV1,
+  isAttendanceProjectionOwnerWithCalculationPointerV1,
+  type AttendanceProjectionOwnerV1,
+} from './w7-provenance-domain'
 
 export const ATTENDANCE_IMPORT_ROLLBACK_ERROR_CODES_V1 = Object.freeze([
   'IMPORT_ROLLBACK_COMMAND_INVALID',
@@ -368,7 +373,7 @@ export type AttendanceImportRollbackProjectionV1 = Readonly<{
 
 export type AttendanceImportRollbackPresentPreimageFingerprintInputV1 = Readonly<{
   projection: AttendanceImportRollbackProjectionV1
-  projectionOwner: 'legacy_untracked' | 'w4'
+  projectionOwner: AttendanceProjectionOwnerV1
   currentCalculationId: string | null
   visibilityState: 'active' | 'retired'
   visibilityReason: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
@@ -376,7 +381,7 @@ export type AttendanceImportRollbackPresentPreimageFingerprintInputV1 = Readonly
 
 export type FrozenAttendanceImportRollbackPreimageV1 = Readonly<{
   posture: 'absent' | 'present'
-  projectionOwner?: 'legacy_untracked' | 'w4'
+  projectionOwner?: AttendanceProjectionOwnerV1
   currentCalculationId?: string | null
   visibilityState?: 'active' | 'retired'
   visibilityReason?: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'
@@ -434,11 +439,15 @@ export function parseAttendanceImportRollbackPresentPreimageFingerprintInputV1(
     'lateMinutes',
     'earlyLeaveMinutes',
   ])
+  // W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the
+  // membership test and the pointer-coupling disjunction are widened together —
+  // widening only the first would admit `w4_group` and then reject it here.
+  // `w4_group` takes `w4`'s non-NULL-pointer arm (semantic ruling).
   if (
-    (row.projectionOwner !== 'legacy_untracked' && row.projectionOwner !== 'w4') ||
+    !isAttendanceProjectionOwnerV1(row.projectionOwner) ||
     !(
       (row.projectionOwner === 'legacy_untracked' && row.currentCalculationId === null) ||
-      (row.projectionOwner === 'w4' &&
+      (isAttendanceProjectionOwnerWithCalculationPointerV1(row.projectionOwner) &&
         typeof row.currentCalculationId === 'string' &&
         UUID.test(row.currentCalculationId))
     ) ||
@@ -464,8 +473,12 @@ export function parseAttendanceImportRollbackPresentPreimageFingerprintInputV1(
       earlyLeaveMinutes: nonNegativeInteger(projection.earlyLeaveMinutes),
     }),
     projectionOwner: row.projectionOwner,
-    currentCalculationId:
-      row.projectionOwner === 'w4' ? uuid(row.currentCalculationId) : null,
+    // W7-1a-M: pointer-bearing owners keep their pointer. Left as `=== 'w4'` this
+    // would silently NULL a `w4_group` pointer — the exact silent-downgrade shape
+    // the ratification names.
+    currentCalculationId: isAttendanceProjectionOwnerWithCalculationPointerV1(row.projectionOwner)
+      ? uuid(row.currentCalculationId)
+      : null,
     visibilityState: row.visibilityState,
     visibilityReason: row.visibilityReason,
   }) as AttendanceImportRollbackPresentPreimageFingerprintInputV1
@@ -512,10 +525,12 @@ export function parseAttendanceImportRollbackPreimageV1(
     rootKeys.length !== expectedRootKeys.length ||
     rootKeys.some((key, index) => key !== expectedRootKeys[index]) ||
     row.posture !== 'present' ||
-    (row.projectionOwner !== 'legacy_untracked' && row.projectionOwner !== 'w4') ||
+    // W7-1a-M: second, independent copy of the same exhaustive gate — widened in
+    // lockstep with the first (membership + pointer-coupling disjunction).
+    !isAttendanceProjectionOwnerV1(row.projectionOwner) ||
     !(
       (row.projectionOwner === 'legacy_untracked' && row.currentCalculationId === null) ||
-      (row.projectionOwner === 'w4' &&
+      (isAttendanceProjectionOwnerWithCalculationPointerV1(row.projectionOwner) &&
         typeof row.currentCalculationId === 'string' &&
         UUID.test(row.currentCalculationId))
     ) ||
@@ -1191,7 +1206,9 @@ async function executeRollback(
     if (
       !record ||
       !calculation ||
-      record.projection_owner !== 'w4' ||
+      // W7-1a-M: pointer-owning parents are rollback-eligible; `w4_group` inherits
+      // `w4`'s arm rather than silently failing SUPERSEDED.
+      !isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner) ||
       record.current_calculation_id !== calculation.id ||
       calculation.source_batch_id !== command.sourceBatchId ||
       !['legacy_import', 'integration_sync'].includes(calculation.entrypoint)
