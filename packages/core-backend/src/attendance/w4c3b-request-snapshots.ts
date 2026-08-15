@@ -22,7 +22,7 @@ import {
   type AttendanceW4TransactionClientV1,
 } from './w4c0-identity'
 import { canonicalAttendanceJsonV1 } from './w4c0-fingerprints'
-import { validateFrozenContextShape } from './w4c1-segment-calculator'
+import { isSupportedFrozenAttendanceContextV1 } from './w4c1-segment-calculator'
 import type {
   AttendanceAttributionSnapshotV1,
   FrozenAttendanceContextV1,
@@ -568,7 +568,9 @@ export function normalizeAttendanceContextSnapshotV1(
   input: unknown,
 ): FrozenAttendanceContextV1 | null {
   if (input === null || input === undefined) return null
-  if (!validateFrozenContextShape(input)) {
+  // W7-1b X2 [MUST_WIDEN]: un-widened, a request snapshot on a group-frozen
+  // day silently drops the frozen context.
+  if (!isSupportedFrozenAttendanceContextV1(input)) {
     fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.INPUT_INVALID, 400, 'Invalid request snapshot input')
   }
   const canonical = canonicalAttendanceJsonV1(input)

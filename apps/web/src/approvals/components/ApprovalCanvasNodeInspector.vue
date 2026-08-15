@@ -51,9 +51,9 @@ defineExpose({
   >
     <div class="template-authoring__canvas-inspector-header">
       <div class="template-authoring__canvas-inspector-title">
-        <strong>{{ graphNodeLabel(node.key) }}</strong>
+        <strong>{{ nodeTypeLabel(node.type) }}</strong>
         <span class="template-authoring__node-type" :data-node-type="node.type">
-          {{ nodeTypeLabel(node.type) }}
+          {{ graphNodeLabel(node.key) }}
         </span>
       </div>
       <el-button
@@ -159,6 +159,7 @@ defineExpose({
           删除
         </el-button>
       </div>
+      <p class="template-authoring__inspector-section-label">节点设置</p>
       <slot />
     </div>
   </aside>
@@ -171,12 +172,13 @@ defineExpose({
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 6px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-left: 1px solid var(--el-border-color);
+  border-radius: 0;
   background: var(--el-bg-color);
   display: flex;
   flex-direction: column;
-  max-height: min(70vh, 720px);
+  max-height: none;
   overflow: hidden;
   scroll-margin-top: 164px;
 }
@@ -185,7 +187,7 @@ defineExpose({
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid var(--el-border-color-light);
 }
 .template-authoring__canvas-inspector-title {
@@ -193,7 +195,13 @@ defineExpose({
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  font-size: 13px;
+  font-size: 15px;
+}
+.template-authoring__inspector-section-label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
 }
 .template-authoring__canvas-inspector-body {
   flex: 1 1 auto;

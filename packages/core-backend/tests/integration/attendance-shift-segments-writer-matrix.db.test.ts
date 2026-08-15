@@ -1593,24 +1593,26 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
    * (`index.cjs`, the `referenceSegments:` argument of its `assertShiftReferenceAllowed`
    * call) load-bearing ON ITS OWN.
    *
-   * Why the leg above cannot do it: forcing THAT ONE site fail-open (`referenceSegments: true`)
-   * leaves it green, because a SECOND fail-closed door downstream —
-   * `assertWorkContextSegmentCalculationAllowed` (hardcoded `referenceSegments: false`, one of
-   * this cutover's disclosed residual-R4 pinned-closed read paths) — refuses the same request
-   * and produces an identical `422` + identical error code. Classic 多道 fail-closed 门互相掩护:
-   * status and code are dominated, so neither can discriminate.
+   * Why the matrix leg above cannot do it: forcing THAT ONE site fail-open
+   * (`referenceSegments: true`) leaves it green, because a SECOND fail-closed door downstream —
+   * `assertWorkContextSegmentCalculationAllowed` — refuses the same request and produces an
+   * identical `422` + identical error code. Classic 多道 fail-closed 门互相掩护: status and code
+   * are dominated for a NON-enabled org, so neither can discriminate. (R4 re-sourced that door
+   * from the port; for a non-enabled org it still resolves `false`, so the covering behaviour
+   * above is unchanged and this leg keeps its discriminating power.)
    *
-   * What still discriminates, without opening the R4 door: WHICH producer refused. The typed
-   * 422's message names the refusing guard's `producer`. Correct behaviour ⇒ the dispatch
-   * final-approval guard refuses FIRST and the message names `schedule_dispatch_final_approval`.
-   * With that one site forced fail-open, the request survives it and is refused later by the
-   * calculation read path instead, whose message names `attendance calculation` — so this leg
-   * REDS while status/code stay 422/GUARD_CODE. Verified by executing exactly that mutation.
+   * What discriminates here: WHICH producer refused. The typed 422's message names the refusing
+   * guard's `producer`. Correct behaviour ⇒ the dispatch final-approval guard refuses FIRST and
+   * the message names `schedule_dispatch_final_approval`. With that one site forced fail-open,
+   * the request survives it and is refused later by the calculation read path instead, whose
+   * message names `attendance calculation` — so this leg REDS while status/code stay
+   * 422/GUARD_CODE. Verified by executing exactly that mutation.
    *
-   * Residual (disclosed in the PR body): this is an attribution-level proof, not a status-flip
-   * proof. A 200-vs-422 behavioural flip at this site remains impossible while the R4 door is
-   * pinned closed; closing P2-1 fully is therefore a BLOCKING precondition on the R4 slice,
-   * which is exactly what makes this site live.
+   * SCOPE, post-R4: this leg is the FAIL-OPEN half of P2-1. The FAIL-CLOSED half — a 200-vs-422
+   * status flip at the same site — is the enabled-org leg at the bottom of this file
+   * ("R4/P2-1: dispatch final approval is status-coverable ..."), which became constructible
+   * once R4 lifted the covering door for an enabled org. Neither leg subsumes the other:
+   * fail-open is invisible to status, fail-closed is invisible to attribution.
    */
   it('P2-1: schedule-dispatch final approval 422 is attributed to ITS OWN guard, not to the covering R4 door', async () => {
     const orgId = org('p21-dispatch-final-attribution')
@@ -1653,8 +1655,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
    * only then `SELECT ... FROM attendance_requests ... FOR UPDATE` (w4c3a-rollout-control.ts —
    * exclusive at the top of the control transaction, request scan at `:948`). If the APPROVAL
    * transaction were to take the request row lock FIRST and reach for the rollout SHARED lock
-   * only later (e.g. inside finalization, which is where this cutover wired a posture call),
-   * the two form a textbook wait cycle:
+   * only later, the two form a textbook wait cycle:
    *     approval  holds request row   + waits rollout-shared
    *     transition holds rollout-excl + waits request row
    * PostgreSQL's detector fires and one side dies with SQLSTATE 40P01.
@@ -1668,9 +1669,20 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
    *      holds no row lock — it is the discriminating observation.
    *   4. conn B commits (releasing exclusive); A then proceeds and completes.
    *
-   * Load-bearing: hoisting the approval's posture resolution back BELOW the request row lock
-   * makes step 3 block on A while A waits on B ⇒ genuine deadlock, and the run dies with
-   * `40P01`. Verified by executing exactly that mutation.
+   * Load-bearing — the mutation NAMED HERE IS THE ONE THAT WAS EXECUTED, at this head.
+   * (#4899 residual R4 rewrote this paragraph: the slice removed the in-finalization posture
+   * resolve, so the old wording — "hoist the posture resolution back below the request row
+   * lock" — no longer names a site that exists. At head the ONLY rollout-lock takes on this
+   * path are above `execute`: the request-decision adapter's `prepare` resolving the posture
+   * through the port, and the W4C-3b boundary's own `acquireAttendanceCalculationRolloutLock`.)
+   *
+   * The single-point mutation that recreates the hazard is to move the ROW lock up instead of
+   * the rollout lock down: append `FOR UPDATE` to the request-decision adapter's `prepare`
+   * `SELECT * FROM attendance_requests ...` (`index.cjs`, the query immediately above
+   * `const legacyAuthorization = await resolveRequestLegacyAuthorization(...)`). Then A holds
+   * the request row while parked on the rollout SHARED lock, step 3 blocks on A, and the run
+   * dies with SQLSTATE `40P01`. Executed against this file: the leg fails with
+   * `transition-order connection failed (SQLSTATE 40P01): error: deadlock detected`.
    */
   it('P1: approval acquires the rollout lock BEFORE any request row lock (no deadlock vs a concurrent transition)', async () => {
     const { buildAttendanceCalculationRolloutAdvisoryKey } = await import('../../src/attendance/w4c0-identity')
@@ -2225,6 +2237,227 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       expect(res.status, res.raw).toBe(422)
       expect(codeOf(res)).toBe(GUARD_CODE)
       expect(await countRows('attendance_shift_assignments', orgW)).toBe(0)
+    })
+  })
+
+  /**
+   * #4899 residual R4 — P2-1 FULL closure (route-level, real PG, production approval chain).
+   *
+   * The P2-1 leg above can only prove ATTRIBUTION, because while
+   * `assertWorkContextSegmentCalculationAllowed` was hardcoded `referenceSegments: false` a
+   * SECOND fail-closed door dominated the status for every org: both a correct refusal and a
+   * fail-open at the dispatch site produced `422 + GUARD_CODE`. R4 re-sources that door from
+   * the SAME boundary-resolved posture the finalization guard consumes, which lifts the cover
+   * for an ENABLED org and makes a 200-vs-422 flip constructible here for the first time.
+   *
+   * Shape (mirrors the Gate A lock-in describe, one route further down the chain — the
+   * production approval chain `POST /api/attendance/requests/:id/approve` ->
+   * `schedule_dispatch_final_approval`):
+   *   - org A: exact env entry + persisted `shadow` row => BOTH doors admit; the approval
+   *     completes, the request flips to `approved`/`published` and ONE assignment is persisted.
+   *   - org W: persisted `shadow` row but reachable only via the wildcard `*` => still 422 +
+   *     zero writes, and the refusal is still attributed to the dispatch guard, not to the now
+   *     re-sourced calculation door. The wildcard stays inert at this route too.
+   *
+   * Enablement lands AFTER the request is created, which is both the realistic Gate C order
+   * and the reason org A's create needs no `operationId`: the org is still legacy at that
+   * moment. Its approve DOES carry one (plus approval OCC), because a W4-enabled org's
+   * boundary refuses null-ID commands (`W4C0_OPERATION_ID_REQUIRED`).
+   *
+   * MUTATION-PROVABLE ON STATUS — each verified by executing exactly that mutation:
+   *   - `index.cjs` `finalizeScheduleDispatchRequest`'s `referenceSegments:` argument forced
+   *     `false` (equivalently: delete the key => `undefined` => fail-closed) => org A flips
+   *     200 -> 422. This is the direction that was UNDETECTABLE before R4 and it dominates
+   *     "wrong org", "wrong posture field", and "value ignored" — all of them collapse to a
+   *     non-`true` boolean at this site.
+   *   - `index.cjs` `assertWorkContextSegmentCalculationAllowed` forced back to
+   *     `referenceSegments: false` (the pre-R4 pin) => org A flips 200 -> 422, i.e. this leg
+   *     also holds the R4 door itself open.
+   *   - the W4C-3b boundary's `referenceSegments: preflight.referenceSegments` forced `false`
+   *     => org A flips 200 -> 422, holding the whole thread-through load-bearing.
+   *   - fail-OPEN at the dispatch site (`referenceSegments: true`) does NOT flip this leg's
+   *     status; it reds the ATTRIBUTION leg above instead. The two legs are complementary and
+   *     both are required: fail-open is caught by attribution, fail-closed by status.
+   */
+  describe('R4/P2-1: dispatch final approval is status-coverable once the calculation door is re-sourced', () => {
+    const orgA = randomUUID()
+    const orgW = randomUUID()
+    let savedEnv: string | undefined
+
+    beforeAll(() => {
+      savedEnv = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    })
+
+    afterAll(() => {
+      if (savedEnv === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = savedEnv
+    })
+
+    /** Create a pending dispatch request for a still-legacy org, then make its shift multi-segment. */
+    async function seedPendingDispatchWithMultiSegmentTarget(orgId: string, token: string) {
+      const shiftId = (await createShiftViaApi(token, orgId, {
+        name: 'R4 dispatch target', workStartTime: '09:00', workEndTime: '18:00',
+      })).body.data.id as string
+      await seedDispatchFlow(token, orgId)
+      const scheduleGroupId = await seedScheduleGroup(orgId)
+      const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
+        userId: `${orgId}-worker`,
+        targetScheduleGroupId: scheduleGroupId,
+        targetShiftId: shiftId,
+        startDate: '2049-09-01',
+        endDate: '2049-09-01',
+      })
+      expect(create.status, create.raw).toBe(201)
+      await injectSecondSegment(orgId, shiftId)
+      return create.body.data.request.id as string
+    }
+
+    async function approvalCursor(requestId: string) {
+      const result = await pool.query(
+        `SELECT ai.version, ai.current_node_key
+           FROM attendance_requests ar
+           JOIN approval_instances ai ON ai.id = ar.approval_instance_id
+          WHERE ar.id = $1::uuid`,
+        [requestId],
+      )
+      expect(result.rows).toHaveLength(1)
+      return { version: Number(result.rows[0].version), node: String(result.rows[0].current_node_key) }
+    }
+
+    it('org A (exact env entry + persisted shadow row) FINALIZES the dispatch — 2xx and a persisted assignment', async () => {
+      const actorId = `${orgA}-admin`
+      await seedActiveIdentity(actorId, orgA)
+      // A W4-enabled org rechecks the SUBJECT's liveness/membership in-transaction, so the
+      // dispatched worker must be a durable active member too.
+      await seedActiveIdentity(`${orgA}-worker`, orgA)
+      const token = await mintToken(actorId, orgA)
+
+      // Still legacy at create time — no rollout row, and the env holds nothing for this org.
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ''
+      const requestId = await seedPendingDispatchWithMultiSegmentTarget(orgA, token)
+
+      // Gate C enablement: exact entry (plus the inert wildcard) AND the persisted row.
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = `${orgA},*`
+      await insertShadowRolloutRow(orgA)
+
+      const cursor = await approvalCursor(requestId)
+      const approve = await postJson(`/api/attendance/requests/${requestId}/approve`, token, orgA, {
+        comment: 'go',
+        operationId: randomUUID(),
+        expectedApprovalVersion: cursor.version,
+        expectedApprovalNode: cursor.node,
+      })
+
+      // THE load-bearing assertion: a STATUS-level admission, not an attribution message.
+      expect(approve.status, approve.raw).toBe(200)
+      // Non-vacuous: the production writer chain ran to completion, not merely past one guard.
+      expect(await countRows('attendance_shift_assignments', orgA)).toBe(1)
+      const state = await pool.query(
+        `SELECT r.status, d.publish_status, d.finalized_at
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE r.id = $1`,
+        [requestId],
+      )
+      expect(state.rows[0].status).toBe('approved')
+      expect(state.rows[0].publish_status).toBe('published')
+      expect(state.rows[0].finalized_at).not.toBeNull()
+    })
+
+    it('org W (shadow row, wildcard-only) still fails closed at ITS OWN dispatch guard — wildcard inert here too', async () => {
+      const actorId = `${orgW}-admin`
+      await seedActiveIdentity(actorId, orgW)
+      await seedActiveIdentity(`${orgW}-worker`, orgW)
+      const token = await mintToken(actorId, orgW)
+
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = `${orgA},*`
+      await insertShadowRolloutRow(orgW)
+      const requestId = await seedPendingDispatchWithMultiSegmentTarget(orgW, token)
+
+      // No operationId: a wildcard-only org resolves `legacy`, so the boundary still accepts
+      // null-ID legacy commands. That it does is itself part of the inertness claim.
+      const approve = await postJson(`/api/attendance/requests/${requestId}/approve`, token, orgW, { comment: 'go' })
+      expect(approve.status, approve.raw).toBe(422)
+      expect(codeOf(approve)).toBe(GUARD_CODE)
+      // The refusal still belongs to the dispatch writer's own guard — R4 did not merely move
+      // the refusal to a different door for non-enabled orgs.
+      expect(messageOf(approve), approve.raw).toContain('schedule_dispatch_final_approval')
+      expect(messageOf(approve), approve.raw).not.toContain('attendance calculation')
+      expect(await countRows('attendance_shift_assignments', orgW)).toBe(0)
+      const state = await pool.query(
+        `SELECT r.status, d.publish_status, d.finalized_at
+           FROM attendance_schedule_dispatch_requests d
+           JOIN attendance_requests r ON r.id = d.request_id
+          WHERE r.id = $1`,
+        [requestId],
+      )
+      expect(state.rows[0].status).toBe('pending')
+      expect(state.rows[0].publish_status).toBe('pending')
+      expect(state.rows[0].finalized_at).toBeNull()
+    })
+
+    /**
+     * The SAME asymmetry, one producer over: `shift_swap_final_approval` also stopped
+     * re-resolving the posture in this slice and now consumes the boundary-threaded value.
+     * Measured before writing this leg: forcing that site fail-OPEN reds the existing
+     * `matrix: shift-swap final approval fails closed ...` leg, but forcing it fail-CLOSED
+     * reddened NOTHING in the whole file — i.e. "value ignored / wrong org / wrong posture
+     * field" was undetectable there for exactly the P2-1 reason. This leg closes it on status.
+     *
+     * Mutation-proven: `referenceSegments: referenceSegments === true` -> `false` at the
+     * `shift_swap_final_approval` guard flips this leg 200 -> 422.
+     */
+    it('org S (enabled) FINALIZES a shift swap whose source shift became multi-segment — 2xx and replacement rows', async () => {
+      const orgS = randomUUID()
+      const requesterId = `${orgS}-req`
+      const counterpartyId = `${orgS}-cpy`
+      await seedActiveIdentity(requesterId, orgS)
+      await seedActiveIdentity(counterpartyId, orgS)
+      const requesterToken = await mintToken(requesterId, orgS)
+      const counterpartyToken = await mintToken(counterpartyId, orgS)
+
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = ''
+      const shiftA = (await createShiftViaApi(requesterToken, orgS, { name: 'S-A', workStartTime: '09:00', workEndTime: '13:00' })).body.data.id as string
+      const shiftB = (await createShiftViaApi(requesterToken, orgS, { name: 'S-B', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
+      const assignmentA = await seedPublishedAssignment(orgS, requesterId, shiftA, '2049-09-14')
+      const assignmentB = await seedPublishedAssignment(orgS, counterpartyId, shiftB, '2049-09-15')
+
+      const create = await postJson('/api/attendance/shift-swap-requests', requesterToken, orgS, {
+        requesterAssignmentId: assignmentA,
+        counterpartyAssignmentId: assignmentB,
+      })
+      expect(create.status, create.raw).toBe(201)
+      const requestId = create.body.data.request.id as string
+      const accept = await postJson(`/api/attendance/shift-swap-requests/${requestId}/accept`, counterpartyToken, orgS, {})
+      expect(accept.status, accept.raw).toBe(200)
+
+      // The requester shift becomes multi-segment AFTER the snapshot, then Gate C enables the org.
+      await injectSecondSegment(orgS, shiftA)
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = `${orgS},*`
+      await insertShadowRolloutRow(orgS)
+
+      const cursor = await approvalCursor(requestId)
+      const approve = await postJson(`/api/attendance/requests/${requestId}/approve`, requesterToken, orgS, {
+        comment: 'go',
+        operationId: randomUUID(),
+        expectedApprovalVersion: cursor.version,
+        expectedApprovalNode: cursor.node,
+      })
+      expect(approve.status, approve.raw).toBe(200)
+
+      const state = await pool.query(
+        `SELECT r.status, d.requester_replacement_assignment_id, d.counterparty_replacement_assignment_id, d.finalized_at
+           FROM attendance_requests r
+           JOIN attendance_shift_swap_requests d ON d.request_id = r.id
+          WHERE r.id = $1`,
+        [requestId],
+      )
+      expect(state.rows[0].status).toBe('approved')
+      expect(state.rows[0].requester_replacement_assignment_id).not.toBeNull()
+      expect(state.rows[0].counterparty_replacement_assignment_id).not.toBeNull()
+      expect(state.rows[0].finalized_at).not.toBeNull()
+      // Non-vacuous: the two seeded sources plus the two replacements.
+      expect(await countRows('attendance_shift_assignments', orgS)).toBe(4)
     })
   })
 })

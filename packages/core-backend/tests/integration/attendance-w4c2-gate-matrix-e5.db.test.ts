@@ -444,6 +444,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+      // W7-1b: required adapter. Kept `unreached` on purpose — these legs assert
+      // the boundary REFUSES before any freeze, so a reachable stub here would
+      // weaken the very control-flow pin the leg exists for.
+      issueFrozenContext: unreached('issueFrozenContext') as never,
     }
     return { adapters, absenceCallCount: () => n, absenceCallUserIds: () => seenUserIds.slice() }
   }
@@ -1813,6 +1817,8 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       resolveLiveCandidate: async () => { throw new Error('unreached') },
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: async () => { throw new Error('unreached') },
+      // W7-1b: required adapter; same `unreached` discipline as above.
+      issueFrozenContext: async () => { throw new Error('unreached') },
       applyScheduledAbsenceLegacy: async (trx, args) => {
         absenceCalls += 1
         const result = await trx.query(
@@ -2275,6 +2281,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
       resolveScheduledCandidate: unreached('resolveScheduledCandidate') as never,
       buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+      // W7-1b: required adapter. Kept `unreached` on purpose — these legs assert
+      // the boundary REFUSES before any freeze, so a reachable stub here would
+      // weaken the very control-flow pin the leg exists for.
+      issueFrozenContext: unreached('issueFrozenContext') as never,
     }
     return { adapters, absenceCallCount: () => n }
   }

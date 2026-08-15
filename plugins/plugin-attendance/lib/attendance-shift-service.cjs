@@ -505,8 +505,17 @@ function createAttendanceShiftService(deps) {
    * re-deriving posture from the environment. That is byte-identical to the retired
    * env-gate's production behaviour (the plugin master gate was OFF, so this was always
    * `false`). The authoritative reference-writer decision is made by the port, not here;
-   * a shadow/authoritative org's capability hint stays 'preview_only' until the read DTO
-   * is re-sourced from the port in a later slice (tracked residual R4).
+   * a shadow/authoritative org's capability hint stays 'preview_only'.
+   *
+   * STILL PINNED after the residual-R4 slice — deliberately, and adjudicated rather than
+   * forgotten. R4 opened the AUTHORIZATION door
+   * (`index.cjs`, `assertWorkContextSegmentCalculationAllowed`), which refuses writes; this
+   * function is a DISPLAY hint that gates nothing (Gate A adjudication #3: the whole
+   * `SEGMENT_CALCULATION_IMPLEMENTED` family reaches only the read-only W6 effective-policy
+   * aggregate, whose transaction is `SET TRANSACTION READ ONLY`). Making it accurate needs a
+   * posture read on a request-scoped client this synchronous DTO does not have, i.e. a route
+   * change, not a one-line thread-through. Named out of scope, not claimed resolved: an
+   * enabled org sees `preview_only` in the shift DTO while its writers are admitted.
    */
   function buildShiftCapabilities(orgId) {
     const enabled = false

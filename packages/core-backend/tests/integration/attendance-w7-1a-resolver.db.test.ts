@@ -29,7 +29,10 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
+import {
+  isAttendanceCalculationOrgAllowlistedV1,
+  type AttendanceW4TransactionClientV1,
+} from '../../src/attendance/w4c0-identity'
 import { ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1 } from '../../src/attendance/w7-context-source-posture-contract'
 import {
   down as postureMigrationDown,
@@ -46,6 +49,7 @@ import {
   ATTENDANCE_W7_CONTEXT_SOURCE_SCOPE_INVALID,
   ATTENDANCE_W7_CONTEXT_SOURCE_STATE_AMBIGUOUS,
   ATTENDANCE_W7_CONTEXT_SOURCE_STATE_INVALID,
+  isAttendanceW7ContextSourceOrgAllowlistedV1,
   isResolvedAttendanceW7ContextSourcePostureV1,
   resolveAttendanceW7ContextSourcePostureV1,
 } from '../../src/attendance/w7-resolver/w7-context-source-posture-resolver'
@@ -480,6 +484,127 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
       const rawRow = await pool.query(`SELECT 1 FROM ${POSTURE_TABLE} WHERE org_id = $1`, [upper])
       expect(rawRow.rows).toHaveLength(0)
       expect(process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV]).not.toContain(upper)
+    })
+
+    /**
+     * #4899 residual R4 / P3-2 — this file's original OPS-FOOTGUN note deferred
+     * case-folding "jointly with the W4 predicate". Owner approved the fold; W4
+     * (`w4c0-identity.ts`, `isOrgExactlyAllowlisted`) and W7 are folded in the SAME
+     * change, so the two allowlists still agree on matching semantics.
+     *
+     * The fold is an ADMISSION WIDENING, so both halves are proven: it widened, and it
+     * widened by EXACTLY case — never into prefix/substring/wildcard matching.
+     */
+    describe('R4: the W7 allowlist entry itself is ASCII case-folded (admission widening)', () => {
+      /**
+       * FIXED, letter-bearing canonical keys instead of this file's `randomUUID()` fixtures
+       * (#4919 gate NIT-2). `randomUUID()` can in principle draw an all-digit hex spelling
+       * (~1.2e-6: the version nibble is '4' and the variant is 8/9/a/b, leaving 30 free chars),
+       * which makes `toUpperCase()` a NO-OP and turns every leg below vacuously green. Failing
+       * loudly on that draw was the old behaviour; not being able to draw it is better, and it
+       * matches the W4 unit legs' `FOLD_ORG`.
+       */
+      const FOLD_ORG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      const FOLD_OTHER = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+
+      /** Upper-case exactly the FIRST hex letter — deterministic, and never a no-op. */
+      function firstLetterUpper(key: string): string {
+        const index = key.search(/[a-f]/)
+        expect(index, 'fixture has no hex letter; every fold leg would be vacuous').toBeGreaterThan(-1)
+        return `${key.slice(0, index)}${key[index].toUpperCase()}${key.slice(index + 1)}`
+      }
+
+      /** The outer hooks only clean the file's `orgId`/`otherOrgId` rows; these fixed fixtures
+       *  clean their own, on BOTH sides, so residue from a crashed run cannot make a leg throw
+       *  `_STATE_AMBIGUOUS` instead of exercising the fold. */
+      async function clearFoldRows(): Promise<void> {
+        await pool.query(`DELETE FROM ${POSTURE_TABLE} WHERE org_id = ANY($1::text[])`, [[FOLD_ORG, FOLD_OTHER]])
+      }
+      beforeEach(clearFoldRows)
+      afterEach(clearFoldRows)
+
+      async function insertFoldPosture(state: string): Promise<void> {
+        await pool.query(
+          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
+          [FOLD_ORG, state],
+        )
+      }
+
+      it('HARNESS CONTROL: the org fixtures really change under toUpperCase (else every leg is vacuous)', () => {
+        expect(FOLD_ORG.toUpperCase()).not.toBe(FOLD_ORG)
+        expect(FOLD_OTHER.toUpperCase()).not.toBe(FOLD_OTHER)
+        expect(FOLD_ORG).not.toBe(FOLD_OTHER)
+      })
+
+      it('an UPPER-CASE env ENTRY now admits the lower-case org key (the widening)', async () => {
+        await insertFoldPosture('group_authoritative')
+        const upperEntry = FOLD_ORG.toUpperCase()
+        // Discriminating precondition: the entry bytes really differ from the org key.
+        expect(upperEntry).not.toBe(FOLD_ORG)
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = upperEntry
+
+        expect((await resolvePosture(FOLD_ORG)).effectiveState).toBe('group_authoritative')
+        expect(isAttendanceW7ContextSourceOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+      })
+
+      it('mixed case plus surrounding whitespace/commas fold together', async () => {
+        await insertFoldPosture('group_eligible')
+        const mixed = firstLetterUpper(FOLD_ORG)
+        expect(mixed).not.toBe(FOLD_ORG)
+        expect(mixed).not.toBe(FOLD_ORG.toUpperCase())
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = `${FOLD_OTHER},  ${mixed} \t,`
+        expect((await resolvePosture(FOLD_ORG)).effectiveState).toBe('group_eligible')
+      })
+
+      it('NEGATIVE CONTROL: an UPPER-CASE entry for a DIFFERENT org still resolves off', async () => {
+        await insertFoldPosture('group_authoritative')
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = FOLD_OTHER.toUpperCase()
+        // A fold that degenerated into prefix/substring matching would admit here.
+        expect((await resolvePosture(FOLD_ORG)).effectiveState).toBe('off')
+        expect(isAttendanceW7ContextSourceOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+      })
+
+      it('NEGATIVE CONTROL: folding never lets a prefix, suffix, or wildcard entry match', async () => {
+        await insertFoldPosture('group_authoritative')
+        for (const entry of [
+          FOLD_ORG.slice(0, 20).toUpperCase(), // strict prefix
+          `${FOLD_ORG.toUpperCase()}-EXTRA`, // strict suffix extension
+          '*',
+          ' * ',
+          '.*',
+          '%',
+          '',
+        ]) {
+          process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = entry
+          expect(
+            (await resolvePosture(FOLD_ORG)).effectiveState,
+            `entry ${JSON.stringify(entry)} must not admit`,
+          ).toBe('off')
+        }
+        // POSITIVE CONTROL for this loop: the same machinery DOES admit the exact key
+        // (upper-cased), so the seven denials above are real rejections, not a dead harness.
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+        expect((await resolvePosture(FOLD_ORG)).effectiveState).toBe('group_authoritative')
+      })
+
+      it('W4 and W7 fold IDENTICALLY — one shared matching semantics, two separate variables', () => {
+        // Same input shape on both predicates: upper-case exact entry admits, wildcard never.
+        process.env[W4_ENV] = FOLD_ORG.toUpperCase()
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+        expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+        expect(isAttendanceW7ContextSourceOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+
+        process.env[W4_ENV] = '*'
+        process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = '*'
+        expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+        expect(isAttendanceW7ContextSourceOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+
+        // ...and they remain SEPARATE variables: W4 on alone never advertises W7.
+        process.env[W4_ENV] = FOLD_ORG.toUpperCase()
+        delete process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV]
+        expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+        expect(isAttendanceW7ContextSourceOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+      })
     })
   })
 
