@@ -116,4 +116,6 @@ Implementer scratch dir (goal `{SCRATCH}`):
 | `owner-smoke.log` | `SKIP_TESTS=1` exit 0, files required, no flag flip |
 | `flags-default-off.log` | canvas / FWB / attachments default OFF; locks still PROPOSED |
 
-Owner-only remainder (out of this closeout): G0 ratify, real-tenant UAT, staged flag enablement, product FINAL.
+Owner-only remainder at this residual closeout: G0 ratify, real-tenant UAT, staged flag enablement, product FINAL.
+
+Follow-on 2026-08-15: G0 was owner-RATIFIED (O3 DEFER) in `docs/development/approval-canvas-g0-ratify-20260815.md`. This residual closeout still does not claim real-tenant UAT, staged flag ON, or product FINAL.
