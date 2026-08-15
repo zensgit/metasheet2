@@ -12,10 +12,20 @@
  * closed-enumeration declaration the canonical transition boundary
  * (`w4c3a-rollout-control.ts`) reads to refuse that promotion.
  *
- * Gate D2 (#4556 / #4844) shipped the `live_punch` writer and removed its ONE refusal site, so
- * TWO sites remain in that file today, both `scheduled`. The declaration below moved to
- * `{live_punch:true, scheduled:false}` in that same reviewed change, which is exactly the
- * lockstep the correspondence test requires.
+ * Gate D2 (#4556 / #4844) shipped the `live_punch` writer and removed its ONE refusal site, moving
+ * the declaration to `{live_punch:true, scheduled:false}` in that same reviewed change. Gate D3
+ * (#4556 / #4844) then shipped the `scheduled` writer and removed BOTH of its sites — the org-wide
+ * probe (now a routing fall-through into the durable run registry) and the per-target loop (now the
+ * real writer) — so ZERO refusal sites remain in that file and the declaration is
+ * `{live_punch:true, scheduled:true}`. Each flip landed in lockstep with its own site removals,
+ * which is exactly what the correspondence test requires.
+ *
+ * READ THIS BEFORE TRUSTING THE CORRESPONDENCE TEST AS A BEHAVIOURAL GUARD: with both entrypoints
+ * delivered, the Gate D describe-block in that test is a ZERO-VERSUS-ZERO identity on real content.
+ * Its remaining discriminating power lives entirely in the SYNTHETIC decoys it now carries (a
+ * reintroduced refusal site inside a mapped function; a refusal site inside an unmapped function).
+ * The behavioural pins for "the writers really are wired" are the real-DB zero-invocation
+ * legacy-adapter spies and the probe-routing legs, not this declaration.
  *
  * WHAT THIS MODULE DOES NOT DO: it does not probe, does not import, and has no runtime
  * dependency on `w4c2-live-scheduled-boundary.ts`. It is a LEAF — zero imports from any W4C-2/
@@ -55,14 +65,22 @@ export type AttendanceW4C2AuthoritativeEntrypointV1 =
  * `live_punch` is `true` as of Gate D2 (#4556 / #4844): the boundary's `executeLivePunch` now
  * carries the real authoritative writer and its single refusal call site is gone, so the
  * correspondence guard's expected weight and the source's actual count moved 1 -> 0 in lockstep.
- * `scheduled` stays `false` — `executeScheduledRunInternal` still fails closed at both of its
- * sites; D3 delivers it. Promotion to the `authoritative` rollout state therefore still refuses
- * (`w4c3a-rollout-control.ts` gates on the UNDELIVERED count, which is 1, not 0).
+ *
+ * `scheduled` is `true` as of Gate D3 (#4556 / #4844): `executeScheduledRunInternal` carries the
+ * real authoritative per-target writer, and BOTH of its refusal call sites are gone — the org-wide
+ * probe's arm became a routing fall-through into the durable run registry, and the per-target arm
+ * became the writer. Its weight and actual count moved 2 -> 0 in the same lockstep.
+ *
+ * The UNDELIVERED count is therefore 0, which is Gate D's intended exit condition: the
+ * `w4c3a-rollout-control.ts` promotion refusal keyed on this count no longer fires. Promotion to
+ * `authoritative` remains gated by every OTHER rollout control plus the owner-actioned exact-org
+ * `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` allowlist, which is unset in production — so
+ * delivering both writers is byte-neutral for every production org.
  */
 const DECLARED_DELIVERED: Readonly<Record<AttendanceW4C2AuthoritativeEntrypointV1, boolean>> =
   Object.freeze({
     live_punch: true,
-    scheduled: false,
+    scheduled: true,
   })
 
 // ---------------------------------------------------------------------------

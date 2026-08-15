@@ -66,13 +66,27 @@
  *  - effective `eligible`/`authoritative`: a legacy-only business time is
  *    rejected BEFORE any event/record/result/effect DML (the whole transaction
  *    rolls back, discarding the preflight claim).
- *  - effective `authoritative` (`live_punch` ONLY, Gate D2, #4844): the real
+ *  - effective `authoritative` (`live_punch`, Gate D2, #4844): the real
  *    authoritative writer runs — split event INSERT (no legacy records upsert),
  *    fail-closed retirement guard, create-if-absent review placeholder, then
  *    `writeAuthoritativeSegmentCalculationV1` (the D1 core) owns the calc row,
- *    the lineage, and the parent pointer. `scheduled` is STILL undelivered and
- *    still fails closed at its two sites (see
- *    `` `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` ``); D3 delivers it.
+ *    the lineage, and the parent pointer.
+ *  - effective `authoritative` (`scheduled`, Gate D3, #4844): BOTH former
+ *    fail-closed sites are gone. The org-wide probe site is now a routing
+ *    fall-through into the durable run registry (no run/targets/witnesses exist
+ *    there yet, so no per-target record and no core call belong at that point);
+ *    the per-target site is the real writer — one seam that resolves the parent
+ *    guard-first (retirement adjudication dominates every return, including the
+ *    present-parent SKIP), the create-if-absent review placeholder, the D2
+ *    preimage builder, a scheduled-domain payload fingerprint, and the same D1
+ *    core with `entrypoint: 'scheduled'`. `applyScheduledAbsenceLegacy` is
+ *    called ZERO times on that branch. D3's distinctive machinery is PER-TARGET
+ *    CONTAINMENT: a refusal whose class is in the ONE exported containment table
+ *    rolls back to the branch savepoint, CANCELS the claimed operation (the
+ *    deferred `trg_aro_claimed_commit_guard` makes committing a still-claimed
+ *    operation illegal), records a terminal `'failed'` run outcome, and lets the
+ *    batch CONTINUE; everything else rethrows and aborts so recovery/resume
+ *    re-attempts the target.
  *    BYTE-NEUTRAL IN PRODUCTION regardless: `effectiveState==='authoritative'`
  *    additionally requires an EXACT-org entry in
  *    `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (wildcard never counts),
@@ -104,6 +118,7 @@ import {
 } from './w4c0-authorization'
 import {
   attendanceResultOperationPreflightV1,
+  cancelAttendanceResultOperationV1,
   enqueueAttendanceResultEventOutboxV1,
   isRetryableSqlState,
   runAttendanceResultOperationTransactionV1,
@@ -161,6 +176,7 @@ import {
 import { isExpectedAttendanceShadowDifferenceV1 } from './w4c2-shadow-expected-differences'
 // Gate D2 (#4556 / #4844) — the authoritative live-punch writer's collaborators.
 import {
+  AttendanceW4AuthoritativeCalculationError,
   writeAuthoritativeSegmentCalculationV1,
   type AttendanceAuthoritativeParentPreimageV1,
 } from './w4c2-authoritative-calculation-core'
@@ -168,7 +184,13 @@ import {
 // Never hand-rolled here, and never modeled on ops-retirement's separate 6-field
 // `dailyFingerprint` (a different, domainless digest — reconciling those two is out of scope).
 import { computeAttendanceImportRollbackPreimageFingerprintV1 } from './w4c3a-import-rollback'
-import { assertParentNotRetiredForAuthoritativePunchV1 } from './w4c3c-ops-retirement'
+// Gate D3 (#4556 / #4844) imports the ERROR CLASS as well as the guard: the scheduled per-target
+// containment predicate discriminates by CLASS IDENTITY, never by `error.name` (spoofable) and
+// never by enumerating code strings (enumeration does not converge).
+import {
+  AttendanceW4OpsRetirementError,
+  assertParentNotRetiredForAuthoritativePunchV1,
+} from './w4c3c-ops-retirement'
 
 // ---------------------------------------------------------------------------
 // Errors.
@@ -187,6 +209,58 @@ export class AttendanceW4LiveScheduledBoundaryError extends Error {
 
 function boundaryFail(code: string, httpStatus = 422): never {
   throw new AttendanceW4LiveScheduledBoundaryError(code, httpStatus)
+}
+
+// ---------------------------------------------------------------------------
+// Gate D3 (#4556 / #4844) — the scheduled per-target CONTAINMENT membership authority.
+//
+// The authoritative `scheduled` writer runs once per target inside its own transaction, inside a
+// batch loop that has no try/catch today. The D1 core refuses with a closed enumeration of typed
+// product codes and the boundary retirement guard refuses with its own two; none of those is a
+// retryable SQLSTATE, so without containment ONE refused target would abort every remaining target
+// in the run. The durable run registry has exactly one failure slot built for this
+// (`{terminalOutcome:'failed', failureReasonCode:'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED'}`),
+// and a `'failed'` outcome is terminal by construction: excluded from the resume outstanding set,
+// from finalization's not-ready check, and from both fold counters.
+//
+// MEMBERSHIP IS MECHANICAL, NOT PROSE: `(a)` the error carries a non-empty string `code` (a product
+// code, never a raw SQLSTATE object or a bare `Error`) AND `(b)` it is an instance of a class in the
+// ONE table below. The table is WALKED by a test, so adding a class here automatically extends the
+// per-class proof rather than silently widening an undescribed predicate.
+//
+// DELIBERATE, STATED OVER-BREADTH: `AttendanceW4OpsRetirementError` also carries
+// `ATTENDANCE_RECORD_NOT_FOUND`, `ATTENDANCE_RECORD_VERSION_CONFLICT`,
+// `W4C3C_OPS_RETIREMENT_REPLAY_CONFLICT`, `W4C3C_OPS_RETIREMENT_OPERATION_ID_REQUIRED` and
+// `W4C3C_OPS_RETIREMENT_DATABASE_RESULT_INVALID`, none of which the scheduled writer can reach today
+// (it calls only that module's two `assert*` helpers). Containing by CLASS is therefore wider than
+// the two reachable codes. That widening fails toward "this one target is marked failed and the
+// batch continues" rather than "the whole batch aborts", which is the intended direction — recorded
+// here rather than left as an unstated reachability argument that rots the moment a future call is
+// added to this branch.
+//
+// WHAT IS DELIBERATELY *NOT* CONTAINED (fail-closed default; see the per-bucket table on the writer
+// branch): `AttendanceW4LiveScheduledBoundaryError` (our own 500-class
+// `W4C2_AUTHORITATIVE_PARENT_UNRESOLVED` is potentially transient — abort so recovery/resume
+// re-attempts the target instead of burning it terminally), `AttendanceW4OperationError` (org
+// suspension is run-wide, not per-target), raw pg errors including 40001/40P01 (absorbed by the two
+// retry layers), and anything else.
+export const ATTENDANCE_W4C2_SCHEDULED_CONTAINED_REFUSAL_CLASSES_V1 = Object.freeze([
+  AttendanceW4AuthoritativeCalculationError,
+  AttendanceW4OpsRetirementError,
+] as const)
+
+/**
+ * The ONLY containment predicate for the scheduled authoritative per-target branch.
+ *
+ * Never `.name` matching: `index.cjs`'s `W4_ERROR_NAMES` dispatch uses `error.name` ONLY because it
+ * crosses a CJS/ESM module boundary where the class identity is not shared. Inside this package the
+ * constructor identity is available and is not spoofable by an attacker-shaped object literal.
+ */
+export function isAttendanceScheduledContainedRefusalV1(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  if (typeof code !== 'string' || code.length === 0) return false
+  return ATTENDANCE_W4C2_SCHEDULED_CONTAINED_REFUSAL_CLASSES_V1.some((cls) => error instanceof cls)
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +635,14 @@ export type AttendanceScheduledRunBoundaryResultV1 =
       readonly rows: Array<{ user_id: string }>
       readonly perUser: Array<{
         readonly userId: string
-        readonly mode: 'replay' | 'executed' | 'legacy_compat'
+        /**
+         * Gate D3 (#4556 / #4844) added `'failed'` — a per-target authoritative refusal the batch
+         * CONTAINED (recorded as a terminal `'failed'` run outcome) rather than aborting on. It
+         * contributes no rows. Additive and internal: `perUser` has zero consumers repo-wide (the
+         * plugin caller reads only `rows`), so widening the union cannot break a caller. Naming is
+         * `` [OWNER-CONFIRM] ``.
+         */
+        readonly mode: 'replay' | 'executed' | 'legacy_compat' | 'failed'
         readonly inserted: boolean
       }>
     }
@@ -904,6 +985,120 @@ export function computeAuthoritativeLivePunchPayloadFingerprintV1(
       holidayKind: input.holidayKind,
     }),
   )
+}
+
+/**
+ * Gate D3 (#4556 / #4844) — domain separator for the SCHEDULED payload fingerprint, terminated by a
+ * NUL written as the ESCAPE `\u0000` and never as a raw 0x00 byte (same convention, and the same
+ * reason, as the live-punch sibling above: a literal NUL makes `file(1)` classify this `.ts` as
+ * `data` and makes `grep`/`rg` skip it SILENTLY, dropping the whole module out of every static audit
+ * that walks the tree — the repo's own DML/read-inventory collectors included). The escape produces
+ * the identical runtime string, so the digest is unchanged.
+ *
+ * A SEPARATE domain from `live_punch` on purpose: the two entrypoints must never be able to mint the
+ * same payload digest for structurally different commands.
+ */
+export const ATTENDANCE_W4C2_SCHEDULED_PAYLOAD_FINGERPRINT_DOMAIN_V1 =
+  'metasheet2:attendance:w4c2:scheduled-authoritative-payload:v1\u0000'
+
+/**
+ * Deterministic payload identity for the core's retry-idempotency conflict check, derived ONLY from
+ * the RESOLVED command payload — never from a clock, a random id, or the operation id itself. The
+ * core reads `input_provenance.payloadFingerprint` VERBATIM off the stored row on a retry, so the
+ * caller must embed this value in BOTH `input.payloadFingerprint` and
+ * `inputProvenance.payloadFingerprint`; omitting the embedded copy turns a genuine retry into
+ * `REPLAY_CONFLICT`.
+ */
+export function computeAuthoritativeScheduledPayloadFingerprintV1(
+  payload: Readonly<{
+    scheduledRunId: string
+    userId: string
+    workDate: string
+    expectedRunVersion: number
+    scheduledAbsenceSource: string
+  }>,
+): string {
+  return sha256Hex(
+    ATTENDANCE_W4C2_SCHEDULED_PAYLOAD_FINGERPRINT_DOMAIN_V1
+    + canonicalAttendanceJsonV1({
+      scheduledRunId: payload.scheduledRunId,
+      userId: payload.userId,
+      workDate: payload.workDate,
+      expectedRunVersion: payload.expectedRunVersion,
+      scheduledAbsenceSource: payload.scheduledAbsenceSource,
+    }),
+  )
+}
+
+/**
+ * Gate D3 (#4556 / #4844) — the ONE seam that resolves the authoritative `scheduled` writer's parent
+ * and is the ONLY place in this module that may produce a `'skip'`.
+ *
+ * WHY ONE SEAM RATHER THAN INLINE STEPS: the retirement guard must dominate EVERY outcome, including
+ * the skip. A naive top-to-bottom "present ⇒ skip, else placeholder, then guard" would seal
+ * `{inserted:false, completed}` over an `operator_retirement` / `import_rollback` parent — a silent
+ * pass over a day an operator or a rollback deliberately retired. Here the caller can never see a row
+ * this function did not adjudicate, because the guard is called exactly once, unconditionally, before
+ * BOTH returns; the only path that bypasses it is the 500-class throw, which is not a return.
+ *
+ * ORDER (normative):
+ *  1. class-11 target lock + widened `FOR UPDATE` parent read;
+ *  2. absent ⇒ create-if-absent `retired`/`review_placeholder` parent, then ALWAYS re-lock/re-read —
+ *     a lost race may have been won by a legacy-ACTIVE row, another placeholder, or a retired-other
+ *     row, and every one of those must re-enter the SAME adjudication below (still `null` under our
+ *     own lock ⇒ `W4C2_AUTHORITATIVE_PARENT_UNRESOLVED`, which is NOT contained — see the writer);
+ *  3. DEFAULT-REFUSE retirement adjudication on whatever row we ended up holding;
+ *  4. presence branching on the GUARD'S VERDICT, never on bare `row !== null`:
+ *     - guard-admitted `retired`/`review_placeholder` ⇒ WRITE (the F6 steady state, and the very
+ *       placeholder step 2 creates — our own artifact, which a re-attempt must be able to complete);
+ *     - present and NOT retired ⇒ SKIP (§6.2 default: legacy-ACTIVE rows and already-`w4`-owned
+ *       active rows alike). The justification is LEGACY PARITY, not rarity: `'generate'` targets are
+ *       not NOT-EXISTS-filtered at run creation, so a present parent is the ordinary case for anyone
+ *       who punched that day, and the legacy `INSERT .. SELECT .. WHERE NOT EXISTS` contributes
+ *       `inserted=false` for exactly that user — so `rows`/`generated_count`/`total` are unchanged by
+ *       posture. It also makes the core's `RECORD_NOT_FOUND` unreachable for the legitimate dedup
+ *       case. CONSEQUENCE, disclosed: the core's completed-supersede-over-legacy-active path stays
+ *       DORMANT on `scheduled` under this default.
+ */
+type AuthoritativeScheduledParentResolutionV1 =
+  | { readonly kind: 'skip' }
+  | { readonly kind: 'write'; readonly parent: ShadowTargetRow }
+
+async function resolveAuthoritativeScheduledParentV1(
+  trx: AttendanceW4TransactionClientV1,
+  org: VerifiedAttendanceOrgIdentityV1,
+  userId: string,
+  workDate: string,
+  placeholder: Readonly<{ orgId: string; timezone: string; isWorkday: boolean }>,
+): Promise<AuthoritativeScheduledParentResolutionV1> {
+  let parent = await lockShadowParentRecord(trx, org, userId, workDate)
+  if (parent === null) {
+    await insertAuthoritativeReviewPlaceholderParentV1(trx, {
+      orgId: placeholder.orgId,
+      userId,
+      workDate,
+      timezone: placeholder.timezone,
+      isWorkday: placeholder.isWorkday,
+    })
+    parent = await lockShadowParentRecord(trx, org, userId, workDate)
+    if (parent === null) {
+      // Neither our INSERT nor a racer's produced a visible row under our own lock — a
+      // programming/DB-state error, not a business outcome, and deliberately NOT contained.
+      boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
+    }
+  }
+  // The guard is called on EVERY row this function ever returns or skips on. Its refusals are the
+  // two ops-retirement 409s, which the writer's containment converts to a per-target `'failed'`.
+  assertParentNotRetiredForAuthoritativePunchV1({
+    visibilityState: parent.visibilityState,
+    visibilityReason: parent.visibilityReason,
+  })
+  if (parent.visibilityState === 'retired') {
+    // The guard admits exactly ONE retired reason (`review_placeholder`); every other retired reason
+    // threw above. So this arm is the F6 carve-out, reached only through the guard's own verdict.
+    return { kind: 'write', parent }
+  }
+  return { kind: 'skip' }
 }
 
 async function nextCalculationVersion(
@@ -2503,9 +2698,22 @@ export function createAttendanceLiveScheduledBoundaryV1(
           })
           return { mode: 'legacy' as const, rows: rows as Array<{ user_id: string }> }
         }
-        if (posture.writePosture === 'authoritative' || posture.effectiveState === 'authoritative') {
-          boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', 503)
-        }
+        // Gate D3 (#4556 / #4844) — SITE A, the org-wide probe: REPLACEMENT BY ROUTING, not a
+        // delete. This branch previously failed closed here. At this point in the probe
+        // transaction NO run, NO targets and NO witnesses exist yet, so nothing per-target can be
+        // recorded and no D1-core call belongs here — the correct authoritative treatment is
+        // exactly the classification the shadow and eligible postures already take: fall through
+        // to the run-registry mode below and let the durable per-target machinery (which admits
+        // authoritative posture: `createOrResumeAttendanceScheduledRunV1` returns early only on
+        // `blocked` and `legacy_projection_only`, and freezes the run row at
+        // shadow/eligible/authoritative) do the writing.
+        //
+        // FAIL-OPEN CHECK: an authoritative posture cannot leak into the legacy batch arm — that
+        // arm is gated on `legacy_projection_only`, which precedes this point and is disjoint
+        // (`POSTURE_TABLE` maps state `authoritative` to writePosture `authoritative`). Pinned
+        // behaviourally by the D3 probe-routing leg (authoritative org ⇒ run-registry mode, ZERO
+        // legacy batch INSERT..SELECT rows, no 503) with `legacy_projection_only`/`blocked`
+        // negative controls, not by this comment.
         return { mode: 'w4' as const, rows: [] as Array<{ user_id: string }> }
       }),
     )
@@ -2608,7 +2816,11 @@ export function createAttendanceLiveScheduledBoundaryV1(
         ? targetUserIds
         : startOutcome.outstandingGenerateTargets.map((t) => t.userId)
 
-    const perUser: Array<{ userId: string; mode: 'replay' | 'executed' | 'legacy_compat'; inserted: boolean }> = []
+    const perUser: Array<{
+      userId: string
+      mode: 'replay' | 'executed' | 'legacy_compat' | 'failed'
+      inserted: boolean
+    }> = []
     const insertedRows: Array<{ user_id: string }> = []
 
     for (const userId of pendingUserIds) {
@@ -2673,6 +2885,259 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // run — is rejected BEFORE the source DML, never after.
           await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, orgKey, runId)
 
+          // =================================================================
+          // Gate D3 (#4556 / #4844) — SITE B, the AUTHORITATIVE `scheduled` per-target writer.
+          //
+          // REPLACEMENT, NOT A DELETE, and it must run BEFORE the legacy absence adapter below.
+          // Deleting the old fail-closed branch instead of replacing it would let an allowlisted
+          // authoritative org's target fall through to `applyScheduledAbsenceLegacy`, fabricating a
+          // legacy-ACTIVE `'absent'` `attendance_records` row visible to ordinary readers — the very
+          // row the D1 core owns — the instant the allowlist gains an authoritative entry. The
+          // branch body is always a real writer and always `return`s (or records a contained
+          // failure) before control can reach that call site; the behavioural pin is the
+          // zero-invocation spy on the INJECTED `applyScheduledAbsenceLegacy`, not this comment.
+          //
+          // The posture re-read is HOISTED above the legacy adapter (it used to sit after it) and
+          // survives as the BRANCH SELECTOR — authoritative writer vs the existing shadow path —
+          // mirroring how the `legacy_compat` arm below already handles the legacy-downgrade race
+          // per-target. The hoist is behaviour-preserving for every other posture: it is a
+          // read-only query, this transaction writes nothing it reads, and the SERIALIZABLE
+          // snapshot is fixed before either position. It is skipped entirely for `legacy_compat`,
+          // exactly as before.
+          //
+          // Dropping the absence adapter on this branch (ZERO invocations, never a split) also
+          // removes the pre-writer source DML that made the §7.8 preimage capture point ambiguous
+          // and the F6 self-created-parent hazard: the scheduled legacy adapter is 100% the
+          // to-DROP half (one `INSERT .. SELECT .. WHERE NOT EXISTS` on `attendance_records`, zero
+          // `attendance_events` DML), and the scheduled evidence is SYNTHETIC
+          // (`{kind:'scheduled_absence', ref: runId}`), durable via the run registry rather than
+          // via events.
+          //
+          // BYTE-NEUTRAL IN PRODUCTION: this branch fires only when the resolved posture is
+          // `authoritative`, which requires an EXACT-org entry in
+          // `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` (wildcard never counts). That env is
+          // unset in production, so every production org collapses to `legacy` and this branch is
+          // unreachable irrespective of DB contents — including via the run's frozen posture, which
+          // can only be `authoritative` if the org resolved authoritative at run creation.
+          // =================================================================
+          if (!isLegacyCompat) {
+            const targetPosture = await resolveSegmentCalculationPosture(trx, orgKey)
+            if (
+              targetPosture.effectiveState === 'authoritative'
+              || org.acceptedWritePosture === 'authoritative'
+            ) {
+              // -- CONTAINMENT SCOPE ------------------------------------------------------------
+              // ONE savepoint around the parent seam (placeholder INSERT included), the preimage
+              // build, and the core call. It deliberately does NOT enclose the preflight claim: the
+              // claim must survive a contained refusal so `cancelAttendanceResultOperationV1` (a
+              // bare `UPDATE ... WHERE state='claimed'`) can dispose of it. Rolling the claim back
+              // would make that cancel match zero rows and throw a NON-contained class, aborting the
+              // very batch the containment exists to protect.
+              //
+              // WHY THE CLAIM MUST BE DISPOSED AT ALL: `trg_aro_claimed_commit_guard` is a
+              // `CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED` on
+              // `attendance_result_operations` that re-reads the row's state AT COMMIT and raises
+              // `W4C0_CLAIMED_COMMIT` if it is still `claimed`. "Record the outcome and leave the
+              // operation unsealed" is therefore ILLEGAL — it would fail at COMMIT with a raw,
+              // untyped exception and abort the batch anyway. Cancelling (`claimed -> canceled`,
+              // `response_snapshot` stays NULL, admitted by
+              // `attendance_w4_operation_transition_guard`) is the legal terminal disposition, and
+              // it PRESERVES the "seal ⇒ success snapshot" invariant, because a contained failure is
+              // never sealed at all. The finalize fold's LEFT JOIN then yields a NULL
+              // `response_snapshot` for it, contributing 0 to `generated_count`.
+              //
+              // PER-BUCKET DISPOSITION of everything typed that can be thrown inside this savepoint:
+              //  - the core's closed 15-code enumeration (`AttendanceW4AuthoritativeCalculationError`)
+              //    ⇒ CONTAIN: deterministic for this (parent, payload); a retry cannot change it.
+              //  - the two retirement 409s (`AttendanceW4OpsRetirementError`) ⇒ CONTAIN: same.
+              //  - `W4C2_AUTHORITATIVE_PARENT_UNRESOLVED` (500,
+              //    `AttendanceW4LiveScheduledBoundaryError`) ⇒ RETHROW, batch aborts: not a business
+              //    outcome and potentially transient, so recovery/resume must re-attempt the target
+              //    rather than burn it terminally. That is the principled split — CONTAINED =
+              //    deterministic-for-this-target; RETHROWN = transient or infrastructural.
+              //  - raw pg errors incl. 40001/40P01 ⇒ RETHROW (the two retry layers own those).
+              //  - `AttendanceW4OperationError` (org suspension) ⇒ RETHROW, and it is thrown before
+              //    this savepoint anyway — suspension is run-wide, not per-target.
+              //  - anything else ⇒ RETHROW (fail-closed default).
+              // The membership authority is `isAttendanceScheduledContainedRefusalV1` over the ONE
+              // exported class table; this list is the reachability commentary, never the predicate.
+              const authoritativeSavepoint = 'attendance_w4c2_scheduled_authoritative'
+              let authoritativeSealInput: { inserted: boolean; calculationId: string | null }
+              await trx.query(`SAVEPOINT ${authoritativeSavepoint}`)
+              try {
+                const resolvedParent = await resolveAuthoritativeScheduledParentV1(
+                  trx,
+                  org,
+                  userId,
+                  workDate,
+                  {
+                    orgId: orgKey,
+                    timezone: input.timezone,
+                    isWorkday: input.isWorkday !== false,
+                  },
+                )
+                if (resolvedParent.kind === 'skip') {
+                  // §6.2 default: present, guard-admitted, not-retired parent ⇒ no core call, no
+                  // placeholder, no writes at all. Legacy parity: the legacy INSERT contributes
+                  // `inserted=false` for exactly this user, so `rows`/`generated_count`/`total` are
+                  // identical under either posture and the parent stays bit-identical.
+                  await trx.query(`RELEASE SAVEPOINT ${authoritativeSavepoint}`)
+                  authoritativeSealInput = { inserted: false, calculationId: null }
+                } else {
+                  const authoritativeParent = resolvedParent.parent
+                  const authoritativeNowIso = new Date().toISOString()
+                  // The SHARED shadow compute, reused verbatim: the in-transaction W2 `scheduled`
+                  // channel anchored on the run's OWN workDate (required — it is a run identity
+                  // byte, not a resolver output), `scheduled_resolution` attribution
+                  // (ambiguous/unresolved/strict-rebuild failure ⇒ `unsupported` ⇒ review, never a
+                  // fabricated V2), the frozen context for `resolved_v2`, synthetic evidence, and
+                  // the pure calculator. The shadow path's `nextCalculationVersion` is DEAD here —
+                  // the core allocates its own. No identity-drift override: `scheduled` BY DESIGN
+                  // has no outer resolution to compare against (there is no
+                  // `outerSourceDefinitionFingerprint` on the scheduled input), so synthesizing one
+                  // would be inventing a gate, not replicating D2's.
+                  const authoritativeResolution = await adapters.resolveScheduledCandidate(pluginTrx, {
+                    orgId: orgKey,
+                    userId,
+                    timezone: input.timezone,
+                    calendarWorkDate: workDate,
+                  })
+                  const authoritativeAttribution = attributionFromResolution(authoritativeResolution, {
+                    orgId: orgKey,
+                    userId,
+                    source: 'scheduled_resolution',
+                    nowIso: authoritativeNowIso,
+                  })
+                  let authoritativeContext: FrozenAttendanceContextV1 | null = null
+                  if (authoritativeAttribution.posture === 'resolved_v2') {
+                    authoritativeContext = await adapters.buildShadowFrozenContext(pluginTrx, {
+                      orgId: orgKey,
+                      userId,
+                      workDate,
+                      shiftId: authoritativeAttribution.value.shiftId,
+                      timezone: input.timezone,
+                      isWorkday: input.isWorkday !== false,
+                      holidayKind: input.holidayKind ?? null,
+                    })
+                  }
+                  const authoritativeEvidence: AttendanceEvidenceV1[] = [
+                    { kind: 'scheduled_absence', ref: runId },
+                  ]
+                  const authoritativeCalculation = calculateAttendanceSegmentsV1({
+                    attribution: authoritativeAttribution,
+                    context: authoritativeContext,
+                    evidence: authoritativeEvidence,
+                    approvedFacts: [],
+                  })
+                  const authoritativeProvenanceRef: AttendanceInputProvenanceRefV1 = {
+                    transport: 'scheduled_job',
+                    sourceRef: SCHEDULED_SOURCE_REF[input.initiator],
+                    artifactSha256: null,
+                    normalizedCsvSha256: null,
+                    convertedSheetName: null,
+                  }
+                  // Derived ONLY from the resolved command payload — the same five fields the
+                  // envelope carries — never from a clock, a random id, or the operation id.
+                  const authoritativePayloadFingerprint =
+                    computeAuthoritativeScheduledPayloadFingerprintV1({
+                      scheduledRunId: runId,
+                      userId,
+                      workDate,
+                      expectedRunVersion: 1,
+                      scheduledAbsenceSource: SCHEDULED_ABSENCE_SOURCE[input.initiator],
+                    })
+                  // The D2 preimage builder VERBATIM (it takes only a `ShadowTargetRow`, which the
+                  // widened locked read supplies) — the CANONICAL compat fingerprint, instants
+                  // normalized to ISO with the SAME bytes hashed and stored, and
+                  // `expectedCurrentCalculationId` always the LOCKED actual.
+                  const { preimage: authoritativePreimage, expectedCurrentCalculationId } =
+                    buildAuthoritativeLivePunchPreimageV1(authoritativeParent)
+                  const authoritativeWritten = await writeAuthoritativeSegmentCalculationV1(trx, {
+                    orgId: orgKey,
+                    recordId: authoritativeParent.id,
+                    // The DB entrypoint value: a disjoint retry space from `'live'`, so the
+                    // `(org, entrypoint, operation_id)` replay key can never collide across kinds.
+                    entrypoint: 'scheduled',
+                    operationId: identity.id,
+                    calculation: authoritativeCalculation,
+                    attribution: authoritativeAttribution,
+                    context: authoritativeContext,
+                    evidence: authoritativeEvidence as unknown as readonly unknown[],
+                    approvedFacts: [],
+                    provenanceRef: authoritativeProvenanceRef,
+                    // BOTH places: top-level for the core's own conflict check, and embedded so a
+                    // genuine retry's `input_provenance.payloadFingerprint` read matches.
+                    inputProvenance: {
+                      ...authoritativeProvenanceRef,
+                      payloadFingerprint: authoritativePayloadFingerprint,
+                    },
+                    payloadFingerprint: authoritativePayloadFingerprint,
+                    preimage: authoritativePreimage,
+                    expectedCurrentCalculationId,
+                    sourceBatchId: null,
+                    actorId: authorization.actorId,
+                    correlationId: envelope.correlationId,
+                  })
+                  await trx.query(`RELEASE SAVEPOINT ${authoritativeSavepoint}`)
+                  // §6.3 default: `inserted:true` ⇔ the pointer moved (an authoritative "generated
+                  // absence day"), keeping `generated_count`'s meaning intact; a review outcome (or
+                  // a replay of one) is `inserted:false`.
+                  authoritativeSealInput = {
+                    inserted: authoritativeWritten.kind === 'completed',
+                    calculationId: authoritativeWritten.calculationId,
+                  }
+                }
+              } catch (error) {
+                if (!isAttendanceScheduledContainedRefusalV1(error)) throw error
+                // ROLLBACK TO is LOAD-BEARING: without it a refused target can leave an orphan
+                // `review_placeholder` parent behind for a target that produced nothing, and the
+                // parent is required to be bit-identical after a refusal. RELEASE follows the
+                // rollback (the D2 carry-forward lesson: `ROLLBACK TO` undoes the subtransaction but
+                // leaves its slot on the stack).
+                await trx.query(`ROLLBACK TO SAVEPOINT ${authoritativeSavepoint}`)
+                await trx.query(`RELEASE SAVEPOINT ${authoritativeSavepoint}`)
+                // Cancel FIRST, then record the outcome. `cancelAttendanceResultOperationV1`'s
+                // docblock says "source-free cancel: allowed only before source DML (lock 7.1)" —
+                // the rule is stated there and NOT enforced in code. Here the savepoint rollback has
+                // already undone every source write this branch made, so the operation IS source-free
+                // at cancel time; whether "source-free because it was rolled back" is the same
+                // predicate the lock meant is an OWNER lock interpretation, shipped as the default
+                // and surfaced for ruling, not decided here. The outcome table is run-registry
+                // machinery, not source DML.
+                await cancelAttendanceResultOperationV1(trx, identity)
+                // The registry's single allowlisted failure reason. The writer validates the shape
+                // as EXACTLY two keys, so persisting the specific refusing code alongside it is not
+                // a build-time option — it would fail `W4C2_SCHEDULED_RUN_OUTCOME_INVALID`.
+                await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, {
+                  terminalOutcome: 'failed',
+                  failureReasonCode: 'ATTENDANCE_SCHEDULED_TARGET_OPERATION_REJECTED',
+                })
+                // Terminal and contained: the loop continues to the next target, resume never
+                // re-loops this one, and both fold counters exclude it.
+                return { mode: 'failed' as const, inserted: false }
+              }
+              // Seal + outcome sit OUTSIDE the savepoint on purpose: their own failures must
+              // propagate (the outcome writer refuses a non-`running` run) rather than re-enter
+              // containment. The sealed snapshot PRESERVES the existing contract exactly — the two
+              // keys the finalize fold reads (`response_snapshot ->> 'inserted'`) plus
+              // `resolvedCalculationId`. Adding keys here would be a protocol change requiring an
+              // independent ratify, not a side effect of delivering the writer.
+              await sealAttendanceResultOperationV1(trx, identity, {
+                responseSnapshot: { inserted: authoritativeSealInput.inserted },
+                resolvedCalculationId: authoritativeSealInput.calculationId,
+              })
+              // §6.3 default: a `review_required` CALCULATION outcome still records `'completed'` —
+              // the operation ran to a terminal calc outcome and the review state is carried on the
+              // calc row. `'failed'` is reserved exclusively for contained refusals.
+              await recordAttendanceScheduledRunTargetOutcomeV1(trx, identity, {
+                terminalOutcome: 'completed',
+              })
+              // The P-A obligation: this `return` is what keeps control from reaching the shadow
+              // `applyScheduledAbsenceLegacy` call site below.
+              return { mode: 'executed' as const, inserted: authoritativeSealInput.inserted }
+            }
+          }
+
           const rows = await adapters.applyScheduledAbsenceLegacy(pluginTrx, {
             orgId: orgKey,
             workDate,
@@ -2696,10 +3161,11 @@ export function createAttendanceLiveScheduledBoundaryV1(
             return { mode: 'legacy_compat' as const, inserted }
           }
 
-          const posture = await resolveSegmentCalculationPosture(trx, orgKey)
-          if (posture.effectiveState === 'authoritative' || org.acceptedWritePosture === 'authoritative') {
-            boundaryFail('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED', 503)
-          }
+          // Gate D3 (#4556 / #4844): the authoritative arm's posture re-read and its former
+          // fail-closed refusal used to live HERE, after the legacy absence adapter. Both moved
+          // above that call site — the re-read is now the writer-branch selector and the refusal is
+          // replaced by the real writer, which returns before control can reach the adapter. Only
+          // shadow/eligible reach this point, and the arm below is unchanged.
 
           let calculationId: string | null = null
           if (inserted) {

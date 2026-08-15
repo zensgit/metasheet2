@@ -600,9 +600,24 @@ const CURATED_DEBT_ENTRIES = [
   },
   {
     id: 'X07',
-    title: 'W4C-2 Gate D2 live_punch authoritative branch: the create-if-absent review-path parent placeholder INSERT on attendance_records (§7.5 F6 parent-state install).',
+    title: 'W4C-2 Gate D2/D3 authoritative branches: the create-if-absent review-path parent placeholder INSERT on attendance_records (§7.5 F6 parent-state install).',
     owningSlice: 'W4C-2',
     sharedHook: false,
+    // Gate D3 (#4844) CLASSIFICATION NOTE — measured with the collectors, not reasoned:
+    //   * the scheduled authoritative branch's placeholder creation is a CALL to the same
+    //     `insertAuthoritativeReviewPlaceholderParentV1` helper this entry claims BY SYMBOL, so it
+    //     adds no new DML statement text and no new census site. The `bySymbol` claim is exactly
+    //     what makes a second call site inert here while still refusing a genuinely NEW
+    //     attendance_records writer added to the boundary file;
+    //   * the core call, the first production `recordAttendanceScheduledRunTargetOutcomeV1('failed')`
+    //     call and the `cancelAttendanceResultOperationV1` call are CALLS into already-claimed
+    //     writers (the D1 core / the run registry / the operation registry), not new DML;
+    //   * D3 REMOVES `applyScheduledAbsenceLegacy` from the authoritative arm — a classification
+    //     change rather than a new site: that adapter's own INSERT..SELECT stays claimed for the
+    //     legacy/shadow/legacy_compat paths that still call it;
+    //   * the branch's `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` statements carry
+    //     no verb the DML scanner tracks.
+    // Collector output on the D3 head: unclaimed = 0, with no census hand-edit.
     // Its own Gate-D2 marker, not the 'W4C-2' removed-by-adapter marker (pinned to the four
     // legacy P01-P04 writers) and not Gate D1's. This is the canonical authoritative-path parent
     // creator D2 adds, not a legacy site being canonicalized away.
