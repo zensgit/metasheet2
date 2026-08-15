@@ -167,8 +167,8 @@ defineExpose({
 
 <style scoped>
 .template-authoring__canvas-inspector {
-  flex: 0 0 360px;
-  width: 360px;
+  flex: 0 0 400px;
+  width: 400px;
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;

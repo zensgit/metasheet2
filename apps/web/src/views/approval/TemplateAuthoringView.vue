@@ -1296,7 +1296,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type CSSProperties } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -2310,7 +2310,7 @@ const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(dr
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
-const canvasStageStyle = computed(() => {
+const canvasStageStyle = computed<CSSProperties>(() => {
   const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
   const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
   const vpW = canvasViewportState.value.width
