@@ -47,27 +47,40 @@
  *
  * WIDENING HISTORY. Landed as `.ts .tsx .js .cjs .mjs .sql .sh` (7
  * extensions, 4154 of 10954 tracked files at the time). #4908 widened it to
- * add `.vue .ps1 .py` (the three hand-authored extensions counted OUTSIDE
- * the original domain when it was drafted — 242 + 22 + 3 = 267 files,
- * exactly the "267 hand-authored files" figure #4908 cited, which is why
- * `.yml/.yaml` and other tracked-but-not-hand-authored extensions were
- * considered and left out: they are structured config consumed by a parser,
- * not code with string-literal escape idiom, and the issue's own count
- * already closed the hand-authored set at those three). #4908 RE-MEASURED
- * the widened set before flipping the switch, per this docstring's own
- * instruction to whoever widens it next: all 267 files (242 `.vue`, 22
- * `.ps1`, 3 `.py`) were clean of both a raw NUL and every other C0 byte
- * (`git ls-files -z --cached` piped through the same byte scan the tests
- * below run) — a measured fact about that domain at that commit, not a
- * promise that stays true forever. Do the same re-measurement before
- * widening it again.
+ * add `.vue .ps1 .py` — the three extensions the issue named, and counted
+ * OUTSIDE the original domain when it was drafted: 242 + 22 + 3 = 267 files,
+ * exactly the "267 hand-authored files" figure #4908 cited. #4908
+ * RE-MEASURED the widened set before flipping the switch, per this
+ * docstring's own instruction to whoever widens it next: all 267 files were
+ * clean of both a raw NUL and every other C0 byte (`git ls-files -z --cached`
+ * piped through the same byte scan the tests below run) — a measured fact
+ * about that domain at that commit, not a promise that stays true forever.
  *
- * What still sits OUTSIDE the (now 10-extension) domain: non-source tracked
- * files — docs, JSON, YAML/config, assets. A raw NUL in any of those would
- * make that file binary to git and grep exactly as it did here, and this
- * guard would not see it; they are excluded because they are not
- * hand-authored programming/scripting source in the sense this defect class
- * requires, not because anyone checked them and found them clean.
+ * #4908 also went looking for OTHER tracked extensions that might be the same
+ * class before writing this section, rather than asserting the three named
+ * ones were the only candidates — the earlier overclaim this paragraph
+ * already warns about, reincarnated one level up, is exactly the mistake of
+ * saying "nothing else qualifies" without having looked:
+ *   - `.yml`/`.yaml` (133 tracked): structured config consumed by a parser,
+ *     not code with this defect class's string-literal escape idiom. NOT
+ *     byte-scanned — excluded on category, same reasoning as docs/JSON.
+ *   - `.bat` (1 file, a Windows batch script — same class as `.sh`/`.ps1`)
+ *     and `.rhai` (1 file, a Rhai script): genuinely hand-authored scripting
+ *     source, same defect-class risk as what's already in the domain.
+ *     Byte-scanned clean (0 NUL, 0 other C0) but left OUT of #4908's
+ *     `SOURCE_EXTENSIONS` change because they weren't what the issue asked
+ *     for — a deliberate deferral, not an oversight; whoever widens next
+ *     should treat them as pending, not re-derive that they exist.
+ *   - `.css` (5 files) and `.html` (12 files): hand-authored but declarative
+ *     markup/stylesheet, not procedural source in this defect class's sense.
+ *     Byte-scanned clean (0 NUL, 0 other C0) anyway and adjudicated OUT on
+ *     category, same footing as `.yml`/`.yaml`.
+ *
+ * What still sits OUTSIDE the (now 10-extension) domain: everything above
+ * that was left out, plus non-source tracked files never considered
+ * candidates at all — docs, JSON, other assets. A raw NUL in any of those
+ * would make that file binary to git and grep exactly as it did here, and
+ * this guard would not see it.
  *
  * WHY NOT BAN ALL C0 CONTROL BYTES REPO-WIDE. Because `0x01` is a deliberate,
  * pre-existing in-repo delimiter in three files that this guard does not own
@@ -96,9 +109,10 @@ const REPO_ROOT = path.resolve(__dirname, '../../../../')
 /** Extensions where this defect class lands: hand-authored source. Binary
  *  assets (images, fonts, archives) legitimately contain NUL and are not
  *  source, so they are not in the domain at all. Widened by #4908 to add
- *  `.vue .ps1 .py` (re-measured clean first — see docstring above);
- *  `.yml/.yaml` and other config extensions were considered and left out as
- *  parser-consumed config rather than hand-authored source. */
+ *  `.vue .ps1 .py` — the three extensions the issue named (re-measured clean
+ *  first — see docstring above). `.bat`/`.rhai`/`.css`/`.html`/`.yml`/`.yaml`
+ *  were also considered (byte-scanned or category-excluded — see docstring);
+ *  none of them were folded into this change. */
 const SOURCE_EXTENSIONS = new Set([
   '.ts',
   '.tsx',
