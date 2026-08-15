@@ -753,6 +753,14 @@ export default defineConfig({
       // DATABASE_URL-gated (it derives its scratch connection from the same env var) and still
       // needs the two-point wiring: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts',
+      // #4556 W7-1a: the group-policy posture/facts resolvers and the composite lock order.
+      // Needs real PostgreSQL for every leg the ratification makes required — the ruling-7
+      // persisted-row + exact-allowlist controls, the three P3-2 hard throws (each constructs
+      // state the schema forbids inside a rolled-back transaction), the FOR SHARE membership
+      // read, and above all the ruling-8 TWO-CONNECTION reverse-contention proof, which needs
+      // the server's own deadlock detector to return 40P01. Excluded here so the no-DB job
+      // cannot skip-green it; whole-file run in plugin-tests.yml's attendance step.
+      'tests/integration/attendance-w7-1a-resolver.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',

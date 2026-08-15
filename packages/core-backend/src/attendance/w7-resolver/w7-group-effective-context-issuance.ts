@@ -1,0 +1,379 @@
+/**
+ * W7-1a (#4556) STEP 3 — the SINGLE core-owned group-effective V2 issuance
+ * boundary (W7-R1).
+ *
+ * Authority: design-lock §3 red line W7-R1, §7 OD-W7-2(a), OD-W7-6(a);
+ * ratified per #4556 comments 5293034619 (owner-directed disclosed relay) +
+ * 5293478713 (owner first-person confirmation) — ruling 10 (OD-W7-6 = (a):
+ * group policy is frozen INTO the context, no second snapshot table).
+ *
+ * EXACTLY TWO OPERATIONS, and no third way to obtain a registered V2 context:
+ *
+ *   (i)  `coreIssueGroupEffectiveContextV2(facts)` — mint a NEW context from
+ *        the normalized facts the in-transaction resolver returned.
+ *   (ii) `coreRehydrateGroupEffectiveContextV2(serialized, fingerprint)` —
+ *        re-admit an ALREADY-FROZEN serialized context by exact-key / schema /
+ *        fingerprint validation, performing NO resolver read, NO policy-table
+ *        read, and NO live-config read.
+ *
+ * Plugin adapters pass normalized FACTS; they never inject a construction
+ * callback, and there is no exported factory that would let a caller supply
+ * its own builder.
+ *
+ * ORIGIN AND CONTENT ARE SEPARATE PROOFS, and this file must not be read as
+ * conflating them:
+ *   - ORIGIN is the module-private `WeakSet`. Membership is the only proof
+ *     that an object came out of (i) or (ii). It is process-local by design:
+ *     JSON round-trip, spread, `Object.assign`, and `structuredClone` all
+ *     destroy it, which is exactly why a serialized context must go back
+ *     through (ii) before a writer accepts it.
+ *   - CONTENT is the domain-separated fingerprint. It is CONTENT INTEGRITY
+ *     ONLY and MUST NOT be described as origin proof: anyone holding the
+ *     payload can compute a matching fingerprint, so a valid fingerprint says
+ *     "these bytes were not altered", never "these bytes came from here".
+ *
+ * OD-W7-6(a) — group policy is frozen INTO this context. There is no second
+ * group-policy snapshot table and no external row this context references;
+ * the exact-key payload below IS the immutable policy carrier.
+ *
+ * W7-0 P3-1 CARRY-FORWARD (a constraint on a LATER slice, deliberately not
+ * acted on here): when W7-1b wires a `schemaVersion` discriminant into the
+ * LIVE validator (`../w4c1-segment-calculator.ts`'s `validateFrozenContextShape`),
+ * it must read `schemaVersion` FIRST and only then route — v1 keeps its own
+ * key rule INCLUDING the optional W5 `flexPolicy` key, v2 uses the exact
+ * 14-key set below. The 14-exact-key discipline in this file is v2's alone
+ * and MUST NOT be carried onto any v1 branch: doing so would strip
+ * `flexPolicy` from every existing v1 context, a production regression rather
+ * than a scope note. W7-1a touches that validator not at all — this paragraph
+ * is the carry-forward record, not a change.
+ *
+ * STRUCTURALLY INERT (W7-1a): zero production import sites, zero call sites.
+ */
+import crypto from 'node:crypto'
+
+import type { AttendanceW7GroupEffectiveFactsV1 } from './w7-group-effective-facts-resolver'
+
+export class AttendanceW7IssuanceError extends Error {
+  readonly code: string
+  constructor(code: string) {
+    super(code)
+    this.name = 'AttendanceW7IssuanceError'
+    this.code = code
+  }
+}
+
+export const ATTENDANCE_W7_CONTEXT_FACTS_INVALID = 'W7_CONTEXT_FACTS_INVALID'
+export const ATTENDANCE_W7_CONTEXT_SHAPE_INVALID = 'W7_CONTEXT_SHAPE_INVALID'
+export const ATTENDANCE_W7_CONTEXT_FINGERPRINT_MISMATCH = 'W7_CONTEXT_FINGERPRINT_MISMATCH'
+
+function fail(code: string): never {
+  throw new AttendanceW7IssuanceError(code)
+}
+
+// ---------------------------------------------------------------------------
+// The v2 shape. Mirrors `../w7-frozen-context-v2-contract.ts` (the W7-0
+// ratified contract) — the key ORDER below is also the fingerprint's
+// serialization order, so it is load-bearing, not cosmetic.
+// ---------------------------------------------------------------------------
+
+export interface FrozenAttendanceContextSegmentV2 {
+  index: 0 | 1 | 2
+  startTime: string
+  endTime: string
+  startDayOffset: 0
+  endDayOffset: 0 | 1
+  lateGraceMinutes: number
+  earlyLeaveGraceMinutes: number
+}
+
+export interface FrozenAttendanceContextV2 {
+  schemaVersion: 2
+  selector: 'legacy' | 'group_effective'
+  orgId: string
+  userId: string
+  workDate: string
+  timezone: string
+  shiftId: string
+  isWorkday: boolean
+  holidayKind: string | null
+  calculationGroupId: string | null
+  roundingMinutes: number
+  severeLateThresholdMinutes: number
+  absenceLateThresholdMinutes: number
+  segments: FrozenAttendanceContextSegmentV2[]
+}
+
+const V2_CONTEXT_KEYS = [
+  'schemaVersion',
+  'selector',
+  'orgId',
+  'userId',
+  'workDate',
+  'timezone',
+  'shiftId',
+  'isWorkday',
+  'holidayKind',
+  'calculationGroupId',
+  'roundingMinutes',
+  'severeLateThresholdMinutes',
+  'absenceLateThresholdMinutes',
+  'segments',
+] as const
+
+const V2_SEGMENT_KEYS = [
+  'index',
+  'startTime',
+  'endTime',
+  'startDayOffset',
+  'endDayOffset',
+  'lateGraceMinutes',
+  'earlyLeaveGraceMinutes',
+] as const
+
+/** Domain separator. A bare hash of the payload would collide across every
+ *  other artifact in the system that hashes a similar JSON object; the prefix
+ *  makes this fingerprint mean "a W7 group-effective v2 context" and nothing
+ *  else. */
+const W7_V2_FINGERPRINT_DOMAIN = 'metasheet.attendance.w7.frozen-context.v2\u0000'
+
+// ---------------------------------------------------------------------------
+// Origin registry (module-private).
+// ---------------------------------------------------------------------------
+
+const groupEffectiveContextWitnesses = new WeakSet<object>()
+
+export function isCoreIssuedGroupEffectiveContextV2(candidate: unknown): boolean {
+  return (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    groupEffectiveContextWitnesses.has(candidate)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers.
+// ---------------------------------------------------------------------------
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (!isPlainObject(value)) return false
+  const own = Object.getOwnPropertyNames(value)
+  if (own.length !== keys.length) return false
+  const allowed = new Set(keys)
+  return own.every((key) => allowed.has(key))
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function validateSegmentShape(segment: unknown, index: number): boolean {
+  if (!hasExactKeys(segment, V2_SEGMENT_KEYS)) return false
+  const seg = segment as Record<string, unknown>
+  if (seg.index !== index) return false
+  if (!isNonEmptyString(seg.startTime) || !isNonEmptyString(seg.endTime)) return false
+  if (seg.startDayOffset !== 0) return false
+  if (seg.endDayOffset !== 0 && seg.endDayOffset !== 1) return false
+  if (!isNonNegativeInteger(seg.lateGraceMinutes)) return false
+  if (!isNonNegativeInteger(seg.earlyLeaveGraceMinutes)) return false
+  return true
+}
+
+/**
+ * Exact-key, fail-closed v2 shape validation. Shared by (i) and (ii) so the
+ * two operations cannot admit different shapes.
+ *
+ * Scoped to V2 ONLY — see the P3-1 carry-forward in the file header. This
+ * function must never be pointed at a v1 object.
+ */
+function isValidV2Shape(context: unknown): boolean {
+  if (!hasExactKeys(context, V2_CONTEXT_KEYS)) return false
+  const ctx = context as Record<string, unknown>
+  if (ctx.schemaVersion !== 2) return false
+  if (ctx.selector !== 'legacy' && ctx.selector !== 'group_effective') return false
+  // W7-R1 guard 6: `calculationGroupId` is non-empty iff group_effective.
+  if (ctx.selector === 'legacy' && ctx.calculationGroupId !== null) return false
+  if (ctx.selector === 'group_effective' && !isNonEmptyString(ctx.calculationGroupId)) return false
+  if (!isNonEmptyString(ctx.orgId) || !isNonEmptyString(ctx.userId)) return false
+  if (!isNonEmptyString(ctx.workDate)) return false
+  if (!isNonEmptyString(ctx.timezone) || !isNonEmptyString(ctx.shiftId)) return false
+  if (typeof ctx.isWorkday !== 'boolean') return false
+  if (ctx.holidayKind !== null && !isNonEmptyString(ctx.holidayKind)) return false
+  if (!isNonNegativeInteger(ctx.roundingMinutes) || (ctx.roundingMinutes as number) < 1) return false
+  if (!isNonNegativeInteger(ctx.severeLateThresholdMinutes)) return false
+  if (!isNonNegativeInteger(ctx.absenceLateThresholdMinutes)) return false
+  if (!Array.isArray(ctx.segments) || ctx.segments.length < 1 || ctx.segments.length > 3) return false
+  for (let i = 0; i < ctx.segments.length; i += 1) {
+    if (!validateSegmentShape(ctx.segments[i], i)) return false
+  }
+  return true
+}
+
+/**
+ * Deterministic serialization: keys emitted in the fixed `V2_CONTEXT_KEYS` /
+ * `V2_SEGMENT_KEYS` order rather than in the object's own insertion order, so
+ * two contexts with identical values fingerprint identically regardless of
+ * how they were assembled.
+ */
+function canonicalPayload(ctx: Record<string, unknown>): string {
+  const ordered: unknown[] = V2_CONTEXT_KEYS.map((key) => {
+    if (key !== 'segments') return ctx[key]
+    return (ctx.segments as Record<string, unknown>[]).map((segment) =>
+      V2_SEGMENT_KEYS.map((segKey) => segment[segKey]),
+    )
+  })
+  return JSON.stringify(ordered)
+}
+
+/**
+ * Domain-separated content fingerprint. CONTENT INTEGRITY ONLY — see the
+ * header. Exported so a writer can independently recompute it from the
+ * exact-key payload rather than trusting a value handed to it.
+ */
+export function computeAttendanceW7GroupEffectiveContextFingerprintV1(context: unknown): string {
+  if (!isValidV2Shape(context)) fail(ATTENDANCE_W7_CONTEXT_SHAPE_INVALID)
+  return crypto
+    .createHash('sha256')
+    .update(W7_V2_FINGERPRINT_DOMAIN, 'utf8')
+    .update(canonicalPayload(context as Record<string, unknown>), 'utf8')
+    .digest('hex')
+}
+
+function deepFreezeContext(context: FrozenAttendanceContextV2): FrozenAttendanceContextV2 {
+  for (const segment of context.segments) Object.freeze(segment)
+  Object.freeze(context.segments)
+  return Object.freeze(context)
+}
+
+// ---------------------------------------------------------------------------
+// Operation (i): mint from resolver facts.
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONLY way a new group-effective V2 context comes into existence.
+ *
+ * `selector` is hard-coded `'group_effective'` and `schemaVersion` hard-coded
+ * `2`: they are not inputs, so no caller can mint a `'legacy'`-selectored
+ * object through the group boundary. `calculationGroupId` must be a non-empty
+ * string in the facts — the resolver already guarantees it, and this
+ * re-checks rather than assuming, because "the caller already validated it" is
+ * how a boundary stops being one.
+ *
+ * Emits NO provenance value. Widening `projectionOwner` / trace `source.kind`
+ * is the separate inert slice W7-1a-M; this operation writes neither, which is
+ * mechanically checkable (the v2 key set has no provenance member).
+ */
+export function coreIssueGroupEffectiveContextV2(
+  facts: AttendanceW7GroupEffectiveFactsV1,
+): FrozenAttendanceContextV2 {
+  if (!isPlainObject(facts)) fail(ATTENDANCE_W7_CONTEXT_FACTS_INVALID)
+  if (!isNonEmptyString(facts.calculationGroupId)) fail(ATTENDANCE_W7_CONTEXT_FACTS_INVALID)
+
+  const context: FrozenAttendanceContextV2 = {
+    schemaVersion: 2,
+    selector: 'group_effective',
+    orgId: facts.orgId,
+    userId: facts.userId,
+    workDate: facts.workDate,
+    timezone: facts.timezone,
+    shiftId: facts.shiftId,
+    isWorkday: facts.isWorkday,
+    holidayKind: facts.holidayKind,
+    calculationGroupId: facts.calculationGroupId,
+    roundingMinutes: facts.roundingMinutes,
+    severeLateThresholdMinutes: facts.severeLateThresholdMinutes,
+    absenceLateThresholdMinutes: facts.absenceLateThresholdMinutes,
+    segments: facts.segments.map((segment) => ({
+      index: segment.index,
+      startTime: segment.startTime,
+      endTime: segment.endTime,
+      startDayOffset: 0 as const,
+      endDayOffset: segment.endDayOffset,
+      lateGraceMinutes: segment.lateGraceMinutes,
+      earlyLeaveGraceMinutes: segment.earlyLeaveGraceMinutes,
+    })),
+  }
+
+  if (!isValidV2Shape(context)) fail(ATTENDANCE_W7_CONTEXT_FACTS_INVALID)
+
+  const frozen = deepFreezeContext(context)
+  groupEffectiveContextWitnesses.add(frozen)
+  return frozen
+}
+
+// ---------------------------------------------------------------------------
+// Operation (ii): rehydrate an already-frozen serialized context.
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-admit a context that crossed a serialization boundary (request snapshot,
+ * import payload, `frozen_prior` DB column).
+ *
+ * Performs NO resolver call, NO policy-table read, NO live-config read — it is
+ * a pure function of its two arguments. That is W7-R6's whole point: a
+ * `frozen_prior` recomputation must consume only the previously frozen
+ * snapshot, so if this function could read live policy, replaying history
+ * would silently re-resolve it.
+ *
+ * The `expectedFingerprint` argument is required, not optional. Making it
+ * optional would let a caller skip the content leg by simply not passing it,
+ * which is the "guard you can opt out of" shape.
+ */
+export function coreRehydrateGroupEffectiveContextV2(
+  serialized: unknown,
+  expectedFingerprint: string,
+): FrozenAttendanceContextV2 {
+  if (!isValidV2Shape(serialized)) fail(ATTENDANCE_W7_CONTEXT_SHAPE_INVALID)
+  const source = serialized as Record<string, unknown>
+
+  const actualFingerprint = computeAttendanceW7GroupEffectiveContextFingerprintV1(source)
+  if (
+    typeof expectedFingerprint !== 'string' ||
+    expectedFingerprint.length !== actualFingerprint.length ||
+    !crypto.timingSafeEqual(
+      Buffer.from(actualFingerprint, 'utf8'),
+      Buffer.from(expectedFingerprint, 'utf8'),
+    )
+  ) {
+    fail(ATTENDANCE_W7_CONTEXT_FINGERPRINT_MISMATCH)
+  }
+
+  // Rebuild rather than freeze-in-place: the caller's object may be shared,
+  // may carry a mutable prototype, and must not become registered by
+  // reference. The rebuilt object copies only the exact keys.
+  const context: FrozenAttendanceContextV2 = {
+    schemaVersion: 2,
+    selector: source.selector as 'legacy' | 'group_effective',
+    orgId: source.orgId as string,
+    userId: source.userId as string,
+    workDate: source.workDate as string,
+    timezone: source.timezone as string,
+    shiftId: source.shiftId as string,
+    isWorkday: source.isWorkday as boolean,
+    holidayKind: source.holidayKind as string | null,
+    calculationGroupId: source.calculationGroupId as string | null,
+    roundingMinutes: source.roundingMinutes as number,
+    severeLateThresholdMinutes: source.severeLateThresholdMinutes as number,
+    absenceLateThresholdMinutes: source.absenceLateThresholdMinutes as number,
+    segments: (source.segments as Record<string, unknown>[]).map((segment) => ({
+      index: segment.index as 0 | 1 | 2,
+      startTime: segment.startTime as string,
+      endTime: segment.endTime as string,
+      startDayOffset: 0 as const,
+      endDayOffset: segment.endDayOffset as 0 | 1,
+      lateGraceMinutes: segment.lateGraceMinutes as number,
+      earlyLeaveGraceMinutes: segment.earlyLeaveGraceMinutes as number,
+    })),
+  }
+
+  const frozen = deepFreezeContext(context)
+  groupEffectiveContextWitnesses.add(frozen)
+  return frozen
+}
