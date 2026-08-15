@@ -187,6 +187,19 @@ describeIfDatabase('W4C-2 Gate D3 — authoritative scheduled writer (real DB)',
         if (injected !== null) throw injected
         return adapters.buildW4ShadowFrozenContextV1(trx, args)
       },
+      // W7-1b: the boundary now reaches the frozen context through the ISSUANCE
+      // SEAM, which is a required adapter. This fixture routes THROUGH this
+      // suite's own spied/fault-injecting `buildShadowFrozenContext` rather than
+      // around it, so the call-count spy keeps counting and the fault injection
+      // keeps firing — the suite measures exactly what it measured before.
+      //
+      // With no posture row (this suite never writes one) the real seam takes the
+      // legacy arm, so `arm: 'legacy'` is the faithful reproduction, not a stub.
+      issueFrozenContext: async (trx, args) => ({
+        arm: 'legacy' as const,
+        context: await legacyAdapters.buildShadowFrozenContext(trx, args),
+        reason: null,
+      }),
     }
     const boundary = createAttendanceLiveScheduledBoundaryV1({
       acquireConnection: async () => {

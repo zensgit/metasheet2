@@ -29,7 +29,7 @@ import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerpri
 import {
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   deriveAttendanceLateTierFieldsV1,
-  validateFrozenContextShape,
+  isSupportedFrozenAttendanceContextV1,
 } from './w4c1-segment-calculator'
 import {
   applyManualOverrideDailyOverlayV1,
@@ -375,7 +375,9 @@ export async function appendManualOverrideCalculationV1(
   if (!isResolvedV2Attribution(prior.attribution_snapshot)) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.PRIOR_INCOMPLETE, 409)
   }
-  if (!validateFrozenContextShape(prior.context_snapshot)) {
+  // W7-1b X3 [MUST_WIDEN]: reads `prior.context_snapshot`, which after 1b can
+  // be a v2 group context. Un-widened, manual edit fails on a group-frozen day.
+  if (!isSupportedFrozenAttendanceContextV1(prior.context_snapshot)) {
     fail(ATTENDANCE_MANUAL_EDIT_APPLY_ERROR_CODES.PRIOR_INCOMPLETE, 409)
   }
   const expectedSegmentCount = Number(prior.expected_segment_count)
@@ -417,7 +419,18 @@ export async function appendManualOverrideCalculationV1(
   }
 
   const priorAttribution = prior.attribution_snapshot
-  const priorContext = prior.context_snapshot
+  // W7-1b X3: the prior context is EITHER schema. The three fields read below
+  // (`segments`, `workDate`, the two late thresholds) are members of the SHARED
+  // 14-key set, identically named and typed in v1 and v2, so this site is
+  // schema-agnostic by construction rather than by luck. Typed as the shared
+  // projection instead of `FrozenAttendanceContextV1`, because calling a v2
+  // object a v1 is precisely the lie the router exists to prevent.
+  const priorContext = prior.context_snapshot as {
+    segments: unknown[]
+    workDate?: unknown
+    severeLateThresholdMinutes: number
+    absenceLateThresholdMinutes: number
+  }
   const priorEvidence = prior.evidence_snapshot
   const priorApproved = Array.isArray(prior.approved_facts_snapshot)
     ? prior.approved_facts_snapshot

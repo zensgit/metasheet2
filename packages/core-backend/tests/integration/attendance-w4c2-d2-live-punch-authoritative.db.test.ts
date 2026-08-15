@@ -163,6 +163,15 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
         resolveLiveCandidate: (trx, args) => adapters.resolveW4LiveCandidateInTransactionV1(trx, args),
         resolveScheduledCandidate: async () => ({ kind: 'unresolved' as const }),
         buildShadowFrozenContext: (trx, args) => adapters.buildW4ShadowFrozenContextV1(trx, args),
+        // W7-1b: the issuance seam is now a REQUIRED adapter (folded into the
+        // same fail-closed gate). With no posture row — this suite never writes
+        // one — the real seam takes the legacy arm, so this fixture reproduces
+        // exactly that and the suite keeps measuring what it already measured.
+        issueFrozenContext: async (trx, args) => ({
+          arm: 'legacy' as const,
+          context: await adapters.buildW4ShadowFrozenContextV1(trx, args),
+          reason: null,
+        }),
       },
     })
     return { boundary, spies }

@@ -1,7 +1,7 @@
 import type { QueryResult, QueryResultRow } from 'pg'
 import {
   deriveAttendanceLateTierFieldsV1,
-  validateFrozenContextShape,
+  isSupportedFrozenAttendanceContextV1,
 } from '../attendance/w4c1-segment-calculator'
 import type { FrozenAttendanceContextV1 } from '../attendance/w4c0-write-boundary-types'
 import { ATTENDANCE_PROJECTION_OWNERS_V1 } from '../attendance/w7-provenance-domain'
@@ -756,7 +756,12 @@ function parseTraceProjection(
     return null
   }
   if (expectedSegmentCount < 1 || segments.length !== expectedSegmentCount) unsupported()
-  if (!validateFrozenContextShape(row.context_snapshot)) unsupported()
+  // W7-1b X6 [MUST_WIDEN]: the admin calculation-detail READ API. Un-widened,
+  // it returns `unsupported()` for EVERY persisted group row — a read-side
+  // hard failure invisible to any write-path test. 1a-M widened this same file
+  // for `projectionOwner`; the context SHAPE is a different domain it did not
+  // touch.
+  if (!isSupportedFrozenAttendanceContextV1(row.context_snapshot)) unsupported()
   const context = row.context_snapshot as FrozenAttendanceContextV1
   const status = parseDailyStatus(row.projected_status)
   if (status === null) unsupported()

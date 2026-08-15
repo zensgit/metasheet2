@@ -169,12 +169,37 @@ function parseImportContext(value: unknown): FrozenAttendanceContextV1 | null {
     'absenceLateThresholdMinutes',
     'segments',
   ])
+  // ---------------------------------------------------------------------
+  // W7-1b X7 [MUST_WIDEN] — the in-backend twin of the `apps/web` duplicate
+  // W7-1a-M found.
+  //
+  // This is a HAND-DUPLICATED 14-key parser. It is INVISIBLE to any grep for
+  // `validateFrozenContextShape`, which is why the predecessor design's
+  // one-site list missed it entirely and why the shape domain needs a
+  // derive-and-diff rather than a hand list.
+  //
+  // Un-widened, it THROWS `W4C3A_IMPORT_FREEZE_INVALID` on any group context —
+  // so P5 (batch import) would hard-fail for a group-authoritative org rather
+  // than review out.
+  //
+  // The discriminant pair is widened to exactly the routing domain
+  // {v1-legacy, v2-legacy, v2-group_effective}; the parser is NOT relaxed into
+  // "any schemaVersion". The `calculationGroupId` polarity is kept COUPLED to
+  // the selector rather than dropped: a `legacy` selector still requires null,
+  // and a `group_effective` selector still requires a non-empty string. Simply
+  // deleting the `calculationGroupId !== null` conjunct would have admitted a
+  // legacy-selectored context carrying a group id — a shape nothing may mint.
+  const importSelector = root.selector
+  const importSchemaVersion = root.schemaVersion
   if (
-    root.schemaVersion !== 1 ||
-    root.selector !== 'legacy' ||
+    (importSchemaVersion !== 1 && importSchemaVersion !== 2) ||
+    (importSelector !== 'legacy' && importSelector !== 'group_effective') ||
+    (importSchemaVersion === 1 && importSelector !== 'legacy') ||
+    (importSelector === 'legacy' && root.calculationGroupId !== null) ||
+    (importSelector === 'group_effective' &&
+      (typeof root.calculationGroupId !== 'string' || root.calculationGroupId.length === 0)) ||
     typeof root.isWorkday !== 'boolean' ||
     (root.holidayKind !== null && typeof root.holidayKind !== 'string') ||
-    root.calculationGroupId !== null ||
     !Array.isArray(root.segments) ||
     root.segments.length < 1 ||
     root.segments.length > 3
@@ -1158,7 +1183,7 @@ async function appendCanonicalCalculation(
       `UPDATE attendance_records
           SET status = $3, first_in_at = $4, last_out_at = $5,
               work_minutes = $6, late_minutes = $7, early_leave_minutes = $8,
-              timezone = $9, projection_owner = 'w4', current_calculation_id = $10::uuid,
+              timezone = $9, projection_owner = $11, current_calculation_id = $10::uuid,
               visibility_state = 'active', visibility_reason = 'active', updated_at = now()
         WHERE id = $1::uuid AND org_id = $2`,
       [
@@ -1172,6 +1197,12 @@ async function appendCanonicalCalculation(
         projection.earlyLeaveMinutes,
         context?.timezone ?? input.write.timezone,
         calculationId,
+        // W7-1b — PROVENANCE EMISSION, domain A, at P5's writer. Same rule as the
+        // core pointer writer and derived from the SAME place: the calculation's
+        // own frozen context, never the parent's existing `projection_owner`.
+        (context as { selector?: unknown } | null)?.selector === 'group_effective'
+          ? 'w4_group'
+          : 'w4',
       ],
     )
   }

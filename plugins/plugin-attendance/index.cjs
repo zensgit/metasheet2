@@ -587,6 +587,22 @@ function __setAttendanceW4LivePunchPreBoundarySeamForTests(seam) {
   }
   attendanceW4LivePunchPreBoundarySeamForTests = typeof seam === 'function' ? seam : null
 }
+// W7-1b (#4556 comments 5293034619 + 5293478713): a module-scope REFERENCE cell
+// for the issuance seam, populated at `activate()` once the host port and the
+// plugin-owned deps are both in scope. The W7-R3 golden harness and the mirror
+// suites reach the SAME seam the production mirror calls — not a
+// re-implementation of it — which is the only way a golden can prove anything
+// about production bytes. The cell holds `null` until activate runs, so a suite
+// that forgets to activate gets a hard failure rather than a silent skip.
+const __attendanceW7IssuanceSeamRefForTests = { issueAttendanceFrozenContextV1: null }
+// Companion cell for the ARM-SELECTION read (the mirror gate's W7 disjunct).
+// Exposed separately from the seam because the two must stay distinguishable:
+// the inert negative controls assert an EXACT `effectiveState`, which the seam's
+// return value deliberately does not carry — four postures take the legacy arm,
+// so "the legacy arm ran" cannot discriminate `off` from `group_shadow`.
+const __attendanceW7ArmSelectionRefForTests = { resolveAttendanceW7GroupArmSelectionV1: null }
+// Companion cell for the PLUGIN-SIDE producer entry point (seam + §2.4).
+const __attendanceW7ProducerRefForTests = { issueW4FrozenContextForProducerV1: null }
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -10535,7 +10551,12 @@ async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, op
   try {
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
-      [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+      // g1 (W7-1b): CANONICAL org key. W7-1a's
+      // `buildAttendanceW7ScheduleFactsLockKeyV1` mirrors this exact string and
+      // keys off the canonical form, so a mixed-case spelling here derived a
+      // DIFFERENT key and the two never excluded each other. No-op for a
+      // canonical spelling; a non-canonical spelling could never commit anyway.
+      [`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`, String(userId ?? '')]
     )
   } catch (error) {
     if (options.required === true) throw error
@@ -10546,7 +10567,18 @@ async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, op
 async function acquireAttendanceScheduleAssignmentReadLock(client, orgId, userId) {
   await client.query(
     'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
-    [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+    // g1 (W7-1b) — P1-1 FIX. This SHARED reader and the EXCLUSIVE writer above
+    // must derive the SAME advisory key or they do not exclude each other at
+    // all. Canonicalising only the writer (as an earlier revision of this slice
+    // did) is STRICTLY WORSE than canonicalising neither: for a non-canonical
+    // org spelling the two sides then key differently, so the writer's ~13
+    // mutation routes and this reader (the W2 work-date resolver's
+    // schedule-facts read) run concurrently with no mutual exclusion.
+    //
+    // `FOR SHARE OF a` cannot substitute: a row-share lock cannot block an
+    // INSERT of a NEW conflicting assignment, which is exactly what the
+    // exclusive writer guards against.
+    [`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`, String(userId ?? '')]
   )
 }
 
@@ -11279,16 +11311,20 @@ function toWorkDate(value, timeZone) {
 }
 
 function getZonedMinutes(value, timeZone) {
+  // `hourCycle: 'h23'` + the `24 -> 0` fold: same h24-midnight hazard as
+  // `getZonedParts` (older ICU renders midnight as '24' under `hour12: false`,
+  // which here returned 1440+ minutes for a midnight instant). `hour12` would
+  // take precedence over `hourCycle`, so it is replaced, not accompanied.
   const formatter = getCachedIntlDateTimeFormat(zonedMinutesFormatterCache, timeZone, 'en-GB', {
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   })
   if (!formatter) return value.getUTCHours() * 60 + value.getUTCMinutes()
   try {
     const text = formatter.format(value)
     const [hRaw, mRaw] = String(text).split(':')
-    const hour = Number(hRaw)
+    const hour = Number(hRaw) === 24 ? 0 : Number(hRaw)
     const minute = Number(mRaw)
     if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
       return value.getUTCHours() * 60 + value.getUTCMinutes()
@@ -12497,8 +12533,18 @@ async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
 }
 
 function getZonedParts(date, timeZone) {
+  // `hourCycle: 'h23'` — NOT `hour12: false` — and the `24 -> 0` fold below.
+  // Older ICU (the node 18/20 CI runners) resolves `hour12: false` to the
+  // h24 cycle, which formats midnight as hour '24' on the SAME calendar day;
+  // `getTimeZoneOffset` then overflows `Date.UTC(..., 24, ...)` into the next
+  // day and reports a +1440-minute offset, so `zonedTimeToUtc` lands every
+  // midnight wall time ONE DAY EARLY (observed live: a '00:00' shift start
+  // froze as workDate-1T00:00Z and the W4 strict rebuild refused the window).
+  // `hour12` takes precedence over `hourCycle` when both are present, so the
+  // fix must REPLACE it, not accompany it. Same idiom as core's
+  // `automation-timezone.ts`, which documents this exact V8/ICU hazard.
   const formatter = getCachedIntlDateTimeFormat(zonedPartsFormatterCache, timeZone, 'en-US', {
-    hour12: false,
+    hourCycle: 'h23',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -12531,6 +12577,10 @@ function getZonedParts(date, timeZone) {
     else if (part.type === 'minute') minute = Number(part.value)
     else if (part.type === 'second') second = Number(part.value)
   }
+  // Defensive h24 fold (belt to the `hourCycle` braces above): '24:xx' is the
+  // h24 rendering of 00:xx on the displayed calendar date (verified against
+  // real formatToParts output — the date part does NOT roll back).
+  if (hour === 24) hour = 0
   return { year, month, day, hour, minute, second }
 }
 
@@ -24086,6 +24136,12 @@ module.exports = {
   // the D2 boundary suite drives production bytes rather than a re-implementation. Exposing the
   // legacy adapter here is what lets that suite wrap it in a call-count spy and prove the
   // authoritative branch invokes it ZERO times (the P-A control-flow pin).
+  // W7-1b (#4556): the PRODUCTION issuance seam, exposed so the W7-R3 golden
+  // harness and the mirror suites drive the same bytes the mirror does.
+  // Populated at activate(); `null` before that, deliberately.
+  __attendanceW7IssuanceSeamForTests: __attendanceW7IssuanceSeamRefForTests,
+  __attendanceW7ArmSelectionForTests: __attendanceW7ArmSelectionRefForTests,
+  __attendanceW7ProducerForTests: __attendanceW7ProducerRefForTests,
   __attendanceW4c2LivePunchAdaptersForTests: {
     insertLivePunchEventV1,
     deriveLivePunchWorkDateResolutionV1,
@@ -24126,6 +24182,11 @@ module.exports = {
   // canonical write-boundary transaction). Pass null to clear. Throws outside a test
   // runtime — see the setter's own guard.
   __setAttendanceW4LivePunchPreBoundarySeamForTests,
+  // W7-1b h24-midnight regression pin (see `getZonedParts`): exposed so a test
+  // can assert midnight wall times round-trip on the SAME calendar day. The CI
+  // node 18/20 matrix is the old-ICU oracle that makes the leg discriminating.
+  __buildZonedDateForTests: buildZonedDate,
+  __getZonedMinutesForTests: getZonedMinutes,
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
@@ -24629,7 +24690,8 @@ module.exports = {
 	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
 	        return { attributionSnapshot, contextSnapshot: null }
 	      }
-	      const contextSnapshot = await buildW4ShadowFrozenContextV1(trx, {
+	      // W7-1b P4 (request-creation snapshot) — through the seam + §2.4.
+	      const contextSnapshot = (await issueW4FrozenContextForProducerV1(trx, {
 	        orgId: args.orgId,
 	        userId: args.userId,
 	        workDate: attributionSnapshot.value.workDate,
@@ -24640,7 +24702,7 @@ module.exports = {
 	            : timezone,
 	        isWorkday: workContext?.isWorkingDay !== false,
 	        holidayKind: workContext?.holiday?.kind ?? null,
-	      })
+	      })).context
 	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
 	      return { attributionSnapshot, contextSnapshot }
 	    }
@@ -24828,11 +24890,177 @@ module.exports = {
       && typeof attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1 === 'function'
         ? attendanceW4SegmentCalculationPort.computeOuterSourceDefinitionFingerprintV1
         : null
+    // W7-1b (#4556 comments 5293034619 + 5293478713): the single shared
+    // frozen-context issuance seam, reached over the SAME host-port mechanism
+    // and with the SAME presence-guard discipline as
+    // `computeOuterSourceDefinitionFingerprintV1` above. It is folded into the
+    // `w4LiveScheduledBoundary` required-method conjunction below deliberately:
+    // a host that exposes `createLiveScheduledBoundary` but NOT this method must
+    // fail closed exactly the way every other missing required method already
+    // does, never silently take the legacy arm. Silently degrading to legacy is
+    // the one outcome the REPLACE cutover cannot tolerate, because it is
+    // indistinguishable from a correctly-configured legacy org.
+    const w4IssueFrozenContextV1 =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.issueAttendanceFrozenContextV1 === 'function'
+        ? attendanceW4SegmentCalculationPort.issueAttendanceFrozenContextV1
+        : null
+
+    /**
+     * W7-1b — call the seam with a PLUGIN-shaped transaction client.
+     *
+     * Two client shapes meet here and getting them backwards is silent:
+     *   - the W7 resolvers read a CORE-shaped client (`query()` -> `{ rows }`);
+     *   - `buildW4ShadowFrozenContextV1` reads a PLUGIN-shaped one
+     *     (`query()` -> row array, indexed directly as `rows[0]`).
+     * Passing the wrong shape does not throw — the builder simply reads
+     * `undefined` and returns `null`, which downstream looks exactly like "this
+     * org has no shift". So the adaptation happens HERE, once, and the legacy
+     * builder is handed the caller's own untouched client through a pre-bound
+     * thunk rather than being re-shaped inside the seam.
+     *
+     * `loadOrgRuleFacts` deliberately closes over the SAME plugin-shaped client
+     * and ignores the core-shaped one the resolver passes it: the org rule
+     * scalars are read by `loadDefaultRule`, a plugin-owned reader, and it must
+     * run inside the caller's transaction rather than on a second connection.
+     */
+    const issueW4FrozenContextViaW7SeamV1 = async (pluginTrx, args) => {
+      if (!w4IssueFrozenContextV1) {
+        // Unreachable while the boundary conjunction above holds; asserted
+        // rather than assumed, because a silent legacy fallback here would
+        // defeat the whole REPLACE cutover.
+        throw new HttpError(503, 'W7_ISSUANCE_SEAM_UNAVAILABLE', 'Attendance calculation host is not available.')
+      }
+      const coreTrx = {
+        query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
+      }
+      return w4IssueFrozenContextV1(
+        coreTrx,
+        {
+          deriveFixedScheduleEffectiveness:
+            attendanceGroupFixedScheduleEffectivenessServiceLib
+              .deriveAttendanceGroupFixedScheduleEffectiveness,
+          buildFixedScheduleProducerKey: buildAttendanceGroupFixedScheduleProducerKey,
+          loadOrgRuleFacts: async (_coreTrx, orgKey) => {
+            const rule = await loadDefaultRule(pluginTrx, orgKey)
+            return {
+              severeLateThresholdMinutes: Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+                ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+                : DEFAULT_RULE.severeLateThresholdMinutes,
+              absenceLateThresholdMinutes: Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+                ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+                : DEFAULT_RULE.absenceLateThresholdMinutes,
+            }
+          },
+          buildLegacyFrozenContext: (legacyArgs) =>
+            buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs),
+        },
+        args,
+      )
+    }
+    __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
+      issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
+
+    /**
+     * W7-1b — the PLUGIN-SIDE producer entry point (P4 request-creation snapshot,
+     * P5 batch import, P6 recompute `current_policy`).
+     *
+     * It is the seam PLUS the §2.4 COHERENCE PRECONDITION, and the precondition
+     * lives HERE, in the caller, rather than inside the seam — deliberately:
+     *   - it must never leak into `purpose: 'mirror'`, or it would weaken
+     *     ruling 7's control (the mirror persists nothing and must still observe);
+     *   - the four CORE-BOUNDARY arms do not need it: they are unreachable unless
+     *     the W4 posture is already non-legacy, so the incoherent combination
+     *     cannot arise there.
+     *
+     * WHY IT EXISTS. W4 and W7 are INDEPENDENT state machines. With the W4
+     * variable unset every org resolves to `legacy_projection_only` and both live
+     * entrypoints return before any freeze — but these three plugin-side
+     * producers do NOT read the W4 posture at their own call sites, so a
+     * W7-group / W4-legacy org would persist V2 contexts on a day whose live
+     * punches are still V1. A split-brain day.
+     *
+     * FAIL-CLOSED IN THE STRONG SENSE: the failure mode is "this org's
+     * request/import/recompute is REFUSED", never "an unintended context is
+     * minted". The refusal is raised BEFORE the seam runs, so nothing is
+     * produced and then discarded.
+     *
+     * The arm question is answered with the ARM-SELECTION read, not by calling
+     * the seam: calling the seam to answer a yes/no question would mint a context
+     * as a side effect, and at P6 it would mint it before the refusal that is
+     * supposed to precede production.
+     *
+     * `effectiveState === 'legacy'` is an EXACT equivalent of
+     * `writePosture === 'legacy_projection_only'`, not a proxy: `legacy` is the
+     * only member of the W4 posture table that maps to that write posture.
+     *
+     * ⚠️ This fence is NOT the OD-W7-10 refusal and must never be merged with it.
+     * This one compares the W7 posture against the W4 WRITE POSTURE — two state
+     * machines, NOW. OD-W7-10 compares the prior CALCULATION's producer against
+     * the W7 state — one state machine, ACROSS TIME. A group×legacy superseded
+     * source on a fully coherent org is refused by OD-W7-10 and untouched by
+     * this; a W4-legacy + W7-group org is refused by this regardless of any prior
+     * calculation. Each must stay singly deletable.
+     */
+    const issueW4FrozenContextForProducerV1 = async (pluginTrx, args) => {
+      const coreTrx = {
+        query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
+      }
+      const armSelection =
+        attendanceW4SegmentCalculationPort
+        && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+          ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, args.orgId)
+          : null
+      if (armSelection && armSelection.selectsGroupArm) {
+        const w4Posture =
+          attendanceW4SegmentCalculationPort
+          && typeof attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture === 'function'
+            // NOTE the client shape: this port method wants the PLUGIN-shaped
+            // client (it looks for `__rawClient` or the `__w4CanonicalTrx`
+            // marker and rejects anything else with
+            // `W4C3B_TRANSACTION_CLIENT_REQUIRED`), whereas the W7 arm-selection
+            // read above wants the CORE-shaped one. Two ports, two shapes, one
+            // call site — passing either the wrong way round fails loudly here
+            // rather than silently skipping the fence.
+            ? await attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture(pluginTrx, args.orgId)
+            : null
+        if (!w4Posture || w4Posture.effectiveState === 'legacy') {
+          throw new HttpError(
+            409,
+            'W7_GROUP_CONTEXT_POSTURE_INCOHERENT',
+            'Attendance calculation posture is incoherent for this operation.',
+          )
+        }
+      }
+      const issued = await issueW4FrozenContextViaW7SeamV1(pluginTrx, { ...args, purpose: 'persist' })
+      // OD-W7-4(a): suspension STOPS the producer. Returning the blocked result
+      // to the caller would let `.context === null` become a review row, which
+      // is a produced calculation.
+      if (issued.arm === 'blocked') {
+        throw new HttpError(
+          409,
+          'W7_CONTEXT_SOURCE_SUSPENDED',
+          'Attendance calculation is suspended for this organization.',
+        )
+      }
+      return issued
+    }
+    __attendanceW7ProducerRefForTests.issueW4FrozenContextForProducerV1 = (pluginTrx, args) =>
+      issueW4FrozenContextForProducerV1(pluginTrx, args)
+
+    __attendanceW7ArmSelectionRefForTests.resolveAttendanceW7GroupArmSelectionV1 =
+      attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+        ? (coreTrx, orgId) =>
+            attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, orgId)
+        : null
+
     const w4LiveScheduledBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
       && w4MergePolicyPure
       && w4ComputeOuterSourceDefinitionFingerprint
+      && w4IssueFrozenContextV1
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
@@ -24851,6 +25079,12 @@ module.exports = {
               resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),
               resolveScheduledCandidate: (trx, args) => resolveW4ScheduledCandidateInTransactionV1(trx, args),
               buildShadowFrozenContext: (trx, args) => buildW4ShadowFrozenContextV1(trx, args),
+              // W7-1b (#4556): the issuance seam, injected ALONGSIDE the legacy
+              // builder (never as a flag on it) so the legacy adapter stays the
+              // byte-identical arm the seam itself calls, and so a spy proving
+              // "the group arm invoked the legacy builder ZERO times" remains a
+              // real control-flow pin.
+              issueFrozenContext: (trx, args) => issueW4FrozenContextViaW7SeamV1(trx, args),
             },
           })
         : null
@@ -28911,7 +29145,8 @@ module.exports = {
 	                && importAttribution.resolution.fullWinner.timezone
 	                ? importAttribution.resolution.fullWinner.timezone
 	                : (ruleForMetrics.timezone ?? context.rule?.timezone)
-	              frozenImportContext = await buildW4ShadowFrozenContextV1(trx, {
+	              // W7-1b P5 (batch import) — through the seam + §2.4.
+	              frozenImportContext = (await issueW4FrozenContextForProducerV1(trx, {
 	                orgId,
 	                userId: rowUserId,
 	                workDate: importAttribution.resolution.workDate,
@@ -28922,7 +29157,7 @@ module.exports = {
 	                  ? (context.holiday.type
 	                    ?? (context.holiday.isWorkingDay === false ? 'holiday' : 'working_day_override'))
 	                  : null,
-	              })
+	              })).context
 	            }
 	            const ruleVersion = activeRuleSetId
 	              ? `rule-set:${activeRuleSetId}`
@@ -29490,9 +29725,75 @@ module.exports = {
           // guarded block, still `null` under the identical conditions as before).
           let outerResolution = null
           let outerContext = null
+          // ---------------------------------------------------------------
+          // W7-1b RULING-7 MIRROR REWORK (#4556 comments 5293034619 +
+          // 5293478713). TWO independent changes, both required; either alone
+          // leaves a hole, and they have different mutations.
+          //
+          // (R7-a) THE GATE IS NOW A DISJUNCTION. It was solely
+          //   `ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED`, so the fingerprint
+          //   was `null` whenever that variable was unset — and any group arm
+          //   reachable in that configuration compared its in-transaction
+          //   fingerprint against `null`. The W7 disjunct is a REAL POSTURE
+          //   READ, never an env read: re-deriving the two-part rule from the
+          //   allowlist alone would reintroduce the allowlist-alone hole the
+          //   ruling's inert negative controls exist to catch.
+          //
+          //   The posture read is UNCONDITIONAL and is deliberately not
+          //   short-circuited on either env var. The reason is correctness, not
+          //   cost: short-circuiting would skip W7-1a's three hard throws
+          //   (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` / `_STATE_INVALID` /
+          //   `_SCOPE_INVALID`) for every non-allowlisted org, making a corrupt
+          //   posture row indistinguishable from an unconfigured one. It is a
+          //   plain unlocked SELECT.
+          //
+          // (R7-b) THE MIRROR ROUTES THROUGH THE SAME SEAM. It used to call
+          //   `buildW4ShadowFrozenContextV1` directly while the boundary's inner
+          //   arm froze whatever the seam selected. Two copies of the selection
+          //   logic is exactly the drift ruling 7 forbids: if the inner arm
+          //   froze a V2 group context while this block still built a V1 legacy
+          //   one, the two canonical JSONs differ and
+          //   `authoritativeFingerprintMismatch` / `fingerprintMismatch` fires on
+          //   EVERY punch of that org — `review_required`, `context_mismatch`,
+          //   zeroed segments. `computeAttendanceOuterComparableSourceDefinition
+          //   FingerprintV1` takes `context: unknown` and hashes it opaquely, so
+          //   a V2 context is accepted and simply hashes differently. Not
+          //   diagnostic — silent.
+          //
+          // LOCKING (§4.3). This block runs on `db`, the POOLED connection,
+          // outside any explicit transaction. W7-1a's composite facts-lock
+          // helper takes `pg_advisory_xact_lock_shared`, whose scope is the ENCLOSING
+          // TRANSACTION; on an autocommit connection each lock is released at
+          // statement end and buys NO mutual exclusion at all. An "unlocked
+          // mirror path" is not available either: the facts resolver acquires
+          // those locks unconditionally as its step 1, before any fact read,
+          // and W7-1b may not edit that file. So the mirror opens its OWN SHORT
+          // READ TRANSACTION, and it is COMMITTED BEFORE `executeLivePunch`
+          // opens — a pooled connection held open across the boundary call would
+          // be a genuine self-deadlock. Both locks are taken SHARED on both
+          // paths, so the mirror does not block the same request's later
+          // boundary transaction.
+          //
+          // The mirror's observation is deliberately INDEPENDENT of the
+          // in-transaction freeze: its DISAGREEMENT with that freeze is the
+          // whole signal. Do not "strengthen" this into a lock shared with the
+          // freeze — that destroys the divergence detector.
+          // ---------------------------------------------------------------
+          const w7MirrorArmSelection =
+            attendanceW4SegmentCalculationPort
+            && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+              ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(
+                  { query: async (sqlText, params) => ({ rows: await db.query(sqlText, params ?? []) }) },
+                  orgId,
+                )
+              : null
+          const w7MirrorSelectsGroupArm = Boolean(w7MirrorArmSelection && w7MirrorArmSelection.selectsGroupArm)
           if (
             w4ComputeOuterSourceDefinitionFingerprint
-            && String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+            && (
+              String(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED || '').trim()
+              || w7MirrorSelectsGroupArm
+            )
           ) {
             outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
               orgId,
@@ -29501,7 +29802,7 @@ module.exports = {
               timezone: requestTimezone,
             })
             if (outerResolution && outerResolution.kind === 'resolved') {
-              outerContext = await buildW4ShadowFrozenContextV1(db, {
+              const outerBuildArgs = {
                 orgId,
                 userId,
                 workDate: outerResolution.workDate,
@@ -29512,7 +29813,18 @@ module.exports = {
                     : requestTimezone,
                 isWorkday: context.isWorkingDay,
                 holidayKind: null,
-              })
+              }
+              // The seam call is wrapped in the mirror's own short READ
+              // transaction so the composite advisory locks have a real scope
+              // and are released at COMMIT. Read-only by construction: no DML,
+              // no `FOR UPDATE`, and it returns before the boundary opens.
+              const issued = await db.transaction(async (mirrorTrx) =>
+                issueW4FrozenContextViaW7SeamV1(mirrorTrx, {
+                  ...outerBuildArgs,
+                  purpose: 'mirror',
+                }),
+              )
+              outerContext = issued.context
               outerSourceDefinitionFingerprint = w4ComputeOuterSourceDefinitionFingerprint({
                 orgId,
                 userId,
@@ -29634,7 +29946,16 @@ module.exports = {
           // field-by-field against the freeze step's persisted `attribution_snapshot`.
           if (attendanceW4LivePunchPreBoundarySeamForTests) {
             await attendanceW4LivePunchPreBoundarySeamForTests({
+              // W7-1b: `outerSourceDefinitionFingerprint` and the resolved W7
+              // arm are handed through so ruling 7's control can assert BOTH of
+              // its conjuncts — "the group arm ran" AND "the outer fingerprint
+              // is non-null" — in ONE leg. Two passing tests do not prove the
+              // two can hold at once, which is the whole point of the ruling's
+              // conjunction. Test-only seam; production never installs it.
               orgId, userId, workDate, timezone, outerResolution, outerContext,
+              outerSourceDefinitionFingerprint,
+              w7MirrorSelectsGroupArm,
+              w7MirrorEffectiveState: w7MirrorArmSelection ? w7MirrorArmSelection.effectiveState : null,
             })
           }
           const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
@@ -34918,15 +35239,17 @@ module.exports = {
 	                r.work_date::text AS work_date,
 	                r.current_calculation_id::text AS current_calculation_id,
 	                current_calc.version AS current_calculation_version,
+	                current_calc.context_snapshot AS current_calculation_context,
 	                latest_calc.id::text AS latest_calculation_id,
-	                latest_calc.version AS latest_calculation_version
+	                latest_calc.version AS latest_calculation_version,
+	                latest_calc.context_snapshot AS latest_calculation_context
 	           FROM attendance_records r
 	           LEFT JOIN attendance_record_calculations current_calc
 	             ON current_calc.id = r.current_calculation_id
 	            AND current_calc.attendance_record_id = r.id
 	            AND current_calc.org_id = r.org_id
 	           LEFT JOIN LATERAL (
-	             SELECT c.id, c.version
+	             SELECT c.id, c.version, c.context_snapshot
 	               FROM attendance_record_calculations c
 	              WHERE c.attendance_record_id = r.id
 	                AND c.org_id = r.org_id
@@ -34948,6 +35271,12 @@ module.exports = {
 	          version: record.latest_calculation_version == null
 	            ? null
 	            : Number(record.latest_calculation_version),
+	          // W7-1b (OD-W7-10): the context travels WITH the id, from the SAME
+	          // posture-dependent choice. A second, inline copy of this selection
+	          // is exactly the drift the one-seam doctrine forbids elsewhere, and
+	          // reading `current_calc` unconditionally would read NULL for a
+	          // shadow org so the refusal would silently never fire.
+	          context: record.latest_calculation_context ?? null,
 	        }
 	      }
 	      return {
@@ -34955,6 +35284,7 @@ module.exports = {
 	        version: record.current_calculation_version == null
 	          ? null
 	          : Number(record.current_calculation_version),
+	        context: record.current_calculation_context ?? null,
 	      }
 	    }
 
@@ -35408,6 +35738,83 @@ module.exports = {
         if (posture === 'legacy_projection_only') {
           throw new HttpError(409, 'W4C3C_RECOMPUTE_REQUIRES_W4_POSTURE', 'recompute requires shadow or authoritative posture')
         }
+        // ------------------------------------------------------------------
+        // W7-1b — OD-W7-10(a). RATIFIED (ruling 4); scope confirmed to 1b by
+        // fork O-5. #4556 comments 5293034619 + 5293478713.
+        //
+        // Refuse `current_policy` recompute for any work date whose EXISTING
+        // frozen calculation's producer differs from the org's CURRENT W7 state.
+        //
+        // The ruled predicate is a COMPARISON OF TWO THINGS, so it is
+        // BIDIRECTIONAL. A fence that tested only the org's current state would
+        // be wrong twice: it would over-refuse a correctly-configured group org
+        // (bricking `current_policy` for it permanently) AND under-refuse the
+        // one case this decision exists for — a day frozen under a group source
+        // on an org since reverted to legacy.
+        //
+        // PLACEMENT: after the W4 posture 409 above, BEFORE the `current_policy`
+        // branch below — therefore before `buildW4ShadowFrozenContextV1` is
+        // called, exactly as the lock requires. It guards `current_policy` ONLY;
+        // `frozen_prior` is untouched (W7-R6 owns it and the lock explicitly
+        // keeps it out of this decision).
+        //
+        // ⚠️ THIS IS NOT THE §2.4 COHERENCE PRECONDITION and must never be
+        // merged with it. This compares the prior CALCULATION's producer against
+        // the W7 state — one state machine, ACROSS TIME. §2.4 compares the W7
+        // posture against the W4 WRITE POSTURE — two state machines, NOW. Each
+        // must stay singly deletable.
+        if (prepared.state.policy === 'current_policy') {
+          const expected = resolveW4c3cExpectedCalculation(prepared.state.record, posture)
+          const coreTrxForProducer = {
+            query: async (sqlText, params) => ({ rows: await trx.query(sqlText, params ?? []) }),
+          }
+          // `currentProducer` reads the POSTURE RESOLVER, never the seam.
+          // Calling the seam to answer a yes/no question would MINT A CONTEXT as
+          // a side effect — here, before the refusal whose entire purpose is to
+          // precede production.
+          const w7Arm =
+            attendanceW4SegmentCalculationPort
+            && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+              ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(
+                  coreTrxForProducer,
+                  prepared.orgId,
+                )
+              : null
+          const currentProducer = w7Arm && w7Arm.selectsGroupArm ? 'group' : 'legacy'
+          if (expected.id) {
+            const priorContext = expected.context
+            // NO `?? 'legacy'` DEFAULT — deliberately. `selector` is a member of
+            // v1's OWN key set and the legacy builder hard-codes it, so EVERY
+            // persisted context carries one and the comparison is total. A
+            // defaulting fallback would convert "context missing or unparseable"
+            // into "legacy", which is an ALLOW — i.e. it would fail OPEN. An
+            // absent or unreadable prior context is its own fail-closed refusal.
+            if (priorContext === null || typeof priorContext !== 'object') {
+              throw new HttpError(
+                409,
+                'W4C3C_RECOMPUTE_SOURCE_SUPERSEDED',
+                'recompute is refused: the existing frozen calculation cannot be attributed to a producer',
+              )
+            }
+            // Derived from the CALCULATION, never from the parent's
+            // `projection_owner`: that column is written ONLY on the
+            // authoritative path, so a SHADOW-posture org's parent stays
+            // `legacy_untracked` while its calculations carry a full group
+            // context — a parent-based predicate reads `legacy` there and ALLOWS
+            // a recompute the ruling refuses.
+            const priorProducer = priorContext.selector === 'group_effective' ? 'group' : 'legacy'
+            if (priorProducer !== currentProducer) {
+              // Values-free: no org id, user id, work date, policy value or
+              // context fragment. This surface is reachable by an ordinary admin
+              // caller, and the audit surface must not leak or fabricate values.
+              throw new HttpError(
+                409,
+                'W4C3C_RECOMPUTE_SOURCE_SUPERSEDED',
+                'recompute is refused: the existing frozen calculation was produced by a superseded source',
+              )
+            }
+          }
+        }
         const port = attendanceW4SegmentCalculationPort
         if (!port || typeof port.appendRecomputeCalculation !== 'function') {
           throw new HttpError(503, 'W4_WRITE_BOUNDARY_UNAVAILABLE', 'Recompute calculation port unavailable')
@@ -35478,7 +35885,8 @@ module.exports = {
               'current_policy recompute could not freeze resolved_v2 attribution',
             )
           }
-          const frozenContext = await buildW4ShadowFrozenContextV1(trx, {
+          // W7-1b P6 (recompute current_policy) — through the seam + §2.4.
+          const frozenContext = (await issueW4FrozenContextForProducerV1(trx, {
             orgId: prepared.orgId,
             userId: prepared.subjectUserId,
             workDate: attributionSnapshot.value.workDate || workDate,
@@ -35489,7 +35897,7 @@ module.exports = {
                 : timezone,
             isWorkday: workContext?.isWorkingDay !== false,
             holidayKind: workContext?.holiday?.kind ?? null,
-          })
+          })).context
           if (
             !frozenContext
             || !Array.isArray(frozenContext.segments)
