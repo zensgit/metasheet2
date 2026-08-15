@@ -38,33 +38,52 @@
  * SCOPE — stated precisely, because an earlier draft of this paragraph
  * overclaimed it as "EVERY tracked source file … NO exclusions".
  *
- * What the NUL leg actually covers: every tracked file whose extension is one
- * of `.ts .tsx .js .cjs .mjs .sql .sh` — **4154** of the repository's 10954
- * tracked files at the time of writing, all clean, which is why the leg needs
- * no allowlist WITHIN that domain. The absence of exclusions is real; the
- * "every source file" part was not.
+ * What the NUL leg covers: every tracked file whose extension is in
+ * `SOURCE_EXTENSIONS` below — derive the live count yourself rather than
+ * trusting a number pasted into a comment (that is this paragraph's own
+ * lesson, twice over now):
  *
- * What sits OUTSIDE it, counted rather than hand-waved: **267 hand-authored
- * files** — 242 `.vue`, 22 `.ps1`, 3 `.py` — plus non-source tracked files
- * (docs, JSON, YAML, assets). A raw NUL in any of those would make that file
- * binary to git and grep exactly as it did here, and this guard would not see
- * it. The 7-extension domain is where THIS defect actually occurred (a string
- * literal in a `.ts` module) and it is what shipped; widening it to `.vue`
- * and the scripting extensions is a straightforward, deliberately deferred
- * FOLLOW-UP, because widening a guard's domain is a behaviour change and this
- * commit is text-only. Whoever widens it should re-measure first: the
- * no-exclusions property above is a measured fact about the CURRENT domain,
- * not a promise that a larger one is equally clean.
+ *   git ls-files | grep -cE '\.(ts|tsx|js|cjs|mjs|sql|sh|vue|ps1|py)$'
+ *
+ * WIDENING HISTORY. Landed as `.ts .tsx .js .cjs .mjs .sql .sh` (7
+ * extensions, 4154 of 10954 tracked files at the time). #4908 widened it to
+ * add `.vue .ps1 .py` (the three hand-authored extensions counted OUTSIDE
+ * the original domain when it was drafted — 242 + 22 + 3 = 267 files,
+ * exactly the "267 hand-authored files" figure #4908 cited, which is why
+ * `.yml/.yaml` and other tracked-but-not-hand-authored extensions were
+ * considered and left out: they are structured config consumed by a parser,
+ * not code with string-literal escape idiom, and the issue's own count
+ * already closed the hand-authored set at those three). #4908 RE-MEASURED
+ * the widened set before flipping the switch, per this docstring's own
+ * instruction to whoever widens it next: all 267 files (242 `.vue`, 22
+ * `.ps1`, 3 `.py`) were clean of both a raw NUL and every other C0 byte
+ * (`git ls-files -z --cached` piped through the same byte scan the tests
+ * below run) — a measured fact about that domain at that commit, not a
+ * promise that stays true forever. Do the same re-measurement before
+ * widening it again.
+ *
+ * What still sits OUTSIDE the (now 10-extension) domain: non-source tracked
+ * files — docs, JSON, YAML/config, assets. A raw NUL in any of those would
+ * make that file binary to git and grep exactly as it did here, and this
+ * guard would not see it; they are excluded because they are not
+ * hand-authored programming/scripting source in the sense this defect class
+ * requires, not because anyone checked them and found them clean.
  *
  * WHY NOT BAN ALL C0 CONTROL BYTES REPO-WIDE. Because `0x01` is a deliberate,
  * pre-existing in-repo delimiter in three files that this guard does not own
  * (`src/attendance/w4c1-segment-calculator.ts` and two plugin-integration
- * tests), plus one vendored minified bundle. Banning C0 repo-wide would
- * therefore need an exclusion list on day one. Instead the stricter
- * "no C0 at all" leg is scoped to the W7 slice's own directory, where the
- * escape convention is established and the set is genuinely empty — and where
- * a raw `U+001F` was very nearly shipped in the composite lock helper before
- * being caught by hand.
+ * tests), plus one vendored minified bundle (a different, non-`0x01` pair of
+ * C0 bytes, already binary-hostile on its own terms and out of this guard's
+ * remit either way). Banning C0 repo-wide would therefore need an exclusion
+ * list on day one. Instead the stricter "no C0 at all" leg is scoped to the
+ * W7 slice's own directory, where the escape convention is established and
+ * the set is genuinely empty — and where a raw `U+001F` was very nearly
+ * shipped in the composite lock helper before being caught by hand. #4908
+ * re-checked `0x01` specifically across the WIDENED domain (the new `.vue
+ * .ps1 .py` files included, not just the original 7 extensions): still
+ * exactly those same three pre-existing carriers, no new ones introduced by
+ * the widening. A test below keeps that an executable fact rather than a
+ * comment someone forgets to update.
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -76,13 +95,38 @@ const REPO_ROOT = path.resolve(__dirname, '../../../../')
 
 /** Extensions where this defect class lands: hand-authored source. Binary
  *  assets (images, fonts, archives) legitimately contain NUL and are not
- *  source, so they are not in the domain at all. */
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs', '.sql', '.sh'])
+ *  source, so they are not in the domain at all. Widened by #4908 to add
+ *  `.vue .ps1 .py` (re-measured clean first — see docstring above);
+ *  `.yml/.yaml` and other config extensions were considered and left out as
+ *  parser-consumed config rather than hand-authored source. */
+const SOURCE_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.cjs',
+  '.mjs',
+  '.sql',
+  '.sh',
+  '.vue',
+  '.ps1',
+  '.py',
+])
 
 /** Tab, LF and CR are the only control bytes a text source legitimately holds. */
 const ALLOWED_CONTROL_BYTES = new Set([0x09, 0x0a, 0x0d])
 
 const W7_SLICE_DIR = 'packages/core-backend/src/attendance/w7-resolver'
+
+/** The only files anywhere in the (now widened) domain allowed to carry a
+ *  deliberate `0x01` delimiter — see "WHY NOT BAN ALL C0 CONTROL BYTES
+ *  REPO-WIDE" above. A file added to this set is a design decision, not a
+ *  test fixture; anything else that starts carrying `0x01` is either an
+ *  accident or needs its own reviewed addition here. */
+const KNOWN_0X01_CARRIERS = new Set([
+  'packages/core-backend/src/attendance/w4c1-segment-calculator.ts',
+  'plugins/plugin-integration-core/__tests__/k3-df-t1-target-payload-preview.test.cjs',
+  'plugins/plugin-integration-core/__tests__/read-source-probe-runtime.test.cjs',
+])
 
 /** Domain DERIVED from git, never a hand-maintained list — a file nobody
  *  listed is exactly what this guard has to see. */
@@ -149,14 +193,33 @@ describe('repo guard: source files contain no raw NUL byte', () => {
     // over nothing — the same "empty read is not an absence" failure this
     // guard exists to prevent, one level up.
     const files = trackedSourceFiles()
-    expect(files.length).toBeGreaterThan(3000)
+    expect(files.length).toBeGreaterThan(4000)
     expect(files).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
     expect(files).toContain(`${W7_SLICE_DIR}/w7-group-effective-context-issuance.ts`)
     expect(files).toContain('plugins/plugin-attendance/index.cjs')
+    // #4908 widening — proves the filter genuinely reaches the three new
+    // extensions rather than just growing SOURCE_EXTENSIONS in the const
+    // without the domain function actually picking them up.
+    expect(files).toContain('apps/web/src/App.vue')
+    expect(files).toContain('apps/web/src/views/AttendanceView.vue')
+    expect(files).toContain('scripts/ops/attendance-onprem-deploy-run.ps1')
+    expect(files).toContain('scripts/ops/github-dingtalk-oauth-stability-summary.py')
   })
 
-  it('NO tracked .ts/.tsx/.js/.cjs/.mjs/.sql/.sh file contains a raw NUL byte (no exclusions within that domain)', () => {
+  it('NO tracked .ts/.tsx/.js/.cjs/.mjs/.sql/.sh/.vue/.ps1/.py file contains a raw NUL byte (no exclusions within that domain)', () => {
     expect(filesContainingRawNul(trackedSourceFiles())).toEqual([])
+  })
+
+  it('0x01 is confined to exactly the three known pre-existing delimiter carriers, across the WIDENED domain', () => {
+    // Turns the docstring's "re-verified, no new 0x01 carriers" claim into an
+    // executable fact instead of a comment someone forgets to update the next
+    // time the domain widens. Scoped to 0x01 only — the vendored minified
+    // bundle legitimately carries other C0 bytes and is out of this guard's
+    // remit either way (see docstring).
+    const carriers = filesContainingOtherControlBytes(trackedSourceFiles())
+      .filter((hit) => hit.byte === '0x01')
+      .map((hit) => hit.file)
+    expect(new Set(carriers)).toEqual(KNOWN_0X01_CARRIERS)
   })
 
   it('POSITIVE CONTROL: a planted raw NUL reds the leg', () => {
@@ -181,6 +244,29 @@ describe('repo guard: source files contain no raw NUL byte', () => {
         expect(filesContainingRawNul(files, decoyRoot)).not.toContain(
           'packages/core-backend/src/attendance/clean.ts',
         )
+      },
+    )
+  })
+
+  it('POSITIVE CONTROL (#4908 widening): a planted raw NUL in a .vue SFC reds the leg', () => {
+    // Proves the widened domain is actually exercised, not just declared: a
+    // NUL inside a Vue single-file component's script block, the format that
+    // made up 242 of the 267 files this ticket brought into scope.
+    const probe = 'apps/web/src/views/probe-with-nul.vue'
+    withDecoyTree(
+      {
+        [probe]: Buffer.from(
+          `<script setup lang="ts">\nconst label = 'x\u0000'\n</script>\n<template><div>{{ label }}</div></template>\n`,
+          'utf8',
+        ),
+        'apps/web/src/views/clean.vue':
+          "<script setup lang='ts'>\nconst label = 'x\\u0000'\n</script>\n<template><div>{{ label }}</div></template>\n",
+      },
+      (decoyRoot) => {
+        const files = [probe, 'apps/web/src/views/clean.vue']
+        expect(fs.readFileSync(path.join(decoyRoot, probe)).includes(0x00)).toBe(true)
+        expect(filesContainingRawNul(files, decoyRoot)).toEqual([probe])
+        expect(filesContainingRawNul(files, decoyRoot)).not.toContain('apps/web/src/views/clean.vue')
       },
     )
   })
