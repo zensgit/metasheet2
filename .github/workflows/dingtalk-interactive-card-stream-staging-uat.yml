@@ -6,8 +6,10 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 # One dispatch = ONE action. Stream stays OFF except explicit action=on.
 # Lifecycle flags are NEVER written by this lane.
 #
-# EXECUTABLE: status | prepare | on | off | https-on | https-off
+# EXECUTABLE: status | observe | prepare | on | off | https-on | https-off
 #   status  = read-only values-free snapshot (booleans / counts / reason classes)
+#   observe = read-only callback/corp-anchor/card-update result classes from the
+#             current Stream-ON backend container; never emits raw logs or ids
 #   prepare = transport Stream credentials (chmod-600 files), derive exactly one
 #             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
 #             atomically write the four credential/id env keys into
@@ -22,7 +24,7 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 #               staging public/CORS/OAuth callback URLs, restart backend, verify
 #   https-off = restore the pre-HTTPS staging env and remove the TLS gateway
 #
-# Exact deployed FULL 40-char lowercase SHA required for every mutating action.
+# Exact deployed FULL 40-char lowercase SHA required for every non-status action.
 # Secrets (prepare only): STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID /
 #   _CLIENT_SECRET / _TEMPLATE_ID — demoted + file transport; never argv/env
 #   persistence beyond the materialize window. Integration id is derived on host.
@@ -36,14 +38,14 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status | prepare | on | off | https-on | https-off'
+        description: 'status | observe | prepare | on | off | https-on | https-off'
         required: true
         type: choice
         # Quote 'on'/'off' — YAML 1.1 bare on/off become booleans.
-        options: [status, prepare, 'on', 'off', https-on, https-off]
+        options: [status, observe, prepare, 'on', 'off', https-on, https-off]
         default: status
       deploy_sha:
-        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for mutating actions; optional for status.'
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for every non-status action; optional for status exact-match reporting.'
         required: false
         default: ''
 
@@ -73,11 +75,11 @@ jobs:
           # (bash -n and other children must not inherit raw secret env).
         run: |
           set -euo pipefail
-          case "$ACTION" in status|prepare|on|off|https-on|https-off) ;; *)
+          case "$ACTION" in status|observe|prepare|on|off|https-on|https-off) ;; *)
             echo "invalid action: $ACTION" >&2; exit 2
           ;; esac
 
-          # Every mutating action requires exact full SHA.
+          # Every non-status action requires exact full SHA.
           if [[ "$ACTION" != "status" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=${ACTION}, got: '$DEPLOY_SHA'" >&2
@@ -140,7 +142,7 @@ jobs:
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
           # prepare secrets are materialized INSIDE this step under EXIT trap —
           # never via a prior step secrets_dir output (cross-step leak / cancel).
-          # status/on/off do not receive credential secrets.
+          # status/observe/on/off do not receive credential secrets.
           STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID || '' }}
           STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET || '' }}
           STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID || '' }}

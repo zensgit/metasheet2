@@ -2,11 +2,11 @@
 // dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL controlled Stream staging UAT lane:
-//   EXECUTABLE: status | prepare | on | off | https-on | https-off
+//   EXECUTABLE: status | observe | prepare | on | off | https-on | https-off
 //
 // Load-bearing rails:
 //   * workflow wiring (dispatch choices, SSH, concurrency, no schedule)
-//   * exact-SHA gate for every mutating action
+//   * exact-SHA gate for every non-status action
 //   * secret demotion + chmod-600 file transport (prepare only)
 //   * prepare forces Stream OFF while writing four credential/id keys
 //   * on flips only Stream flag true after LOG_LEVEL + prerequisite checks
@@ -117,14 +117,14 @@ test('workflow YAML parses with repository-available parser', () => {
 
 // --- workflow wiring ------------------------------------------------------------------
 
-test('workflow action choices include reversible HTTPS gateway actions', () => {
+test('workflow action choices include observer and reversible HTTPS gateway actions', () => {
   const doc = loadYaml(read(WORKFLOW))
   const inputs = workflowOn(doc).workflow_dispatch.inputs
-  assert.deepEqual(inputs.action.options, ['status', 'prepare', 'on', 'off', 'https-on', 'https-off'])
+  assert.deepEqual(inputs.action.options, ['status', 'observe', 'prepare', 'on', 'off', 'https-on', 'https-off'])
   assert.equal(inputs.action.default, 'status')
   // Quote on/off so YAML 1.1 keeps strings (loadYaml may coerce bare on/off).
   const yaml = read(WORKFLOW)
-  assert.match(yaml, /options:\s*\[status,\s*prepare,\s*'on',\s*'off',\s*https-on,\s*https-off\]/)
+  assert.match(yaml, /options:\s*\[status,\s*observe,\s*prepare,\s*'on',\s*'off',\s*https-on,\s*https-off\]/)
   assert.ok(
     inputs.action.options.every((o) => typeof o === 'string'),
     'on/off must remain strings after parse',
@@ -196,7 +196,7 @@ test('contract suite is wired into the required Node 20 plugin-tests lane', () =
 
 // --- exact-SHA gate -------------------------------------------------------------------
 
-test('workflow exact-SHA gate requires full 40-char deploy_sha for every mutating action', () => {
+test('workflow exact-SHA gate requires full 40-char deploy_sha for every non-status action', () => {
   const yaml = read(WORKFLOW)
   const doc = loadYaml(yaml)
   const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
@@ -214,22 +214,36 @@ test('workflow exact-SHA gate requires full 40-char deploy_sha for every mutatin
   )
 })
 
-test('remote script require_exact_deployed_sha used by every mutating action and not status', () => {
+test('remote script require_exact_deployed_sha used by every non-status action and not status', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /require_exact_deployed_sha/)
   assert.match(source, /resolve_deployed_sha/)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
   const prepare = actionBody(source, 'action_prepare', ['action_on'])
   const on = actionBody(source, 'action_on', ['action_off'])
   const off = actionBody(source, 'action_off', ['action_https_on'])
   const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
   const httpsOff = actionBody(source, 'action_https_off')
-  const status = actionBody(source, 'action_status', ['action_prepare'])
+  const status = actionBody(source, 'action_status', ['action_observe'])
+  assert.match(observe, /require_exact_deployed_sha "observe"/)
   assert.match(prepare, /require_exact_deployed_sha/)
   assert.match(on, /require_exact_deployed_sha/)
   assert.match(off, /require_exact_deployed_sha/)
   assert.match(httpsOn, /require_exact_deployed_sha/)
   assert.match(httpsOff, /require_exact_deployed_sha/)
   assert.doesNotMatch(status, /require_exact_deployed_sha/)
+})
+
+test('observe is read-only and emits values-free callback classes without raw logs or ids', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  assert.match(observe, /action=observe/)
+  assert.match(observe, /header_event_corp_id_present=/)
+  assert.match(observe, /body_corp_id_present=/)
+  assert.match(observe, /latest_callback_outcome=/)
+  assert.match(observe, /card_update_failed_count=/)
+  assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
+  assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
 })
 
 // --- secret demotion ------------------------------------------------------------------
@@ -852,7 +866,7 @@ test('status artifacts emit only booleans/counts/reason classes/sha schema keys'
 
 test('status action is read-only: no env writes, no flag flips, no compose up', () => {
   const source = read(REMOTE_SH)
-  const status = actionBody(source, 'action_status', ['action_prepare'])
+  const status = actionBody(source, 'action_status', ['action_observe'])
   assert.match(status, /write_status_artifact/)
   assert.doesNotMatch(status, /atomic_upsert_env_keys_from_files/)
   assert.doesNotMatch(status, /atomic_set_stream_flag/)
