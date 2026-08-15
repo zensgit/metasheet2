@@ -48,6 +48,7 @@ fail() { echo "[stream-uat][error] $*" >&2; exit 1; }
 
 ACTION="${ACTION:?ACTION is required (status|observe|prepare|on|off|https-on|https-off)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
+EXPECTED_DELIVERY_ID="${EXPECTED_DELIVERY_ID:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
@@ -1731,6 +1732,8 @@ action_observe() {
   assert_staging_only
   require_exact_deployed_sha "observe"
   require_log_level_info_or_debug
+  [[ "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+    || fail "action=observe requires expected_delivery_id as a lowercase UUID"
 
   local live_flag
   live_flag="$(read_flag_from_container "$FLAG_STREAM" || echo unknown)"
@@ -1745,14 +1748,14 @@ action_observe() {
   docker logs "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
     || fail "action=observe could not read current backend container logs"
 
-  anchor_count="$(grep -F -c 'DingTalk interactive-card callback corp anchor' "$tmp" || true)"
-  handled_count="$(grep -F -c 'DingTalk interactive-card callback handled (' "$tmp" || true)"
+  anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
   handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
-  update_failed_count="$(grep -F -c 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" || true)"
+  update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
 
   if [[ "$anchor_count" -gt 0 ]]; then
     local anchor_line
-    anchor_line="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | tail -n 1)"
+    anchor_line="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
     [[ "$anchor_line" == *'headerEventCorpIdPresent=true'* || "$anchor_line" == *'"headerEventCorpIdPresent":true'* ]] \
       && header_present="true"
     [[ "$anchor_line" == *'headerEventCorpIdPresent=false'* || "$anchor_line" == *'"headerEventCorpIdPresent":false'* ]] \
@@ -1765,7 +1768,7 @@ action_observe() {
 
   if [[ "$handled_count" -gt 0 ]]; then
     local handled_line
-    handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | tail -n 1)"
+    handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
     case "$handled_line" in
       *'(executed delivery='*) handled_outcome="executed" ;;
       *'(stale delivery='*) handled_outcome="stale" ;;

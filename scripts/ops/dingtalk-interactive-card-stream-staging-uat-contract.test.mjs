@@ -214,6 +214,19 @@ test('workflow exact-SHA gate requires full 40-char deploy_sha for every non-sta
   )
 })
 
+test('observe requires a lowercase expected delivery UUID and never emits it', () => {
+  const yaml = read(WORKFLOW)
+  const doc = loadYaml(yaml)
+  const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
+  assert.equal(validate.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
+  assert.match(validate.run, /observe requires expected_delivery_id as a lowercase UUID/)
+  assert.match(validate.run, /\[1-5\]\[0-9a-f\]\{3\}/)
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  assert.match(observe, /grep -F -c "\$EXPECTED_DELIVERY_ID"/)
+  assert.doesNotMatch(observe, /echo .*EXPECTED_DELIVERY_ID/)
+})
+
 test('remote script require_exact_deployed_sha used by every non-status action and not status', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /require_exact_deployed_sha/)

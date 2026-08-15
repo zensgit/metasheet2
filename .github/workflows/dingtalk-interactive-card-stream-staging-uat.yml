@@ -48,6 +48,10 @@ on:
         description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for every non-status action; optional for status exact-match reporting.'
         required: false
         default: ''
+      expected_delivery_id:
+        description: 'Lowercase delivery UUID required only for observe; used for matching and never emitted.'
+        required: false
+        default: ''
 
 # Share the attendance staging runner concurrency group so compose/env races
 # cannot interleave on the same staging stack.
@@ -70,6 +74,7 @@ jobs:
         env:
           ACTION: ${{ inputs.action }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          EXPECTED_DELIVERY_ID: ${{ inputs.expected_delivery_id }}
           # Intentionally NO Stream secrets here — presence is checked only in
           # Run remote action after demoting env → non-exported shell vars + unset
           # (bash -n and other children must not inherit raw secret env).
@@ -89,6 +94,11 @@ jobs:
 
           if [[ -n "$DEPLOY_SHA" && ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "deploy_sha must be empty or the FULL 40-char lowercase commit SHA, got: '$DEPLOY_SHA'" >&2
+            exit 2
+          fi
+
+          if [[ "$ACTION" == "observe" && ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+            echo "observe requires expected_delivery_id as a lowercase UUID" >&2
             exit 2
           fi
 
@@ -139,6 +149,7 @@ jobs:
           STAGING_DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || 'metasheet2-dingtalk-staging' }}
           ACTION: ${{ inputs.action }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          EXPECTED_DELIVERY_ID: ${{ inputs.expected_delivery_id }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
           # prepare secrets are materialized INSIDE this step under EXIT trap —
           # never via a prior step secrets_dir output (cross-step leak / cancel).
@@ -266,6 +277,7 @@ jobs:
           remote_script="set -euo pipefail
           export ACTION='${ACTION}'
           export DEPLOY_SHA='${DEPLOY_SHA}'
+          export EXPECTED_DELIVERY_ID='${EXPECTED_DELIVERY_ID}'
           export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
           export DEPLOY_PATH='${DEPLOY_PATH}'
           export OUTPUT_DIR='${remote_output_dir}'
