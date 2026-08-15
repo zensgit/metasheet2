@@ -1,0 +1,29 @@
+name: DingTalk OAuth Staging Config Contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dingtalk-oauth-staging-config.yml'
+      - '.github/workflows/dingtalk-oauth-staging-config-contract.yml'
+      - 'scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs'
+      - 'scripts/ops/dingtalk-oauth-staging-config-remote.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify runner YAML parser
+        run: python3 -c 'import yaml'
+      - name: Run OAuth staging configuration contract
+        run: node --test scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs
