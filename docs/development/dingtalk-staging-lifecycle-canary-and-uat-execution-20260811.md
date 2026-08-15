@@ -1,6 +1,6 @@
 # DingTalk staging lifecycle canary and UAT execution record (2026-08-11/15)
 
-- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / DEPROVISION-DENIAL BROWSER CHECKPOINT NOT EXECUTED / U1-U13 NOT EXECUTED**
+- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / STREAM PREPARE PASS WITH STREAM OFF / DEPROVISION-DENIAL BROWSER CHECKPOINT NOT EXECUTED / U1-U13 NOT EXECUTED**
 - Repository evidence head: `cc69791604f338a90e07dc07da8118a2d7a68188`
 - Lifecycle staging deploy SHA: `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`
 - Production-readiness inventory deploy SHA: `cc69791604f338a90e07dc07da8118a2d7a68188`
@@ -50,13 +50,16 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
    [31817757706](https://github.com/zensgit/metasheet2/actions/runs/31817757706) reported exact
    deployed SHA, healthy backend, zero pending migrations, mode OFF, and all three lifecycle flags
    false after the real OAuth exercise.
-6. Staging Stream status
-   [31817945571](https://github.com/zensgit/metasheet2/actions/runs/31817945571) now reports all
-   three Stream credentials plus the integration anchor present, two configured-corp anchors with
-   exactly one eligible anchor and two linked local users, Stream OFF, worker disabled, and lifecycle
-   flags OFF.
-   This closes the former missing-configuration precondition only; U1-U13 and the real callback
-   corp-anchor remain `NOT EXECUTED` until an explicit owner-approved Stream window.
+6. Staging Stream preparation
+   [pre-status 31854272476](https://github.com/zensgit/metasheet2/actions/runs/31854272476),
+   [prepare 31854315133](https://github.com/zensgit/metasheet2/actions/runs/31854315133), and
+   [post-status 31854359627](https://github.com/zensgit/metasheet2/actions/runs/31854359627)
+   ran against exact deployed SHA `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`. The prepare action
+   reported `prepare_ok`, forced Stream OFF, required no backend restart, and retained one eligible
+   configured-corp anchor with two linked local users. Both status runs proved Stream OFF, worker
+   disabled, healthy backend and HTTPS gateway, and all lifecycle flags OFF.
+   This closes the configuration-prepare precondition only; U1-U13 and the real callback corp-anchor
+   remain `NOT EXECUTED` until a separate owner-approved Stream `on` window.
 7. Production read-only inventory
    [31818159368](https://github.com/zensgit/metasheet2/actions/runs/31818159368) at exact deployed
    SHA `cc69791604f338a90e07dc07da8118a2d7a68188` reports a ready two-linked-user directory
@@ -372,11 +375,11 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | Current staging inputs/anchor are ready per run `31817945571`, but Stream `prepare` and the separately approved `on` window have not run |
+| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | Stream `prepare` completed in run `31854315133` and post-status `31854359627` proved Stream remained OFF; the separately approved `on` window has not run |
 | U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
 | P1 latest storage-health precondition | conditionally ready, recheck at UAT start | Latest observed `Attendance Remote Storage Health (Prod)` run [31453711071](https://github.com/zensgit/metasheet2/actions/runs/31453711071) was successful; the evidence pack requires a fresh check at the actual UAT start |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
-| P3 real corp + two linked users | **READY for staging prepare** | Run `31817945571` reports exactly one eligible configured-corp anchor with two linked users and all Stream inputs present |
+| P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
 
 Historical Stream inventory from run `31579935836` (superseded for staging readiness by
@@ -390,16 +393,14 @@ integration_id_present=false
 credentials_ready=false
 ```
 
-Those values are historical for run `31579935836`. Current staging status `31817945571` supersedes
-the missing-configuration diagnosis: credentials and the selected integration anchor are present,
-one eligible anchor has two linked users, Stream remains OFF, and the worker remains disabled.
-U1-U13 and the callback corp-anchor are still not executed.
+Those values are historical for run `31579935836`. Prepare run `31854315133` and post-status
+`31854359627` supersede the missing-configuration diagnosis: credentials and the selected
+integration anchor are present, one eligible anchor has two linked users, Stream remains OFF, and
+the worker remains disabled. U1-U13 and the callback corp-anchor are still not executed.
 
-Required external action: with explicit owner approval, execute Stream `prepare` through the
-approved secret/configuration channel while forcing Stream OFF. After a fresh status proof, a
-separate owner GO may open the controlled `on` window for the canonical U1-U13 procedure and real
-human clicks. Capture only values-free booleans/status enums and execute `off` after U13. Secrets
-must not be pasted into this document or chat.
+Required external action: a separate owner GO may open the controlled Stream `on` window for the
+canonical U1-U13 procedure and real human clicks. Capture only values-free booleans/status enums
+and execute `off` after U13. Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
 
@@ -426,9 +427,8 @@ DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false
 
 1. Complete the remaining deprovision apply-time browser denial checkpoint if production lifecycle
    enablement is to be considered; do not infer it from server-side access denial.
-2. With explicit owner approval, run staging Stream `prepare` while forcing Stream OFF, recheck
-   status, then separately authorize a short `on` window for U1-U13 and the real callback
-   corp-anchor; execute `off` immediately afterward.
+2. Separately authorize a short Stream `on` window for U1-U13 and the real callback corp-anchor;
+   execute `off` immediately afterward. Stream prepare and post-prepare OFF status are complete.
 3. Record named owners and explicit production switch decisions. Any absent evidence remains
    `NOT EXECUTED`.
 

@@ -2,7 +2,7 @@
 
 - Date: 2026-08-10
 - Updated: 2026-08-15
-- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH COMPLETE / APPLY-TIME BROWSER DENIAL + U1-U13 + PRODUCTION GATES NOT EXECUTED**
+- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH + STREAM PREPARE/OFF COMPLETE / APPLY-TIME BROWSER DENIAL + U1-U13 + PRODUCTION GATES NOT EXECUTED**
 - Implementation baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
 - Repository evidence head: `origin/main @ cc69791604f338a90e07dc07da8118a2d7a68188`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
@@ -135,7 +135,7 @@ Real enterprise evidence is unavailable in this development lane. Therefore thes
 - named owners and final production switch decisions;
 - deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, and the exact-subject post-activation/post-restore OAuth positives are complete per §3.2 and the companion execution record. The current terminal status independently proves runtime OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status` are complete per §3.2 and the companion execution record. The current terminal statuses independently prove the lifecycle flags and Stream remain OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
