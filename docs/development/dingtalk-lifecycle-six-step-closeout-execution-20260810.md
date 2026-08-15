@@ -128,7 +128,8 @@ The former image-tag/health-commit conflict is resolved. Alias and pending produ
 
 ## 4. Owner and ops acceptance
 
-The controlled staging Stream window ran, but real DingTalk human-click evidence was unavailable.
+Controlled staging Stream windows ran, and the latest window produced a real interactive-card
+delivery, but real DingTalk receipt and human-click evidence remain unavailable.
 Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
 
 - U1-U13 interactive-card acceptance;
@@ -136,7 +137,7 @@ Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
 - named owners and final production switch decisions;
 - deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. Stream `on` created approval `AP-100009`; no card receipt or click was observed, so this is start/stop evidence only. The current terminal statuses independently prove the lifecycle flags and Stream remain OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; receipt and click remain unverified, so the U1-U13 matrix is still partial and not accepted. Terminal run `31864575172` independently proves the lifecycle flags and Stream remain OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
@@ -177,4 +178,4 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
 | Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
 
-The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, and `31863021812`/`31863057131`; the real-card U1-U13/corp-anchor matrix is not. The owner-authorized per-integration link secret was generated without exposing its value, closing the second window's pre-send blocker. In the third window, fresh approval `AP-100011` reached DingTalk create-and-deliver but was rejected because Stream application `dingn9htcox9lc12rxmc` lacked `Card.Instance.Write`; that permission must be granted and published before another window. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, and `31864532416`/`31864575172`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. The fourth window's fresh approval `AP-100012` completed automation with `deliveryKind=interactive_card`, but human receipt/click and the real callback corp-anchor remain unexecuted; the U1-U13 matrix is therefore partial, not PASS. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.

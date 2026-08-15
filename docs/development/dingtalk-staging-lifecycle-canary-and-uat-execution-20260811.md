@@ -132,6 +132,22 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     `stream_enabled=false`, `worker_state=disabled`, `lifecycle_flags_all_off=true`, exact deployed
     SHA match, and healthy backend. Another window requires owner-side DingTalk permission grant
     and publication first; this record does not claim that external action is complete.
+17. The owner published `Card.Instance.Write` for Stream application `dingn9htcox9lc12rxmc`, then
+    authorized a fourth controlled window. Fresh
+    [status 31863947642](https://github.com/zensgit/metasheet2/actions/runs/31863947642) and
+    [storage health 31864023183](https://github.com/zensgit/metasheet2/actions/runs/31864023183)
+    passed before
+    [on 31864059132](https://github.com/zensgit/metasheet2/actions/runs/31864059132). The operator
+    created approval `AP-100012` for `GH UI Smoke`; automation completed and returned
+    `deliveryKind=interactive_card` with a non-secret delivery identifier. This proves the send
+    path crossed the prior permission blocker, but the assignee had not yet confirmed receipt or
+    clicked the card, so no callback or U11-a claim is made. The window was closed rather than left
+    open while waiting for the human:
+    [off 31864532416](https://github.com/zensgit/metasheet2/actions/runs/31864532416) succeeded and
+    terminal read-only
+    [status 31864575172](https://github.com/zensgit/metasheet2/actions/runs/31864575172) proved exact
+    deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, and all
+    lifecycle flags OFF.
 
 ## 1. Environment boundary
 
@@ -437,10 +453,10 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | The first approved window created `AP-100009` without observable DingTalk receipt; the second created `AP-100010`, whose automation failed before send because the assignee integration had no approval-card link secret; after that secret was generated, the third created `AP-100011`, which DingTalk rejected because the Stream application lacked `Card.Instance.Write`. Neither a MetaSheet pending row nor operational shutdown substitutes for the canonical human matrix |
+| U1-U13 (including U3-a and U11-b) | **PARTIAL; NOT ACCEPTED** | The first three windows exposed and closed configuration/permission blockers. After `Card.Instance.Write` was published, the fourth window's `AP-100012` automation completed with `deliveryKind=interactive_card`. Assignee receipt, card-body inspection, callback, duplicate/non-assignee behavior, OA fallback, and the remaining human matrix are still unexecuted; a successful send alone is not U1 acceptance |
 | U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
-| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, and `31863021812`/`31863057131` prove clean operational stops and disabled worker; post-OFF OA fallback send and the human callback sequence were not executed |
-| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31862873263](https://github.com/zensgit/metasheet2/actions/runs/31862873263) was successful before Stream `on` |
+| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, and `31864532416`/`31864575172` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
+| P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31864023183](https://github.com/zensgit/metasheet2/actions/runs/31864023183) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
 | P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
@@ -459,16 +475,16 @@ credentials_ready=false
 Those values are historical for run `31579935836`. Prepare run `31854315133` and post-status
 `31854359627` supersede the missing-configuration diagnosis. The later controlled window
 `31856025380 -> 31856520796 -> 31856563224` proved worker start followed by a safe return to OFF.
-U1-U13 and the callback corp-anchor remain unexecuted. The owner-authorized random link-secret
-generation closed the second window's pre-send blocker without exposing the value. The third window
-then established the next external blocker: `AP-100011` reached DingTalk but the Stream application
-was denied because `Card.Instance.Write` was not enabled.
+U1-U13 and the callback corp-anchor remain incomplete. The owner-authorized random link-secret
+generation closed the second window's pre-send blocker without exposing the value, and publication
+of `Card.Instance.Write` closed the third window's permission blocker. The fourth window produced a
+real `interactive_card` delivery for `AP-100012`, then returned safely to OFF before waiting for the
+human.
 
-Required external action: in DingTalk Open Platform, grant and publish `Card.Instance.Write` for
-application `dingn9htcox9lc12rxmc`. Then schedule another short owner-approved Stream window when
-the linked assignee and non-assignee can operate DingTalk in real time. Execute the canonical
-U1-U13 procedure, capture only values-free booleans/status enums, and execute `off` before the
-window ends. Secrets must not be pasted into this document or chat.
+Required external action: the linked assignee must confirm receipt and be available for a short
+owner-approved callback window together with a non-assignee. Execute the canonical U1-U13
+procedure, capture only values-free booleans/status enums, and execute `off` before the window ends.
+Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
 
