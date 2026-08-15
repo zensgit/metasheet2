@@ -1051,6 +1051,41 @@ export async function readAttendanceRequestSnapshotDefectReportV1(
   return classifyAttendanceRequestSnapshotDefectsV1(connection, orgId)
 }
 
+/**
+ * W7-3 (#4556) reuse seams. Thin named exports of the two private predicate
+ * counters above, added so the W7 context-source transition boundary
+ * (`w7-context-source-transition.ts`) can REUSE them instead of re-deriving a
+ * second, narrower definition of "incomplete operation" / "unresolved ingress
+ * review" — two definitions of the same predicate can drift, and the narrower
+ * copy is the shape this repo treats as a contract change rather than a reuse.
+ *
+ * Deliberately wrappers rather than an `export` keyword moved onto the
+ * originals: this mirrors `readAttendanceRequestSnapshotDefectReportV1`
+ * immediately above, which is the same file's existing idiom for publishing a
+ * private classifier without changing the private function's own call sites or
+ * name. Behaviour is unchanged for every existing caller — these add a second
+ * entry point to the identical function, nothing more.
+ *
+ * NOTE FOR CALLERS: both take `FOR UPDATE` row locks (on
+ * `attendance_import_jobs` and `attendance_records` respectively). They are not
+ * side-effect-free reads and belong inside the caller's own transaction, taken
+ * in that order — see the W7 boundary's lock-order census.
+ */
+export async function countIncompleteOperationsV1(
+  connection: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  return countIncompleteOperations(connection, orgId)
+}
+
+/** See `countIncompleteOperationsV1` — same reuse-seam rationale. */
+export async function countUnresolvedIngressReviewsV1(
+  connection: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  return countUnresolvedIngressReviews(connection, orgId)
+}
+
 // ---------------------------------------------------------------------------
 // W4C-5 §5 tooling contract: "a read-only `status`/`plan` command that emits
 // `PASS|BLOCKED` per predicate". This is the SOLE plan-report shape — the

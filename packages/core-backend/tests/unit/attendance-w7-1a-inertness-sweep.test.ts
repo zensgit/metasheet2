@@ -238,13 +238,101 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
   })
 })
 
+/**
+ * W7-3 (#4556) AMENDMENT to the three legs below.
+ *
+ * WHY THESE LEGS CHANGE, and why the change is a NARROWING rather than a
+ * weakening. At W7-1a's head the honest measurement was "zero". W7-3 ships the
+ * transition WRITER, and the writer is REQUIRED — by the resolver's own doc
+ * comment (`w7-resolver/w7-context-source-posture-resolver.ts:95-101`, "The
+ * future W7 transition writer must gate on
+ * `isAttendanceW7ContextSourceOrgAllowlistedV1` below ... NOT a second copied
+ * allowlist mechanism") — to import the resolver module and name that symbol,
+ * and it is by definition the module that writes the posture table. So each of
+ * these three legs necessarily acquires exactly one new member.
+ *
+ * The alternative was to place the writer under `w7-resolver/`, which
+ * `isProductionSource` excludes, and let all three legs stay `[]` untouched.
+ * That was rejected deliberately: it would keep the guard green by HIDING the
+ * new file in an excluded directory rather than by the property still holding —
+ * green-by-exclusion, which is the failure mode this whole suite exists to
+ * prevent. Ruling 9 fixes `w7-resolver/` for the RESOLVER; the writer is the
+ * write side and sits beside `w4c3a-rollout-control.ts`, the boundary it clones.
+ *
+ * WHAT KEEPS THE LEGS DISCRIMINATING: each stays an EXACT-SET equality, not a
+ * relaxation to "contains" or a filter that drops the writer. Any OTHER
+ * production file acquiring an importer, a call site or a table reference still
+ * reds, and the negative controls below are unchanged. The inertness CLAIM is
+ * unchanged and is re-asserted one level up by
+ * `W7_TRANSITION_WRITER_ENTRY_POINTS` immediately after: the writer itself has
+ * zero production importers and zero production call sites, so nothing in the
+ * runtime graph can reach the posture table through it.
+ */
+const W7_TRANSITION_WRITER = 'packages/core-backend/src/attendance/w7-context-source-transition.ts'
+
+/** The W7-3 writer's exported runtime entry points. A production file naming any
+ *  of these is a call site even without a relative import. */
+const W7_TRANSITION_WRITER_ENTRY_POINTS = [
+  'transitionAttendanceW7ContextSourceV1',
+  'planAttendanceW7ContextSourceTransitionV1',
+] as const
+
 describe('W7-1a structural inertness: zero production importers and call sites', () => {
-  it('ZERO production files import anything under w7-resolver/', () => {
-    expect(productionImportersOfResolver()).toEqual([])
+  it('the ONLY production importer of w7-resolver/ is the W7-3 transition writer', () => {
+    expect(productionImportersOfResolver()).toEqual([W7_TRANSITION_WRITER])
   })
 
-  it('ZERO production files name any W7-1a runtime entry point', () => {
-    expect(productionCallSites()).toEqual([])
+  it('the ONLY production naming of a W7-1a runtime entry point is the writer using the ONE allowlist predicate', () => {
+    // Exactly one hit, and specifically the allowlist predicate: the writer must
+    // gate on the landed predicate rather than hold a second copy of the
+    // allowlist parsing rules. A hit on any OTHER W7 runtime symbol — e.g. the
+    // writer starting to call the READ resolver — would red here.
+    expect(productionCallSites()).toEqual([
+      { file: W7_TRANSITION_WRITER, symbol: 'isAttendanceW7ContextSourceOrgAllowlistedV1' },
+    ])
+  })
+
+  it('the W7-3 transition writer is itself unreachable: zero production importers, zero call sites', () => {
+    const files = productionFiles()
+
+    // Anchor-hit check FIRST: an unhit sweep and a dead gate look identical.
+    expect(files, 'the writer is not in the swept set — dead sweep').toContain(W7_TRANSITION_WRITER)
+
+    const importers = files
+      .filter((rel) => rel !== W7_TRANSITION_WRITER)
+      .filter((rel) => resolvedTargets(rel).includes(W7_TRANSITION_WRITER))
+      .sort()
+    expect(importers, 'a production module imports the W7 transition writer').toEqual([])
+
+    const namers: Array<{ file: string; symbol: string }> = []
+    for (const rel of files) {
+      if (rel === W7_TRANSITION_WRITER) continue
+      const code = stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'))
+      for (const symbol of W7_TRANSITION_WRITER_ENTRY_POINTS) {
+        if (code.includes(symbol)) namers.push({ file: rel, symbol })
+      }
+    }
+    expect(namers, 'a production module names a W7 transition writer entry point').toEqual([])
+  })
+
+  it('NEGATIVE CONTROL on the writer-reachability leg: a planted caller is really detected', () => {
+    // Without this, the leg above could be passing because `stripComments` ate
+    // everything or the entry-point list is misspelled.
+    withDecoyTree(
+      {
+        [PROBE_REL]: [
+          "import { transitionAttendanceW7ContextSourceV1 } from './w7-context-source-transition'",
+          'export const probe = transitionAttendanceW7ContextSourceV1',
+          '',
+        ].join('\n'),
+        [W7_TRANSITION_WRITER]: 'export const transitionAttendanceW7ContextSourceV1 = 1\n',
+      },
+      (decoyRoot) => {
+        expect(resolvedTargets(PROBE_REL, decoyRoot)).toContain(W7_TRANSITION_WRITER)
+        const code = stripComments(fs.readFileSync(path.join(decoyRoot, PROBE_REL), 'utf8'))
+        expect(code).toContain('transitionAttendanceW7ContextSourceV1')
+      },
+    )
   })
 
   it('NEGATIVE CONTROL: planting a production importer reds both legs', () => {
@@ -313,11 +401,28 @@ describe('W7-1a structural inertness: zero production importers and call sites',
 })
 
 describe('W7-1a structural inertness: the posture table has no production reader or writer', () => {
-  it('ZERO production CODE outside the migration touches the posture table', () => {
+  it('the ONLY production CODE outside the migration touching the posture table is the single writer (+ its DML classification)', () => {
     // The resolver itself is excluded from `productionFiles()` (it lives under
-    // w7-resolver/), which is the point: it is the only module whose CODE names
-    // the table, and nothing production-side reaches it.
-    expect(postureTableCodeReferences()).toEqual([])
+    // w7-resolver/), which is the point: nothing production-side reaches it.
+    //
+    // W7-3 amendment — an EXACT set, so any THIRD file naming the table still
+    // reds. Two members, each for a different reason:
+    //
+    //  - the transition writer: this is the whole point of W7-R4's "one writer".
+    //    That it is the SOLE DML path is proven mechanically by the collector
+    //    census, not by this leg; this leg proves no OTHER module has started
+    //    naming the table.
+    //  - the DML inventory's table-classification map: names the table as a
+    //    BUCKET KEY (`attendance_calculation_context_source_state: 'w4_canonical'`),
+    //    which is a classification datum, not a read or a write. Adding it there
+    //    is mandatory — an unclassified table is a hard CI failure by design —
+    //    and the `stripComments` matcher cannot tell a bucket key from a query,
+    //    so it is recorded here explicitly rather than papered over by widening
+    //    the matcher.
+    expect(postureTableCodeReferences()).toEqual([
+      W7_TRANSITION_WRITER,
+      'scripts/attendance/w4c0-dml-inventory/table-classification.cjs',
+    ])
   })
 
   it('the only remaining mention of the posture table is PROSE in the W7-0 contract header', () => {
