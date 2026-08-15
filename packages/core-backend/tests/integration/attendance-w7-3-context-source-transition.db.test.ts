@@ -49,6 +49,7 @@ import {
 import {
   ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_PREDICATE_CODES_V1,
   buildAttendanceW7ContextSourceAdvisoryKeyV1,
+  __setW7ContextSourcePlanInsideTransactionForTests,
   planAttendanceW7ContextSourceTransitionV1,
   transitionAttendanceW7ContextSourceV1,
   __setW7ContextSourceTransitionAfterExclusiveLockForTests,
@@ -313,6 +314,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG)', () => {
     __setW7ContextSourceTransitionAfterExclusiveLockForTests(null)
     __setW7ContextSourceTransitionBeforeEventInsertForTests(null)
     __setW7ContextSourceTransitionBeforeStateUpdateForTests(null)
+    __setW7ContextSourcePlanInsideTransactionForTests(null)
   })
 
   // -------------------------------------------------------------------------
@@ -1186,7 +1188,56 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG)', () => {
   // The plan reporter.
   // -------------------------------------------------------------------------
   describe('T-P1 / T-P4 / T-P6 / T-P7 the read-only plan reporter', () => {
-    it('T-P1 plan NEVER commits: the row is byte-identical afterwards, including its xmin', async () => {
+    it('T-P1 plan NEVER commits: a write made INSIDE its transaction does not survive', async () => {
+      // WHY THIS SHAPE AND NOT THE OBVIOUS ONE, recorded because the obvious one
+      // was written first and was found to be worthless by mutation: asserting
+      // "the row is byte-identical (row hash + xmin) after a plan call" passes
+      // whether the `finally` issues ROLLBACK or COMMIT, because a transaction
+      // that performed no DML commits nothing observable. Replacing ROLLBACK
+      // with COMMIT left the entire suite green. The leg below makes the plan's
+      // transaction dirty ON PURPOSE through the module's test seam, so the
+      // outcome differs between the two.
+      const orgId = await preparedOrg()
+      const probeOrg = randomUUID()
+      createdOrgs.push(probeOrg)
+
+      __setW7ContextSourcePlanInsideTransactionForTests(async (trx) => {
+        await trx.query(
+          `INSERT INTO ${STATE_TABLE}
+             (org_id, state, scope, version, prior_state, engine_version, reason_code, actor_id)
+           VALUES ($1, 'off', 'synthetic_staging', 1, NULL, 'probe', 'context_source_transition', 'probe')`,
+          [probeOrg],
+        )
+      })
+      try {
+        await withClient(async (client) => {
+          const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+            orgId,
+            targetState: 'group_shadow',
+          })
+          expect(plan.currentState).toBe('off')
+        })
+      } finally {
+        __setW7ContextSourcePlanInsideTransactionForTests(null)
+      }
+
+      // The seam's write must NOT have survived the plan call.
+      expect(await stateRow(probeOrg), 'the plan reporter COMMITTED its transaction').toBe(null)
+
+      // POSITIVE CONTROL: the identical statement outside the plan (autocommit)
+      // DOES persist — so the assertion above can see a write, and is not
+      // passing because the INSERT never ran or the org key was wrong.
+      await pool.query(
+        `INSERT INTO ${STATE_TABLE}
+           (org_id, state, scope, version, prior_state, engine_version, reason_code, actor_id)
+         VALUES ($1, 'off', 'synthetic_staging', 1, NULL, 'probe', 'context_source_transition', 'probe')`,
+        [probeOrg],
+      )
+      expect(await stateRow(probeOrg)).toEqual({ state: 'off', priorState: null, version: 1 })
+      await pool.query(`DELETE FROM ${STATE_TABLE} WHERE org_id = $1`, [probeOrg])
+    })
+
+    it('T-P1b plan performs zero DML of its own: xmin and the event count are unmoved', async () => {
       const orgId = await preparedOrg()
       const before = await pool.query(
         `SELECT xmin::text AS xmin, state, version FROM ${STATE_TABLE} WHERE org_id = $1`,

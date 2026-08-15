@@ -615,6 +615,37 @@ export function __setW7ContextSourceTransitionBeforeStateUpdateForTests(
   beforeStateUpdateForTests = hook
 }
 
+let insidePlanTransactionForTests: ((trx: AttendanceW4TransactionClientV1) => Promise<void>) | null =
+  null
+
+/**
+ * Test-only seam fired INSIDE the plan reporter's transaction, receiving that
+ * transaction's client.
+ *
+ * IT EXISTS BECAUSE THE OBVIOUS TEST DOES NOT WORK, and that was discovered by
+ * mutation rather than by reading. The natural leg for "plan never commits" is
+ * "the table is byte-identical (row hash + `xmin`) after a plan call". That leg
+ * passes whether the `finally` issues `ROLLBACK` or `COMMIT`, because a
+ * transaction that performed no DML commits nothing observable — so it proves
+ * the reporter wrote nothing, which was never in doubt, and proves NOTHING about
+ * the `finally` being a rollback. Replacing `ROLLBACK` with `COMMIT` left the
+ * whole real-PG suite green.
+ *
+ * With this seam a test can make the plan's transaction dirty on purpose and
+ * then assert the write did not survive. That is the property the unconditional
+ * `ROLLBACK` actually buys: it turns "this function does not issue
+ * INSERT/UPDATE/DELETE" from a claim about the code into a mechanically enforced
+ * invariant about what the database ever durably observes, even against a future
+ * edit inside the plan builder that accidentally added a write.
+ *
+ * Not imported by production wiring; `null` by default.
+ */
+export function __setW7ContextSourcePlanInsideTransactionForTests(
+  hook: ((trx: AttendanceW4TransactionClientV1) => Promise<void>) | null,
+): void {
+  insidePlanTransactionForTests = hook
+}
+
 // ---------------------------------------------------------------------------
 // Predicates — W4C-5 §3 style, with per-predicate COUNTS returned by the
 // command.
@@ -1183,6 +1214,7 @@ export async function planAttendanceW7ContextSourceTransitionV1(
     await connection.query("SELECT set_config('statement_timeout', $1, true)", [
       String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
     ])
+    await insidePlanTransactionForTests?.(connection)
     return await buildContextSourcePlan(connection, orgId, targetState)
   } finally {
     await connection.query('ROLLBACK').catch(() => undefined)
