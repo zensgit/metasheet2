@@ -1,12 +1,13 @@
 # Approval Canvas + Data Closure — Owner Handoff (G0 / UAT / staged flags)
 
-**Status:** OWNER ACTION REQUIRED — engineering closed on main; product FINAL blocked here  
+**Status:** G0 RATIFIED 2026-08-15 — real-tenant UAT and staged enablement remain open; product FINAL blocked here  
+**G0 record:** `docs/development/approval-canvas-g0-ratify-20260815.md`  
 **Date:** 2026-08-08  
 **Product code land:** https://github.com/zensgit/metasheet2/pull/4806 → `main` `323d7e1afe`  
 **Docs land stamp:** https://github.com/zensgit/metasheet2/pull/4811 → `main` `bea44e12d5`  
-**Authority locks (still PROPOSED until G0):**  
-- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md`  
-- `docs/development/approval-canvas-v2-development-plan-20260720.md`  
+**Authority locks:**  
+- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` (**G0 RATIFIED 2026-08-15**)  
+- `docs/development/approval-canvas-v2-development-plan-20260720.md` (G0 recorded; O3 DEFER; UAT/flags still owner-controlled)  
 **Engineering companions:**  
 - `docs/development/approval-canvas-data-closure-final-eligibility-development-20260808.md`  
 - `docs/development/approval-canvas-data-closure-final-eligibility-verification-20260808.md`  
@@ -20,10 +21,10 @@
 |---|---|
 | Engineering stack for Canvas V2 authoring path + G5-R engineering invariants | **YES — on main** |
 | Product FINAL | **NO** |
-| G0 ratify of D0 | **NO — owner only** |
-| Real-tenant UAT | **NO — owner only** |
+| G0 ratify of D0 | **YES — 2026-08-15 RATIFY** (see `approval-canvas-g0-ratify-20260815.md`) |
+| Real-tenant UAT | **NO — still owner / tenant** |
 | Any production / staging flag ON by default | **NO** (`approvalCanvasV2`, FWB, attachments all default OFF) |
-| D3 Vue Flow / ELK renderer | **NO — blocked on O3** |
+| D3 Vue Flow / ELK renderer | **NO — O3 DEFER** |
 | Number FWB unlock / optional D7 runtimes | **NO** |
 
 Agents must **not** flip env flags or rewrite lock status from PROPOSED → RATIFIED without an explicit owner decision recorded below.
@@ -65,15 +66,15 @@ Copy this block into the PR/issue comment or lock header when decided:
 
 ```text
 G0 decision for approval-canvas-v2-interaction-design-lock-20260721.md
-Date:
-Owner:
-Decision: RATIFY | REJECT | RATIFY-WITH-DELTAS
-If RATIFY-WITH-DELTAS, list deltas:
-O3 layout engine (optional, independent): KEEP_BESPOKE | ADOPT_VUE_FLOW_ELK | DEFER
-Notes:
+Date: 2026-08-15
+Owner: zensgit
+Decision: RATIFY
+If RATIFY-WITH-DELTAS, list deltas: (none)
+O3 layout engine (optional, independent): DEFER
+Notes: Staging Canvas-only UAT (S1–S12) and staged flag enablement remain open. FWB/attachments stay OFF. No product FINAL.
 ```
 
-On **RATIFY**, owner (or designated doc maintainer) may flip the D0 lock **Status** line from `PROPOSED` to `RATIFIED` and cite this decision. Agents must not do that unilaterally.
+Recorded in `docs/development/approval-canvas-g0-ratify-20260815.md`. D0 lock Status is **RATIFIED**. Agents must still not flip runtime flags or claim product FINAL without a later owner decision.
 
 ### 2.2 G0 checklist (plan §7 + lock §19) — engineering evidence vs owner judgment
 
@@ -170,13 +171,13 @@ Do **not** enable everything at once. Canvas ON does **not** transitively enable
 
 ```text
 Product FINAL gate — Approval Canvas + Data Closure
-Land SHA: 323d7e1afe (or later main tip: ________)
-G0: RATIFY | REJECT | WITH-DELTAS  (date/owner)
-UAT G5-C: PASS | FAIL  (S1–S12 evidence link/notes)
-UAT G5-R: PASS | FAIL | DEFERRED (R1–R3)
-Staged flags: Canvas __ / FWB __ / Attachments __
-Residual accepted: dual-canvas full shell? O3 DEFER? list fallback keep?
-Product FINAL authorized: YES | NO
+Land SHA: 323d7e1afe (later main tip at G0 record: 9b693a11d9)
+G0: RATIFY  2026-08-15 / zensgit
+UAT G5-C: NOT RUN  (no managed staging tenant on the recording machine)
+UAT G5-R: DEFERRED (R1–R3 — not this round)
+Staged flags: Canvas not applied / FWB OFF / Attachments OFF
+Residual accepted: O3 DEFER; list fallback keep; dual-canvas full shell not required for this G0
+Product FINAL authorized: NO
 ```
 
 Only when **G0 + real-tenant UAT + staged enablement** are all owner-complete may docs claim **product FINAL**.
@@ -196,8 +197,8 @@ Only when **G0 + real-tenant UAT + staged enablement** are all owner-complete ma
 
 ## 7. Suggested owner order of operations
 
-1. **G0** on D0 lock (and optional O3) using §2.  
-2. Staging **Canvas-only** UAT using §3.2.  
-3. Stage flags per §4 (Canvas before FWB before attachments).  
-4. Sign product FINAL with §5.  
+1. **G0** on D0 lock (and optional O3) using §2. **Done 2026-08-15 (RATIFY, O3 DEFER).**  
+2. Staging **Canvas-only** UAT using §3.2. **Still open.**  
+3. Stage flags per §4 (Canvas before FWB before attachments). **Not started.**  
+4. Sign product FINAL with §5. **Not authorized.**  
 5. Open residual polish PRs only if UAT produces concrete gaps.

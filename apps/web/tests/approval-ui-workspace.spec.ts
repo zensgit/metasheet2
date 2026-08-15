@@ -36,6 +36,10 @@ describe('approval workspace visual structure', () => {
 
     expect(source).toContain("type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'review'")
     expect(source).toContain('class="template-authoring__workspace"')
+    expect(source).toContain("label: '基础信息'")
+    expect(source).toContain("label: '表单设计'")
+    expect(source).toContain("label: '流程设计'")
+    expect(source).toContain("label: '测试发布'")
     expect(source).toContain('data-testid="approval-template-section-next"')
     expect(source).toContain("v-show=\"activeAuthoringSection === 'fields'\"")
     expect(source).toContain("v-show=\"activeAuthoringSection === 'flow'\"")

@@ -1,6 +1,6 @@
 # Approval Canvas + Data Closure — Final Eligibility Verification (2026-08-08)
 
-**Status:** ENGINEERING-READY FOR PRODUCT FINAL (owner UAT + staged flag ON **not** done)  
+**Status:** ENGINEERING-READY FOR PRODUCT FINAL (G0 RATIFIED 2026-08-15; owner UAT + staged flag ON **not** done)  
 **Landed:** https://github.com/zensgit/metasheet2/pull/4806 → `main` squash `323d7e1afe` (2026-08-08T04:20:48Z)  
 **Authoritative land SHA:** `323d7e1afef407f68c8ff2a6bfa940f175300f59`  
 **Pre-merge branch family:** `claude/approval-canvas-final-engineering-20260808`  
@@ -139,11 +139,11 @@ No product-code change in this delivery flips a default to ON.
 | Engineering stack complete for G5-C product-path + mounted undo/history + canvas-first under flag | **YES** |
 | G5-R number fail-closed + flag defaults + attachment flag-OFF still hold on this head | **YES** |
 | Documentation with SHAs + command evidence | **YES** |
-| **Product FINAL** (real-tenant UAT + staged flag ON + G0 ratify) | **NO** |
+| **Product FINAL** (real-tenant UAT + staged flag ON + G0 ratify) | **NO** — G0 is done; UAT and staged flags are not |
 
 **Authoritative status string:**
 
-> **ENGINEERING-READY FOR PRODUCT FINAL; NOT PRODUCT FINAL — owner UAT and staged flag enablement remain open.**
+> **ENGINEERING-READY FOR PRODUCT FINAL; G0 RATIFIED 2026-08-15; NOT PRODUCT FINAL — owner UAT and staged flag enablement remain open.**
 
 ## 6. Owner-only remaining gates
 
@@ -151,7 +151,7 @@ Executable owner packet (checklists + flag stages + sign-off template):
 
 → **`docs/development/approval-canvas-data-closure-owner-handoff-20260808.md`**
 
-1. G0 ratify of `approval-canvas-v2-interaction-design-lock-20260721.md` (and O3 layout engine choice if renderer migration is desired).  
-2. Real-tenant UAT: form authoring, linear/condition/parallel publish+execute, route preview, FWB create/update, attachments, version restore.  
-3. Staged enablement: durable → Class A → Class B → FWB → attachments / Canvas V2, with observation windows.  
+1. G0 ratify of `approval-canvas-v2-interaction-design-lock-20260721.md` — **done 2026-08-15 (RATIFY; O3 DEFER)**. See `approval-canvas-g0-ratify-20260815.md`.  
+2. Real-tenant UAT: form authoring, linear/condition/parallel publish+execute, route preview. FWB create/update and attachments stay **deferred** this round.  
+3. Staged enablement: Canvas-only staging first; FWB and attachments later, with observation windows.  
 4. Optional residual product polish (not blocking ENGINEERING-READY): form palette drag affordances; full editor-embedded dual-canvas version UX (beyond TemplateDetailView summary). Edge `+` / no canvas node clusters / form palette / shell extract already landed in #4806.

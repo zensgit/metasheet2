@@ -110,6 +110,7 @@ on:
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
       - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
       - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/tests/approval-form-palette-focus.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -303,6 +304,7 @@ on:
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
       - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
       - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/tests/approval-form-palette-focus.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -470,6 +472,7 @@ jobs:
             approval-version-dual-canvas \
             approval-flow-canvas-a11y \
             approval-canvas-inspector-a11y \
+            approval-form-palette-focus \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract
