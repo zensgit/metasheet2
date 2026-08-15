@@ -442,9 +442,55 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     ).rows[0]
 
   // -------------------------------------------------------------------------
+  // DIAGNOSTIC (DELETE once the CI-only differential is explained). These two
+  // legs are green locally (CI-exact in-list run, twice independently) and red
+  // in CI at three consecutive heads; three rounds of reasoning have not
+  // reproduced the cause, so this emits the mirror gate's REAL inputs from
+  // inside the route at evaluation time — the only place they exist. One CI
+  // run, read the values, delete the block. Values-free except allowlist SHAPE
+  // (presence/count/membership booleans), never entries themselves.
+  // Field → hypothesis it falsifies:
+  //   w4EnvPresent/HasThisOrg  env missing at evaluation time vs present-but-not-matching
+  //   w4EnvEntries             a neighbour OVERWROTE the allowlist rather than clearing it
+  //   w7MirrorEffectiveState   posture read reaching the DB, and what it returned
+  //   outerResolutionKind      null => the `A || B` gate never opened (or the
+  //                            activate-injected fingerprint computer was absent —
+  //                            with w4EnvHasThisOrg=true that conjunct is the only
+  //                            way in); non-`resolved` => THE GATE OPENED and
+  //                            candidate resolution failed — untested root that
+  //                            fits a null fingerprint with the env fully intact
+  //   fingerprintType          null-vs-string without the `.toMatch()` ambiguity
+  //   pid                      whether the failing punch shares a worker with a neighbour
+  const emitW71bDiag = (label: string, orgId: string, ctx: Record<string, unknown>) => {
+    const w4Raw = String(process.env[W4_ENV] || '')
+    console.log('[W7-1b-DIAG]', label, JSON.stringify({
+      w4EnvPresent: Boolean(w4Raw.trim()),
+      w4EnvEntries: w4Raw.split(',').map((s) => s.trim()).filter(Boolean).length,
+      w4EnvHasThisOrg: w4Raw.split(',').map((s) => s.trim()).includes(orgId.toLowerCase()),
+      w7EnvHasThisOrg: String(process.env[W7_ENV] || '')
+        .split(',').map((s) => s.trim()).includes(orgId.toLowerCase()),
+      w7MirrorEffectiveState: ctx.w7MirrorEffectiveState ?? null,
+      w7MirrorSelectsGroupArm: ctx.w7MirrorSelectsGroupArm ?? null,
+      fingerprintType: typeof ctx.outerSourceDefinitionFingerprint,
+      outerResolutionKind: (ctx.outerResolution as { kind?: string } | null)?.kind ?? null,
+      outerContextSchemaVersion:
+        (ctx.outerContext as { schemaVersion?: number } | null)?.schemaVersion ?? null,
+      pid: process.pid,
+    }))
+  }
 
   it('T-M5 + T-R1: both machines ON => the group arm runs END TO END and the inner/outer fingerprints AGREE', async () => {
     await withEnv(BOTH_MACHINES_ENV(), async () => {
+    // DIAGNOSTIC seam install — observation only, uninstalled in finally.
+    const diagPlugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      __setAttendanceW4LivePunchPreBoundarySeamForTests: (
+        seam: ((ctx: Record<string, unknown>) => Promise<void>) | null,
+      ) => void
+    }
+    diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
+      emitW71bDiag('T-M5', bothOrg, ctx)
+    })
+    try {
     // EXACT membership, not substring: the allowlist rule is exact-org, and a
     // substring check would pass for an org that merely shares a prefix.
     expect(
@@ -490,6 +536,10 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(record.projection_owner).toBe('w4_group')
     expect(record.current_calculation_id).toEqual(expect.any(String))
     expect(String(record.current_calculation_id).length).toBeGreaterThan(0)
+    } finally {
+      // DIAGNOSTIC seam uninstall (paired with the install above).
+      diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+    }
     })
   }, 60_000)
 
@@ -523,6 +573,8 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     const observed: Record<string, unknown>[] = []
     plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
       observed.push(ctx)
+      // DIAGNOSTIC (delete with the block above) — same emitter, this leg's org.
+      emitW71bDiag('T-B4', w4OnlyOrg, ctx)
     })
     try {
       const res = await punch(w4OnlyUser, w4OnlyOrg, 'check_in')
