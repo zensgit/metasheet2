@@ -5,6 +5,7 @@ import {
 } from '../attendance/w4c1-segment-calculator'
 import type { FrozenAttendanceContextV1 } from '../attendance/w4c0-write-boundary-types'
 import { ATTENDANCE_PROJECTION_OWNERS_V1 } from '../attendance/w7-provenance-domain'
+import { ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1 } from '../attendance/w4c2-shadow-expected-differences'
 
 export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
   'equal',
@@ -23,12 +24,12 @@ export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
 
 export type AttendanceW4ShadowDiffCode = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES)[number]
 
-const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>([
-  'work_date_mismatch',
-  'context_mismatch',
-  'input_mismatch',
-  'review_required',
-])
+// W7-2 (#4556): derived from the ONE exported critical-code set — see
+// `ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1`'s doc comment for why this is
+// no longer a module-private duplicate.
+const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>(
+  ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1,
+)
 
 export const ATTENDANCE_W4_SHADOW_DIFF_LABELS: Readonly<Record<AttendanceW4ShadowDiffCode, string>> =
   Object.freeze({
