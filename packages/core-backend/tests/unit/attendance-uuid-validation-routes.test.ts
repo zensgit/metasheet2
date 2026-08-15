@@ -119,6 +119,9 @@ async function createHarness(
               operationId: input.operationId ?? null,
               correlationId: input.correlationId,
               acceptedWritePosture: 'legacy_projection_only',
+              // Mirror the real W4C-3b boundary's context shape (#4899 residual R4): the legacy
+              // posture this double emulates resolves referenceSegments false.
+              referenceSegments: false,
               routeVariant: input.routeVariant ?? null,
             }
             const adapter = adapters[input.kind]
