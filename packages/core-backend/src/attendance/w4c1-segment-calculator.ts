@@ -906,6 +906,15 @@ export function calculateAttendanceSegmentsV1(
   if (!isSupportedFrozenAttendanceContextV1(input.context)) {
     return review('input_schema_invalid')
   }
+  // The cast is SCHEMA-AGNOSTIC BY CONSTRUCTION, not by luck, and the argument
+  // belongs here rather than in a commit message: every field read below is a
+  // member of the SHARED 14-key set, identically named and typed in v1 and v2.
+  // The one v1-only key is `flexPolicy`, which a v2 context never carries — so
+  // the flex reads downstream see `undefined`, which is exactly the STRICT
+  // behaviour a group-effective context (which has no flex arm in W7-1b) must
+  // get. `strict: false` means the compiler will NOT catch a future v2-only
+  // divergence here, so if the two key sets ever stop coinciding this cast must
+  // become an explicit `routeFrozenAttendanceContextV1` branch.
   const context = input.context as FrozenAttendanceContextV1
   const windows = attributionCheck.windows
 

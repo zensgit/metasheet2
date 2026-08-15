@@ -183,6 +183,19 @@ export function validateFrozenAttendanceContextV2ShapeV1(
   return true
 }
 
+/**
+ * ⚠️ NO PRODUCTION CONSUMER YET, and that is recorded rather than implied.
+ *
+ * All six widened X-sites use the BOOLEAN `isSupportedFrozenAttendanceContextV1`,
+ * because all six genuinely accept both schemas — their per-site verdicts are
+ * "accept either", so there is nothing for them to discriminate on. The
+ * discriminated form exists for the sites that will need to branch (a v2-only
+ * read side, a future group-specific projection), and it is exercised by tests.
+ *
+ * This is the same "shape with no producer" honesty the `v2-legacy` note above
+ * applies to itself: saying so is what stops a later reader from assuming the
+ * router is load-bearing in production when the boolean is.
+ */
 export type RoutedFrozenAttendanceContextV1 =
   | { kind: 'v1'; context: FrozenAttendanceContextV1 }
   | { kind: 'v2'; context: FrozenAttendanceContextV2 }

@@ -264,7 +264,17 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
  * module. Widening this set is a design change requiring its own review, not a
  * test edit.
  */
-const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze(['packages/core-backend/src/index.ts'])
+const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
+  // The V2 discriminant router. TYPE-ONLY (`import type { FrozenAttendanceContextV2 }`)
+  // — erased at runtime, so it adds no runtime coupling. It is enumerated anyway
+  // rather than carved out: the sweep matches RESOLVED module paths and does not
+  // distinguish type from value imports, and teaching it to do so would weaken it
+  // for every future caller. Importing the type is the right call — the
+  // alternative is a second structural definition of the V2 shape, i.e. drift.
+  'packages/core-backend/src/attendance/w7-frozen-context-router.ts',
+  // The host port — the single place the CJS plugin can reach core-owned W7 code.
+  'packages/core-backend/src/index.ts',
+])
 /**
  * EMPTY, and this is a STRONGER statement after W7-1b than before it, not a
  * leftover from W7-1a.
@@ -299,10 +309,19 @@ describe('W7-1b closure (re-formed from W7-1a inertness): the production importe
     // enumerated entry against the real file.
     for (const rel of W7_1B_PRODUCTION_IMPORTERS_V1) {
       expect(fs.existsSync(path.join(REPO_ROOT, rel)), `missing: ${rel}`).toBe(true)
-      expect(resolvedTargets(rel)).toContain(
-        `${W7_RESOLVER_DIR}/w7-frozen-context-issuance-seam.ts`,
-      )
+      // Each enumerated importer must really resolve INTO the resolver directory
+      // — otherwise an exact-set assertion could be satisfied by a stale name.
+      expect(
+        resolvedTargets(rel).some((target) => target.startsWith(`${W7_RESOLVER_DIR}/`)),
+        `${rel} does not actually import anything under ${W7_RESOLVER_DIR}/`,
+      ).toBe(true)
     }
+    // And the HOST PORT specifically must reach THE SEAM — that is the wiring
+    // this slice exists to create, and a generic "imports something under
+    // w7-resolver/" assertion would not notice if it stopped doing so.
+    expect(resolvedTargets('packages/core-backend/src/index.ts')).toContain(
+      `${W7_RESOLVER_DIR}/w7-frozen-context-issuance-seam.ts`,
+    )
   })
 
   it('NEGATIVE CONTROL: planting a production importer reds both legs', () => {

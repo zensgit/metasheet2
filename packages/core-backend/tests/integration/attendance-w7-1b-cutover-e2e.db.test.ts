@@ -107,13 +107,22 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   const bothUser = randomUUID()
   const bothShift = randomUUID()
   const bothGroup = randomUUID()
+  // W4-ON + NO posture row — T-B4 / T-M4 arm-A-TRUE. THE CONFIGURATION THAT
+  // ACTUALLY SHIPS once W4 is rolled out and W7 is not: the mirror RUNS (arm A
+  // of the disjunction is true) and must still take the LEGACY arm and produce a
+  // non-null fingerprint. Every other leg in this repo's W7 matrix has either the
+  // W4 env unset or a posture row present, so without this org the one live
+  // combination for existing W4 orgs is unmeasured.
+  const w4OnlyOrg = randomUUID()
+  const w4OnlyUser = randomUUID()
+  const w4OnlyShift = randomUUID()
   // W4-legacy + W7-group org — the §2.4 incoherence fixture (T-R9).
   const incoherentOrg = randomUUID()
   const incoherentUser = randomUUID()
   const incoherentShift = randomUUID()
   const incoherentGroup = randomUUID()
 
-  const allOrgs = () => [bothOrg, incoherentOrg]
+  const allOrgs = () => [bothOrg, incoherentOrg, w4OnlyOrg]
 
   const mintToken = async (userId: string): Promise<string> => {
     const res = await requestJson(
@@ -240,7 +249,10 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     process.env.SKIP_PLUGINS = 'false'
     // BOTH allowlists carry the both-machines org, EXACTLY. The W4 half is what
     // makes the boundary's inner arm reachable at all (§1 Chain A).
-    process.env[W4_ENV] = bothOrg.toLowerCase()
+    // W4 allowlist carries BOTH the both-machines org and the W4-only org;
+    // the W7 allowlist carries ONLY the both-machines org. That asymmetry is
+    // what makes the W4-only org exercise "arm A true, arm B false".
+    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()}`
     process.env[W7_ENV] = bothOrg.toLowerCase()
 
     const repoRoot = path.join(HERE, '../../../../')
@@ -259,6 +271,31 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     await insertActiveUser(bothUser, bothOrg)
     await seedAuthoritativeRollout(bothOrg)
     await seedShiftAndEffectiveGroup(bothOrg, bothUser, bothShift, bothGroup)
+
+    // T-B4 fixture: W4-authoritative and W4-allowlisted, but NO posture row and
+    // NO W7 allowlist entry. Seeded with a PLAIN published assignment (not a
+    // group-produced one) so nothing about it is group-shaped.
+    await insertActiveUser(w4OnlyUser, w4OnlyOrg)
+    await seedAuthoritativeRollout(w4OnlyOrg)
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days,
+          late_grace_minutes, early_grace_minutes, rounding_minutes, flex_mode)
+       VALUES ($1, $2, $3, 'UTC', '00:00', '23:59', false, '[0,1,2,3,4,5,6]'::jsonb, 5, 5, 15, 'strict')`,
+      [w4OnlyShift, w4OnlyOrg, `w7-1b-e2e w4only ${w4OnlyShift}`],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_segments
+         (id, org_id, shift_id, segment_index, start_time, end_time, start_day_offset, end_day_offset)
+       VALUES ($1, $2, $3, 0, '00:00', '23:59', 0, 0)`,
+      [randomUUID(), w4OnlyOrg, w4OnlyShift],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $2, $3, '2026-01-01', '2027-12-31', true, 'published', 1)`,
+      [w4OnlyOrg, w4OnlyUser, w4OnlyShift],
+    )
 
     await insertActiveUser(incoherentUser, incoherentOrg)
     await seedLegacyRollout(incoherentOrg)
@@ -288,7 +325,9 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
         orgs.map((o) => o.toLowerCase()),
       ])
       .catch(() => undefined)
-    await pool?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser]]).catch(() => undefined)
+    await pool
+      ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[bothUser, incoherentUser, w4OnlyUser]])
+      .catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorW4 === undefined) delete process.env[W4_ENV]
@@ -334,8 +373,16 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   // -------------------------------------------------------------------------
 
   it('T-M5 + T-R1: both machines ON => the group arm runs END TO END and the inner/outer fingerprints AGREE', async () => {
-    expect(process.env[W4_ENV], 'W4 allowlist must carry the org').toBe(bothOrg.toLowerCase())
-    expect(process.env[W7_ENV], 'W7 allowlist must carry the org').toBe(bothOrg.toLowerCase())
+    // EXACT membership, not substring: the allowlist rule is exact-org, and a
+    // substring check would pass for an org that merely shares a prefix.
+    expect(
+      String(process.env[W4_ENV] || '').split(',').map((v) => v.trim()),
+      'W4 allowlist must carry the org',
+    ).toContain(bothOrg.toLowerCase())
+    expect(
+      String(process.env[W7_ENV] || '').split(',').map((v) => v.trim()),
+      'W7 allowlist must carry the org',
+    ).toContain(bothOrg.toLowerCase())
 
     const res = await punch(bothUser, bothOrg, 'check_in')
     expect(res.status, `punch failed: ${res.raw}`).toBe(200)
@@ -371,6 +418,73 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(record.projection_owner).toBe('w4_group')
     expect(record.current_calculation_id).toEqual(expect.any(String))
     expect(String(record.current_calculation_id).length).toBeGreaterThan(0)
+  }, 60_000)
+
+  it('T-B4 + T-M4 arm-A-TRUE: W4 env SET with the posture table EMPTY => the mirror RUNS, takes the LEGACY arm, and the punch completes', async () => {
+    // THE CONFIGURATION THAT ACTUALLY SHIPS for every existing W4-rolled-out org
+    // once this lands. It is the only combination in which arm A of the mirror's
+    // `A || B` gate is TRUE while arm B is false — every other leg in this matrix
+    // has either the W4 env unset or a posture row present, so without this leg
+    // the live path for existing W4 orgs is unmeasured and "arm A true" is only
+    // ever tested as "arm A false".
+    expect(
+      String(process.env[W4_ENV] || '').split(',').map((v) => v.trim()),
+      'the W4 allowlist must carry this org',
+    ).toContain(w4OnlyOrg.toLowerCase())
+    expect(
+      String(process.env[W7_ENV] || '').split(',').map((v) => v.trim()),
+      'the W7 allowlist must NOT carry this org',
+    ).not.toContain(w4OnlyOrg.toLowerCase())
+    const postureRows = await pool.query(
+      `SELECT 1 FROM ${POSTURE_TABLE} WHERE org_id = $1`,
+      [w4OnlyOrg.toLowerCase()],
+    )
+    expect(postureRows.rowCount, 'this org must have NO posture row').toBe(0)
+
+    const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      __setAttendanceW4LivePunchPreBoundarySeamForTests: (
+        seam: ((ctx: Record<string, unknown>) => Promise<void>) | null,
+      ) => void
+    }
+    const observed: Record<string, unknown>[] = []
+    plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
+      observed.push(ctx)
+    })
+    try {
+      const res = await punch(w4OnlyUser, w4OnlyOrg, 'check_in')
+      expect(res.status, `punch failed: ${res.raw}`).toBe(200)
+      expect(observed.length, 'the pre-boundary seam never fired').toBeGreaterThan(0)
+      const ctx = observed[observed.length - 1]
+
+      // Arm A TRUE, arm B FALSE — asserted as exact values, not as "not group".
+      expect(ctx.w7MirrorEffectiveState).toBe('off')
+      expect(ctx.w7MirrorSelectsGroupArm).toBe(false)
+
+      // T-B4: the mirror RAN and produced a real fingerprint over a LEGACY V1
+      // context. A null here would mean the disjunction lost its W4 arm; a v2
+      // context here would mean the seam mis-routed an org with no posture row.
+      expect(ctx.outerSourceDefinitionFingerprint).toMatch(/^[0-9a-f]{64}$/)
+      expect((ctx.outerContext as Record<string, unknown>).schemaVersion).toBe(1)
+      expect((ctx.outerContext as Record<string, unknown>).selector).toBe('legacy')
+      expect((ctx.outerContext as Record<string, unknown>).calculationGroupId).toBeNull()
+
+      // ...and the punch COMPLETES: the mirror's outer fingerprint and the
+      // boundary's inner one agree on the legacy arm too, not only on the group
+      // arm. Asserted as the positive success equality.
+      const calcs = await calculationsFor(w4OnlyUser)
+      expect(calcs.length).toBeGreaterThan(0)
+      const calc = calcs[calcs.length - 1]
+      expect(calc.outcome).toBe('completed')
+      expect(calc.outcome_reason_code).toBe('calculated')
+      expect((calc.context_snapshot as Record<string, unknown>).selector).toBe('legacy')
+
+      // Provenance stays `w4` — the group emitter must not fire for a non-group
+      // org. This is the negative half of T-P1, in the same run.
+      const record = await recordFor(w4OnlyUser)
+      expect(record.projection_owner).toBe('w4')
+    } finally {
+      plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
+    }
   }, 60_000)
 
   it('T-R9 (§2.4 coherence precondition): W4-legacy + W7-group is REFUSED at a plugin-side producer, with its own closed code', async () => {
