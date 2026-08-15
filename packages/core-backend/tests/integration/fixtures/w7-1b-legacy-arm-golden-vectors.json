@@ -1,0 +1,47 @@
+{
+  "_README": "CAPTURED AT THE PRE-1b BASE. Do not regenerate from a tree that already carries a behavioural change — a golden generated from the post-change code proves only that the code equals itself.",
+  "capturedAtBaseSha": "7e715d31a2bca6ec8675cc278090aff30089df98",
+  "harnessSha256": "1371fa7d98d63d9492c22079cd06d2d4b3dac62874e02c6bca8d8981965235c9",
+  "entries": {
+    "workday": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "ae0646fe9ee071c936f694ccebfa2130fd7cab0f6b8b7242551e0451e8e34aa8",
+      "outerComparableFingerprint": "fc3c1dac452663f7e3a462a88f7ea1fbbb85f2019b2336a116fe1fdc7d9430b6"
+    },
+    "non_workday": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":false,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "3ff9111d59b2ff6b7b4ff44dc71fd1c06f9e489c1309b3adcd681fac92095e95",
+      "outerComparableFingerprint": "0beb2f6f0b353ea0f0f96a9b92fd52910a4c62d9050659e19e1a8ceb1a05e31e"
+    },
+    "holiday": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":\"statutory\",\"isWorkday\":false,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "be53f8385f0a1131ab5aafc967ab2f331571437347e290e6e6cf968707b629ee",
+      "outerComparableFingerprint": "25d1fffeabba55bc8ef88e1574879e5965352b1cc4e75d134bb41dfe9f2ccf70"
+    },
+    "flex": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"flexPolicy\":{\"arrivalWindowAfterMinutes\":60,\"arrivalWindowBeforeMinutes\":60,\"coreEndTime\":\"15:00\",\"coreStartTime\":\"11:00\",\"mode\":\"flex_required_duration\",\"requiredMinutes\":480},\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "363b1c21e6df5375a11140886c3b1f4e25de9fe23eda565a0ac4c122ed537ae0",
+      "outerComparableFingerprint": "69e1991b39ce2a89d428d214c8549bf05df19c229a70cb0a0a9b36a43a6e8349"
+    },
+    "overnight": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":1,\"endTime\":\"06:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"22:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "61829125b1ef39c4494c7fd1c1ea691bf6ddb2447a65d9abb5c042670818636a",
+      "outerComparableFingerprint": "0a1af798b9aad13a163ee70a69d1cea848777c3f34b5a3f11097d2f44c9aa957"
+    },
+    "multi_segment": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"12:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"},{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":1,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"13:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "c9b56ca9e682e35e7409e76e6da42f3baa26344872db71a1f086c9b1da41e07c",
+      "outerComparableFingerprint": "cfd743cb61de52c05c730bdc65a9af64a376a256172fa3de22f23f1a84a1ef7b"
+    },
+    "derived_segment": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"19:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"10:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "81c9178c04722f3e714ba45c6cac388670139b6389124a78c78bb273dea81889",
+      "outerComparableFingerprint": "bd5e113c2b33e5b73fc4af104983f23c90cbe2c83bc11307279ae988ced9837a"
+    },
+    "shift_timezone_override": {
+      "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"17:30\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"America/New_York\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
+      "storageFingerprint": "f56da15005c2313c33b3bce1c0df899da64dd71e6892dce85a86d4bc65e3f3b3",
+      "outerComparableFingerprint": "2f89639ff2e26a3b3423f9da3ba3fb5ace52bfa6e8d1ec3d92a24f777b76af5e"
+    }
+  }
+}
