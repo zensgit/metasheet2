@@ -1422,6 +1422,7 @@ jobs:
             tests/integration/attendance-w7-1b-issuance-seam.db.test.ts \
             tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts \
             tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts \
+            tests/integration/attendance-w7-1b-lock-census.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 

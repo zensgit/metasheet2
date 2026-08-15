@@ -784,6 +784,11 @@ export default defineConfig({
       // values against real CHECK constraints and deferred triggers, walks the
       // rollout state machine per case, and drives the real route. Real PG only.
       'tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts',
+      // #4556 W7-1b B9: the composite-lock re-census over the seven-producer
+      // reality, with CONSTRUCTED two-connection races (a real 40P01 positive
+      // control and the composed-order non-deadlock) plus T-M6's pg_locks
+      // observation. Concurrency evidence is meaningless without real PostgreSQL.
+      'tests/integration/attendance-w7-1b-lock-census.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.
