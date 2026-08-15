@@ -863,27 +863,39 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
           CROSS JOIN (VALUES (1), (2)) AS gs(v)
          WHERE r.org_id = 'w72-plan-org'`)
       await client.query('ANALYZE attendance_record_calculations')
+      // EXACT index-name equality (gate NIT): a substring check would be
+      // satisfied by any index whose name merely STARTS with
+      // `uq_arc_operation` (e.g. a future `uq_arc_operation_*` sibling), so
+      // the scanning index's name is extracted and compared whole.
+      const scanIndexNames = (plan: string): string[] =>
+        [...plan.matchAll(/Index (?:Only )?Scan using (\S+) on/g)].map((m) => m[1])
       for (const shape of shapes) {
         const plan = (await client.query(`EXPLAIN ${shape.sql}`)).rows
           .map((r) => String(r['QUERY PLAN']))
           .join('\n')
-        expect(plan, `${shape.site}: must plan onto uq_arc_operation\n${plan}`).toContain(
+        expect(scanIndexNames(plan), `${shape.site}: must plan onto uq_arc_operation exactly\n${plan}`).toEqual([
           'uq_arc_operation',
-        )
+        ])
         expect(plan, `${shape.site}: full three-column Index Cond\n${plan}`).toMatch(
           /Index Cond: .*org_id.*entrypoint.*operation_id/s,
         )
       }
       // POSITIVE CONTROL — the probe can SEE the regression it guards: with
-      // the index gone (transactionally), the same statement must stop
-      // planning onto it. Without this, "plan contains uq_arc_operation"
-      // could be satisfied by a probe that reads nothing.
+      // the index gone (transactionally), EVERY shape must stop planning onto
+      // it (gate NIT: all shapes, not a single representative — the six
+      // instantiations differ in entrypoint literal and selected columns, and
+      // a per-shape planner quirk must not hide behind shapes[0]).
       await client.query('SAVEPOINT w72_plan_control')
       await client.query('DROP INDEX uq_arc_operation')
-      const degradedPlan = (await client.query(`EXPLAIN ${shapes[0].sql}`)).rows
-        .map((r) => String(r['QUERY PLAN']))
-        .join('\n')
-      expect(degradedPlan.includes('uq_arc_operation')).toBe(false)
+      for (const shape of shapes) {
+        const degradedPlan = (await client.query(`EXPLAIN ${shape.sql}`)).rows
+          .map((r) => String(r['QUERY PLAN']))
+          .join('\n')
+        expect(
+          scanIndexNames(degradedPlan).includes('uq_arc_operation'),
+          `${shape.site}: with the index dropped the probe must go red\n${degradedPlan}`,
+        ).toBe(false)
+      }
       await client.query('ROLLBACK TO SAVEPOINT w72_plan_control')
       await client.query('ROLLBACK')
     } finally {
@@ -897,6 +909,10 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
   it('P1-2 containment (total fault): with EVERY comparison insert faulted, the served scheduled run still commits and finalizes', async () => {
     const client = await pool.connect()
     try {
+      // The function+trigger pair is created ATOMICALLY (gate NIT): a suite
+      // death between the two statements must not leave a half-installed
+      // fault on the shared table.
+      await client.query('BEGIN')
       await client.query(`
         CREATE OR REPLACE FUNCTION w72_fault_comparison_insert() RETURNS trigger AS $$
         BEGIN
@@ -909,6 +925,7 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
           FOR EACH ROW
           WHEN (NEW.input_provenance ? 'w7GroupShadowCompare')
           EXECUTE FUNCTION w72_fault_comparison_insert()`)
+      await client.query('COMMIT')
       const boundary = makeBoundary()
       // The run must complete despite BOTH recorder attempts (full + degraded)
       // failing for every target — the served half is fail-isolated.
@@ -934,6 +951,8 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
   it('P1-2 containment (partial fault): with only the FULL comparison insert faulted, the degraded fail-close record lands (shadowReason recorder-error) and the run commits', async () => {
     const client = await pool.connect()
     try {
+      // Atomic function+trigger install (gate NIT) — see the total-fault leg.
+      await client.query('BEGIN')
       await client.query(`
         CREATE OR REPLACE FUNCTION w72_fault_comparison_insert() RETURNS trigger AS $$
         BEGIN
@@ -948,6 +967,7 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
           FOR EACH ROW
           WHEN (NEW.input_provenance ? 'w7GroupShadowCompare' AND NEW.context_snapshot IS NOT NULL)
           EXECUTE FUNCTION w72_fault_comparison_insert()`)
+      await client.query('COMMIT')
       const boundary = makeBoundary()
       await boundary.executeScheduledRun(scheduledInput(degradedOrg, [degradedUser]))
       const run = await pool.query(`SELECT state FROM attendance_scheduled_runs WHERE org_id = $1`, [degradedOrg])

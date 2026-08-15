@@ -42,13 +42,33 @@ import { sql, type Kysely } from 'kysely'
  *
  * WHAT THIS MIGRATION DOES CHANGE — [OWNER-CONFIRM, surfaced not buried]:
  * `chk_arc_operation_id` (zzzz20260725120000, comment: "operation_id is null
- * only for the internal legacy baseline") is REBUILT with a third disjunct
- * admitting the marker-tagged shadow comparison record with a NULL
- * operation_id (and REQUIRING NULL there, plus a non-empty marker
- * `operationId`, so a comparison record can never re-enter the
- * `uq_arc_operation` domain and can never lose its provenance link). This is
- * an additive widening — every previously legal row remains legal and both
- * original disjuncts are carried verbatim — but it amends a landed
+ * only for the internal legacy baseline") is REBUILT. The precise
+ * disjunct-by-disjunct delta — the owner rules from this text (gate P3-F1
+ * corrected an earlier wording here that called both original disjuncts
+ * "verbatim", which was mechanically false for the second one):
+ *
+ *   D1 (original first disjunct) — VERBATIM:
+ *       `calculation_kind = 'legacy_baseline' AND operation_id IS NULL`.
+ *   D2 (original second disjunct) — original text PLUS one added
+ *       marker-exclusion conjunct
+ *       (`AND NOT (input_provenance ? 'w7GroupShadowCompare')`). The added
+ *       conjunct is VACUOUS on every pre-existing row — provable, not
+ *       assumed: no pre-existing row carries the marker (it is written only
+ *       by the W7-2 comparison recorder this branch introduces), so
+ *       `NOT (marker)` is true for all of them and D2 admits exactly the
+ *       rows it admitted before. Its purpose is forward-looking: it makes
+ *       D2 and D3 disjoint, so a marker-tagged row can never satisfy the
+ *       operation-bearing disjunct and re-enter the `uq_arc_operation`
+ *       domain.
+ *   D3 (NEW) — the marker-gated comparison-record disjunct: `mode='shadow'`
+ *       AND the marker present AND `operation_id IS NULL` (REQUIRED) AND a
+ *       non-empty marker `operationId` (REQUIRED), so a comparison record
+ *       can neither collide with the served row's dedup slot nor lose its
+ *       provenance link.
+ *
+ * Net: every previously legal row remains legal (D1 verbatim; D2's narrowing
+ * vacuous on all pre-existing rows), and one previously illegal shape (the
+ * comparison record) becomes legal under D3 — but this amends a landed
  * constraint's stated invariant and therefore belongs in front of the owner
  * with this slice's ratify; it is named in the PR body as its own decision
  * point.
