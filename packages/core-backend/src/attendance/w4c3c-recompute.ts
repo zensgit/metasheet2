@@ -16,7 +16,7 @@ import {
   calculateAttendanceSegmentsV1,
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   deriveAttendanceLateTierFieldsV1,
-  validateFrozenContextShape,
+  isSupportedFrozenAttendanceContextV1,
 } from './w4c1-segment-calculator'
 import {
   canonicalAttendanceJsonV1,
@@ -329,7 +329,9 @@ export async function appendRecomputeCalculationV1(
     if (!isResolvedV2Attribution(prior.attribution_snapshot)) {
       fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.PRIOR_UNSUPPORTED, 409)
     }
-    if (!validateFrozenContextShape(prior.context_snapshot)) {
+    // W7-1b X4 [MUST_WIDEN]: `frozen_prior` recompute replays the persisted
+    // context verbatim; un-widened it fails on every group-frozen day.
+    if (!isSupportedFrozenAttendanceContextV1(prior.context_snapshot)) {
       fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.PRIOR_UNSUPPORTED, 409)
     }
     const segmentRows = await rows(
@@ -362,7 +364,9 @@ export async function appendRecomputeCalculationV1(
     if (!isResolvedV2Attribution(input.currentPolicyAttribution)) {
       fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.CURRENT_POLICY_INCOMPLETE, 409)
     }
-    if (!validateFrozenContextShape(input.currentPolicyContext)) {
+    // W7-1b X5 [MUST_WIDEN]: P6's core side. The freshly-built context is
+    // whatever the seam issued, so it can be v2.
+    if (!isSupportedFrozenAttendanceContextV1(input.currentPolicyContext)) {
       fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.CURRENT_POLICY_INCOMPLETE, 409)
     }
     const currentSegments: unknown[] = Array.isArray(

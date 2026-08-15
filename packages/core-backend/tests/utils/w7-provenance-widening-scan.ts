@@ -232,21 +232,71 @@ export function deriveAliasIdentifiersV1(source: string): string[] {
 }
 
 /**
+ * Regex-escape a symbol before it is interpolated into a matcher. Widening
+ * symbols are ordinary identifiers today, but `$` is a legal identifier
+ * character and is also a regex metacharacter in replacement position; an
+ * unescaped interpolation is how a matcher silently stops matching.
+ */
+function escapeForRegExpV1(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * WHOLE-TOKEN containment. `String.includes` is a SUBSTRING test, and a
+ * substring test over widening symbols is not merely over-broad — it
+ * MANUFACTURES widening evidence. A rename minting a short alias that happens
+ * to be a substring of the field spelling (`… as Owner`, a substring of
+ * `projectionOwner`) makes every line mentioning `projectionOwner` report
+ * `hasWideningSymbol = true`, and `hasWideningSymbol` feeds the
+ * `widened_predicate` evidence the diff consults. An un-widened predicate in
+ * such a file is then accepted as widened and the "漏一点即红" property the
+ * ratification made load-bearing fails silently.
+ *
+ * `\b` is NOT usable here: JS word boundaries treat `$` as a non-word
+ * character, so `\b` would split inside a `$`-carrying identifier. The
+ * identifier-class lookarounds below are the correct token boundary.
+ */
+function containsWholeTokenV1(haystack: string, token: string): boolean {
+  return new RegExp(`(?<![\\w$])${escapeForRegExpV1(token)}(?![\\w$])`).test(haystack)
+}
+
+/**
  * Second taint hop: `import { isAttendanceProjectionOwnerV1 as ownsPointer }`.
  * The file-level gate sees the original symbol, but every CALL SITE then spells
  * only the renamed local — so without this hop the file anchors and no line is
  * ever a site. The renamed local is treated as a widening symbol FOR THAT FILE.
+ *
+ * ANCHORED to a real import/export BINDING LIST. The previous form matched
+ * `X as Y` anywhere in the file, so a TS type assertion (`foo as Owner`), an
+ * `import()` type position, or prose inside a block comment containing those
+ * words all minted an alias that was then trusted as widening evidence for the
+ * whole file. Widening the regex is how that happened; the fix is to parse the
+ * clause and read the rename only inside it.
+ *
+ * The hop is REPAIRED, not removed: deleting it would pass every negative probe
+ * while silently under-collecting, which is the opposite failure. A legitimate
+ * `import { isAttendanceProjectionOwnerV1 as isKnown }` must still be honoured.
  */
 export function deriveRenamedWideningSymbolsV1(
   source: string,
   symbols: readonly string[],
 ): string[] {
   const renamed = new Set<string>()
-  for (const symbol of symbols) {
-    const re = new RegExp(`\\b${symbol}\\s+as\\s+([A-Za-z_$][\\w$]*)`, 'g')
-    let m: RegExpExecArray | null
-    while ((m = re.exec(source)) !== null) {
-      if (m[1]) renamed.add(m[1])
+  // `import { … }` / `import type { … }` / `export { … }` / `export type { … }`.
+  // The binding list is the ONLY position where `X as Y` is a rename.
+  const clauseRe = /\b(?:import|export)\s+(?:type\s+)?\{([^}]*)\}/g
+  let clause: RegExpExecArray | null
+  while ((clause = clauseRe.exec(source)) !== null) {
+    const bindings = clause[1]
+    for (const symbol of symbols) {
+      const re = new RegExp(
+        `(?<![\\w$])${escapeForRegExpV1(symbol)}\\s+as\\s+([A-Za-z_$][\\w$]*)`,
+        'g',
+      )
+      let m: RegExpExecArray | null
+      while ((m = re.exec(bindings)) !== null) {
+        if (m[1]) renamed.add(m[1])
+      }
     }
   }
   return [...renamed].sort()
@@ -337,7 +387,7 @@ export function deriveProvenanceWideningSurfaceV1(
         }
         if (inImportBlock || /^\s*import\b/.test(text)) continue
         if (isCommentLine(text)) continue
-        const hasWideningSymbol = symbols.some((symbol) => text.includes(symbol))
+        const hasWideningSymbol = symbols.some((symbol) => containsWholeTokenV1(text, symbol))
         // Evaluated over the enclosing DECLARATION, not the line. A fold's
         // return expression names the value but not the subject — the subject is
         // in the signature (`function foldKind(k: string): AttendanceDecisionTraceSourceKind`).
@@ -369,7 +419,9 @@ export function deriveProvenanceWideningSurfaceV1(
           hasNewValue: text.includes(newValue),
           hasWideningSymbol,
           declarationHasNewValue: declaration.includes(newValue),
-          declarationHasWideningSymbol: symbols.some((symbol) => declaration.includes(symbol)),
+          declarationHasWideningSymbol: symbols.some((symbol) =>
+            containsWholeTokenV1(declaration, symbol),
+          ),
         })
       }
     }
@@ -632,10 +684,22 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'const timelineEnv = parsed.basis.find((env) => env.source.kind === \'audit\' && env.source.ref === \'approval_records\')', rule: 'single_member_selector' },
   { file: 'packages/core-backend/src/attendance/w4c0-write-boundary-types.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
-  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'SET current_calculation_id = $3::uuid, projection_owner = \'w4\',', rule: 'write_side_emitter' },
+  // ⚠️ W7-1b: the hard-coded literal is GONE — this writer now DERIVES the value
+  // from the calculation's own frozen context, so the two ternary arms below are
+  // the derived points and the old single-literal entry is correctly stale.
+  // `write_side_emitter` holds for both: neither line TESTS the value, so neither
+  // can route the new member to the wrong side. The selection is made by the
+  // ternary CONDITION, which compares `context.selector`, not `projection_owner`.
+  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: "? 'w4_group'", rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ": 'w4'", rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'isAttendanceProjectionOwnerWithCalculationPointerV1(parent.projectionOwner) &&', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'let owner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
-  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'owner = \'w4\'', rule: 'write_side_emitter' },
+  // ⚠️ W7-1b B6 THIRD EMITTER: the hard-coded `owner = 'w4'` on the
+  // absent-preimage RETIRE path is GONE — it now derives from the calculation's
+  // own frozen context, so the old single-literal entry is correctly stale and
+  // the derived points are the shared `? 'w4_group'` / `: 'w4'` ternary arms
+  // already ledgered above for this file. Retiring a group-owned parent used to
+  // RELABEL it `'w4'` (a lying pointer); that is what this removal records.
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'projectionOwner: isAttendanceProjectionOwnerV1(row.projection_owner)', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'readonly projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: '} else if (parent.projectionOwner === \'legacy_untracked\' && parent.visibilityState === \'active\') {', rule: 'legacy_polarity' },
@@ -652,7 +716,10 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '(projectionOwner === \'legacy_untracked\' && currentCalculationId !== null) ||', rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '\'legacy_untracked\',NULL,$15,$16,now(),now()', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: 'if (input.preimage.projectionOwner !== \'legacy_untracked\') return', rule: 'legacy_polarity' },
-  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: 'timezone = $9, projection_owner = \'w4\', current_calculation_id = $10::uuid,', rule: 'write_side_emitter' },
+  // W7-1b: same shape at P5's import writer — literal replaced by a bound
+  // parameter whose value is derived from the same place.
+  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: "? 'w4_group'", rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: ": 'w4',", rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', text: 'AND (current_calculation_id IS NOT NULL OR projection_owner IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1}))', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback.ts', text: '!isAttendanceProjectionOwnerV1(row.projectionOwner) ||', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback.ts', text: '!isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner) ||', rule: 'widened_predicate' },

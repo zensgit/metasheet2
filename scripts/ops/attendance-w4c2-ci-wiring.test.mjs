@@ -2266,6 +2266,11 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-w6-group-effective-policy.db.test.ts',
   'tests/integration/attendance-w7-1a-resolver.db.test.ts',
   'tests/integration/attendance-w7-1am-provenance-widening.db.test.ts',
+  'tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts',
+  'tests/integration/attendance-w7-1b-issuance-seam.db.test.ts',
+  'tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts',
+  'tests/integration/attendance-w7-1b-lock-census.db.test.ts',
+  'tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts',
   'tests/integration/attendance-work-date-resolver-w2.db.test.ts',
 ])
 

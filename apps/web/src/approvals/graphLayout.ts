@@ -21,12 +21,12 @@ export interface GraphLayout {
   height: number
 }
 
-export const GRAPH_LAYOUT_NODE_WIDTH = 190
-export const GRAPH_LAYOUT_NODE_HEIGHT = 96
-const X_SPACING = 230
-const Y_SPACING = 150
-const X_MARGIN = 40
-const Y_MARGIN = 40
+export const GRAPH_LAYOUT_NODE_WIDTH = 264
+export const GRAPH_LAYOUT_NODE_HEIGHT = 76
+const X_SPACING = 304
+const Y_SPACING = 176
+const X_MARGIN = 72
+const Y_MARGIN = 36
 
 /**
  * Vertical longest-path layout: each node's layer is the longest path from `start` to it, so a
