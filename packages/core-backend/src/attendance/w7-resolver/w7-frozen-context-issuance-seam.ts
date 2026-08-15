@@ -17,9 +17,18 @@
  *
  * Two copies of an arm-selection rule is exactly the drift the lock forbids,
  * and it is why this is a seam rather than a helper each producer calls
- * alongside its own logic. `tests/unit/attendance-w7-1b-issuance-seam-closure.test.ts`
- * pins the closure mechanically (import graph, adapter graph, CJS require
- * graph), because "everyone remembered to call the seam" is not an invariant.
+ * alongside its own logic. The closure is pinned mechanically by the re-formed
+ * census in `tests/unit/attendance-w7-1a-inertness-sweep.test.ts`
+ * (`W7_1B_PRODUCTION_IMPORTERS_V1` — exact-set importer closure over resolved
+ * module paths, static AND dynamic `import()` — plus
+ * `W7_1B_PRODUCTION_CALL_SITES_V1`, the empty direct-call-site set), because
+ * "everyone remembered to call the seam" is not an invariant. (W7-2 doc
+ * correction: an earlier revision of this header cited a
+ * `attendance-w7-1b-issuance-seam-closure.test.ts` file that does not exist —
+ * the census above is the real, running guard; the import-graph leg is what it
+ * pins, and the adapter-graph/CJS-require coupling is carried by the boundary's
+ * fail-closed adapter conjunction plus the host-port wiring legs, not by a
+ * dedicated file of that name.)
  *
  * ---------------------------------------------------------------------------
  * PLACEMENT — a NAMED DEVIATION from the predecessor brief (owner fork O-3)
@@ -73,7 +82,10 @@ import {
   coreIssueGroupEffectiveContextV2,
   type FrozenAttendanceContextV2,
 } from './w7-group-effective-context-issuance'
-import type { AttendanceW7ContextSourcePostureStateV1 } from '../w7-context-source-posture-contract'
+import {
+  ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1,
+  type AttendanceW7ContextSourcePostureStateV1,
+} from '../w7-context-source-posture-contract'
 
 // ---------------------------------------------------------------------------
 // The arm-selection rule. EXPORTED, because OD-W7-10's `currentProducer` needs
@@ -106,19 +118,88 @@ export const ATTENDANCE_W7_BLOCKED_ARM_STATES_V1: readonly AttendanceW7ContextSo
   Object.freeze(['suspended'] as const)
 
 /**
- * The posture states that select the GROUP arm.
+ * The posture states that select the GROUP arm — the states where the group
+ * arm is SERVED.
  *
- * `group_authoritative` ONLY, for W7-1b. `group_shadow`, `group_eligible` and
- * `off` take the legacy arm; `suspended` is BLOCKED (see above).
- *
- * This is a NAMED NON-DELIVERY, not an omission: 1b's enumerated scope is the
- * REPLACE cutover, and a shadow-COMPARE arm is a different behaviour with a
- * different acceptance story that the ratification's 1b list does not name.
- * Widening this set is a behaviour change requiring its own ruling — it is a
- * frozen array rather than a predicate so that widening it is a visible diff.
+ * `group_authoritative` ONLY, and W7-2 keeps it that way: the compare rung
+ * (design lock §8 item 5, the ratified W7-2 slice) delivers `group_shadow` /
+ * `group_eligible` as a DUAL-RUN sibling set
+ * (`ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1` below) in which the legacy arm
+ * stays the served producer byte for byte (W7-R3) — NOT as a widening of this
+ * array, which would make the group arm replace the legacy one. `off` takes
+ * the legacy arm; `suspended` is BLOCKED (see above). It remains a frozen
+ * array rather than a predicate so that widening it is a visible diff.
+ * (1b's "NAMED NON-DELIVERY" note stood here; W7-2 is the ruled slice that
+ * closes it — ratification ruling 1 adopts the lock, §4.2 fixes the
+ * `group_shadow` semantics, and the work boundary enumerates W7-2 as an
+ * authorized-to-build slice.)
  */
 export const ATTENDANCE_W7_GROUP_ARM_STATES_V1: readonly AttendanceW7ContextSourcePostureStateV1[] =
   Object.freeze(['group_authoritative'] as const)
+
+/**
+ * W7-2 — the posture states that run the SHADOW-COMPARE dual-run (design lock
+ * §4.2): the legacy arm remains the SERVED producer byte for byte (W7-R3),
+ * and the group arm additionally produces an UNSERVED comparison context.
+ *
+ * A SIBLING of `ATTENDANCE_W7_GROUP_ARM_STATES_V1`, never a widening of it:
+ * that array means "the group arm is SERVED", and adding `group_shadow` to it
+ * would make the group arm REPLACE the legacy one in a state where the lock
+ * requires it not to — a W7-R3 violation, and the single worst available
+ * misreading of the compare rung. The group-arm array is deliberately
+ * UNCHANGED by W7-2.
+ *
+ * `group_eligible` also runs the compare — [OWNER-CONFIRM B-3, OPEN]: the
+ * lock fixes byte parity in both states (W7-R3) but does not say explicitly
+ * whether the comparison keeps running in `group_eligible`; the recommended
+ * reading implemented here is YES (otherwise the compare window's evidence
+ * goes stale between eligibility and cutover). The owner may rule that
+ * `group_eligible` freezes comparison, which shrinks this array by one.
+ */
+export const ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1: readonly AttendanceW7ContextSourcePostureStateV1[] =
+  Object.freeze(['group_shadow', 'group_eligible'] as const)
+
+export function attendanceW7PostureSelectsShadowCompareV1(
+  effectiveState: AttendanceW7ContextSourcePostureStateV1,
+): boolean {
+  return ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1.includes(effectiveState)
+}
+
+/**
+ * W7-2 — the arm-state PARTITION invariant, asserted at module load so a
+ * violation is unrepresentable rather than merely untested. Derived from
+ * `ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1` (imported, never
+ * re-spelled): the group-arm set, the shadow-compare set, the blocked set and
+ * the legacy remainder (`off`) must be pairwise disjoint and must cover the
+ * state enumeration EXACTLY — a sixth state added later with no bucket reds
+ * here by construction, and a state added to two buckets reds too.
+ *
+ * Exported so the partition leg can also exercise it against a mutated local
+ * domain copy (the added-state control).
+ */
+export function assertAttendanceW7ArmStatePartitionV1(
+  domain: readonly string[] = ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1,
+): void {
+  const buckets: readonly (readonly string[])[] = [
+    ATTENDANCE_W7_GROUP_ARM_STATES_V1,
+    ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1,
+    ATTENDANCE_W7_BLOCKED_ARM_STATES_V1,
+    ['off'], // the legacy remainder — the ladder's own legacy-sourcing state
+  ]
+  const seen = new Set<string>()
+  for (const bucket of buckets) {
+    for (const member of bucket) {
+      if (seen.has(member) || !domain.includes(member)) {
+        throw new Error('W7_ARM_STATE_PARTITION_INVALID')
+      }
+      seen.add(member)
+    }
+  }
+  for (const member of domain) {
+    if (!seen.has(member)) throw new Error('W7_ARM_STATE_PARTITION_INVALID')
+  }
+}
+assertAttendanceW7ArmStatePartitionV1()
 
 /**
  * The arm-selection rule, isolated from issuance.
@@ -216,6 +297,28 @@ export type AttendanceW7IssuanceResultV1 =
       context: FrozenAttendanceContextV2 | null
       reason: AttendanceW7GroupResolutionReasonV1 | null
     }
+  /**
+   * W7-2 — the DUAL-RUN variant (shadow-compare states, `purpose:'persist'`).
+   * `context` is the LEGACY arm's output — the SERVED context, byte-identical
+   * to what the legacy variant would carry (W7-R3) — so every existing
+   * `.context` unwrap keeps serving the legacy result unchanged. The group
+   * half rides alongside: `shadowContext` is the UNSERVED group-derived V2
+   * (recorded as a shadow calculation by the boundary, never served), and a
+   * failed group resolution carries `shadowReason` instead — consumed, not
+   * discarded: the boundary records it as a per-target comparison record
+   * (design lock §5 item 1), never an org-wide wedge and never a silently
+   * substituted legacy result.
+   *
+   * A THIRD variant rather than a second seam call: one call per producer
+   * keeps the closure census a single-importer assertion, and keeps "both
+   * arms ran on identical inputs" true by construction.
+   */
+  | {
+      arm: 'legacy_with_group_shadow'
+      context: FrozenAttendanceContextV1 | null
+      shadowContext: FrozenAttendanceContextV2 | null
+      shadowReason: AttendanceW7GroupResolutionReasonV1 | null
+    }
 
 /**
  * `core-backend` compiles with `strict: false`, so TypeScript does NOT narrow
@@ -290,6 +393,66 @@ export async function issueAttendanceFrozenContextV1(
   // does not redirect it.
   if (ATTENDANCE_W7_BLOCKED_ARM_STATES_V1.includes(posture.effectiveState)) {
     return { arm: 'blocked', context: null, reason: 'suspended' }
+  }
+
+  // Step 2a (W7-2) — the SHADOW-COMPARE dual-run. Both arms run: the legacy
+  // arm's output is the SERVED context (byte-identical args and bytes —
+  // W7-R3), the group arm's output is the UNSERVED comparison half.
+  //
+  //  - `purpose: 'mirror'` deliberately does NOT dual-run: the mirror is the
+  //    outer-fingerprint observer of the SERVED path, and under the
+  //    shadow-compare states the served path is the legacy arm — minting an
+  //    unserved group context in a fingerprint-only observer would be work
+  //    nothing records. The mirror therefore falls through to the plain
+  //    legacy arm below, which keeps ruling 7's mirror byte-identical to the
+  //    served result in these states.
+  //  - Group-side ORDER: legacy first, then the group facts resolver — the
+  //    same relative order as the pre-W7-2 tree at the boundary's W4-shadow
+  //    sites, and the same single composite-lock helper (no new lock-order
+  //    pair: the (parent row lock -> composite advisory locks) composition
+  //    already exists at those sites under `group_authoritative`, per the
+  //    W7-1b lock re-census).
+  //  - `{ok:false}` group resolution FAILS CLOSED into `shadowReason` — never
+  //    a thrown error (the served punch must not 5xx because the unserved
+  //    comparison half could not resolve; rulings 5/6/11 fail-closes surface
+  //    as recorded per-target comparison records, design lock §5 item 1).
+  //    The posture resolver's three CORRUPTION throws already propagated at
+  //    step 1, unchanged.
+  if (
+    attendanceW7PostureSelectsShadowCompareV1(posture.effectiveState) &&
+    input.purpose === 'persist'
+  ) {
+    const context = await deps.buildLegacyFrozenContext({
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      timezone: input.timezone,
+      isWorkday: input.isWorkday,
+      holidayKind: input.holidayKind,
+      shiftId: input.shiftId,
+    })
+    const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, deps, {
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      timezone: input.timezone,
+      isWorkday: input.isWorkday,
+      holidayKind: input.holidayKind,
+    })
+    if (isFailedGroupResolutionV1(resolution)) {
+      return {
+        arm: 'legacy_with_group_shadow',
+        context: context ?? null,
+        shadowContext: null,
+        shadowReason: resolution.reason,
+      }
+    }
+    return {
+      arm: 'legacy_with_group_shadow',
+      context: context ?? null,
+      shadowContext: coreIssueGroupEffectiveContextV2(resolution.facts),
+      shadowReason: null,
+    }
   }
 
   // Steps 2/3 — the branch.

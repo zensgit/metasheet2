@@ -24,9 +24,14 @@ export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
 
 export type AttendanceW4ShadowDiffCode = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES)[number]
 
-// W7-2 (#4556): derived from the ONE exported critical-code set — see
-// `ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1`'s doc comment for why this is
-// no longer a module-private duplicate.
+// W7-2 (#4556): derived from the ONE exported critical-code set
+// (ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1, doc comment there) so the
+// criticality classification cannot fork between this reader and the W7
+// compare-window counters. NOTE for editors: comments in this file must stay
+// free of stray backticks and apostrophes — the DML-inventory read census
+// derives SQL-literal boundaries with a quote-parity scan over the whole file,
+// and an odd quote count above a query silently strips its predicate
+// fingerprint (observed while landing W7-2).
 const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>(
   ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1,
 )

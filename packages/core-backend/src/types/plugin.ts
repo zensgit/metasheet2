@@ -1231,12 +1231,18 @@ export interface PluginServices {
      * W7-1b (#4556 comments 5293034619 + 5293478713) — THE single shared
      * frozen-context issuance seam (ruling 3 / OD-W7-9 = REPLACE).
      *
-     * Resolves the W7 context-source posture and returns EITHER the legacy
-     * arm's context (built by the caller's own injected legacy builder, bytes
-     * unchanged) or a core-issued group-effective V2 context. The arm-selection
-     * rule exists ONLY inside the seam; a caller that re-derives it is the drift
-     * the lock forbids, and `attendance-w7-1b-issuance-seam-closure.test.ts`
-     * pins that mechanically.
+     * Resolves the W7 context-source posture and returns the legacy arm's
+     * context (built by the caller's own injected legacy builder, bytes
+     * unchanged), a core-issued group-effective V2 context, or — W7-2, under
+     * the shadow-compare posture states — the dual-run variant carrying the
+     * served legacy context PLUS the unserved group comparison half. The
+     * arm-selection rule exists ONLY inside the seam; a caller that re-derives
+     * it is the drift the lock forbids, pinned mechanically by the re-formed
+     * closure census in `tests/unit/attendance-w7-1a-inertness-sweep.test.ts`
+     * (exact-set production-importer and direct-call-site legs). (W7-2 doc
+     * correction: an earlier revision cited a
+     * `attendance-w7-1b-issuance-seam-closure.test.ts` file that never
+     * existed; the census above is the real, running guard.)
      *
      * `deps` is injected by the plugin because three of the four dependencies
      * are plugin-owned (the pure FSER derivation, the canonical producer-key

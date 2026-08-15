@@ -814,6 +814,13 @@ export default defineConfig({
       // PostgreSQL. Two-point wired: excluded from no-DB collection here,
       // whole-file run in plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-w7-2-compare-window-status.db.test.ts',
+      // #4556 W7-2: the group_shadow dual-run produced-row legs. Drives the
+      // production boundary factory with the plugin's real scheduled adapters and
+      // the real core issuance seam over real PostgreSQL (posture rows, rollout
+      // walks, FSER group fixtures, the dedup-partition probe). Two-point wired:
+      // excluded from no-DB collection here, whole-file run in plugin-tests.yml's
+      // attendance-real-db-integration step.
+      'tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
