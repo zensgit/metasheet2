@@ -1740,7 +1740,7 @@ action_observe() {
   [[ "$live_flag" == "true" ]] \
     || fail "action=observe requires live Stream ON (got stream_enabled=${live_flag})"
 
-  local tmp anchor_count handled_count handler_error_count update_failed_count
+  local tmp anchor_count handled_count window_handler_error_count update_failed_count
   local header_present="unknown" body_present="unknown" handled_outcome="unknown"
   tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
   register_ephemeral "$tmp"
@@ -1750,7 +1750,10 @@ action_observe() {
 
   anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
   handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
-  handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
+  # The worker's catch log intentionally carries no delivery id. Keep it as a
+  # window-level diagnostic; it must never be presented as scoped evidence for
+  # EXPECTED_DELIVERY_ID.
+  window_handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
   update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
 
   if [[ "$anchor_count" -gt 0 ]]; then
@@ -1772,9 +1775,6 @@ action_observe() {
     case "$handled_line" in
       *'(executed delivery='*) handled_outcome="executed" ;;
       *'(stale delivery='*) handled_outcome="stale" ;;
-      *'(rejected:'*) handled_outcome="rejected" ;;
-      *'(ignored_unsupported_action out_track_id='*) handled_outcome="ignored_unsupported_action" ;;
-      *'(delivery_not_found out_track_id='*) handled_outcome="delivery_not_found" ;;
       *'(operator_unresolved:'*) handled_outcome="operator_unresolved" ;;
       *'(link_secret_unavailable delivery='*) handled_outcome="link_secret_unavailable" ;;
       *'(engine_rejected:'*) handled_outcome="engine_rejected" ;;
@@ -1794,7 +1794,7 @@ action_observe() {
     echo "body_corp_id_present=${body_present}"
     echo "callback_handled_count=${handled_count}"
     echo "latest_callback_outcome=${handled_outcome}"
-    echo "callback_handler_error_count=${handler_error_count}"
+    echo "window_callback_handler_error_count=${window_handler_error_count}"
     echo "card_update_failed_count=${update_failed_count}"
   } > "${OUTPUT_DIR}/callback-observer.txt"
   cp "${OUTPUT_DIR}/callback-observer.txt" "${OUTPUT_DIR}/summary.txt"

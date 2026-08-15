@@ -221,6 +221,10 @@ test('observe requires a lowercase expected delivery UUID and never emits it', (
   assert.equal(validate.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
   assert.match(validate.run, /observe requires expected_delivery_id as a lowercase UUID/)
   assert.match(validate.run, /\[1-5\]\[0-9a-f\]\{3\}/)
+  const remoteStep = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
+  assert.equal(remoteStep.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
+  assert.match(remoteStep.run, /refusing invalid expected_delivery_id in remote execution step/)
+  assert.match(remoteStep.run, /case "\$ACTION" in status\|observe\|prepare\|on\|off/)
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
   assert.match(observe, /grep -F -c "\$EXPECTED_DELIVERY_ID"/)
@@ -254,13 +258,11 @@ test('observe is read-only and emits values-free callback classes without raw lo
   assert.match(observe, /header_event_corp_id_present=/)
   assert.match(observe, /body_corp_id_present=/)
   assert.match(observe, /latest_callback_outcome=/)
+  assert.match(observe, /window_callback_handler_error_count=/)
   assert.match(observe, /card_update_failed_count=/)
   for (const outcome of [
     'executed',
     'stale',
-    'rejected',
-    'ignored_unsupported_action',
-    'delivery_not_found',
     'operator_unresolved',
     'link_secret_unavailable',
     'engine_rejected',
@@ -268,7 +270,17 @@ test('observe is read-only and emits values-free callback classes without raw lo
   ]) {
     assert.match(observe, new RegExp(`handled_outcome="${outcome}"`))
   }
+  // These production outcome strings do not carry the delivery UUID and cannot
+  // be claimed as evidence for EXPECTED_DELIVERY_ID.
+  for (const unscopedOutcome of [
+    'rejected',
+    'ignored_unsupported_action',
+    'delivery_not_found',
+  ]) {
+    assert.doesNotMatch(observe, new RegExp(`handled_outcome="${unscopedOutcome}"`))
+  }
   assert.doesNotMatch(observe, /handled_outcome="(?:accepted|duplicate)"/)
+  assert.doesNotMatch(observe, /echo "callback_handler_error_count=/)
   assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
   assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
 })
