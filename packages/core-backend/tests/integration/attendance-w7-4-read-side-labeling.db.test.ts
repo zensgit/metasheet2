@@ -9,13 +9,18 @@
  * (blob `f7acf1da3be791bb2d77dbe58ca1078055828521`). Draft/HOLD slice — every
  * Ready/merge/flag/env/enablement step is separately owner-gated.
  *
- * `[OWNER-CONFIRM]` forks, recorded OPEN (none is ruled, none is assumed):
+ * `[OWNER-CONFIRM]` forks:
  *   D-1  slot numbering (whether this slice is "W7-4" or "W7-5") — OPEN; no
  *        deliverable here changes under either ruling.
- *   D-2  O-8's scoping half (emission in the read-side slice vs retro-fitted
- *        into 1b) — OPEN; the O-8 *technical* adjudication (field threading,
- *        not a new surface: no new SQL, no DML, no lock) is an orchestration
- *        adjudication of scope, not an owner ruling.
+ *   D-2  O-8's scoping half — RULED, no longer open: the W7 ratification
+ *        addendum (#4556 comment 5302425091, owner first-person confirmation
+ *        5302459230, 2026-08-15T13:32:20Z, prospective from confirmation)
+ *        rules "O-8 = 归 W7-4" — emission belongs to this read-side slice, and
+ *        the emission conditions on the CONTEXT'S selector, never the org
+ *        posture (the ruling names that condition verbatim; the implementation
+ *        below matches it word for word). The O-8 *technical* half (field
+ *        threading, not a new surface: no new SQL, no DML, no lock) was an
+ *        orchestration adjudication of scope and is now subsumed by the ruling.
  *   D-3  `posture: 'undeterminable'` being unreachable for `w4_group` — OPEN;
  *        asserted below as an invariant consequence, not as a ruling.
  *
@@ -237,6 +242,17 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
   const shadowUser = randomUUID()
   const shadowShift = randomUUID()
   const shadowGroup = randomUUID()
+  // LEGACY-SHADOW org (T-K7b, the SHADOW arm's legacy-selector negative case):
+  // a legacy org (NO W7 posture row, NOT W7-allowlisted) at W4 rollout
+  // `shadow` — its completed shadow calculation carries a legacy-built v1
+  // context (`selector: 'legacy'`). This is a reachable production posture
+  // inside W7-R3's protected population; without this fixture the shadow
+  // emission's legacy branch has zero coverage (a widening of the shadow
+  // ternary to also emit the group kind for `'legacy'` would leave every other
+  // leg green — gate probe G3).
+  const legacyShadowOrg = randomUUID()
+  const legacyShadowUser = randomUUID()
+  const legacyShadowShift = randomUUID()
   // REVIEW org (T-K10): shadow rollout + group posture, punched into a
   // NON-COMPLETED latest shadow calculation → `contextSelector` null → 'snapshot'.
   const reviewOrg = randomUUID()
@@ -258,7 +274,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
 
   const workDates: Record<string, string> = {}
 
-  const allOrgs = () => [groupOrg, legacyOrg, preGroupOrg, shadowOrg, reviewOrg, corruptOrg]
+  const allOrgs = () => [groupOrg, legacyOrg, preGroupOrg, shadowOrg, legacyShadowOrg, reviewOrg, corruptOrg]
   const w4Allowlist = () => allOrgs().map((o) => o.toLowerCase()).join(',')
   const w7Allowlist = () =>
     [groupOrg, shadowOrg, reviewOrg, corruptOrg].map((o) => o.toLowerCase()).join(',')
@@ -569,6 +585,11 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
     await seedRollout(shadowOrg, 'shadow')
     await seedEffectiveGroup(shadowOrg, shadowUser, shadowShift, shadowGroup, 'group_authoritative')
 
+    // ---- LEGACY-SHADOW org (T-K7b) -----------------------------------------
+    await insertActiveUser(legacyShadowUser, legacyShadowOrg)
+    await seedRollout(legacyShadowOrg, 'shadow')
+    await seedPlainAssignment(legacyShadowOrg, legacyShadowUser, legacyShadowShift, 1439)
+
     // ---- REVIEW org --------------------------------------------------------
     await insertActiveUser(reviewUser, reviewOrg)
     await seedRollout(reviewOrg, 'shadow')
@@ -587,6 +608,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
         [legacyUser, legacyOrg],
         [preGroupUser, preGroupOrg],
         [shadowUser, shadowOrg],
+        [legacyShadowUser, legacyShadowOrg],
         [corruptUser, corruptOrg],
       ] as const) {
         const res = await punch(user, org, 'check_in')
@@ -619,6 +641,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
       ['legacy', legacyUser],
       ['preGroup', preGroupUser],
       ['shadow', shadowUser],
+      ['legacyShadow', legacyShadowUser],
       ['review', reviewUser],
       ['corrupt', corruptUser],
     ] as const) {
@@ -732,7 +755,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
       .catch(() => undefined)
     await pool
       ?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [
-        [groupUser, legacyUser, preGroupUser, shadowUser, reviewUser, corruptUser],
+        [groupUser, legacyUser, preGroupUser, shadowUser, legacyShadowUser, reviewUser, corruptUser],
       ])
       .catch(() => undefined)
     await pool?.end()
@@ -1046,6 +1069,33 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
     const env = calcBasisEnv(res.body, 'shadow')
     expect(env, 'shadow basis env must exist').toBeDefined()
     expect(env!.source.kind).toBe(ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1)
+    expect(env!.source.ref).toBe('attendance_record_calculations:shadow')
+    expect((env as any).version.posture).toBe('current_live_no_history')
+  })
+
+  it('T-K7b: LEGACY-selector completed shadow evidence stays snapshot — the shadow arm negative case', async () => {
+    // Premise from the DB first: a COMPLETED shadow calculation whose context
+    // is the legacy-built v1 (`selector: 'legacy'`), in an org with NO posture
+    // row — the exact W7-R3-protected shape the shadow arm must never relabel.
+    const calc = await latestCalc(legacyShadowUser)
+    expect(calc.mode).toBe('shadow')
+    expect(calc.outcome).toBe('completed')
+    const ctx = calc.context_snapshot as Record<string, unknown>
+    expect(ctx.selector).toBe('legacy')
+    expect(ctx.schemaVersion).toBe(1)
+    const posture = await pool.query(`SELECT state FROM ${POSTURE_TABLE} WHERE org_id = $1`, [
+      legacyShadowOrg.toLowerCase(),
+    ])
+    expect(posture.rowCount).toBe(0)
+
+    const res = await adminTrace(legacyShadowOrg, legacyShadowUser, 'today_status', workDates.legacyShadow)
+    expect(res.status).toBe(200)
+    const env = calcBasisEnv(res.body, 'shadow')
+    expect(env, 'shadow basis env must exist').toBeDefined()
+    // The POSITIVE non-group equality: a widening of the shadow ternary that
+    // also emits the group kind for `'legacy'` (gate probe G3) reds exactly
+    // this line while every other leg stays green.
+    expect(env!.source.kind).toBe('snapshot')
     expect(env!.source.ref).toBe('attendance_record_calculations:shadow')
     expect((env as any).version.posture).toBe('current_live_no_history')
   })

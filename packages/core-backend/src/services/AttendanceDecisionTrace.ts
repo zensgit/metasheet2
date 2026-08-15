@@ -383,6 +383,15 @@ async function readAttendanceW4DecisionBasis(
         projection: null,
       }
     }
+    // W7-4 (#4556) CURRENT-FACT note (not an invariant): this guard is
+    // behaviourally unreachable TODAY, because the projection status domain
+    // (`DAILY_STATUSES`, AttendanceW4CalculationDetail.ts) and the record
+    // status domain (`ATTENDANCE_RECORD_STATUS_VALUES`, this file) are the
+    // same 8-member set — mechanically compared 2026-08-15, both-direction
+    // set difference empty. It stays as defense-in-depth: if the two sets
+    // ever diverge, this arm emits the SAME unavailable env as the two
+    // reachable siblings above (each of which is mutation-covered), so a
+    // divergence cannot mislabel — it degrades to unavailable.
     if (!isAttendanceRecordStatus(result.evidence.projection.status)) {
       return {
         basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
