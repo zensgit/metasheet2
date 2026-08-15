@@ -789,6 +789,14 @@ export default defineConfig({
       // control and the composed-order non-deadlock) plus T-M6's pg_locks
       // observation. Concurrency evidence is meaningless without real PostgreSQL.
       'tests/integration/attendance-w7-1b-lock-census.db.test.ts',
+      // #4556 W7-4: read-side trace labeling. Boots a real MetaSheetServer with
+      // the real plugin, drives real punches to persist group/legacy/shadow
+      // calculations, and reads them back through the real decision-trace and
+      // calculation-detail routes — including the T-K1 golden captured at the
+      // pre-W7-4 base. Meaningless without real PostgreSQL. Two-point wired:
+      // excluded from no-DB collection here, whole-file run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-4-read-side-labeling.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.

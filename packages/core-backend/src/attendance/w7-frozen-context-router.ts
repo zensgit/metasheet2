@@ -184,17 +184,22 @@ export function validateFrozenAttendanceContextV2ShapeV1(
 }
 
 /**
- * ⚠️ NO PRODUCTION CONSUMER YET, and that is recorded rather than implied.
+ * PRODUCTION CONSUMERS, recorded rather than implied (this note originally
+ * read "no production consumer yet"; W7-4 changed that).
  *
- * All six widened X-sites use the BOOLEAN `isSupportedFrozenAttendanceContextV1`,
- * because all six genuinely accept both schemas — their per-site verdicts are
- * "accept either", so there is nothing for them to discriminate on. The
- * discriminated form exists for the sites that will need to branch (a v2-only
- * read side, a future group-specific projection), and it is exercised by tests.
+ * Five of the six widened X-sites use the BOOLEAN
+ * `isSupportedFrozenAttendanceContextV1`, because their per-site verdicts are
+ * "accept either" — there is nothing for them to discriminate on. X6
+ * (`parseTraceProjection`, `AttendanceW4CalculationDetail.ts`) consumes the
+ * DISCRIMINATED router since W7-4 (#4556 read-side labeling): its acceptance
+ * verdict is unchanged (the boolean IS the router's `!== 'invalid'`), but it
+ * additionally threads the validated context's `selector` out to the
+ * decision-trace basis builder, which needs the typed discriminated branches
+ * rather than a cast.
  *
- * This is the same "shape with no producer" honesty the `v2-legacy` note above
- * applies to itself: saying so is what stops a later reader from assuming the
- * router is load-bearing in production when the boolean is.
+ * The `v2-legacy` note above still applies to itself: saying which form each
+ * consumer uses is what stops a later reader from assuming the wrong one is
+ * load-bearing.
  */
 export type RoutedFrozenAttendanceContextV1 =
   | { kind: 'v1'; context: FrozenAttendanceContextV1 }
