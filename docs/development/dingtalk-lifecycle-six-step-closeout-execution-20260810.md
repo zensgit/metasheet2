@@ -2,7 +2,7 @@
 
 - Date: 2026-08-10
 - Updated: 2026-08-15
-- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH + STREAM PREPARE/OFF COMPLETE / APPLY-TIME BROWSER DENIAL + U1-U13 + PRODUCTION GATES NOT EXECUTED**
+- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH + STREAM START/STOP PROVEN / APPLY-TIME BROWSER DENIAL + U1-U13 HUMAN CLICK MATRIX + PRODUCTION GATES NOT EXECUTED**
 - Implementation baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
 - Repository evidence head: `origin/main @ cc69791604f338a90e07dc07da8118a2d7a68188`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
@@ -128,14 +128,15 @@ The former image-tag/health-commit conflict is resolved. Alias and pending produ
 
 ## 4. Owner and ops acceptance
 
-Real enterprise evidence is unavailable in this development lane. Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
+The controlled staging Stream window ran, but real DingTalk human-click evidence was unavailable.
+Therefore these are explicitly **NOT EXECUTED**, not simulated PASS:
 
 - U1-U13 interactive-card acceptance;
 - U11-a real callback corp-anchor;
 - named owners and final production switch decisions;
 - deprovision apply-time browser denial (post-activation and post-restore OAuth positives passed; production flags remain separate decisions);
 
-Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status` are complete per §3.2 and the companion execution record. The current terminal statuses independently prove the lifecycle flags and Stream remain OFF.
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-activation/post-restore OAuth positives, and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. Stream `on` created approval `AP-100009`; no card receipt or click was observed, so this is start/stop evidence only. The current terminal statuses independently prove the lifecycle flags and Stream remain OFF.
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
@@ -176,4 +177,4 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
 | Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
 
-The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. The deprovision apply-time browser denial, U1-U13/corp-anchor, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796` and `31856563224`; the real-card U1-U13/corp-anchor matrix is not. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
