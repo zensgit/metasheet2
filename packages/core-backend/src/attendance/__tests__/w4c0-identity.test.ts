@@ -334,6 +334,14 @@ describe('resolveSegmentCalculationPosture return-shape matrix', () => {
       expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
     })
 
+    /**
+     * Every entry in this loop is STRUCTURALLY INERT: none of them can equal ANY org key, so
+     * the leg's scope is "folding does not invent prefix/substring/wildcard matching".
+     *
+     * `'DEFAULT'` was in this loop and has been removed — see the leg below. It is true that it
+     * does not admit a UUID subject, but it is not inert in kind (it folds onto a legal org
+     * key), and leaving it here invited the over-general read "DEFAULT still admits nothing".
+     */
     it('NEGATIVE CONTROL: folding never lets a prefix, suffix, or wildcard entry match', async () => {
       for (const entry of [
         FOLD_ORG.slice(0, 20).toUpperCase(), // strict prefix
@@ -342,7 +350,6 @@ describe('resolveSegmentCalculationPosture return-shape matrix', () => {
         ' * ',
         '.*',
         '%',
-        'DEFAULT',
         '',
       ]) {
         process.env[ALLOWLIST_ENV] = entry
@@ -352,9 +359,42 @@ describe('resolveSegmentCalculationPosture return-shape matrix', () => {
         ).toBe('legacy')
       }
       // POSITIVE CONTROL for this loop: the same machinery DOES admit the exact key,
-      // so the eight denials above are real rejections and not a broken harness.
+      // so the seven denials above are real rejections and not a broken harness.
       process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
       expect((await postureFor(FOLD_ORG, { state: 'authoritative' })).effectiveState).toBe('authoritative')
+    })
+
+    /**
+     * `'DEFAULT'` is the ONE case-variant entry that is not structurally inert, named here
+     * rather than buried in the loop above (#4919 gate P3).
+     *
+     * `parseOrgKeyLexical` accepts the exact ASCII sentinel `'default'` as a legal org key, so
+     * after the fold an env entry spelled `DEFAULT` / `Default` matches the `default` ORG —
+     * where before only the lower-case spelling did. This is the intended case semantics
+     * applied to a PRE-EXISTING match (lower-case `default` already admitted it), not a new
+     * class; the new marginal risk is that `DEFAULT` is a common ops-template placeholder that
+     * used to be inert. This leg asserts what actually happens, in both directions, so nobody
+     * can read the loop above as "DEFAULT admits nothing".
+     */
+    it('`DEFAULT` is NOT inert — it folds onto the legal `default` sentinel org key', () => {
+      for (const entry of ['DEFAULT', 'Default', 'default', ' DEFAULT ']) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          isAttendanceCalculationOrgAllowlistedV1('default'),
+          `entry ${JSON.stringify(entry)} must match the default org`,
+        ).toBe(true)
+      }
+      // ...and it remains inert against a UUID subject, which is what the loop above covers.
+      process.env[ALLOWLIST_ENV] = 'DEFAULT'
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+      // NEGATIVE CONTROL: the sentinel is exact — no other spelling reaches it.
+      for (const entry of ['DEFAULTS', 'DEFAUL', 'defau1t', '*']) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          isAttendanceCalculationOrgAllowlistedV1('default'),
+          `entry ${JSON.stringify(entry)} must not match the default org`,
+        ).toBe(false)
+      }
     })
 
     it('the named export and the private predicate stay ONE predicate under folding', () => {

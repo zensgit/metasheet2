@@ -348,15 +348,36 @@ export type ResolvedSegmentCalculationPostureV1 = Opaque<
 >
 
 /**
- * Implementation capability (section 9 effective-state requirement 1) for THIS slice:
+ * Implementation capability (section 9 effective-state requirement 1):
  * W4C-0 ships durable storage + the identity/lock layer, so the resolver seam itself is
- * implemented. The authoritative segment CALCULATOR is W4C-1: an `authoritative` answer
- * additionally requires a persisted `authoritative` rollout row, which cannot exist yet —
- * the Stage A rollout guard admits only `legacy`/`shadow` initial states and no transition
- * writer ships in W4C-0. Advertising `shadow` additionally requires BOTH an exact-org env
- * allowlist entry AND a persisted state row; neither exists by default, so default runtime
- * behavior remains byte-identical (`legacy_projection_only` for every org). The separate W3
- * reference-writer constant in attendance-shift-service.cjs stays `false` and is untouched.
+ * implemented. The authoritative segment CALCULATOR is W4C-1 and has NOT shipped.
+ *
+ * ERRATUM (#4899 residual R4, 2026-08-15): this comment used to add "…an `authoritative`
+ * answer additionally requires a persisted `authoritative` rollout row, which cannot exist
+ * yet — the Stage A rollout guard admits only `legacy`/`shadow` initial states and no
+ * transition writer ships in W4C-0." That sentence has become FALSE and is removed rather
+ * than left standing, because it generalised an INITIAL-STATE restriction into a
+ * REACHABILITY claim and was then relied on downstream:
+ *   - `legacy -> shadow` is only the BOOTSTRAP restriction on creating a MISSING row
+ *     (`w4c3a-rollout-control.ts`, `canBootstrap`), and that bootstrap inserts state
+ *     `'legacy'`. It is not the legality table.
+ *   - a transition writer HAS since shipped, and its `LEGAL_TRANSITIONS`
+ *     (`w4c3a-rollout-control.ts`) contains `shadow -> eligible` and
+ *     `eligible -> authoritative`.
+ *   - the one gate that did block promotion into `authoritative` — the
+ *     `W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED` refusal — no longer
+ *     fires since #4844 declared both entrypoints delivered
+ *     (`w4c2-authoritative-delivery.ts`, `DECLARED_DELIVERED`), so the undelivered count is 0.
+ * `attendance-w4c3a-rollout-control.db.test.ts` drives `eligible -> authoritative` to
+ * completion and reads back `authoritative`, so this is behavioural, not a reading.
+ *
+ * What IS still true, and is the actual byte-neutrality argument: advertising anything above
+ * `legacy` requires BOTH an exact-org env allowlist entry AND a persisted state row, and
+ * neither exists by default — so default runtime behavior remains byte-identical
+ * (`legacy_projection_only` for every org). Reaching `authoritative` takes a deliberate
+ * three-step operator walk through the transition boundary; it is not the default and it is
+ * not impossible. The separate W3 reference-writer constant in attendance-shift-service.cjs
+ * stays `false` and is untouched.
  */
 const SEGMENT_CALCULATION_IMPLEMENTATION_CAPABILITY = true
 
@@ -375,12 +396,26 @@ const SEGMENT_CALCULATION_ALLOWLIST_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_
  * strict superset: every entry admitted before is still admitted, plus the case variants.
  * The widening is bounded by construction — `String.prototype.toLowerCase` is a per-character
  * map, so it can only ever make two strings that differ in ASCII case compare equal; it can
- * never turn a non-matching entry into a prefix/substring/wildcard match, and it never changes
- * the length of an entry. `'*'`, `' * '`, `'.*'`, `'%'`, prefixes, and suffixes therefore still
- * allowlist nothing (an org key can never equal any of them — the canonical parser rejects them
- * outright). The W7 context-source predicate
- * (`w7-resolver/w7-context-source-posture-resolver.ts`) is folded IDENTICALLY in the same
- * change, so the two allowlists cannot drift in matching semantics.
+ * never turn a non-matching entry into a prefix/substring/wildcard match, and it never
+ * SHORTENS an entry. (Deliberately not "never changes the length": mechanically enumerated over
+ * U+0080..U+2FFFF, exactly one codepoint lengthens — `U+0130` (İ) folds to `"i̇"`, 2 units.
+ * That exception is inert here: the same sweep found ZERO non-ASCII codepoints that fold into
+ * the org-key alphabet `[0-9a-f-]`, so no non-ASCII entry can become a UUID key.) `'*'`,
+ * `' * '`, `'.*'`, `'%'`, prefixes, and suffixes therefore still allowlist nothing — a UUID org
+ * key can never equal any of them.
+ *
+ * ONE ENTRY IS NOT INERT, and is called out rather than left to the reader: the `'default'`
+ * sentinel IS a legal org key (`parseOrgKeyLexical`), so a folded env entry spelled `DEFAULT`
+ * or `Default` now matches the `default` org where before only lower-case `default` did. That
+ * is the intended case semantics applied to a pre-existing match, not a new class — but
+ * `DEFAULT` is a common ops-template placeholder that was previously inert, so treat it as a
+ * live entry. `mintOrgWitness` fail-closes the W4C-3b boundary path for `default` under any
+ * non-legacy posture (`W4C0_DEFAULT_ORG_POSTURE_REJECTED`); the plugin's direct
+ * `resolveReferenceSegmentsPostureForWrite` sites mint no witness, so that bound is partial.
+ *
+ * The W7 context-source predicate (`w7-resolver/w7-context-source-posture-resolver.ts`) is
+ * folded IDENTICALLY in the same change, so the two allowlists cannot drift in matching
+ * semantics.
  */
 function isOrgExactlyAllowlisted(orgKey: string): boolean {
   const raw = typeof process.env[SEGMENT_CALCULATION_ALLOWLIST_ENV] === 'string'

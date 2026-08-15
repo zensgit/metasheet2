@@ -8374,24 +8374,43 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
  * The bit consumed here is `referenceSegments` (true from `shadow` upward), NOT
  * `authoritativeResults` (true only for `authoritative`). Both exist in the W4 posture table
  * and the guard's own 422 text says "authoritative segment calculation is disabled", so
- * `authoritativeResults` is the reading a reviewer would expect. It is rejected because the
- * Stage A rollout guard cannot produce an `authoritative` row at all
- * (`w4c3a-rollout-control.ts` admits only `legacy` -> `shadow`), so that bit is `false` for
- * every reachable org and the door would stay shut for everyone — leaving Gate A's admitted
- * writers permanently un-calculable. `referenceSegments` is the bit that answers the question
- * this door actually asks: "may this org's scheduling data REFERENCE a multi-segment shift?"
+ * `authoritativeResults` is the reading a reviewer would expect.
  *
- * MEASURED CONSEQUENCE, disclosed rather than discovered later. The segment-aware calculator
- * is W4C-1 and has NOT shipped (`SEGMENT_CALCULATION_IMPLEMENTED === false`). Until it does,
- * the legacy calculator downstream of this door works off the shift's OUTER ENVELOPE. For a
- * `shadow` org with an 08:00-12:00 + 13:00-17:00 shift and a full-span attendance, a real
- * approval run produced `attendance_records.work_minutes = 540`, while the shift DTO's
- * `plannedMinutes` is 480 (R1: the 60-minute break is never payable time). The break is
- * therefore counted as worked time for an ENABLED org. That is an owner decision about which
- * failure is preferable — a Gate-C org whose users cannot be calculated at all (the pinned
- * state) versus one calculated on envelope semantics until W4C-1 lands — and it is called out
- * in the PR body, not settled here. It is unreachable today: no rollout row exists, so no org
- * resolves anything but `legacy`.
+ * The honest framing is NOT "one bit works, the other is a dead door" — an earlier revision of
+ * this comment said `authoritative` was unreachable and that was FALSE at this head. It IS
+ * reachable: `LEGAL_TRANSITIONS` (`w4c3a-rollout-control.ts`) contains `shadow -> eligible`
+ * and `eligible -> authoritative`; the `legacy -> shadow` restriction applies only to
+ * BOOTSTRAPPING a missing row; and the
+ * `W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED` refusal stopped firing when
+ * #4844 declared both entrypoints delivered. `attendance-w4c3a-rollout-control.db.test.ts`
+ * drives the promotion and reads back `authoritative`.
+ *
+ * So the real question the choice settles is WHICH ROLLOUT RUNG opens this door:
+ *   - `referenceSegments` opens it at `shadow` — Gate C step one — and also at `eligible`;
+ *   - `authoritativeResults` opens it only after a deliberate three-step operator walk
+ *     (`legacy -> shadow -> eligible -> authoritative`) carrying evidence manifests and the
+ *     full transition precondition set.
+ * `referenceSegments` is chosen because it is the bit that answers what this door actually
+ * asks — "may this org's scheduling data REFERENCE a multi-segment shift?" — and because it
+ * matches the 17 write-side sites, so read and write admission cannot disagree for an org.
+ * A THIRD reading exists and is named rather than silently dropped: conjoin the door with
+ * "the segment calculator has shipped" (`SEGMENT_CALCULATION_IMPLEMENTED`), which would open
+ * it exactly when it produces correct numbers. It is NOT built here; it is the owner's to
+ * weigh.
+ *
+ * MEASURED CONSEQUENCE, disclosed rather than discovered later, and NEITHER BIT AVOIDS IT.
+ * The segment-aware calculator is W4C-1 and has NOT shipped
+ * (`SEGMENT_CALCULATION_IMPLEMENTED === false`), so an `authoritative` org gets the same
+ * envelope semantics a `shadow` one does. Until W4C-1 lands, the legacy calculator downstream
+ * of this door works off the shift's OUTER ENVELOPE. For an enabled org with an
+ * 08:00-12:00 + 13:00-17:00 shift and a full-span attendance, a real approval run PERSISTED
+ * `attendance_records.work_minutes = 540`, while the shift DTO's `plannedMinutes` is 480
+ * (R1: the 60-minute break is never payable time). This is DATA CORRUPTION — a durable wrong
+ * row — not merely a wrong response. The owner's trade is outage versus corruption: a Gate-C
+ * org whose users cannot be calculated at all (the pinned state, while Gate A already lets it
+ * WRITE the reference) versus one whose records overstate worked time until W4C-1 lands. It is
+ * put to the owner in the PR body, not settled here, and deliberately NOT frozen by a test.
+ * Unreachable today: no rollout row exists, so no org resolves anything but `legacy`.
  */
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext, referenceSegments) {
   if (!workContext || workContext.source === 'rule') return
