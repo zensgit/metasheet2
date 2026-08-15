@@ -167,31 +167,68 @@ const W7_EXCLUSIVE_KEY_TAKERS_V1 = Object.freeze([
 const read = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
 
 /**
- * The smallest enclosing `function`/`const fn = ` block containing `needle`.
- * Structure-derived (brace balance), never a fixed window — a fixed window both
- * under-reads a long body and over-reads the next declaration.
+ * The full block of the function declared at `declStart`: paren-balance the
+ * PARAMETER LIST first, then brace-balance the BODY from the first `{` after
+ * it. The two-phase order is the load-bearing part — an earlier revision
+ * brace-matched from the declaration head and closed on the `{}` of a
+ * `options = {}` DEFAULT PARAMETER, returning a 91-char signature fragment
+ * that contained neither the needle nor any lock call.
+ */
+function functionBlockAt(source: string, declStart: number): { start: number; end: number } | null {
+  const parenAt = source.indexOf('(', declStart)
+  if (parenAt === -1) return null
+  let pDepth = 0
+  let i = parenAt
+  for (; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '(') pDepth += 1
+    else if (ch === ')') {
+      pDepth -= 1
+      if (pDepth === 0) break
+    }
+  }
+  if (pDepth !== 0) return null
+  const bodyOpen = source.indexOf('{', i + 1)
+  if (bodyOpen === -1) return null
+  let depth = 0
+  for (let j = bodyOpen; j < source.length; j += 1) {
+    const ch = source[j]
+    if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) return { start: declStart, end: j + 1 }
+    }
+  }
+  return null
+}
+
+/**
+ * The smallest function block CONTAINING `needle` — the ENCLOSING function,
+ * selected by containment, never by proximity. An earlier revision took the
+ * NEAREST PRECEDING declaration (`lastIndexOf`), which for a needle deep
+ * inside one function returned the complete body of the unrelated helper
+ * declared just above it. This scans every declaration head before the
+ * needle, computes each full block, and keeps the innermost one whose span
+ * contains the needle. Known limitation (stated, not hidden): brace balance
+ * can be fooled by an unmatched `{`/`}` inside a string literal; the
+ * caller's containment assertion (`acquiring` must include the needle) makes
+ * an extraction failure red the leg rather than pass it.
  */
 function enclosingFunctionContaining(source: string, needle: string): string | null {
   const at = source.indexOf(needle)
   if (at === -1) return null
-  const head = source.lastIndexOf('\nasync function ', at)
-  const head2 = source.lastIndexOf('\nfunction ', at)
-  const head3 = source.lastIndexOf('\nconst ', at)
-  const start = Math.max(head, head2, head3)
-  if (start === -1) return null
-  let depth = 0
-  let seen = false
-  for (let i = start; i < source.length; i += 1) {
-    const ch = source[i]
-    if (ch === '{') {
-      depth += 1
-      seen = true
-    } else if (ch === '}') {
-      depth -= 1
-      if (seen && depth === 0) return source.slice(start, i + 1)
+  const headRe =
+    /\n\s*(?:export\s+)?(?:async\s+)?function\s+\w|\n\s*(?:export\s+)?const\s+\w+\s*=\s*(?:async\s*)?(?:function\b|\()/g
+  let best: { start: number; end: number } | null = null
+  let m: RegExpExecArray | null
+  while ((m = headRe.exec(source)) !== null) {
+    if (m.index > at) break
+    const block = functionBlockAt(source, m.index)
+    if (block && block.start <= at && at < block.end) {
+      if (!best || block.end - block.start < best.end - best.start) best = block
     }
   }
-  return source.slice(start)
+  return best ? source.slice(best.start, best.end) : null
 }
 
 describeDb('W7-1b — B9 composite-lock re-census over the seven-producer reality (real DB)', () => {
@@ -307,11 +344,45 @@ describeDb('W7-1b — B9 composite-lock re-census over the seven-producer realit
       // be checked mechanically and soundly.
       const acquiring = enclosingFunctionContaining(source, taker.keyFamily)
       expect(acquiring, `could not locate the function acquiring ${taker.keyFamily}`).not.toBeNull()
+      // FAIL-CLOSED extraction check: the extracted block must contain the very
+      // acquisition it was located by, and the acquisition call itself. Without
+      // this, a broken extractor returns SOME block, the FOR UPDATE probe scans
+      // the wrong text, and the leg is vacuous — which is exactly what happened
+      // twice before (signature fragment; unrelated neighbouring helper).
       expect(
-        /FOR\s+UPDATE/i.test(acquiring as string),
-        `${taker.file}: the function acquiring ${taker.keyFamily} EXCLUSIVELY also takes a row ` +
-          'lock — that is how a cycle closes against a producer’s parent-then-shared ordering',
-      ).toBe(false)
+        acquiring as string,
+        'the extracted block does not contain the acquisition it was located by',
+      ).toContain(taker.keyFamily)
+      expect(
+        acquiring as string,
+        'the extracted block does not contain an advisory-lock call at all',
+      ).toContain('pg_advisory_xact_lock')
+      // THE PROBE MATCHES THE INVARIANT'S OWN WORDS: a `FOR UPDATE` whose
+      // statement reads `attendance_records`. A bare any-`FOR UPDATE` probe is
+      // BROADER than the invariant — the W1 writer legitimately row-locks its
+      // own membership/operation tables inside the same function, and those
+      // locks cannot close a cycle against the producers' parent-then-shared
+      // ordering, because the producers' parent lock is on attendance_records.
+      // (The earlier broken extractor never reached the real body, so the
+      // over-broad probe never had the chance to misfire.) Statement anchoring
+      // is structural, not a fixed window: for each FOR UPDATE, the segment
+      // from its statement's nearest preceding SELECT is what names the table.
+      const block = acquiring as string
+      const offendingStatements: string[] = []
+      const forUpdateRe = /FOR\s+UPDATE/gi
+      let fu: RegExpExecArray | null
+      while ((fu = forUpdateRe.exec(block)) !== null) {
+        const selectAt = block.toUpperCase().lastIndexOf('SELECT', fu.index)
+        const statementHead = selectAt === -1 ? block.slice(0, fu.index) : block.slice(selectAt, fu.index)
+        if (/\battendance_records\b/.test(statementHead)) {
+          offendingStatements.push(statementHead.slice(0, 200))
+        }
+      }
+      expect(
+        offendingStatements,
+        `${taker.file}: the function acquiring ${taker.keyFamily} EXCLUSIVELY also row-locks ` +
+          'attendance_records — that is how a cycle closes against a producer’s parent-then-shared ordering',
+      ).toEqual([])
       takersChecked += 1
     }
     // The loop must actually have run over every enumerated taker.

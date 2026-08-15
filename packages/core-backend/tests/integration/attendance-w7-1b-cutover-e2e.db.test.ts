@@ -43,9 +43,6 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
-// DIAG v2 only (delete with the diagnostic): re-runs the exact attribution
-// rebuild the fingerprint path performs, to print WHICH refusal fires in CI.
-import { buildFrozenWorkDateAttributionV2 } from '../../src/attendance/w4c2-frozen-attribution'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -444,124 +441,6 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       )
     ).rows[0]
 
-  // -------------------------------------------------------------------------
-  // DIAGNOSTIC (DELETE once the CI-only differential is explained). These two
-  // legs are green locally (CI-exact in-list run, twice independently) and red
-  // in CI at three consecutive heads; three rounds of reasoning have not
-  // reproduced the cause, so this emits the mirror gate's REAL inputs from
-  // inside the route at evaluation time — the only place they exist. One CI
-  // run, read the values, delete the block. Values-free except allowlist SHAPE
-  // (presence/count/membership booleans), never entries themselves.
-  // Field → hypothesis it falsifies:
-  //   w4EnvPresent/HasThisOrg  env missing at evaluation time vs present-but-not-matching
-  //   w4EnvEntries             a neighbour OVERWROTE the allowlist rather than clearing it
-  //   w7MirrorEffectiveState   posture read reaching the DB, and what it returned
-  //   outerResolutionKind      null => the `A || B` gate never opened (or the
-  //                            activate-injected fingerprint computer was absent —
-  //                            with w4EnvHasThisOrg=true that conjunct is the only
-  //                            way in); non-`resolved` => THE GATE OPENED and
-  //                            candidate resolution failed — untested root that
-  //                            fits a null fingerprint with the env fully intact
-  //   fingerprintType          null-vs-string without the `.toMatch()` ambiguity
-  //   pid                      whether the failing punch shares a worker with a neighbour
-  const emitW71bDiag = (label: string, orgId: string, ctx: Record<string, unknown>) => {
-    const w4Raw = String(process.env[W4_ENV] || '')
-    console.log('[W7-1b-DIAG]', label, JSON.stringify({
-      w4EnvPresent: Boolean(w4Raw.trim()),
-      w4EnvEntries: w4Raw.split(',').map((s) => s.trim()).filter(Boolean).length,
-      w4EnvHasThisOrg: w4Raw.split(',').map((s) => s.trim()).includes(orgId.toLowerCase()),
-      w7EnvHasThisOrg: String(process.env[W7_ENV] || '')
-        .split(',').map((s) => s.trim()).includes(orgId.toLowerCase()),
-      w7MirrorEffectiveState: ctx.w7MirrorEffectiveState ?? null,
-      w7MirrorSelectsGroupArm: ctx.w7MirrorSelectsGroupArm ?? null,
-      fingerprintType: typeof ctx.outerSourceDefinitionFingerprint,
-      outerResolutionKind: (ctx.outerResolution as { kind?: string } | null)?.kind ?? null,
-      outerContextSchemaVersion:
-        (ctx.outerContext as { schemaVersion?: number } | null)?.schemaVersion ?? null,
-      pid: process.pid,
-    }))
-    // DIAG v2 (delete with the rest): round 1 proved the ONLY unhealthy field
-    // was fingerprintType:"object" while resolution was `resolved` and the
-    // context was issued — so the null is born inside the fingerprint's
-    // attribution rebuild. Re-run that exact rebuild here (same arg mapping as
-    // `attributionFromResolution`) and print `kind`/`code`; a THROW is equally
-    // diagnostic (a string `startAt` would fail `.toISOString()`, exposing a
-    // type-poisoned pg parser). Winner window instants are printed to compare
-    // against the strict per-workDate rebuild the V2 builder performs.
-    try {
-      const r = ctx.outerResolution as {
-        kind?: string
-        workDate?: unknown
-        shiftId?: unknown
-        reasonCode?: unknown
-        attributionTailMinutes?: unknown
-        fullWinner?: {
-          workStartTime?: unknown
-          workEndTime?: unknown
-          timezone?: unknown
-          isOvernight?: unknown
-          absoluteWindow?: { startAt?: unknown; endAt?: unknown }
-          attributionWindow?: { startAt?: unknown; endAt?: unknown }
-        } | null
-        approvedOvertimeWindows?: Array<{ requestId?: unknown; approvedEndAt?: unknown }>
-      } | null
-      const w = r?.fullWinner ?? null
-      const iso = (v: unknown) =>
-        v instanceof Date ? v.toISOString() : `<${typeof v}:${String(v)}>`
-      const base: Record<string, unknown> = {
-        winnerPresent: Boolean(w),
-        workDate: String(r?.workDate ?? '<none>'),
-        reasonCode: String(r?.reasonCode ?? '<none>'),
-        tail: r?.attributionTailMinutes ?? null,
-        workStartTime: w ? String(w.workStartTime) : null,
-        workEndTime: w ? String(w.workEndTime) : null,
-        tz: w ? String(w.timezone) : null,
-        absStart: w ? iso(w.absoluteWindow?.startAt) : null,
-        absEnd: w ? iso(w.absoluteWindow?.endAt) : null,
-        attrStart: w ? iso(w.attributionWindow?.startAt) : null,
-        attrEnd: w ? iso(w.attributionWindow?.endAt) : null,
-      }
-      if (r && r.kind === 'resolved' && w) {
-        const built = buildFrozenWorkDateAttributionV2({
-          orgId,
-          userId: '<diag>',
-          workDate: String(r.workDate),
-          shiftId: String(r.shiftId),
-          reasonCode: String(r.reasonCode ?? 'SINGLE_MATCHING_CANDIDATE'),
-          resolvedAt: new Date().toISOString(),
-          timezone: String(w.timezone),
-          workStartTime: String(w.workStartTime),
-          workEndTime: String(w.workEndTime),
-          isOvernight: w.isOvernight === true,
-          candidateAbsoluteWindow: {
-            startAt: (w.absoluteWindow!.startAt as Date).toISOString(),
-            endAt: (w.absoluteWindow!.endAt as Date).toISOString(),
-          },
-          candidateAttributionWindow: {
-            startAt: (w.attributionWindow!.startAt as Date).toISOString(),
-            endAt: (w.attributionWindow!.endAt as Date).toISOString(),
-          },
-          attributionTailMinutes: r.attributionTailMinutes as number,
-          approvedOvertimeWindows: (r.approvedOvertimeWindows ?? []).map((e) => ({
-            requestId: String(e.requestId),
-            approvedEndAt:
-              e.approvedEndAt instanceof Date
-                ? e.approvedEndAt.toISOString()
-                : String(e.approvedEndAt),
-            anchor: null,
-          })),
-          source: 'live_resolution',
-        })
-        base.rebuiltKind = built.kind
-        base.rebuiltCode = built.kind === 'resolved_v2' ? null : (built as { code?: string }).code ?? null
-      }
-      console.log('[W7-1b-DIAG2]', label, JSON.stringify(base))
-    } catch (error) {
-      console.log('[W7-1b-DIAG2]', label, JSON.stringify({
-        threw: String((error as Error)?.message ?? error),
-      }))
-    }
-  }
 
   it('h24-midnight regression pin: zoned midnight wall times land on the SAME calendar day', () => {
     // ROOT CAUSE of this suite's three CI-only reds (node 18/20, both legs,
@@ -586,20 +465,38 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(bzd('2026-08-15', '23:59', 'UTC')?.toISOString()).toBe('2026-08-15T23:59:00.000Z')
     // The sibling in-class site: a midnight instant is minute 0, never 1440.
     expect(plugin.__getZonedMinutesForTests(new Date('2026-08-15T00:00:00.000Z'), 'UTC')).toBe(0)
+
+    // STRUCTURAL PREMISE PINS — deterministic on EVERY ICU, so this leg keeps
+    // teeth after CI runners upgrade past the h24-resolving versions (the
+    // assertions above are discriminating only on old ICU; these two are
+    // discriminating everywhere):
+    //   (1) h24 really does render the midnight that BEGINS a day as hour '24'
+    //       on the SAME displayed calendar date — the `24 -> 0` fold's exact
+    //       assumption; if any ICU ever rolled the date back instead, the fold
+    //       would land a day early and this pin would red first;
+    //   (2) an explicit `hourCycle: 'h23'` is honoured (midnight = '00') — the
+    //       property the fix stands on.
+    const partsOf = (hourCycle: 'h23' | 'h24') =>
+      Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', {
+          hourCycle,
+          timeZone: 'UTC',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+          .formatToParts(new Date('2026-08-15T00:30:00.000Z'))
+          .filter((part) => part.type !== 'literal')
+          .map((part) => [part.type, part.value]),
+      )
+    expect(partsOf('h24')).toMatchObject({ day: '15', hour: '24' })
+    expect(partsOf('h23')).toMatchObject({ day: '15', hour: '00' })
   })
 
   it('T-M5 + T-R1: both machines ON => the group arm runs END TO END and the inner/outer fingerprints AGREE', async () => {
     await withEnv(BOTH_MACHINES_ENV(), async () => {
-    // DIAGNOSTIC seam install — observation only, uninstalled in finally.
-    const diagPlugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
-      __setAttendanceW4LivePunchPreBoundarySeamForTests: (
-        seam: ((ctx: Record<string, unknown>) => Promise<void>) | null,
-      ) => void
-    }
-    diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
-      emitW71bDiag('T-M5', bothOrg, ctx)
-    })
-    try {
     // EXACT membership, not substring: the allowlist rule is exact-org, and a
     // substring check would pass for an org that merely shares a prefix.
     expect(
@@ -645,10 +542,6 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(record.projection_owner).toBe('w4_group')
     expect(record.current_calculation_id).toEqual(expect.any(String))
     expect(String(record.current_calculation_id).length).toBeGreaterThan(0)
-    } finally {
-      // DIAGNOSTIC seam uninstall (paired with the install above).
-      diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
-    }
     })
   }, 60_000)
 
@@ -682,8 +575,6 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     const observed: Record<string, unknown>[] = []
     plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
       observed.push(ctx)
-      // DIAGNOSTIC (delete with the block above) — same emitter, this leg's org.
-      emitW71bDiag('T-B4', w4OnlyOrg, ctx)
     })
     try {
       const res = await punch(w4OnlyUser, w4OnlyOrg, 'check_in')
@@ -751,23 +642,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       )).rows[0].n
       expect(Number(before)).toBe(0)
 
-      // DIAG (delete with the emitter): this leg 200'd in CI with the LEGACY
-      // projection while the PLUGIN-producer suspended leg passed — so the
-      // mirror's view of THIS org (posture state, arm) is the missing datum.
-      const diagPlugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
-        __setAttendanceW4LivePunchPreBoundarySeamForTests: (
-          seam: ((ctx: Record<string, unknown>) => Promise<void>) | null,
-        ) => void
-      }
-      diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(async (ctx) => {
-        emitW71bDiag('T-SUSP', suspendedOrg, ctx)
-      })
-      let res: HttpResponse
-      try {
-        res = await punch(suspendedUser, suspendedOrg, 'check_in')
-      } finally {
-        diagPlugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
-      }
+      const res = await punch(suspendedUser, suspendedOrg, 'check_in')
       // The EXACT closed code, never "a 4xx". The boundary maps its own error
       // class, so this proves the BOUNDARY site refused — not the plugin one.
       const code = String((res.body as { error?: { code?: string } } | undefined)?.error?.code ?? `<none:${res.status}>`)
