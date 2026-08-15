@@ -952,9 +952,28 @@ async function writeCompletedRow(
   // keys off the LOCKED ACTUAL current (never `expectedCurrentCalculationId`) so it does not silently
   // re-implement — and thereby cover for — that guard. The lock guarantees the actual cannot move
   // between the read and this write.
+  // W7-1b (#4556 comments 5293034619 + 5293478713) — PROVENANCE EMISSION,
+  // domain A. W7-1a-M widened `projection_owner` to accept `w4_group` and
+  // emitted it NOWHERE; this pointer writer is its first real producer.
+  //
+  // Derived from THE CALCULATION'S OWN frozen context, never from the parent's
+  // existing `projection_owner`: emission must describe what THIS calculation
+  // was built from. A group-owned parent labelled `w4` is a LYING POINTER — the
+  // read side and every rollback guard would treat a group-policy projection as
+  // a W4 one.
+  //
+  // Reachability, stated so the claim cannot inflate: this writer is on the
+  // AUTHORITATIVE path, so `w4_group` is emitted only for an org that is
+  // W4-authoritative AND W7-group. The shadow path's `insertShadowCalculation`
+  // does not move the pointer and emits no owner at all. That is narrower than
+  // W7-1a-M's synthetic inserts covered.
+  const projectionOwnerToWrite =
+    (input.context as { selector?: unknown } | null)?.selector === 'group_effective'
+      ? 'w4_group'
+      : 'w4'
   const updated = await trx.query(
     `UPDATE attendance_records
-        SET current_calculation_id = $3::uuid, projection_owner = 'w4',
+        SET current_calculation_id = $3::uuid, projection_owner = $11,
             visibility_state = 'active', visibility_reason = 'active',
             status = $4, first_in_at = $5, last_out_at = $6,
             work_minutes = $7, late_minutes = $8, early_leave_minutes = $9,
@@ -973,6 +992,7 @@ async function writeCompletedRow(
       projection.lateMinutes,
       projection.earlyLeaveMinutes,
       parent.currentCalculationId,
+      projectionOwnerToWrite,
     ],
   )
   if (updated.rows.length !== 1) {

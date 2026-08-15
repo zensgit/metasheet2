@@ -122,6 +122,10 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w6-group-effective-policy-response-contract.ts',
   'packages/core-backend/src/attendance/w7-context-source-posture-contract.ts',
   'packages/core-backend/src/attendance/w7-frozen-context-v2-contract.ts',
+  // W7-1b: the V2 discriminant-routing rule. `calculation_path` — the HONEST
+  // bucket, not a carve-out: it decides which frozen-context shapes the
+  // calculator will accept, so both ban legs must apply to it.
+  'packages/core-backend/src/attendance/w7-frozen-context-router.ts',
   'packages/core-backend/src/attendance/w7-provenance-domain.ts',
   'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-composite-lock-order.ts',

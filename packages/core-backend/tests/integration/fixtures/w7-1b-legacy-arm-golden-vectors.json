@@ -1,6 +1,6 @@
 {
   "_README": "CAPTURED AT THE PRE-1b BASE. Do not regenerate from a tree that already carries a behavioural change — a golden generated from the post-change code proves only that the code equals itself.",
-  "capturedAtBaseSha": "0261b33c615a0135bc07357c5420a9769fbdf4bf",
+  "capturedAtBaseSha": "348eccde90825591ed6af0b6e503d152fe3cc672",
   "harnessSha256": "1a8834a33610cbbd1ba849d550f38189833498c4248aab030f3e4393ff5aaad4",
   "entries": {
     "workday": {

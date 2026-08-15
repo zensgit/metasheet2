@@ -772,6 +772,13 @@ export default defineConfig({
       // PostgreSQL for the posture table, the W1 membership timeline and the
       // fixed-schedule effectiveness fixture. Two-point wired as above.
       'tests/integration/attendance-w7-1b-issuance-seam.db.test.ts',
+      // #4556 W7-1b: the CUTOVER end-to-end suite. Boots a real MetaSheetServer,
+      // walks the rollout state machine to `authoritative`, seeds a fully
+      // effective fixed-shift group and drives a real punch route — the leg that
+      // proves the mirror's outer fingerprint and the boundary's inner one AGREE
+      // once both machines are on. Meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.

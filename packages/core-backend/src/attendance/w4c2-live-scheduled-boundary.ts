@@ -458,6 +458,38 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
       holidayKind: string | null
     },
   ): Promise<FrozenAttendanceContextV1 | null>
+  /**
+   * W7-1b (#4556 comments 5293034619 + 5293478713) — THE ISSUANCE SEAM.
+   *
+   * Ruling 3 / OD-W7-9 = REPLACE: the posture branch sits upstream of the
+   * legacy CONTEXT BUILDER, and every producer routes through ONE seam. This is
+   * injected rather than imported so the boundary does not become a second
+   * production importer of `w7-resolver/` — the plugin already owns the host
+   * port and the plugin-side dependencies (the pure FSER derivation, the
+   * canonical producer-key builder, the org-rule loader), and the seam's legacy
+   * arm must be handed the caller's OWN plugin-shaped client.
+   *
+   * `buildShadowFrozenContext` is deliberately kept on this interface: it is the
+   * LEGACY arm the seam itself calls, and removing it would hide the byte-for-
+   * byte identity of that arm behind the new method.
+   */
+  issueFrozenContext(
+    trx: AttendancePluginShapedTrxV1,
+    args: {
+      orgId: string
+      userId: string
+      workDate: string
+      shiftId: string
+      timezone: string
+      isWorkday: boolean
+      holidayKind: string | null
+      purpose: 'persist' | 'mirror'
+    },
+  ): Promise<{
+    arm: 'legacy' | 'group'
+    context: FrozenAttendanceContextV1 | null
+    reason: string | null
+  }>
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,12 +1591,48 @@ export function createAttendanceLiveScheduledBoundaryV1(
     typeof adapters.applyScheduledAbsenceLegacy !== 'function' ||
     typeof adapters.resolveLiveCandidate !== 'function' ||
     typeof adapters.resolveScheduledCandidate !== 'function' ||
-    typeof adapters.buildShadowFrozenContext !== 'function'
+    typeof adapters.buildShadowFrozenContext !== 'function' ||
+    // W7-1b: folded into the SAME fail-closed gate. A host that supplies the
+    // legacy builder but not the seam must make the boundary not exist, never
+    // silently keep taking the legacy arm — that degradation is
+    // indistinguishable from a correctly-configured legacy org.
+    typeof adapters.issueFrozenContext !== 'function'
   ) {
     boundaryFail('W4C2_LEGACY_ADAPTERS_INVALID', 500)
   }
   if (typeof deps.acquireConnection !== 'function') {
     boundaryFail('W4C2_CONNECTION_PROVIDER_INVALID', 500)
+  }
+
+  /**
+   * W7-1b — the ONE place this boundary reaches the issuance seam.
+   *
+   * Every producer arm calls THIS, never `adapters.buildShadowFrozenContext`
+   * directly: the arm-selection rule must have a single definition, and a
+   * second call site would be free to select differently for the same
+   * `(org, work_date)`. `purpose: 'persist'` on all four arms — these are
+   * persisting producers, not the fingerprint-only mirror.
+   *
+   * The `.context` unwrap keeps every call site's downstream code identical to
+   * the pre-1b shape (`FrozenAttendanceContextV1 | null`), so the legacy arm's
+   * control flow is unchanged byte-for-byte. The group arm's fail-closed `null`
+   * (O-9 review-out) travels the SAME path the legacy builder's own `null`
+   * already travelled, which is why no new review branch is needed here.
+   */
+  async function issueThroughW7Seam(
+    pluginTrx: AttendancePluginShapedTrxV1,
+    args: {
+      orgId: string
+      userId: string
+      workDate: string
+      shiftId: string
+      timezone: string
+      isWorkday: boolean
+      holidayKind: string | null
+    },
+  ): Promise<FrozenAttendanceContextV1 | null> {
+    const issued = await adapters.issueFrozenContext(pluginTrx, { ...args, purpose: 'persist' })
+    return issued.context
   }
 
   async function withConnection<T>(body: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
@@ -1891,7 +1959,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
           })
           let authoritativeContext: FrozenAttendanceContextV1 | null = null
           if (authoritativeAttribution.posture === 'resolved_v2') {
-            authoritativeContext = await adapters.buildShadowFrozenContext(pluginTrx, {
+            authoritativeContext = await issueThroughW7Seam(pluginTrx, {
               orgId: envelope.orgId,
               userId: input.userId,
               workDate: authoritativeAttribution.value.workDate,
@@ -2214,7 +2282,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
           })
           let context: FrozenAttendanceContextV1 | null = null
           if (attribution.posture === 'resolved_v2') {
-            context = await adapters.buildShadowFrozenContext(pluginTrx, {
+            context = await issueThroughW7Seam(pluginTrx, {
               orgId: envelope.orgId,
               userId: input.userId,
               workDate: attribution.value.workDate,
@@ -3010,7 +3078,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
                   })
                   let authoritativeContext: FrozenAttendanceContextV1 | null = null
                   if (authoritativeAttribution.posture === 'resolved_v2') {
-                    authoritativeContext = await adapters.buildShadowFrozenContext(pluginTrx, {
+                    authoritativeContext = await issueThroughW7Seam(pluginTrx, {
                       orgId: orgKey,
                       userId,
                       workDate,
@@ -3187,7 +3255,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
               })
               let context: FrozenAttendanceContextV1 | null = null
               if (attribution.posture === 'resolved_v2') {
-                context = await adapters.buildShadowFrozenContext(pluginTrx, {
+                context = await issueThroughW7Seam(pluginTrx, {
                   orgId: orgKey,
                   userId,
                   workDate,

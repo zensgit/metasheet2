@@ -601,6 +601,8 @@ const __attendanceW7IssuanceSeamRefForTests = { issueAttendanceFrozenContextV1: 
 // return value deliberately does not carry — four postures take the legacy arm,
 // so "the legacy arm ran" cannot discriminate `off` from `group_shadow`.
 const __attendanceW7ArmSelectionRefForTests = { resolveAttendanceW7GroupArmSelectionV1: null }
+// Companion cell for the PLUGIN-SIDE producer entry point (seam + §2.4).
+const __attendanceW7ProducerRefForTests = { issueW4FrozenContextForProducerV1: null }
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -10549,7 +10551,12 @@ async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, op
   try {
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
-      [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+      // g1 (W7-1b): CANONICAL org key. W7-1a's
+      // `buildAttendanceW7ScheduleFactsLockKeyV1` mirrors this exact string and
+      // keys off the canonical form, so a mixed-case spelling here derived a
+      // DIFFERENT key and the two never excluded each other. No-op for a
+      // canonical spelling; a non-canonical spelling could never commit anyway.
+      [`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`, String(userId ?? '')]
     )
   } catch (error) {
     if (options.required === true) throw error
@@ -24105,6 +24112,7 @@ module.exports = {
   // Populated at activate(); `null` before that, deliberately.
   __attendanceW7IssuanceSeamForTests: __attendanceW7IssuanceSeamRefForTests,
   __attendanceW7ArmSelectionForTests: __attendanceW7ArmSelectionRefForTests,
+  __attendanceW7ProducerForTests: __attendanceW7ProducerRefForTests,
   __attendanceW4c2LivePunchAdaptersForTests: {
     insertLivePunchEventV1,
     deriveLivePunchWorkDateResolutionV1,
@@ -24648,7 +24656,8 @@ module.exports = {
 	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
 	        return { attributionSnapshot, contextSnapshot: null }
 	      }
-	      const contextSnapshot = await buildW4ShadowFrozenContextV1(trx, {
+	      // W7-1b P4 (request-creation snapshot) — through the seam + §2.4.
+	      const contextSnapshot = (await issueW4FrozenContextForProducerV1(trx, {
 	        orgId: args.orgId,
 	        userId: args.userId,
 	        workDate: attributionSnapshot.value.workDate,
@@ -24659,7 +24668,7 @@ module.exports = {
 	            : timezone,
 	        isWorkday: workContext?.isWorkingDay !== false,
 	        holidayKind: workContext?.holiday?.kind ?? null,
-	      })
+	      })).context
 	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
 	      return { attributionSnapshot, contextSnapshot }
 	    }
@@ -24917,6 +24926,83 @@ module.exports = {
     }
     __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
       issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
+
+    /**
+     * W7-1b — the PLUGIN-SIDE producer entry point (P4 request-creation snapshot,
+     * P5 batch import, P6 recompute `current_policy`).
+     *
+     * It is the seam PLUS the §2.4 COHERENCE PRECONDITION, and the precondition
+     * lives HERE, in the caller, rather than inside the seam — deliberately:
+     *   - it must never leak into `purpose: 'mirror'`, or it would weaken
+     *     ruling 7's control (the mirror persists nothing and must still observe);
+     *   - the four CORE-BOUNDARY arms do not need it: they are unreachable unless
+     *     the W4 posture is already non-legacy, so the incoherent combination
+     *     cannot arise there.
+     *
+     * WHY IT EXISTS. W4 and W7 are INDEPENDENT state machines. With the W4
+     * variable unset every org resolves to `legacy_projection_only` and both live
+     * entrypoints return before any freeze — but these three plugin-side
+     * producers do NOT read the W4 posture at their own call sites, so a
+     * W7-group / W4-legacy org would persist V2 contexts on a day whose live
+     * punches are still V1. A split-brain day.
+     *
+     * FAIL-CLOSED IN THE STRONG SENSE: the failure mode is "this org's
+     * request/import/recompute is REFUSED", never "an unintended context is
+     * minted". The refusal is raised BEFORE the seam runs, so nothing is
+     * produced and then discarded.
+     *
+     * The arm question is answered with the ARM-SELECTION read, not by calling
+     * the seam: calling the seam to answer a yes/no question would mint a context
+     * as a side effect, and at P6 it would mint it before the refusal that is
+     * supposed to precede production.
+     *
+     * `effectiveState === 'legacy'` is an EXACT equivalent of
+     * `writePosture === 'legacy_projection_only'`, not a proxy: `legacy` is the
+     * only member of the W4 posture table that maps to that write posture.
+     *
+     * ⚠️ This fence is NOT the OD-W7-10 refusal and must never be merged with it.
+     * This one compares the W7 posture against the W4 WRITE POSTURE — two state
+     * machines, NOW. OD-W7-10 compares the prior CALCULATION's producer against
+     * the W7 state — one state machine, ACROSS TIME. A group×legacy superseded
+     * source on a fully coherent org is refused by OD-W7-10 and untouched by
+     * this; a W4-legacy + W7-group org is refused by this regardless of any prior
+     * calculation. Each must stay singly deletable.
+     */
+    const issueW4FrozenContextForProducerV1 = async (pluginTrx, args) => {
+      const coreTrx = {
+        query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
+      }
+      const armSelection =
+        attendanceW4SegmentCalculationPort
+        && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
+          ? await attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, args.orgId)
+          : null
+      if (armSelection && armSelection.selectsGroupArm) {
+        const w4Posture =
+          attendanceW4SegmentCalculationPort
+          && typeof attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture === 'function'
+            // NOTE the client shape: this port method wants the PLUGIN-shaped
+            // client (it looks for `__rawClient` or the `__w4CanonicalTrx`
+            // marker and rejects anything else with
+            // `W4C3B_TRANSACTION_CLIENT_REQUIRED`), whereas the W7 arm-selection
+            // read above wants the CORE-shaped one. Two ports, two shapes, one
+            // call site — passing either the wrong way round fails loudly here
+            // rather than silently skipping the fence.
+            ? await attendanceW4SegmentCalculationPort.resolveOrgSegmentCalculationPosture(pluginTrx, args.orgId)
+            : null
+        if (!w4Posture || w4Posture.effectiveState === 'legacy') {
+          throw new HttpError(
+            409,
+            'W7_GROUP_CONTEXT_POSTURE_INCOHERENT',
+            'Attendance calculation posture is incoherent for this operation.',
+          )
+        }
+      }
+      return issueW4FrozenContextViaW7SeamV1(pluginTrx, { ...args, purpose: 'persist' })
+    }
+    __attendanceW7ProducerRefForTests.issueW4FrozenContextForProducerV1 = (pluginTrx, args) =>
+      issueW4FrozenContextForProducerV1(pluginTrx, args)
+
     __attendanceW7ArmSelectionRefForTests.resolveAttendanceW7GroupArmSelectionV1 =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1 === 'function'
@@ -24948,6 +25034,12 @@ module.exports = {
               resolveLiveCandidate: (trx, args) => resolveW4LiveCandidateInTransactionV1(trx, args),
               resolveScheduledCandidate: (trx, args) => resolveW4ScheduledCandidateInTransactionV1(trx, args),
               buildShadowFrozenContext: (trx, args) => buildW4ShadowFrozenContextV1(trx, args),
+              // W7-1b (#4556): the issuance seam, injected ALONGSIDE the legacy
+              // builder (never as a flag on it) so the legacy adapter stays the
+              // byte-identical arm the seam itself calls, and so a spy proving
+              // "the group arm invoked the legacy builder ZERO times" remains a
+              // real control-flow pin.
+              issueFrozenContext: (trx, args) => issueW4FrozenContextViaW7SeamV1(trx, args),
             },
           })
         : null
@@ -29008,7 +29100,8 @@ module.exports = {
 	                && importAttribution.resolution.fullWinner.timezone
 	                ? importAttribution.resolution.fullWinner.timezone
 	                : (ruleForMetrics.timezone ?? context.rule?.timezone)
-	              frozenImportContext = await buildW4ShadowFrozenContextV1(trx, {
+	              // W7-1b P5 (batch import) — through the seam + §2.4.
+	              frozenImportContext = (await issueW4FrozenContextForProducerV1(trx, {
 	                orgId,
 	                userId: rowUserId,
 	                workDate: importAttribution.resolution.workDate,
@@ -29019,7 +29112,7 @@ module.exports = {
 	                  ? (context.holiday.type
 	                    ?? (context.holiday.isWorkingDay === false ? 'holiday' : 'working_day_override'))
 	                  : null,
-	              })
+	              })).context
 	            }
 	            const ruleVersion = activeRuleSetId
 	              ? `rule-set:${activeRuleSetId}`
@@ -35661,7 +35754,8 @@ module.exports = {
               'current_policy recompute could not freeze resolved_v2 attribution',
             )
           }
-          const frozenContext = await buildW4ShadowFrozenContextV1(trx, {
+          // W7-1b P6 (recompute current_policy) — through the seam + §2.4.
+          const frozenContext = (await issueW4FrozenContextForProducerV1(trx, {
             orgId: prepared.orgId,
             userId: prepared.subjectUserId,
             workDate: attributionSnapshot.value.workDate || workDate,
@@ -35672,7 +35766,7 @@ module.exports = {
                 : timezone,
             isWorkday: workContext?.isWorkingDay !== false,
             holidayKind: workContext?.holiday?.kind ?? null,
-          })
+          })).context
           if (
             !frozenContext
             || !Array.isArray(frozenContext.segments)

@@ -684,7 +684,14 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: 'const timelineEnv = parsed.basis.find((env) => env.source.kind === \'audit\' && env.source.ref === \'approval_records\')', rule: 'single_member_selector' },
   { file: 'packages/core-backend/src/attendance/w4c0-write-boundary-types.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
-  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'SET current_calculation_id = $3::uuid, projection_owner = \'w4\',', rule: 'write_side_emitter' },
+  // ⚠️ W7-1b: the hard-coded literal is GONE — this writer now DERIVES the value
+  // from the calculation's own frozen context, so the two ternary arms below are
+  // the derived points and the old single-literal entry is correctly stale.
+  // `write_side_emitter` holds for both: neither line TESTS the value, so neither
+  // can route the new member to the wrong side. The selection is made by the
+  // ternary CONDITION, which compares `context.selector`, not `projection_owner`.
+  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: "? 'w4_group'", rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ": 'w4'", rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'isAttendanceProjectionOwnerWithCalculationPointerV1(parent.projectionOwner) &&', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'let owner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'owner = \'w4\'', rule: 'write_side_emitter' },
@@ -704,7 +711,10 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '(projectionOwner === \'legacy_untracked\' && currentCalculationId !== null) ||', rule: 'legacy_polarity' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '\'legacy_untracked\',NULL,$15,$16,now(),now()', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: 'if (input.preimage.projectionOwner !== \'legacy_untracked\') return', rule: 'legacy_polarity' },
-  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: 'timezone = $9, projection_owner = \'w4\', current_calculation_id = $10::uuid,', rule: 'write_side_emitter' },
+  // W7-1b: same shape at P5's import writer — literal replaced by a bound
+  // parameter whose value is derived from the same place.
+  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: "? 'w4_group'", rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: ": 'w4',", rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', text: 'AND (current_calculation_id IS NOT NULL OR projection_owner IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1}))', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback.ts', text: '!isAttendanceProjectionOwnerV1(row.projectionOwner) ||', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-import-rollback.ts', text: '!isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner) ||', rule: 'widened_predicate' },

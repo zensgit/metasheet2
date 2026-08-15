@@ -69,7 +69,18 @@ describe('W7-1a: the membership-timeline lock key IS the W1 writer’s key', () 
   it('the W1 writer still spells that key, and still takes it in the ONE-argument keyspace', () => {
     const source = read(W1_WRITER)
     // The key template, verbatim from the writer.
-    expect(source).toContain('`attendance-calc-timeline\\u001f${input.orgId}\\u001f${input.userId}`')
+    // ⚠️ RE-FORMED BY W7-1b (g1). The writer used to spell the RAW org id here.
+    // W7-1a's builder keys off the CANONICAL org key, so a mixed-case spelling
+    // derived two different advisory keys and the two families never excluded
+    // each other — recorded by W7-1a as a W7-1b alignment obligation and fixed
+    // at the WRITER, which is where the divergence was.
+    //
+    // The assertion is therefore STRONGER than before, not merely different: it
+    // now pins that the writer canonicalises, which is the property that makes
+    // the two keyspaces actually equal. Reverting the writer to `${input.orgId}`
+    // reds this leg.
+    expect(source).toContain('`attendance-calc-timeline\\u001f${canonicalLockOrgKeyV1(input.orgId)}`')
+    expect(source).toContain('function canonicalLockOrgKeyV1(')
     // The arity is half the lock identity: one-arg `hashtextextended` is a
     // DIFFERENT lock space from the two-arg `hashtext` form.
     expect(source).toContain('pg_advisory_xact_lock(hashtextextended($1, 0))')
