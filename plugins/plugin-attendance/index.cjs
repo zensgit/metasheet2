@@ -8368,7 +8368,30 @@ function getAttendanceGroupFixedScheduleEffectivenessService() {
  *
  * Fail-closed default: anything other than `true` refuses a multi-segment work context, exactly
  * as the pinned-closed version did. Callers that do not (yet) thread a resolved posture keep
- * byte-identical behaviour — see `resolveWorkContext` for the enumerated residual set.
+ * byte-identical behaviour — see `resolveWorkContext` for the residual set.
+ *
+ * WHICH POSTURE BIT, AND WHY — this is a CHOICE, recorded as one rather than left implicit.
+ * The bit consumed here is `referenceSegments` (true from `shadow` upward), NOT
+ * `authoritativeResults` (true only for `authoritative`). Both exist in the W4 posture table
+ * and the guard's own 422 text says "authoritative segment calculation is disabled", so
+ * `authoritativeResults` is the reading a reviewer would expect. It is rejected because the
+ * Stage A rollout guard cannot produce an `authoritative` row at all
+ * (`w4c3a-rollout-control.ts` admits only `legacy` -> `shadow`), so that bit is `false` for
+ * every reachable org and the door would stay shut for everyone — leaving Gate A's admitted
+ * writers permanently un-calculable. `referenceSegments` is the bit that answers the question
+ * this door actually asks: "may this org's scheduling data REFERENCE a multi-segment shift?"
+ *
+ * MEASURED CONSEQUENCE, disclosed rather than discovered later. The segment-aware calculator
+ * is W4C-1 and has NOT shipped (`SEGMENT_CALCULATION_IMPLEMENTED === false`). Until it does,
+ * the legacy calculator downstream of this door works off the shift's OUTER ENVELOPE. For a
+ * `shadow` org with an 08:00-12:00 + 13:00-17:00 shift and a full-span attendance, a real
+ * approval run produced `attendance_records.work_minutes = 540`, while the shift DTO's
+ * `plannedMinutes` is 480 (R1: the 60-minute break is never payable time). The break is
+ * therefore counted as worked time for an ENABLED org. That is an owner decision about which
+ * failure is preferable — a Gate-C org whose users cannot be calculated at all (the pinned
+ * state) versus one calculated on envelope semantics until W4C-1 lands — and it is called out
+ * in the PR body, not settled here. It is unreachable today: no rollout row exists, so no org
+ * resolves anything but `legacy`.
  */
 function assertWorkContextSegmentCalculationAllowed(orgId, workContext, referenceSegments) {
   if (!workContext || workContext.source === 'rule') return
@@ -15217,21 +15240,32 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
  * transaction that already holds row locks (see the lock-order rationale on
  * `assertWorkContextSegmentCalculationAllowed`).
  *
- * WIRED in this slice — exactly one consumer, the request-decision approval path
- * (`executeRequestDecisionInTransaction`, the `resolveWorkContext` call at ~`:37223`). Its value
- * comes from the W4C-3b boundary's single resolve, taken under the rollout lock BEFORE any
- * request row lock, and is the SAME value the finalization reference guards consume.
+ * WIRED in this slice — exactly ONE consumer: the `resolveWorkContext` call inside
+ * `executeRequestDecisionInTransaction`. Its value comes from the W4C-3b boundary's single
+ * resolve, taken under the rollout lock BEFORE any request row lock, and is the SAME value the
+ * finalization reference guards consume.
  *
- * OUT OF SCOPE for this slice (enumerated, not hand-waved): every other call site still passes
- * nothing and therefore still fails closed on a multi-segment work context —
- * `:14166`, `:15644`, `:17290`, `:21105`, `:22469`, `:22984`, `:24613`, `:28548`, `:29397`,
- * `:29409`, `:35455`, `:40330`, `:40924`, plus the synchronous prefetch variant's callers
- * `:18707`, `:28542`, `:29898`, `:30556`. The blocker is not effort: each one needs its own
- * lock-order census in the #4899 sense (what locks does its caller already hold, and can the
- * rollout SHARED lock be hoisted above them) before it may resolve a posture. Opening them
- * without that census is how the owner-P1 deadlock gets re-introduced. This slice therefore
- * opens the R4 door PARTIALLY — for the approval path that item 4 needs to be behaviourally
- * coverable — and leaves the rest closed and named.
+ * BREADTH OF THAT ONE SITE, stated so nobody reads "one call site" as "one request type": it
+ * sits under `if (action === 'approve' && isFinalApproval)` and therefore runs for EVERY
+ * request type's final approval — leave, overtime, missed_check_in, missed_check_out,
+ * time_correction, shift_swap, schedule_dispatch. For an enabled org this slice changes
+ * segment-calculation admission for all of them. Only the shift_swap and schedule_dispatch
+ * finalization producers have route-level coverage in this slice; the other types are admitted
+ * by the same door with no leg of their own.
+ *
+ * OUT OF SCOPE for this slice: every OTHER call site of `resolveWorkContext` /
+ * `resolveWorkContextFromPrefetch` still passes nothing and therefore still fails closed on a
+ * multi-segment work context. Enumerate the residual set MECHANICALLY at any head (line numbers
+ * in a comment go stale; this does not):
+ *
+ *   grep -n 'resolveWorkContext(\|resolveWorkContextFromPrefetch(' plugins/plugin-attendance/index.cjs
+ *
+ * Exactly one of those call sites passes a `referenceSegments:` argument today. The blocker on
+ * the rest is not effort: each needs its own lock-order census in the #4899 sense (what locks
+ * does its caller already hold, and can the rollout SHARED lock be hoisted above them) before
+ * it may resolve a posture. Opening them without that census is how the owner-P1 deadlock gets
+ * re-introduced. This slice therefore opens the R4 door PARTIALLY — for the approval path that
+ * P2-1 needs to be behaviourally coverable — and leaves the rest closed.
  */
 async function resolveWorkContext(options) {
   const { db, orgId, userId, workDate, defaultRule, holidayOverride } = options
