@@ -90,7 +90,7 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV = 'ATTENDANCE_W7_CONTEXT
 
 /**
  * Exact org-only outer allowlist; the wildcard `*` NEVER counts. Entries are
- * comma-separated and trimmed; empty entries are dropped.
+ * comma-separated, trimmed and ASCII case-folded; empty entries are dropped.
  *
  * This is the ONE definition. The future W7 transition writer must gate on
  * `isAttendanceW7ContextSourceOrgAllowlistedV1` below — a thin named export of
@@ -100,21 +100,27 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV = 'ATTENDANCE_W7_CONTEXT
  * write side would then disagree about which orgs are in scope.
  */
 /*
- * OPS FOOTGUN, documented deliberately rather than fixed here: entries are
- * trimmed but NOT case-folded, while `orgKey` arrives already lower-cased by
- * `parseUuidSyntax` (`../w4c0-identity.ts:132`). So an operator who writes the
- * org UUID in upper case —
- * `ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED=3F9A1C2E-…` — gets a silent `off`
- * with no signal anywhere.
+ * OPS FOOTGUN — RESOLVED (#4899 residual R4, owner-approved), superseding this
+ * file's original "deferred jointly with the W4 predicate" note.
  *
- * It fails CLOSED, which is why this is a note and not a defect: the failure
- * mode is "the org stays legacy", never "an unintended org is advertised".
- * Not fixed in this slice because case-folding is the SAME open question Gate
- * A deferred for the W4 allowlist (`isOrgExactlyAllowlisted`,
- * `../w4c0-identity.ts:366`), and W7 quietly diverging from the W4 predicate's
- * matching semantics would create two allowlists that disagree — the precise
- * outcome the single-predicate discipline below exists to prevent. Whoever
- * resolves it should resolve it for both, in one change.
+ * Entries are now trimmed AND lower-cased, matching `orgKey`, which arrives
+ * already lower-cased from `parseUuidSyntax` (`../w4c0-identity.ts:132`). An
+ * operator who writes the org UUID in upper case —
+ * `ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED=3F9A1C2E-…` — is now admitted rather
+ * than getting a silent `off`.
+ *
+ * This is an ADMISSION WIDENING, not a tidy-up: the admitted set grows from
+ * the lower-case spellings to all ASCII-case spellings of the same org keys.
+ * It is bounded by construction — `toLowerCase` is a per-character map, so it
+ * can only make two strings that differ in ASCII case compare equal; it never
+ * shortens an entry and never turns a non-match into a prefix/substring/
+ * wildcard match. `'*'`, `' * '`, `'.*'`, `'%'`, prefixes and suffixes still
+ * allowlist nothing.
+ *
+ * The old note deferred this precisely so W7 would not diverge from the W4
+ * predicate's matching semantics. That constraint is honoured: the W4 fold
+ * (`../w4c0-identity.ts`, `isOrgExactlyAllowlisted`) lands in the SAME change,
+ * with the same one-line transformation, so the two allowlists still agree.
  */
 function isOrgExactlyAllowlisted(orgKey: string): boolean {
   const raw =
@@ -123,7 +129,7 @@ function isOrgExactlyAllowlisted(orgKey: string): boolean {
       : ''
   const entries = raw
     .split(',')
-    .map((entry) => entry.trim())
+    .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean)
   // Exact membership only. `'*'` is just another entry string here, and an org
   // key can never equal `'*'` (the canonical parser rejects it), so a wildcard
