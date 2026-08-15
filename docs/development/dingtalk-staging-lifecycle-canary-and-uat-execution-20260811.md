@@ -148,6 +148,13 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     [status 31864575172](https://github.com/zensgit/metasheet2/actions/runs/31864575172) proved exact
     deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, and all
     lifecycle flags OFF.
+18. A later read-only HTTPS inventory used draft PR #4890's status-only probe:
+    [31865023926](https://github.com/zensgit/metasheet2/actions/runs/31865023926). It found the
+    digest-pinned staging Caddy gateway running and healthy, ports 80/443 listening, all three live
+    URL settings matching the managed HTTPS origin/callback, and the pre-HTTPS backup still present.
+    Stream and all lifecycle flags remained OFF. This is an honest pending operational state, not a
+    production enablement: PR #4890 is still draft/unmerged, and no `https-off` mutation is
+    authorized by this evidence record.
 
 ## 1. Environment boundary
 
