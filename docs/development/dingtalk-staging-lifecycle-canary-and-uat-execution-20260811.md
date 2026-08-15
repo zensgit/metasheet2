@@ -179,6 +179,17 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     [status 31866437330](https://github.com/zensgit/metasheet2/actions/runs/31866437330) proved exact
     deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, one
     eligible configured-corp anchor, and all lifecycle flags OFF.
+21. Because the card still displayed its pre-action presentation, draft PR #4913 added a
+    read-only, values-free callback observer. A diagnostic duplicate-click window used
+    [on 31867195160](https://github.com/zensgit/metasheet2/actions/runs/31867195160). The assignee did
+    not complete a second click before the bounded observation point, and
+    [observe 31867282493](https://github.com/zensgit/metasheet2/actions/runs/31867282493) reported zero
+    corp-anchor, handled-callback, handler-error, and card-update-failure log classes. This is a
+    valid zero-callback observation, not U5/U9/U10/U11-a evidence. Fail-safe
+    [off 31867339380](https://github.com/zensgit/metasheet2/actions/runs/31867339380) succeeded; terminal
+    [status 31867392575](https://github.com/zensgit/metasheet2/actions/runs/31867392575) again proved
+    exact deployed SHA match, healthy backend, Stream OFF, worker disabled, and all lifecycle flags
+    OFF.
 
 ## 1. Environment boundary
 
