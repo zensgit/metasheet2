@@ -360,8 +360,8 @@ function fakePlan(overrides: Record<string, unknown> = {}): never {
     canBootstrap: false,
     blocked: false,
     predicates: [
-      { code: 'ORG_ALLOWLISTED', applicable: true, pass: true, count: null },
-      { code: 'LEGAL_TRANSITION_PAIR', applicable: true, pass: true, count: null },
+      { code: 'ORG_ALLOWLISTED', applicable: true, evaluated: true, pass: true, count: null },
+      { code: 'LEGAL_TRANSITION_PAIR', applicable: true, evaluated: true, pass: true, count: null },
     ],
     ...overrides,
   } as never
@@ -401,14 +401,23 @@ test('plan digest: sensitive to every predicate sub-field', () => {
   const subFieldMutations: Array<Record<string, unknown>> = [
     { code: 'CONTEXT_SOURCE_ROW_RESOLVABLE' },
     { applicable: false },
+    // `evaluated` ALONE — `pass` deliberately left at `true`.
+    //
+    // The first version of this entry was `{ evaluated: false, pass: null }` and
+    // was WORTHLESS: it moved two hashed fields at once, so the digest changed
+    // because of `pass` and the entry passed even with `evaluated` removed from
+    // the digest entirely (verified by mutation). One field at a time, or the
+    // sibling carries the leg. The pair is intentionally invariant-violating
+    // here — this is a pure hash-coverage fixture, not a runtime verdict.
+    { evaluated: false },
     { pass: false },
     { count: 3 },
   ]
   for (const patch of subFieldMutations) {
     const mutated = fakePlan({
       predicates: [
-        { code: 'ORG_ALLOWLISTED', applicable: true, pass: true, count: null, ...patch },
-        { code: 'LEGAL_TRANSITION_PAIR', applicable: true, pass: true, count: null },
+        { code: 'ORG_ALLOWLISTED', applicable: true, evaluated: true, pass: true, count: null, ...patch },
+        { code: 'LEGAL_TRANSITION_PAIR', applicable: true, evaluated: true, pass: true, count: null },
       ],
     })
     assert.notEqual(
