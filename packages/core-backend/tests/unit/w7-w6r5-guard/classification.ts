@@ -137,6 +137,11 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w7-resolver/w7-frozen-context-issuance-seam.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-context-issuance.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-facts-resolver.ts',
+  // W7-2: the expected-differences roster + fail-closed probe. Classified
+  // `calculation_path` — the HONEST bucket, not a carve-out: the roster is the
+  // claim side of the compare gate that decides which legacy-vs-group
+  // divergences may pass `group_eligible` entry, so both ban legs must apply.
+  'packages/core-backend/src/attendance/w7-shadow-expected-differences.ts',
   'packages/core-backend/src/attendance/w7-w6r5-guard-root-set.ts',
   'plugins/plugin-attendance/engine/index.cjs',
   'plugins/plugin-attendance/engine/sample-config.cjs',
