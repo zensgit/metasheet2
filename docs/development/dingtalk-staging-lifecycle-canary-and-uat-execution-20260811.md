@@ -58,8 +58,8 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
    reported `prepare_ok`, forced Stream OFF, required no backend restart, and retained one eligible
    configured-corp anchor with two linked local users. Both status runs proved Stream OFF, worker
    disabled, healthy backend and HTTPS gateway, and all lifecycle flags OFF.
-   This closes the configuration-prepare precondition only; U1-U13 and the real callback corp-anchor
-   remain `NOT EXECUTED` until a separate owner-approved Stream `on` window.
+   This closed the configuration-prepare precondition only. The later owner-approved window in
+   items 9-11 proved start/stop but did not execute U1-U13 or the real callback corp-anchor.
 7. Production read-only inventory
    [31818159368](https://github.com/zensgit/metasheet2/actions/runs/31818159368) at exact deployed
    SHA `cc69791604f338a90e07dc07da8118a2d7a68188` reports a ready two-linked-user directory
@@ -74,8 +74,8 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
    [31765617958](https://github.com/zensgit/metasheet2/actions/runs/31765617958), then Stream
    [on 31856025380](https://github.com/zensgit/metasheet2/actions/runs/31856025380) at exact
    deployed SHA `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`. The `on` artifact reported
-   `reason=on_ok`, `stream_enabled=true`, `worker_state=started`, healthy runtime, and all lifecycle
-   flags OFF. As designed, startup alone left `stream_connected=unknown`.
+   `reason=on_ok`, `stream_enabled=true`, `worker_state=started`, `backend_health=true`, and all
+   lifecycle flags OFF. As designed, startup alone left `stream_connected=unknown`.
 10. While Stream was on, the operator created the values-free staging approval `AP-100009` from the
     published UAT template. MetaSheet showed it as pending for the linked local assignee. No
     controllable DingTalk message surface or human confirmation was available in the window, so
@@ -394,9 +394,9 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U11 (including U3-a and U11-b where applicable) | **NOT EXECUTED** | The approved window ran and created `AP-100009`, but no real DingTalk card receipt/click or callback frame was observed; the MetaSheet pending row is not delivery evidence |
+| U1-U13 (including U3-a and U11-b) | **NOT EXECUTED** | The approved window ran and created `AP-100009`, but no real DingTalk card receipt/click or callback frame was observed; the MetaSheet pending row and operational shutdown are not substitutes for the canonical human matrix |
 | U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
-| U12/U13 worker shutdown and terminal OFF | **PARTIAL PASS** | Runs `31856520796` and `31856563224` prove clean operational stop and disabled worker; post-OFF OA fallback send and the full human callback sequence were not executed |
+| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796` and `31856563224` prove clean operational stop and disabled worker; post-OFF OA fallback send and the human callback sequence were not executed |
 | P1 latest storage-health precondition | **PASS at window start** | `Attendance Remote Storage Health (Prod)` run [31765617958](https://github.com/zensgit/metasheet2/actions/runs/31765617958) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
 | P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
@@ -416,7 +416,7 @@ credentials_ready=false
 Those values are historical for run `31579935836`. Prepare run `31854315133` and post-status
 `31854359627` supersede the missing-configuration diagnosis. The later controlled window
 `31856025380 -> 31856520796 -> 31856563224` proved worker start followed by a safe return to OFF.
-U1-U11 and the callback corp-anchor remain unexecuted because no real DingTalk card click was
+U1-U13 and the callback corp-anchor remain unexecuted because no real DingTalk card click was
 observed.
 
 Required external action: schedule another short owner-approved Stream window when the linked
