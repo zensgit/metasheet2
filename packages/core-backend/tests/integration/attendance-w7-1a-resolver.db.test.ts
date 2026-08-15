@@ -30,11 +30,15 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
-import { ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1 } from '../../src/attendance/w7-context-source-posture-contract'
+import {
+  ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_LEGAL_TRANSITIONS_V1,
+  ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1,
+} from '../../src/attendance/w7-context-source-posture-contract'
 import {
   down as postureMigrationDown,
   up as postureMigrationUp,
 } from '../../src/db/migrations/zzzz20260814120000_w7_attendance_context_source_posture_state'
+import { up as contextSourceWriterMigrationUp } from '../../src/db/migrations/zzzz20260816120000_w7_context_source_transition_writer'
 import { coreIssueGroupEffectiveContextV2 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
 import {
   ATTENDANCE_CALCULATION_GROUP_MEMBERSHIP_OVERLAP,
@@ -68,6 +72,9 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 
 const W4_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 const POSTURE_TABLE = 'attendance_calculation_context_source_state'
+/** W7-3's legal-matrix trigger backstop
+ *  (`zzzz20260816120000_w7_context_source_transition_writer.ts`). */
+const STATE_GUARD_TRIGGER = 'trg_accss_state_guard'
 const WORK_DATE = '2026-08-14'
 
 /** The rule scalars are org-level, not group policy — injected exactly as
@@ -97,6 +104,63 @@ function asTrx(client: PoolClient): AttendanceW4TransactionClientV1 {
 
 function codeOf(error: unknown): string {
   return (error as { code?: string }).code ?? `<no code: ${String(error)}>`
+}
+
+/**
+ * Removes W7-3's BEFORE trigger for the duration of the CALLER's transaction.
+ *
+ * The three hard-throw legs below deliberately construct rows the schema
+ * forbids. W7-3's trigger would reject those INSERTs before the resolver is ever
+ * reached, so each leg drops it alongside the constraint it already drops.
+ *
+ * WHY THIS IS NOT COSMETIC: without it these legs still passed, but only because
+ * the `replays down/up` leg declared EARLIER in this file had already dropped
+ * and recreated the table WITHOUT W7-3's columns or trigger. That made them
+ * silently order-dependent — reordering the file, or running a leg in isolation,
+ * would have broken them. Dropping it explicitly here makes each leg
+ * self-contained. `DROP TRIGGER` is transactional, so the rollback restores it,
+ * and `IF EXISTS` keeps this a no-op on a database where W7-3 has not been
+ * applied.
+ */
+/**
+ * The full shipped column set for a fixture row.
+ *
+ * W7-3 (#4556) added `version` / `prior_state` / `engine_version` /
+ * `reason_code` / `actor_id` / `changed_at`, four of them NOT NULL with no
+ * default, so a bare `(org_id, state, scope)` INSERT now fails `23502` before
+ * reaching either the trigger or the CHECKs. Every fixture below supplies the
+ * full set through this ONE helper, so the discriminating enforcer for each leg
+ * is the one that leg is actually about.
+ */
+function postureFixtureInsert(stateExpr: string, scopeExpr: string, priorExpr = 'NULL'): string {
+  return (
+    `INSERT INTO ${POSTURE_TABLE}` +
+    ' (org_id, state, scope, version, prior_state, engine_version, reason_code, actor_id)' +
+    ` VALUES ($1, ${stateExpr}, ${scopeExpr}, 1, ${priorExpr},` +
+    " 'w7-1a-fixture', 'context_source_transition', 'w7-1a-fixture')"
+  )
+}
+
+/** The legal ladder path from `off` to `target`, derived from the RATIFIED
+ *  transition constant by breadth-first search — never a hand-written route. */
+function legalLadderPathTo(target: string): string[] {
+  if (target === 'off') return []
+  const queue: Array<{ state: string; path: string[] }> = [{ state: 'off', path: [] }]
+  const seen = new Set<string>(['off'])
+  while (queue.length > 0) {
+    const head = queue.shift() as { state: string; path: string[] }
+    if (head.state === target) return head.path
+    for (const [from, to] of ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_LEGAL_TRANSITIONS_V1) {
+      if (from !== head.state || seen.has(to)) continue
+      seen.add(to)
+      queue.push({ state: to, path: [...head.path, to] })
+    }
+  }
+  throw new Error(`no legal ladder path to ${target}`)
+}
+
+async function dropW73StateGuard(client: PoolClient): Promise<void> {
+  await client.query(`DROP TRIGGER IF EXISTS ${STATE_GUARD_TRIGGER} ON ${POSTURE_TABLE}`)
 }
 
 describeIfDatabase('W7-1a resolvers (real PG)', () => {
@@ -262,11 +326,39 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
     }
   }
 
+  /**
+   * Seeds a persisted posture row in `state`.
+   *
+   * W7-3 (#4556) AMENDMENT — this used to be a single bare INSERT of an
+   * arbitrary state. It cannot be any more, and that is the point of the change
+   * rather than an inconvenience: W7-3's `trg_accss_state_guard` restricts
+   * INSERT to the two BOOTSTRAP shapes (`off` with no prior state, or
+   * `group_shadow` from `off`), so an arbitrary posture is now reachable ONLY by
+   * walking the ratified legal ladder. A test that could still conjure
+   * `group_authoritative` out of a bare INSERT would be seeding a row the
+   * production writer can never produce.
+   *
+   * The path is DERIVED from the ratified transition constant by breadth-first
+   * search, never hand-written, so removing a pair from that constant makes the
+   * walk unreachable and throws here instead of silently taking a stale route.
+   */
   async function insertPosture(state: string): Promise<void> {
     await pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-      [orgId, state],
+      postureFixtureInsert("'off'", "'synthetic_staging'"),
+      [orgId],
     )
+    for (const step of legalLadderPathTo(state)) {
+      await pool.query(
+        `UPDATE ${POSTURE_TABLE}
+            SET state = $2, prior_state = state, version = version + 1
+          WHERE org_id = $1`,
+        [orgId, step],
+      )
+    }
+    // The walk must have LANDED. An unasserted walk would let every leg below
+    // run against whatever state the row happened to stop at.
+    const landed = await pool.query(`SELECT state FROM ${POSTURE_TABLE} WHERE org_id = $1`, [orgId])
+    expect(landed.rows[0]?.state, `ladder walk to ${state} did not land`).toBe(state)
   }
 
   async function resolvePosture(org: string = orgId) {
@@ -312,22 +404,82 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
     })
 
     it('the CHECKs actually REJECT out-of-union values (a constraint definition is not behaviour)', async () => {
+      // W7-3 (#4556) AMENDMENT — a declared behavioural change, not a relaxation.
+      //
+      // This leg used to assert SQLSTATE `23514` (check_violation) for a bare
+      // out-of-union INSERT. W7-3 adds `trg_accss_state_guard`, a
+      // `BEFORE INSERT OR UPDATE ... FOR EACH ROW` trigger on this table.
+      // PostgreSQL runs BEFORE triggers ahead of CHECK constraint evaluation, so
+      // the OBSERVABLE error for these two inserts is now the trigger's `P0001`
+      // and the CHECK is never reached. That is a change to a landed table's
+      // error contract and is recorded as such rather than discovered later.
+      //
+      // The leg is made STRONGER rather than merely updated: it now proves BOTH
+      // doors, each EXCLUSIVELY. Two fail-closed doors that are only ever tested
+      // together cover for each other — either could be deleted with every test
+      // still green.
+
+      // ANCHOR CHECK: door 1 only means something if the trigger is actually
+      // installed. Asserted rather than assumed — an absent trigger would make
+      // every `P0001` expectation below fail confusingly instead of saying why.
+      const guard = await pool.query(
+        `SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = $1 AND tgrelid = $2::regclass`,
+        [STATE_GUARD_TRIGGER, POSTURE_TABLE],
+      )
+      expect(
+        Number(guard.rows[0].n),
+        `${STATE_GUARD_TRIGGER} is not installed — is the database migrated to the W7-3 head?`,
+      ).toBe(1)
+
+      // DOOR 1 (outer): the trigger refuses both rows.
       await expect(
         pool.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'authoritative', 'synthetic_staging')`,
+          postureFixtureInsert("'authoritative'", "'synthetic_staging'"),
           [otherOrgId],
         ),
-      ).rejects.toMatchObject({ code: '23514' })
+      ).rejects.toMatchObject({ code: 'P0001' })
       await expect(
         pool.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'production')`,
+          postureFixtureInsert("'group_shadow'", "'production'"),
           [otherOrgId],
         ),
-      ).rejects.toMatchObject({ code: '23514' })
-      // POSITIVE CONTROL: a well-formed row inserts, so the two rejections
-      // above are the CHECKs and not a broken INSERT.
+      ).rejects.toMatchObject({ code: 'P0001' })
+
+      // DOOR 2 (inner): with the trigger neutered, the CHECKs still refuse —
+      // and with the ORIGINAL `23514`, so the constraints remain behaviourally
+      // load-bearing and not merely defined.
+      await pool.query(`ALTER TABLE ${POSTURE_TABLE} DISABLE TRIGGER ${STATE_GUARD_TRIGGER}`)
+      try {
+        await expect(
+          pool.query(
+            postureFixtureInsert("'authoritative'", "'synthetic_staging'"),
+            [otherOrgId],
+          ),
+        ).rejects.toMatchObject({ code: '23514' })
+        await expect(
+          pool.query(
+            postureFixtureInsert("'group_shadow'", "'production'"),
+            [otherOrgId],
+          ),
+        ).rejects.toMatchObject({ code: '23514' })
+      } finally {
+        await pool.query(`ALTER TABLE ${POSTURE_TABLE} ENABLE TRIGGER ${STATE_GUARD_TRIGGER}`)
+      }
+
+      // The ENABLE really took effect — otherwise every later leg in this file
+      // would be running against a silently trigger-less table.
+      await expect(
+        pool.query(
+          postureFixtureInsert("'authoritative'", "'synthetic_staging'"),
+          [otherOrgId],
+        ),
+      ).rejects.toMatchObject({ code: 'P0001' })
+
+      // POSITIVE CONTROL: a well-formed BOOTSTRAP row inserts, so every
+      // rejection above is a real refusal and not a broken INSERT. `group_shadow`
+      // with `prior_state = 'off'` is the shape W7-3's trigger accepts on INSERT.
       await pool.query(
-        `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'synthetic_staging')`,
+        postureFixtureInsert("'group_shadow'", "'synthetic_staging'", "'off'"),
         [otherOrgId],
       )
     })
@@ -390,6 +542,16 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
         // failure that sent us here.
         try {
           await postureMigrationUp(db)
+          // W7-3 (#4556): restoring HALF the shipped schema is not restoring it.
+          // `postureMigrationDown` is a DROP TABLE, so it also takes W7-3's
+          // columns, CHECKs, event-table triggers and the legal-matrix guard —
+          // and `postureMigrationUp` alone brings back only the W7-1a shape.
+          // Before this line, every run of this leg left the shared database
+          // permanently missing W7-3's schema, which made the trigger-vs-CHECK
+          // leg above pass or fail depending on whether this file had already
+          // run against that database. Re-applying the writer migration here
+          // restores the table to the shape a migrated database actually ships.
+          await contextSourceWriterMigrationUp(db)
         } catch {
           /* best-effort restore — never mask the original failure */
         }
@@ -514,8 +676,13 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
       // Without this, all three legs below could be "passes because the harness
       // itself throws".
       const state = await inRolledBackTx(async (client) => {
+        // Same reason as the three hard-throw legs below: W7-3's INSERT guard
+        // would reject this bare `group_shadow` row (no `prior_state`), and this
+        // leg is about the RESOLVER, not about the write path. Dropped inside
+        // the rolled-back transaction, so the trigger is restored on exit.
+        await dropW73StateGuard(client)
         await client.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'synthetic_staging')`,
+          postureFixtureInsert("'group_shadow'", "'synthetic_staging'"),
           [orgId],
         )
         return resolveAttendanceW7ContextSourcePostureV1(asTrx(client), orgId)
@@ -526,11 +693,14 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
 
     it('>1 row for one org THROWS _STATE_AMBIGUOUS (never "pick one")', async () => {
       const code = await inRolledBackTx(async (client) => {
+        await dropW73StateGuard(client)
         await client.query(`ALTER TABLE ${POSTURE_TABLE} DROP CONSTRAINT ${POSTURE_TABLE}_pkey`)
         await client.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES
-             ($1, 'group_shadow', 'synthetic_staging'),
-             ($1, 'group_authoritative', 'synthetic_staging')`,
+          `INSERT INTO ${POSTURE_TABLE}
+             (org_id, state, scope, version, prior_state, engine_version, reason_code, actor_id)
+           VALUES
+             ($1, 'group_shadow', 'synthetic_staging', 1, NULL, 'w7-1a-fixture', 'context_source_transition', 'w7-1a-fixture'),
+             ($1, 'group_authoritative', 'synthetic_staging', 1, NULL, 'w7-1a-fixture', 'context_source_transition', 'w7-1a-fixture')`,
           [orgId],
         )
         try {
@@ -545,9 +715,10 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
 
     it('an invalid state value THROWS _STATE_INVALID (never collapses to off)', async () => {
       const code = await inRolledBackTx(async (client) => {
+        await dropW73StateGuard(client)
         await client.query(`ALTER TABLE ${POSTURE_TABLE} DROP CONSTRAINT chk_accss_state`)
         await client.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'authoritative', 'synthetic_staging')`,
+          postureFixtureInsert("'authoritative'", "'synthetic_staging'"),
           [orgId],
         )
         try {
@@ -565,9 +736,10 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
 
     it('a non-synthetic_staging scope THROWS _SCOPE_INVALID', async () => {
       const code = await inRolledBackTx(async (client) => {
+        await dropW73StateGuard(client)
         await client.query(`ALTER TABLE ${POSTURE_TABLE} DROP CONSTRAINT chk_accss_scope`)
         await client.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_authoritative', 'production')`,
+          postureFixtureInsert("'group_authoritative'", "'production'"),
           [orgId],
         )
         try {

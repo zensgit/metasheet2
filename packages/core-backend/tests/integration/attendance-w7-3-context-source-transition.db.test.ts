@@ -20,8 +20,29 @@
  * The TRIGGER-vs-TS equality is proven by EXERCISING THE DATABASE against the
  * IMPORTED TS constant, never by comparing the migration's text to the
  * contract's text — two identically-wrong lists would pass a text comparison.
+ *
+ * DEDICATED EPHEMERAL DATABASE, not the shared `metasheet_test` — and the reason
+ * is a measured collision, not caution. This suite performs SCHEMA-destructive
+ * work (a `down()`/`up()` replay of the W7-3 migration; a
+ * `DISABLE TRIGGER`/`ENABLE TRIGGER` pair proving the CHECK is a separate door),
+ * and the landed `attendance-w7-1a-resolver.db.test.ts` performs its own
+ * schema-destructive replay of the W7-1a migration — whose `down()` is a
+ * `DROP TABLE` that takes W7-3's columns and trigger with it and whose `up()`
+ * recreates the table WITHOUT them. Two suites replaying migrations against one
+ * shared table under `pool: 'forks'` parallelism broke each other in both
+ * directions when this was first run against the shared database: 11 failures
+ * across the two files, none of them a real defect in either.
+ *
+ * The shape is cloned from the equivalent W4 transition-boundary suite,
+ * `attendance-w4c3a-rollout-control.db.test.ts` (scratch database ->
+ * hand-built minimal base tables -> the REAL W4C-0 migration `up()` on top), so
+ * the parts that carry weight — this slice's own migration, the W4C-0
+ * `attendance_w4_deny_mutation()` function, and the W4 rollout state machine the
+ * `W4_POSTURE_COHERENT` predicate reads — all run for real rather than being
+ * re-spelled by hand.
  */
 import { randomUUID } from 'node:crypto'
+import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -58,6 +79,8 @@ import {
   type AttendanceW7ContextSourceTransitionInputV1,
 } from '../../src/attendance/w7-context-source-transition'
 import { ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV } from '../../src/attendance/w7-resolver/w7-context-source-posture-resolver'
+import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
+import { up as postureSchemaUp } from '../../src/db/migrations/zzzz20260814120000_w7_attendance_context_source_posture_state'
 import {
   down as writerMigrationDown,
   up as writerMigrationUp,
@@ -119,8 +142,58 @@ function asTrx(client: PoolClient): AttendanceW4TransactionClientV1 {
   }
 }
 
-describeIfDatabase('W7-3 context-source transition boundary (real PG)', () => {
-  const pool = new Pool({ connectionString: dbUrl, max: 12 })
+/**
+ * The minimal non-W4C-0 tables this boundary's predicates read. Copied in shape
+ * from `attendance-w4c3a-rollout-control.db.test.ts`'s own `createBase` — the
+ * same predicates, so the same minimum. Everything else (the rollout state
+ * machine, the request-snapshot table, `attendance_w4_deny_mutation`) comes from
+ * the REAL W4C-0 migration applied on top, never hand-written here.
+ */
+async function createBase(pool: Pool): Promise<void> {
+  await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
+  await pool.query(`
+    CREATE TABLE attendance_records (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id text NOT NULL, work_date date NOT NULL,
+      first_in_at timestamptz, last_out_at timestamptz, work_minutes integer NOT NULL DEFAULT 0,
+      late_minutes integer NOT NULL DEFAULT 0, early_leave_minutes integer NOT NULL DEFAULT 0,
+      status varchar(64) NOT NULL DEFAULT 'normal', is_workday boolean, meta jsonb,
+      source_batch_id uuid, org_id text NOT NULL
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_requests (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id text NOT NULL, work_date date NOT NULL,
+      request_type varchar(30) NOT NULL, status varchar(20) NOT NULL DEFAULT 'pending', org_id text NOT NULL,
+      requested_in_at timestamptz, requested_out_at timestamptz, reason text,
+      metadata jsonb NOT NULL DEFAULT '{}'::jsonb, approval_instance_id text
+    )`)
+  await pool.query(`
+    CREATE TABLE approval_instances (
+      id text PRIMARY KEY, status text NOT NULL, version integer NOT NULL DEFAULT 0
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_import_jobs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id text NOT NULL, batch_id uuid NOT NULL,
+      created_by text NOT NULL, idempotency_key text, status varchar(20) NOT NULL DEFAULT 'queued',
+      progress integer NOT NULL DEFAULT 0, total integer NOT NULL DEFAULT 0, error text,
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb, started_at timestamptz, finished_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_import_batches (
+      id uuid PRIMARY KEY, org_id text NOT NULL, idempotency_key text, status text NOT NULL,
+      row_count integer NOT NULL DEFAULT 0, meta jsonb NOT NULL DEFAULT '{}'::jsonb
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_import_items (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), batch_id uuid NOT NULL, org_id text NOT NULL,
+      user_id text, work_date date, record_id uuid, preview_snapshot jsonb
+    )`)
+}
+
+describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated ephemeral DB)', () => {
+  const scratchName = `ms2_w73_ctx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  let adminPool: Pool
+  let pool: Pool
   const createdOrgs: string[] = []
 
   let savedW4: string | undefined
@@ -284,23 +357,61 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG)', () => {
     if (!dbUrl) throw new Error('DATABASE_URL / ATTENDANCE_TEST_DATABASE_URL is required')
     savedW4 = process.env[W4_ENV]
     savedW7 = process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV]
-  })
+
+    const adminUrl = new URL(dbUrl)
+    adminUrl.pathname = '/postgres'
+    adminPool = new Pool({ connectionString: adminUrl.toString() })
+    await adminPool.query(`DROP DATABASE IF EXISTS ${scratchName}`)
+    await adminPool.query(`CREATE DATABASE ${scratchName}`)
+    const scratchUrl = new URL(dbUrl)
+    scratchUrl.pathname = `/${scratchName}`
+    pool = new Pool({ connectionString: scratchUrl.toString(), max: 12 })
+
+    await createBase(pool)
+    // Kysely owns a pool on destroy, so it gets its own; `pool` is retained for
+    // the suite's own connections (including the two-connection contention legs)
+    // and is closed in afterAll.
+    const migrationPool = new Pool({ connectionString: scratchUrl.toString(), max: 4 })
+    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
+    try {
+      await w4c0Up(db)
+      await postureSchemaUp(db)
+      await writerMigrationUp(db)
+    } finally {
+      await db.destroy()
+    }
+
+    // ANCHOR CHECK on the bootstrap itself: if any of the three migrations
+    // silently no-opped, every leg below would be measuring an empty or
+    // half-built schema. Assert the objects this suite depends on EXIST before
+    // a single assertion runs.
+    const objects = await pool.query(
+      `SELECT to_regclass($1)::text AS state_table,
+              to_regclass($2)::text AS event_table,
+              to_regclass('attendance_calculation_rollout_state')::text AS rollout_table,
+              (SELECT count(*)::int FROM pg_proc WHERE proname = 'attendance_w4_deny_mutation') AS deny_fn,
+              (SELECT count(*)::int FROM pg_trigger WHERE tgname = 'trg_accss_state_guard') AS guard_trigger`,
+      [STATE_TABLE, EVENT_TABLE],
+    )
+    expect(objects.rows[0].state_table, 'scratch bootstrap: state table missing').toBe(STATE_TABLE)
+    expect(objects.rows[0].event_table, 'scratch bootstrap: event table missing').toBe(EVENT_TABLE)
+    expect(objects.rows[0].rollout_table, 'scratch bootstrap: W4 rollout table missing').toBe(
+      'attendance_calculation_rollout_state',
+    )
+    expect(Number(objects.rows[0].deny_fn), 'scratch bootstrap: deny-mutation fn missing').toBe(1)
+    expect(Number(objects.rows[0].guard_trigger), 'scratch bootstrap: W7 guard trigger missing').toBe(1)
+  }, 60_000)
 
   afterAll(async () => {
-    for (const orgId of createdOrgs) {
-      await pool.query(`DELETE FROM ${STATE_TABLE} WHERE org_id = $1`, [orgId]).catch(() => undefined)
-      await pool
-        .query(`DELETE FROM attendance_calculation_rollout_state WHERE org_id = $1`, [orgId])
-        .catch(() => undefined)
-      await pool
-        .query(`DELETE FROM attendance_requests WHERE org_id = $1`, [orgId])
-        .catch(() => undefined)
-    }
     if (savedW4 === undefined) delete process.env[W4_ENV]
     else process.env[W4_ENV] = savedW4
     if (savedW7 === undefined) delete process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV]
     else process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = savedW7
-    await pool.end()
+    await pool?.end().catch(() => undefined)
+    if (adminPool) {
+      await adminPool.query(`DROP DATABASE IF EXISTS ${scratchName}`).catch(() => undefined)
+      await adminPool.end().catch(() => undefined)
+    }
   })
 
   beforeEach(() => {
@@ -627,7 +738,10 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG)', () => {
     })
 
     it('down() then up() replays without drift', async () => {
-      const { Kysely, PostgresDialect } = await import('kysely')
+      // Safe HERE and only here: this suite owns its database outright, so a
+      // schema replay cannot reach any sibling suite. On the shared database
+      // this exact leg broke the W7-1a suite (and was broken by it) in both
+      // directions — see the file header.
       const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
       const before = await pool.query(
         `SELECT column_name, data_type, is_nullable FROM information_schema.columns
