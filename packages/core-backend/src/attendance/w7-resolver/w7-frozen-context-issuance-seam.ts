@@ -81,10 +81,35 @@ import type { AttendanceW7ContextSourcePostureStateV1 } from '../w7-context-sour
 // ---------------------------------------------------------------------------
 
 /**
+ * The posture states that BLOCK issuance entirely.
+ *
+ * ⚠️ `suspended` is NOT a legacy-arm state. Routing a suspended org's
+ * calculation to the legacy producer would be A LEGACY FALLBACK BY ANOTHER NAME,
+ * and OD-W7-4(a) is ratified precisely against that: *no legacy fallback from
+ * `group_authoritative` — suspend/resume only; one producer per work date.*
+ *
+ * The W4 precedent the ruling names is explicit: `POSTURE_TABLE.suspended`
+ * carries `writePosture: 'blocked'` (`w4c0-identity.ts`), i.e. suspension stops
+ * the writer rather than redirecting it. The landed W7 posture resolver already
+ * gives `suspended` a never-evadable priority for the same reason.
+ *
+ * This shipped as the legacy arm in an earlier revision and was unreachable
+ * (no writer ⇒ no rows), but W7-3 makes it reachable, so it is corrected here
+ * rather than left as a latent fallback.
+ *
+ * [OWNER-CONFIRM] The counter-reading is recorded rather than suppressed:
+ * 「suspended 读态合法且无消费者，legacy 臂即『无变化』」 — i.e. that while nothing
+ * consumes the state, the legacy arm is a no-op and therefore harmless. The
+ * RATIFIED default implemented here is BLOCKED; the owner may override.
+ */
+export const ATTENDANCE_W7_BLOCKED_ARM_STATES_V1: readonly AttendanceW7ContextSourcePostureStateV1[] =
+  Object.freeze(['suspended'] as const)
+
+/**
  * The posture states that select the GROUP arm.
  *
- * `group_authoritative` ONLY, for W7-1b. `group_shadow`, `group_eligible`,
- * `suspended` and `off` all take the legacy arm.
+ * `group_authoritative` ONLY, for W7-1b. `group_shadow`, `group_eligible` and
+ * `off` take the legacy arm; `suspended` is BLOCKED (see above).
  *
  * This is a NAMED NON-DELIVERY, not an omission: 1b's enumerated scope is the
  * REPLACE cutover, and a shadow-COMPARE arm is a different behaviour with a
@@ -182,6 +207,9 @@ export interface AttendanceW7IssuanceDepsV1 extends AttendanceW7GroupEffectiveRe
  * not a soft degrade — see `issueAttendanceFrozenContextV1`'s step 4.
  */
 export type AttendanceW7IssuanceResultV1 =
+  /** OD-W7-4(a): a SUSPENDED org produces NO calculation. Not a legacy context,
+   *  not a null group context — a refusal the caller must surface. */
+  | { arm: 'blocked'; context: null; reason: 'suspended' }
   | { arm: 'legacy'; context: FrozenAttendanceContextV1 | null; reason: null }
   | {
       arm: 'group'
@@ -256,6 +284,13 @@ export async function issueAttendanceFrozenContextV1(
 ): Promise<AttendanceW7IssuanceResultV1> {
   // Step 1 — posture. Hard throws propagate by design.
   const posture = await resolveAttendanceW7ContextSourcePostureV1(trx, input.orgId)
+
+  // Step 1b — BLOCKED states, before any arm selection. OD-W7-4(a) forbids a
+  // legacy fallback out of the group posture; suspension stops the producer, it
+  // does not redirect it.
+  if (ATTENDANCE_W7_BLOCKED_ARM_STATES_V1.includes(posture.effectiveState)) {
+    return { arm: 'blocked', context: null, reason: 'suspended' }
+  }
 
   // Steps 2/3 — the branch.
   if (!attendanceW7PostureSelectsGroupArmV1(posture.effectiveState)) {

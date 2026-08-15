@@ -486,7 +486,10 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
       purpose: 'persist' | 'mirror'
     },
   ): Promise<{
-    arm: 'legacy' | 'group'
+    // `blocked` is OD-W7-4(a)'s suspended posture: NO calculation is produced.
+    // It is a distinct arm rather than a null context precisely so the caller
+    // cannot unwrap it into a review row.
+    arm: 'legacy' | 'group' | 'blocked'
     context: FrozenAttendanceContextV1 | null
     reason: string | null
   }>
@@ -1632,6 +1635,16 @@ export function createAttendanceLiveScheduledBoundaryV1(
     },
   ): Promise<FrozenAttendanceContextV1 | null> {
     const issued = await adapters.issueFrozenContext(pluginTrx, { ...args, purpose: 'persist' })
+    // OD-W7-4(a): a SUSPENDED org produces NO calculation. Unwrapping `.context`
+    // here would yield `null`, which the calculator turns into a durable
+    // `review('missing_frozen_context')` ROW — a produced calculation, i.e.
+    // exactly what suspension must prevent. So this refuses instead.
+    //
+    // On the scheduled path D3's per-target SAVEPOINT containment applies, so a
+    // suspended target does not abort the surrounding batch.
+    if (issued.arm === 'blocked') {
+      boundaryFail('W4C2_W7_CONTEXT_SOURCE_SUSPENDED', 409)
+    }
     return issued.context
   }
 

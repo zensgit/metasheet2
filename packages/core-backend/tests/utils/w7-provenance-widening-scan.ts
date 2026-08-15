@@ -694,7 +694,12 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: ": 'w4'", rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'isAttendanceProjectionOwnerWithCalculationPointerV1(parent.projectionOwner) &&', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'let owner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
-  { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'owner = \'w4\'', rule: 'write_side_emitter' },
+  // ⚠️ W7-1b B6 THIRD EMITTER: the hard-coded `owner = 'w4'` on the
+  // absent-preimage RETIRE path is GONE — it now derives from the calculation's
+  // own frozen context, so the old single-literal entry is correctly stale and
+  // the derived points are the shared `? 'w4_group'` / `: 'w4'` ternary arms
+  // already ledgered above for this file. Retiring a group-owned parent used to
+  // RELABEL it `'w4'` (a lying pointer); that is what this removal records.
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'projectionOwner: isAttendanceProjectionOwnerV1(row.projection_owner)', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'readonly projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: '} else if (parent.projectionOwner === \'legacy_untracked\' && parent.visibilityState === \'active\') {', rule: 'legacy_polarity' },

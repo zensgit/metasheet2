@@ -1042,6 +1042,61 @@ describeIfDatabase('W4C-2 Gate D1 — authoritative-mode result-write CORE (real
       expect(rec.visibility_reason).toBe('import_rollback')
     })
 
+    it('W7-1b B6 (THIRD emitter): an absent-preimage retire of a GROUP calculation keeps projection_owner = w4_group', async () => {
+      // THE THIRD PROVENANCE EMISSION POINT, and the one the first B6 pass
+      // missed. On this branch the owner was hard-coded `'w4'`, so retiring a
+      // group-owned parent RELABELLED it — the lying-pointer class B6 exists to
+      // prevent. The owner is now derived from THIS calculation's own frozen
+      // context, identically to the pointer writer and the import writer.
+      const org = `org-w7b6-${RUN}`
+      const { recordId, calcId: first } = await seedFirstCompleted(org)
+      const reversed = { ...(await calcRow(first)) } as Record<string, unknown>
+      // Make the reversed calculation's context the GROUP shape — this is what
+      // the emitter must read.
+      reversed.context_snapshot = {
+        schemaVersion: 2,
+        selector: 'group_effective',
+        calculationGroupId: `group-${RUN}`,
+      }
+      const reversal = await withTxn((client) =>
+        writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
+          supersedesCalculationId: first,
+          reversedRow: reversed,
+          preimage: { posture: 'absent' },
+          restoresCalculationId: null,
+          frozenTarget: { visibilityState: 'retired', visibilityReason: 'import_rollback', projection: projectionOf(reversed), dailyFingerprint: String(reversed.projected_daily_fingerprint) },
+          outcomeReasonCode: 'import_rollback_reversal',
+          mergePolicy: 'reversal',
+        })),
+      )
+      const rec = await recordRow(recordId)
+      expect(rec.current_calculation_id).toBe(reversal.calculationId)
+      // POSITIVE equality, never `notEqual('w4')`.
+      expect(rec.projection_owner).toBe('w4_group')
+    })
+
+    it('W7-1b B6 (THIRD emitter) negative half: a LEGACY calculation still retires as w4', async () => {
+      // Without this, the leg above is equally consistent with "this branch now
+      // always says w4_group".
+      const org = `org-w7b6n-${RUN}`
+      const { recordId, calcId: first } = await seedFirstCompleted(org)
+      const reversed = await calcRow(first)
+      const reversal = await withTxn((client) =>
+        writeAuthoritativeReversalV1(asTrx(client), reversalInput(org, recordId, {
+          supersedesCalculationId: first,
+          reversedRow: reversed as Record<string, unknown>,
+          preimage: { posture: 'absent' },
+          restoresCalculationId: null,
+          frozenTarget: { visibilityState: 'retired', visibilityReason: 'import_rollback', projection: projectionOf(reversed as Record<string, unknown>), dailyFingerprint: String((reversed as Record<string, unknown>).projected_daily_fingerprint) },
+          outcomeReasonCode: 'import_rollback_reversal',
+          mergePolicy: 'reversal',
+        })),
+      )
+      const rec = await recordRow(recordId)
+      expect(rec.current_calculation_id).toBe(reversal.calculationId)
+      expect(rec.projection_owner).toBe('w4')
+    })
+
     it('NEGATIVE (product code): a reversal without a supersedes target is refused with REVERSAL_SUPERSEDES_REQUIRED', async () => {
       const org = `org-x3-${RUN}`
       const { recordId, calcId: first } = await seedFirstCompleted(org)

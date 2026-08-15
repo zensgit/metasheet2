@@ -249,11 +249,13 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     process.env.SKIP_PLUGINS = 'false'
     // BOTH allowlists carry the both-machines org, EXACTLY. The W4 half is what
     // makes the boundary's inner arm reachable at all (§1 Chain A).
-    // W4 allowlist carries BOTH the both-machines org and the W4-only org;
-    // the W7 allowlist carries ONLY the both-machines org. That asymmetry is
-    // what makes the W4-only org exercise "arm A true, arm B false".
-    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()}`
-    process.env[W7_ENV] = bothOrg.toLowerCase()
+    // ⚠️ The env is installed PER TEST (see `withEnv`), not here. `beforeAll` is
+    // a per-FILE hook while `process.env` is per-WORKER, so a value set here can
+    // be changed by a neighbouring suite before this file's bodies run — which
+    // is precisely the CI-only failure this suite hit while passing in isolation.
+    // Only the ORIGINAL values are captured here, for restoration in afterAll.
+    delete process.env[W4_ENV]
+    delete process.env[W7_ENV]
 
     const repoRoot = path.join(HERE, '../../../../')
     const { MetaSheetServer: Server } = await import('../../src/index')
@@ -336,6 +338,48 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     else process.env[W7_ENV] = priorW7
   }, 60_000)
 
+  /**
+   * HERMETIC per-test env. `beforeAll` is a per-FILE hook, but `process.env` is
+   * per-WORKER and several attendance suites in the same run-list set or clear
+   * these two variables. Relying on a `beforeAll` value to still be there when a
+   * test body runs is an ordering assumption, not an invariant — and it is the
+   * mechanism behind this suite's CI-only failure while the file passed alone.
+   *
+   * Every leg that depends on the env now installs it itself and restores the
+   * previous value, so a neighbour cannot invalidate the premise and this suite
+   * cannot leak into one either.
+   */
+  function withEnv<T>(vars: Record<string, string | undefined>, body: () => Promise<T>): Promise<T> {
+    const prior = new Map<string, string | undefined>()
+    for (const [key, value] of Object.entries(vars)) {
+      prior.set(key, process.env[key])
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    const restore = () => {
+      for (const [key, value] of prior) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+    return body().then(
+      (result) => {
+        restore()
+        return result
+      },
+      (error) => {
+        restore()
+        throw error
+      },
+    )
+  }
+
+  /** The allowlist state every punching leg needs, installed per test. */
+  const BOTH_MACHINES_ENV = () => ({
+    [W4_ENV]: `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()}`,
+    [W7_ENV]: bothOrg.toLowerCase(),
+  })
+
   const punch = async (userId: string, orgId: string, eventType: 'check_in' | 'check_out') =>
     requestJson(`${baseUrl}/api/attendance/punch`, {
       method: 'POST',
@@ -373,6 +417,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
   // -------------------------------------------------------------------------
 
   it('T-M5 + T-R1: both machines ON => the group arm runs END TO END and the inner/outer fingerprints AGREE', async () => {
+    await withEnv(BOTH_MACHINES_ENV(), async () => {
     // EXACT membership, not substring: the allowlist rule is exact-org, and a
     // substring check would pass for an org that merely shares a prefix.
     expect(
@@ -418,6 +463,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(record.projection_owner).toBe('w4_group')
     expect(record.current_calculation_id).toEqual(expect.any(String))
     expect(String(record.current_calculation_id).length).toBeGreaterThan(0)
+    })
   }, 60_000)
 
   it('T-B4 + T-M4 arm-A-TRUE: W4 env SET with the posture table EMPTY => the mirror RUNS, takes the LEGACY arm, and the punch completes', async () => {
@@ -427,6 +473,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     // has either the W4 env unset or a posture row present, so without this leg
     // the live path for existing W4 orgs is unmeasured and "arm A true" is only
     // ever tested as "arm A false".
+    await withEnv(BOTH_MACHINES_ENV(), async () => {
     expect(
       String(process.env[W4_ENV] || '').split(',').map((v) => v.trim()),
       'the W4 allowlist must carry this org',
@@ -485,6 +532,7 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     } finally {
       plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests(null)
     }
+    })
   }, 60_000)
 
   it('T-R9 (§2.4 coherence precondition): W4-legacy + W7-group is REFUSED at a plugin-side producer, with its own closed code', async () => {
@@ -503,6 +551,10 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     expect(typeof ref?.issueW4FrozenContextForProducerV1).toBe('function')
 
     const priorW7Env = process.env[W7_ENV]
+    const priorW4Env = process.env[W4_ENV]
+    // This leg needs the W4 allowlist state too: the coherent-org positive
+    // control below only reaches the group arm when both machines are live.
+    process.env[W4_ENV] = `${bothOrg.toLowerCase()},${w4OnlyOrg.toLowerCase()}`
     process.env[W7_ENV] = incoherentOrg.toLowerCase()
     try {
       // The plugin-shaped client production passes carries the `__w4CanonicalTrx`
@@ -547,6 +599,8 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     } finally {
       if (priorW7Env === undefined) delete process.env[W7_ENV]
       else process.env[W7_ENV] = priorW7Env
+      if (priorW4Env === undefined) delete process.env[W4_ENV]
+      else process.env[W4_ENV] = priorW4Env
     }
   }, 60_000)
 })

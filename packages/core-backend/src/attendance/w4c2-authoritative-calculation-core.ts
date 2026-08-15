@@ -1186,7 +1186,21 @@ export async function writeAuthoritativeReversalV1(
     daily = input.preimage.projection ?? input.frozenTarget.projection
   } else {
     pointerTarget = id
-    owner = 'w4'
+    // W7-1b B6 — THE THIRD PROVENANCE EMITTER, and the one the first B6 pass
+    // missed. On the absent-preimage RETIRE path this hard-coded `'w4'`
+    // RELABELLED a group-owned parent, which is exactly the lying-pointer class
+    // B6 exists to prevent: the read side and every rollback guard would then
+    // treat a group-policy projection as a W4 one.
+    //
+    // Derived from THIS calculation's own frozen context, identically to the
+    // pointer writer and the import writer — never from the parent's existing
+    // `projection_owner`, which on a shadow-posture org would read
+    // `legacy_untracked` while the calculation carries a full group context.
+    owner =
+      (input.reversedSnapshots.contextSnapshot as { selector?: unknown } | null)?.selector ===
+      'group_effective'
+        ? 'w4_group'
+        : 'w4'
     visibilityState = 'retired'
     visibilityReason = input.frozenTarget.visibilityReason
     daily = input.frozenTarget.projection

@@ -10567,7 +10567,18 @@ async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId, op
 async function acquireAttendanceScheduleAssignmentReadLock(client, orgId, userId) {
   await client.query(
     'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))',
-    [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+    // g1 (W7-1b) — P1-1 FIX. This SHARED reader and the EXCLUSIVE writer above
+    // must derive the SAME advisory key or they do not exclude each other at
+    // all. Canonicalising only the writer (as an earlier revision of this slice
+    // did) is STRICTLY WORSE than canonicalising neither: for a non-canonical
+    // org spelling the two sides then key differently, so the writer's ~13
+    // mutation routes and this reader (the W2 work-date resolver's
+    // schedule-facts read) run concurrently with no mutual exclusion.
+    //
+    // `FOR SHARE OF a` cannot substitute: a row-share lock cannot block an
+    // INSERT of a NEW conflicting assignment, which is exactly what the
+    // exclusive writer guards against.
+    [`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`, String(userId ?? '')]
   )
 }
 
@@ -24998,7 +25009,18 @@ module.exports = {
           )
         }
       }
-      return issueW4FrozenContextViaW7SeamV1(pluginTrx, { ...args, purpose: 'persist' })
+      const issued = await issueW4FrozenContextViaW7SeamV1(pluginTrx, { ...args, purpose: 'persist' })
+      // OD-W7-4(a): suspension STOPS the producer. Returning the blocked result
+      // to the caller would let `.context === null` become a review row, which
+      // is a produced calculation.
+      if (issued.arm === 'blocked') {
+        throw new HttpError(
+          409,
+          'W7_CONTEXT_SOURCE_SUSPENDED',
+          'Attendance calculation is suspended for this organization.',
+        )
+      }
+      return issued
     }
     __attendanceW7ProducerRefForTests.issueW4FrozenContextForProducerV1 = (pluginTrx, args) =>
       issueW4FrozenContextForProducerV1(pluginTrx, args)

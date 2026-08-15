@@ -79,7 +79,11 @@ describe('W7-1a: the membership-timeline lock key IS the W1 writer’s key', () 
     // now pins that the writer canonicalises, which is the property that makes
     // the two keyspaces actually equal. Reverting the writer to `${input.orgId}`
     // reds this leg.
+    // ⚠️ BOTH HALVES. An earlier revision of this pin kept only the org half,
+    // which would have let the USER half be renamed or dropped without reddening
+    // — and the user id is half the lock identity, not decoration.
     expect(source).toContain('`attendance-calc-timeline\\u001f${canonicalLockOrgKeyV1(input.orgId)}`')
+    expect(source).toContain('`\\u001f${input.userId}`')
     expect(source).toContain('function canonicalLockOrgKeyV1(')
     // The arity is half the lock identity: one-arg `hashtextextended` is a
     // DIFFERENT lock space from the two-arg `hashtext` form.
@@ -100,15 +104,47 @@ describe('W7-1a: the schedule-facts lock key IS the plugin’s key', () => {
     expect(buildAttendanceW7ScheduleFactsLockKeyV1('org-a')).toBe('attendance-schedule:org-a')
   })
 
-  it('the plugin still spells that key, and still takes it in the TWO-argument keyspace', () => {
+  it('BOTH the exclusive writer AND the shared reader spell the CANONICAL key (g1 P1-1)', () => {
     const source = read(PLUGIN_ENTRY)
-    expect(source).toContain('`attendance-schedule:${String(orgId ?? \'\')}`')
+    // ⚠️ THE POINT OF THIS LEG. Canonicalising only ONE side is STRICTLY WORSE
+    // than canonicalising neither: for a non-canonical org spelling the writer
+    // and the reader then derive DIFFERENT advisory keys and stop excluding each
+    // other entirely — silently. An earlier revision of this slice shipped
+    // exactly that half-fix, so the pin now counts BOTH sides rather than
+    // asserting the string exists somewhere.
+    const canonicalForm = "`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`"
+    const rawForm = "`attendance-schedule:${String(orgId ?? '')}`"
+    const canonicalCount = source.split(canonicalForm).length - 1
+    expect(
+      canonicalCount,
+      'both the exclusive writer and the shared reader must derive the CANONICAL schedule key',
+    ).toBe(2)
+    expect(
+      source.includes(rawForm),
+      'no site may still derive the RAW schedule key — a one-sided canonicalisation does not exclude',
+    ).toBe(false)
     expect(source).toContain(
       "'SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))'",
     )
     // The exclusive writer form must also still exist — it is what the shared
     // W7 read is supposed to conflict with.
     expect(source).toContain("'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))'")
+  })
+
+  it('MUTATION CONTROL: a ONE-SIDED rename is caught (the P1-1 shape itself)', () => {
+    // Proves the leg above discriminates rather than merely matching a string
+    // that happens to be present. Reverting either side alone must fail the
+    // count, and `FOR SHARE OF a` cannot substitute for the advisory key: a
+    // row-share lock cannot block an INSERT of a NEW conflicting assignment.
+    const source = read(PLUGIN_ENTRY)
+    const canonicalForm = "`attendance-schedule:${String(orgId ?? '').trim().toLowerCase()}`"
+    const rawForm = "`attendance-schedule:${String(orgId ?? '')}`"
+    // Simulate reverting ONE side, in memory.
+    const oneSided = source.replace(canonicalForm, rawForm)
+    expect(oneSided.split(canonicalForm).length - 1, 'the in-memory revert must remove exactly one').toBe(1)
+    expect(oneSided.includes(rawForm), 'the reverted side derives the raw key again').toBe(true)
+    // ...and that is exactly what the pin above rejects.
+    expect(oneSided.split(canonicalForm).length - 1).not.toBe(2)
   })
 
   it('the W7 helper takes it in that same two-argument keyspace, org first then user', () => {

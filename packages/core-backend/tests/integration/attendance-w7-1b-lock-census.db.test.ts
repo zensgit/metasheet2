@@ -18,10 +18,22 @@
  * transactions that already hold other locks. In particular the two live arms
  * compose with the parent row lock in OPPOSITE relative order:
  *
- *   P1 live authoritative — parent `FOR UPDATE` is taken BEFORE the seam
- *   P2 live shadow        — parent `FOR UPDATE` is taken AFTER  the seam
+ *   P1  live authoritative      — parent `FOR UPDATE` BEFORE the seam (:1869 -> :1962)
+ *   P2  live shadow             — parent `FOR UPDATE` BEFORE the seam (:2207 -> :2285)
+ *   P3a scheduled authoritative — parent `FOR UPDATE` BEFORE the seam
+ *   P3b scheduled shadow        — parent `FOR UPDATE` BEFORE the seam (:3241 -> :3258)
  *
- * That is the classic shape a sequential argument cannot clear.
+ * ⚠️ CORRECTION (gate finding P2-5). An earlier revision of this census recorded
+ * P2 live shadow as taking the parent lock AFTER the seam, and built its whole
+ * headline on the resulting "opposite relative orderings". THAT ROW WAS FALSE:
+ * `lockShadowParentRecord` at boundary:2207 precedes the seam call at :2285.
+ * Re-derived, ALL FOUR boundary arms take the parent lock BEFORE the seam —
+ * the composition is UNIFORM, and the opposite-order hazard does not exist in
+ * the boundary at all.
+ *
+ * The correction makes the census SIMPLER and the tree SAFER than the earlier
+ * claim, which is exactly why it must be stated rather than quietly amended: a
+ * census that overstates a hazard is still a census that was not derived.
  *
  * ⚠️ AND THE D2 SERIALIZATION ARGUMENT DOES NOT TRANSFER. `w4c2-live-scheduled-
  * boundary.ts` argues the two orderings cannot interleave because the org
@@ -87,8 +99,10 @@ const W7_1B_LOCK_CENSUS_V1 = Object.freeze([
     producer: 'P2 live shadow',
     file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
     anchor: 'context = await issueThroughW7Seam(pluginTrx, {',
-    heldWhenSeamRuns: 'org rollout SHARED advisory',
-    parentLockRelativePosition: 'AFTER the seam',
+    // CORRECTED (gate P2-5): `lockShadowParentRecord` at :2207 PRECEDES the seam
+    // call at :2285. The earlier 'AFTER' was wrong.
+    heldWhenSeamRuns: 'org rollout SHARED advisory + parent FOR UPDATE',
+    parentLockRelativePosition: 'BEFORE the seam',
   }),
   Object.freeze({
     producer: 'P3a scheduled authoritative (added by D3)',
@@ -201,11 +215,27 @@ describeDb('W7-1b — B9 composite-lock re-census over the seven-producer realit
     expect(W7_1B_LOCK_CENSUS_V1.length, 'the census must cover 7 producers + the mirror').toBe(8)
     // The mirror is IN the census, not excluded from it.
     expect(W7_1B_LOCK_CENSUS_V1.some((r) => r.producer.startsWith('MIRROR'))).toBe(true)
-    // And the census must actually record the OPPOSITE relative orderings that
-    // make this a real question rather than a formality.
-    const positions = new Set(W7_1B_LOCK_CENSUS_V1.map((r) => r.parentLockRelativePosition))
-    expect(positions.has('BEFORE the seam')).toBe(true)
-    expect(positions.has('AFTER the seam')).toBe(true)
+    // ⚠️ The earlier revision asserted BOTH orderings were present — which is
+    // what let a FALSE row survive. The derived fact is that every boundary arm
+    // is uniform, so the assertion is now the DERIVED one: no boundary producer
+    // takes the parent lock after the seam. A future arm that did would red here
+    // and re-open the opposite-order question honestly.
+    const boundaryRows = W7_1B_LOCK_CENSUS_V1.filter((r) =>
+      r.file.endsWith('w4c2-live-scheduled-boundary.ts'),
+    )
+    expect(boundaryRows.length, 'four boundary producers').toBe(4)
+    for (const row of boundaryRows) {
+      expect(row.parentLockRelativePosition, `${row.producer}`).toBe('BEFORE the seam')
+    }
+    // ...and the recorded ordering is CHECKED AGAINST SOURCE, not just declared:
+    // the shadow arm's parent lock must really precede its seam call.
+    const boundarySource = read('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts')
+    const lines = boundarySource.split('\n')
+    const shadowParent = lines.findIndex((l) => l.includes('const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)'))
+    const shadowSeam = lines.findIndex((l) => l.includes('context = await issueThroughW7Seam(pluginTrx, {') && !l.includes('authoritative'))
+    expect(shadowParent, 'shadow parent lock not found').toBeGreaterThan(-1)
+    expect(shadowSeam, 'shadow seam call not found').toBeGreaterThan(-1)
+    expect(shadowParent, 'the shadow arm must lock the parent BEFORE the seam').toBeLessThan(shadowSeam)
   })
 
   it('census leg 1: every producer takes the W7 composite keys SHARED, never exclusively', () => {
@@ -269,54 +299,70 @@ describeDb('W7-1b — B9 composite-lock re-census over the seven-producer realit
     expect(outcomes.filter((o) => o.endsWith(':ok')).length, `outcomes: ${outcomes.join(',')}`).toBe(1)
   }, 120_000)
 
-  it('THE COMPOSED ORDER: opposite parent-lock orderings with SHARED W7 keys neither deadlock nor serialize', async () => {
-    // The real production shape: P1 takes the parent row BEFORE the seam, P2
-    // takes it AFTER, and both take the W7 keys SHARED. Two DIFFERENT parent
-    // rows, as two concurrent punches for different users would have.
-    const otherRecordId = randomUUID()
-    const otherUserId = randomUUID()
-    await pool.query(
-      `INSERT INTO attendance_records
-         (id, user_id, org_id, work_date, timezone, work_minutes, late_minutes, early_leave_minutes,
-          status, is_workday, projection_owner, visibility_state, visibility_reason, created_at, updated_at)
-       VALUES ($1,$2,$3,'2026-07-02','UTC',0,0,0,'normal',true,'legacy_untracked','active','active',now(),now())`,
-      [otherRecordId, otherUserId, orgId],
-    )
+  it('THE COMPOSED ORDER, GENUINELY CONTENDING: two producers on the SAME (org,user) serialize on the parent row and both commit', async () => {
+    // ⚠️ REPLACED after gate finding P2-5. The earlier version of this leg used
+    // two DIFFERENT parent rows and only SHARED advisory keys — i.e. NO shared
+    // exclusive resource at all — so it could not have failed and proved
+    // nothing about contention.
+    //
+    // The real production shape, given the corrected census (all four boundary
+    // arms lock the parent BEFORE the seam): two concurrent punches for the
+    // SAME (org, user) contend on the SAME parent row EXCLUSIVELY while taking
+    // the SAME W7 keys SHARED.
+    //
+    // WHAT THIS CAN SHOW: that the composition serializes on the parent row and
+    // that BOTH sides complete — no deadlock, no lost waiter. Blocking is
+    // SERVER-OBSERVED via `pg_blocking_pids`, not inferred from timing.
+    // WHAT IT CANNOT SHOW: safety against a counterparty that holds a W7 key
+    // EXCLUSIVELY and then wants the parent row. That shape is covered by
+    // census leg 2 (no such site exists) plus the 40P01 positive control above
+    // (the cycle is detectable when it does exist).
+    const timelineKey = buildAttendanceW7MembershipTimelineLockKeyV1(orgId, userId)
+    const scheduleKey = buildAttendanceW7ScheduleFactsLockKeyV1(orgId)
+    const outcomes: string[] = []
+    let observedBlocking = false
+
+    const firstClient = await pool.connect()
+    const secondClient = await pool.connect()
     try {
-      const scheduleKey = buildAttendanceW7ScheduleFactsLockKeyV1(orgId)
-      const outcomes: string[] = []
-      const arm = async (label: 'p1_row_first' | 'p2_row_after', rid: string, uid: string) =>
-        withClient(async (c) => {
-          await c.query('BEGIN')
-          try {
-            const takeW7 = async () => {
-              await c.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, [
-                buildAttendanceW7MembershipTimelineLockKeyV1(orgId, uid),
-              ])
-              await c.query(`SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))`, [scheduleKey, uid])
-            }
-            if (label === 'p1_row_first') {
-              await c.query(`SELECT 1 FROM attendance_records WHERE id = $1::uuid FOR UPDATE`, [rid])
-              await new Promise((r) => setTimeout(r, 250))
-              await takeW7()
-            } else {
-              await takeW7()
-              await new Promise((r) => setTimeout(r, 250))
-              await c.query(`SELECT 1 FROM attendance_records WHERE id = $1::uuid FOR UPDATE`, [rid])
-            }
-            await c.query('COMMIT')
-            outcomes.push(`${label}:ok`)
-          } catch (error) {
-            await c.query('ROLLBACK').catch(() => undefined)
-            outcomes.push(`${label}:${(error as { code?: string }).code ?? 'err'}`)
-          }
-        })
-      await Promise.all([arm('p1_row_first', recordId, userId), arm('p2_row_after', otherRecordId, otherUserId)])
-      // BOTH succeed: no deadlock, and no serialization either.
-      expect(outcomes.sort().join(','), 'the composed order must not deadlock').toBe('p1_row_first:ok,p2_row_after:ok')
+      // A: parent row EXCLUSIVE, then the W7 keys SHARED — and HOLD.
+      await firstClient.query('BEGIN')
+      await firstClient.query(`SELECT 1 FROM attendance_records WHERE id = $1::uuid FOR UPDATE`, [recordId])
+      await firstClient.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, [timelineKey])
+      await firstClient.query(`SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))`, [scheduleKey, userId])
+      const secondPid = Number((await secondClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+
+      // B: the SAME sequence on the SAME row — must block on the parent row.
+      await secondClient.query('BEGIN')
+      const bDone = (async () => {
+        await secondClient.query(`SELECT 1 FROM attendance_records WHERE id = $1::uuid FOR UPDATE`, [recordId])
+        await secondClient.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, [timelineKey])
+        await secondClient.query(`SELECT pg_advisory_xact_lock_shared(hashtext($1::text), hashtext($2::text))`, [scheduleKey, userId])
+        await secondClient.query('COMMIT')
+        outcomes.push('B:ok')
+      })()
+
+      // Server-observed blocking, polled — never a sleep-and-assume.
+      for (let i = 0; i < 40 && !observedBlocking; i += 1) {
+        const blockers = (await pool.query('SELECT pg_blocking_pids($1)::int[] AS b', [secondPid])).rows[0].b
+        if (Array.isArray(blockers) && blockers.length > 0) observedBlocking = true
+        else await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(observedBlocking, 'B must be SERVER-OBSERVED blocking on the parent row held by A').toBe(true)
+      // B is still waiting, so the SHARED W7 keys did not let it past the row lock.
+      expect(outcomes).not.toContain('B:ok')
+
+      await firstClient.query('COMMIT')
+      outcomes.push('A:ok')
+      await bDone
     } finally {
-      await pool.query(`DELETE FROM attendance_records WHERE id = $1::uuid`, [otherRecordId]).catch(() => undefined)
+      await firstClient.query('ROLLBACK').catch(() => undefined)
+      await secondClient.query('ROLLBACK').catch(() => undefined)
+      firstClient.release()
+      secondClient.release()
     }
+    // Both complete, in order, with no deadlock.
+    expect(outcomes).toEqual(['A:ok', 'B:ok'])
   }, 120_000)
 
   it('T-M6: the W7 composite locks are TRANSACTION-scoped — held inside, released at COMMIT (pg_locks, observed)', async () => {

@@ -621,6 +621,67 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
     }
   })
 
+  it('OD-W7-4(a): a SUSPENDED org is BLOCKED — no calculation produced, NOT a legacy fallback', async () => {
+    // Routing a suspended org to the LEGACY producer would be a legacy fallback
+    // by another name, and OD-W7-4(a) is ratified against exactly that: no
+    // legacy fallback from the group posture — suspend/resume only, one producer
+    // per work date. The W4 precedent it names is explicit
+    // (`POSTURE_TABLE.suspended.writePosture = 'blocked'`): suspension STOPS the
+    // writer rather than redirecting it.
+    //
+    // [OWNER-CONFIRM] counter-reading recorded in the seam header: 「suspended
+    // 读态合法且无消费者，legacy 臂即『无变化』」. The ratified default is BLOCKED.
+    const suspendedOrg = randomUUID()
+    const suspendedUser = randomUUID()
+    const suspendedShift = randomUUID()
+    await insertShift(suspendedOrg, suspendedShift, 'w7-1b suspended', [{ start: '09:00', end: '18:00' }])
+    await insertActiveUser(suspendedUser, suspendedOrg)
+    await setPosture(suspendedOrg, 'suspended')
+    const priorW7Env = process.env[W7_ENV]
+    process.env[W7_ENV] = suspendedOrg.toLowerCase()
+    try {
+      // The posture really is `suspended` — not `off` — so this is not the
+      // inert path wearing a different name.
+      const arm = await resolveArm(suspendedOrg)
+      expect(arm.effectiveState).toBe('suspended')
+      expect(arm.selectsGroupArm).toBe(false)
+
+      const result = await issue(suspendedOrg, suspendedUser, suspendedShift)
+      // POSITIVE equalities on all three. `arm: 'blocked'` is a DISTINCT arm, not
+      // a null context — precisely so a caller cannot unwrap it into a durable
+      // `review('missing_frozen_context')` row, which would BE a produced
+      // calculation.
+      expect(result.arm).toBe('blocked')
+      expect(result.context).toBeNull()
+      expect(result.reason).toBe('suspended')
+
+      // NEVER-EVADABLE: removing the allowlist entry does NOT downgrade a
+      // persisted `suspended` row to `off`. That is 1a's ratified priority and
+      // the same doctrine W4 applies to its own suspended posture, so it is
+      // asserted here rather than assumed.
+      delete process.env[W7_ENV]
+      expect((await resolveArm(suspendedOrg)).effectiveState).toBe('suspended')
+      expect((await issue(suspendedOrg, suspendedUser, suspendedShift)).arm).toBe('blocked')
+
+      // ...and the LEGACY arm CAN build a perfectly good context from this
+      // fixture's data — proven by removing the POSTURE ROW, which is the only
+      // thing that makes the org `off`. That is what makes `blocked` a
+      // deliberate refusal rather than an absence of data.
+      await pool.query(`DELETE FROM ${POSTURE_TABLE} WHERE org_id = $1`, [suspendedOrg.toLowerCase()])
+      const asLegacy = await issue(suspendedOrg, suspendedUser, suspendedShift)
+      expect(asLegacy.arm).toBe('legacy')
+      expect(asLegacy.context).not.toBeNull()
+    } finally {
+      if (priorW7Env === undefined) delete process.env[W7_ENV]
+      else process.env[W7_ENV] = priorW7Env
+      for (const table of ['attendance_shift_segments', 'attendance_shifts', 'user_orgs']) {
+        await pool.query(`DELETE FROM ${table} WHERE org_id = $1`, [suspendedOrg]).catch(() => undefined)
+      }
+      await pool.query(`DELETE FROM ${POSTURE_TABLE} WHERE org_id = $1`, [suspendedOrg.toLowerCase()]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [suspendedUser]).catch(() => undefined)
+    }
+  })
+
   // -------------------------------------------------------------------------
   // T-R2 — O-9's fail-closed shape, asserted as a POSITIVE equality.
   // -------------------------------------------------------------------------

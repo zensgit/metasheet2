@@ -2263,16 +2263,62 @@ export class MetaSheetServer {
                     throw error
                   }
                 },
-                issueAttendanceFrozenContextV1: (
+                issueAttendanceFrozenContextV1: async (
                   trx: unknown,
                   deps: unknown,
                   input: unknown,
-                ) =>
-                  issueAttendanceFrozenContextV1(
-                    trx as Parameters<typeof issueAttendanceFrozenContextV1>[0],
-                    deps as AttendanceW7IssuanceDepsV1,
-                    input as AttendanceW7IssuanceInputV1,
-                  ),
+                ) => {
+                  const issuanceDeps = deps as AttendanceW7IssuanceDepsV1
+                  const issuanceInput = input as AttendanceW7IssuanceInputV1
+                  try {
+                    return await issueAttendanceFrozenContextV1(
+                      trx as Parameters<typeof issueAttendanceFrozenContextV1>[0],
+                      issuanceDeps,
+                      issuanceInput,
+                    )
+                  } catch (error) {
+                    // P2-3 FIX — the SAME discipline as the two sibling reads
+                    // above, for the same reason, and it was missing here.
+                    //
+                    // W7-1b puts this seam on the request-creation, batch-import
+                    // and recompute paths, all of which accept an org id from an
+                    // unvalidated request string. Without this catch, an org id
+                    // that is not a canonical rollout org key made the POSTURE
+                    // RESOLVER throw and the whole producer 5xx — a regression
+                    // the pre-1b tree never had, because the legacy builder
+                    // never canonicalised anything.
+                    //
+                    // FAIL-CLOSED AND PROVABLY TOTAL, not a soft default: the
+                    // posture table's PRIMARY KEY *is* the canonical org key, so
+                    // an org whose id cannot be canonicalised CANNOT have a
+                    // posture row, cannot be group-postured, and the LEGACY arm
+                    // is the only answer consistent with the data. That is also
+                    // exactly what the pre-1b tree did for such an org.
+                    //
+                    // Narrowed to that ONE code: W7-1a's three corruption throws
+                    // (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` / `_STATE_INVALID` /
+                    // `_SCOPE_INVALID`) must still propagate — making a corrupt
+                    // posture row indistinguishable from an unconfigured org is
+                    // the exact blindness the unconditional read exists to
+                    // prevent.
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      const context = await issuanceDeps.buildLegacyFrozenContext({
+                        orgId: issuanceInput.orgId,
+                        userId: issuanceInput.userId,
+                        workDate: issuanceInput.workDate,
+                        timezone: issuanceInput.timezone,
+                        isWorkday: issuanceInput.isWorkday,
+                        holidayKind: issuanceInput.holidayKind,
+                        shiftId: issuanceInput.shiftId,
+                      })
+                      return { arm: 'legacy' as const, context: context ?? null, reason: null }
+                    }
+                    throw error
+                  }
+                },
                 buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
                   buildAttendanceRequestCreationAttributionSnapshotV1(
                     input as Parameters<typeof buildAttendanceRequestCreationAttributionSnapshotV1>[0],
