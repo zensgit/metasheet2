@@ -70,6 +70,12 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     expect(CANVAS_SRC).toMatch(/border-radius: 50%/)
     expect(CANVAS_SRC).toMatch(/插入抄送节点/)
     expect(CANVAS_SRC).not.toMatch(/办理人/)
+    // Insert chrome is painted after node cards so the open menu receives the click.
+    const nodeIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-node"')
+    const insertIdx = CANVAS_SRC.lastIndexOf('data-testid="approval-canvas-edge-insert"')
+    expect(nodeIdx).toBeGreaterThan(0)
+    expect(insertIdx).toBeGreaterThan(nodeIdx)
+    expect(CANVAS_SRC).toMatch(/\.is-open \{\s*z-index: 20;/)
   })
 
   it('fit-to-view toolbar control has business aria-label', () => {

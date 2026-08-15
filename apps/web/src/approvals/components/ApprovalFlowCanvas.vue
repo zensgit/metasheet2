@@ -212,6 +212,47 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
               <span>移到这里</span>
             </button>
             <div
+              v-for="pos in canvasLayout.nodes"
+              :key="pos.key"
+              class="template-authoring__canvas-node"
+              :class="{
+                'is-selected': selectedCanvasNode === pos.key,
+                'is-moving': movingCanvasNode === pos.key,
+              }"
+              :style="nodePosStyle(pos)"
+              :data-canvas-node="pos.key"
+              :data-node-type="canvasNodeByKey(pos.key)?.type"
+              data-testid="approval-canvas-node"
+              :draggable="!readOnly && canMoveCanvasNode(pos.key)"
+              @click="emit('select-node', pos.key)"
+              @dragstart="emit('drag-start', $event, pos.key)"
+              @dragend="emit('drag-end')"
+            >
+              <div
+                class="template-authoring__canvas-node-kind"
+                :data-node-type="canvasNodeByKey(pos.key)?.type"
+              >
+                {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+              </div>
+              <div
+                class="template-authoring__canvas-node-selector"
+                role="button"
+                tabindex="0"
+                :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
+                :aria-pressed="selectedCanvasNode === pos.key"
+                data-testid="approval-canvas-node-select"
+                @click.stop="emit('select-node', pos.key)"
+                @keydown.enter.stop.prevent="emit('select-node', pos.key)"
+                @keydown.space.stop.prevent="emit('select-node', pos.key)"
+                @keydown="emit('node-keydown', $event, pos.key)"
+              >
+                <span class="template-authoring__canvas-node-summary">
+                  {{ canvasNodeSummary(pos.key) }}
+                </span>
+                <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
+              </div>
+            </div>
+            <div
               v-for="line in canvasEdgeLines"
               v-show="!readOnly && !movingCanvasNode"
               :key="`edge-insert-${line.key}`"
@@ -237,6 +278,8 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                 class="template-authoring__canvas-edge-insert-menu"
                 role="menu"
                 data-testid="approval-canvas-edge-insert-menu"
+                @click.stop
+                @pointerdown.stop
               >
                 <button
                   type="button"
@@ -287,47 +330,6 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                   </span>
                   并行分支
                 </button>
-              </div>
-            </div>
-            <div
-              v-for="pos in canvasLayout.nodes"
-              :key="pos.key"
-              class="template-authoring__canvas-node"
-              :class="{
-                'is-selected': selectedCanvasNode === pos.key,
-                'is-moving': movingCanvasNode === pos.key,
-              }"
-              :style="nodePosStyle(pos)"
-              :data-canvas-node="pos.key"
-              :data-node-type="canvasNodeByKey(pos.key)?.type"
-              data-testid="approval-canvas-node"
-              :draggable="!readOnly && canMoveCanvasNode(pos.key)"
-              @click="emit('select-node', pos.key)"
-              @dragstart="emit('drag-start', $event, pos.key)"
-              @dragend="emit('drag-end')"
-            >
-              <div
-                class="template-authoring__canvas-node-kind"
-                :data-node-type="canvasNodeByKey(pos.key)?.type"
-              >
-                {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
-              </div>
-              <div
-                class="template-authoring__canvas-node-selector"
-                role="button"
-                tabindex="0"
-                :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
-                :aria-pressed="selectedCanvasNode === pos.key"
-                data-testid="approval-canvas-node-select"
-                @click.stop="emit('select-node', pos.key)"
-                @keydown.enter.stop.prevent="emit('select-node', pos.key)"
-                @keydown.space.stop.prevent="emit('select-node', pos.key)"
-                @keydown="emit('node-keydown', $event, pos.key)"
-              >
-                <span class="template-authoring__canvas-node-summary">
-                  {{ canvasNodeSummary(pos.key) }}
-                </span>
-                <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
               </div>
             </div>
           </div>
@@ -511,8 +513,12 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas-edge-insert {
   position: absolute;
-  z-index: 4;
+  z-index: 6;
   transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+.template-authoring__canvas-edge-insert.is-open {
+  z-index: 20;
 }
 .template-authoring__canvas-edge-insert-btn {
   width: 28px;
@@ -537,9 +543,9 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 }
 .template-authoring__canvas-edge-insert-menu {
   position: absolute;
-  top: 34px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 50%;
+  left: 36px;
+  transform: translateY(-50%);
   display: flex;
   flex-direction: row;
   align-items: flex-start;
@@ -550,6 +556,7 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   border-radius: 10px;
   background: var(--ms-bg-card);
   box-shadow: var(--el-box-shadow);
+  pointer-events: auto;
 }
 .template-authoring__canvas-edge-insert-menu button {
   border: 0;

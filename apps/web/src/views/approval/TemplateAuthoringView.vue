@@ -2182,11 +2182,19 @@ function onAddConditionBranch(nodeKey: string): void {
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
+function selectInsertedNode(beforeKeys: Set<string>): void {
+  const inserted = canvasEffectiveGraph.value.nodes.find((node) => !beforeKeys.has(node.key))?.key
+  if (inserted) selectedCanvasNode.value = inserted
+}
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
 }
 function onInsertCcAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'node', nodeKey })
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
 }
 function onInsertConditionAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
@@ -2452,27 +2460,48 @@ function canInsertParallelOnEdge(edgeKey: string): boolean {
   const source = edgeSourceNode(edgeKey)
   return Boolean(source && canInsertParallelAfter(source))
 }
+function canInsertOnCanvasEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || source.type === 'end') return false
+  return canvasEffectiveGraph.value.edges.filter((edge) => edge.source === source.key).length === 1
+}
+function rejectEdgeInsert(): void {
+  ElMessage.warning('当前连线不能插入这种节点')
+  closeEdgeInsertMenu()
+}
 function onEdgeInsertApproval(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertApprovalAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertCc(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertCcAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertCondition(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertConditionAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertParallel(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertParallelAfter(source)) return
+  if (!source || !canInsertParallelAfter(source) || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertParallelAfter(source.key)
   closeEdgeInsertMenu()
 }
