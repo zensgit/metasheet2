@@ -1386,6 +1386,7 @@ jobs:
             tests/integration/attendance-w6-group-effective-policy.db.test.ts \
             tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts \
             tests/integration/attendance-w7-1a-resolver.db.test.ts \
+            tests/integration/attendance-w7-3-context-source-transition.db.test.ts \
             tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
             tests/integration/attendance-settlement-table-v1-5a.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \

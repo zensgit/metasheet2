@@ -111,6 +111,41 @@ function renderLegalTransitionClauses(): string {
     .join(' OR\n        ')
 }
 
+/**
+ * TWO AUTHORING HAZARDS THIS FILE HAS ALREADY BEEN BITTEN BY. Recorded so the
+ * next author does not rediscover them, and because both are invisible in
+ * review.
+ *
+ * 1. NULL IS NOT FALSE IN THE TRIGGER'S BOOTSTRAP CLAUSE. The clause was first
+ *    written as the W4 guard writes it:
+ *
+ *        IF NOT ( (NEW.state = 'off'          AND NEW.prior_state IS NULL) OR
+ *                 (NEW.state = 'group_shadow' AND NEW.prior_state = 'off') )
+ *
+ *    `prior_state` is NULLABLE. For the row `(state='group_shadow',
+ *    prior_state=NULL)` the first disjunct is FALSE and the second is NULL
+ *    (`NULL = 'off'` is NULL), so the disjunction is NULL, `NOT NULL` is NULL,
+ *    and plpgsql treats a NULL `IF` condition as not-true — it FALLS THROUGH
+ *    and ACCEPTS the row. That is precisely the illegal bootstrap shape the
+ *    clause exists to reject. Fixed with `IS NOT DISTINCT FROM` plus a
+ *    `COALESCE(..., false)` wrapper on both branches, so NULL fails CLOSED.
+ *    Caught by the DB-exercised INSERT sweep in
+ *    `tests/integration/attendance-w7-3-context-source-transition.db.test.ts`,
+ *    not by review.
+ *
+ *    DISCLOSED, NOT FIXED HERE: `attendance_w4_rollout_state_guard`
+ *    (`zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage.ts:1031-1073`)
+ *    carries the identical latent shape for `(shadow, prior_state NULL)`.
+ *    Correcting it means a new zzzz migration replacing a landed W4 trigger —
+ *    a change to the W4 machine, with its own review. Recorded rather than
+ *    silently cloned, and rather than silently patched inside a W7 slice.
+ *
+ * 2. NO BACKTICKS INSIDE THE `sql` TEMPLATE LITERALS BELOW. The plpgsql body is
+ *    a JavaScript template literal; a backtick in a `--` SQL comment terminates
+ *    it and the file fails to transform with a syntax error pointing at an
+ *    unrelated line. Keep SQL comments backtick-free and put any prose that
+ *    wants them up here, in TypeScript comment space.
+ */
 export async function up(db: Kysely<unknown>): Promise<void> {
   // -------------------------------------------------------------------------
   // 1. Transition bookkeeping columns on the posture-state table.
@@ -257,9 +292,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     AS $fn$
     BEGIN
       IF TG_OP = 'INSERT' THEN
-        IF NOT (
+        -- IS NOT DISTINCT FROM, never a bare =, and the whole disjunction
+        -- wrapped in COALESCE. See the TypeScript comment above up() for the
+        -- full reasoning; in short, prior_state is NULLABLE, so a bare equality
+        -- yields NULL rather than FALSE and plpgsql then FALLS THROUGH an
+        -- IF NOT (...) guard, silently accepting the very shape this clause
+        -- exists to reject.
+        IF NOT COALESCE(
           (NEW.state = 'off' AND NEW.prior_state IS NULL) OR
-          (NEW.state = 'group_shadow' AND NEW.prior_state = 'off')
+          (NEW.state = 'group_shadow' AND NEW.prior_state IS NOT DISTINCT FROM 'off'),
+          false
         ) THEN
           RAISE EXCEPTION 'W7_CONTEXT_SOURCE: illegal initial context-source state on %', TG_TABLE_NAME;
         END IF;
@@ -271,8 +313,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.scope IS DISTINCT FROM OLD.scope THEN
         RAISE EXCEPTION 'W7_CONTEXT_SOURCE: context-source identity fields are immutable on %', TG_TABLE_NAME;
       END IF;
-      IF NOT (
-        ${sql.raw(renderLegalTransitionClauses())}
+      -- COALESCE for the same reason as the INSERT branch above. state is NOT
+      -- NULL on both OLD and NEW today, so this cannot currently evaluate to
+      -- NULL; it is uniform NULL-fail-closed hardening, so that a future
+      -- widening of the column nullability cannot turn a refusal into a
+      -- silent acceptance.
+      IF NOT COALESCE(
+        ${sql.raw(renderLegalTransitionClauses())},
+        false
       ) THEN
         RAISE EXCEPTION 'W7_CONTEXT_SOURCE: illegal context-source state transition on %', TG_TABLE_NAME;
       END IF;
