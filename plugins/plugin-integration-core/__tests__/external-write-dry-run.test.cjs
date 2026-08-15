@@ -928,6 +928,40 @@ async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
   assert.equal(calls.lookupByKey.length, 6, 'apply preflights both add rows after the planner lookups')
 }
 
+async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
+  const deadLetters = []
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    insertRows: () => {
+      throw new Error('K3 Save failed with private row values')
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two_first_save_failure',
+    deadLetterStore: {
+      async createDeadLetter(entry) {
+        deadLetters.push(entry)
+        return { ...entry, id: `dl_${deadLetters.length}` }
+      },
+    },
+  })
+
+  assert.equal(apply.status, 'failed')
+  assert.equal(apply.counts.written, 0)
+  assert.equal(apply.counts.add, 0)
+  assert.equal(apply.counts.failed, 1)
+  assert.equal(calls.insertRows.length, 1, 'strict exact-two stops without attempting the sibling Save')
+  assert.equal(calls.updateRows.length, 0)
+  assert.deepEqual(apply.deadLetters, { attempted: 1, persisted: 1 })
+  const evidence = JSON.stringify(apply) + JSON.stringify(deadLetters)
+  for (const privateValue of ['P-001', 'P-002', 'Widget', 'Gadget']) {
+    assert.equal(evidence.includes(privateValue), false, `strict failure evidence stays values-free (${privateValue})`)
+  }
+}
+
 async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply() {
   const { input, calls } = k3ExactTwoAcceptanceInput({
     sourceRows: [
@@ -1227,6 +1261,7 @@ async function main() {
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
   await testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan()
+  await testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure()
   await testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply()
   await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
   await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
