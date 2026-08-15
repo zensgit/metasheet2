@@ -1,6 +1,8 @@
 # Approval Canvas V2 Interaction Design Lock (D0, 2026-07-21)
 
-**Status:** PROPOSED — owner ratification required (G0) before D3-D6 (D6-f1 excepted) and D6-f2 start
+**Status:** RATIFIED 2026-08-15 (G0, owner zensgit). O3: DEFER (bespoke renderer retained; Vue Flow / ELK not authorized). Runtime flags stay default OFF. This ratify does not enable Canvas / FWB / attachments, does not record real-tenant UAT, and does not claim product FINAL.  
+**G0 record:** `docs/development/approval-canvas-g0-ratify-20260815.md`  
+**History:** was PROPOSED — owner ratification required (G0) before D3-D6 (D6-f1 excepted) and D6-f2 start.
 **Plan item:** D0 of `docs/development/approval-canvas-v2-development-plan-20260720.md` ("the plan")
 **Review baseline:** `3ade0d685bbad1605cf71803b228f9aac27d0842`
 **Phase-1 implementation checkpoint:** `eb107032d` (command/preview/backend guards only; no D3+ authorization)
@@ -9,9 +11,9 @@
 authoring surface — flow canvas, inspector, form builder, version lifecycle, route preview, states,
 accessibility, and acceptance evidence. It decides how people interact; it does not change what the graph means.
 
-This lock authorizes **development direction only**. Runtime flags, merge, UAT, and production enablement
-remain owner-gated exactly as the plan states (§4.3, §9 Human merge authority, §13). Nothing here turns
-anything on.
+This lock is the ratified interaction contract (G0, 2026-08-15). Runtime flags, UAT, and production
+enablement remain owner-gated exactly as the plan states (§4.3, §9 Human merge authority, §13). Nothing
+here turns anything on.
 
 ---
 
@@ -531,9 +533,8 @@ exists only after `committed`.
 
 ## 18. Owner gates preserved
 
-- G0 (this lock) → ratification required before D3/D6-f2 (plan §12: D3–D6 and D6-f2 BLOCKED on D0).
-  D3-p is the sole exception and still requires its own owner O3-p authorization; it closes an existing
-  frontend round-trip defect only and confers no renderer or Canvas enablement authority.
+- G0 (this lock) → **RATIFIED 2026-08-15**. O3 is **DEFER**, so D3 Vue Flow / ELK remains unauthorized.
+  D3-p stays a compatibility-only exception and confers no renderer or Canvas enablement authority.
 - Merge authority: every implementation PR requires named human owner/reviewer approval on exact-head
   evidence; subagent/Codex verdicts are recommendations only (plan §9).
 - `approvalCanvasV2` stays default-OFF; canary only after G5-C; default ON only after owner UAT (G6-C,

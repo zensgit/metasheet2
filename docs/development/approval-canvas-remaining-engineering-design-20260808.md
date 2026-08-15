@@ -3,7 +3,7 @@
 **Status:** ENGINEERING CLOSED ON MAIN (owner product FINAL gates remain)  
 **Tracking PR:** https://github.com/zensgit/metasheet2/pull/4806 (**MERGED** squash `323d7e1afe`, 2026-08-08T04:20:48Z)  
 **Landed head family:** `claude/approval-canvas-final-engineering-20260808` → `main`  
-**Authority locks:** D0 interaction lock (written contract; G0 owner ratify still open), canvas V2 plan D-items, final-eligibility MDs  
+**Authority locks:** D0 interaction lock (**G0 RATIFIED 2026-08-15**; O3 DEFER), canvas V2 plan D-items, final-eligibility MDs  
 **Flags:** remain default OFF. No production enablement. No real-tenant UAT in this plan.
 
 ## Goal
@@ -43,7 +43,7 @@ Engineering stack for this line is **landed on main** via #4806. Further agent w
 | CI: approval-web-guard / web-tests green | **GREEN then MERGED** | squash `323d7e1afe` after required checks (incl. plugin `test` 18.x/20.x) |
 | Version dual-canvas shell (full D8-b) | **PARTIAL→UI wired** | pure summary + TemplateDetailView read summary lines/overlay tallies; full dual-canvas product shell not claimed |
 | Extract `ApprovalFlowCanvas` / inspector modules | **DONE on main** | `ApprovalFlowCanvas.vue` + `ApprovalCanvasNodeInspector.vue`; draft/history remain in parent |
-| D3 Vue Flow/ELK | **BLOCKED (O3)** | do not start |
+| D3 Vue Flow/ELK | **BLOCKED (O3 DEFER 2026-08-15)** | do not start |
 
 ## PR Plan (execute-plan ready)
 
