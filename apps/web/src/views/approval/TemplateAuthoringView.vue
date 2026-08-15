@@ -98,10 +98,6 @@
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
         <nav class="template-authoring__steps" aria-label="模板配置步骤">
-          <div class="template-authoring__steps-heading">
-            <strong>模板配置</strong>
-            <span>按步骤完成，随时可保存草稿</span>
-          </div>
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -109,22 +105,14 @@
             :class="{ 'is-active': activeAuthoringSection === section.id }"
             text
             :aria-current="activeAuthoringSection === section.id ? 'step' : undefined"
+            :aria-label="`${index + 1} ${section.label} ${section.description}`"
             :data-testid="`approval-template-section-${section.id}`"
             @click="selectAuthoringSection(section.id)"
           >
             <span class="template-authoring__step-index">{{ index + 1 }}</span>
             <span class="template-authoring__step-copy">
               <strong>{{ section.label }}</strong>
-              <small>{{ section.description }}</small>
             </span>
-            <span
-              v-if="section.id === 'fields'"
-              class="template-authoring__step-count"
-            >{{ draft.fields.length }}</span>
-            <span
-              v-else-if="section.id === 'flow'"
-              class="template-authoring__step-count"
-            >{{ authoringFlowNodeCount }}</span>
           </el-button>
         </nav>
 
@@ -1569,9 +1557,9 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础设置', description: '名称、范围与模板起点' },
+  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
   { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
-  { id: 'flow', label: '审批流程', description: '审批人、分支与字段权限' },
+  { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -3412,57 +3400,51 @@ onUnmounted(() => {
 
 .template-authoring__workspace {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: var(--ms-space-5);
+  gap: var(--ms-space-4);
 }
 
 .template-authoring__steps {
   position: sticky;
-  top: 116px;
-  display: grid;
-  gap: var(--ms-space-2);
-  padding: var(--ms-space-3);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-lg);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
-}
-
-.template-authoring__steps-heading {
-  display: grid;
-  gap: var(--ms-space-1);
-  padding: var(--ms-space-2) var(--ms-space-2) var(--ms-space-3);
-  color: var(--ms-text-1);
-}
-
-.template-authoring__steps-heading span {
-  color: var(--ms-text-3);
-  font-size: 12px;
+  top: 72px;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  border-radius: 0;
+  background: var(--ms-bg-page);
+  box-shadow: none;
 }
 
 .template-authoring__step {
-  width: 100%;
+  width: auto;
   height: auto;
-  min-height: 58px;
+  min-height: 48px;
   margin: 0;
-  padding: var(--ms-space-2);
+  padding: 10px 16px 12px;
   color: var(--ms-text-2);
-  white-space: normal;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
 }
 
 .template-authoring__step :deep(> span) {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  display: inline-flex;
   align-items: center;
-  gap: var(--ms-space-2);
-  width: 100%;
+  gap: 8px;
+  width: auto;
   text-align: left;
 }
 
 .template-authoring__step.is-active {
-  background: var(--el-color-primary-light-9);
+  background: transparent;
   color: var(--ms-color-primary);
+  border-bottom-color: var(--ms-color-primary);
 }
 
 .template-authoring__step-index,
@@ -3758,27 +3740,13 @@ pre {
 
 @media (max-width: 1024px) {
   .template-authoring__workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .template-authoring__steps {
-    position: sticky;
-    top: 108px;
-    z-index: 2;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .template-authoring__steps-heading {
-    display: none;
-  }
-
-  .template-authoring__step-copy small,
-  .template-authoring__step-count {
-    display: none;
-  }
-
-  .template-authoring__step :deep(> span) {
-    grid-template-columns: 28px minmax(0, 1fr);
+    top: 0;
+    justify-content: flex-start;
+    overflow-x: auto;
   }
 }
 
@@ -3814,7 +3782,7 @@ pre {
 
   .template-authoring__steps {
     top: 0;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: flex-start;
   }
 
   .template-authoring__grid {
