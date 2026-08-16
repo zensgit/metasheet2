@@ -140,6 +140,18 @@ function renderLegalTransitionClauses(): string {
  *    a change to the W4 machine, with its own review. Recorded rather than
  *    silently cloned, and rather than silently patched inside a W7 slice.
  *
+ * 1b. THE `version <> 1` CLAUSE DELIBERATELY LACKS THE COALESCE TREATMENT its
+ *    two neighbours in the INSERT branch received, and that asymmetry is
+ *    intentional rather than an oversight (raised as P3, disclosure-only, by the
+ *    landing gate at `b37ce19f22`). `version` is `NOT NULL` with its transient
+ *    default dropped, so a NULL can never reach the branch: the column
+ *    constraint rejects the row first, and `IF NULL <> 1` is unreachable. The
+ *    neighbours needed COALESCE because `prior_state` IS nullable — that is the
+ *    whole difference. Normalising it would cost nothing but would also imply
+ *    the two cases are alike; they are not, and a reader comparing them should
+ *    find the reason here rather than infer an omission. If `version` ever
+ *    becomes nullable, this clause needs the same treatment in the same change.
+ *
  * 2. NO BACKTICKS INSIDE THE `sql` TEMPLATE LITERALS BELOW. The plpgsql body is
  *    a JavaScript template literal; a backtick in a `--` SQL comment terminates
  *    it and the file fails to transform with a syntax error pointing at an
