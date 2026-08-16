@@ -96,7 +96,7 @@ hash_value() {
   fi
 }
 
-ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep)}"
+ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
@@ -1302,15 +1302,15 @@ action_soak_baseline() {
     fail "refusing to capture the p95 baseline: ${SOAK_W4_ENV_NAME}='${w4_env:-<unset>}' ${SOAK_W7_ENV_NAME}='${w7_env:-<unset>}' already set on the serving backend — the baseline must precede the flags (P95-BASELINE-CAPTURE-PACK-20260816; an unanchored +5% claim is not evidence)"
   fi
   soak_resolve_pg
-  # Dual-channel staging identity (L6 precedent: /api/health build.commit can be env-pinned
-  # stale, so the image tag is the accepted fallback identity).
+  # Build identity = the CONTAINER IMAGE TAG SHA. This is the accepted staging deploy
+  # identity (L6 precedent: /api/health build.commit can be env-pinned stale, so it is NOT a
+  # reliable identity — recorded below only as an informational cross-check). Recording the
+  # image-tag SHA is load-bearing for the soak-flags SHA-scope gate (P2-2): soak-flags
+  # requires DEPLOY_SHA == the running image tag, so the marker's staging_build_commit must
+  # be that same channel or the comparison would false-mismatch on a stale health commit.
   local live_commit commit sha8 ts
   live_commit="$(fetch_health_commit)"
-  if [[ "$live_commit" =~ ^[0-9a-f]{40}$ ]]; then
-    commit="$live_commit"
-  else
-    commit="$(soak_backend_image_sha)"
-  fi
+  commit="$(soak_backend_image_sha)"
   sha8="${commit:0:8}"
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   local baseline_name="p95-baseline-${sha8}-${ts}"
@@ -1520,12 +1520,13 @@ soak_w4_walk_to_shadow() {
   cur_version="$(soak_json_get "$plan_file" currentVersion)"
   [[ "$cur_version" == "null" ]] && cur_version=1
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "W4C-5 planDigest unparseable for org ${org8}"
-  # Fresh manifest, built AFTER the attestations it carries were mechanically verified
-  # (pending=0 / health ok / worker off — see action_soak_seed's preflight): this runner
-  # never attests what it has not just checked.
+  # Fresh manifest, built AFTER every attestation it carries was checked by this runner:
+  # pending=0 / health ok / worker off (preflight), the org verified exclusively-synthetic
+  # (customerData:false, preflight synthetic-org check), and ownerAuthorizationRef /
+  # entrypointInventoryRef supplied by the operator (never fabricated — required soak_opts).
   local manifest_host="${OUTPUT_DIR}/w4-manifest-${org8}.json"
-  printf '{"schemaVersion":1,"collectedAt":"%s","orgId":"%s","targetState":"shadow","imageSha":"%s","pendingMigrations":0,"serviceHealthy":true,"ownerAuthorizationRef":"%s","syntheticOrgRef":"synthetic-staging-org-%s","customerData":false,"externalNotificationsDisabled":true,"externalDestinationCount":0,"entrypointInventoryRef":"w4-lock-12.8-entry-4"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$org" "$SOAK_IMAGE_SHA" "$SOAK_OWNER_REF" "$org8" > "$manifest_host"
+  printf '{"schemaVersion":1,"collectedAt":"%s","orgId":"%s","targetState":"shadow","imageSha":"%s","pendingMigrations":0,"serviceHealthy":true,"ownerAuthorizationRef":"%s","syntheticOrgRef":"synthetic-staging-org-%s","customerData":false,"externalNotificationsDisabled":true,"externalDestinationCount":0,"entrypointInventoryRef":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$org" "$SOAK_IMAGE_SHA" "$SOAK_OWNER_REF" "$org8" "$SOAK_ENTRYPOINT_INVENTORY_REF" > "$manifest_host"
   docker cp "$manifest_host" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/w4-manifest-${org8}.json"
   local corr apply_rc=0
   corr="$(soak_uuid)"
@@ -1632,6 +1633,14 @@ action_soak_seed() {
   SOAK_OWNER_REF="$(soak_opt owner_ref '')"
   [[ -n "$SOAK_OWNER_REF" ]] || fail "owner_ref is required for action=soak-seed (soak_opts owner_ref=<ref>): the transition manifests' ownerAuthorizationRef must name the owner's own authorization artifact — this runner never fabricates one (authorization source must be owner-authored)"
   [[ "$SOAK_OWNER_REF" =~ $SOAK_REF_RE ]] || fail "owner_ref does not match the manifest reference pattern [A-Za-z0-9][A-Za-z0-9._:-]{0,127}: '${SOAK_OWNER_REF}'"
+  # entrypointInventoryRef (W4 manifest) is an operator ATTESTATION the boundary only
+  # pattern-checks — it cannot be fabricated as a constant here for the same reason
+  # ownerAuthorizationRef cannot (a runner-invented attestation is exactly the class the
+  # 820f5d354c retraction forbade). Required from the operator, same REF_PATTERN, never
+  # defaulted. The W7 manifest deliberately does NOT carry this key (verified asymmetry).
+  SOAK_ENTRYPOINT_INVENTORY_REF="$(soak_opt entrypoint_inventory_ref '')"
+  [[ -n "$SOAK_ENTRYPOINT_INVENTORY_REF" ]] || fail "entrypoint_inventory_ref is required for action=soak-seed (soak_opts entrypoint_inventory_ref=<ref>): the W4 transition manifest's entrypointInventoryRef is an operator attestation this runner will not fabricate (W4 lock §12.8 entry 4 names the entrypoint set; the operator asserts they collected it)"
+  [[ "$SOAK_ENTRYPOINT_INVENTORY_REF" =~ $SOAK_REF_RE ]] || fail "entrypoint_inventory_ref does not match the manifest reference pattern [A-Za-z0-9][A-Za-z0-9._:-]{0,127}: '${SOAK_ENTRYPOINT_INVENTORY_REF}'"
   # Per-org timezones: one value for all three, or exactly three '|'-separated.
   local tz1 tz2 tz3 tz_extra
   if [[ "$tz_opt" == *'|'* ]]; then
@@ -1649,6 +1658,33 @@ action_soak_seed() {
   done
   soak_psql_ta "SELECT gen_random_uuid();" >/dev/null \
     || fail "gen_random_uuid() unavailable on the staging DB (pgcrypto missing?) — refusing to seed"
+
+  # --- SYNTHETIC-ORG verification: verify BEFORE attesting customerData=false ----------
+  # customerData:false / syntheticOrgRef are operator attestations the W4C-5 boundary
+  # cannot verify; whoever automates the CLI becomes the attester. So verify it here rather
+  # than assert it: refuse any org that holds NON-synthetic content. A real staging org
+  # (typo / copy-paste / demo-org reuse) would otherwise be seeded, walked legacy->shadow
+  # through the sanctioned writer on a fabricated customerData:false, exactly what that
+  # predicate exists to stop. Scoped to NON-synth rows so an idempotent re-seed (whose own
+  # prior synth rows are present) still passes; a foreign user/attendance/posture row fails.
+  local org nonsynth_users nonsynth_records foreign_w4 foreign_w7
+  for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
+    nonsynth_users="$(soak_psql_ta "SELECT count(*) FROM user_orgs WHERE org_id = '${org}' AND user_id NOT LIKE '${SOAK_USER_PREFIX}%';")"
+    [[ "$nonsynth_users" == "0" ]] \
+      || fail "org ${org:0:8} has ${nonsynth_users} non-synthetic user_orgs member(s) — refusing to attest customerData=false / syntheticOrgRef for an org that is not exclusively synthetic (a real org must never be walked to shadow on a fabricated attestation)"
+    nonsynth_records="$(soak_psql_ta "SELECT count(*) FROM attendance_records WHERE org_id = '${org}' AND user_id NOT LIKE '${SOAK_USER_PREFIX}%';")"
+    [[ "$nonsynth_records" == "0" ]] \
+      || fail "org ${org:0:8} has ${nonsynth_records} attendance_records for non-synthetic users — refusing (org is not exclusively synthetic)"
+    # A posture row written by anything other than this soak's own seed actor family is a
+    # foreign row: refuse rather than idempotently 'skip' a real org already mid-rollout.
+    foreign_w4="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_rollout_state WHERE org_id = '${org}' AND state <> 'legacy' AND (actor_id IS NULL OR actor_id NOT LIKE 'w4w7-soak-seed-%');")"
+    [[ "$foreign_w4" == "0" ]] \
+      || fail "org ${org:0:8} has a W4 rollout row not written by this soak's seed actor — refusing (foreign posture history; not a virgin/synthetic org)"
+    foreign_w7="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_context_source_state WHERE org_id = '${org}' AND state <> 'off' AND (actor_id IS NULL OR actor_id NOT LIKE 'w4w7-soak-seed-%');")"
+    [[ "$foreign_w7" == "0" ]] \
+      || fail "org ${org:0:8} has a W7 context-source row not written by this soak's seed actor — refusing (foreign posture history)"
+    echo "org_${org:0:8}_synthetic_verified=nonsynth_users:${nonsynth_users},nonsynth_records:${nonsynth_records},foreign_w4:${foreign_w4},foreign_w7:${foreign_w7}" >> "${OUTPUT_DIR}/soak-seed-synthetic-check.txt"
+  done
 
   # --- manifest-attestation preflight: verify BEFORE attesting -------------------------
   prepare_container_runner
@@ -1678,8 +1714,11 @@ action_soak_seed() {
     ( umask 077 && printf 'SOAK_SYNTH_PASSWORD=%s\n' "$password" > "$SOAK_CREDENTIALS_FILE" )
     log "soak-seed: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, never uploaded)"
   fi
+  # Bcrypt the password in-container, reading it on STDIN (never `-e`/argv): a `docker exec -e`
+  # env or an argv value would sit in the host process table and the docker daemon's exec
+  # config for the call's duration. Stdin does not.
   local pw_hash
-  pw_hash="$(staging_exec_env "SOAK_PW=${password}" -- node -e 'const b = require("bcryptjs"); b.hash(process.env.SOAK_PW, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) })')"
+  pw_hash="$(printf '%s' "$password" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
   [[ "$pw_hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
 
   # --- idempotent data seeding, one transaction per org --------------------------------
@@ -1768,6 +1807,15 @@ action_soak_flags() {
   # once action=soak-baseline captured a PRE-enablement p95 baseline.
   [[ -f "$SOAK_BASELINE_MARKER" ]] \
     || fail "refusing to set soak flags: baseline marker absent (${SOAK_BASELINE_MARKER}) — run action=soak-baseline first (baseline BEFORE flags; O4-2 needs a pre-enablement anchor)"
+  # SHA-SCOPE the marker: a marker captured on a DIFFERENT build than the one the flags go
+  # live on anchors every later O4-2 "+5% vs baseline" comparison to the wrong image (runbook
+  # §2A.5 requires the baseline at "the same deployed image SHA"). This bites on the PR's own
+  # documented mid-soak redeploy path (baseline@A, deploy->B, re-run soak-flags@B). Refuse it;
+  # the operator must re-run soak-baseline against the redeployed SHA.
+  local marker_sha
+  marker_sha="$(sed -n 's/^staging_build_commit=//p' "$SOAK_BASELINE_MARKER")"
+  [[ "$marker_sha" == "$DEPLOY_SHA" ]] \
+    || fail "baseline marker was captured at build ${marker_sha:-<unreadable>}, but flags are being set on ${DEPLOY_SHA} — re-run action=soak-baseline against the deployed SHA (O4-2 must anchor on the same build)"
   # Never silently drop (or silently carry) rd-window flags: env flips for those happen
   # only together with a deploy (bundle §3.4), and this action rewrites the same file.
   if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' "$OVERRIDE_FILE"; then
@@ -1871,9 +1919,14 @@ action_soak_flags() {
 action_soak_run() {
   soak_validate_opts
   local punch_target config_path
-  punch_target="$(soak_opt punch_target 240)"
-  [[ "$punch_target" =~ ^[1-9][0-9]{0,3}$ && "$punch_target" -le 2000 ]] \
-    || fail "punch_target must be 1..2000 (one dispatch is one bounded run at the ruled <=1 req/sec ceiling; a larger target outlives the workflow job), got '${punch_target}'"
+  # Default 200 = the generator's own ruled C1 target (§2A.3), NOT the 240/day capacity:
+  # dailyCounts increments on every ATTEMPT while stopConditionsMet needs totalClean>=target,
+  # so setting the target AT capacity leaves zero headroom and a single documented first-punch
+  # PUNCH_TOO_SOON collision makes targets_met unreachable (the run then idles to the stall
+  # timeout). 200 against a 240 one-day capacity leaves 40 clean slots of headroom.
+  punch_target="$(soak_opt punch_target 200)"
+  [[ "$punch_target" =~ ^[1-9][0-9]{0,3}$ ]] \
+    || fail "punch_target must be 1..9999, got '${punch_target}'"
   config_path="$(soak_opt config "$SOAK_HOST_CONFIG_FILE")"
   [[ -f "$config_path" ]] || fail "soak config not found at ${config_path} — action=soak-seed writes it (or pass soak_opts config=<host-path>)"
   # Order enforcement: the flags must be LIVE on the serving backend before load.
@@ -1890,10 +1943,21 @@ action_soak_run() {
 
   # Fail-closed allowlist coverage: every config org must be in the live W4 allowlist and
   # every both-machines org in the live W7 allowlist — a mismatch would silently no-op.
-  local orgs_csv both_csv org
+  local orgs_csv both_csv org total_users day_capacity
   orgs_csv="$(python3 -c 'import json,sys; print(",".join(e["orgId"] for e in json.load(open(sys.argv[1]))["entries"]))' "$config_path")" \
     || fail "could not parse soak config ${config_path}"
   both_csv="$(python3 -c 'import json,sys; print(",".join(e["orgId"] for e in json.load(open(sys.argv[1]))["entries"] if e["posture"] == "both_machines_group_arm"))' "$config_path")"
+  # DAY-CAPACITY CEILING (P3-2/P3-3): a single soak-run invocation is one bounded pass inside
+  # the 40-minute job. The generator's per-user daily cap (8 punches/user/day) means the most
+  # CLEAN punches one invocation can produce is total_users * 8; a target above that can never
+  # reach targets_met and would only idle to the stall timeout. That ceiling is also what keeps
+  # the run inside the job window (at the >=60s per-user spacing + <=1 req/s ceiling, one day's
+  # capacity for a default 30-user config is ~8 min of active load, not the old 2000-cap ~67 min).
+  total_users="$(python3 -c 'import json,sys; print(sum(len(e["userIds"]) for e in json.load(open(sys.argv[1]))["entries"]))' "$config_path")"
+  [[ "$total_users" =~ ^[1-9][0-9]*$ ]] || fail "could not derive the synthetic user count from ${config_path}"
+  day_capacity=$(( total_users * 8 ))
+  [[ "$punch_target" -le "$day_capacity" ]] \
+    || fail "punch_target=${punch_target} exceeds this config's one-day clean-punch capacity (${total_users} users x 8/user/day = ${day_capacity}); a larger target can never reach targets_met in one invocation and would only idle to the stall timeout. Lower punch_target, raise users_per_org at seed time, or run multiple soak-run invocations across days"
   local IFS_SAVE="$IFS"
   IFS=','
   for org in $orgs_csv; do
@@ -2072,8 +2136,15 @@ action_soak_status() {
     "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
   soak_status_scalar "[Q4a]_w4_legacy_arm_clean_punches_cumulative" \
     "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = op.org_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') AND COALESCE(w7.state, 'off') = 'off';" >/dev/null
+  # [Q4b] MUST NOT join attendance_result_operations: a W7 group-shadow comparison row
+  # carries operation_id IS NULL BY DESIGN (chk_arc_operation_id's marker disjunct,
+  # zzzz20260815130000_w7_2_group_shadow_comparison_identity.ts), so that join is
+  # identically empty and C4's group-arm channel would be structurally zero forever. The
+  # producing operation travels inside the marker instead; count it out of there,
+  # marker AND selector scoped, mirroring w7-compare-window-status.ts:189-196
+  # (uq_arc_w7_comparison_identity makes that marker operationId unique per (org,entrypoint)).
   soak_status_scalar "[Q4b]_w7_group_arm_clean_punches_cumulative" \
-    "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND c.mode = 'shadow' AND c.context_snapshot ->> 'selector' = 'group_effective' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
+    "SELECT count(DISTINCT (c.input_provenance -> 'w7GroupShadowCompare' ->> 'operationId')) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.created_at >= '${window_start}'::timestamptz AND c.created_at < now() AND c.mode = 'shadow' AND (c.input_provenance ? 'w7GroupShadowCompare') AND c.context_snapshot IS NOT NULL AND (c.context_snapshot ->> 'selector') = 'group_effective' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
   soak_status_rows "[Q14] posture-state distribution (org-count summary)" \
     "SELECT COALESCE(w4.state,'legacy') AS w4_posture, COALESCE(w7.state,'off') AS w7_posture, count(*)::int AS org_count FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id GROUP BY w4_posture, w7_posture ORDER BY w4_posture, w7_posture;"
   soak_status_rows "posture rows for the three soak orgs (W4 then W7)" \
@@ -2100,8 +2171,12 @@ action_soak_status() {
     v="$(soak_status_scalar "[Q7]_unresolved_ingress_reviews_${org8}" \
       "SELECT count(*) FROM attendance_records r WHERE r.org_id = '${org}' AND EXISTS (SELECT 1 FROM attendance_record_calculations c WHERE c.org_id = '${org}' AND c.attendance_record_id = r.id AND c.outcome_reason_code = 'legacy_time_ingress_not_authoritative' AND c.version = (SELECT MAX(c2.version) FROM attendance_record_calculations c2 WHERE c2.org_id = '${org}' AND c2.attendance_record_id = r.id));")"
     [[ "$v" == "0" ]] || alerts+=("Q7_unresolved_reviews_${org8}=${v}")
+    # Q9 marker AND selector scoped (unified with the [W7-2]_W7_COMPARE_COVERAGE counter
+    # below and with w7-compare-window-status.ts:189-196): selector alone would also count
+    # a group_authoritative-era W4 group-context shadow row (§3.2 T-D1), so the two spellings
+    # could disagree once such rows exist. Marker-scoping makes them one number.
     soak_status_scalar "[Q9]_w7_compare_coverage_cumulative_${org8}" \
-      "SELECT count(DISTINCT (r.user_id, r.work_date)) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.org_id = '${org}' AND c.created_at >= '${window_start}'::timestamptz AND c.mode = 'shadow' AND c.context_snapshot ->> 'selector' = 'group_effective';" >/dev/null
+      "SELECT count(DISTINCT (r.user_id, r.work_date)) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.org_id = '${org}' AND c.created_at >= '${window_start}'::timestamptz AND c.mode = 'shadow' AND (c.input_provenance ? 'w7GroupShadowCompare') AND c.context_snapshot IS NOT NULL AND c.context_snapshot ->> 'selector' = 'group_effective';" >/dev/null
     soak_status_rows "[Q10] failed scheduled-run target outcomes 24h, org ${org8} (每行单独 triage — not a bare zero requirement)" \
       "SELECT o.run_id, o.target_id, o.terminal_outcome, o.failure_reason_code, o.recorded_at FROM attendance_scheduled_run_target_outcomes o WHERE o.org_id = '${org}' AND o.recorded_at >= now() - interval '24 hours' AND o.terminal_outcome = 'failed' ORDER BY o.recorded_at;"
     soak_status_rows "[Q11] outcome/reason counts 24h, org ${org8}" \

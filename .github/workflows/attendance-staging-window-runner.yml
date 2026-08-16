@@ -36,8 +36,9 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #   soak-run       — real-route synthetic load: login every synthetic user via
 #                    POST /api/auth/login (never minted), then run the committed
 #                    scripts/ops/attendance-w4w7-soak-load-generator.mjs in-container at the
-#                    ruled <=1 req/sec ceiling (soak_opts punch_target, default 240 = one
-#                    ruled soak-day quota: 3 orgs x 10 users x 8 punches).
+#                    ruled <=1 req/sec ceiling (soak_opts punch_target, default 200 = the
+#                    ruled C1 target; capped per invocation at one day's capacity =
+#                    total_users x 8).
 #   soak-status    — daily monitoring channel: monitoring-pack Q1-Q16 + the W7-2
 #                    compare-window counters via psql; exits nonzero on mechanical alerts.
 #
@@ -70,7 +71,7 @@ on:
         required: false
         default: ''
       soak_opts:
-        description: 'soak actions: ";"-separated key=value pairs. Keys: users_per_org (soak-seed, default 10), tz (soak-seed, IANA name or three "|"-separated, default Asia/Shanghai), w7_target (soak-seed, only group_shadow is runnable at kickoff), owner_ref (soak-seed REQUIRED — names the owner-authored authorization artifact for the transition manifests), punch_target (soak-run, default 240), config (soak-run host config path), window_start (soak-status override, ISO8601 UTC).'
+        description: 'soak actions: ";"-separated key=value pairs. Keys: users_per_org (soak-seed, default 10), tz (soak-seed, IANA name or three "|"-separated, default Asia/Shanghai), w7_target (soak-seed, only group_shadow is runnable at kickoff), owner_ref (soak-seed REQUIRED — names the owner-authored authorization artifact for the transition manifests), entrypoint_inventory_ref (soak-seed REQUIRED — operator attestation for the W4 manifest entrypointInventoryRef; never fabricated), punch_target (soak-run, default 200), config (soak-run host config path), window_start (soak-status override, ISO8601 UTC).'
         required: false
         default: ''
       smoke:
@@ -109,10 +110,13 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # 40 (was 15): soak-run's bounded generator pass (punch_target<=2000 at the ruled
-    # <=1 req/sec ceiling plus per-user logins) and soak-seed's in-container tsx CLI walks
-    # legitimately exceed 15 minutes; every pre-soak action still finishes well inside the
-    # old budget and the single concurrency group is unchanged.
+    # 40 (was 15): soak-run's bounded generator pass and soak-seed's in-container tsx CLI
+    # walks legitimately exceed 15 minutes. soak-run is capped at ONE DAY's clean-punch
+    # capacity (total_users x 8), whose binding constraint is the generator's >=60s per-user
+    # spacing (not the <=1 req/s global ceiling): for the default 30-user config that is ~8
+    # minutes of active load, well inside 40 even with logins + docker cp + artifact scp.
+    # Every pre-soak action still finishes well inside the old budget; single concurrency
+    # group unchanged.
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -135,6 +139,17 @@ jobs:
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
               exit 2
             fi
+          fi
+          # SINGLE-LINE GATE, FIRST — before any here-string `read`. A here-string `read`
+          # consumes only the FIRST line, so a newline in SOAK_ORGS/SOAK_OPTS would slip
+          # everything after it past the per-field checks below and then interpolate raw into
+          # `export SOAK_ORGS='...'` in the remote prelude, where a `'` after the newline
+          # closes the assignment and the tail runs as commands. The sibling `stamps` check
+          # already catches this via its `,__sentinel__` idiom; reject embedded newlines
+          # (and CR) outright here so both new inputs get the same immunity.
+          if [[ "$SOAK_ORGS" == *$'\n'* || "$SOAK_ORGS" == *$'\r'* || "$SOAK_OPTS" == *$'\n'* || "$SOAK_OPTS" == *$'\r'* ]]; then
+            echo "soak_orgs / soak_opts must be single-line (no embedded newline/CR)" >&2
+            exit 2
           fi
           # soak input scoping + charset validation (the remote prelude single-quotes these,
           # so the safe-charset checks here are what keeps that interpolation quoting-safe).
@@ -186,10 +201,11 @@ jobs:
                 tz) ;;
                 w7_target) [[ "$value" == "group_shadow" ]] || { echo "w7_target only supports group_shadow at kickoff (deeper rungs carry compare-window exit predicates and are separate owner-run CLI acts), got '$value'" >&2; exit 2; } ;;
                 owner_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "owner_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
-                punch_target) [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "punch_target must be 1..9999 (remote caps at 2000), got '$value'" >&2; exit 2; } ;;
+                entrypoint_inventory_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "entrypoint_inventory_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
+                punch_target) [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "punch_target must be 1..9999 (remote further caps it at the config's one-day capacity), got '$value'" >&2; exit 2; } ;;
                 config) [[ "$value" =~ ^[A-Za-z0-9._/~-]+$ ]] || { echo "config must be a plain path, got '$value'" >&2; exit 2; } ;;
                 window_start) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$ ]] || { echo "window_start must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, got '$value'" >&2; exit 2; } ;;
-                *) echo "unknown soak_opts key: '$key' (known: users_per_org, tz, w7_target, owner_ref, punch_target, config, window_start)" >&2; exit 2 ;;
+                *) echo "unknown soak_opts key: '$key' (known: users_per_org, tz, w7_target, owner_ref, entrypoint_inventory_ref, punch_target, config, window_start)" >&2; exit 2 ;;
               esac
             done
           fi

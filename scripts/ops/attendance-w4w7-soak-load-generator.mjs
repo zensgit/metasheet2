@@ -163,14 +163,14 @@
  *     threshold) but does NOT and CANNOT halt on a 40P01/57P01 or an off-roster shadow diff
  *     it cannot observe. This is a named gap, in the same voice the runbook itself uses for
  *     §0.2/§1.5's 【MECHANISM ABSENT】 items — not a claim that step 7 is fully satisfied.
- *   - W7-side traffic: per runbook §1.5/§2A.1, there is no W7 transition writer anywhere in
- *     the repository today, so no org can actually be in a mechanically-real
- *     `group_shadow`/`group_eligible`/`group_authoritative` posture yet. An entry configured
- *     with `posture: "both_machines_group_arm"` still sends real, valid live-punch traffic
- *     (useful for exercising the W4 side and for being ready the moment W7-2/W7-3 land), but
- *     its `w7_group_arm` count is a LABEL ONLY until that mechanism exists — this script
- *     prints a one-time warning per such entry and never claims C4b is satisfied by its own
- *     tally.
+ *   - W7 arm attribution: this script DECLARES an org's posture from its config; it never
+ *     READS the server-side W7 posture (`attendance_calculation_context_source_state`). So an
+ *     entry configured `posture: "both_machines_group_arm"` sends real, valid live-punch
+ *     traffic, but whether that org is actually at `group_shadow` — and thus whether its
+ *     punches truly populate the W7 group arm — is a DB fact only `soak-status` Q4b can
+ *     confirm. This script's `w7_group_arm` count is a CONFIG-DECLARED LABEL
+ *     (`armAttributionSource: 'config_declared'`); it prints a one-time warning per such entry
+ *     and never claims C4b is satisfied by its own tally.
  *
  * SAFETY / NO-DESTRUCTIVE-OPS DISCIPLINE
  * ---------------------------------------
@@ -534,11 +534,11 @@ async function loadConfig(opts) {
     if (rawEntry.posture === 'both_machines_group_arm') {
       // eslint-disable-next-line no-console
       console.warn(
-        `[config] ${where} (orgId=${orgId}) is posture="both_machines_group_arm". Per runbook §1.5/§2A.1, `
-        + 'no W7 transition writer exists anywhere in the repo today, so this org cannot mechanically be '
-        + 'in a real group_shadow/group_eligible/group_authoritative state yet. This script will still '
-        + 'send valid live-punch traffic to it (useful for the W4 side, and ready for W7-2/W7-3), but its '
-        + 'w7_group_arm count is a CONFIG-DECLARED LABEL ONLY — see armAttributionSource in the summary.'
+        `[config] ${where} (orgId=${orgId}) is posture="both_machines_group_arm". This script declares, `
+        + 'it never READS, the org\'s server-side W7 posture: whether the org is actually at group_shadow '
+        + 'is a fact in attendance_calculation_context_source_state that only a DB read (soak-status Q4b) '
+        + 'can confirm. This script sends valid live-punch traffic either way, but its w7_group_arm count '
+        + 'is a CONFIG-DECLARED LABEL ONLY — see armAttributionSource in the summary.'
       )
     }
 
@@ -808,10 +808,11 @@ function newTally(config) {
       clean: 0,
       incidents: 0,
       applicable: armsInPlay.has(arm),
-      // §2A.1: no W7 transition writer exists today, so a config with no entry declaring
-      // w7_group_arm is the EXPECTED state, not a gap in this run — the ledger template's own
-      // C4b row says to record this precondition status explicitly rather than leave it blank.
-      reason: armsInPlay.has(arm) ? null : (arm === 'w7_group_arm' ? '§2A.1 mechanism precondition not cleared' : 'no entry declared this arm'),
+      // An arm is "not applicable" when no config entry declares it — recorded explicitly
+      // (per the ledger template's C4b row) rather than left blank. This is a config fact,
+      // not a repo-mechanism claim: whether a declared w7_group_arm org is truly at
+      // group_shadow is confirmed server-side by soak-status Q4b, never by this script.
+      reason: armsInPlay.has(arm) ? null : 'no config entry declared this arm',
     }
   }
   return {
