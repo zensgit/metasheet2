@@ -39,11 +39,17 @@
  *     re-hashes the file at run time and compares. Two goldens produced by two
  *     different instruments say nothing about each other.
  *
- *  2. **The harness has ZERO import dependency on 1b's new modules.** It imports
- *     only `w4c0-fingerprints` and `w4c1-fingerprints`, both of which predate
- *     1b, and it reaches production code exclusively through the plugin's
- *     existing `__attendanceW4c2LivePunchAdaptersForTests` export. A harness
- *     that imports what it is measuring cannot be run at the base at all.
+ *  2. **The CAPTURE-ERA harness had ZERO import dependency on 1b's new
+ *     modules** — it imported only `w4c0-fingerprints` and `w4c1-fingerprints`
+ *     and reached production code exclusively through the plugin's existing
+ *     `__attendanceW4c2LivePunchAdaptersForTests` export, which is what made
+ *     running it at the pre-1b base possible at all. That property is a
+ *     digest-pinned HISTORICAL fact of the capture (the recorded
+ *     `harnessSha256`/`capturedAtBaseSha` pair is the audit trail). The W7-2
+ *     extension below ADDS a seam import for the posture-parity legs (W7-R3's
+ *     three named postures) — it never re-captures `entries`, and the
+ *     committed `harnessSha256` was updated deliberately, as its own reviewed
+ *     line, when the extension landed.
  *
  * THIS FILE DELIBERATELY CONTAINS NO SEAM LEG. A presence-guarded seam
  * assertion here would be a skip-when-unreachable gate: at the 1b head a seam
@@ -84,6 +90,16 @@ import {
   computeAttendanceSourceDefinitionFingerprintV1,
   computeAttendanceOuterComparableSourceDefinitionFingerprintV1,
 } from '../../src/attendance/w4c1-fingerprints'
+// W7-2 — the seam, for the posture-parity legs ONLY (see docblock property 2:
+// the CAPTURE path above this import never touches it, and `entries` are
+// never regenerated through it).
+import { issueAttendanceFrozenContextV1 } from '../../src/attendance/w7-resolver/w7-frozen-context-issuance-seam'
+
+/** The pre-1b base the committed vectors were captured at. PINNED so a
+ *  re-capture from a later tree (which would record a different SHA, or none)
+ *  reds here rather than being silently accepted — the harness-digest leg
+ *  alone cannot catch a re-capture, because EMIT rewrites the digest too. */
+const CAPTURED_AT_BASE_SHA = '348eccde90825591ed6af0b6e503d152fe3cc672'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -418,6 +434,9 @@ describeDb('W7-1b — W7-R3 structural parity: legacy-arm golden equality (real 
         'the harness — do NOT edit the recorded digest.',
     ).toBe(harnessDigest)
     expect(vectors.capturedAtBaseSha).toMatch(/^[0-9a-f]{40}$/)
+    // W7-2 hardening: the recorded base is the EXACT pre-1b base, not merely
+    // "some SHA" — a re-capture from a behaviour-carrying tree reds here.
+    expect(vectors.capturedAtBaseSha).toBe(CAPTURED_AT_BASE_SHA)
   })
 
   it('T-B2/T-B4: the legacy arm is byte-identical to the pre-1b base for every fixture', () => {
@@ -460,5 +479,145 @@ describeDb('W7-1b — W7-R3 structural parity: legacy-arm golden equality (real 
     // Both directions: a fixture silently dropped from the corpus must red too.
     expect(Object.keys(captured).sort()).toEqual(Object.keys(vectors.entries).sort())
   })
+
+  // ---------------------------------------------------------------------------
+  // W7-2 — T-A1: W7-R3 names THREE postures for byte parity: no W7 posture
+  // (the legs above), `group_shadow` and `group_eligible`. The two new legs
+  // drive the REAL seam (dual-run) and assert the SERVED half is byte-identical
+  // to the SAME committed vectors — with the arm asserted first, so "unchanged
+  // bytes" cannot be satisfied by the branch never engaging (an unhit probe and
+  // a dead gate look identical).
+  //
+  // The group half fails closed here BY FIXTURE (no W1 membership rows exist
+  // for these orgs => `membership-absent`), which is itself the positive
+  // control that the dual-run really ran its group arm: a seam that silently
+  // skipped it would carry `shadowReason: null`. The produced-group-context
+  // twin lives in `attendance-w7-2-group-shadow-dualrun.db.test.ts`.
+  // ---------------------------------------------------------------------------
+
+  const W7_POSTURE_TABLE = 'attendance_calculation_context_source_state'
+  const W7_ENV = 'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED'
+
+  function coreTrx(p: Pool) {
+    return {
+      query: async (sqlText: string, params?: unknown[]) => ({
+        rows: (await p.query(sqlText, params)).rows,
+      }),
+    }
+  }
+
+  function seamDeps() {
+    const plugin = loadPlugin()
+    const build = plugin.__attendanceW4c2LivePunchAdaptersForTests.buildW4ShadowFrozenContextV1
+    const effectivenessLib = requireCjs(
+      '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
+    ) as { deriveAttendanceGroupFixedScheduleEffectiveness: unknown }
+    const producerKeyLib = requireCjs(
+      '../../../../plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+    ) as { buildAttendanceGroupFixedScheduleProducerKey: unknown }
+    expect(typeof effectivenessLib.deriveAttendanceGroupFixedScheduleEffectiveness).toBe('function')
+    expect(typeof producerKeyLib.buildAttendanceGroupFixedScheduleProducerKey).toBe('function')
+    const trx = pluginTrx(pool)
+    return {
+      deriveFixedScheduleEffectiveness:
+        effectivenessLib.deriveAttendanceGroupFixedScheduleEffectiveness,
+      buildFixedScheduleProducerKey: producerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+      // Reached only AFTER a membership resolves; these fixtures have none, so
+      // a call here means the fixture premise broke — fail loudly, never stub.
+      loadOrgRuleFacts: async () => {
+        throw new Error('W7-2 golden harness: loadOrgRuleFacts must be unreachable (no memberships seeded)')
+      },
+      buildLegacyFrozenContext: (legacyArgs: Record<string, unknown>) => build(trx, legacyArgs),
+    } as never
+  }
+
+  async function runPostureParityLeg(posture: 'group_shadow' | 'group_eligible'): Promise<void> {
+    const vectors = JSON.parse(fs.readFileSync(VECTOR_PATH, 'utf8'))
+    const priorEnv = process.env[W7_ENV]
+    const orgKeys = Object.values(fixtures).map((f) => f.orgId.toLowerCase())
+    process.env[W7_ENV] = orgKeys.join(',')
+    try {
+      for (const f of Object.values(fixtures)) {
+        await pool.query(
+          `INSERT INTO ${W7_POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
+          [f.orgId.toLowerCase(), posture],
+        )
+      }
+      for (const [id, f] of Object.entries(fixtures)) {
+        const issued = (await issueAttendanceFrozenContextV1(coreTrx(pool) as never, seamDeps(), {
+          orgId: f.orgId,
+          userId: f.userId,
+          workDate: f.workDate,
+          timezone: 'Asia/Shanghai',
+          isWorkday: f.isWorkday,
+          holidayKind: f.holidayKind,
+          shiftId: f.shiftId,
+          purpose: 'persist',
+        })) as {
+          arm: string
+          context: Record<string, unknown> | null
+          shadowContext?: unknown
+          shadowReason?: string | null
+        }
+        // ANCHOR FIRST: the branch really engaged for this posture.
+        expect(issued.arm, `${id} (${posture}): arm`).toBe('legacy_with_group_shadow')
+        // The group arm really RAN and failed closed on the fixture's missing
+        // membership — a skipped group arm would carry null/null.
+        expect(issued.shadowReason, `${id} (${posture}): group-arm fail-close reason`).toBe(
+          'membership-absent',
+        )
+        expect(issued.shadowContext, `${id} (${posture}): no group context can exist here`).toBeNull()
+        // THE PARITY CLAIM: the SERVED half is byte-identical to the committed
+        // pre-1b vectors — canonical bytes and BOTH fingerprint domains.
+        const golden = goldenFor(
+          issued.context,
+          frozenAttribution(f.orgId, f.userId, f.workDate, f.shiftId),
+        )
+        expect(golden.context, `${id} (${posture}): served context bytes`).toBe(
+          vectors.entries[id].context,
+        )
+        expect(golden.storageFingerprint, `${id} (${posture}): storage fingerprint`).toBe(
+          vectors.entries[id].storageFingerprint,
+        )
+        expect(golden.outerComparableFingerprint, `${id} (${posture}): outer fingerprint`).toBe(
+          vectors.entries[id].outerComparableFingerprint,
+        )
+        // The MIRROR purpose stays on the plain legacy arm in this posture —
+        // the observer of the SERVED path must observe the served (legacy)
+        // result, and must not mint an unserved group context.
+        const mirrored = (await issueAttendanceFrozenContextV1(coreTrx(pool) as never, seamDeps(), {
+          orgId: f.orgId,
+          userId: f.userId,
+          workDate: f.workDate,
+          timezone: 'Asia/Shanghai',
+          isWorkday: f.isWorkday,
+          holidayKind: f.holidayKind,
+          shiftId: f.shiftId,
+          purpose: 'mirror',
+        })) as { arm: string; context: Record<string, unknown> | null }
+        expect(mirrored.arm, `${id} (${posture}): mirror arm`).toBe('legacy')
+        expect(
+          canonicalAttendanceJsonV1(redactIdentity(mirrored.context)),
+          `${id} (${posture}): mirror served bytes`,
+        ).toBe(vectors.entries[id].context)
+      }
+    } finally {
+      if (priorEnv === undefined) delete process.env[W7_ENV]
+      else process.env[W7_ENV] = priorEnv
+      await pool
+        .query(`DELETE FROM ${W7_POSTURE_TABLE} WHERE org_id = ANY($1::text[])`, [orgKeys])
+        .catch(() => undefined)
+    }
+  }
+
+  it('W7-2 T-A1 (group_shadow): the SERVED half of the dual-run is byte-identical to the pre-1b golden for every fixture', async () => {
+    if (EMIT) return
+    await runPostureParityLeg('group_shadow')
+  }, 60_000)
+
+  it('W7-2 T-A1 (group_eligible): the SERVED half of the dual-run is byte-identical to the pre-1b golden for every fixture', async () => {
+    if (EMIT) return
+    await runPostureParityLeg('group_eligible')
+  }, 60_000)
 
 })

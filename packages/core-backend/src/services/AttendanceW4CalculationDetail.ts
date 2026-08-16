@@ -5,6 +5,7 @@ import {
 } from '../attendance/w4c1-segment-calculator'
 import type { FrozenAttendanceContextV1 } from '../attendance/w4c0-write-boundary-types'
 import { ATTENDANCE_PROJECTION_OWNERS_V1 } from '../attendance/w7-provenance-domain'
+import { ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1 } from '../attendance/w4c2-shadow-expected-differences'
 
 export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
   'equal',
@@ -23,12 +24,21 @@ export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
 
 export type AttendanceW4ShadowDiffCode = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES)[number]
 
-const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>([
-  'work_date_mismatch',
-  'context_mismatch',
-  'input_mismatch',
-  'review_required',
-])
+// W7-2 (#4556): derived from the ONE exported critical-code set
+// (ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1, doc comment there) so the
+// criticality classification cannot fork between this reader and the W7
+// compare-window counters. NOTE for editors: comments in this file must stay
+// free of stray backticks and apostrophes — the DML-inventory read census
+// derives SQL-literal boundaries with a quote-parity scan over the whole file,
+// and an odd quote count above a query strips its predicate fingerprint. For
+// a CLASSIFIED site the census then reds loudly on count/predicate drift
+// (gate-probed while landing W7-2 — the earlier wording here said the strip
+// was silent, which the gate refuted at classified sites); an UNCLASSIFIED
+// site would lose its fingerprint without that backstop, so keep comments
+// quote-clean either way.
+const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>(
+  ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1,
+)
 
 export const ATTENDANCE_W4_SHADOW_DIFF_LABELS: Readonly<Record<AttendanceW4ShadowDiffCode, string>> =
   Object.freeze({
