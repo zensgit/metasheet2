@@ -65,11 +65,13 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
    SHA `cc69791604f338a90e07dc07da8118a2d7a68188` reports a ready two-linked-user directory
    baseline and all four flags OFF, but zero password-capable alias administrators and no Stream
    client secret/template/integration configuration. Production alias and Stream remain NO-GO.
-8. A staging values-free T2-Gate inventory reported three active corp-anchored integrations across
+8. A staging values-free post-fix two-corp UAT inventory reported three active corp-anchored integrations across
    two distinct corp anchors, but only one corp with active directory accounts and zero cross-corp
    overlap groups. Automatic sync and schedules were both zero. The post-fix two-corp UAT entry
    criterion is therefore not met: a real second-enterprise member set and one real overlap person
-   remain external owner inputs. Transfer T3-T5 stays frozen; local DB fabrication is prohibited.
+   remain external owner inputs. Corp-scope Phase A #4602 and Phase B #4605 are already ancestors
+   of the deployed SHA, so the old T2.5 decision branch is retired; Transfer T3-T5 stays frozen
+   on the post-fix UAT and missing production adapter, and local DB fabrication is prohibited.
 9. The owner-approved Stream window used fresh storage-health run
    [31765617958](https://github.com/zensgit/metasheet2/actions/runs/31765617958), then Stream
    [on 31856025380](https://github.com/zensgit/metasheet2/actions/runs/31856025380) at exact
@@ -523,10 +525,12 @@ of `Card.Instance.Write` closed the third window's permission blocker. The fourt
 real `interactive_card` delivery for `AP-100012`, then returned safely to OFF before waiting for the
 human.
 
-Required external action: the linked assignee must confirm receipt and be available for a short
-owner-approved callback window together with a non-assignee. Execute the canonical U1-U13
-procedure, capture only values-free booleans/status enums, and execute `off` before the window ends.
-Secrets must not be pasted into this document or chat.
+Required external action: use the published replacement template `MetaSheetCanaryUAT2` to create a
+fresh card in a short owner-approved callback window while the linked assignee and a non-assignee
+are both available. Execute the canonical U1-U13 procedure, capture only values-free
+booleans/status enums, and execute `off` before the window ends. Publication and prepare evidence
+live in draft #4920; they do not substitute for a fresh card. Secrets must not be pasted into this
+document or chat.
 
 ## 7. Production and transfer gates
 
@@ -536,7 +540,7 @@ Secrets must not be pasted into this document or chat.
 | production pending enable | **NO GO**; staging admit/activate and post-activation OAuth positive passed, but production readiness and owner GO remain incomplete |
 | production deprovision enable | **NO GO**; staging apply/restore and post-restore OAuth positive passed, but the apply-time browser denial checkpoint, production readiness, and separate owner GO remain incomplete |
 | interactive-card Stream enable | **NO GO for production**; staging start/stop is proven, but the U1-U13/U11-a real-card matrix is not executed and production Stream inputs remain absent |
-| Transfer T3-T5 | **FROZEN**; real two-corp T2-Gate remains separate and unexecuted |
+| Transfer T3-T5 | **FROZEN**; post-fix two-corp UAT is unexecuted and no production `OrgTransferBindingAdapter` is registered |
 | lifecycle production-enable owner | **NOT ASSIGNED**; do not infer an owner from repository or staging access |
 | interactive-card UAT owner | one staging window was owner-authorized; a synchronized real-time assignee/non-assignee operator is still **NOT ASSIGNED** for the remaining click matrix |
 

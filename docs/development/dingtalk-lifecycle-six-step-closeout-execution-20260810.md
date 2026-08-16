@@ -143,7 +143,7 @@ Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate inten
 
 The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
 
-## 5. Transfer decision gate (T2-Gate)
+## 5. Transfer post-fix two-corp gate
 
 Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this lane:
 
@@ -152,15 +152,31 @@ corp with active directory accounts and zero cross-corp overlap groups. Automati
 schedules were both zero. The executable UAT therefore still lacks a real second-enterprise
 member set and overlap person; those inputs must not be fabricated in the local database.
 
-| T2-Gate verdict | Consequence |
+The historical `CONFIRMED -> T2.5 / DISPROVED -> T3` matrix is no longer executable. Phase A
+[#4602](https://github.com/zensgit/metasheet2/pull/4602) merged as
+`ac05efa25fd0dfdae0779e7ae14a3a942a0c374e`, and the corp-scoped Phase B migration
+[#4605](https://github.com/zensgit/metasheet2/pull/4605) merged as
+`e4509ab71e6061e7d1188d24f9b30f09fb71c435`. Both are ancestors of the staging deployed SHA
+`d201aff394867d1e776d4e393a7ae71d3df45e44`. Phase B already replaced global provider-key
+uniqueness with corp-scoped account and identity uniqueness; it is the landed successor to the
+old conditional T2.5 concept, not a future branch still awaiting selection.
+
+| Current gate | Consequence |
 |---|---|
-| CONFIRMED | implement T2.5 tenant-scoped key migration before T3 |
-| DISPROVED | T3 may be considered after owner authorization |
+| Post-fix two-corp UAT PASS | owner may authorize T3 implementation; T4/T5 remain serial successors |
+| UAT FAIL | return to code/schema review; do not start T3 |
 | INCONCLUSIVE / NOT EXECUTED | keep T3-T5 frozen |
 
 **Procedure of record (post-fix):** `dingtalk-directory-corp-scope-staging-uat-20260725.md` (and closeout ledger `dingtalk-directory-corp-scope-closeout-verification-20260725.md`). Use that UAT after Phase A + Phase B deployment gates pass.
 
 **Historical provenance only (not the current executable procedure):** `canonical-org-t2-gate-two-corp-staging-runbook-20260717.md` is the pre-fix evidence runbook. It is self-superseded for acceptance after corp-scope Phase B. Steps that described legacy global-key collision preflight against the pre-Phase-B schema **cannot be re-run as executable current steps after Phase B** — they remain **provenance requirements** (what was proven / what SHA and gate outputs must already be on file), not a procedure to re-execute on a post-Phase-B database. Do not point operators at the 20260717 runbook as the live T2-Gate gate.
+
+Even after a post-fix UAT PASS, T3-T5 are not present today: current production code defines the
+`OrgTransferBindingAdapter` seam but registers no provider adapter. Scan/apply therefore fail
+closed with `ORG_TRANSFER_ADAPTER_UNAVAILABLE`; only tests register adapters, while production
+registers none. Do not
+describe the Transfer line as runtime-complete until a reviewed DingTalk adapter implements and
+registers the T3/T4 behavior and T5 closeout is complete.
 
 ## 6. Test infrastructure lane
 
@@ -180,4 +196,4 @@ The code and safe staging OFF-preflight portions of this six-step closeout are c
 | Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
 | Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
 
-The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31866293827`/`31866437330`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. Approval `AP-100012` completed automation with `deliveryKind=interactive_card`; the assignee confirmed receipt (U1), and a later real card click advanced MetaSheet to terminal approved (U4). The DingTalk card did not visibly refresh, the U11-a values-free corp-anchor log is still missing, and the remaining U1-U13 matrix is incomplete; it is therefore partial, not PASS. Read-only run `31865023926` also proves the draft #4890 HTTPS gateway remains healthy and active with its pre-HTTPS backup retained; `https-off` remains an explicit owner-gated deployment action. The deprovision apply-time browser denial, named production decisions, and the real two-corp T2-Gate are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-activation/post-restore OAuth positives are complete and rolled back to OFF. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31866293827`/`31866437330`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. Approval `AP-100012` completed automation with `deliveryKind=interactive_card`; the assignee confirmed receipt (U1), and a later real card click advanced MetaSheet to terminal approved (U4). The historical template did not retire its terminal buttons. Replacement template `MetaSheetCanaryUAT2` has since been published and prepared values-free, but no post-publication card/callback has run; details live in draft #4920. The U11-a values-free corp-anchor log and remaining U1-U13 matrix are incomplete, so this remains partial, not PASS. Read-only run `31865023926` also proves the draft #4890 HTTPS gateway remains healthy and active with its pre-HTTPS backup retained; `https-off` remains an explicit owner-gated deployment action. The deprovision apply-time browser denial, named production decisions, and the post-fix real two-corp UAT are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen and has no production adapter registration. Test-infra observation issue #4820 is closed. None of the remaining gates is represented as PASS by this closeout.
