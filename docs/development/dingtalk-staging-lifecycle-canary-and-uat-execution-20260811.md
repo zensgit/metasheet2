@@ -502,7 +502,7 @@ simulated.
 | Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31865647626`/`31865699179` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
 | P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
-| P3 real corp + two linked users | **READY for controlled staging `on` window** | Runs `31854315133` and `31854359627` report exactly one eligible configured-corp anchor with two linked users after successful prepare |
+| P3 real corp + two linked users | **READY for controlled staging `on` window** | Historical runs `31854315133`/`31854359627` proved the anchor; current UAT3 prepare/status runs `31931539040`/`31931575188` reconfirm the values-free ready state with Stream and lifecycle flags OFF |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
 
 Historical Stream inventory from run `31579935836` (superseded for staging readiness by
@@ -525,12 +525,12 @@ of `Card.Instance.Write` closed the third window's permission blocker. The fourt
 real `interactive_card` delivery for `AP-100012`, then returned safely to OFF before waiting for the
 human.
 
-Required external action: use the published replacement template `MetaSheetCanaryUAT2` to create a
+Required external action: use the published replacement template `MetaSheetCanaryUAT3` to create a
 fresh card in a short owner-approved callback window while the linked assignee and a non-assignee
 are both available. Execute the canonical U1-U13 procedure, capture only values-free
 booleans/status enums, and execute `off` before the window ends. Publication and prepare evidence
-live in draft #4920; they do not substitute for a fresh card. Secrets must not be pasted into this
-document or chat.
+(`31931478708 -> 31931539040 -> 31931575188`) live in draft #4920; they prove the safe OFF-state
+configuration, not a fresh card or callback. Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
 
