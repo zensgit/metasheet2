@@ -564,6 +564,34 @@ describe('W7-1a structural inertness: the posture table has no production reader
     ])
   })
 
+  it('ANNOUNCED READER outside the sweep domain: the soak window-runner shell script reads the posture table, never writes it', () => {
+    // #4556 combined-soak (PR #4929). The staging window-runner's soak actions REALLY read
+    // this table (soak-seed's foreign-posture preflight; soak-status Q3/Q4b/Q14 monitoring)
+    // — a genuine reader, announced here rather than left invisible. It CANNOT be a member
+    // of the exact set above by construction: the sweep's mechanical production domain is
+    // SOURCE_EXTENSIONS (.ts/.tsx/.js/.cjs/.mjs) and this reader is a .sh file, so adding
+    // it to that `toEqual` would fail the leg over a member the derivation can never
+    // produce. Instead of silently relying on the extension gap, this leg pins the
+    // announcement mechanically: the script exists, it really names the table (anchor hit
+    // — a renamed table or file reds here, keeping the announcement honest), and it carries
+    // ZERO DML on the table — its posture WRITES are invocations of the W7-3 operator CLI,
+    // the single sanctioned write path (W7-R4), and its one tracked seed DML site
+    // (a schedule_fact assignments INSERT) is claimed in the collector census under P16.
+    const runner = 'scripts/ops/attendance-staging-window-runner-remote.sh'
+    const abs = path.join(REPO_ROOT, runner)
+    expect(fs.existsSync(abs), `missing: ${runner}`).toBe(true)
+    expect(isProductionSource(runner), '.sh joined the sweep domain — move this reader into the exact set above').toBe(false)
+    const text = fs.readFileSync(abs, 'utf8')
+    expect(text, 'the runner no longer names the posture table — update or drop this announcement').toContain(POSTURE_TABLE)
+    // Reads-only pin, both DML spellings' text forms (the runner is shell + psql, so raw
+    // SQL text is its only DML surface): no INSERT/UPDATE/DELETE may target the table.
+    expect(text).not.toMatch(new RegExp(`INSERT\\s+INTO\\s+${POSTURE_TABLE}`, 'i'))
+    expect(text).not.toMatch(new RegExp(`UPDATE\\s+${POSTURE_TABLE}`, 'i'))
+    expect(text).not.toMatch(new RegExp(`DELETE\\s+FROM\\s+${POSTURE_TABLE}`, 'i'))
+    // ...and the sanctioned write path is really present: the runner drives the W7-3 CLI.
+    expect(text).toContain('attendance-w7-context-source-transition.ts')
+  })
+
   it('the only remaining mention of the posture table is PROSE in the W7-0 contract header', () => {
     // Recorded explicitly rather than silently stripped: the landed W7-0
     // contract module does name the table, in a doc comment, to say what shape

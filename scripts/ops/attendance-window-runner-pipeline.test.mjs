@@ -163,8 +163,8 @@ function assertPersistentComposeContract({ workflow, remote, lifecycleRemote, st
   )
   assert.equal(
     (remote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
-    3,
-    'every non-version-check attendance compose invocation must pin the staging project directory',
+    4,
+    'every non-version-check attendance compose invocation must pin the staging project directory (compose_staging, deploy compose-candidate validation, deploy pair validation, soak-flags pair validation)',
   )
   assert.equal(
     (lifecycleRemote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
@@ -329,8 +329,8 @@ test('residue-sweep is wired into the remote-script dispatcher and the workflow 
   const yaml = readFileSync(WORKFLOW, 'utf8')
   assert.match(
     yaml,
-    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep\]/,
-    'expected the workflow action input to list residue-sweep as a choice',
+    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep,\s*soak-baseline,\s*soak-seed,\s*soak-flags,\s*soak-run,\s*soak-status\]/,
+    'expected the workflow action input to list residue-sweep (and the soak actions) as choices',
   )
   assert.match(yaml, /stamps:/, 'expected a `stamps` workflow_dispatch input for action=residue-sweep')
 })
@@ -503,4 +503,552 @@ test('persistent override re-normalization: force mode adds --force-recreate whi
   )
   assert.match(deploy, /up_args\+=\(backend web\)\n\s+compose_staging "\$\{up_args\[@\]\}"/, 'the only recreated services must be backend and web')
   assert.doesNotMatch(deploy, /up_args\+=\([^\n]*(?:postgres|redis)/, 'postgres/redis must never enter the recreate service list')
+})
+
+// --- W4+W7 combined-soak actions (#4556): soak-baseline / soak-seed / soak-flags /
+// --- soak-run / soak-status source contracts --------------------------------------------
+//
+// Same discipline as the residue-sweep block above: extract each action's slice by its
+// function markers, assert the load-bearing literals, and prove the assertions are
+// themselves load-bearing with mutation legs that delete one guard and require the
+// contract to go red.
+
+const GENERATOR = join(HERE, 'attendance-w4w7-soak-load-generator.mjs')
+const SOAK_TEMPLATE = join(HERE, 'attendance-w4w7-soak-config.template.json')
+
+function sliceBetween(source, startMarker, endMarker, what) {
+  const start = source.indexOf(startMarker)
+  assert.notEqual(start, -1, `expected ${what} start marker: ${startMarker}`)
+  const end = source.indexOf(endMarker, start)
+  assert.notEqual(end, -1, `expected ${what} end marker: ${endMarker}`)
+  return source.slice(start, end)
+}
+
+function extractSoakSlices(remote) {
+  return {
+    baseline: sliceBetween(remote, 'action_soak_baseline() {', '\nsoak_seed_write_org_sql() {', 'soak-baseline'),
+    // The seed slice deliberately spans its helpers (SQL writer, per-org report, W4/W7
+    // posture walks) through the end of action_soak_seed — they are one action's body.
+    seed: sliceBetween(remote, 'soak_seed_write_org_sql() {', '\naction_soak_flags() {', 'soak-seed'),
+    flags: sliceBetween(remote, 'action_soak_flags() {', '\naction_soak_run() {', 'soak-flags'),
+    run: sliceBetween(remote, 'action_soak_run() {', '\nsoak_status_scalar() {', 'soak-run'),
+    status: sliceBetween(remote, 'soak_status_scalar() {', '\n# --- main', 'soak-status'),
+  }
+}
+
+function assertSoakContract({ remote, workflow }) {
+  const slices = extractSoakSlices(remote)
+
+  // Dispatcher + workflow wiring: every soak action routed, enum + validation updated,
+  // inputs exported into the remote prelude, generator shipped in the sync tar.
+  for (const action of ['baseline', 'seed', 'flags', 'run', 'status']) {
+    assert.match(
+      remote,
+      new RegExp(`soak-${action}\\)\\s*action_soak_${action}\\s*;;`),
+      `dispatcher must route soak-${action} to action_soak_${action}`,
+    )
+  }
+  assert.match(
+    workflow,
+    /case "\$ACTION" in deploy\|smoke\|status\|migrate\|residue-sweep\|soak-baseline\|soak-seed\|soak-flags\|soak-run\|soak-status\)/,
+    'workflow input validation must accept exactly the dispatcherʼs action set',
+  )
+  assert.match(
+    workflow,
+    /"\$ACTION" == "deploy" \|\| "\$ACTION" == "smoke" \|\| "\$ACTION" == "soak-flags"/,
+    'deploy_sha must be required for soak-flags (env-only action still pins the RUNNING image tags)',
+  )
+  assert.match(workflow, /export SOAK_ORGS='\$\{SOAK_ORGS\}'/, 'validated soak_orgs must reach the remote script')
+  assert.match(workflow, /export SOAK_OPTS='\$\{SOAK_OPTS\}'/, 'validated soak_opts must reach the remote script')
+  assert.match(
+    workflow,
+    /scripts\/ops\/attendance-w4w7-soak-load-generator\.mjs \\\n/,
+    'the sync tar must ship the soak load generator to the deploy host',
+  )
+  assert.match(
+    workflow,
+    /node --check scripts\/ops\/attendance-w4w7-soak-load-generator\.mjs/,
+    'the validate step must parse-check the generator',
+  )
+
+  // Posture single-writer discipline: NOWHERE in the remote script may a posture table be
+  // written directly — both tables carry legal-transition triggers and exactly one
+  // sanctioned writer each, driven only through the operator CLIs.
+  //
+  // The forbidden-DML regexes are ASSEMBLED FROM PARTS deliberately: a contiguous
+  // "INSERT INTO <posture-table>" literal in THIS file would itself be booked as an
+  // unauthorized writer by the repo's own single-writer inventory sweeps
+  // (w4c3a-rollout-control-inventory.test.ts greps every tracked .mjs for exactly that
+  // pattern, negative assertions included). Splitting the literal keeps this guard's
+  // behavior identical while staying outside those sweeps' text domain — prefer
+  // not-tripping over widening an inventory allowlist.
+  const postureInsertRe = (table) => new RegExp('INSERT\\s+INTO\\s+attendance_calculation_' + table, 'i')
+  assert.doesNotMatch(
+    remote,
+    postureInsertRe('rollout_state'),
+    'the remote script must NEVER insert into the W4 rollout posture table (Gate C CLI is the only path)',
+  )
+  assert.doesNotMatch(
+    remote,
+    postureInsertRe('context_source_state'),
+    'the remote script must NEVER insert into the W7 context-source posture table (W7-3 CLI is the only path)',
+  )
+  assert.doesNotMatch(
+    remote,
+    new RegExp('UPDATE\\s+attendance_calculation_' + '(rollout|context_source)_state', 'i'),
+    'the remote script must NEVER update a posture table directly',
+  )
+
+  // soak-baseline: fail-closed order gate BEFORE any measurement; both allowlist envs
+  // probed; the two P95 pack queries; marker + p95-baseline-<sha8>-<ts> naming.
+  const refusalIdx = slices.baseline.indexOf('refusing to capture the p95 baseline')
+  const measureIdx = slices.baseline.indexOf('percentile_cont(0.95)')
+  assert.notEqual(refusalIdx, -1, 'soak-baseline must refuse when either allowlist env is already set')
+  assert.notEqual(measureIdx, -1, 'soak-baseline must run the P95 pack latency-proxy query')
+  assert.ok(refusalIdx < measureIdx, 'the flags-already-set refusal must come BEFORE any measurement')
+  assert.match(slices.baseline, /SOAK_W4_ENV_NAME/, 'baseline must probe the W4 allowlist env')
+  assert.match(slices.baseline, /SOAK_W7_ENV_NAME/, 'baseline must probe the W7 allowlist env')
+  assert.match(slices.baseline, /pg_stat_statements/, 'baseline must capture (or record as absent) the pg_stat_statements channel')
+  assert.match(slices.baseline, /p95-baseline-\$\{sha8\}-\$\{ts\}/, 'baseline artifact must be named p95-baseline-<sha8>-<ts>')
+  assert.match(slices.baseline, /> "\$SOAK_BASELINE_MARKER"/, 'baseline must write the marker soak-flags gates on')
+  assert.match(remote, /ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED/, 'the W4 allowlist env name must be pinned')
+  assert.match(remote, /ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED/, 'the W7 allowlist env name must be pinned')
+
+  // soak-seed: idempotent SQL, closed synthetic-user family, permission grant, both
+  // operator CLIs with their exact confirmation tokens, owner-authored authorization ref,
+  // verified-before-attested manifest preflight, kickoff-rung-only W7 walk.
+  for (const literal of [
+    'ON CONFLICT (id) DO NOTHING',
+    'ON CONFLICT (org_id, group_id) DO NOTHING',
+    'ON CONFLICT (shift_id, segment_index) DO NOTHING',
+  ]) {
+    assert.ok(slices.seed.includes(literal), `seed SQL must be idempotent: missing ${literal}`)
+  }
+  assert.ok(
+    (slices.seed.match(/NOT EXISTS \(/g) || []).length >= 5,
+    'seed SQL must guard business-key inserts with NOT EXISTS existence checks (shift, group, members, assignments, memberships)',
+  )
+  assert.match(remote, /SOAK_USER_PREFIX="synth-w4w7-"/, 'the closed synthetic user family prefix must be pinned')
+  assert.ok(slices.seed.includes("'attendance:write'"), 'seed must grant attendance:write (punch route is withPermission-gated)')
+  assert.ok(slices.seed.includes('"$SOAK_W4C5_CLI" plan'), 'W4 posture must go through the Gate C CLI plan')
+  assert.ok(slices.seed.includes('"$SOAK_W4C5_CLI" apply'), 'W4 posture must go through the Gate C CLI apply')
+  assert.ok(slices.seed.includes('"$SOAK_W7_CLI" plan'), 'W7 posture must go through the W7-3 CLI plan')
+  assert.ok(slices.seed.includes('"$SOAK_W7_CLI" apply'), 'W7 posture must go through the W7-3 CLI apply')
+  assert.ok(
+    slices.seed.includes('--confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_ONLY'),
+    'W4C-5 apply must carry its exact confirmation token',
+  )
+  assert.ok(
+    slices.seed.includes('--confirm I_UNDERSTAND_THIS_TRANSITIONS_A_SYNTHETIC_ORG_CONTEXT_SOURCE_ONLY'),
+    'W7-3 apply must carry its exact confirmation token',
+  )
+  assert.ok(
+    slices.seed.includes('owner_ref is required for action=soak-seed'),
+    'seed must refuse without an owner-authored authorization reference (never fabricated)',
+  )
+  // P2-3: entrypointInventoryRef must be operator-supplied, never a runner-fabricated
+  // constant (the internal inconsistency the gate flagged — refusing to fabricate one ref
+  // while fabricating another). Resolved in the honest direction: required input.
+  assert.ok(
+    slices.seed.includes('entrypoint_inventory_ref is required for action=soak-seed'),
+    'seed must require entrypoint_inventory_ref as an operator attestation (never fabricated as a constant)',
+  )
+  assert.doesNotMatch(
+    slices.seed,
+    /entrypointInventoryRef":"w4-lock-12\.8-entry-4"/,
+    'the W4 manifest must NOT hardcode entrypointInventoryRef as a literal constant',
+  )
+  // P2-3: customerData:false / syntheticOrgRef must be BACKED by a synthetic-org check, not
+  // asserted for an arbitrary org — refuse any org holding non-synthetic content.
+  assert.ok(
+    slices.seed.includes('non-synthetic user_orgs member'),
+    'seed must verify each org is exclusively synthetic before attesting customerData=false',
+  )
+  assert.ok(
+    slices.seed.includes("user_id NOT LIKE '${SOAK_USER_PREFIX}%'"),
+    'the synthetic-org check must scope on the closed synthetic-user family',
+  )
+  assert.ok(
+    slices.seed.includes('foreign posture history'),
+    'seed must refuse an org carrying a posture row not written by this soakʼs own seed actor',
+  )
+  assert.ok(slices.seed.includes("grep -q '^Pending: 0$'"), 'seed must VERIFY pending=0 before attesting it in a manifest')
+  assert.ok(slices.seed.includes('"ok":true'), 'seed must VERIFY service health before attesting it in a manifest')
+  assert.ok(
+    slices.seed.includes('refusing to attest externalNotificationsDisabled=true'),
+    'seed must verify the delivery worker is off before attesting notifications disabled',
+  )
+  assert.ok(
+    slices.seed.includes('is not runnable by this kickoff seeder'),
+    'seed must refuse W7 targets beyond group_shadow (compare-window exit predicates need real soak evidence)',
+  )
+  assert.match(slices.seed, /suspended\)\s*\n\s*fail/, 'seed must fail closed on a suspended posture, never resume it')
+
+  // soak-flags: baseline-marker order gate BEFORE the override write; atomic
+  // candidate->validate->rename via the SAME persistent override; backend-only recreate
+  // with postgres/redis/web container-id assertions; exact env verification + health.
+  const markerGateIdx = slices.flags.indexOf('[[ -f "$SOAK_BASELINE_MARKER" ]]')
+  const overrideTmpIdx = slices.flags.indexOf('mktemp "${RUNNER_PERSIST_DIR}/.soak-override.XXXXXX"')
+  const flagsValidateIdx = slices.flags.indexOf('-f "$soak_override_tmp" config')
+  const flagsRenameIdx = slices.flags.indexOf('mv -f "$soak_override_tmp" "$OVERRIDE_FILE"')
+  assert.notEqual(markerGateIdx, -1, 'soak-flags must gate on the soak-baseline marker (baseline BEFORE flags)')
+  // P2-2: the marker gate must be SHA-scoped — a stale-build marker (mid-soak redeploy) must
+  // not satisfy it, or every later O4-2 "+5% vs baseline" anchors to the wrong image.
+  assert.match(
+    slices.flags,
+    /\[\[ "\$marker_sha" == "\$DEPLOY_SHA" \]\]/,
+    'soak-flags must compare the baseline markerʼs staging_build_commit to DEPLOY_SHA',
+  )
+  assert.ok(
+    slices.flags.includes('re-run action=soak-baseline against the deployed SHA'),
+    'soak-flags must refuse a baseline captured on a different build (O4-2 same-SHA anchor)',
+  )
+  assert.notEqual(overrideTmpIdx, -1, 'soak-flags must write a mktemp candidate in the persist dir')
+  assert.notEqual(flagsValidateIdx, -1, 'soak-flags must docker-compose-config-validate the candidate pair')
+  assert.notEqual(flagsRenameIdx, -1, 'soak-flags must atomically rename the candidate onto OVERRIDE_FILE')
+  assert.ok(markerGateIdx < overrideTmpIdx, 'the baseline-marker gate must come BEFORE the override write')
+  assert.ok(overrideTmpIdx < flagsValidateIdx && flagsValidateIdx < flagsRenameIdx, 'candidate -> validate -> rename, in that order')
+  assert.ok(
+    slices.flags.includes('carries rd-window env flags'),
+    'soak-flags must refuse to silently rewrite an rd-window override',
+  )
+  assert.match(
+    slices.flags,
+    /compose_staging up -d --no-deps backend 2>&1/,
+    'soak-flags must recreate ONLY the backend service',
+  )
+  assert.doesNotMatch(
+    slices.flags,
+    /up -d --no-deps backend web/,
+    'soak-flags must never recreate the web service',
+  )
+  assert.doesNotMatch(slices.flags, /up -d[^\n]*(postgres|redis)/, 'soak-flags must never recreate postgres/redis')
+  assert.equal(
+    (slices.flags.match(/hard constraint violated/g) || []).length,
+    2,
+    'postgres AND redis container ids must be asserted unchanged',
+  )
+  assert.ok(
+    slices.flags.includes('soak-flags must touch ONLY the backend'),
+    'the web container id must be asserted unchanged too',
+  )
+  assert.match(
+    slices.flags,
+    /\[\[ "\$live_w4" == "\$\{SOAK_ORG1\},\$\{SOAK_ORG2\},\$\{SOAK_ORG3\}" \]\]/,
+    'the W4 allowlist must be verified EXACT-MATCH in the running container env',
+  )
+  assert.match(
+    slices.flags,
+    /\[\[ "\$live_w7" == "\$\{SOAK_ORG3\}" \]\]/,
+    'the W7 allowlist must be verified EXACT-MATCH (org3 only) in the running container env',
+  )
+  assert.ok(slices.flags.includes('"ok":true'), 'soak-flags must health-check after the recreate')
+  assert.match(slices.flags, /> "\$SOAK_WINDOW_START_FILE"/, 'soak-flags must record the soak window start')
+
+  // soak-run: real login route only (never minted tokens), ruled rate ceiling + daily
+  // quota, generator + exact execute confirmation, flags-live order gate, tokens never
+  // shipped into the artifact, haltedReason surfaced.
+  assert.ok(slices.run.includes('/api/auth/login'), 'soak-run must obtain tokens via the REAL login route')
+  assert.doesNotMatch(slices.run, /\bmint_token\b/, 'soak-run must never mint a token for soak users')
+  assert.ok(
+    slices.run.includes('allowlist env not live on the backend'),
+    'soak-run must refuse before soak-flags has run (order enforcement)',
+  )
+  // P2-4: the live-allowlist COVERAGE guard (config orgs must be inside the live allowlists,
+  // else load silently no-ops) — deleting both loops previously left 35/35 green.
+  assert.ok(
+    slices.run.includes('is NOT in the live W4 allowlist'),
+    'soak-run must fail closed when a config org is outside the live W4 allowlist',
+  )
+  assert.ok(
+    slices.run.includes('is NOT in the live W7 allowlist'),
+    'soak-run must fail closed when a both-machines config org is outside the live W7 allowlist',
+  )
+  // P3-2/P3-3: a single soak-run is capped at one dayʼs clean-punch capacity so targets_met
+  // stays reachable and the run fits the job timeout.
+  assert.ok(
+    slices.run.includes("one-day clean-punch capacity"),
+    'soak-run must cap punch_target at the configʼs one-day capacity (total_users x 8)',
+  )
+  assert.ok(slices.run.includes('--rate-limit-per-sec 1'), 'soak-run must pin the ruled <=1 req/sec global ceiling')
+  assert.ok(slices.run.includes('--punches-per-user-per-day 8'), 'soak-run must pin the ruled 8 punches/user/day quota')
+  assert.ok(
+    slices.run.includes('--confirm I_UNDERSTAND_THIS_DRIVES_SYNTHETIC_STAGING_TRAFFIC_ONLY'),
+    'soak-run must carry the generatorʼs exact execute confirmation token',
+  )
+  assert.ok(slices.run.includes('--confirm-org-ids'), 'soak-run must pass the org-set confirmation (set-equality guard)')
+  assert.match(remote, /SOAK_GENERATOR_SCRIPT="attendance-w4w7-soak-load-generator\.mjs"/, 'the committed generator must be the one executed')
+  // NIT-1 strengthened: not a single-spelling match — forbid any COPY-family line (cp / mv /
+  // scp / install) whose text pairs the token-bearing $run_config_host with an OUTPUT_DIR
+  // target, so a differently spelled `cp "$run_config_host" "${OUTPUT_DIR}/x"` cannot evade
+  // it. (The benign login line tees the login LOG — ids + ok/fail only — to OUTPUT_DIR and
+  // merely PASSES $run_config_host as a python arg, so it carries no copy verb and is allowed.)
+  for (const line of slices.run.split('\n')) {
+    if (/\brun_config_host\b/.test(line) && /\b(cp|mv|scp|install)\b/.test(line) && /OUTPUT_DIR/.test(line)) {
+      assert.fail(`the token-bearing run config must never be copied into OUTPUT_DIR: ${line.trim()}`)
+    }
+  }
+  // And it must never be redirected into OUTPUT_DIR either.
+  assert.doesNotMatch(
+    slices.run,
+    /run_config_host[^\n]*>\s*"?\$\{?OUTPUT_DIR/,
+    'the token-bearing run config must never be redirected into the uploaded artifact dir',
+  )
+  assert.ok(slices.run.includes('cleanup_soak_run'), 'soak-run must delete the token-bearing temp config (trap cleanup)')
+  assert.ok(slices.run.includes('max_consecutive_incidents'), 'soak-run must fail on the consecutive-incident halt (alert-class)')
+  assert.ok(slices.run.includes('haltedReason is LOAD-BEARING'), 'soak-run must surface haltedReason semantics in its summary')
+
+  // soak-status: the monitoring-pack Q-series labels must all be present, plus the W7-2
+  // compare-window discriminators (marker AND selector — selector alone would count W4
+  // shadow rows), and a mechanical-alert exit.
+  for (const label of [
+    '[Q1]', '[Q2]', '[Q3]', '[Q4a]', '[Q4b]', '[Q5]', '[Q6]', '[Q7]', '[Q8]',
+    '[Q9]', '[Q10]', '[Q11]', '[Q12]', '[Q13]', '[Q14]', '[Q15a]', '[Q15b]', '[Q15c]', '[Q16]',
+  ]) {
+    assert.ok(slices.status.includes(label), `soak-status must run the monitoring-pack ${label} read`)
+  }
+  assert.ok(slices.status.includes('w7GroupShadowCompare'), 'W7-2 counters must scope on the writer-controlled marker')
+  assert.ok(slices.status.includes("'group_effective'"), 'W7-2 counters must scope on the selector discriminator')
+
+  // P1-1 signature guard: a W7 group-shadow comparison row carries operation_id IS NULL BY
+  // DESIGN, so a [Q4b] spelling that joins attendance_result_operations while filtering
+  // selector='group_effective' is structurally zero forever — the exact bug. Extract the Q4b
+  // region and forbid that conjunction; require the marker-operationId count instead.
+  const q4bStart = slices.status.indexOf('[Q4b]_w7_group_arm_clean_punches_cumulative')
+  assert.notEqual(q4bStart, -1, 'soak-status must run the [Q4b] W7 group-arm count')
+  const q4bAfter = slices.status.indexOf('soak_status_', q4bStart + 1)
+  const q4bRegion = slices.status.slice(q4bStart, q4bAfter === -1 ? undefined : q4bAfter)
+  // Signature guard FIRST (it is the exact bug): the join is what makes C4 read zero forever.
+  assert.doesNotMatch(
+    q4bRegion,
+    /attendance_result_operations/,
+    '[Q4b] must NOT join attendance_result_operations — comparison rows have operation_id IS NULL (chk_arc_operation_id marker disjunct), so that join is identically empty and C4 would read zero forever',
+  )
+  assert.match(
+    q4bRegion,
+    /selector'\)? = 'group_effective'/,
+    '[Q4b] must be selector-scoped to the group arm',
+  )
+  assert.ok(
+    q4bRegion.includes("input_provenance -> 'w7GroupShadowCompare' ->> 'operationId'"),
+    '[Q4b] must count the producing operationId out of the w7GroupShadowCompare marker (w7-compare-window-status.ts:189-196)',
+  )
+  assert.ok(
+    slices.status.includes("shadow_diff_code IN ('work_date_mismatch','context_mismatch','input_mismatch','review_required')"),
+    'the critical shadow-diff code set must be spelled exactly',
+  )
+  assert.ok(
+    slices.status.includes("(c.context_snapshot ->> 'selector') IS NULL"),
+    'the selector-less totality (corruption) probe must run',
+  )
+  assert.ok(
+    slices.status.includes('readAttendanceRequestSnapshotDefectReportV1'),
+    'Q8 must call the EXISTING 8-cell report function, never a raw-SQL re-derivation',
+  )
+  assert.ok(slices.status.includes('mechanical alert condition'), 'soak-status must exit nonzero on mechanical alerts')
+}
+
+test('combined-soak actions: full source contract (workflow wiring, order gates, single-writer posture discipline, ruled rate/quota pins)', () => {
+  assertSoakContract({
+    remote: readFileSync(REMOTE_SH, 'utf8'),
+    workflow: readFileSync(WORKFLOW, 'utf8'),
+  })
+})
+
+test('MUTATION: deleting the soak-flags baseline-marker gate turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('  [[ -f "$SOAK_BASELINE_MARKER" ]] \\\n', '')
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /baseline marker|baseline-marker/,
+  )
+})
+
+test('MUTATION: deleting the soak-flags postgres container-id assertion turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const guard = '  [[ "$pg_id_before" == "$pg_id_after" ]] || fail "staging postgres container was recreated — hard constraint violated"\n'
+  assert.ok(slices.flags.includes(guard), 'mutation anchor must hit the flags slice')
+  const mutatedFlags = slices.flags.replace(guard, '')
+  const mutated = original.replace(slices.flags, mutatedFlags)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /postgres AND redis container ids/,
+  )
+})
+
+test('MUTATION: dropping the generator execute-confirmation from soak-run turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '    --confirm I_UNDERSTAND_THIS_DRIVES_SYNTHETIC_STAGING_TRAFFIC_ONLY \\\n',
+    '',
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /execute confirmation token/,
+  )
+})
+
+test('MUTATION: unrouting soak-seed from the dispatcher turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('  soak-seed) action_soak_seed ;;\n', '')
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /dispatcher must route soak-seed/,
+  )
+})
+
+test('MUTATION (P1-1): reverting [Q4b] to the attendance_result_operations join turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  // The pre-fix spelling: join operations, filter selector='group_effective'. The producing
+  // rows carry operation_id IS NULL, so this counts 0 forever — the exact defect.
+  const fixed = "SELECT count(DISTINCT (c.input_provenance -> 'w7GroupShadowCompare' ->> 'operationId')) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.created_at >= '${window_start}'::timestamptz AND c.created_at < now() AND c.mode = 'shadow' AND (c.input_provenance ? 'w7GroupShadowCompare') AND c.context_snapshot IS NOT NULL AND (c.context_snapshot ->> 'selector') = 'group_effective' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');"
+  const reverted = "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND c.mode = 'shadow' AND c.context_snapshot ->> 'selector' = 'group_effective' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');"
+  assert.ok(original.includes(fixed), 'mutation anchor must hit the fixed [Q4b] query')
+  const mutated = original.replace(fixed, reverted)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /must NOT join attendance_result_operations/,
+  )
+})
+
+test('MUTATION (P2-2): deleting the baseline-marker SHA comparison turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const guard = '  [[ "$marker_sha" == "$DEPLOY_SHA" ]] \\\n'
+  assert.ok(original.includes(guard), 'mutation anchor must hit the SHA-scope guard')
+  const mutated = original.replace(guard, '  [[ -n "$marker_sha" ]] \\\n')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /compare the baseline markerʼs staging_build_commit to DEPLOY_SHA/,
+  )
+})
+
+test('MUTATION (P2-4): deleting the soak-run live-allowlist coverage loops turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const w4Loop = 'config org ${org} is NOT in the live W4 allowlist'
+  const w7Loop = 'both-machines config org ${org} is NOT in the live W7 allowlist'
+  assert.ok(slices.run.includes(w4Loop) && slices.run.includes(w7Loop), 'mutation anchors must hit the run slice')
+  const mutatedRun = slices.run
+    .replace(w4Loop, 'DELETED_W4_COVERAGE_MESSAGE')
+    .replace(w7Loop, 'DELETED_W7_COVERAGE_MESSAGE')
+  const mutated = original.replace(slices.run, mutatedRun)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /fail closed when a config org is outside the live W[47] allowlist/,
+  )
+})
+
+// --- P2-1 executable negative controls: the workflow input-validation block must REJECT a
+// newline-injection payload (the here-string `read` validators only inspect line 1; a newline
+// slips the tail past them and into the single-quoted remote prelude). These EXECUTE the real
+// workflow validation `run:` block, not a paraphrase of it.
+function extractWorkflowRunBlock(workflow, stepName) {
+  const stepIdx = workflow.indexOf(`- name: ${stepName}`)
+  assert.notEqual(stepIdx, -1, `expected workflow step: ${stepName}`)
+  const runIdx = workflow.indexOf('run: |', stepIdx)
+  assert.notEqual(runIdx, -1, `expected a run: | block in step ${stepName}`)
+  const body = workflow.slice(workflow.indexOf('\n', runIdx) + 1)
+  const out = []
+  for (const line of body.split('\n')) {
+    if (line.trim() === '') { out.push(''); continue }
+    if (/^ {0,8}\S/.test(line)) break // a line indented <=8 spaces ends the 10-space run body
+    out.push(line.replace(/^ {10}/, ''))
+  }
+  return out.join('\n')
+}
+
+function runWorkflowValidation(env) {
+  const block = extractWorkflowRunBlock(readFileSync(WORKFLOW, 'utf8'), 'Validate inputs and embedded scripts')
+  const repoRoot = join(HERE, '..', '..')
+  return spawnSync('bash', ['-c', block], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: { ACTION: env.ACTION, SOAK_ORGS: env.SOAK_ORGS ?? '', SOAK_OPTS: env.SOAK_OPTS ?? '', DEPLOY_SHA: '', SET_WINDOW_ENV: 'none', FORCE_RECREATE: 'false', STAMPS: '', PATH: process.env.PATH },
+  })
+}
+
+const THREE_UUIDS = '11111111-1111-4111-8111-111111111111,22222222-2222-4222-8222-222222222222,33333333-3333-4333-8333-333333333333'
+const INJECT = "\n'; touch /tmp/PWNED_soak_test; echo '"
+
+test('P2-1 negative control: a benign single-line soak-seed input PASSES workflow validation (harness discriminates)', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'owner_ref=ownerX;entrypoint_inventory_ref=invY;users_per_org=10' })
+  assert.equal(r.status, 0, `benign input must pass validation; stderr: ${r.stderr}`)
+})
+
+test('P2-1: a newline-injection payload in soak_orgs is REJECTED by workflow validation', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS + INJECT, SOAK_OPTS: '' })
+  assert.equal(r.status, 2, `newline in soak_orgs must be rejected (exit 2); got ${r.status}, stderr: ${r.stderr}`)
+  assert.match(r.stderr, /single-line/, 'rejection must name the single-line rule')
+})
+
+test('P2-1: a newline-injection payload in soak_opts is REJECTED by workflow validation', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'punch_target=200' + INJECT })
+  assert.equal(r.status, 2, `newline in soak_opts must be rejected (exit 2); got ${r.status}, stderr: ${r.stderr}`)
+  assert.match(r.stderr, /single-line/, 'rejection must name the single-line rule')
+})
+
+test('soak generator: committed tool keeps its reviewed guard rails (rate ceiling, dry-run default, ruled daily quota, upper-bound count semantics)', () => {
+  const generator = readFileSync(GENERATOR, 'utf8')
+  assert.ok(
+    generator.includes("'I_UNDERSTAND_THIS_DRIVES_SYNTHETIC_STAGING_TRAFFIC_ONLY'"),
+    'the exact-match execute confirmation literal must survive promotion',
+  )
+  assert.match(
+    generator,
+    /rateLimitPerSec <= 0 \|\| opts\.rateLimitPerSec > 1/,
+    'the (0,1] global rate ceiling guard must survive promotion',
+  )
+  assert.match(
+    generator,
+    /'SOAK_PUNCHES_PER_USER_PER_DAY', 8\)/,
+    'the ruled default of 8 punches/user/day (§2A.7/§2A.9 row) must be the default',
+  )
+  assert.ok(generator.includes('UPPER-BOUNDS'), 'the HTTP-tally-upper-bounds-DB-count semantics note must survive')
+  assert.ok(generator.includes("execute: readBoolOpt(args, 'execute', 'SOAK_EXECUTE', false)"), 'dry-run must stay the default')
+  assert.doesNotMatch(generator, /dev-token\?/, 'the generator must never call the test-only dev-token endpoint')
+})
+
+test('soak config template: inert by construction (three postures, empty tokenOrCreds)', () => {
+  const template = JSON.parse(readFileSync(SOAK_TEMPLATE, 'utf8'))
+  assert.equal(template.entries.length, 3, 'template must model the three-posture design')
+  assert.deepEqual(
+    template.entries.map((entry) => entry.posture),
+    ['legacy_only', 'w4_only_legacy_arm', 'both_machines_group_arm'],
+    'template postures must follow the C3 order',
+  )
+  for (const entry of template.entries) {
+    assert.deepEqual(entry.tokenOrCreds, {}, 'template must never carry tokens — the generator refuses token-less users, keeping the template inert')
+    assert.ok(entry.userIds.length > 0, 'template entries must model the closed user set')
+    assert.ok(entry.userIds.every((id) => id.startsWith('synth-w4w7-')), 'template user ids must follow the closed synthetic family convention')
+  }
+  assert.equal(template.sourceTag, 'synthetic_w4w7_soak_accelerator_v1', 'the durable source tag must match the generator default')
+})
+
+test('raw-control-byte guard: no soak-touched file carries raw control bytes (git-binary diff-blindness class)', () => {
+  const files = [REMOTE_SH, WORKFLOW, GENERATOR, SOAK_TEMPLATE, join(HERE, 'attendance-window-runner-pipeline.test.mjs')]
+  // Allowed: \t (0x09), \n (0x0a), \r (0x0d). Everything else below 0x20, plus 0x7f NUL-class
+  // bytes, turns the file git-binary (diff-blind; secret-scan merge gates skip it).
+  const hasControlByte = (buf) => {
+    for (let i = 0; i < buf.length; i++) {
+      const byte = buf[i]
+      if (!(byte === 0x09 || byte === 0x0a || byte === 0x0d || byte >= 0x20)) return i
+    }
+    return -1
+  }
+  // POSITIVE CONTROL: the scanner actually detects an injected NUL (else the negative result
+  // below is vacuous).
+  assert.equal(hasControlByte(Buffer.from('ok\x00ok', 'binary')), 2, 'scanner must catch an injected NUL')
+  assert.equal(hasControlByte(Buffer.from('plain ascii\ttab\nnewline', 'utf8')), -1, 'scanner must pass allowed whitespace')
+  for (const file of files) {
+    const off = hasControlByte(readFileSync(file))
+    assert.equal(off, -1, `${file} carries a raw control byte at offset ${off}`)
+  }
 })

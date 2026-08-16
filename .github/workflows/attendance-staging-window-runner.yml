@@ -22,6 +22,26 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #                    is nonzero. Takes the `stamps` input (see below); action=status does NOT
 #                    run this SQL — this is the only action that does.
 #
+# W4+W7 COMBINED-SOAK actions (#4556; each is one owner-dispatched step of the soak kickoff,
+# in order — the remote script enforces the order mechanically where it is load-bearing):
+#   soak-baseline  — capture the O4-2 pre-enablement p95 baseline (p95-baseline-<sha8>-<ts>);
+#                    REFUSES if either soak allowlist env is already set on the backend.
+#   soak-seed      — idempotently seed the 3 synthetic soak orgs (takes soak_orgs +
+#                    soak_opts users_per_org/tz/owner_ref); posture walks go through the
+#                    REAL Gate C / W7-3 operator CLIs inside the deployed backend image —
+#                    never a bare posture INSERT (the posture tables carry trigger backstops).
+#   soak-flags     — write the two soak allowlist env vars into the persistent runner
+#                    override (same atomic mechanism as deploy's rd-window env), recreate
+#                    ONLY the backend; REFUSES until soak-baseline's marker exists.
+#   soak-run       — real-route synthetic load: login every synthetic user via
+#                    POST /api/auth/login (never minted), then run the committed
+#                    scripts/ops/attendance-w4w7-soak-load-generator.mjs in-container at the
+#                    ruled <=1 req/sec ceiling (soak_opts punch_target, default 200 = the
+#                    ruled C1 target; capped per invocation at one day's capacity =
+#                    total_users x 8).
+#   soak-status    — daily monitoring channel: monitoring-pack Q1-Q16 + the W7-2
+#                    compare-window counters via psql; exits nonzero on mechanical alerts.
+#
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
 # committed scripts/ops/attendance-staging-window-runner-remote.sh, synced per-run;
@@ -40,10 +60,18 @@ on:
         description: 'What to run against the STAGING stack'
         required: true
         type: choice
-        options: [deploy, smoke, status, migrate, residue-sweep]
+        options: [deploy, smoke, status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
         default: status
       deploy_sha:
-        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy and smoke.'
+        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, smoke, and soak-flags (there it must equal the RUNNING image tags — soak-flags flips env only, never images).'
+        required: false
+        default: ''
+      soak_orgs:
+        description: 'soak actions: comma-separated org1,org2,org3 (lower-case UUIDs, C3 order: legacy-only, W4-only, both-machines). Required for soak-seed/soak-flags; optional override for soak-status.'
+        required: false
+        default: ''
+      soak_opts:
+        description: 'soak actions: ";"-separated key=value pairs. Keys: users_per_org (soak-seed, default 10), tz (soak-seed, IANA name or three "|"-separated, default Asia/Shanghai), w7_target (soak-seed, only group_shadow is runnable at kickoff), owner_ref (soak-seed REQUIRED — names the owner-authored authorization artifact for the transition manifests), entrypoint_inventory_ref (soak-seed REQUIRED — operator attestation for the W4 manifest entrypointInventoryRef; never fabricated), punch_target (soak-run, default 200), config (soak-run host config path), window_start (soak-status override, ISO8601 UTC).'
         required: false
         default: ''
       smoke:
@@ -82,7 +110,14 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 40 (was 15): soak-run's bounded generator pass and soak-seed's in-container tsx CLI
+    # walks legitimately exceed 15 minutes. soak-run is capped at ONE DAY's clean-punch
+    # capacity (total_users x 8), whose binding constraint is the generator's >=60s per-user
+    # spacing (not the <=1 req/s global ceiling): for the default 30-user config that is ~8
+    # minutes of active load, well inside 40 even with logins + docker cp + artifact scp.
+    # Every pre-soak action still finishes well inside the old budget; single concurrency
+    # group unchanged.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,14 +129,85 @@ jobs:
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
           STAMPS: ${{ inputs.stamps }}
+          SOAK_ORGS: ${{ inputs.soak_orgs }}
+          SOAK_OPTS: ${{ inputs.soak_opts }}
         run: |
           set -euo pipefail
-          case "$ACTION" in deploy|smoke|status|migrate|residue-sweep) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
-          if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" ]]; then
+          case "$ACTION" in deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
               exit 2
             fi
+          fi
+          # SINGLE-LINE GATE, FIRST — before any here-string `read`. A here-string `read`
+          # consumes only the FIRST line, so a newline in SOAK_ORGS/SOAK_OPTS would slip
+          # everything after it past the per-field checks below and then interpolate raw into
+          # `export SOAK_ORGS='...'` in the remote prelude, where a `'` after the newline
+          # closes the assignment and the tail runs as commands. The sibling `stamps` check
+          # already catches this via its `,__sentinel__` idiom; reject embedded newlines
+          # (and CR) outright here so both new inputs get the same immunity.
+          if [[ "$SOAK_ORGS" == *$'\n'* || "$SOAK_ORGS" == *$'\r'* || "$SOAK_OPTS" == *$'\n'* || "$SOAK_OPTS" == *$'\r'* ]]; then
+            echo "soak_orgs / soak_opts must be single-line (no embedded newline/CR)" >&2
+            exit 2
+          fi
+          # soak input scoping + charset validation (the remote prelude single-quotes these,
+          # so the safe-charset checks here are what keeps that interpolation quoting-safe).
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          case "$ACTION" in
+            soak-seed|soak-flags)
+              IFS=',' read -r so1 so2 so3 so_extra <<< "${SOAK_ORGS},"
+              if [[ -z "$so1" || -z "$so2" || -z "$so3" || -n "$so_extra" ]]; then
+                echo "soak_orgs must be exactly 3 comma-separated org UUIDs for action=$ACTION, got: '$SOAK_ORGS'" >&2
+                exit 2
+              fi
+              for so in "$so1" "$so2" "$so3"; do
+                [[ "$so" =~ $uuid_re ]] || { echo "soak_orgs entry must be a LOWER-CASE UUID (case-fold footgun: an upper-case entry silently no-ops server-side), got: '$so'" >&2; exit 2; }
+              done
+              ;;
+            soak-status)
+              if [[ -n "$SOAK_ORGS" ]]; then
+                IFS=',' read -r so1 so2 so3 so_extra <<< "${SOAK_ORGS},"
+                if [[ -z "$so1" || -z "$so2" || -z "$so3" || -n "$so_extra" ]]; then
+                  echo "soak_orgs, when given for soak-status, must be exactly 3 comma-separated org UUIDs, got: '$SOAK_ORGS'" >&2
+                  exit 2
+                fi
+                for so in "$so1" "$so2" "$so3"; do
+                  [[ "$so" =~ $uuid_re ]] || { echo "soak_orgs entry must be a LOWER-CASE UUID, got: '$so'" >&2; exit 2; }
+                done
+              fi
+              ;;
+            *)
+              if [[ -n "$SOAK_ORGS" ]]; then
+                echo "soak_orgs is only meaningful for soak actions, got action=$ACTION with soak_orgs='$SOAK_ORGS'" >&2
+                exit 2
+              fi
+              ;;
+          esac
+          if [[ -n "$SOAK_OPTS" ]]; then
+            case "$ACTION" in
+              soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;;
+              *) echo "soak_opts is only meaningful for soak actions, got action=$ACTION" >&2; exit 2 ;;
+            esac
+            opt_value_re='^[A-Za-z0-9._:/|-]+$'
+            IFS=';' read -ra soak_opt_pairs <<< "$SOAK_OPTS"
+            for pair in "${soak_opt_pairs[@]}"; do
+              [[ -n "$pair" ]] || continue
+              key="${pair%%=*}"; value="${pair#*=}"
+              [[ "$pair" == *"="* && -n "$value" ]] || { echo "soak_opts pair must be key=value, got: '$pair'" >&2; exit 2; }
+              [[ "$value" =~ $opt_value_re ]] || { echo "soak_opts $key value has unsafe characters: '$value'" >&2; exit 2; }
+              case "$key" in
+                users_per_org) [[ "$value" =~ ^[1-9][0-9]?$ ]] || { echo "users_per_org must be 1..99, got '$value'" >&2; exit 2; } ;;
+                tz) ;;
+                w7_target) [[ "$value" == "group_shadow" ]] || { echo "w7_target only supports group_shadow at kickoff (deeper rungs carry compare-window exit predicates and are separate owner-run CLI acts), got '$value'" >&2; exit 2; } ;;
+                owner_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "owner_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
+                entrypoint_inventory_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "entrypoint_inventory_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;
+                punch_target) [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "punch_target must be 1..9999 (remote further caps it at the config's one-day capacity), got '$value'" >&2; exit 2; } ;;
+                config) [[ "$value" =~ ^[A-Za-z0-9._/~-]+$ ]] || { echo "config must be a plain path, got '$value'" >&2; exit 2; } ;;
+                window_start) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$ ]] || { echo "window_start must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, got '$value'" >&2; exit 2; } ;;
+                *) echo "unknown soak_opts key: '$key' (known: users_per_org, tz, w7_target, owner_ref, entrypoint_inventory_ref, punch_target, config, window_start)" >&2; exit 2 ;;
+              esac
+            done
           fi
           if [[ "$ACTION" != "deploy" && "$SET_WINDOW_ENV" != "none" ]]; then
             echo "set_window_env=$SET_WINDOW_ENV is only meaningful for action=deploy (env flips happen together with the deploy, never mid-smoke — bundle §3.4)" >&2
@@ -130,6 +236,8 @@ jobs:
           bash -n scripts/ops/attendance-staging-window-runner-remote.sh
           bash -n scripts/ops/attendance-window-runner-pipeline.lib.sh
           node --check scripts/ops/attendance-window-runner-mint-token.mjs
+          node --check scripts/ops/attendance-w4w7-soak-load-generator.mjs
+          node -e "JSON.parse(require('fs').readFileSync('scripts/ops/attendance-w4w7-soak-config.template.json','utf8'))"
           echo "inputs and embedded scripts OK"
 
       - name: Run pipeline self-test (same shape as the remote invocation)
@@ -162,6 +270,7 @@ jobs:
             scripts/ops/attendance-staging-window-runner-remote.sh \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
             scripts/ops/attendance-window-runner-mint-token.mjs \
+            scripts/ops/attendance-w4w7-soak-load-generator.mjs \
           | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
@@ -184,6 +293,8 @@ jobs:
           FORCE_RECREATE: ${{ inputs.force_recreate }}
           SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
           STAMPS: ${{ inputs.stamps }}
+          SOAK_ORGS: ${{ inputs.soak_orgs }}
+          SOAK_OPTS: ${{ inputs.soak_opts }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
         run: |
           set -euo pipefail
@@ -213,6 +324,8 @@ jobs:
           export DEPLOY_PATH='${DEPLOY_PATH}'
           export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
           export STAMPS='${STAMPS}'
+          export SOAK_ORGS='${SOAK_ORGS}'
+          export SOAK_OPTS='${SOAK_OPTS}'
           export OUTPUT_DIR='${remote_output_dir}'
           export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
           rm -rf '${remote_output_dir}'
@@ -255,6 +368,8 @@ jobs:
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
           STAMPS: ${{ inputs.stamps }}
+          SOAK_ORGS: ${{ inputs.soak_orgs }}
+          SOAK_OPTS: ${{ inputs.soak_opts }}
         run: |
           set -euo pipefail
           {
@@ -263,6 +378,10 @@ jobs:
             echo "- Action: \`${ACTION}\`"
             if [[ "$ACTION" == "smoke" ]]; then echo "- Smoke: \`${SMOKE_ID}\`"; fi
             if [[ "$ACTION" == "residue-sweep" ]]; then echo "- Stamps: \`${STAMPS:-<none>}\`"; fi
+            if [[ "$ACTION" == soak-* ]]; then
+              echo "- Soak orgs: \`${SOAK_ORGS:-<none>}\`"
+              echo "- Soak opts: \`${SOAK_OPTS:-<none>}\`"
+            fi
             echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
             echo "- Window env: \`${SET_WINDOW_ENV}\`"
             echo "- Force recreate: \`${FORCE_RECREATE}\`"

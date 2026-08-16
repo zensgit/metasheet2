@@ -309,6 +309,28 @@ const KNOWN_SITES: KnownSite[] = [
     lineText: "const parts = new Intl.DateTimeFormat('en-US', {",
     kind: 'display',
   },
+  {
+    // attendance-w4w7-soak-load-generator.mjs `loadConfig()` (#4556 soak, PR #4929) —
+    // timezone-validity probe: construction-only inside try/catch (RangeError on an unknown
+    // IANA zone); the constructed formatter is DISCARDED — never assigned, never even
+    // `.format()`ed, so no output exists to parse. Same idiom as the isValidIanaTimeZone /
+    // field-codecs probes above. No hour option at all.
+    file: 'scripts/ops/attendance-w4w7-soak-load-generator.mjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: timezone })",
+    kind: 'display',
+  },
+  {
+    // attendance-w4w7-soak-load-generator.mjs `workDateInTimezone()` (#4556 soak, PR #4929)
+    // — the en-CA date-key idiom: formatToParts consumed, but ONLY year/month/day parts,
+    // string-interpolated into a YYYY-MM-DD daily-quota bookkeeping key; no `hour`
+    // requested, so no hour part exists to parse (hour-free by construction — the h24
+    // hazard has no hour component to corrupt). Same shape and classification as the
+    // dispatch-d5/sw5 formatDateInTimeZone and mp6 todayLocalKey entries above; the
+    // display-class "no hour:" enforcement below reds this site if it ever gains one.
+    file: 'scripts/ops/attendance-w4w7-soak-load-generator.mjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
 
   // ---------------------------------------------------------------------------------
   // Sites found only once the domain/pattern widened to close the coverage gaps an
@@ -616,7 +638,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(files).toContain('plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue')
     const candidates = findCandidateSites(files)
     expect(candidates.length).toBe(KNOWN_SITES.length)
-    expect(KNOWN_SITES.length).toBe(20)
+    // 22 = the original 20 (#4927) + the 2 display-class sites in the combined-soak load
+    // generator (#4556 soak, PR #4929): its tz-validity probe and its en-CA date-key idiom.
+    expect(KNOWN_SITES.length).toBe(22)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {
