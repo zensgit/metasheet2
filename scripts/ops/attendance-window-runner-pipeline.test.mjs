@@ -618,15 +618,78 @@ function assertSoakContract({ remote, workflow }) {
   // operator CLIs with their exact confirmation tokens, owner-authored authorization ref,
   // verified-before-attested manifest preflight, kickoff-rung-only W7 walk.
   for (const literal of [
-    'ON CONFLICT (id) DO NOTHING',
     'ON CONFLICT (org_id, group_id) DO NOTHING',
     'ON CONFLICT (shift_id, segment_index) DO NOTHING',
   ]) {
     assert.ok(slices.seed.includes(literal), `seed SQL must be idempotent: missing ${literal}`)
   }
   assert.ok(
-    (slices.seed.match(/NOT EXISTS \(/g) || []).length >= 5,
-    'seed SQL must guard business-key inserts with NOT EXISTS existence checks (shift, group, members, assignments, memberships)',
+    (slices.seed.match(/NOT EXISTS \(/g) || []).length >= 6,
+    'seed SQL must guard business-key inserts with NOT EXISTS existence checks (users, shift, group, members, assignments, memberships)',
+  )
+  // Identity-gate defect (staging run 31957449480): the W4C0 §4.1 canonical identity gate
+  // fail-closes non-UUID user ids at the live shadow boundary, so seeded user IDS must be
+  // minted UUIDs and the family marker may only ride username/email. Structural pins:
+  // (a) the users INSERT mints gen_random_uuid()::text as the id expression;
+  // (b) no INSERT puts a prefix-composed value into users.id (the retired shape);
+  // (c) users idempotency is keyed on the username business key (ids are non-deterministic).
+  const usersInsert = slices.seed.slice(
+    slices.seed.indexOf('INSERT INTO users ('),
+    slices.seed.indexOf('UPDATE users'),
+  )
+  assert.ok(usersInsert.length > 0, 'seed SQL must contain the users INSERT ahead of the family UPDATE')
+  assert.match(usersInsert, /SELECT gen_random_uuid\(\)::text,/, 'seeded user ids must be minted UUIDs (W4C0 §4.1 identity gate)')
+  assert.doesNotMatch(
+    usersInsert,
+    /SELECT :'user_prefix' \|\| lpad/,
+    'the users INSERT must not mint prefix-composed ids (the retired TEXT-id shape 500s in W4 shadow)',
+  )
+  assert.match(
+    usersInsert,
+    /WHERE u\.username = :'user_prefix' \|\| lpad/,
+    'users idempotency must be keyed on the username business key',
+  )
+  // (d) every downstream per-user row reaches the family by JOINing users on username —
+  // never by composing a user_id from the prefix (which would recreate the retired shape).
+  const seedSqlBody = slices.seed.slice(
+    slices.seed.indexOf('-- Synthetic users (closed set;'),
+    slices.seed.indexOf('COMMIT;'),
+  )
+  const prefixComposedInsertions = (seedSqlBody.match(/SELECT [^\n]*:'user_prefix' \|\| lpad/g) || [])
+    .filter((line) =>
+      !line.includes('@w4w7-soak.synthetic')      // email projection carries the marker by design
+      && !line.includes('gen_random_uuid()::text') // the users INSERT head (id is minted, not composed)
+      && !line.includes('.username'))              // username comparisons/joins ARE the sanctioned reach
+  assert.deepEqual(
+    prefixComposedInsertions,
+    [],
+    'no seed INSERT may compose a user_id from the family prefix — family reach is via JOIN users ON username',
+  )
+  assert.ok(
+    (seedSqlBody.match(/JOIN users u ON u\.username = :'user_prefix' \|\| lpad/g) || []).length >= 5,
+    'user_orgs/permissions/members/assignments/memberships must resolve user ids via the username join',
+  )
+  // Retired-family remint: prefix-scoped (current UUIDs can never match), transactional,
+  // canonical-bucket read-guard BEFORE any delete, users last in the dependency chain.
+  assert.ok(
+    slices.seed.includes("SELECT count(*) FROM users WHERE id LIKE '${SOAK_USER_PREFIX}%'"),
+    'remint must detect the retired TEXT-id family by users.id prefix',
+  )
+  assert.ok(
+    slices.seed.includes('refusing to remint'),
+    'remint must fail closed if retired records carry canonical-bucket calculation artifacts',
+  )
+  const remintGuardIdx = slices.seed.indexOf('refusing to remint')
+  const remintDeleteIdx = slices.seed.indexOf("DELETE FROM attendance_records WHERE user_id LIKE :'retired_prefix'")
+  const remintUsersDeleteIdx = slices.seed.indexOf("DELETE FROM users WHERE id LIKE :'retired_prefix'")
+  assert.notEqual(remintDeleteIdx, -1, 'remint must delete retired attendance_records by the retired user_id prefix')
+  assert.notEqual(remintUsersDeleteIdx, -1, 'remint must delete the retired users rows by id prefix')
+  assert.ok(remintGuardIdx < remintDeleteIdx, 'the canonical-bucket guard must run BEFORE any remint delete')
+  assert.ok(remintDeleteIdx < remintUsersDeleteIdx, 'remint must delete dependents before the users rows')
+  assert.doesNotMatch(
+    slices.seed,
+    /DELETE FROM attendance_record_calculations/,
+    'remint must NEVER delete from the canonical-writer-only calculations table',
   )
   assert.match(remote, /SOAK_USER_PREFIX="synth-w4w7-"/, 'the closed synthetic user family prefix must be pinned')
   assert.ok(slices.seed.includes("'attendance:write'"), 'seed must grant attendance:write (punch route is withPermission-gated)')
@@ -664,9 +727,16 @@ function assertSoakContract({ remote, workflow }) {
     slices.seed.includes('non-synthetic user_orgs member'),
     'seed must verify each org is exclusively synthetic before attesting customerData=false',
   )
+  // Family membership = users.username prefix via an anti-join (ids are minted UUIDs and
+  // carry no marker); a user_id that resolves to NO users row also counts as non-synthetic.
   assert.ok(
-    slices.seed.includes("user_id NOT LIKE '${SOAK_USER_PREFIX}%'"),
-    'the synthetic-org check must scope on the closed synthetic-user family',
+    slices.seed.includes("NOT EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%')"),
+    'the synthetic-org check must scope on the closed synthetic-user family via the username anti-join',
+  )
+  assert.doesNotMatch(
+    slices.seed,
+    /user_id NOT LIKE '\$\{SOAK_USER_PREFIX\}%'/,
+    'the synthetic-org check must not use the retired user_id-prefix predicate (ids are UUIDs now)',
   )
   assert.ok(
     slices.seed.includes('foreign posture history'),
@@ -1000,6 +1070,64 @@ test('MUTATION (P2-2): deleting the baseline-marker SHA comparison turns the soa
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /compare the baseline markerʼs staging_build_commit to DEPLOY_SHA/,
+  )
+})
+
+test('MUTATION (identity-gate): reverting the users INSERT to prefix-composed TEXT ids turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  // The retired shape — the exact defect staging run 31957449480 proved: a TEXT family id
+  // 500s (W4C0_USER_ID_INVALID) on every punch once its org enters W4 shadow.
+  const minted = 'SELECT gen_random_uuid()::text,\n'
+  assert.ok(original.includes(minted), 'mutation anchor must hit the minted-UUID id expression')
+  const mutated = original.replace(minted, "SELECT :'user_prefix' || lpad(i::text, 2, '0'),\n")
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /minted UUIDs/,
+  )
+})
+
+test('MUTATION (identity-gate): a remint DELETE on the canonical calculations table turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const recordsDelete = "DELETE FROM attendance_records WHERE user_id LIKE :'retired_prefix';"
+  assert.ok(original.includes(recordsDelete), 'mutation anchor must hit the remint records delete')
+  const mutated = original.replace(
+    recordsDelete,
+    "DELETE FROM attendance_record_calculations c USING attendance_records r WHERE c.attendance_record_id = r.id AND r.user_id LIKE :'retired_prefix';\n" + recordsDelete,
+  )
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /canonical-writer-only calculations table/,
+  )
+})
+
+test('MUTATION (identity-gate): reverting the synthetic-org check to the retired user_id-prefix predicate turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const antiJoin = "SELECT count(*) FROM user_orgs uo WHERE uo.org_id = '${org}' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%')"
+  assert.ok(original.includes(antiJoin), 'mutation anchor must hit the username anti-join preflight')
+  const mutated = original.replace(
+    antiJoin,
+    "SELECT count(*) FROM user_orgs WHERE org_id = '${org}' AND user_id NOT LIKE '${SOAK_USER_PREFIX}%'",
+  )
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /username anti-join|retired user_id-prefix predicate/,
+  )
+})
+
+test('MUTATION (identity-gate): swapping the remint delete order (users before dependents) turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const recordsDelete = "DELETE FROM attendance_records WHERE user_id LIKE :'retired_prefix';"
+  const usersDelete = "DELETE FROM users WHERE id LIKE :'retired_prefix';"
+  assert.ok(original.includes(recordsDelete) && original.includes(usersDelete), 'mutation anchors must hit both remint deletes')
+  const SWAP = '__SOAK_REMINT_SWAP_SENTINEL__'
+  const mutated = original.replace(recordsDelete, SWAP).replace(usersDelete, recordsDelete).replace(SWAP, usersDelete)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /dependents before the users rows/,
   )
 })
 
