@@ -176,6 +176,25 @@ export interface AttendanceRequestOperationContextV1 {
   readonly operationId: string | null
   readonly correlationId: string
   readonly acceptedWritePosture: 'legacy_projection_only' | 'shadow' | 'authoritative' | null
+  /**
+   * #4899 residual R4: the org's resolved `referenceSegments` posture bit, carried down
+   * to `execute` so approval finalization does NOT re-resolve it.
+   *
+   * The boundary already resolves the posture under the class-`00` rollout SHARED advisory
+   * lock BEFORE `execute` runs (`resolveSegmentCalculationPosture`, either in the null-ID
+   * branch below or inside `attendanceResultOperationPreflightV1`). Re-resolving inside
+   * finalization repeats a lock-take plus a SELECT for a value that cannot have changed —
+   * the shared lock is transaction-scoped and still held — and it re-takes that lock AFTER
+   * the request row lock, which is the exact ordering the #4899 owner-P1 counterexample
+   * exists to forbid. One resolve per transaction, above every row lock, consumed by both
+   * the finalization reference guards and the calculation read path.
+   *
+   * `false` in every phase where no posture has been resolved yet (the prepare-phase
+   * context) and for every org outside the canonical W4 domain — fail-closed, matching the
+   * port's own non-canonical answer (`src/index.ts`, `W4C0_ROLLOUT_ORG_KEY_INVALID` =>
+   * `{ effectiveState: 'legacy', referenceSegments: false }`).
+   */
+  readonly referenceSegments: boolean
   /** Host-validated route family; null is the generic non-create surface. */
   readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
 }
@@ -395,6 +414,9 @@ export function createAttendanceRequestOperationBoundaryV1(
             operationId: input.operationId,
             correlationId: input.correlationId,
             acceptedWritePosture: null,
+            // Prepare phase: no posture resolved yet, and prepare performs no reference
+            // writes. Fail-closed until a resolve under the rollout lock supplies it.
+            referenceSegments: false,
             routeVariant: input.routeVariant,
           })
           const identityPrepared = input.operationId === null
@@ -412,6 +434,9 @@ export function createAttendanceRequestOperationBoundaryV1(
             const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
               ...operation,
               acceptedWritePosture: 'legacy_projection_only' as const,
+              // Outside the canonical W4 domain the port itself answers
+              // `{ effectiveState: 'legacy', referenceSegments: false }`; mirror it exactly.
+              referenceSegments: false,
             }))
             return { kind: 'legacy' as const, response: result.response }
           }
@@ -432,6 +457,10 @@ export function createAttendanceRequestOperationBoundaryV1(
               const result = await adapter.execute(shapedTrx, identityPrepared, Object.freeze({
                 ...operation,
                 acceptedWritePosture: 'legacy_projection_only' as const,
+                // Read the RESOLVED bit rather than hardcoding `false`. It is false for
+                // every legacy row today, but deriving it from `writePosture` here would
+                // create a second place that decides what `legacy` admits.
+                referenceSegments: posture.referenceSegments,
               }))
               return { kind: 'legacy' as const, response: result.response }
             }
@@ -470,6 +499,9 @@ export function createAttendanceRequestOperationBoundaryV1(
           const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
             ...operation,
             acceptedWritePosture: preflight.org.acceptedWritePosture,
+            // From the preflight's own resolve, taken under the rollout SHARED lock at
+            // step 2 — the one resolution this transaction performs.
+            referenceSegments: preflight.referenceSegments,
           }))
           if (preflight.kind === 'legacy_no_operation') {
             return { kind: 'legacy' as const, response: result.response }

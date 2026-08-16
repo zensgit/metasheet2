@@ -33,6 +33,7 @@ import {
   createVerifiedAttendanceCalculationTargetIdentityV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
+  isAttendanceCalculationOrgAllowlistedV1,
   parseCanonicalAttendanceOrgKeyV1,
   parseCanonicalAttendanceLegacyIdempotencyKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -287,6 +288,121 @@ describe('resolveSegmentCalculationPosture return-shape matrix', () => {
     expect((await postureFor(ORG, { state: 'authoritative' })).effectiveState).toBe('legacy')
     process.env[ALLOWLIST_ENV] = `*,${ORG}`
     expect((await postureFor(ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+  })
+
+  /**
+   * #4899 residual R4 / P3-2 — the allowlist compare is ASCII CASE-FOLDED.
+   *
+   * `orgKey` arrives lower-cased from `parseUuidSyntax`, so before this change an
+   * upper-case env entry was a silent no-op. Folding is an owner-approved ADMISSION
+   * WIDENING, so the legs below prove both halves: the widening actually happened, and
+   * it widened by EXACTLY case — not into prefix/substring/wildcard matching.
+   */
+  describe('R4: allowlist entries are ASCII case-folded (admission widening)', () => {
+    // The file's shared `ORG` fixture is all-DIGIT hex (`5555…`), so `toUpperCase()` on it is a
+    // NO-OP and every leg below would be vacuously green against it. These fixtures are
+    // deliberately letter-bearing canonical v4 keys, and the invariant is asserted, not assumed.
+    const FOLD_ORG = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const FOLD_OTHER = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+
+    it('HARNESS CONTROL: the fixtures really change under toUpperCase (else every leg is vacuous)', () => {
+      expect(FOLD_ORG.toUpperCase()).not.toBe(FOLD_ORG)
+      expect(FOLD_OTHER.toUpperCase()).not.toBe(FOLD_OTHER)
+      expect(FOLD_ORG).not.toBe(FOLD_OTHER)
+      // ...and the file's shared fixture is exactly the trap this control exists to catch.
+      expect(ORG.toUpperCase()).toBe(ORG)
+    })
+
+    it('an UPPER-CASE env entry now admits the lower-case org key (the widening)', async () => {
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+    })
+
+    it('mixed case and surrounding whitespace fold together', async () => {
+      const mixed = `${FOLD_ORG.slice(0, 18).toUpperCase()}${FOLD_ORG.slice(18)}`
+      expect(mixed).not.toBe(FOLD_ORG)
+      expect(mixed).not.toBe(FOLD_ORG.toUpperCase())
+      process.env[ALLOWLIST_ENV] = `  ${mixed} \t`
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('shadow')
+    })
+
+    it('NEGATIVE CONTROL: an UPPER-CASE entry for a DIFFERENT org still denies', async () => {
+      process.env[ALLOWLIST_ENV] = FOLD_OTHER.toUpperCase()
+      // If the fold had degenerated into a prefix/substring/normalizing match, this would admit.
+      expect((await postureFor(FOLD_ORG, { state: 'shadow' })).effectiveState).toBe('legacy')
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+    })
+
+    /**
+     * Every entry in this loop is STRUCTURALLY INERT: none of them can equal ANY org key, so
+     * the leg's scope is "folding does not invent prefix/substring/wildcard matching".
+     *
+     * `'DEFAULT'` was in this loop and has been removed — see the leg below. It is true that it
+     * does not admit a UUID subject, but it is not inert in kind (it folds onto a legal org
+     * key), and leaving it here invited the over-general read "DEFAULT still admits nothing".
+     */
+    it('NEGATIVE CONTROL: folding never lets a prefix, suffix, or wildcard entry match', async () => {
+      for (const entry of [
+        FOLD_ORG.slice(0, 20).toUpperCase(), // strict prefix
+        `${FOLD_ORG.toUpperCase()}-EXTRA`, // strict suffix extension
+        '*',
+        ' * ',
+        '.*',
+        '%',
+        '',
+      ]) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          (await postureFor(FOLD_ORG, { state: 'authoritative' })).effectiveState,
+          `entry ${JSON.stringify(entry)} must not admit`,
+        ).toBe('legacy')
+      }
+      // POSITIVE CONTROL for this loop: the same machinery DOES admit the exact key,
+      // so the seven denials above are real rejections and not a broken harness.
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect((await postureFor(FOLD_ORG, { state: 'authoritative' })).effectiveState).toBe('authoritative')
+    })
+
+    /**
+     * `'DEFAULT'` is the ONE case-variant entry that is not structurally inert, named here
+     * rather than buried in the loop above (#4919 gate P3).
+     *
+     * `parseOrgKeyLexical` accepts the exact ASCII sentinel `'default'` as a legal org key, so
+     * after the fold an env entry spelled `DEFAULT` / `Default` matches the `default` ORG —
+     * where before only the lower-case spelling did. This is the intended case semantics
+     * applied to a PRE-EXISTING match (lower-case `default` already admitted it), not a new
+     * class; the new marginal risk is that `DEFAULT` is a common ops-template placeholder that
+     * used to be inert. This leg asserts what actually happens, in both directions, so nobody
+     * can read the loop above as "DEFAULT admits nothing".
+     */
+    it('`DEFAULT` is NOT inert — it folds onto the legal `default` sentinel org key', () => {
+      for (const entry of ['DEFAULT', 'Default', 'default', ' DEFAULT ']) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          isAttendanceCalculationOrgAllowlistedV1('default'),
+          `entry ${JSON.stringify(entry)} must match the default org`,
+        ).toBe(true)
+      }
+      // ...and it remains inert against a UUID subject, which is what the loop above covers.
+      process.env[ALLOWLIST_ENV] = 'DEFAULT'
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+      // NEGATIVE CONTROL: the sentinel is exact — no other spelling reaches it.
+      for (const entry of ['DEFAULTS', 'DEFAUL', 'defau1t', '*']) {
+        process.env[ALLOWLIST_ENV] = entry
+        expect(
+          isAttendanceCalculationOrgAllowlistedV1('default'),
+          `entry ${JSON.stringify(entry)} must not match the default org`,
+        ).toBe(false)
+      }
+    })
+
+    it('the named export and the private predicate stay ONE predicate under folding', () => {
+      process.env[ALLOWLIST_ENV] = FOLD_ORG.toUpperCase()
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(true)
+      process.env[ALLOWLIST_ENV] = '*'
+      expect(isAttendanceCalculationOrgAllowlistedV1(FOLD_ORG)).toBe(false)
+    })
   })
 
   it('rejects an unknown persisted state and a non-synthetic scope', async () => {

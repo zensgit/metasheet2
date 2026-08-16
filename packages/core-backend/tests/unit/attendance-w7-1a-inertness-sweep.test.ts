@@ -239,6 +239,67 @@ describe('W7-1a structural inertness: the sweep itself is non-vacuous', () => {
 })
 
 /**
+ * ⚠️ RE-FORMED BY W7-1b (#4556 comments 5293034619 + 5293478713).
+ *
+ * THE DEGENERATION, STATED RATHER THAN PAPERED OVER. W7-1a's claim was
+ * `零生产引用` — ZERO production importers of `w7-resolver/`. W7-1b is the slice
+ * that deliberately ends that claim: the REPLACE cutover wires the issuance seam
+ * into the host port, so the emptiness assertion is now FALSE BY DESIGN.
+ *
+ * The wrong responses, both explicitly rejected:
+ *   - DELETING these legs, which would remove the only mechanical check on how
+ *     many production paths reach the W7 resolvers;
+ *   - relaxing them to "at most a few", which stops discriminating entirely.
+ *
+ * What replaces them is STRICTLY STRONGER than the original once any wiring
+ * exists: an EXACT-SET closure assertion. W7-1a could only say "nobody"; this
+ * says "these and nobody else", so a second, unreviewed production path into the
+ * W7 resolvers still reds — which is the property the inertness claim was
+ * actually protecting. The negative control below is unchanged and still
+ * required: planting an extra importer must red both legs.
+ *
+ * The set is deliberately ONE entry. `packages/core-backend/src/index.ts` is the
+ * host port — the single place the CJS plugin can reach core-owned W7 code — and
+ * the seam's own doctrine is that the arm-selection rule exists in exactly one
+ * module. Widening this set is a design change requiring its own review, not a
+ * test edit.
+ */
+const W7_1B_PRODUCTION_IMPORTERS_V1 = Object.freeze([
+  // W7-3 (train merge): the transition writer — REQUIRED by the resolver's own
+  // doc contract to import `isAttendanceW7ContextSourceOrgAllowlistedV1` rather
+  // than copy the allowlist mechanism. See the W7-3 amendment note below.
+  'packages/core-backend/src/attendance/w7-context-source-transition.ts',
+  // The V2 discriminant router. TYPE-ONLY (`import type { FrozenAttendanceContextV2 }`)
+  // — erased at runtime, so it adds no runtime coupling. It is enumerated anyway
+  // rather than carved out: the sweep matches RESOLVED module paths and does not
+  // distinguish type from value imports, and teaching it to do so would weaken it
+  // for every future caller. Importing the type is the right call — the
+  // alternative is a second structural definition of the V2 shape, i.e. drift.
+  'packages/core-backend/src/attendance/w7-frozen-context-router.ts',
+  // The host port — the single place the CJS plugin can reach core-owned W7 code.
+  'packages/core-backend/src/index.ts',
+])
+/**
+ * EMPTY, and this is a STRONGER statement after W7-1b than before it, not a
+ * leftover from W7-1a.
+ *
+ * `W7_RUNTIME_SYMBOLS` is W7-1a's own entry-point set (the posture resolver, the
+ * facts resolver, op(i), the composite lock helper). W7-1b wires production to
+ * the W7 machinery for the first time — and this leg says production still names
+ * NONE of those symbols directly. Every production path reaches them THROUGH the
+ * issuance seam, which is the one-seam doctrine expressed as a mechanical check
+ * rather than as a comment.
+ *
+ * A production file that called 1a's resolvers directly would bypass the arm
+ * selection, and that is precisely the drift ruling 3 forbids. It reds here.
+ */
+const W7_1B_PRODUCTION_CALL_SITES_V1 = Object.freeze([
+  // W7-3 (train merge): the writer names the ONE allowlist predicate — the exact
+  // wiring the resolver's contract demands, and the only production call site.
+  { file: 'packages/core-backend/src/attendance/w7-context-source-transition.ts', symbol: 'isAttendanceW7ContextSourceOrgAllowlistedV1' },
+] as Array<{ file: string; symbol: string }>)
+
+/**
  * W7-3 (#4556) AMENDMENT to the three legs below.
  *
  * WHY THESE LEGS CHANGE, and why the change is a NARROWING rather than a
@@ -277,32 +338,45 @@ const W7_TRANSITION_WRITER_ENTRY_POINTS = [
   'planAttendanceW7ContextSourceTransitionV1',
 ] as const
 
-describe('W7-1a structural inertness: zero production importers and call sites', () => {
-  it('the ONLY production importer of w7-resolver/ is the W7-3 transition writer', () => {
-    expect(productionImportersOfResolver()).toEqual([W7_TRANSITION_WRITER])
+// ⚠️ TRAIN-MERGE RESOLUTION (2026-08-15, #4923 tree × W7-3 branch): both slices
+// rewrote the two exact-set legs below. The merged sets are the UNION — 1b's two
+// wiring points PLUS W7-3's transition writer (importers), and W7-3's single
+// allowlist-predicate call site. W7-3's writer-reachability legs are retained
+// unchanged inside this same describe. Neither side's assertion was weakened:
+// every set stays an exact equality.
+describe('W7-1b closure (re-formed from W7-1a inertness): the production importers are EXACTLY the wiring points', () => {
+  it('the production importers of w7-resolver/ are exactly the enumerated set', () => {
+    expect(productionImportersOfResolver()).toEqual([...W7_1B_PRODUCTION_IMPORTERS_V1])
   })
 
-  it('the ONLY production naming of a W7-1a runtime entry point is the writer using the ONE allowlist predicate', () => {
-    // Exactly one hit, and specifically the allowlist predicate: the writer must
-    // gate on the landed predicate rather than hold a second copy of the
-    // allowlist parsing rules. A hit on any OTHER W7 runtime symbol — e.g. the
-    // writer starting to call the READ resolver — would red here.
-    expect(productionCallSites()).toEqual([
-      { file: W7_TRANSITION_WRITER, symbol: 'isAttendanceW7ContextSourceOrgAllowlistedV1' },
-    ])
+  it('the production call sites naming a W7 runtime entry point are exactly the enumerated set', () => {
+    // Sorted-and-compared as an exact set, not a superset check: a superset
+    // check would let an unreviewed second entry point in silently, which is
+    // the whole failure mode the original zero-assertion existed to block.
+    expect(productionCallSites()).toEqual([...W7_1B_PRODUCTION_CALL_SITES_V1])
   })
 
-  /**
-   * The separately-gated operator tool. It is the ONE thing allowed to reach the
-   * writer, exactly as `scripts/ops/attendance-w4c5-rollout-transition{,-lib}.ts`
-   * is the one thing allowed to reach the W4 transition boundary.
-   *
-   * SHIPPING THE TOOL IS NOT RUNNING IT: a `scripts/ops` CLI is invoked by an
-   * operator under its own owner ruling, never by the server process. That is
-   * why the leg below splits into TWO assertions instead of one relaxed list —
-   * the load-bearing claim is not "nothing names the writer", it is "no module
-   * in the SERVER RUNTIME GRAPH names the writer", and that stays exactly zero.
-   */
+  it('non-vacuity: the enumerated importer really exists and really imports the seam', () => {
+    // An exact-set assertion over an empty derivation passes vacuously, and a
+    // broken resolved-path matcher would produce exactly that. Anchor the
+    // enumerated entry against the real file.
+    for (const rel of W7_1B_PRODUCTION_IMPORTERS_V1) {
+      expect(fs.existsSync(path.join(REPO_ROOT, rel)), `missing: ${rel}`).toBe(true)
+      // Each enumerated importer must really resolve INTO the resolver directory
+      // — otherwise an exact-set assertion could be satisfied by a stale name.
+      expect(
+        resolvedTargets(rel).some((target) => target.startsWith(`${W7_RESOLVER_DIR}/`)),
+        `${rel} does not actually import anything under ${W7_RESOLVER_DIR}/`,
+      ).toBe(true)
+    }
+    // And the HOST PORT specifically must reach THE SEAM — that is the wiring
+    // this slice exists to create, and a generic "imports something under
+    // w7-resolver/" assertion would not notice if it stopped doing so.
+    expect(resolvedTargets('packages/core-backend/src/index.ts')).toContain(
+      `${W7_RESOLVER_DIR}/w7-frozen-context-issuance-seam.ts`,
+    )
+  })
+
   const W7_TRANSITION_OPERATOR_TOOL = [
     'scripts/ops/attendance-w7-context-source-transition-lib.ts',
     'scripts/ops/attendance-w7-context-source-transition.ts',

@@ -561,12 +561,25 @@ export type AttendanceResultOperationPreflightResultV1 =
       readonly batchIdentity: VerifiedAttendanceOperationIdentityV1 | null
       readonly itemIdentities: readonly VerifiedAttendanceOperationIdentityV1[]
       readonly legacyNullIdCount: number
+      /** See `referenceSegments` below. */
+      readonly referenceSegments: boolean
     }
   | {
       /** legacy_projection_only with ONLY null-ID commands: no operation row at all. */
       readonly kind: 'legacy_no_operation'
       readonly org: VerifiedAttendanceOrgIdentityV1
       readonly legacyNullIdCount: number
+      /**
+       * #4899 residual R4: the resolved `referenceSegments` bit from the SAME posture
+       * resolution this preflight already performed under the class-`00` rollout SHARED
+       * lock (step 2 below). Surfaced on the result — NOT folded into
+       * `VerifiedAttendanceOrgIdentityV1`, whose witness shape is `orgId` +
+       * `acceptedWritePosture` only and is re-minted by the rehydration constructors.
+       * Callers that execute an adapter after preflight pass this down instead of
+       * resolving the posture a second time (which would re-take the rollout lock below
+       * their row locks — the ordering the owner-P1 counterexample forbids).
+       */
+      readonly referenceSegments: boolean
     }
 
 export async function attendanceResultOperationPreflightV1(
@@ -605,7 +618,12 @@ export async function attendanceResultOperationPreflightV1(
   const isLegacy = org.acceptedWritePosture === 'legacy_projection_only'
   if (isLegacy && plan.sourced.length === 0 && plan.batch === null) {
     // Null-ID legacy commands create no operation row (lock 4.1/8.2).
-    return { kind: 'legacy_no_operation', org, legacyNullIdCount: plan.legacyNullIdCount }
+    return {
+      kind: 'legacy_no_operation',
+      org,
+      legacyNullIdCount: plan.legacyNullIdCount,
+      referenceSegments: posture.referenceSegments,
+    }
   }
   if (!isLegacy && plan.legacyNullIdCount > 0) {
     // W4-enabled clients that cannot supply a stable identity fail before source DML.
@@ -690,6 +708,7 @@ export async function attendanceResultOperationPreflightV1(
     batchIdentity,
     itemIdentities,
     legacyNullIdCount: plan.legacyNullIdCount,
+    referenceSegments: posture.referenceSegments,
   }
 }
 

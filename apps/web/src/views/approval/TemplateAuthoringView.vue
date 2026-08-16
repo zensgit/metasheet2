@@ -98,10 +98,6 @@
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
         <nav class="template-authoring__steps" aria-label="模板配置步骤">
-          <div class="template-authoring__steps-heading">
-            <strong>模板配置</strong>
-            <span>按步骤完成，随时可保存草稿</span>
-          </div>
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -109,22 +105,14 @@
             :class="{ 'is-active': activeAuthoringSection === section.id }"
             text
             :aria-current="activeAuthoringSection === section.id ? 'step' : undefined"
+            :aria-label="`${index + 1} ${section.label} ${section.description}`"
             :data-testid="`approval-template-section-${section.id}`"
             @click="selectAuthoringSection(section.id)"
           >
             <span class="template-authoring__step-index">{{ index + 1 }}</span>
             <span class="template-authoring__step-copy">
               <strong>{{ section.label }}</strong>
-              <small>{{ section.description }}</small>
             </span>
-            <span
-              v-if="section.id === 'fields'"
-              class="template-authoring__step-count"
-            >{{ draft.fields.length }}</span>
-            <span
-              v-else-if="section.id === 'flow'"
-              class="template-authoring__step-count"
-            >{{ authoringFlowNodeCount }}</span>
           </el-button>
         </nav>
 
@@ -221,7 +209,7 @@
       <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>表单字段</strong>
+            <strong>表单设计</strong>
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
@@ -252,29 +240,90 @@
           </div>
         </template>
 
-        <!-- D6-f2 palette: ordinary users pick a field kind; no field-id entry. -->
-        <div
-          v-if="!readOnly"
-          class="template-authoring__field-palette"
-          data-testid="approval-field-palette"
-          role="group"
-          aria-label="添加表单字段类型"
-        >
-          <el-button
-            v-for="entry in fieldPaletteEntries"
-            :key="entry.type"
-            size="small"
-            :data-testid="`approval-field-palette-${entry.type}`"
-            @click="addFieldOfType(entry.type)"
-          >
-            {{ entry.label }}
-          </el-button>
-        </div>
+        <div class="template-authoring__form-designer" data-testid="approval-form-designer">
+          <aside class="template-authoring__form-palette-pane">
+            <p class="template-authoring__form-palette-title">控件</p>
+            <!-- D6-f2 palette: ordinary users pick a field kind; no field-id entry. -->
+            <div
+              v-if="!readOnly"
+              class="template-authoring__field-palette"
+              data-testid="approval-field-palette"
+              role="group"
+              aria-label="添加表单字段类型"
+            >
+              <section
+                v-for="group in fieldPaletteGroups"
+                :key="group.id"
+                class="template-authoring__field-palette-group"
+              >
+                <h3>{{ group.label }}</h3>
+                <div class="template-authoring__field-palette-grid">
+                  <button
+                    v-for="entry in group.entries"
+                    :key="entry.type"
+                    type="button"
+                    class="template-authoring__field-palette-chip"
+                    :data-testid="`approval-field-palette-${entry.type}`"
+                    :draggable="true"
+                    @click="addFieldOfType(entry.type)"
+                    @dragstart="onPaletteDragStart(entry.type, $event)"
+                  >
+                    <span>{{ entry.label }}</span>
+                    <span class="template-authoring__field-palette-mark" aria-hidden="true">{{ entry.mark }}</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </aside>
 
+          <div
+            class="template-authoring__form-preview-stage"
+            @dragover.prevent
+            @drop="onPreviewDrop"
+          >
+            <div class="template-authoring__form-phone" data-testid="approval-form-preview">
+              <header class="template-authoring__form-phone-title">
+                {{ draft.name.trim() || '未命名审批' }}
+              </header>
+              <div class="template-authoring__form-phone-body">
+                <div
+                  v-if="draft.fields.length === 0"
+                  class="template-authoring__form-drop-hint"
+                >
+                  点击或拖拽左侧控件至此处
+                </div>
+                <button
+                  v-for="(field, index) in draft.fields"
+                  :key="`preview-${field.localId}`"
+                  type="button"
+                  class="template-authoring__form-preview-row"
+                  :class="{ 'is-selected': formFieldFocusLocalId === field.localId }"
+                  :data-testid="`approval-form-preview-row-${field.localId}`"
+                  @click="selectFormFieldFocus(field.localId)"
+                  :draggable="!readOnly"
+                  @dragstart="onFieldDragStart(index)"
+                  @dragover.prevent
+                  @drop.stop="onFieldDrop(index)"
+                >
+                  <span class="template-authoring__form-preview-label">{{ field.label.trim() || FIELD_PALETTE_LABELS[field.type] }}</span>
+                  <span class="template-authoring__form-preview-type">{{ FIELD_PALETTE_LABELS[field.type] }}</span>
+                </button>
+                <div
+                  v-if="draft.fields.length > 0 && !readOnly"
+                  class="template-authoring__form-drop-hint is-tail"
+                >
+                  点击或拖拽左侧控件至此处
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="template-authoring__form-inspector-pane">
         <div
           v-for="(field, index) in draft.fields"
           :id="`approval-field-row-${field.localId}`"
           :key="field.localId"
+          v-show="formFieldFocusLocalId === field.localId || (!formFieldFocusLocalId && index === 0)"
           class="template-authoring__item"
           :class="{ 'template-authoring__item--focused': formFieldFocusLocalId === field.localId }"
           data-testid="approval-template-field-row"
@@ -559,6 +608,8 @@
             </el-form-item>
           </div>
         </div>
+          </div>
+        </div>
       </el-card>
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
@@ -612,6 +663,7 @@
             :minimap-width="CANVAS_MINIMAP_W"
             :minimap-height="CANVAS_MINIMAP_H"
             :graph-node-label="graphNodeLabel"
+            :canvas-node-summary="canvasNodeCardSummary"
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
@@ -632,6 +684,7 @@
             @drop="onCanvasNodeDrop"
             @toggle-edge-insert="toggleEdgeInsertMenu"
             @edge-insert-approval="onEdgeInsertApproval"
+            @edge-insert-cc="onEdgeInsertCc"
             @edge-insert-condition="onEdgeInsertCondition"
             @edge-insert-parallel="onEdgeInsertParallel"
           />
@@ -1243,7 +1296,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type CSSProperties } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -1320,6 +1373,7 @@ import {
   addParallelBranch,
   adjacentLinearNodeMoveTarget,
   appendApprovalNode,
+  appendCcNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
@@ -1503,9 +1557,9 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础设置', description: '名称、范围与模板起点' },
+  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
   { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
-  { id: 'flow', label: '审批流程', description: '审批人、分支与字段权限' },
+  { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1603,6 +1657,15 @@ const NODE_TYPE_LABELS: Record<string, string> = {
 }
 function nodeTypeLabel(type: string): string {
   return NODE_TYPE_LABELS[type] ?? type
+}
+
+function canvasNodeCardSummary(nodeKey: string): string {
+  const node = canvasNodeByKey(nodeKey)
+  if (!node) return '点击配置'
+  if (node.type === 'start') return '可设置提交人'
+  if (node.type === 'end') return '可设置抄送'
+  const lines = nodeConfigSummary(node)
+  return lines[0] || '点击配置'
 }
 
 // `assigneeSourceSummary` (single-source label) now lives in `../../approvals/assigneeSource` —
@@ -2170,8 +2233,19 @@ function onAddConditionBranch(nodeKey: string): void {
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
+function selectInsertedNode(beforeKeys: Set<string>): void {
+  const inserted = canvasEffectiveGraph.value.nodes.find((node) => !beforeKeys.has(node.key))?.key
+  if (inserted) selectedCanvasNode.value = inserted
+}
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
+}
+function onInsertCcAfter(nodeKey: string): void {
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
 }
 function onInsertConditionAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
@@ -2236,10 +2310,23 @@ const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(dr
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
-const canvasStageStyle = computed(() => ({
-  width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
-  height: `${Math.round(canvasLayout.value.height * canvasZoom.value)}px`,
-}))
+const canvasStageStyle = computed<CSSProperties>(() => {
+  const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
+  const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
+  const vpW = canvasViewportState.value.width
+  const vpH = canvasViewportState.value.height
+  return {
+    minWidth: '100%',
+    minHeight: vpH ? `${vpH}px` : '100%',
+    width: `${Math.max(vpW, scaledW)}px`,
+    height: `${Math.max(vpH, scaledH + 56)}px`,
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    boxSizing: 'border-box',
+    padding: '28px 16px 64px',
+  }
+})
 const canvasSurfaceStyle = computed(() => ({
   position: 'relative' as const,
   width: `${canvasLayout.value.width}px`,
@@ -2437,21 +2524,48 @@ function canInsertParallelOnEdge(edgeKey: string): boolean {
   const source = edgeSourceNode(edgeKey)
   return Boolean(source && canInsertParallelAfter(source))
 }
+function canInsertOnCanvasEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || source.type === 'end') return false
+  return canvasEffectiveGraph.value.edges.filter((edge) => edge.source === source.key).length === 1
+}
+function rejectEdgeInsert(): void {
+  ElMessage.warning('当前连线不能插入这种节点')
+  closeEdgeInsertMenu()
+}
 function onEdgeInsertApproval(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertApprovalAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertCc(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
+  onInsertCcAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertCondition(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertConditionAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertParallel(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertParallelAfter(source)) return
+  if (!source || !canInsertParallelAfter(source) || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertParallelAfter(source.key)
   closeEdgeInsertMenu()
 }
@@ -2713,6 +2827,47 @@ const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
   type,
   label: FIELD_PALETTE_LABELS[type],
 }))
+const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
+  text: 'A',
+  textarea: 'Aa',
+  number: '123',
+  date: '日',
+  datetime: '时',
+  select: '○',
+  'multi-select': '☑',
+  user: '人',
+  detail: '表',
+  'record-link': '链',
+}
+const fieldPaletteGroups = [
+  { id: 'text', label: '文本', types: ['text', 'textarea'] },
+  { id: 'number', label: '数值', types: ['number'] },
+  { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
+  { id: 'date', label: '日期', types: ['date', 'datetime'] },
+  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
+].map((group) => ({
+  ...group,
+  entries: group.types.map((type) => ({
+    type: type as AuthorableFieldType,
+    label: FIELD_PALETTE_LABELS[type as AuthorableFieldType],
+    mark: FIELD_PALETTE_MARKS[type as AuthorableFieldType],
+  })),
+}))
+const paletteDragType = ref<AuthorableFieldType | null>(null)
+function onPaletteDragStart(type: AuthorableFieldType, event: DragEvent): void {
+  if (readOnly.value) {
+    event.preventDefault()
+    return
+  }
+  paletteDragType.value = type
+  event.dataTransfer?.setData('text/plain', type)
+}
+function onPreviewDrop(event: DragEvent): void {
+  event.preventDefault()
+  const type = paletteDragType.value
+  paletteDragType.value = null
+  if (type) addFieldOfType(type)
+}
 
 function addField() {
   if (readOnly.value) return
@@ -2766,7 +2921,14 @@ function onFieldDragStart(index: number) {
   if (!readOnly.value) draggedFieldIndex.value = index
 }
 function onFieldDrop(index: number) {
-  if (readOnly.value || draggedFieldIndex.value === null) return
+  if (readOnly.value) return
+  if (paletteDragType.value) {
+    const type = paletteDragType.value
+    paletteDragType.value = null
+    addFieldOfType(type)
+    return
+  }
+  if (draggedFieldIndex.value === null) return
   const from = draggedFieldIndex.value
   draggedFieldIndex.value = null
   if (from === index) return
@@ -3238,57 +3400,51 @@ onUnmounted(() => {
 
 .template-authoring__workspace {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: var(--ms-space-5);
+  gap: var(--ms-space-4);
 }
 
 .template-authoring__steps {
   position: sticky;
-  top: 116px;
-  display: grid;
-  gap: var(--ms-space-2);
-  padding: var(--ms-space-3);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-lg);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
-}
-
-.template-authoring__steps-heading {
-  display: grid;
-  gap: var(--ms-space-1);
-  padding: var(--ms-space-2) var(--ms-space-2) var(--ms-space-3);
-  color: var(--ms-text-1);
-}
-
-.template-authoring__steps-heading span {
-  color: var(--ms-text-3);
-  font-size: 12px;
+  top: 72px;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  border-radius: 0;
+  background: var(--ms-bg-page);
+  box-shadow: none;
 }
 
 .template-authoring__step {
-  width: 100%;
+  width: auto;
   height: auto;
-  min-height: 58px;
+  min-height: 48px;
   margin: 0;
-  padding: var(--ms-space-2);
+  padding: 10px 16px 12px;
   color: var(--ms-text-2);
-  white-space: normal;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
 }
 
 .template-authoring__step :deep(> span) {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  display: inline-flex;
   align-items: center;
-  gap: var(--ms-space-2);
-  width: 100%;
+  gap: 8px;
+  width: auto;
   text-align: left;
 }
 
 .template-authoring__step.is-active {
-  background: var(--el-color-primary-light-9);
+  background: transparent;
   color: var(--ms-color-primary);
+  border-bottom-color: var(--ms-color-primary);
 }
 
 .template-authoring__step-index,
@@ -3584,27 +3740,13 @@ pre {
 
 @media (max-width: 1024px) {
   .template-authoring__workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .template-authoring__steps {
-    position: sticky;
-    top: 108px;
-    z-index: 2;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .template-authoring__steps-heading {
-    display: none;
-  }
-
-  .template-authoring__step-copy small,
-  .template-authoring__step-count {
-    display: none;
-  }
-
-  .template-authoring__step :deep(> span) {
-    grid-template-columns: 28px minmax(0, 1fr);
+    top: 0;
+    justify-content: flex-start;
+    overflow-x: auto;
   }
 }
 
@@ -3640,7 +3782,7 @@ pre {
 
   .template-authoring__steps {
     top: 0;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: flex-start;
   }
 
   .template-authoring__grid {
@@ -3665,15 +3807,157 @@ pre {
 .template-authoring__canvas-workspace {
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  gap: 0;
   min-width: 0;
   width: 100%;
+  min-height: min(72vh, 760px);
+}
+.template-authoring__form-designer {
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr) minmax(280px, 360px);
+  gap: 0;
+  min-height: min(68vh, 720px);
+  margin: -8px -12px -16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.template-authoring__form-palette-pane {
+  border-right: 1px solid var(--el-border-color-lighter);
+  padding: 12px 12px 16px;
+  overflow: auto;
+  background: var(--el-bg-color);
+}
+.template-authoring__form-palette-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-color-primary);
 }
 .template-authoring__field-palette {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 0;
+}
+.template-authoring__field-palette-group h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+}
+.template-authoring__field-palette-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.template-authoring__field-palette-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 6px;
-  margin-bottom: 12px;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  cursor: grab;
+  text-align: left;
+}
+.template-authoring__field-palette-chip:hover,
+.template-authoring__field-palette-chip:focus-visible {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.template-authoring__field-palette-mark {
+  color: var(--el-text-color-placeholder);
+  font-size: 11px;
+}
+.template-authoring__form-preview-stage {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 24px 16px 32px;
+  background: var(--el-fill-color-lighter);
+}
+.template-authoring__form-phone {
+  width: min(100%, 360px);
+  min-height: 520px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 16px;
+  background: var(--el-bg-color);
+  box-shadow: var(--el-box-shadow-lighter);
+  overflow: hidden;
+}
+.template-authoring__form-phone-title {
+  padding: 16px 16px 12px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--el-border-color-extra-light);
+}
+.template-authoring__form-phone-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.template-authoring__form-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+  cursor: pointer;
+  text-align: left;
+}
+.template-authoring__form-preview-row.is-selected {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-8);
+}
+.template-authoring__form-preview-label {
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+}
+.template-authoring__form-preview-type {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+.template-authoring__form-drop-hint {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  background: var(--el-fill-color-blank);
+}
+.template-authoring__form-drop-hint.is-tail {
+  min-height: 48px;
+  font-size: 12px;
+}
+.template-authoring__form-inspector-pane {
+  border-left: 1px solid var(--el-border-color-lighter);
+  padding: 12px;
+  overflow: auto;
+  background: var(--el-bg-color);
+}
+@media (max-width: 1100px) {
+  .template-authoring__form-designer {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+  .template-authoring__form-inspector-pane {
+    grid-column: 1 / -1;
+    border-left: 0;
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
 }
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {

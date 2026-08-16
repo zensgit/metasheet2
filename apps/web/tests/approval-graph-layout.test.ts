@@ -46,6 +46,7 @@ describe('computeLayout (vertical longest-path layered)', () => {
     expect(byKey.get('end')!.layer).toBe(2)
     expect(byKey.get('a1')!.y).toBeGreaterThan(byKey.get('start')!.y)
     expect(byKey.get('a1')!.x).toBe(byKey.get('start')!.x)
+    expect(byKey.get('a1')!.y - byKey.get('start')!.y).toBe(176)
     expect(layout.nodes).toHaveLength(3)
   })
   it('puts a rejoin node AFTER both of its branches (longest-path, not shortest)', () => {

@@ -120,16 +120,35 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts',
   'packages/core-backend/src/attendance/w6-group-effective-policy-panel-flag.ts',
   'packages/core-backend/src/attendance/w6-group-effective-policy-response-contract.ts',
+  // W7-2: the compare-window exit-criteria counters. Classified
+  // `calculation_path` — the HONEST bucket: it reads the shadow ledger the
+  // calculation writers produce and gates the ladder those writers cut over
+  // on, so both ban legs must apply to it.
+  'packages/core-backend/src/attendance/w7-compare-window-status.ts',
   'packages/core-backend/src/attendance/w7-context-source-delivery.ts',
   'packages/core-backend/src/attendance/w7-context-source-posture-contract.ts',
   'packages/core-backend/src/attendance/w7-context-source-transition.ts',
   'packages/core-backend/src/attendance/w7-frozen-context-v2-contract.ts',
+  // W7-1b: the V2 discriminant-routing rule. `calculation_path` — the HONEST
+  // bucket, not a carve-out: it decides which frozen-context shapes the
+  // calculator will accept, so both ban legs must apply to it.
+  'packages/core-backend/src/attendance/w7-frozen-context-router.ts',
   'packages/core-backend/src/attendance/w7-provenance-domain.ts',
   'packages/core-backend/src/attendance/w7-read-side-provenance-amendment.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-composite-lock-order.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-context-source-posture-resolver.ts',
+  // W7-1b: the issuance seam. Classified `calculation_path` — the HONEST bucket,
+  // not a carve-out: this module IS the frozen-context build path, so both ban
+  // legs must apply to it. W7-1b is the slice where those legs stop being
+  // theoretical (1a was 零生产引用), which is exactly why the seam belongs here.
+  'packages/core-backend/src/attendance/w7-resolver/w7-frozen-context-issuance-seam.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-context-issuance.ts',
   'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-facts-resolver.ts',
+  // W7-2: the expected-differences roster + fail-closed probe. Classified
+  // `calculation_path` — the HONEST bucket, not a carve-out: the roster is the
+  // claim side of the compare gate that decides which legacy-vs-group
+  // divergences may pass `group_eligible` entry, so both ban legs must apply.
+  'packages/core-backend/src/attendance/w7-shadow-expected-differences.ts',
   'packages/core-backend/src/attendance/w7-w6r5-guard-root-set.ts',
   'plugins/plugin-attendance/engine/index.cjs',
   'plugins/plugin-attendance/engine/sample-config.cjs',

@@ -776,7 +776,17 @@ async function countIncompleteOperations(
  * unadjudicated in that case; this predicate is not the sole gate on record-level
  * adjudication, only on the specific legacy-ingress review this bullet names.
  */
-async function countUnresolvedIngressReviews(
+/**
+ * W7-2 (#4556): exported (previously module-private) so the W7 compare-window
+ * status command (`w7-compare-window-status.ts`, predicate
+ * `W7_UNRESOLVED_INGRESS_REVIEW`) REUSES this exact predicate rather than
+ * re-deriving it — the brief's "reuse `countUnresolvedIngressReviews`" clause.
+ * NOTE the `FOR UPDATE`: callers own the transaction; a caller that wants a
+ * point-in-time read without holding the row locks runs it in its own
+ * short-lived transaction and rolls back (same contract as
+ * `readAttendanceRequestSnapshotDefectReportV1` above).
+ */
+export async function countUnresolvedIngressReviews(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
 ): Promise<number> {

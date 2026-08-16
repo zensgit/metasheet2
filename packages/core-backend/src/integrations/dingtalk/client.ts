@@ -743,6 +743,7 @@ export interface DingTalkWorkNotificationActionCardInput {
 }
 
 export const DINGTALK_INTERACTIVE_APPROVAL_CARD_CALLBACK_ROUTE_KEY = 'approval_card'
+export const DINGTALK_INTERACTIVE_APPROVAL_CARD_ACTIONS_VISIBLE_KEY = 'actionsVisible'
 
 export interface DingTalkInteractiveApprovalCardInput {
   /** Recipient DingTalk user id. B-2 uses one card per approver. */
@@ -887,6 +888,7 @@ export async function sendDingTalkInteractiveApprovalCard(
             requestNo,
             nodeName,
             statusText,
+            [DINGTALK_INTERACTIVE_APPROVAL_CARD_ACTIONS_VISIBLE_KEY]: 'true',
             approveText: '同意',
             rejectText: '驳回',
             rejectUrl,
@@ -923,9 +925,10 @@ export async function sendDingTalkInteractiveApprovalCard(
  *
  * Official card-instances update endpoint (`PUT /v1.0/card/instances`), addressed by the SAME
  * `outTrackId` the B-2 send used (= the ledger delivery id). The update is a PRESENTATION
- * follow-up only: it carries exactly one param — the terminal `statusText` — with
- * `updateCardDataByKey` so every other card param (title/requestNo/nodeName/buttons) stays as
- * sent. Values-free by construction (B-2 §5 fence): no form data can ride this call.
+ * follow-up only: it carries the terminal `statusText` and, for a true terminal outcome, flips the
+ * closed template boolean `actionsVisible` to false. The template owns presentation and must bind
+ * BOTH action buttons' visibility to that variable. Values-free by construction (B-2 §5 fence):
+ * no form data can ride this call.
  *
  * HTTP-200 business failures fail closed (`success !== true` throws), same discipline as
  * create-and-deliver above — callers must never treat an unacknowledged update as applied.
@@ -935,6 +938,8 @@ export interface DingTalkInteractiveApprovalCardUpdateInput {
   outTrackId: string
   /** Terminal status copy (values-free, built server-side by interactive-card-update.ts). */
   statusText: string
+  /** Omitted for retryable refusal copy; the update API may retire actions but never re-enable them. */
+  actionsVisible?: false
 }
 
 export async function updateDingTalkInteractiveApprovalCard(
@@ -945,6 +950,10 @@ export async function updateDingTalkInteractiveApprovalCard(
 ): Promise<{ requestId?: string; raw: Record<string, unknown> }> {
   const outTrackId = input.outTrackId.trim()
   const statusText = input.statusText.trim()
+  const cardParamMap: Record<string, string> = { statusText }
+  if (input.actionsVisible === false) {
+    cardParamMap[DINGTALK_INTERACTIVE_APPROVAL_CARD_ACTIONS_VISIBLE_KEY] = 'false'
+  }
 
   if (!accessToken.trim()) throw new Error('DingTalk access token is required')
   if (!outTrackId) throw new Error('DingTalk interactive-card outTrackId is required')
@@ -961,9 +970,7 @@ export async function updateDingTalkInteractiveApprovalCard(
       body: JSON.stringify({
         outTrackId,
         cardData: {
-          cardParamMap: {
-            statusText,
-          },
+          cardParamMap,
         },
         cardUpdateOptions: { updateCardDataByKey: true },
       }),

@@ -26,6 +26,7 @@ import {
 import {
   W7_PROVENANCE_WIDENING_LEDGER_V1,
   deriveProvenanceWideningSurfaceV1,
+  deriveRenamedWideningSymbolsV1,
   diffProvenanceWideningV1,
   resolveRepoRootV1,
   type W7DerivedSiteV1,
@@ -277,6 +278,155 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
     )
     const callSites = planted.sites.filter((site) => site.text.includes('isKnownOwner'))
     expect(callSites.length).toBeGreaterThan(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // P3-6 (#4907 gate finding) — the rename hop / substring-membership defect.
+  //
+  // Carried into W7-1b as a scheduling reassignment because #4907 is closing,
+  // NOT because 1b "touches the scan domain": 1b builds a DIFFERENT
+  // derive-and-diff over the context-shape domain and reuses this module's
+  // TECHNIQUE, not this file. See the W7-1b PR body's scope-leak disclosure.
+  //
+  // The defect was a COMPOSITION of two halves, and each needs its own probe
+  // because fixing either alone leaves the hole open:
+  //   (i)  the rename hop matched `X as Y` ANYWHERE (type assertions, prose in
+  //        block comments, `import()` type positions), minting bogus aliases;
+  //   (ii) alias membership was `String.includes` — a SUBSTRING test — so a
+  //        legitimately-imported short alias that is a substring of the field
+  //        spelling inflated `hasWideningSymbol` for every line naming it.
+  //
+  // `hasWideningSymbol` is both a site-hood input AND the widened-evidence
+  // input the `widened_predicate` rule consults, so inflating it does not
+  // merely over-collect: it MANUFACTURES evidence of widening for lines that
+  // were never widened, defeating the ratification's "漏一点即红" property.
+  //
+  // Each probe below asserts the diff produces a `not_widened` violation even
+  // when the planted site is ledgered as `widened_predicate` — i.e. the ledger
+  // cannot be used to wave the gap through. Under the pre-fix module each probe
+  // is GREEN (no violation), which is the hole.
+  // -------------------------------------------------------------------------
+
+  /** Ledger the planted sites as `widened_predicate` and ask whether the
+   *  evidence check still fails. This is the discriminating question: an
+   *  `unledgered_site` violation fires for any plant and proves nothing about
+   *  the manufactured-evidence hole. */
+  function notWidenedViolationsForPlanted(planted: ReturnType<typeof scanPlanted>) {
+    return diffProvenanceWideningV1(
+      planted,
+      planted.sites.map((site) => ({
+        file: site.file,
+        text: site.text,
+        rule: 'widened_predicate' as const,
+      })),
+    ).filter((violation) => violation.kind === 'not_widened')
+  }
+
+  it('P3-6 half (i): a TYPE-ASSERTION `X as Y` must NOT mint a widening alias', () => {
+    // `isAttendanceProjectionOwnerV1 as ownerGate` here is a TS type assertion,
+    // not an import binding. The pre-fix hop minted `ownerGate` from it, and the
+    // fold line below spells `ownerGate` as a WHOLE token — so the un-widened
+    // `=== 'w4'` fold was accepted as widened. Anchoring the hop to a real
+    // import/export binding list is the only thing that closes this; a
+    // whole-token membership test does NOT (the alias is a genuine whole token).
+    const planted = scanPlanted(
+      'planted-type-assertion-alias.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 } from '../domain'",
+        '',
+        'type ownerGate = string',
+        'const coerced = isAttendanceProjectionOwnerV1 as ownerGate',
+        '',
+        'export function fold(row: { projection_owner: string }): string {',
+        "  const decided: ownerGate = row.projection_owner === 'w4' ? 'w4' : 'legacy_untracked'",
+        '  return decided',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    // Non-vacuity: the un-widened fold really was derived as a site.
+    const foldSites = planted.sites.filter((site) => site.text.includes('decided'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    // And it carries NO widening evidence — the assertion-position alias is gone.
+    expect(foldSites.every((site) => site.hasWideningSymbol)).toBe(false)
+    expect(notWidenedViolationsForPlanted(planted).length).toBeGreaterThan(0)
+  })
+
+  it('P3-6 half (ii): a SHORT alias that is a SUBSTRING of the field must not manufacture evidence', () => {
+    // Here the rename IS a real import binding, so half (i)'s anchoring does not
+    // stop it — `Owner` is legitimately minted. The defect is the membership
+    // test: `'row.projectionOwner === ...'.includes('Owner')` is true, so every
+    // line naming `projectionOwner` reported widening evidence it never had.
+    // Only the whole-token match closes this.
+    const planted = scanPlanted(
+      'planted-substring-alias.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as Owner } from '../domain'",
+        '',
+        'export function fold(row: { projectionOwner: string }): string {',
+        "  return row.projectionOwner === 'w4' ? 'w4' : 'legacy_untracked'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const foldSites = planted.sites.filter((site) => site.text.includes('projectionOwner'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    expect(foldSites.every((site) => site.hasWideningSymbol)).toBe(false)
+    expect(notWidenedViolationsForPlanted(planted).length).toBeGreaterThan(0)
+  })
+
+  it('P3-6 positive control: a LEGITIMATE import rename is still honoured as widening evidence', () => {
+    // The failure mode to guard against is a "fix" that simply DELETES the hop:
+    // it would pass both negative probes above and silently under-collect every
+    // renamed call site. The hop must be repaired, not removed.
+    const planted = scanPlanted(
+      'planted-legit-rename.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as isKnown } from '../domain'",
+        '',
+        'export function fold(row: { projection_owner: string }): string {',
+        "  return isKnown(row.projection_owner) ? row.projection_owner : 'legacy_untracked'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const callSites = planted.sites.filter((site) => site.text.includes('isKnown('))
+    expect(callSites.length).toBeGreaterThan(0)
+    expect(callSites.some((site) => site.hasWideningSymbol)).toBe(true)
+  })
+
+  it('P3-6: the rename hop still reads a real import/export binding list, and only that', () => {
+    // Direct unit assertion on the exported hop, independent of the site walk —
+    // so a future refactor of the walk cannot make these probes vacuous.
+    const symbols = ['isAttendanceProjectionOwnerV1']
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "import { isAttendanceProjectionOwnerV1 as isKnown } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['isKnown'])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "export { isAttendanceProjectionOwnerV1 as reExported } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['reExported'])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "import type { isAttendanceProjectionOwnerV1 as typeOnly } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['typeOnly'])
+    // Non-import positions must mint nothing.
+    expect(
+      deriveRenamedWideningSymbolsV1('const x = isAttendanceProjectionOwnerV1 as Gate', symbols),
+    ).toEqual([])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        '/* prose: treat isAttendanceProjectionOwnerV1 as Owner here */',
+        symbols,
+      ),
+    ).toEqual([])
   })
 
   it('planted consumer: an AMBIGUOUS-member trace fold is derived (no distinctive fallback)', () => {

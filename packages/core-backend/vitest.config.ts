@@ -758,6 +758,37 @@ export default defineConfig({
       // Two-point wired: excluded from no-DB collection here, whole-file run in
       // plugin-tests.yml's attendance-real-db-integration step.
       'tests/integration/attendance-w7-1am-provenance-widening.db.test.ts',
+      // #4556 W7-1b (ratified per #4556 comments 5293034619 + 5293478713): W7-R3
+      // structural parity. Runs the REAL production legacy frozen-context builder
+      // against real PostgreSQL over an eight-fixture corpus and compares the
+      // serialized artifacts to vectors captured at the pre-1b base. Meaningless
+      // without a database — the builder reads shift/segment/rule rows. Two-point
+      // wired: excluded from no-DB collection here, whole-file run in
+      // plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts',
+      // #4556 W7-1b: the issuance seam and ruling-7's mirror controls. Boots a real
+      // MetaSheetServer with the real plugin (so the seam under test is the one
+      // activate() wired into production) and drives a real punch route. Needs real
+      // PostgreSQL for the posture table, the W1 membership timeline and the
+      // fixed-schedule effectiveness fixture. Two-point wired as above.
+      'tests/integration/attendance-w7-1b-issuance-seam.db.test.ts',
+      // #4556 W7-1b: the CUTOVER end-to-end suite. Boots a real MetaSheetServer,
+      // walks the rollout state machine to `authoritative`, seeds a fully
+      // effective fixed-shift group and drives a real punch route — the leg that
+      // proves the mirror's outer fingerprint and the boundary's inner one AGREE
+      // once both machines are on. Meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts',
+      // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
+      // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
+      // values against real CHECK constraints and deferred triggers, walks the
+      // rollout state machine per case, and drives the real route. Real PG only.
+      'tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts',
+      // #4556 W7-1b B9: the composite-lock re-census over the seven-producer
+      // reality, with CONSTRUCTED two-connection races (a real 40P01 positive
+      // control and the composed-order non-deadlock) plus T-M6's pg_locks
+      // observation. Concurrency evidence is meaningless without real PostgreSQL.
+      'tests/integration/attendance-w7-1b-lock-census.db.test.ts',
       // #4556 W6-1 §7.2 fixture matrix: all eight committed aggregate fixtures are
       // reproduced from seeded rows against a dedicated disposable PostgreSQL database
       // with canonical FSER. Excluded from no-DB collection and whole-file wired below.
@@ -776,6 +807,20 @@ export default defineConfig({
       // the server's own deadlock detector to return 40P01. Excluded here so the no-DB job
       // cannot skip-green it; whole-file run in plugin-tests.yml's attendance step.
       'tests/integration/attendance-w7-1a-resolver.db.test.ts',
+      // #4556 W7-2 (ratified per #4556 comments 5293034619 + 5293478713): the
+      // compare-window exit-criteria counters. Seeds shadow-ledger rows against the
+      // real CHECK matrix and the deferred segment-count trigger, and asserts
+      // transaction-scoped read semantics (T-C8) — meaningless without real
+      // PostgreSQL. Two-point wired: excluded from no-DB collection here,
+      // whole-file run in plugin-tests.yml's attendance-real-db-integration step.
+      'tests/integration/attendance-w7-2-compare-window-status.db.test.ts',
+      // #4556 W7-2: the group_shadow dual-run produced-row legs. Drives the
+      // production boundary factory with the plugin's real scheduled adapters and
+      // the real core issuance seam over real PostgreSQL (posture rows, rollout
+      // walks, FSER group fixtures, the dedup-partition probe). Two-point wired:
+      // excluded from no-DB collection here, whole-file run in plugin-tests.yml's
+      // attendance-real-db-integration step.
+      'tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts',
       // #4556 W7-3: the context-source TRANSITION boundary. Needs real PostgreSQL for every leg
       // that carries this slice's weight and cannot exist without a server: the 25-ordered-pair
       // sweep that proves the DB trigger's accepted set equals the imported TS constant (a text

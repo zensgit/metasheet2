@@ -6,6 +6,7 @@ import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
 import { graphValidityIssues } from '../src/approvals/graphLayout'
 import {
   appendApprovalNode,
+  appendCcNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
@@ -146,6 +147,24 @@ describe('appendApprovalNode', () => {
   })
   it('refuses to insert after a node with ≠1 outgoing edge', () => {
     expect(() => appendApprovalNode(PARALLEL, 'parallel_1')).toThrow(/exactly one outgoing/)
+  })
+})
+
+describe('appendCcNode', () => {
+  it('inserts a shipped cc node on a linear segment without mutating input', () => {
+    const before = snap(LINEAR)
+    const out = appendCcNode(LINEAR, 'approval_1', '抄送财务')
+    expect(LINEAR).toEqual(before)
+    const newNode = out.nodes.find((n) => n.type === 'cc')!
+    expect(newNode.name).toBe('抄送财务')
+    expect(newNode.config).toEqual({ targetType: 'user', targetIds: [] })
+    expect(edgeBetween(out, 'approval_1', newNode.key)).toBeTruthy()
+    expect(edgeBetween(out, newNode.key, 'end')).toBeTruthy()
+    expect(edgeBetween(out, 'approval_1', 'end')).toBeFalsy()
+    expect(node(out, 'start')).toEqual(node(LINEAR, 'start'))
+  })
+  it('refuses to insert after a node with ≠1 outgoing edge', () => {
+    expect(() => appendCcNode(PARALLEL, 'parallel_1')).toThrow(/exactly one outgoing/)
   })
 })
 

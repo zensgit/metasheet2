@@ -53,6 +53,14 @@ const ALLOWED_RELATIVE_FILES = new Set([
   // resolver under test defines NO second effectiveness predicate — which is
   // what W6-R4 guards — and makes zero factory calls.
   'packages/core-backend/tests/integration/attendance-w7-1a-resolver.db.test.ts',
+  // W7-2: the extended golden harness and the dual-run suite BOTH inject the
+  // real FSER derivation into the issuance seam's deps — the same
+  // inject-the-real-predicate posture as the W7-1a resolver suite above (a
+  // stub would make the group arm's "effective" legs test the stub). Neither
+  // file defines a second effectiveness predicate; both make zero factory
+  // calls (they reference the singleton exports only).
+  'packages/core-backend/tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts',
+  'packages/core-backend/tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts',
   // this inventory test's own file (names the guarded strings for documentation)
   'packages/core-backend/tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts',
   // Names the module in a CLOSED FILE SET / a derived-domain floor list, not

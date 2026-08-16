@@ -51,6 +51,7 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
 
   it('edge-insert menu items use business-language aria-labels (no edge keys)', () => {
     expect(CANVAS_SRC).toMatch(/aria-label="插入审批节点"/)
+    expect(CANVAS_SRC).toMatch(/aria-label="插入抄送节点"/)
     expect(CANVAS_SRC).toMatch(/aria-label="插入条件分支"/)
     expect(CANVAS_SRC).toMatch(/aria-label="插入并行分支"/)
     // Menu item labels must not interpolate edge keys into accessible names
@@ -60,6 +61,21 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     expect(CANVAS_SRC).not.toMatch(
       /aria-label="[^"]*\$\{line\.key\}[^"]*"[\s\S]{0,120}edge-insert-(approval|condition|parallel)/,
     )
+  })
+
+  it('flow cards expose type chrome, summary, and a circular edge + (no 办理人)', () => {
+    expect(CANVAS_SRC).toMatch(/template-authoring__canvas-node-kind/)
+    expect(CANVAS_SRC).toMatch(/canvasNodeSummary\(pos\.key\)/)
+    expect(CANVAS_SRC).toMatch(/template-authoring__canvas-edge-insert-btn/)
+    expect(CANVAS_SRC).toMatch(/border-radius: 50%/)
+    expect(CANVAS_SRC).toMatch(/插入抄送节点/)
+    expect(CANVAS_SRC).not.toMatch(/办理人/)
+    // Insert chrome is painted after node cards so the open menu receives the click.
+    const nodeIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-node"')
+    const insertIdx = CANVAS_SRC.lastIndexOf('data-testid="approval-canvas-edge-insert"')
+    expect(nodeIdx).toBeGreaterThan(0)
+    expect(insertIdx).toBeGreaterThan(nodeIdx)
+    expect(CANVAS_SRC).toMatch(/\.is-open \{\s*z-index: 20;/)
   })
 
   it('fit-to-view toolbar control has business aria-label', () => {
