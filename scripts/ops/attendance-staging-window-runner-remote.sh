@@ -1841,13 +1841,13 @@ SQL
   # `userIds` entries are the closed family USERNAMES — soak-run feeds each one to POST
   # /api/auth/login as `identifier` (resolved by username) and the returned token carries
   # the user's minted UUID id. They are generator-local login/attribution keys, not DB ids.
-  python3 - "$SOAK_HOST_CONFIG_FILE" "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3" "$users_per_org" "$SOAK_USER_PREFIX" <<'PY'
+  python3 - "$SOAK_HOST_CONFIG_FILE" "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3" "$users_per_org" "$SOAK_USER_PREFIX" "$tz1" "$tz2" "$tz3" <<'PY'
 import json, os, sys
-path, org1, org2, org3, count, prefix = sys.argv[1:7]
+path, org1, org2, org3, count, prefix, tz1, tz2, tz3 = sys.argv[1:10]
 count = int(count)
 postures = ["legacy_only", "w4_only_legacy_arm", "both_machines_group_arm"]
 entries = []
-for org, posture in zip([org1, org2, org3], postures):
+for org, posture, tz in zip([org1, org2, org3], postures, [tz1, tz2, tz3]):
     user_prefix = f"{prefix}{org[:8]}-u"
     entries.append({
         "orgId": org,
@@ -1855,6 +1855,9 @@ for org, posture in zip([org1, org2, org3], postures):
         "minCleanPunches": 20,
         "userIds": [f"{user_prefix}{i:02d}" for i in range(1, count + 1)],
         "tokenOrCreds": {},
+        # gate round-2 P2-1: the 2/day cap must count against the ORG'S calendar day, not
+        # the generator's UTC default. Bookkeeping-only; never sent in a punch body.
+        "dailyCapTimezone": tz,
     })
 cfg = {
     "baseUrl": "http://127.0.0.1:8900",
@@ -2058,6 +2061,27 @@ action_soak_run() {
   done
   IFS="$IFS_SAVE"
 
+  # SAME-DAY RE-DISPATCH GUARD (gate round-2 P2-1): the generator's daily cap is
+  # per-process, so a second soak-run inside the same org-calendar day would land a second
+  # pair on the SAME work date — exactly the duplicate-session shape that floods
+  # §4.2-critical review_required diffs. The org day is derived from the FIRST config
+  # entry's dailyCapTimezone (all soak orgs share one); override only for a deliberate
+  # halt-retry with soak_opts allow_same_day_rerun=true (documented critical-shape risk).
+  local batch_tz batch_day last_batch_day
+  batch_tz="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entries"][0].get("dailyCapTimezone", "UTC"))' "$config_path")"
+  batch_day="$(TZ="$batch_tz" date +%Y-%m-%d)"
+  local batch_marker="${SOAK_PERSIST_DIR}/soak-run-last-batch-day"
+  if [[ -f "$batch_marker" ]]; then
+    last_batch_day="$(cat "$batch_marker")"
+    if [[ "$last_batch_day" == "$batch_day" && "$(soak_opt allow_same_day_rerun false)" != "true" ]]; then
+      fail "a soak-run batch already ran (or started) on ${batch_day} (${batch_tz}) — a second same-day batch lands duplicate sessions on the same work date (§4.2-critical review_required). Wait for the next org-calendar day, or pass soak_opts allow_same_day_rerun=true for a deliberate retry (accepting that risk for already-punched users)"
+    fi
+  fi
+  # Written BEFORE the generator runs: even a PARTIAL batch punched some users, so a bare
+  # same-day retry would duplicate exactly those — burning the day on any attempt is the
+  # fail-closed choice; the override above is the deliberate escape hatch.
+  printf '%s\n' "$batch_day" > "$batch_marker"
+
   # Log every synthetic user in through the REAL login route; tokens go ONLY into a 0600
   # host temp config (deleted below) and are never echoed (per-user output is id + ok/fail).
   mkdir -p "$SOAK_PERSIST_DIR"
@@ -2162,11 +2186,24 @@ PY
     echo "http_level_clean=${total_clean}"
     echo "attempts=${total_attempts}"
     echo "note=haltedReason is LOAD-BEARING: targets_met (this batch met its targets) and daily_capacity_exhausted (every user completed its one daily pair; cumulative criteria accrue across days) are the clean outcomes; the HTTP tally upper-bounds (never equals) the DB-level clean-punch count — soak-status Q1-Q4 are the authoritative counts"
-    echo "result=$([[ "$halted" == "max_consecutive_incidents" ]] && echo FAIL || echo ok)"
+    # gate round-2 P2-3: exactly the two clean halts print ok; incidents FAIL the job; every
+    # other halt (stall, duration, safety cap) prints WARN — recorded, non-alert, but never
+    # dressed up as a clean batch.
+    case "$halted" in
+      targets_met|daily_capacity_exhausted) echo "result=ok" ;;
+      max_consecutive_incidents) echo "result=FAIL" ;;
+      *) echo "result=WARN" ;;
+    esac
   } > "${OUTPUT_DIR}/summary.txt"
   if [[ "$halted" == "max_consecutive_incidents" ]]; then
     fail "generator halted on consecutive non-clean responses (haltedReason=max_consecutive_incidents) — alert-class outcome, see soak-run.log + soak-run-summary.json"
   fi
+  case "$halted" in
+    targets_met|daily_capacity_exhausted) ;;
+    *)
+      log "soak-run WARN: haltedReason=${halted} is neither clean outcome — see summary.txt (a same-day retry needs soak_opts allow_same_day_rerun=true and accepts the duplicate-session risk for already-punched users)"
+      ;;
+  esac
   log "soak-run done: haltedReason=${halted} http_clean=${total_clean}/${punch_target} (DB-level counts come from action=soak-status, never from this tally)"
 }
 

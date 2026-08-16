@@ -533,6 +533,24 @@ async function loadConfig(opts) {
       }
     }
 
+    // #4932 gate round-2 P2-1: the one-pair-per-WORK-DATE invariant is only as good as the
+    // day boundary the cap counts against. config.timezone defaults to UTC while the soak
+    // orgs' work dates are org-timezone days, so the cap must key on the ORG'S day: soak-seed
+    // writes dailyCapTimezone per entry (the org group's IANA timezone). Bookkeeping-only —
+    // NEVER sent in a punch body (that would override the org rule timezone server-side).
+    let dailyCapTimezone = null
+    if (rawEntry.dailyCapTimezone !== undefined) {
+      if (typeof rawEntry.dailyCapTimezone !== 'string' || !rawEntry.dailyCapTimezone.trim()) {
+        throw new ConfigError(`${where}.dailyCapTimezone must be a non-empty IANA timezone string when present.`)
+      }
+      dailyCapTimezone = rawEntry.dailyCapTimezone.trim()
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: dailyCapTimezone })
+      } catch {
+        throw new ConfigError(`${where}.dailyCapTimezone ${JSON.stringify(dailyCapTimezone)} is not a recognized IANA timezone.`)
+      }
+    }
+
     const minCleanPunches = Number.isFinite(rawEntry.minCleanPunches) && rawEntry.minCleanPunches > 0
       ? rawEntry.minCleanPunches
       : opts.targetPerOrg
@@ -561,6 +579,7 @@ async function loadConfig(opts) {
       minCleanPunches,
       userIds,
       tokenOrCreds,
+      dailyCapTimezone,
     }
   })
 
@@ -776,6 +795,11 @@ function nextEventType(userState) {
   return 'check_in'
 }
 
+function capTimezoneFor(entry, config) {
+  // Per-entry org-day boundary; config.timezone (default UTC) only as a fallback.
+  return entry.dailyCapTimezone || config.timezone
+}
+
 function userEligible(userState, opts, nowMs, timezone) {
   const sinceLast = (nowMs - userState.lastPunchAt) / 1000
   if (userState.lastPunchAt !== 0 && sinceLast < opts.minSecondsBetweenPunchesPerUser) return false
@@ -962,7 +986,7 @@ async function runScheduler({ config, opts, willExecute }) {
       const idx = (cursor + i) % pool.length
       const candidate = pool[idx]
       if (!orgNeedsMorePunches(tally, candidate.entry, opts)) continue
-      if (!userEligible(candidate, opts, Date.now(), config.timezone)) continue
+      if (!userEligible(candidate, opts, Date.now(), capTimezoneFor(candidate.entry, config))) continue
       picked = candidate
       cursor = idx + 1
       break
@@ -973,10 +997,9 @@ async function runScheduler({ config, opts, willExecute }) {
       // day — end THIS invocation cleanly instead of idling to the stall timeout. The
       // runbook's cumulative count criteria accrue across daily batches (DB-side
       // soak-status judgments), so this is a success outcome, not a shortfall.
-      const todayKey = workDateInTimezone(new Date(), config.timezone)
       const allCapped = pool.every((u) =>
         !orgNeedsMorePunches(tally, u.entry, opts)
-        || (u.dailyCounts.get(todayKey) || 0) >= opts.punchesPerUserPerDay)
+        || (u.dailyCounts.get(workDateInTimezone(new Date(), capTimezoneFor(u.entry, config))) || 0) >= opts.punchesPerUserPerDay)
       if (allCapped) { haltedReason = 'daily_capacity_exhausted'; break }
       // Otherwise somebody is only cooldown-ineligible (per-user spacing) — wait briefly.
       // Bounded by the stall-timeout check above (fires only after stallTimeoutMinutes of
@@ -1032,7 +1055,7 @@ async function runScheduler({ config, opts, willExecute }) {
       })
     }
 
-    const today = workDateInTimezone(new Date(), config.timezone)
+    const today = workDateInTimezone(new Date(), capTimezoneFor(picked.entry, config))
     picked.dailyCounts.set(today, (picked.dailyCounts.get(today) || 0) + 1)
 
     sinceLastPrint++
