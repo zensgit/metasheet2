@@ -43,6 +43,7 @@ import { randomUUID } from 'crypto'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import {
   createAttendanceLiveScheduledBoundaryV1,
@@ -242,10 +243,19 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
     }
   }
 
+  /**
+   * W7-3 (#4556) landing-gate P1-1: the bare `(org_id, state, scope)` shape is
+   * ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes only
+   * -> P0001) and its four NOT NULL columns (-> 23502). Routed through the ONE shared
+   * legal fixture: bootstrap at `off`, then walk the ratified ladder. Never by
+   * dropping the trigger — that would run this evidence against a schema production
+   * does not ship.
+   */
   const setW7Posture = (orgId: string, state: string) =>
-    pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-      [orgId.toLowerCase(), state],
+    seedAttendanceW7ContextSourcePostureV1(
+      pool,
+      orgId,
+      state,
     )
 
   // ---- the REAL boundary with the REAL seam --------------------------------

@@ -125,7 +125,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // calculation writers produce and gates the ladder those writers cut over
   // on, so both ban legs must apply to it.
   'packages/core-backend/src/attendance/w7-compare-window-status.ts',
+  'packages/core-backend/src/attendance/w7-context-source-delivery.ts',
   'packages/core-backend/src/attendance/w7-context-source-posture-contract.ts',
+  'packages/core-backend/src/attendance/w7-context-source-transition.ts',
   'packages/core-backend/src/attendance/w7-frozen-context-v2-contract.ts',
   // W7-1b: the V2 discriminant-routing rule. `calculation_path` — the HONEST
   // bucket, not a carve-out: it decides which frozen-context shapes the

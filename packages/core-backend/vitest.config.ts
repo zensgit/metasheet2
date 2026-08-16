@@ -821,6 +821,17 @@ export default defineConfig({
       // excluded from no-DB collection here, whole-file run in plugin-tests.yml's
       // attendance-real-db-integration step.
       'tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts',
+      // #4556 W7-3: the context-source TRANSITION boundary. Needs real PostgreSQL for every leg
+      // that carries this slice's weight and cannot exist without a server: the 25-ordered-pair
+      // sweep that proves the DB trigger's accepted set equals the imported TS constant (a text
+      // comparison of the two files would pass on two identically-wrong lists), the trigger's
+      // INSERT/bookkeeping/immutability clauses, the CHECK-vs-trigger exclusivity leg (which
+      // DISABLEs the trigger to prove the constraint is a separate door), the plan reporter's
+      // zero-write proof via `xmin`, the pg_locks observation of the session advisory lock, and
+      // the TWO-CONNECTION serialization proof whose loser must see the version conflict.
+      // Excluded here so the no-DB job cannot skip-green it; whole-file run in plugin-tests.yml's
+      // attendance step and pinned in the CI wiring corpus.
+      'tests/integration/attendance-w7-3-context-source-transition.db.test.ts',
       // #4556 W5 flex persistence and canonical writer proof requires real PostgreSQL;
       // the whole file is explicitly run in plugin-tests.yml.
       'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',

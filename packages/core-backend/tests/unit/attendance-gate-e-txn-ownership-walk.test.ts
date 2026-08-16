@@ -91,6 +91,18 @@ describe('Gate E (#4844) transaction-ownership guard — walk the exported table
         'w4c0-operation-registry.ts::runAttendanceResultOperationTransactionV1',
         'w4c2-outbox-dispatcher.ts::dispatchAttendanceResultEventOutboxV1',
         'w4c3a-rollout-control.ts::planAttendanceCalculationRolloutTransitionV1',
+        // W7-3 (#4556): the context-source plan reporter, announced by this
+        // census rather than slipping in — which is the guard working, not an
+        // obstacle to it. It is the exact structural TWIN of the
+        // `w4c3a-rollout-control.ts` sibling directly above: a read-only `plan`
+        // that opens `BEGIN ISOLATION LEVEL SERIALIZABLE` on a CALLER-supplied
+        // connection, proves that connection idle with `assertConnectionIsIdleV1`
+        // BEFORE the `BEGIN` (so a dirty caller cannot have its own transaction
+        // silently joined — PostgreSQL only WARNs on a nested `BEGIN`), and
+        // unconditionally `ROLLBACK`s in a `finally` on every path, never
+        // `COMMIT`. It therefore OWNS its transaction end to end and needs no
+        // JOINS/NESTED allowlist entry.
+        'w7-context-source-transition.ts::planAttendanceW7ContextSourceTransitionV1',
       ])
       for (const s of sites) {
         expect(s.bucket).toBe('OWNS')

@@ -51,6 +51,27 @@
  *     committed `harnessSha256` was updated deliberately, as its own reviewed
  *     line, when the extension landed.
  *
+ *     W7-3 (#4556) did the SAME, for the same reason and under the same rule.
+ *     Its migration made this file's posture seeding (`INSERT INTO
+ *     attendance_calculation_context_source_state (org_id, state, scope)`)
+ *     ILLEGAL — `trg_accss_state_guard` rejects a non-bootstrap initial state
+ *     with `P0001`, and four new NOT NULL columns reject the bare shape with
+ *     `23502` — so the seeding was routed through the shared legal fixture
+ *     `tests/utils/w7-context-source-posture-fixture.ts` (bootstrap at `off`,
+ *     then walk the ratified ladder). That edits the harness, so
+ *     `harnessSha256` moved and was updated as its own reviewed line:
+ *     `cf50b312…` -> the value now recorded in the vector file.
+ *
+ *     WHAT WAS NOT DONE, because it would have destroyed the evidence:
+ *     `entries` was NOT re-captured. Re-capturing at a post-change head is
+ *     precisely the "a golden generated from the post-change code proves only
+ *     that the code equals itself" failure this vector file's own `_README`
+ *     warns against. The recorded `capturedAtBaseSha`
+ *     (`348eccde90825591ed6af0b6e503d152fe3cc672`) and every golden entry are
+ *     byte-unchanged; only the instrument's identity was re-recorded, and the
+ *     equality those entries assert still runs against the same production
+ *     code through the same plugin adapters.
+ *
  * THIS FILE DELIBERATELY CONTAINS NO SEAM LEG. A presence-guarded seam
  * assertion here would be a skip-when-unreachable gate: at the 1b head a seam
  * that failed to export would self-skip GREEN, which is the exact
@@ -85,6 +106,7 @@ import * as crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { canonicalAttendanceJsonV1 } from '../../src/attendance/w4c0-fingerprints'
 import {
   computeAttendanceSourceDefinitionFingerprintV1,
@@ -538,10 +560,11 @@ describeDb('W7-1b — W7-R3 structural parity: legacy-arm golden equality (real 
     process.env[W7_ENV] = orgKeys.join(',')
     try {
       for (const f of Object.values(fixtures)) {
-        await pool.query(
-          `INSERT INTO ${W7_POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-          [f.orgId.toLowerCase(), posture],
-        )
+        // W7-3 (#4556) landing-gate P1-1: the bare `(org_id, state, scope)` shape is
+        // ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes
+        // only -> P0001) and its four NOT NULL columns (-> 23502). Seeded through the
+        // ONE shared legal fixture: bootstrap at `off`, then walk the ratified ladder.
+        await seedAttendanceW7ContextSourcePostureV1(pool, f.orgId, posture)
       }
       for (const [id, f] of Object.entries(fixtures)) {
         const issued = (await issueAttendanceFrozenContextV1(coreTrx(pool) as never, seamDeps(), {
