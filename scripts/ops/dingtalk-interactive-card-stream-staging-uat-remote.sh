@@ -1775,6 +1775,8 @@ action_observe() {
     local handled_line
     handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
     case "$handled_line" in
+      *'(ignored_unsupported_action out_track_id='*) handled_outcome="ignored_unsupported_action" ;;
+      *'(delivery_not_found out_track_id='*) handled_outcome="delivery_not_found" ;;
       *'(executed delivery='*) handled_outcome="executed" ;;
       *'(stale delivery='*) handled_outcome="stale" ;;
       *'(operator_unresolved:'*) handled_outcome="operator_unresolved" ;;

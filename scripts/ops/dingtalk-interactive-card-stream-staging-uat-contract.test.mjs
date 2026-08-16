@@ -330,6 +330,8 @@ test('observe is read-only and emits values-free callback classes without raw lo
   assert.match(observe, /window_callback_handler_error_count=/)
   assert.match(observe, /card_update_failed_count=/)
   for (const outcome of [
+    'ignored_unsupported_action',
+    'delivery_not_found',
     'executed',
     'stale',
     'operator_unresolved',
@@ -339,15 +341,9 @@ test('observe is read-only and emits values-free callback classes without raw lo
   ]) {
     assert.match(observe, new RegExp(`handled_outcome="${outcome}"`))
   }
-  // These production outcome strings do not carry the delivery UUID and cannot
-  // be claimed as evidence for EXPECTED_DELIVERY_ID.
-  for (const unscopedOutcome of [
-    'rejected',
-    'ignored_unsupported_action',
-    'delivery_not_found',
-  ]) {
-    assert.doesNotMatch(observe, new RegExp(`handled_outcome="${unscopedOutcome}"`))
-  }
+  // A parse-time rejection has no delivery id and cannot be claimed as scoped
+  // evidence for EXPECTED_DELIVERY_ID. The two out_track_id outcomes above do.
+  assert.doesNotMatch(observe, /handled_outcome="rejected"/)
   assert.doesNotMatch(observe, /handled_outcome="(?:accepted|duplicate)"/)
   assert.doesNotMatch(observe, /echo "callback_handler_error_count=/)
   assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
@@ -417,6 +413,67 @@ test('observe dynamically scopes Winston log evidence to the expected delivery',
     assert.match(artifact, /window_callback_handler_error_count=1/)
     assert.match(artifact, /card_update_failed_count=1/)
     assert.doesNotMatch(artifact, new RegExp(`${expected}|${other}`))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('observe precisely classifies scoped out_track_id terminal outcomes', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-out-track-'))
+  const output = join(dir, 'output')
+  const logs = join(dir, 'backend.log')
+  const harness = join(dir, 'harness.sh')
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  try {
+    writeFileSync(
+      harness,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'log() { :; }',
+        'fail() { echo "$*" >&2; exit 1; }',
+        'assert_staging_only() { :; }',
+        'require_exact_deployed_sha() { :; }',
+        'require_lifecycle_flags_off() { :; }',
+        'require_log_level_info_or_debug() { :; }',
+        'register_ephemeral() { :; }',
+        'read_flag_from_container() { printf true; }',
+        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
+        'BACKEND_CONTAINER=metasheet-staging-backend',
+        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+        observe,
+        'action_observe',
+      ].join('\n'),
+    )
+    for (const [line, expectedOutcome] of [
+      [
+        `info: DingTalk interactive-card callback handled (ignored_unsupported_action out_track_id=${expected})`,
+        'ignored_unsupported_action',
+      ],
+      [
+        `info: DingTalk interactive-card callback handled (delivery_not_found out_track_id=${expected})`,
+        'delivery_not_found',
+      ],
+    ]) {
+      writeFileSync(logs, `${line}\n`)
+      const result = spawnSync('bash', [harness], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          EXPECTED_DELIVERY_ID: expected,
+          LOG_FIXTURE: logs,
+          OUTPUT_DIR: output,
+          STREAM_UAT_PERSIST_DIR: dir,
+        },
+      })
+      assert.equal(result.status, 0, result.stderr)
+      const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
+      assert.match(artifact, new RegExp(`latest_callback_outcome=${expectedOutcome}`))
+      assert.doesNotMatch(artifact, new RegExp(expected))
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
