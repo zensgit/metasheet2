@@ -649,25 +649,36 @@ function assertSoakContract({ remote, workflow }) {
     /WHERE u\.username = :'user_prefix' \|\| lpad/,
     'users idempotency must be keyed on the username business key',
   )
-  // (d) every downstream per-user row reaches the family by JOINing users on username —
-  // never by composing a user_id from the prefix (which would recreate the retired shape).
+  // (d) EXACT-SET pin on every seed-SQL line touching :'user_prefix'. The #4931 gate
+  // showed a line-scoped negative regex is dodgeable four ways (same-line `.username`
+  // decoys, continuation lines, VALUES form, to_char instead of lpad) — 枚举陷阱不收敛,
+  // so instead: enumerate every prefix-touching line and pin the ordered multiset. Any
+  // new or changed use of the prefix in the seed SQL turns this red and forces review.
+  // Sanctioned forms only: email projection, username projection, username comparisons/
+  // joins, and the family credential UPDATE's WHERE.
   const seedSqlBody = slices.seed.slice(
     slices.seed.indexOf('-- Synthetic users (closed set;'),
     slices.seed.indexOf('COMMIT;'),
   )
-  const prefixComposedInsertions = (seedSqlBody.match(/SELECT [^\n]*:'user_prefix' \|\| lpad/g) || [])
-    .filter((line) =>
-      !line.includes('@w4w7-soak.synthetic')      // email projection carries the marker by design
-      && !line.includes('gen_random_uuid()::text') // the users INSERT head (id is minted, not composed)
-      && !line.includes('.username'))              // username comparisons/joins ARE the sanctioned reach
+  const prefixLines = seedSqlBody.split('\n').map((l) => l.trim()).filter((l) => l.includes(":'user_prefix'"))
   assert.deepEqual(
-    prefixComposedInsertions,
-    [],
-    'no seed INSERT may compose a user_id from the family prefix — family reach is via JOIN users ON username',
+    prefixLines,
+    [
+      ":'user_prefix' || lpad(i::text, 2, '0') || '@w4w7-soak.synthetic',",
+      ":'user_prefix' || lpad(i::text, 2, '0'),",
+      "SELECT 1 FROM users u WHERE u.username = :'user_prefix' || lpad(i::text, 2, '0'));",
+      "WHERE username LIKE :'user_prefix' || '%';",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+    ],
+    "every seed-SQL use of :'user_prefix' must be one of the sanctioned username/email forms — exact ordered set; a composed user_id would recreate the retired TEXT-id shape",
   )
   assert.ok(
-    (seedSqlBody.match(/JOIN users u ON u\.username = :'user_prefix' \|\| lpad/g) || []).length >= 5,
-    'user_orgs/permissions/members/assignments/memberships must resolve user ids via the username join',
+    slices.seed.includes('INSERT INTO users (id, email, username, name, password_hash'),
+    'the users INSERT column order must stay pinned (id first) so the minted-UUID projection pin binds to the id column',
   )
   // Retired-family remint: prefix-scoped (current UUIDs can never match), transactional,
   // canonical-bucket read-guard BEFORE any delete, users last in the dependency chain.
@@ -690,6 +701,64 @@ function assertSoakContract({ remote, workflow }) {
     slices.seed,
     /DELETE FROM attendance_record_calculations/,
     'remint must NEVER delete from the canonical-writer-only calculations table',
+  )
+  // #4931 gate P2 hardening — each pin below was proven load-bearing by a neuter probe
+  // that left the whole suite GREEN before the pin existed (probes C9/C2'/C3/C6/C12):
+  // P2-1 (C9): an unscoped retired_prefix ("%") would DELETE every user/user_org/record
+  // on the host — pin the exact psql -v composition.
+  assert.ok(
+    slices.seed.includes('-v retired_prefix="${SOAK_USER_PREFIX}%"'),
+    'remint psql must scope retired_prefix to the closed family prefix + trailing %',
+  )
+  // P2-2 (C2'): the canonical-bucket guard must be an exact zero comparison — `-n` (or any
+  // always-true test) makes the fail-closed refusal unreachable.
+  assert.ok(
+    slices.seed.includes('[[ "$retired_calc" == "0" ]]'),
+    'the canonical-bucket remint guard must compare the count to exact zero',
+  )
+  // P2-3 (C3): the remint must delete EXACTLY these seven tables in dependency order — a
+  // dropped dependent (e.g. user_orgs) orphans rows whose user_id no longer resolves,
+  // which the username anti-join preflight counts as non-synthetic → the org is bricked
+  // for every future seed with no scripted remedy.
+  const remintSqlStart = slices.seed.indexOf("DELETE FROM attendance_records WHERE user_id LIKE :'retired_prefix';")
+  const remintSqlEndMark = "DELETE FROM users WHERE id LIKE :'retired_prefix';"
+  const remintSqlBody = slices.seed.slice(remintSqlStart, slices.seed.indexOf(remintSqlEndMark) + remintSqlEndMark.length)
+  assert.deepEqual(
+    remintSqlBody.match(/DELETE FROM [a-z_]+/g) || [],
+    [
+      'DELETE FROM attendance_records',
+      'DELETE FROM attendance_calculation_group_memberships',
+      'DELETE FROM attendance_shift_assignments',
+      'DELETE FROM attendance_group_members',
+      'DELETE FROM user_permissions',
+      'DELETE FROM user_orgs',
+      'DELETE FROM users',
+    ],
+    'the remint must delete exactly these seven tables, dependents first, users last',
+  )
+  // P2-4 (C6): the deletes must run as ONE transaction under ON_ERROR_STOP — the operator-
+  // facing failure message says "transactional — nothing deleted" and must stay true.
+  const remintHeredoc = slices.seed.slice(
+    slices.seed.indexOf('cat > "$remint_sql"'),
+    slices.seed.indexOf('< "$remint_sql"'),
+  )
+  assert.match(remintHeredoc, /\\set ON_ERROR_STOP on/, 'remint SQL must stop on first error')
+  const remintBeginIdx = remintHeredoc.indexOf('\nBEGIN;\n')
+  const remintCommitIdx = remintHeredoc.indexOf('\nCOMMIT;\n')
+  const remintFirstDeleteIdx = remintHeredoc.indexOf('DELETE FROM attendance_records')
+  const remintLastDeleteIdx = remintHeredoc.indexOf('DELETE FROM users WHERE')
+  assert.ok(remintBeginIdx !== -1 && remintCommitIdx !== -1, 'remint SQL must open and commit a transaction')
+  assert.ok(
+    remintBeginIdx < remintFirstDeleteIdx && remintLastDeleteIdx < remintCommitIdx,
+    'every remint delete must sit inside the BEGIN/COMMIT transaction',
+  )
+  // P2-6 (C12): the family credential UPDATE must keep its username-prefix WHERE bound to
+  // THAT statement — a bare UPDATE would reset every staging account's password and set
+  // local_password_set on all of them.
+  assert.match(
+    slices.seed,
+    /UPDATE users\n {3}SET password_hash = :'pw_hash',\n {7}is_active = true,\n {7}activation_status = 'activated',\n {7}local_password_set = true\n WHERE username LIKE :'user_prefix' \|\| '%';/,
+    'the credential UPDATE must be prefix-scoped to synthetic usernames (WHERE bound to the statement)',
   )
   assert.match(remote, /SOAK_USER_PREFIX="synth-w4w7-"/, 'the closed synthetic user family prefix must be pinned')
   assert.ok(slices.seed.includes("'attendance:write'"), 'seed must grant attendance:write (punch route is withPermission-gated)')
@@ -1128,6 +1197,88 @@ test('MUTATION (identity-gate): swapping the remint delete order (users before d
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /dependents before the users rows/,
+  )
+})
+
+test('MUTATION (gate C9): unscoping the remint retired_prefix to "%" turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const scoped = '-v retired_prefix="${SOAK_USER_PREFIX}%"'
+  assert.ok(original.includes(scoped), 'mutation anchor must hit the scoped retired_prefix flag')
+  const mutated = original.replace(scoped, '-v retired_prefix="%"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /closed family prefix \+ trailing %/,
+  )
+})
+
+test('MUTATION (gate C2ʹ): weakening the canonical-bucket guard to a non-empty test turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const guard = '[[ "$retired_calc" == "0" ]]'
+  assert.ok(original.includes(guard), 'mutation anchor must hit the exact-zero guard')
+  const mutated = original.replace(guard, '[[ -n "$retired_calc" ]]')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /compare the count to exact zero/,
+  )
+})
+
+test('MUTATION (gate C3): dropping the remint user_orgs delete turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const line = "DELETE FROM user_orgs WHERE user_id LIKE :'retired_prefix';\n"
+  assert.ok(original.includes(line), 'mutation anchor must hit the user_orgs delete')
+  const mutated = original.replace(line, '')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /exactly these seven tables/,
+  )
+})
+
+test('MUTATION (gate C6): stripping BEGIN/COMMIT from the remint SQL turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const remintAnchor = "log \"soak-seed: reminting ${retired}"
+  assert.ok(original.includes(remintAnchor), 'mutation anchor must hit the remint block')
+  const heredocStart = original.indexOf('cat > "$remint_sql"')
+  const heredocEnd = original.indexOf('< "$remint_sql"')
+  assert.ok(heredocStart !== -1 && heredocEnd > heredocStart, 'remint heredoc bounds must resolve')
+  const heredoc = original.slice(heredocStart, heredocEnd)
+  const mutatedHeredoc = heredoc.replace('\nBEGIN;\n', '\n').replace('\nCOMMIT;\n', '\n')
+  assert.notEqual(mutatedHeredoc, heredoc, 'mutation must change the heredoc')
+  const mutated = original.slice(0, heredocStart) + mutatedHeredoc + original.slice(heredocEnd)
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /open and commit a transaction/,
+  )
+})
+
+test('MUTATION (gate C12): deleting the credential UPDATEʼs WHERE turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const where = "\n WHERE username LIKE :'user_prefix' || '%';"
+  assert.ok(original.includes(where), 'mutation anchor must hit the credential-UPDATE WHERE')
+  const mutated = original.replace(where, ';')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /prefix-scoped to synthetic usernames|sanctioned username\/email forms/,
+  )
+})
+
+test('MUTATION (exact-set): a rogue prefix-composed user_id projection in the seed SQL turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  // Continuation-line dodge from the #4931 gate: a bare composed value on its own line,
+  // no SELECT/.username on the line — the retired negative regex never saw it.
+  const anchor = "INSERT INTO user_orgs (user_id, org_id, is_active)\nSELECT u.id, :'org', true\n"
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the user_orgs insert head')
+  const mutated = original.replace(
+    anchor,
+    "INSERT INTO user_orgs (user_id, org_id, is_active)\nSELECT\n  :'user_prefix' || lpad(i::text, 2, '0'), :'org', true\n",
+  )
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /sanctioned username\/email forms/,
   )
 })
 

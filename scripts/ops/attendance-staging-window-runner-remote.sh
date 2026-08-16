@@ -1766,6 +1766,10 @@ action_soak_seed() {
   # rows so the username-keyed reseed below can re-mint the same closed family. Scope is
   # provably the retired shape ONLY: current-family ids are UUIDs and can never match the
   # family prefix. Dependency order, one transaction; a fresh host is a no-op.
+  # attendance_events rows keyed to retired ids are DELIBERATELY left in place: no FK or
+  # unique index binds them, no soak/preflight/P95 query reads events by user_id, and
+  # deleting them would add another census-tracked business-table writer for zero
+  # behavioural benefit (#4931 gate, disclosed inert orphans).
   local retired retired_calc
   retired="$(soak_psql_ta "SELECT count(*) FROM users WHERE id LIKE '${SOAK_USER_PREFIX}%';")"
   if [[ "$retired" != "0" ]]; then
