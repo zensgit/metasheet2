@@ -669,6 +669,34 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     )
   })
 
+  it('POSITIVE CONTROL: an `allowsHourOption` exception site that drifts to an unaudited shape (hour12:true) reds — the exception permits only the audited hour12:false or the prescribed hourCycle:\'h23\' fix, never arbitrary drift', () => {
+    // Distinct from the generic "DISPLAY site gains an hour: option" control below: THIS site
+    // already has `hour:` and is already classified `allowsHourOption: true` (mirroring the
+    // real CARD_TIME_FORMATTER entry), so the generic branch never runs for it — the
+    // exception-shape check inside the `allowsHourOption` branch is its ONLY door. `hour12:
+    // true` is neither the audited `hour12: false` shape nor the prescribed `hourCycle: 'h23'`
+    // fix, so it must red.
+    const probe = 'packages/core-backend/src/integrations/dingtalk/probe-exception-drift.ts'
+    withDecoyTree(
+      {
+        [probe]: "const PROBE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', hour12: true })\n",
+      },
+      (decoyRoot) => {
+        const site: KnownSite = {
+          file: probe,
+          lineText: "const PROBE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', hour12: true })",
+          kind: 'display',
+          allowsHourOption: true,
+        }
+        const violations = computeViolations([site], findCandidateSites([probe], decoyRoot))
+        expect(violations.length).toBe(1)
+        expect(violations[0]).toContain(probe)
+        expect(violations[0]).toContain('re-audit')
+        expect(violations[0]).toContain(ISSUE)
+      },
+    )
+  })
+
   it('POSITIVE CONTROL: a planted hour12:false PARSING site reds the leg, naming the file, the fix, and the issue', () => {
     const probe = 'packages/core-backend/src/attendance/probe-hour12-parsing.ts'
     withDecoyTree(
@@ -687,6 +715,36 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
         const violations = computeViolations([site], findCandidateSites([probe], decoyRoot))
         expect(violations.length).toBe(1)
         expect(violations[0]).toContain(probe)
+        expect(violations[0]).toContain("hourCycle: 'h23'")
+        expect(violations[0]).toContain(ISSUE)
+      },
+    )
+  })
+
+  it('POSITIVE CONTROL: a planted PARSING site carrying BOTH hour12:false AND hourCycle:\'h23\' still reds, and by the hour12-specific message — this shape is hazardous per spec (hour12 takes precedence, so hourCycle alongside it is a silent no-op) and the `hasHour12` branch is its SOLE door: `hasCorrectHourCycle` is true for this shape, so the adjacent `!hasCorrectHourCycle` branch never fires for it', () => {
+    const probe = 'packages/core-backend/src/attendance/probe-hour12-with-hourcycle-parsing.ts'
+    withDecoyTree(
+      {
+        [probe]:
+          "const fmt = new Intl.DateTimeFormat('en-US', { hour12: false, hourCycle: 'h23', hour: '2-digit' })\n" +
+          'const parts = fmt.formatToParts(new Date())\n' +
+          "const hour = Number(parts.find((p) => p.type === 'hour')?.value)\n",
+      },
+      (decoyRoot) => {
+        const site: KnownSite = {
+          file: probe,
+          lineText:
+            "const fmt = new Intl.DateTimeFormat('en-US', { hour12: false, hourCycle: 'h23', hour: '2-digit' })",
+          kind: 'parsing',
+        }
+        const violations = computeViolations([site], findCandidateSites([probe], decoyRoot))
+        expect(violations.length).toBe(1)
+        expect(violations[0]).toContain(probe)
+        // Discriminates from the adjacent branch's message: with `hasCorrectHourCycle` true for
+        // this shape, a neutered `hasHour12` produces ZERO violations here (not a fallback
+        // message on the other branch) — so this assertion set, unlike the plain
+        // hour12:false-no-hourCycle control above, cannot be satisfied by any other door.
+        expect(violations[0]).toContain('uses hour12')
         expect(violations[0]).toContain("hourCycle: 'h23'")
         expect(violations[0]).toContain(ISSUE)
       },
