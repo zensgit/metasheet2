@@ -52,6 +52,27 @@ export const ATTENDANCE_W4_SHADOW_DIFF_CODES_V1 = Object.freeze([
 ] as const)
 export type AttendanceW4ShadowDiffCodeV1 = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES_V1)[number]
 
+/**
+ * W7-2 (#4556, design-lock §4.2): the CRITICAL shadow-diff classes — exactly
+ * the "work-date/context/input/review classes" §4.2's `group_eligible` entry
+ * criterion names ("zero critical diffs").
+ *
+ * This is the ONE set. It was previously a module-private duplicate inside
+ * `AttendanceW4CalculationDetail.ts` (`CRITICAL_SHADOW_DIFF_CODES`); that
+ * consumer now derives its set from THIS export, so the criticality
+ * classification cannot fork between the W4 backlog reader and the W7
+ * compare-window counters. Every member must be a member of
+ * `ATTENDANCE_W4_SHADOW_DIFF_CODES_V1` (asserted by test, and by the
+ * `AttendanceW4ShadowDiffCodeV1` element type at compile time).
+ */
+export const ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1: readonly AttendanceW4ShadowDiffCodeV1[] =
+  Object.freeze([
+    'work_date_mismatch',
+    'context_mismatch',
+    'input_mismatch',
+    'review_required',
+  ] as const)
+
 const DAILY_STATUSES = Object.freeze([
   'normal',
   'late',

@@ -776,7 +776,17 @@ async function countIncompleteOperations(
  * unadjudicated in that case; this predicate is not the sole gate on record-level
  * adjudication, only on the specific legacy-ingress review this bullet names.
  */
-async function countUnresolvedIngressReviews(
+/**
+ * W7-2 (#4556): exported (previously module-private) so the W7 compare-window
+ * status command (`w7-compare-window-status.ts`, predicate
+ * `W7_UNRESOLVED_INGRESS_REVIEW`) REUSES this exact predicate rather than
+ * re-deriving it — the brief's "reuse `countUnresolvedIngressReviews`" clause.
+ * NOTE the `FOR UPDATE`: callers own the transaction; a caller that wants a
+ * point-in-time read without holding the row locks runs it in its own
+ * short-lived transaction and rolls back (same contract as
+ * `readAttendanceRequestSnapshotDefectReportV1` above).
+ */
+export async function countUnresolvedIngressReviews(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
 ): Promise<number> {
@@ -1049,6 +1059,41 @@ export async function readAttendanceRequestSnapshotDefectReportV1(
   orgId: string,
 ): Promise<AttendanceRequestSnapshotDefectReportV1> {
   return classifyAttendanceRequestSnapshotDefectsV1(connection, orgId)
+}
+
+/**
+ * W7-3 (#4556) reuse seams. Thin named exports of the two private predicate
+ * counters above, added so the W7 context-source transition boundary
+ * (`w7-context-source-transition.ts`) can REUSE them instead of re-deriving a
+ * second, narrower definition of "incomplete operation" / "unresolved ingress
+ * review" — two definitions of the same predicate can drift, and the narrower
+ * copy is the shape this repo treats as a contract change rather than a reuse.
+ *
+ * Deliberately wrappers rather than an `export` keyword moved onto the
+ * originals: this mirrors `readAttendanceRequestSnapshotDefectReportV1`
+ * immediately above, which is the same file's existing idiom for publishing a
+ * private classifier without changing the private function's own call sites or
+ * name. Behaviour is unchanged for every existing caller — these add a second
+ * entry point to the identical function, nothing more.
+ *
+ * NOTE FOR CALLERS: both take `FOR UPDATE` row locks (on
+ * `attendance_import_jobs` and `attendance_records` respectively). They are not
+ * side-effect-free reads and belong inside the caller's own transaction, taken
+ * in that order — see the W7 boundary's lock-order census.
+ */
+export async function countIncompleteOperationsV1(
+  connection: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  return countIncompleteOperations(connection, orgId)
+}
+
+/** See `countIncompleteOperationsV1` — same reuse-seam rationale. */
+export async function countUnresolvedIngressReviewsV1(
+  connection: AttendanceW4TransactionClientV1,
+  orgId: string,
+): Promise<number> {
+  return countUnresolvedIngressReviews(connection, orgId)
 }
 
 // ---------------------------------------------------------------------------

@@ -138,6 +138,13 @@ export const ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1 = Object.fre
   REVERSAL_RESTORES_MISMATCH: 'ATTENDANCE_W4_AUTH_CALC_REVERSAL_RESTORES_MISMATCH',
   REVERSAL_EFFECT_INVALID: 'ATTENDANCE_W4_AUTH_CALC_REVERSAL_EFFECT_INVALID',
   PREIMAGE_INVALID: 'ATTENDANCE_W4_AUTH_CALC_PREIMAGE_INVALID',
+  // W7-2 gate P2-1 (announced widening of this closed set): the replay lookup
+  // now guards the one-row invariant its four siblings already guard
+  // (`DATABASE_RESULT_INVALID` in each of w4c3c-recompute /
+  // w4c3c-manual-edit-apply / w4c3c-ops-retirement /
+  // w4c3b-approved-leave-cancellation). Deterministic for the target, so the
+  // scheduled path's containment treats it like every other member.
+  REPLAY_LOOKUP_AMBIGUOUS: 'ATTENDANCE_W4_AUTH_CALC_REPLAY_LOOKUP_AMBIGUOUS',
 } as const)
 
 export type AttendanceW4AuthoritativeCalculationErrorCodeV1 =
@@ -614,6 +621,15 @@ async function retryReplayLookup(
     [input.orgId, input.entrypoint, input.operationId],
   )
   if (existing.rows.length === 0) return null
+  // W7-2 gate P2-1: this lookup CONSUMES the global at-most-one-row invariant
+  // `uq_arc_operation` enforces over operation-bearing rows (the W7
+  // comparison record carries `operation_id NULL` + a provenance marker, so
+  // it can never match `operation_id = $3` — structurally outside this
+  // result set). Its four siblings guard the invariant anyway; guarded here
+  // for parity rather than left correct-by-accident.
+  if (existing.rows.length > 1) {
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.REPLAY_LOOKUP_AMBIGUOUS, 500)
+  }
   const existingRow = existing.rows[0]
   if (String(existingRow.record_id) !== input.recordId) {
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.REPLAY_CONFLICT, 409)

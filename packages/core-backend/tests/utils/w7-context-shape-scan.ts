@@ -261,9 +261,12 @@ export const W7_CONTEXT_SHAPE_LEDGER_V1: readonly W7ContextShapeLedgerEntryV1[] 
   },
   {
     file: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts',
-    text: 'if (!isSupportedFrozenAttendanceContextV1(row.context_snapshot)) unsupported()',
+    text: 'const routed = routeFrozenAttendanceContextV1(row.context_snapshot)',
     family: 'validator_call', verdict: 'MUST_WIDEN',
-    note: 'X6 — the admin READ API; un-widened it hard-fails for EVERY persisted group row',
+    note: 'X6 — the admin READ API; un-widened it hard-fails for EVERY persisted group row. '
+      + 'W7-4 (read-side labeling) rewrote the boolean gate into the DISCRIMINATED router call: '
+      + 'acceptance is unchanged (the boolean IS `router !== invalid`), and the routed branches '
+      + 'type `context.selector` for the trace-provenance threading',
   },
   {
     file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts',
