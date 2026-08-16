@@ -331,25 +331,6 @@ const KNOWN_SITES: KnownSite[] = [
     lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
     kind: 'display',
   },
-  {
-    // attendance-w4w7-soak-load-generator.mjs `zonedDateTimeToUtcIso()` (#4556 soak pair
-    // ladder) — formatToParts with hour/minute/second Number-consumed straight into
-    // Date.UTC(...): EXACTLY the h24-midnight hazard shape (this util constructs the
-    // 00:00:00 check_in instants). Carries explicit `hourCycle: 'h23'` AND the defensive
-    // 24->0 fold, mirroring the #4911 fix pair.
-    file: 'scripts/ops/attendance-w4w7-soak-load-generator.mjs',
-    lineText: "const fmt = new Intl.DateTimeFormat('en-CA', {",
-    kind: 'parsing',
-  },
-  {
-    // attendance-w4w7-soak-load-generator.mjs entry validation (#4556 soak pair ladder) —
-    // ladderTimezone IANA-validity probe: construction-only inside try/catch, formatter
-    // discarded; same idiom and classification as the loadConfig() probe above.
-    file: 'scripts/ops/attendance-w4w7-soak-load-generator.mjs',
-    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: ladderTimezone })",
-    kind: 'display',
-  },
-
   // ---------------------------------------------------------------------------------
   // Sites found only once the domain/pattern widened to close the coverage gaps an
   // independent gate review identified: `.vue` files inside the existing domain
@@ -658,7 +639,7 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(candidates.length).toBe(KNOWN_SITES.length)
     // 22 = the original 20 (#4927) + the 2 display-class sites in the combined-soak load
     // generator (#4556 soak, PR #4929): its tz-validity probe and its en-CA date-key idiom.
-    expect(KNOWN_SITES.length).toBe(24)
+    expect(KNOWN_SITES.length).toBe(22)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

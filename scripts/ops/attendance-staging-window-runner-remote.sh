@@ -2002,14 +2002,15 @@ action_soak_flags() {
 action_soak_run() {
   soak_validate_opts
   local punch_target config_path
-  # Default 200 = the generator's own ruled C1 target (§2A.3), NOT the 240/day capacity:
-  # dailyCounts increments on every ATTEMPT while stopConditionsMet needs totalClean>=target,
-  # so setting the target AT capacity leaves zero headroom and a single documented first-punch
-  # PUNCH_TOO_SOON collision makes targets_met unreachable (the run then idles to the stall
-  # timeout). 200 against a 240 one-day capacity leaves 40 clean slots of headroom.
-  punch_target="$(soak_opt punch_target 200)"
-  [[ "$punch_target" =~ ^[1-9][0-9]{0,3}$ ]] \
-    || fail "punch_target must be 1..9999, got '${punch_target}'"
+  # Default `auto` = this run's ONE-DAY BATCH: with the 2/user/day cap (one in/out pair per
+  # user per wall-clock day — same-day session packing floods §4.2-critical review_required
+  # diffs, soak-status 31962440160, and backdating is rejected by the route's global-latest
+  # ordering, #4932 gate P1-1), a soak-run invocation is one daily batch. The runbook's
+  # CUMULATIVE §2A.3 criteria (200 total / 20 per org / 50 per arm) are judged from
+  # soak-status DB counts across days, never from one run's tally.
+  punch_target="$(soak_opt punch_target auto)"
+  [[ "$punch_target" == "auto" || "$punch_target" =~ ^[1-9][0-9]{0,3}$ ]] \
+    || fail "punch_target must be 1..9999 or 'auto' (one-day batch), got '${punch_target}'"
   config_path="$(soak_opt config "$SOAK_HOST_CONFIG_FILE")"
   [[ -f "$config_path" ]] || fail "soak config not found at ${config_path} — action=soak-seed writes it (or pass soak_opts config=<host-path>)"
   # Order enforcement: the flags must be LIVE on the serving backend before load.
@@ -2030,21 +2031,21 @@ action_soak_run() {
   orgs_csv="$(python3 -c 'import json,sys; print(",".join(e["orgId"] for e in json.load(open(sys.argv[1]))["entries"]))' "$config_path")" \
     || fail "could not parse soak config ${config_path}"
   both_csv="$(python3 -c 'import json,sys; print(",".join(e["orgId"] for e in json.load(open(sys.argv[1]))["entries"] if e["posture"] == "both_machines_group_arm"))' "$config_path")"
-  # DAY-CAPACITY CEILING (P3-2/P3-3): a single soak-run invocation is one bounded pass inside
-  # the 40-minute job. The generator's per-user daily cap (8 punches/user/day) means the most
-  # CLEAN punches one invocation can produce is total_users * 8; a target above that can never
-  # reach targets_met and would only idle to the stall timeout. That ceiling is also what keeps
-  # the run inside the job window (at the >=60s per-user spacing + <=1 req/s ceiling, one day's
-  # capacity for a default 30-user config is ~8 min of active load, not the old 2000-cap ~67 min).
+  # DAY-CAPACITY (P3-2/P3-3, revised for the 2/user/day pair cadence): one soak-run
+  # invocation is one daily batch — the most CLEAN punches it can produce is total_users * 2
+  # (one in/out pair per user per wall-clock day). punch_target=auto resolves to exactly that
+  # batch; an explicit target above it can never reach targets_met and would only idle to the
+  # stall timeout. Well inside the 40-minute job at <=1 req/s + >=60s per-user spacing.
   total_users="$(python3 -c 'import json,sys; print(sum(len(e["userIds"]) for e in json.load(open(sys.argv[1]))["entries"]))' "$config_path")"
   [[ "$total_users" =~ ^[1-9][0-9]*$ ]] || fail "could not derive the synthetic user count from ${config_path}"
-  day_capacity=$(( total_users * 8 ))
-  # Past ~60 users the GLOBAL <=1 req/sec ceiling binds instead of the per-user spacing, so a
-  # large-config capacity (e.g. 99x3x8=2376) would overrun the 40-minute job. 1800 = 30 min of
-  # active load at 1/s, leaving margin for logins/docker cp/artifact scp inside the timeout.
+  day_capacity=$(( total_users * 2 ))
+  # Past ~30x3 users the GLOBAL <=1 req/sec ceiling binds instead of the per-user spacing;
+  # 1800 = 30 min of active load at 1/s, leaving job-window margin for logins/docker cp/scp.
   (( day_capacity > 1800 )) && day_capacity=1800
+  [[ "$punch_target" == "auto" ]] && punch_target="$day_capacity"
   [[ "$punch_target" -le "$day_capacity" ]] \
-    || fail "punch_target=${punch_target} exceeds this config's one-day clean-punch capacity (${total_users} users x 8/user/day = ${day_capacity}); a larger target can never reach targets_met in one invocation and would only idle to the stall timeout. Lower punch_target, raise users_per_org at seed time, or run multiple soak-run invocations across days"
+    || fail "punch_target=${punch_target} exceeds this config's one-day clean-punch capacity (${total_users} users x 2/user/day = ${day_capacity}); the pair cadence makes cumulative criteria a multi-day affair — raise users_per_org at seed time or run daily batches"
+
   local IFS_SAVE="$IFS"
   IFS=','
   for org in $orgs_csv; do
@@ -2056,26 +2057,6 @@ action_soak_run() {
       || fail "both-machines config org ${org} is NOT in the live W7 allowlist ('${live_w7}')"
   done
   IFS="$IFS_SAVE"
-
-  # Pair-ladder anchors (identity of each run's backdated work-date window). The generator's
-  # retired always-server-clock cadence packed every pair into ONE work date, which collided
-  # with the W4 calculator's ambiguity semantics (duplicate_check_in / ambiguous_segment_match
-  # -> review_required, a §4.2 CRITICAL diff class): soak-status 31962440160 counted 50+80
-  # critical rows from cadence alone, so that fixture could NEVER meet the ratified
-  # zero-critical criterion. The ladder gives each (user, work_date) exactly ONE in/out pair:
-  # anchor = day before the family's earliest already-punched work_date (DB is the cursor —
-  # no host state file), or yesterday in the org's group timezone on a fresh family.
-  soak_resolve_pg
-  local ladder_specs="" cfg_org anchor tzv
-  while IFS= read -r cfg_org; do
-    [[ -n "$cfg_org" ]] || continue
-    tzv="$(soak_psql_ta "SELECT g.timezone FROM attendance_groups g WHERE g.org_id = '${cfg_org}' AND g.name LIKE 'w4w7-soak%' LIMIT 1;")"
-    [[ -n "$tzv" ]] || fail "org ${cfg_org:0:8} has no w4w7-soak group — cannot derive the ladder timezone (run action=soak-seed first)"
-    anchor="$(soak_psql_ta "SELECT to_char(COALESCE((SELECT min(r.work_date) FROM attendance_records r WHERE r.org_id = '${cfg_org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%')) - 1, (now() AT TIME ZONE '${tzv}')::date - 1), 'YYYY-MM-DD');")"
-    [[ "$anchor" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "ladder anchor derivation returned '${anchor}' for org ${cfg_org:0:8} — refusing"
-    ladder_specs+="${cfg_org}=${anchor}=${tzv};"
-    log "soak-run: org ${cfg_org:0:8} pair-ladder anchor ${anchor} (tz ${tzv})"
-  done < <(python3 -c 'import json,sys; [print(e["orgId"]) for e in json.load(open(sys.argv[1]))["entries"]]' "$config_path")
 
   # Log every synthetic user in through the REAL login route; tokens go ONLY into a 0600
   # host temp config (deleted below) and are never echoed (per-user output is id + ok/fail).
@@ -2089,17 +2070,11 @@ action_soak_run() {
   trap cleanup_soak_run EXIT
   local -a login_pipe_status
   set +e
-  SOAK_SYNTH_PASSWORD="$SOAK_SYNTH_PASSWORD" SOAK_LADDER_SPECS="$ladder_specs" python3 - "$config_path" "$run_config_host" <<'PY' 2>&1 | tee "${OUTPUT_DIR}/soak-run-login.log"
+  SOAK_SYNTH_PASSWORD="$SOAK_SYNTH_PASSWORD" python3 - "$config_path" "$run_config_host" <<'PY' 2>&1 | tee "${OUTPUT_DIR}/soak-run-login.log"
 import json, os, sys, urllib.request
 config_path, out_path = sys.argv[1], sys.argv[2]
 cfg = json.load(open(config_path))
 password = os.environ["SOAK_SYNTH_PASSWORD"]
-ladder = {}
-for spec in os.environ.get("SOAK_LADDER_SPECS", "").split(";"):
-    if not spec:
-        continue
-    org, anchor, tz = spec.split("=", 2)
-    ladder[org] = (anchor, tz)
 base = "http://127.0.0.1:8082"
 failures = 0
 for entry in cfg["entries"]:
@@ -2123,13 +2098,6 @@ for entry in cfg["entries"]:
             print(f"[soak-run] login FAILED: {user_id} ({getattr(err, 'code', type(err).__name__)})")
             failures += 1
     entry["tokenOrCreds"] = creds
-    if entry["orgId"] not in ladder:
-        print(f"[soak-run] ladder anchor MISSING for org {entry['orgId']}")
-        failures += 1
-    else:
-        anchor, tz = ladder[entry["orgId"]]
-        entry["ladderAnchorDate"] = anchor
-        entry["ladderTimezone"] = tz
 fd = os.open(out_path, os.O_WRONLY | os.O_TRUNC | os.O_CREAT, 0o600)
 with os.fdopen(fd, "w") as f:
     json.dump(cfg, f)
@@ -2156,7 +2124,7 @@ PY
     --base-url "$IN_CONTAINER_BASE_URL" \
     --target-total "$punch_target" \
     --rate-limit-per-sec 1 \
-    --punches-per-user-per-day 8 \
+    --punches-per-user-per-day 2 \
     --stall-timeout-minutes 15 \
     --tally-interval 10 \
     --output "${CONTAINER_RUNNER_DIR}/soak-run-summary.json" \
@@ -2193,7 +2161,7 @@ PY
     echo "halted_reason=${halted}"
     echo "http_level_clean=${total_clean}"
     echo "attempts=${total_attempts}"
-    echo "note=haltedReason is LOAD-BEARING: only targets_met means this invocation reached its targets; the HTTP tally upper-bounds (never equals) the DB-level clean-punch count — soak-status Q1-Q4 are the authoritative counts"
+    echo "note=haltedReason is LOAD-BEARING: targets_met (this batch met its targets) and daily_capacity_exhausted (every user completed its one daily pair; cumulative criteria accrue across days) are the clean outcomes; the HTTP tally upper-bounds (never equals) the DB-level clean-punch count — soak-status Q1-Q4 are the authoritative counts"
     echo "result=$([[ "$halted" == "max_consecutive_incidents" ]] && echo FAIL || echo ok)"
   } > "${OUTPUT_DIR}/summary.txt"
   if [[ "$halted" == "max_consecutive_incidents" ]]; then

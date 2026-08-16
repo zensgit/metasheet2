@@ -322,14 +322,16 @@ function buildOptions(argv) {
     confirmToken: readOpt(args, 'confirm', 'SOAK_CONFIRM', ''),
     confirmOrgIds: readOpt(args, 'confirm-org-ids', 'SOAK_CONFIRM_ORG_IDS', ''),
     rateLimitPerSec: readNumberOpt(args, 'rate-limit-per-sec', 'SOAK_RATE_LIMIT_PER_SEC', 1),
-    // Default 8, per the runbook's ruled parameter row (§2A.7 recommended row, in effect per
-    // §2A.9's default+veto record): 10 users/org x 3 orgs x 8 punches/user/day = 240/day, which
-    // clears the ruled count criteria (N>=200 total, >=20/org, >=50/arm) inside one soak day.
-    // Under the PAIR LADDER this caps punches per WALL-CLOCK day (rate hygiene): the 8 punches
-    // land as 4 in/out pairs on 4 DISTINCT backdated work dates, one pair per date — never as
-    // 4 same-date sessions (the retired cadence's shape, which floods §4.2-critical
-    // review_required diffs; see the entry validation).
-    punchesPerUserPerDay: readNumberOpt(args, 'punches-per-user-per-day', 'SOAK_PUNCHES_PER_USER_PER_DAY', 8),
+    // Default 2 = ONE check_in/check_out pair per user per wall-clock day. This REVISES the
+    // §2A.7 recommended row's 8/day (a documented, owner-vetoable deviation per §2A.9): the
+    // soak itself proved 8/day structurally violates the ratified zero-critical criterion —
+    // 4 same-day sessions on one full-day segment are flagged duplicate/ambiguous by the W4
+    // calculator (review_required, a §4.2 CRITICAL class; soak-status 31962440160 counted
+    // 50+80 critical rows from cadence alone). Backdated multi-date acceleration was built
+    // and retired unmerged (#4932 gate P1-1: enforcePunchConstraints' global-latest ordering
+    // 429s every backdated check_out). The honest accelerator is users_per_org at seed time,
+    // never same-day session packing.
+    punchesPerUserPerDay: readNumberOpt(args, 'punches-per-user-per-day', 'SOAK_PUNCHES_PER_USER_PER_DAY', 2),
     targetTotal: readNumberOpt(args, 'target-total', 'SOAK_TARGET_TOTAL', 200), // §2A.3 C1
     targetPerOrg: readNumberOpt(args, 'target-per-org', 'SOAK_TARGET_PER_ORG', 20), // §2A.3 C2
     targetPerArm: readNumberOpt(args, 'target-per-arm', 'SOAK_TARGET_PER_ARM', 50), // §2A.3 C4
@@ -346,9 +348,6 @@ function buildOptions(argv) {
       path.join(SCRIPT_DIR, `soak-load-generator-summary-${nowStampForFilename()}.json`)
     ),
     maxAttemptsSafetyMultiplier: readNumberOpt(args, 'max-attempts-multiplier', 'SOAK_MAX_ATTEMPTS_MULTIPLIER', 5),
-    // Pair-ladder depth ceiling: bounds how many distinct backdated work dates one run may
-    // descend below each entry's anchor (see the entry validation for why the ladder exists).
-    ladderMaxDepthDays: readNumberOpt(args, 'ladder-max-depth-days', 'SOAK_LADDER_MAX_DEPTH_DAYS', 60),
   }
 
   if (opts.rateLimitPerSec <= 0 || opts.rateLimitPerSec > 1) {
@@ -363,10 +362,6 @@ function buildOptions(argv) {
   if (opts.targetPerOrg <= 0) throw new ConfigError('--target-per-org must be > 0')
   if (opts.punchesPerUserPerDay <= 0) throw new ConfigError('--punches-per-user-per-day must be > 0')
   if (opts.minSecondsBetweenPunchesPerUser < 0) throw new ConfigError('--min-seconds-between-punches-per-user must be >= 0')
-  if (!Number.isInteger(opts.ladderMaxDepthDays) || opts.ladderMaxDepthDays <= 0 || opts.ladderMaxDepthDays > 366) {
-    throw new ConfigError('--ladder-max-depth-days must be an integer in [1, 366]')
-  }
-
   return opts
 }
 
@@ -400,17 +395,13 @@ Common options (env var fallback in parentheses):
   --output <path>                     Final JSON summary path. (SOAK_OUTPUT_FILE)
   --help                              This message.
 
-  --ladder-max-depth-days <n>         Pair-ladder depth ceiling per entry. Default 60. (SOAK_LADDER_MAX_DEPTH_DAYS)
-
-Note: every punch sends an explicit BACKDATED occurredAt (the PAIR LADDER): pair j for a user
-targets work date ladderAnchorDate - j, check_in at 00:00:00 and check_out at 23:59:00 wall
-time in ladderTimezone — one pair per (user, work date), which is why a healthy run's whole
-shadow-diff surface is 'equal'. The retired always-server-clock cadence packed every pair
-into ONE work date; the W4 calculator flags that as duplicate/ambiguous (review_required — a
-§4.2 CRITICAL diff class), so that fixture could never meet the ratified zero-critical
-criterion (soak-status 31962440160). Only PAST dates are ever sent (validated at config
-load), so the route's future-punch guard is never approached; anchors are injected per entry
-by action=soak-run from the DB (day before the family's earliest punched work date).
+Note: occurredAt is never sent — every punch uses the server's own clock, and the default
+daily cap of 2 gives each user exactly ONE in/out pair per wall-clock day. Same-day session
+packing (the old 8/day row) floods §4.2-critical review_required diffs (soak-status
+31962440160), and backdating was built and retired unmerged (#4932 gate P1-1:
+enforcePunchConstraints' global-latest ordering 429s every backdated check_out). Reaching
+the runbook's cumulative count criteria is therefore a MULTI-DAY affair by design; the
+honest accelerator is users_per_org at seed time.
 
 This script defaults to DRY RUN. See the file header "SAFETY / NO-DESTRUCTIVE-OPS DISCIPLINE"
 for the three conditions required to send real traffic, and 【OWNER】 markers throughout.
@@ -542,36 +533,6 @@ async function loadConfig(opts) {
       }
     }
 
-    // PAIR-LADDER contract (both fields REQUIRED — the retired always-server-clock cadence
-    // is not selectable): each (user, work_date) gets exactly one check_in/check_out pair,
-    // pair j targeting ladderAnchorDate - j. Injected per entry by the runner's soak-run
-    // (anchor = day before the family's earliest punched work_date, from the DB); a config
-    // without them fails closed here rather than silently reverting to the retired cadence.
-    if (typeof rawEntry.ladderAnchorDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(rawEntry.ladderAnchorDate)) {
-      throw new ConfigError(
-        `${where}.ladderAnchorDate must be a YYYY-MM-DD date — the retired server-clock cadence `
-        + 'packs every pair into one work date and floods §4.2-critical review_required diffs '
-        + '(soak-status 31962440160); action=soak-run injects the anchor from the DB.'
-      )
-    }
-    if (typeof rawEntry.ladderTimezone !== 'string' || !rawEntry.ladderTimezone.trim()) {
-      throw new ConfigError(`${where}.ladderTimezone must name the org's group IANA timezone (soak-run injects it).`)
-    }
-    const ladderTimezone = rawEntry.ladderTimezone.trim()
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: ladderTimezone })
-    } catch {
-      throw new ConfigError(`${where}.ladderTimezone ${JSON.stringify(ladderTimezone)} is not a recognized IANA timezone.`)
-    }
-    const todayInLadderTz = workDateInTimezone(new Date(), ladderTimezone)
-    if (rawEntry.ladderAnchorDate >= todayInLadderTz) {
-      throw new ConfigError(
-        `${where}.ladderAnchorDate ${rawEntry.ladderAnchorDate} is not strictly before today (${todayInLadderTz} `
-        + `in ${ladderTimezone}) — only PAST work dates are punched (future/today would race the server clock `
-        + "and the route's future-punch guard)."
-      )
-    }
-
     const minCleanPunches = Number.isFinite(rawEntry.minCleanPunches) && rawEntry.minCleanPunches > 0
       ? rawEntry.minCleanPunches
       : opts.targetPerOrg
@@ -600,8 +561,6 @@ async function loadConfig(opts) {
       minCleanPunches,
       userIds,
       tokenOrCreds,
-      ladderAnchorDate: rawEntry.ladderAnchorDate,
-      ladderTimezone,
     }
   })
 
@@ -673,44 +632,6 @@ function workDateInTimezone(date, timezone) {
   return `${map.year}-${map.month}-${map.day}`
 }
 
-/** date-only arithmetic on YYYY-MM-DD strings (UTC-anchored — no zone involved). */
-function minusDaysDateOnly(dateStr, days) {
-  const base = new Date(`${dateStr}T00:00:00Z`)
-  base.setUTCDate(base.getUTCDate() - days)
-  return base.toISOString().slice(0, 10)
-}
-
-/**
- * The UTC instant of wall time `HH:MM:SS` on `YYYY-MM-DD` in `timezone`, as an ISO string.
- * Two-pass offset derivation with `hourCycle: 'h23'` + a defensive 24->0 fold — the
- * repo-wide h24-midnight lesson (#4922): older ICU resolves `hour12: false` to the h24
- * cycle, formats midnight as hour '24', and a naive Date.UTC(...) then overflows a day
- * forward, which for THIS tool would land every 00:00 check_in on the wrong work date.
- * Exact for fixed-offset zones (the soak's Asia/Shanghai); a DST-fold wall time would
- * resolve to one of its two instants, which is fine for fixture purposes.
- */
-function zonedDateTimeToUtcIso(dateStr, timeStr, timezone) {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone, hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
-  const wallAsUtc = Date.parse(`${dateStr}T${timeStr}.000Z`)
-  const partsAt = (ms) => {
-    const map = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((p) => [p.type, p.value]))
-    let hour = Number(map.hour)
-    if (hour === 24) hour = 0
-    return Date.UTC(Number(map.year), Number(map.month) - 1, Number(map.day), hour, Number(map.minute), Number(map.second))
-  }
-  // First pass: the zone's UTC offset observed at `wallAsUtc`; second pass re-derives the
-  // offset AT the candidate instant (handles offset transitions near the target wall time).
-  let offset = partsAt(wallAsUtc) - wallAsUtc
-  let candidate = wallAsUtc - offset
-  offset = partsAt(candidate) - candidate
-  candidate = wallAsUtc - offset
-  return new Date(candidate).toISOString()
-}
-
 // -----------------------------------------------------------------------------------------
 // HTTP punch call
 // -----------------------------------------------------------------------------------------
@@ -756,21 +677,20 @@ function classifyResponse(status, bodyText) {
   }
 }
 
-async function sendPunchWithRetry({ baseUrl, entry, userId, token, eventType, operationId, occurredAt, opts, throttle }) {
+async function sendPunchWithRetry({ baseUrl, entry, userId, token, eventType, operationId, opts, throttle }) {
   const body = {
     eventType,
     operationId, // idempotency key — same value reused across the retries below
     source: opts.sourceTagResolved,
     // meta intentionally omitted (null) — see "meta IS NOT AN INERT BAG" in the file header.
     orgId: entry.orgId, // always explicit — never rely on the token's own org claim (getOrgId precedence)
-    // PAIR-LADDER (retired-cadence replacement): an explicit BACKDATED business instant.
-    // The retired always-server-clock cadence packed every pair into one work date, which
-    // the W4 calculator flags as duplicate/ambiguous (review_required — a §4.2 CRITICAL
-    // class), so that fixture could never meet the ratified zero-critical criterion
-    // (soak-status 31962440160: 50+80 critical rows from cadence alone). Each pair now
-    // targets its own past work date; only PAST dates are ever sent (validated at config
-    // load), so the route's future-punch guard is never approached.
-    occurredAt,
+    // occurredAt intentionally omitted — server clock always. Backdating was BUILT and then
+    // RETIRED unmerged: enforcePunchConstraints compares each punch against the user's
+    // GLOBALLY LATEST event (ORDER BY occurred_at DESC LIMIT 1, index.cjs ~22465), so any
+    // check_out below an already-recorded later same-type event 429s (PUNCH_TOO_SOON) —
+    // the #4932 gate reproduced a descending backdate ladder jamming on exactly that from
+    // rung 1 onward. Same-day pacing is governed by punchesPerUserPerDay (default 2 = one
+    // in/out pair per user per wall-day) instead.
   }
   if (opts.timezoneToSend) {
     // Only sent when the config file explicitly declared a timezone — see the file header's
@@ -844,8 +764,7 @@ function buildUserPool(config) {
         token: entry.tokenOrCreds[userId],
         lastPunchAt: 0,
         lastEventType: null, // null => first punch is check_in
-        dailyCounts: new Map(), // workDate(tz) -> count (WALL-CLOCK day — rate hygiene, not ladder targeting)
-        pairCursor: 0, // pair j targets entry.ladderAnchorDate - j; advances on a CLEAN check_out
+        dailyCounts: new Map(), // workDate(tz) -> count
       })
     }
   }
@@ -863,9 +782,6 @@ function userEligible(userState, opts, nowMs, timezone) {
   const today = workDateInTimezone(new Date(nowMs), timezone)
   const countToday = userState.dailyCounts.get(today) || 0
   if (countToday >= opts.punchesPerUserPerDay) return false
-  // Ladder depth bound: never descend more than ladderMaxDepthDays behind the anchor —
-  // a runaway (or mis-targeted) run must stall out rather than backfill months of records.
-  if (userState.pairCursor >= opts.ladderMaxDepthDays) return false
   return true
 }
 
@@ -985,17 +901,6 @@ function assessFeasibility(config, opts) {
   }))
   const slowestOrgDays = Math.max(totalDaysNeeded, ...perOrgDays.map((o) => o.daysNeeded))
 
-  // Ladder-depth reachability: each user contributes at most 2 punches per backdated work
-  // date, so the depth ceiling bounds this run's total capacity outright.
-  const ladderCapacity = totalUsers * opts.ladderMaxDepthDays * 2
-  if (opts.targetTotal > ladderCapacity) {
-    throw new ConfigError(
-      `targetTotal=${opts.targetTotal} exceeds the pair-ladder capacity ${ladderCapacity} `
-      + `(${totalUsers} users x ladderMaxDepthDays=${opts.ladderMaxDepthDays} x 2 punches/date) — `
-      + 'raise --ladder-max-depth-days, add users, or lower the target.'
-    )
-  }
-
   const lines = [
     `[feasibility] ${totalUsers} total users x ${opts.punchesPerUserPerDay}/day = `
     + `${totalDailyCapacity} punches/day best-case capacity`,
@@ -1063,27 +968,25 @@ async function runScheduler({ config, opts, willExecute }) {
       break
     }
     if (!picked) {
-      // Nobody eligible right now (daily caps or per-user spacing cooldown, or — see
-      // assessFeasibility — a legitimate wait for the next calendar day to reset daily caps).
-      // Bounded by the stall-timeout check above, which does NOT false-fire on this: it only
-      // fires after opts.stallTimeoutMinutes of ZERO attempts, deliberately set longer than
-      // one calendar-day daily-cap reset.
+      // DAILY-BATCH clean halt: when every user is either day-capped or belongs to an org
+      // whose targets are already met, nothing more can happen until the next wall-clock
+      // day — end THIS invocation cleanly instead of idling to the stall timeout. The
+      // runbook's cumulative count criteria accrue across daily batches (DB-side
+      // soak-status judgments), so this is a success outcome, not a shortfall.
+      const todayKey = workDateInTimezone(new Date(), config.timezone)
+      const allCapped = pool.every((u) =>
+        !orgNeedsMorePunches(tally, u.entry, opts)
+        || (u.dailyCounts.get(todayKey) || 0) >= opts.punchesPerUserPerDay)
+      if (allCapped) { haltedReason = 'daily_capacity_exhausted'; break }
+      // Otherwise somebody is only cooldown-ineligible (per-user spacing) — wait briefly.
+      // Bounded by the stall-timeout check above (fires only after stallTimeoutMinutes of
+      // ZERO attempts).
       await sleep(1000)
       continue
     }
 
     const eventType = nextEventType(picked)
     const operationId = randomUUID()
-    // Pair j targets work date anchor - j. check_in lands exactly ON the segment start
-    // (00:00:00 wall) and check_out at the segment end (23:59:00 wall): with the seeded
-    // full-day shift both machines compute zero late/early minutes, so a healthy run's
-    // whole diff surface is 'equal' — any non-equal row is signal, never fixture noise.
-    const ladderDate = minusDaysDateOnly(picked.entry.ladderAnchorDate, picked.pairCursor)
-    const occurredAt = zonedDateTimeToUtcIso(
-      ladderDate,
-      eventType === 'check_in' ? '00:00:00' : '23:59:00',
-      picked.entry.ladderTimezone,
-    )
 
     let result
     if (willExecute) {
@@ -1097,7 +1000,6 @@ async function runScheduler({ config, opts, willExecute }) {
         token: picked.token,
         eventType,
         operationId,
-        occurredAt,
         opts,
         throttle,
       })
@@ -1118,10 +1020,6 @@ async function runScheduler({ config, opts, willExecute }) {
 
     if (result.category === 'clean') {
       consecutiveIncidents = 0
-      // A CLEAN check_out completes this user's pair for `ladderDate`; the next pair
-      // descends one day. A failed check_out leaves the cursor put, so the SAME date is
-      // retried (a permanently half-punched date would surface as its own diff signal).
-      if (eventType === 'check_out') picked.pairCursor += 1
     } else {
       consecutiveIncidents++
       incidentLog.push({

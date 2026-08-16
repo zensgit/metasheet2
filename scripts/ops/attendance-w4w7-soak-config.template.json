@@ -13,9 +13,7 @@
         "synth-w4w7-<org1first8>-u01",
         "synth-w4w7-<org1first8>-u02"
       ],
-      "tokenOrCreds": {},
-      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
-      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
+      "tokenOrCreds": {}
     },
     {
       "orgId": "<org2-lowercase-uuid w4-only>",
@@ -25,9 +23,7 @@
         "synth-w4w7-<org2first8>-u01",
         "synth-w4w7-<org2first8>-u02"
       ],
-      "tokenOrCreds": {},
-      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
-      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
+      "tokenOrCreds": {}
     },
     {
       "orgId": "<org3-lowercase-uuid both-machines>",
@@ -37,10 +33,8 @@
         "synth-w4w7-<org3first8>-u01",
         "synth-w4w7-<org3first8>-u02"
       ],
-      "tokenOrCreds": {},
-      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
-      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
+      "tokenOrCreds": {}
     }
   ],
-  "$ladder_note": "PAIR LADDER: action=soak-run injects ladderAnchorDate (YYYY-MM-DD, strictly before today) and ladderTimezone (the org group's IANA timezone) into every entry from the DB (anchor = day before the family's earliest punched work_date). The generator fails closed without them — the retired always-server-clock cadence packed every pair into one work date, flooding §4.2-critical review_required diffs (soak-status 31962440160). Pair j for a user targets anchor-j: check_in 00:00:00, check_out 23:59:00 wall time; a healthy run's whole shadow-diff surface is 'equal'."
+  "$cadence_note": "CADENCE: the generator default is 2 punches/user/wall-day = exactly ONE check_in/check_out pair per user per day (server clock; occurredAt never sent). Same-day session packing (the old 8/day row) floods §4.2-critical review_required diffs (soak-status 31962440160), and backdated acceleration is rejected by the route's global-latest punch ordering (#4932 gate P1-1) — the honest accelerator is users_per_org at seed time; the runbook's cumulative count criteria accrue across daily soak-run batches (DB-side soak-status judgments)."
 }

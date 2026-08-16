@@ -9,12 +9,12 @@
  *  BOTH machines compute the same values and the next calc row is `equal`. Leg A pins the
  *  full lifecycle: v1 = late_minutes_mismatch (delta = the real late minutes), v2 = equal.
  *
- *  Family B — the PAIR-LADDER fixture contract: one check_in at the segment start
- *  (00:00:00 wall) + one check_out at the segment end (23:59:00 wall) on a BACKDATED work
- *  date produces `equal` on EVERY calc row and a legacy `normal` day — which is why the
- *  soak load generator's healthy diff surface is all-equal and any non-equal row is signal.
- *  (The generator's retired server-clock cadence packed pairs into one work date and
- *  flooded §4.2-critical review_required diffs; see the generator header.)
+ *  Family B — the SINGLE-DAILY-PAIR contract (the soak generator's 2/user/day cadence):
+ *  exactly one check_in + one check_out on a work date — here at the segment boundaries
+ *  (00:00:00 / 23:59:00 wall), the zero-anomaly ideal — produces `equal` on every calc row
+ *  and a legacy `normal` day. One pair per (user, work date) is the load shape whose
+ *  healthy diff surface is all-equal; extra same-day sessions are what flooded
+ *  §4.2-critical review_required diffs (soak-status 31962440160; see the generator header).
  *
  * Shared-DB discipline: every fixture id is a file-namespaced random UUID.
  */
@@ -69,7 +69,7 @@ function requestJson(
   })
 }
 
-describeDb('#4556 soak shadow-diff families — transient partial-day mismatch + pair-ladder all-equal (org2 shape)', () => {
+describeDb('#4556 soak shadow-diff families — transient partial-day mismatch + single-daily-pair all-equal (org2 shape)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
   let baseUrl = ''
@@ -78,7 +78,7 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
 
   const org = randomUUID()
   const userA = randomUUID() // Family A — transient partial-day lifecycle
-  const userB = randomUUID() // Family B — pair-ladder all-equal contract
+  const userB = randomUUID() // Family B — single-daily-pair all-equal contract
   const shift = randomUUID()
   const group = randomUUID()
   const TZ = 'Asia/Shanghai'
@@ -229,7 +229,9 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
         Authorization: `Bearer ${await mintToken(userId)}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ orgId: org, eventType, timezone: TZ, operationId: randomUUID(), occurredAt }),
+      // timezone deliberately OMITTED from the body — mirrors the soak generator (sent only
+      // when config-explicit); the org rule's own timezone governs work-date attribution.
+      body: JSON.stringify({ orgId: org, eventType, operationId: randomUUID(), occurredAt }),
     })
 
   const calcsFor = async (userId: string) =>
@@ -268,7 +270,7 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
     expect(rec.rows[0].late_minutes).toBe(90)
   })
 
-  it('Family B: a pair-ladder pair (00:00:00 in, 23:59:00 out, backdated) is equal on every calc row and a normal legacy day', async () => {
+  it('Family B: a single daily pair (00:00:00 in, 23:59:00 out) is equal on every calc row and a normal legacy day', async () => {
     // 2026-08-11T16:00:00Z == 2026-08-12 00:00:00 +08; 2026-08-12T15:59:00Z == 23:59:00 +08.
     const rIn = await punch(userB, 'check_in', '2026-08-11T16:00:00.000Z')
     const rOut = await punch(userB, 'check_out', '2026-08-12T15:59:00.000Z')
