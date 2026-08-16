@@ -1313,6 +1313,28 @@ export function adminDirectoryRouter(): Router {
     return null
   }
 
+  function readDeprovisionEventLimit(value: unknown): number | null {
+    if (value === undefined) return 50
+    if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return null
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed <= 200 ? parsed : null
+  }
+
+  function readCompatibilityRestoreMode(
+    value: unknown,
+  ): 'rehire' | 'admin_force' | null {
+    if (value === undefined) return 'rehire'
+    if (typeof value !== 'string') return null
+    const mode = value.trim()
+    return mode === 'rehire' || mode === 'admin_force' ? mode : null
+  }
+
+  function validateDeprovisionEventId(req: Request, res: Response): boolean {
+    if (UUID_SHAPE_RE.test(req.params.eventId)) return true
+    jsonError(res, 400, 'DEPROVISION_EVENT_ID_INVALID', 'eventId must be a UUID')
+    return false
+  }
+
   async function listDeprovisionEventsForRequest(
     req: Request,
     res: Response,
@@ -1330,30 +1352,81 @@ export function adminDirectoryRouter(): Router {
       )
       return
     }
+    const queryIntegrationId = req.query.integrationId
+    if (
+      queryIntegrationId !== undefined
+      && (
+        typeof queryIntegrationId !== 'string'
+        || !UUID_SHAPE_RE.test(queryIntegrationId)
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_INVALID',
+        'integrationId must be a UUID',
+      )
+      return
+    }
+    if (
+      integrationId !== undefined
+      && queryIntegrationId !== undefined
+      && queryIntegrationId !== integrationId
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_MISMATCH',
+        'integrationId query must match the route integrationId',
+      )
+      return
+    }
+    const rawIntegrationId = integrationId ?? queryIntegrationId
+    if (
+      rawIntegrationId !== undefined
+      && (
+        typeof rawIntegrationId !== 'string'
+        || !UUID_SHAPE_RE.test(rawIntegrationId)
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_INVALID',
+        'integrationId must be a UUID',
+      )
+      return
+    }
+    const requestedIntegrationId = typeof rawIntegrationId === 'string'
+      ? rawIntegrationId
+      : undefined
+    const limit = readDeprovisionEventLimit(req.query.limit)
+    if (limit === null) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_EVENT_LIMIT_INVALID',
+        'limit must be an integer between 1 and 200',
+      )
+      return
+    }
     try {
       const items = await listDeprovisionEvents({
-        integrationId:
-          integrationId
-          ?? (typeof req.query.integrationId === 'string'
-            ? req.query.integrationId
-            : undefined),
+        integrationId: requestedIntegrationId,
         localUserId:
           typeof req.query.userId === 'string'
             ? req.query.userId
             : undefined,
-        limit:
-          typeof req.query.limit === 'string'
-            ? Number(req.query.limit)
-            : 50,
+        limit,
         status,
       })
       jsonOk(res, { items, flags: readDeprovisionRuntimeFlags() })
-    } catch (error) {
+    } catch {
       jsonError(
         res,
         500,
         'DEPROVISION_EVENTS_FAILED',
-        readErrorMessage(error, 'List events failed'),
+        'List events failed',
       )
     }
   }
@@ -1365,6 +1438,23 @@ export function adminDirectoryRouter(): Router {
   ): Promise<void> {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    const requestedMode = req.body?.mode
+    if (
+      requestedMode !== undefined
+      && (
+        typeof requestedMode !== 'string'
+        || requestedMode.trim() !== mode
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'RESTORE_MODE_INVALID',
+        `mode must match the ${mode} route`,
+      )
+      return
+    }
+    if (!validateDeprovisionEventId(req, res)) return
     try {
       const result = await restoreDeprovisionEvent({
         eventId: req.params.eventId,
@@ -1391,10 +1481,9 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, result)
     } catch (error) {
-      const code =
-        (error as { code?: string })?.code
-        || 'DEPROVISION_RESTORE_FAILED'
-      const status =
+      const errorCode = (error as { code?: unknown })?.code
+      const code = typeof errorCode === 'string' ? errorCode : ''
+      const knownStatus =
         code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND'
           ? 404
           : code === 'DRIFT_CONFLICT'
@@ -1406,12 +1495,34 @@ export function adminDirectoryRouter(): Router {
             : code === 'FORCE_CONFIRM_REQUIRED'
                 || code === 'FORCE_NOTE_REQUIRED'
               ? 400
-              : 500
+              : null
       jsonError(
         res,
-        status,
-        code,
-        (error as Error)?.message || 'Restore failed',
+        knownStatus ?? 500,
+        knownStatus === null ? 'DEPROVISION_RESTORE_FAILED' : code,
+        knownStatus === null
+          ? 'Restore failed'
+          : (error as Error)?.message || 'Restore failed',
+      )
+    }
+  }
+
+  async function listDeprovisionEffectsForRequest(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!validateDeprovisionEventId(req, res)) return
+    try {
+      const items = await listDeprovisionEffects(req.params.eventId)
+      jsonOk(res, { items })
+    } catch {
+      jsonError(
+        res,
+        500,
+        'DEPROVISION_EFFECTS_FAILED',
+        'List effects failed',
       )
     }
   }
@@ -1501,6 +1612,15 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 400, 'INTEGRATION_ID_REQUIRED', 'integrationId is required')
         return
       }
+      if (!UUID_SHAPE_RE.test(integrationId)) {
+        jsonError(
+          res,
+          400,
+          'DEPROVISION_INTEGRATION_ID_INVALID',
+          'integrationId must be a UUID',
+        )
+        return
+      }
       const data = await previewDeprovisionForUser(req.params.userId, integrationId)
       jsonOk(res, data)
     } catch (error) {
@@ -1509,7 +1629,7 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 404, code, (error as Error).message)
         return
       }
-      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', readErrorMessage(error, 'Preview failed'))
+      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', 'Preview failed')
     }
   })
 
@@ -1531,36 +1651,17 @@ export function adminDirectoryRouter(): Router {
   router.get(
     '/deprovision-events/:eventId/effects',
     async (req: Request, res: Response) => {
-      const adminUserId = await ensurePlatformAdmin(req, res)
-      if (!adminUserId) return
-      try {
-        const items = await listDeprovisionEffects(req.params.eventId)
-        jsonOk(res, { items })
-      } catch (error) {
-        jsonError(
-          res,
-          500,
-          'DEPROVISION_EFFECTS_FAILED',
-          readErrorMessage(error, 'List effects failed'),
-        )
-      }
+      await listDeprovisionEffectsForRequest(req, res)
     },
   )
 
   router.get('/deprovision/events/:eventId/effects', async (req: Request, res: Response) => {
-    const adminUserId = await ensurePlatformAdmin(req, res)
-    if (!adminUserId) return
-    try {
-      const items = await listDeprovisionEffects(req.params.eventId)
-      jsonOk(res, { items })
-    } catch (error) {
-      jsonError(res, 500, 'DEPROVISION_EFFECTS_FAILED', readErrorMessage(error, 'List effects failed'))
-    }
+    await listDeprovisionEffectsForRequest(req, res)
   })
 
   router.post('/deprovision/events/:eventId/restore', async (req: Request, res: Response) => {
-    const mode = String(req.body?.mode ?? 'rehire').trim()
-    if (mode !== 'rehire' && mode !== 'admin_force') {
+    const mode = readCompatibilityRestoreMode(req.body?.mode)
+    if (mode === null) {
       const adminUserId = await ensurePlatformAdmin(req, res)
       if (!adminUserId) return
       jsonError(

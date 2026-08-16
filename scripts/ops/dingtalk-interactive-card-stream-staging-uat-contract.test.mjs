@@ -2,11 +2,11 @@
 // dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
 //
 // Durable synthetic contract for the MINIMAL controlled Stream staging UAT lane:
-//   EXECUTABLE: status | prepare | on | off
+//   EXECUTABLE: status | observe | prepare | on | off | https-on | https-off
 //
 // Load-bearing rails:
 //   * workflow wiring (dispatch choices, SSH, concurrency, no schedule)
-//   * exact-SHA gate for prepare/on/off
+//   * exact-SHA gate for every non-status action
 //   * secret demotion + chmod-600 file transport (prepare only)
 //   * prepare forces Stream OFF while writing four credential/id keys
 //   * on flips only Stream flag true after LOG_LEVEL + prerequisite checks
@@ -117,14 +117,14 @@ test('workflow YAML parses with repository-available parser', () => {
 
 // --- workflow wiring ------------------------------------------------------------------
 
-test('workflow action choices are status/prepare/on/off with status default', () => {
+test('workflow action choices include observer and reversible HTTPS gateway actions', () => {
   const doc = loadYaml(read(WORKFLOW))
   const inputs = workflowOn(doc).workflow_dispatch.inputs
-  assert.deepEqual(inputs.action.options, ['status', 'prepare', 'on', 'off'])
+  assert.deepEqual(inputs.action.options, ['status', 'observe', 'prepare', 'on', 'off', 'https-on', 'https-off'])
   assert.equal(inputs.action.default, 'status')
   // Quote on/off so YAML 1.1 keeps strings (loadYaml may coerce bare on/off).
   const yaml = read(WORKFLOW)
-  assert.match(yaml, /options:\s*\[status,\s*prepare,\s*'on',\s*'off'\]/)
+  assert.match(yaml, /options:\s*\[status,\s*observe,\s*prepare,\s*'on',\s*'off',\s*https-on,\s*https-off\]/)
   assert.ok(
     inputs.action.options.every((o) => typeof o === 'string'),
     'on/off must remain strings after parse',
@@ -196,12 +196,12 @@ test('contract suite is wired into the required Node 20 plugin-tests lane', () =
 
 // --- exact-SHA gate -------------------------------------------------------------------
 
-test('workflow exact-SHA gate requires full 40-char deploy_sha for prepare/on/off', () => {
+test('workflow exact-SHA gate requires full 40-char deploy_sha for every non-status action', () => {
   const yaml = read(WORKFLOW)
   const doc = loadYaml(yaml)
   const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
   assert.equal(validate.env.DEPLOY_SHA, '${{ inputs.deploy_sha }}')
-  assert.match(validate.run, /ACTION" == "prepare" \|\| "\$ACTION" == "on" \|\| "\$ACTION" == "off"/)
+  assert.match(validate.run, /"\$ACTION" != "status"/)
   assert.match(
     validate.run,
     /deploy_sha must be the FULL 40-char lowercase commit SHA for action=\$\{ACTION\}/,
@@ -214,18 +214,269 @@ test('workflow exact-SHA gate requires full 40-char deploy_sha for prepare/on/of
   )
 })
 
-test('remote script require_exact_deployed_sha used by prepare/on/off and not status-only path', () => {
+test('observe exclusively requires a lowercase expected delivery UUID and never emits it', () => {
+  const yaml = read(WORKFLOW)
+  const doc = loadYaml(yaml)
+  const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
+  assert.equal(validate.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
+  assert.match(validate.run, /observe requires expected_delivery_id as a lowercase UUID/)
+  assert.match(validate.run, /expected_delivery_id is accepted only for action=observe/)
+  assert.match(validate.run, /\[1-5\]\[0-9a-f\]\{3\}/)
+  const remoteStep = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
+  assert.equal(remoteStep.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
+  assert.match(remoteStep.run, /refusing invalid expected_delivery_id in remote execution step/)
+  assert.match(remoteStep.run, /refusing expected_delivery_id outside action=observe/)
+  assert.match(remoteStep.run, /case "\$ACTION" in status\|observe\|prepare\|on\|off\|https-on\|https-off/)
+  assert.match(remoteStep.run, /refusing invalid deploy_sha in remote execution step/)
+  assert.match(remoteStep.run, /refusing invalid optional deploy_sha in remote execution step/)
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  assert.match(observe, /grep -F -c "\$EXPECTED_DELIVERY_ID"/)
+  assert.doesNotMatch(observe, /echo .*EXPECTED_DELIVERY_ID/)
+})
+
+test('workflow and remote preflights reject cross-action delivery-id injection before SSH construction', () => {
+  const doc = loadYaml(read(WORKFLOW))
+  const steps = doc.jobs.run.steps
+  const validate = steps.find((s) => s.name === 'Validate inputs and embedded scripts')
+  const remoteStep = steps.find((s) => s.name === 'Run remote action')
+  const remotePreflightEnd = remoteStep.run.indexOf('for pair in')
+  assert.ok(remotePreflightEnd > 0, 'remote preflight must precede path validation and SSH construction')
+  const remotePreflight = `${remoteStep.run.slice(0, remotePreflightEnd)}\nexit 0\n`
+  const sha = 'a'.repeat(40)
+  const deliveryId = '12345678-1234-4123-8123-123456789abc'
+
+  const runValidate = (action, deploySha, expectedDeliveryId) => spawnSync(
+    'bash',
+    ['-c', validate.run],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: action,
+        DEPLOY_SHA: deploySha,
+        EXPECTED_DELIVERY_ID: expectedDeliveryId,
+      },
+    },
+  )
+  const runRemotePreflight = (action, deploySha, expectedDeliveryId) => spawnSync(
+    'bash',
+    ['-c', remotePreflight],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: action,
+        DEPLOY_SHA: deploySha,
+        EXPECTED_DELIVERY_ID: expectedDeliveryId,
+        STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID: '',
+        STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET: '',
+        STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID: '',
+      },
+    },
+  )
+
+  for (const action of ['status', 'observe', 'prepare', 'on', 'off', 'https-on', 'https-off']) {
+    const deploySha = action === 'status' ? '' : sha
+    const expectedDeliveryId = action === 'observe' ? deliveryId : ''
+    assert.equal(runValidate(action, deploySha, expectedDeliveryId).status, 0, `validate ${action}`)
+    assert.equal(runRemotePreflight(action, deploySha, expectedDeliveryId).status, 0, `remote ${action}`)
+  }
+
+  for (const unsafe of [deliveryId, "'; touch /tmp/stream-uat-injection; #"]) {
+    assert.equal(runValidate('status', '', unsafe).status, 2)
+    assert.equal(runRemotePreflight('status', '', unsafe).status, 2)
+  }
+  assert.equal(runValidate('observe', sha, '').status, 2)
+  assert.equal(runRemotePreflight('observe', sha, '').status, 2)
+  assert.equal(runValidate('observe', sha, "'; touch /tmp/stream-uat-injection; #").status, 2)
+  assert.equal(runRemotePreflight('observe', sha, "'; touch /tmp/stream-uat-injection; #").status, 2)
+  assert.equal(runValidate('status', "'; touch /tmp/stream-uat-injection; #", '').status, 2)
+  assert.equal(runRemotePreflight('status', "'; touch /tmp/stream-uat-injection; #", '').status, 2)
+  assert.equal(runRemotePreflight('https-on', 'not-a-sha', '').status, 2)
+})
+
+test('remote script require_exact_deployed_sha used by every non-status action and not status', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /require_exact_deployed_sha/)
   assert.match(source, /resolve_deployed_sha/)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
   const prepare = actionBody(source, 'action_prepare', ['action_on'])
   const on = actionBody(source, 'action_on', ['action_off'])
-  const off = actionBody(source, 'action_off')
-  const status = actionBody(source, 'action_status', ['action_prepare'])
+  const off = actionBody(source, 'action_off', ['action_https_on'])
+  const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
+  const httpsOff = actionBody(source, 'action_https_off')
+  const status = actionBody(source, 'action_status', ['action_observe'])
+  assert.match(observe, /require_exact_deployed_sha "observe"/)
   assert.match(prepare, /require_exact_deployed_sha/)
   assert.match(on, /require_exact_deployed_sha/)
   assert.match(off, /require_exact_deployed_sha/)
+  assert.match(httpsOn, /require_exact_deployed_sha/)
+  assert.match(httpsOff, /require_exact_deployed_sha/)
   assert.doesNotMatch(status, /require_exact_deployed_sha/)
+})
+
+test('observe is read-only and emits values-free callback classes without raw logs or ids', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  assert.match(observe, /action=observe/)
+  assert.match(observe, /require_lifecycle_flags_off "observe"/)
+  assert.match(observe, /require_log_level_info_or_debug "observe"/)
+  assert.match(observe, /header_event_corp_id_present=/)
+  assert.match(observe, /body_corp_id_present=/)
+  assert.match(observe, /latest_callback_outcome=/)
+  assert.match(observe, /window_callback_handler_error_count=/)
+  assert.match(observe, /card_update_failed_count=/)
+  for (const outcome of [
+    'ignored_unsupported_action',
+    'delivery_not_found',
+    'executed',
+    'stale',
+    'operator_unresolved',
+    'link_secret_unavailable',
+    'engine_rejected',
+    'wrapper_not_found',
+  ]) {
+    assert.match(observe, new RegExp(`handled_outcome="${outcome}"`))
+  }
+  // A parse-time rejection has no delivery id and cannot be claimed as scoped
+  // evidence for EXPECTED_DELIVERY_ID. The two out_track_id outcomes above do.
+  assert.doesNotMatch(observe, /handled_outcome="rejected"/)
+  assert.doesNotMatch(observe, /handled_outcome="(?:accepted|duplicate)"/)
+  assert.doesNotMatch(observe, /echo "callback_handler_error_count=/)
+  assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
+  assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
+})
+
+test('observe dynamically scopes Winston log evidence to the expected delivery', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-'))
+  const output = join(dir, 'output')
+  const logs = join(dir, 'backend.log')
+  const harness = join(dir, 'harness.sh')
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const other = '87654321-4321-4123-8123-cba987654321'
+  try {
+    writeFileSync(
+      logs,
+      [
+        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${other}","headerEventCorpIdPresent":false,"bodyCorpIdPresent":true}`,
+        `info: DingTalk interactive-card callback handled (stale delivery=${other})`,
+        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`,
+        `info: DingTalk interactive-card callback handled (operator_unresolved:missing_link delivery=${expected})`,
+        `info: DingTalk interactive-card callback handled (executed delivery=${expected})`,
+        'warn: DingTalk interactive-card callback failed (callback_handler_error)',
+        `warn: DingTalk approval-card terminal update failed (card_update_failed:Error) delivery=${expected}`,
+      ].join('\n') + '\n',
+    )
+    writeFileSync(
+      harness,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'log() { :; }',
+        'fail() { echo "$*" >&2; exit 1; }',
+        'assert_staging_only() { :; }',
+        'require_exact_deployed_sha() { :; }',
+        'require_lifecycle_flags_off() { :; }',
+        'require_log_level_info_or_debug() { :; }',
+        'register_ephemeral() { :; }',
+        'read_flag_from_container() { printf true; }',
+        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
+        'BACKEND_CONTAINER=metasheet-staging-backend',
+        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+        observe,
+        'action_observe',
+      ].join('\n'),
+    )
+    const result = spawnSync('bash', [harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        EXPECTED_DELIVERY_ID: expected,
+        LOG_FIXTURE: logs,
+        OUTPUT_DIR: output,
+        STREAM_UAT_PERSIST_DIR: dir,
+      },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
+    assert.match(artifact, /callback_anchor_log_count=1/)
+    assert.match(artifact, /header_event_corp_id_present=true/)
+    assert.match(artifact, /body_corp_id_present=false/)
+    assert.match(artifact, /callback_handled_count=2/)
+    assert.match(artifact, /latest_callback_outcome=executed/)
+    assert.match(artifact, /window_callback_handler_error_count=1/)
+    assert.match(artifact, /card_update_failed_count=1/)
+    assert.doesNotMatch(artifact, new RegExp(`${expected}|${other}`))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('observe precisely classifies scoped out_track_id terminal outcomes', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-out-track-'))
+  const output = join(dir, 'output')
+  const logs = join(dir, 'backend.log')
+  const harness = join(dir, 'harness.sh')
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  try {
+    writeFileSync(
+      harness,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'log() { :; }',
+        'fail() { echo "$*" >&2; exit 1; }',
+        'assert_staging_only() { :; }',
+        'require_exact_deployed_sha() { :; }',
+        'require_lifecycle_flags_off() { :; }',
+        'require_log_level_info_or_debug() { :; }',
+        'register_ephemeral() { :; }',
+        'read_flag_from_container() { printf true; }',
+        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
+        'BACKEND_CONTAINER=metasheet-staging-backend',
+        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+        observe,
+        'action_observe',
+      ].join('\n'),
+    )
+    for (const [line, expectedOutcome] of [
+      [
+        `info: DingTalk interactive-card callback handled (ignored_unsupported_action out_track_id=${expected})`,
+        'ignored_unsupported_action',
+      ],
+      [
+        `info: DingTalk interactive-card callback handled (delivery_not_found out_track_id=${expected})`,
+        'delivery_not_found',
+      ],
+    ]) {
+      writeFileSync(logs, `${line}\n`)
+      const result = spawnSync('bash', [harness], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          EXPECTED_DELIVERY_ID: expected,
+          LOG_FIXTURE: logs,
+          OUTPUT_DIR: output,
+          STREAM_UAT_PERSIST_DIR: dir,
+        },
+      })
+      assert.equal(result.status, 0, result.stderr)
+      const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
+      assert.match(artifact, new RegExp(`latest_callback_outcome=${expectedOutcome}`))
+      assert.doesNotMatch(artifact, new RegExp(expected))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // --- secret demotion ------------------------------------------------------------------
@@ -677,7 +928,7 @@ test('action=on live STREAM_INTEGRATION_ID equals uniquely-derived anchor via fi
 
 test('remote off is fail-safe: forces Stream false, restarts, verifies worker stopped', () => {
   const source = read(REMOTE_SH)
-  const off = actionBody(source, 'action_off')
+  const off = actionBody(source, 'action_off', ['action_https_on'])
   assert.match(off, /atomic_set_stream_flag\s+"false"/)
   assert.match(off, /recreate_backend_only/)
   assert.match(off, /wait_for_worker_disabled/)
@@ -795,7 +1046,7 @@ test('workflow and remote script never echo secrets or raw credential env values
 
 test('status artifacts emit only booleans/counts/reason classes/sha schema keys', () => {
   const source = read(REMOTE_SH)
-  assert.match(source, /schema=dingtalk-interactive-card-stream-staging-uat-status-v2/)
+  assert.match(source, /schema=dingtalk-interactive-card-stream-staging-uat-status-v3/)
   for (const key of [
     'stream_enabled=',
     'client_id_present=',
@@ -816,6 +1067,21 @@ test('status artifacts emit only booleans/counts/reason classes/sha schema keys'
     'backend_health=',
     'deployed_sha=',
     'deployed_sha_match=',
+    'https_port_80_listener=',
+    'https_port_443_listener=',
+    'https_port_80_docker_publishers=',
+    'https_port_443_docker_publishers=',
+    'https_sudo_noninteractive=',
+    'https_host_nginx_present=',
+    'https_host_caddy_present=',
+    'https_host_certbot_present=',
+    'https_gateway_container_running=',
+    'https_gateway_health=',
+    'https_gateway_image_match=',
+    'https_env_backup_present=',
+    'https_public_url_match=',
+    'https_cors_origin_match=',
+    'https_dingtalk_redirect_match=',
   ]) {
     assert.match(source, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
@@ -833,7 +1099,7 @@ test('status artifacts emit only booleans/counts/reason classes/sha schema keys'
 
 test('status action is read-only: no env writes, no flag flips, no compose up', () => {
   const source = read(REMOTE_SH)
-  const status = actionBody(source, 'action_status', ['action_prepare'])
+  const status = actionBody(source, 'action_status', ['action_observe'])
   assert.match(status, /write_status_artifact/)
   assert.doesNotMatch(status, /atomic_upsert_env_keys_from_files/)
   assert.doesNotMatch(status, /atomic_set_stream_flag/)
@@ -841,6 +1107,300 @@ test('status action is read-only: no env writes, no flag flips, no compose up', 
   assert.doesNotMatch(status, /compose_staging_cmd up/)
   assert.doesNotMatch(status, /mv -f/)
   assert.doesNotMatch(status, />>\s*"\$STAGING_ENV_FILE"/)
+})
+
+test('status reports only bounded HTTPS gateway facts', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /probe_https_gateway_status/)
+  assert.match(source, /docker ps --format '\{\{\.Names\}\}\|\{\{\.Ports\}\}'/)
+  assert.match(source, /sudo -n true/)
+  assert.match(source, /https_port_80_docker_publishers=/)
+  assert.match(source, /https_port_443_docker_publishers=/)
+  assert.doesNotMatch(source, /docker inspect.*Env/)
+})
+
+test('https-on is pinned, exact-SHA gated, TLS-ALPN only, and rollback-armed', () => {
+  const source = read(REMOTE_SH)
+  const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
+  assert.match(source, /caddy:2\.10\.2-alpine@sha256:[0-9a-f]{64}/)
+  assert.match(source, /disable_http_challenge/)
+  assert.match(source, /auto_https disable_redirects/)
+  assert.match(source, /"\$HTTPS_GATEWAY_IMAGE" caddy validate --config \/etc\/caddy\/Caddyfile/)
+  assert.match(httpsOn, /require_exact_deployed_sha/)
+  assert.match(httpsOn, /require_lifecycle_flags_off/)
+  assert.match(httpsOn, /requires Stream OFF/)
+  assert.match(httpsOn, /probe_tcp_listener 443/)
+  assert.match(httpsOn, /getent ahostsv4 "\$HTTPS_GATEWAY_HOST"/)
+  assert.match(httpsOn, /resolved_ip.*HTTPS_GATEWAY_EXPECTED_IP/)
+  assert.match(httpsOn, /arm_https_on_fail_safe_rollback/)
+  assert.match(httpsOn, /atomic_upsert_env_keys_from_files/)
+  assert.match(httpsOn, /PUBLIC_APP_URL/)
+  assert.match(httpsOn, /CORS_ORIGIN/)
+  assert.match(httpsOn, /DINGTALK_REDIRECT_URI/)
+  assert.match(httpsOn, /recreate_backend_only/)
+  assert.match(httpsOn, /disarm_https_on_fail_safe_rollback/)
+  assert.ok(
+    httpsOn.indexOf('arm_https_on_fail_safe_rollback') < httpsOn.indexOf('docker run -d'),
+    'rollback must arm before gateway mutation',
+  )
+})
+
+test('HTTPS transitions never write the Stream flag', () => {
+  const source = read(REMOTE_SH)
+  const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
+  const httpsOff = actionBody(source, 'action_https_off')
+  assert.doesNotMatch(httpsOn, /atomic_set_stream_flag/)
+  assert.doesNotMatch(httpsOff, /atomic_set_stream_flag/)
+})
+
+test('HTTPS success requires a certificate valid for at least 24 hours', () => {
+  const source = read(REMOTE_SH)
+  const wait = actionBody(source, 'wait_for_https_gateway', ['require_https_live_env_matches'])
+  assert.match(wait, /openssl s_client .* -servername "\$HTTPS_GATEWAY_HOST"/)
+  assert.match(wait, /openssl x509 -checkend 86400 -noout/)
+})
+
+test('https-on rollback detects a completed env write and preserves the gateway when env restore fails', () => {
+  const source = read(REMOTE_SH)
+  const rollback = actionBody(source, 'https_on_fail_safe_rollback', ['arm_https_on_fail_safe_rollback'])
+  assert.match(rollback, /https_env_file_matches_gateway[\s\S]*env_match_rc=\$\?/)
+  assert.match(rollback, /HTTPS_ENV_WRITTEN.*true.*\|\|.*env_match_rc.*0/)
+  assert.match(rollback, /env_match_rc.*2[\s\S]*env_was_switched="unknown"/)
+  assert.match(rollback, /env_rc.*0.*&&.*recreate_rc.*0/)
+  assert.match(rollback, /gateway_rc=2/)
+  assert.match(rollback, /skipped_env_not_restored/)
+  assert.match(
+    rollback,
+    /if \[\[ "\$env_was_switched" == "false" \|\| \( "\$env_rc" == "0" && "\$recreate_rc" == "0" \) \]\]; then\s+remove_https_gateway_if_present \|\| gateway_rc=1\s+else[\s\S]*?gateway_rc=2/,
+  )
+})
+
+test('HTTPS env-state detection is tri-state and fails closed on unknown reads', () => {
+  const source = read(REMOTE_SH)
+  const detector = actionBody(source, 'https_env_file_matches_gateway', ['remove_https_gateway_if_present'])
+  assert.match(detector, /STAGING_ENV_FILE.*\|\| return 2/)
+  assert.match(detector, /UNKNOWN[\s\S]*return 2/)
+  assert.doesNotMatch(detector, /UNKNOWN[\s\S]*return 1/)
+})
+
+test('HTTPS env restore changes only the three URL keys and preserves intervening env changes', () => {
+  const source = read(REMOTE_SH)
+  const restore = actionBody(source, 'restore_https_env_backup', ['https_env_file_matches_gateway'])
+  assert.match(restore, /require_https_env_backup_integrity \|\| return 1/)
+  assert.match(restore, /target_keys = \("PUBLIC_APP_URL", "CORS_ORIGIN", "DINGTALK_REDIRECT_URI"\)/)
+  assert.match(restore, /read_lines\(current_path\)/)
+  assert.match(restore, /backup_values/)
+  assert.doesNotMatch(restore, /cp -p "\$HTTPS_ENV_BACKUP" "\$candidate"/)
+})
+
+test('HTTPS backup is checksum-sealed before gateway mutation and verified before restore', () => {
+  const source = read(REMOTE_SH)
+  const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
+  const httpsOff = actionBody(source, 'action_https_off')
+  assert.match(httpsOn, /write_https_env_backup_checksum \|\| fail/)
+  assert.ok(
+    httpsOn.indexOf('write_https_env_backup_checksum') < httpsOn.indexOf('docker pull'),
+    'backup must be sealed before gateway mutation',
+  )
+  assert.match(httpsOff, /require_https_env_backup_integrity \|\| fail/)
+  assert.ok(
+    httpsOff.indexOf('require_https_env_backup_integrity') <
+      httpsOff.indexOf('restore_https_env_backup'),
+    'backup integrity must be verified before restore',
+  )
+  assert.match(httpsOff, /rm -f "\$HTTPS_ENV_BACKUP" "\$HTTPS_ENV_BACKUP_SHA256"/)
+})
+
+test('HTTPS backup checksum detects tampering without printing values', () => {
+  const source = read(REMOTE_SH)
+  const writeChecksum = actionBody(source, 'write_https_env_backup_checksum', [
+    'validate_legacy_https_env_backup',
+  ])
+  const validateLegacy = actionBody(source, 'validate_legacy_https_env_backup', [
+    'require_https_env_backup_integrity',
+  ])
+  const requireIntegrity = actionBody(source, 'require_https_env_backup_integrity', [
+    'restore_https_env_backup',
+  ])
+  const dir = mkdtempSync(join(tmpdir(), 'https-env-checksum-'))
+  const backup = join(dir, 'backup.env')
+  const checksum = join(dir, 'backup.env.sha256')
+  try {
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    const harness = `
+set -euo pipefail
+HTTPS_ENV_BACKUP="$1"
+HTTPS_ENV_BACKUP_SHA256="$2"
+HTTPS_GATEWAY_ORIGIN="https://gateway.example"
+HTTPS_GATEWAY_CALLBACK="https://gateway.example/login/dingtalk/callback"
+HTTPS_ENV_BACKUP_LEGACY_SEALED=false
+RUN_STAMP=test
+register_ephemeral() { :; }
+${writeChecksum}
+${validateLegacy}
+${requireIntegrity}
+write_https_env_backup_checksum
+require_https_env_backup_integrity
+printf '\\n# tampered\\n' >>"$HTTPS_ENV_BACKUP"
+if require_https_env_backup_integrity; then
+  exit 19
+fi
+`
+    const result = spawnSync('bash', ['-c', harness, 'bash', backup, checksum], {
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr, '')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('legacy HTTPS backup adoption accepts one coherent prior URL triplet and rejects ambiguity', () => {
+  const source = read(REMOTE_SH)
+  const validator = actionBody(source, 'validate_legacy_https_env_backup', [
+    'require_https_env_backup_integrity',
+  ])
+  const match = validator.match(/<<'PY'\n([\s\S]*?)\nPY/)
+  assert.ok(match, 'legacy backup validator must be extractable')
+  const dir = mkdtempSync(join(tmpdir(), 'https-legacy-backup-'))
+  const backup = join(dir, 'backup.env')
+  const run = () =>
+    spawnSync(
+      'python3',
+      [
+        '-c',
+        match[1],
+        backup,
+        'https://gateway.example',
+        'https://gateway.example/login/dingtalk/callback',
+      ],
+      { encoding: 'utf8' },
+    )
+  try {
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.equal(run().status, 0)
+
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'PUBLIC_APP_URL=http://other.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'duplicate URL keys must be rejected')
+
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=https://gateway.example',
+        'CORS_ORIGIN=https://gateway.example',
+        'DINGTALK_REDIRECT_URI=https://gateway.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'already-gateway snapshot must be rejected')
+
+    writeFileSync(
+      backup,
+      ['PUBLIC_APP_URL=http://old.example', 'CORS_ORIGIN=http://old.example'].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'truncated snapshot must be rejected')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('HTTPS restore helper dynamically restores only URL keys and removes backup-missing keys', () => {
+  const source = read(REMOTE_SH)
+  const restore = actionBody(source, 'restore_https_env_backup', ['https_env_file_matches_gateway'])
+  const match = restore.match(/cat >"\$py_script" <<'PY'\n([\s\S]*?)\nPY/)
+  assert.ok(match, 'embedded targeted restore script must be extractable')
+
+  const dir = mkdtempSync(join(tmpdir(), 'https-env-restore-'))
+  const current = join(dir, 'current.env')
+  const backup = join(dir, 'backup.env')
+  const candidate = join(dir, 'candidate.env')
+  try {
+    writeFileSync(
+      current,
+      [
+        'PUBLIC_APP_URL=https://gateway.example',
+        'CORS_ORIGIN=https://gateway.example',
+        'DINGTALK_REDIRECT_URI=https://gateway.example/login/dingtalk/callback',
+        'DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=true',
+        'ROTATED_CREDENTIAL=new-marker',
+      ].join('\n') + '\n',
+    )
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=false',
+        'ROTATED_CREDENTIAL=old-marker',
+      ].join('\n') + '\n',
+    )
+    const result = spawnSync('python3', ['-c', match[1], current, backup, candidate], {
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const restored = read(candidate)
+    assert.match(restored, /^PUBLIC_APP_URL=http:\/\/old\.example$/m)
+    assert.match(restored, /^CORS_ORIGIN=http:\/\/old\.example$/m)
+    assert.doesNotMatch(restored, /^DINGTALK_REDIRECT_URI=/m)
+    assert.match(restored, /^DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=true$/m)
+    assert.match(restored, /^ROTATED_CREDENTIAL=new-marker$/m)
+    assert.doesNotMatch(restored, /old-marker/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('https-off verifies restored live env and fails closed until the gateway is absent', () => {
+  const source = read(REMOTE_SH)
+  const httpsOff = actionBody(source, 'action_https_off')
+  assert.match(httpsOff, /restore_https_env_backup/)
+  assert.match(httpsOff, /recreate_backend_only/)
+  assert.match(httpsOff, /require_https_live_env_matches_backup/)
+  assert.match(httpsOff, /require_lifecycle_flags_off/)
+  assert.match(httpsOff, /requires Stream OFF/)
+  assert.match(httpsOff, /HTTPS env backup integrity check failed/)
+  assert.match(httpsOff, /remove_https_gateway_if_present \|\| fail/)
+  assert.match(httpsOff, /rm -f "\$HTTPS_ENV_BACKUP" "\$HTTPS_ENV_BACKUP_SHA256"/)
+  assert.doesNotMatch(httpsOff, /docker rm -f[\s\S]*\|\| true/)
+  assert.ok(
+    httpsOff.indexOf('restore_https_env_backup') < httpsOff.indexOf('remove_https_gateway_if_present'),
+    'env/backend restore must precede gateway removal',
+  )
+  assert.ok(
+    httpsOff.indexOf('remove_https_gateway_if_present') < httpsOff.indexOf('write_status_artifact'),
+    'status success must follow verified gateway removal',
+  )
+})
+
+test('gateway removal helper treats absence as success but verifies a present container is gone', () => {
+  const source = read(REMOTE_SH)
+  const remove = actionBody(source, 'remove_https_gateway_if_present', ['https_on_fail_safe_rollback'])
+  assert.match(remove, /if ! docker inspect/)
+  assert.match(remove, /docker rm -f .* \|\| return 1/)
+  assert.match(remove, /! docker inspect/)
 })
 
 // --- lifecycle isolation --------------------------------------------------------------
