@@ -87,6 +87,16 @@ const P16_EXACT_ALLOWLIST = new Set([
   // INSERT added to this script would be absorbed by this same key, so additions to this
   // script's seed SQL must be reviewed against this claim, not assumed newly gated.
   "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::insert",
+  // Retired TEXT-id family remint (identity-gate defect 2026-08-16, staging run 31957449480):
+  // soak-seed's one-time cleanup DELETEs of rows keyed to the RETIRED user-id shape
+  // (user_id LIKE 'synth-w4w7-%'). Current-family ids are minted UUIDs and can never match
+  // that prefix, so the scope is provably the retired shape only; runs behind the same
+  // assert_staging_only + synthetic-org preflight as the seeder, single transaction, no-op
+  // once the retired rows are gone. Same (module-scope) granularity caveat as the insert
+  // claim above: any OTHER module-scope delete on these tables added to this script would
+  // be absorbed by these keys and must be reviewed against this claim.
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_records::delete",
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_events::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_batches::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_items::delete",

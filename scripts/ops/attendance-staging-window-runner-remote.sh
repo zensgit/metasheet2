@@ -177,7 +177,10 @@ SOAK_BASELINE_MARKER="${SOAK_PERSIST_DIR}/p95-baseline.marker"
 SOAK_WINDOW_START_FILE="${SOAK_PERSIST_DIR}/soak-window-start"
 SOAK_HOST_CONFIG_FILE="${SOAK_PERSIST_DIR}/soak-config.json"
 SOAK_CREDENTIALS_FILE="${SOAK_PERSIST_DIR}/credentials.env"
-# Closed synthetic user-id family (generator README convention): synth-w4w7-<org8>-u<NN>.
+# Closed synthetic user family (generator README convention): USERNAMES synth-w4w7-<org8>-u<NN>.
+# The prefix marks usernames/emails, NEVER user ids: ids are minted UUIDs because the W4C0
+# §4.1 canonical identity gate fail-closes non-UUID user ids at the live shadow boundary
+# (staging run 31957449480 — a TEXT family id 500s every punch once its org enters W4 shadow).
 SOAK_USER_PREFIX="synth-w4w7-"
 SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
 SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
@@ -1370,35 +1373,44 @@ soak_seed_write_org_sql() {
 \set ON_ERROR_STOP on
 BEGIN;
 
--- Synthetic users (closed set; naming convention synth-w4w7-<org8>-u<NN>).
+-- Synthetic users (closed set; USERNAME convention synth-w4w7-<org8>-u<NN>). The family
+-- marker lives on username/email ONLY: user ids are minted UUIDs, because the W4 live
+-- shadow boundary's canonical identity gate (W4C0 §4.1 parseCanonicalAttendanceUserIdV1)
+-- fail-closes non-UUID user ids — a TEXT family id 500s every punch the moment its org
+-- enters W4 shadow (proven on staging: run 31957449480, W4C0_USER_ID_INVALID for every
+-- org2 attempt). Idempotency is keyed on the username business key (ids are minted, not
+-- deterministic, so ON CONFLICT (id) can no longer carry it).
 INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
-SELECT :'user_prefix' || lpad(i::text, 2, '0'),
+SELECT gen_random_uuid()::text,
        :'user_prefix' || lpad(i::text, 2, '0') || '@w4w7-soak.synthetic',
        :'user_prefix' || lpad(i::text, 2, '0'),
        'W4W7 combined-soak synthetic user',
        :'pw_hash', 'user', '[]'::jsonb, true, false, now(), now()
 FROM generate_series(1, :user_count) AS i
-ON CONFLICT (id) DO NOTHING;
+WHERE NOT EXISTS (
+  SELECT 1 FROM users u WHERE u.username = :'user_prefix' || lpad(i::text, 2, '0'));
 
 -- Keep the whole closed family loginable with the CURRENT host credentials file, and
--- past the auth gate (activation/local-password) — synthetic ids only, prefix-scoped.
+-- past the auth gate (activation/local-password) — synthetic usernames only, prefix-scoped.
 UPDATE users
    SET password_hash = :'pw_hash',
        is_active = true,
        activation_status = 'activated',
        local_password_set = true
- WHERE id LIKE :'user_prefix' || '%';
+ WHERE username LIKE :'user_prefix' || '%';
 
 INSERT INTO user_orgs (user_id, org_id, is_active)
-SELECT :'user_prefix' || lpad(i::text, 2, '0'), :'org', true
+SELECT u.id, :'org', true
 FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
 
 -- POST /api/attendance/punch is withPermission('attendance:write'); login tokens carry no
 -- perms on staging (RBAC reads the tables), so grant the one needed permission directly.
 INSERT INTO user_permissions (user_id, permission_code)
-SELECT :'user_prefix' || lpad(i::text, 2, '0'), 'attendance:write'
+SELECT u.id, 'attendance:write'
 FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
 
 -- Full-day shift 00:00-23:59 in the org's timezone (task-ruled shape).
@@ -1425,41 +1437,46 @@ WHERE g.org_id = :'org' AND g.name = :'group_name'
 ON CONFLICT (org_id, group_id) DO NOTHING;
 
 INSERT INTO attendance_group_members (org_id, group_id, user_id)
-SELECT :'org', g.id, :'user_prefix' || lpad(i::text, 2, '0')
-FROM attendance_groups g, generate_series(1, :user_count) AS i
+SELECT :'org', g.id, u.id
+FROM attendance_groups g
+CROSS JOIN generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 WHERE g.org_id = :'org' AND g.name = :'group_name'
   AND NOT EXISTS (
     SELECT 1 FROM attendance_group_members m
      WHERE m.org_id = :'org' AND m.group_id = g.id
-       AND m.user_id = :'user_prefix' || lpad(i::text, 2, '0'));
+       AND m.user_id = u.id);
 
 -- Published GROUP-PRODUCED assignment. producer_key spells the ONE canonical
 -- implementation (plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs):
 -- 'attendance_group_fixed_schedule:<groupId>:<shiftId>:<startDate>:<endDate>'.
 INSERT INTO attendance_shift_assignments (org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, publish_status)
-SELECT :'org', :'user_prefix' || lpad(i::text, 2, '0'), s.id, :'start_date'::date, :'end_date'::date, true,
+SELECT :'org', u.id, s.id, :'start_date'::date, :'end_date'::date, true,
        'attendance_group_fixed_schedule', g.id,
        'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date',
        gen_random_uuid(), 'published'
 FROM attendance_groups g
 JOIN attendance_shifts s ON s.org_id = g.org_id AND s.name = :'shift_name'
 CROSS JOIN generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 WHERE g.org_id = :'org' AND g.name = :'group_name'
   AND NOT EXISTS (
     SELECT 1 FROM attendance_shift_assignments a
      WHERE a.org_id = :'org'
-       AND a.user_id = :'user_prefix' || lpad(i::text, 2, '0')
+       AND a.user_id = u.id
        AND a.shift_id = s.id
        AND a.producer_key = 'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date');
 
 INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to, assigned_by, assigned_reason, assigned_correlation_id)
-SELECT :'org', :'user_prefix' || lpad(i::text, 2, '0'), g.id, :'start_date'::date, NULL, 'w4w7-soak-seed', 'combined-soak seed', 'w4w7-soak-' || g.id
-FROM attendance_groups g, generate_series(1, :user_count) AS i
+SELECT :'org', u.id, g.id, :'start_date'::date, NULL, 'w4w7-soak-seed', 'combined-soak seed', 'w4w7-soak-' || g.id
+FROM attendance_groups g
+CROSS JOIN generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 WHERE g.org_id = :'org' AND g.name = :'group_name'
   AND NOT EXISTS (
     SELECT 1 FROM attendance_calculation_group_memberships m
      WHERE m.org_id = :'org'
-       AND m.user_id = :'user_prefix' || lpad(i::text, 2, '0')
+       AND m.user_id = u.id
        AND m.group_id = g.id AND m.effective_to IS NULL);
 
 COMMIT;
@@ -1467,20 +1484,22 @@ SQL
 }
 
 soak_seed_report_org() {
-  # soak_seed_report_org <org> <user_prefix> — values-free per-org count report.
+  # soak_seed_report_org <org> <user_prefix> — values-free per-org count report. The family
+  # marker lives on users.username (ids are minted UUIDs), so every per-user count reaches
+  # the family through a username join, never a user_id prefix.
   local org="$1" prefix="$2"
   {
     echo "org=${org}"
-    echo "users=$(soak_psql_ta "SELECT count(*) FROM users WHERE id LIKE '${prefix}%';")"
-    echo "user_orgs=$(soak_psql_ta "SELECT count(*) FROM user_orgs WHERE org_id = '${org}' AND user_id LIKE '${prefix}%';")"
-    echo "user_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions WHERE user_id LIKE '${prefix}%' AND permission_code = 'attendance:write';")"
+    echo "users=$(soak_psql_ta "SELECT count(*) FROM users WHERE username LIKE '${prefix}%';")"
+    echo "user_orgs=$(soak_psql_ta "SELECT count(*) FROM user_orgs uo WHERE uo.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${prefix}%');")"
+    echo "user_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions p WHERE p.permission_code = 'attendance:write' AND EXISTS (SELECT 1 FROM users u WHERE u.id = p.user_id AND u.username LIKE '${prefix}%');")"
     echo "shifts=$(soak_psql_ta "SELECT count(*) FROM attendance_shifts WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "segments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_segments seg WHERE seg.org_id = '${org}' AND EXISTS (SELECT 1 FROM attendance_shifts s WHERE s.id = seg.shift_id AND s.name LIKE 'w4w7-soak%');")"
     echo "groups=$(soak_psql_ta "SELECT count(*) FROM attendance_groups WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "fixed_schedule_configs=$(soak_psql_ta "SELECT count(*) FROM attendance_group_fixed_schedule_configs WHERE org_id = '${org}' AND updated_by = 'w4w7-soak-seed';")"
-    echo "group_members=$(soak_psql_ta "SELECT count(*) FROM attendance_group_members WHERE org_id = '${org}' AND user_id LIKE '${prefix}%';")"
-    echo "published_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments WHERE org_id = '${org}' AND user_id LIKE '${prefix}%' AND publish_status = 'published';")"
-    echo "calc_group_memberships=$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_group_memberships WHERE org_id = '${org}' AND user_id LIKE '${prefix}%';")"
+    echo "group_members=$(soak_psql_ta "SELECT count(*) FROM attendance_group_members m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
+    echo "published_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments a WHERE a.org_id = '${org}' AND a.publish_status = 'published' AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id AND u.username LIKE '${prefix}%');")"
+    echo "calc_group_memberships=$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_group_memberships m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
   } >> "${OUTPUT_DIR}/soak-seed-report.txt"
 }
 
@@ -1681,10 +1700,15 @@ action_soak_seed() {
   # prior synth rows are present) still passes; a foreign user/attendance/posture row fails.
   local org nonsynth_users nonsynth_records foreign_w4 foreign_w7
   for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
-    nonsynth_users="$(soak_psql_ta "SELECT count(*) FROM user_orgs WHERE org_id = '${org}' AND user_id NOT LIKE '${SOAK_USER_PREFIX}%';")"
+    # Family membership = users.username prefix (ids are minted UUIDs and carry no marker).
+    # A row whose user_id resolves to NO users row at all also counts as non-synthetic —
+    # strictly fail-closed relative to the retired user_id-prefix predicate. The retired
+    # TEXT-id family still passes here pre-remint because those rows' usernames carry the
+    # same prefix (their user_id IS their username's value, and the users row still exists).
+    nonsynth_users="$(soak_psql_ta "SELECT count(*) FROM user_orgs uo WHERE uo.org_id = '${org}' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%');")"
     [[ "$nonsynth_users" == "0" ]] \
       || fail "org ${org:0:8} has ${nonsynth_users} non-synthetic user_orgs member(s) — refusing to attest customerData=false / syntheticOrgRef for an org that is not exclusively synthetic (a real org must never be walked to shadow on a fabricated attestation)"
-    nonsynth_records="$(soak_psql_ta "SELECT count(*) FROM attendance_records WHERE org_id = '${org}' AND user_id NOT LIKE '${SOAK_USER_PREFIX}%';")"
+    nonsynth_records="$(soak_psql_ta "SELECT count(*) FROM attendance_records r WHERE r.org_id = '${org}' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%');")"
     [[ "$nonsynth_records" == "0" ]] \
       || fail "org ${org:0:8} has ${nonsynth_records} attendance_records for non-synthetic users — refusing (org is not exclusively synthetic)"
     # A posture row written by anything other than this soak's own seed actor family is a
@@ -1733,6 +1757,50 @@ action_soak_seed() {
   pw_hash="$(printf '%s' "$password" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
   [[ "$pw_hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
 
+  # --- one-time remint of the RETIRED TEXT-id family (identity-gate defect, 2026-08-16) --
+  # The first soak seed minted users whose IDS carried the family marker
+  # (synth-w4w7-<org8>-u<NN>). The W4C0 §4.1 canonical identity gate fail-closes non-UUID
+  # user ids at the live shadow boundary, so every such user 500s the moment its org enters
+  # W4 shadow (staging run 31957449480, W4C0_USER_ID_INVALID on all org2 attempts). Ids are
+  # minted UUIDs now with the marker on username/email; this block deletes retired-shape
+  # rows so the username-keyed reseed below can re-mint the same closed family. Scope is
+  # provably the retired shape ONLY: current-family ids are UUIDs and can never match the
+  # family prefix. Dependency order, one transaction; a fresh host is a no-op.
+  # attendance_events rows keyed to retired ids are DELIBERATELY left in place: no FK or
+  # unique index binds them, no soak/preflight/P95 query reads events by user_id, and
+  # deleting them would add another census-tracked business-table writer for zero
+  # behavioural benefit (#4931 gate, disclosed inert orphans).
+  local retired retired_calc
+  retired="$(soak_psql_ta "SELECT count(*) FROM users WHERE id LIKE '${SOAK_USER_PREFIX}%';")"
+  if [[ "$retired" != "0" ]]; then
+    # attendance_record_calculations is a w4_canonical-bucket table (census boundary: only
+    # the canonical adapter path may write it), so this remint never deletes from it.
+    # Provably empty for the retired family — org1 stayed in W4 'legacy' rollout state (no
+    # calc artifacts) and every org2/org3 punch 500-rolled-back — but verify, don't assume:
+    retired_calc="$(soak_psql_ta "SELECT count(*) FROM attendance_record_calculations c JOIN attendance_records r ON c.attendance_record_id = r.id WHERE r.user_id LIKE '${SOAK_USER_PREFIX}%';")"
+    [[ "$retired_calc" == "0" ]] \
+      || fail "retired-family attendance_records carry ${retired_calc} attendance_record_calculations row(s) — refusing to remint (that table is canonical-writer-only; clean-up of calc artifacts is an owner/ops act through the canonical path)"
+    log "soak-seed: reminting ${retired} retired TEXT-id synthetic user(s) (family marker moves to username; ids become UUIDs)"
+    local remint_sql="${OUTPUT_DIR}/soak-seed-remint.sql"
+    cat > "$remint_sql" <<'SQL'
+\set ON_ERROR_STOP on
+BEGIN;
+DELETE FROM attendance_records WHERE user_id LIKE :'retired_prefix';
+DELETE FROM attendance_calculation_group_memberships WHERE user_id LIKE :'retired_prefix';
+DELETE FROM attendance_shift_assignments WHERE user_id LIKE :'retired_prefix';
+DELETE FROM attendance_group_members WHERE user_id LIKE :'retired_prefix';
+DELETE FROM user_permissions WHERE user_id LIKE :'retired_prefix';
+DELETE FROM user_orgs WHERE user_id LIKE :'retired_prefix';
+DELETE FROM users WHERE id LIKE :'retired_prefix';
+COMMIT;
+SQL
+    docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" -e \
+      -v retired_prefix="${SOAK_USER_PREFIX}%" \
+      < "$remint_sql" > "${OUTPUT_DIR}/soak-seed-remint.txt" 2>&1 \
+      || fail "retired TEXT-id family remint failed (transactional — nothing deleted); see soak-seed-remint.txt"
+    log "soak-seed: retired-family remint complete (per-table DELETE counts in soak-seed-remint.txt)"
+  fi
+
   # --- idempotent data seeding, one transaction per org --------------------------------
   local seed_sql="${OUTPUT_DIR}/soak-seed-org.sql"
   soak_seed_write_org_sql "$seed_sql"
@@ -1770,6 +1838,9 @@ action_soak_seed() {
   } >> "${OUTPUT_DIR}/soak-seed-posture.txt"
 
   # --- host soak config for action=soak-run (tokens deliberately ABSENT) ----------------
+  # `userIds` entries are the closed family USERNAMES — soak-run feeds each one to POST
+  # /api/auth/login as `identifier` (resolved by username) and the returned token carries
+  # the user's minted UUID id. They are generator-local login/attribution keys, not DB ids.
   python3 - "$SOAK_HOST_CONFIG_FILE" "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3" "$users_per_org" "$SOAK_USER_PREFIX" <<'PY'
 import json, os, sys
 path, org1, org2, org3, count, prefix = sys.argv[1:7]
