@@ -97,8 +97,13 @@ jobs:
             exit 2
           fi
 
-          if [[ "$ACTION" == "observe" && ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-            echo "observe requires expected_delivery_id as a lowercase UUID" >&2
+          if [[ "$ACTION" == "observe" ]]; then
+            if [[ ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+              echo "observe requires expected_delivery_id as a lowercase UUID" >&2
+              exit 2
+            fi
+          elif [[ -n "$EXPECTED_DELIVERY_ID" ]]; then
+            echo "expected_delivery_id is accepted only for action=observe" >&2
             exit 2
           fi
 
@@ -172,12 +177,26 @@ jobs:
 
           ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-          case "$ACTION" in status|observe|prepare|on|off) ;; *)
+          case "$ACTION" in status|observe|prepare|on|off|https-on|https-off) ;; *)
             echo "refusing invalid action in remote execution step" >&2
             exit 2
           ;; esac
-          if [[ "$ACTION" == "observe" && ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-            echo "refusing invalid expected_delivery_id in remote execution step" >&2
+          if [[ "$ACTION" != "status" ]]; then
+            if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "refusing invalid deploy_sha in remote execution step" >&2
+              exit 2
+            fi
+          elif [[ -n "$DEPLOY_SHA" && ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "refusing invalid optional deploy_sha in remote execution step" >&2
+            exit 2
+          fi
+          if [[ "$ACTION" == "observe" ]]; then
+            if [[ ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+              echo "refusing invalid expected_delivery_id in remote execution step" >&2
+              exit 2
+            fi
+          elif [[ -n "$EXPECTED_DELIVERY_ID" ]]; then
+            echo "refusing expected_delivery_id outside action=observe" >&2
             exit 2
           fi
           for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
@@ -342,7 +361,7 @@ jobs:
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
-            echo "**Executable:** status / prepare / on / off / https-on / https-off."
+            echo "**Executable:** status / observe / prepare / on / off / https-on / https-off."
             echo "prepare forces Stream OFF after writing credentials + derived integration id."
             echo "on flips ONLY Stream flag true after prerequisite + LOG_LEVEL checks; proves worker_started only."
             echo "stream_connected is always unknown here (SDK connect resolves + retries forever; not log-proven)."

@@ -814,6 +814,7 @@ classify_log_level() {
 }
 
 require_log_level_info_or_debug() {
+  local context="${1:-on}"
   classify_log_level
   if [[ "$LOG_LEVEL_READY" == "true" ]]; then
     case "$LOG_LEVEL_REASON" in
@@ -823,7 +824,7 @@ require_log_level_info_or_debug() {
         ;;
     esac
   fi
-  fail "action=on requires LOG_LEVEL info/debug (got ready=${LOG_LEVEL_READY} reason=${LOG_LEVEL_REASON})"
+  fail "action=${context} requires LOG_LEVEL info/debug (got ready=${LOG_LEVEL_READY} reason=${LOG_LEVEL_REASON})"
 }
 
 # --- lifecycle flags (read only; never written) --------------------------------------
@@ -1731,7 +1732,8 @@ action_status() {
 action_observe() {
   assert_staging_only
   require_exact_deployed_sha "observe"
-  require_log_level_info_or_debug
+  require_lifecycle_flags_off "observe"
+  require_log_level_info_or_debug "observe"
   [[ "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
     || fail "action=observe requires expected_delivery_id as a lowercase UUID"
 
@@ -1881,7 +1883,7 @@ action_on() {
   require_exact_deployed_sha "on"
   pin_live_backend_image_for_transition
   require_lifecycle_flags_off "on"
-  require_log_level_info_or_debug
+  require_log_level_info_or_debug "on"
   require_stream_prerequisites_for_on
   require_staging_env_file
 

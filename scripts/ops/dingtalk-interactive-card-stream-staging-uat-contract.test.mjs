@@ -214,21 +214,88 @@ test('workflow exact-SHA gate requires full 40-char deploy_sha for every non-sta
   )
 })
 
-test('observe requires a lowercase expected delivery UUID and never emits it', () => {
+test('observe exclusively requires a lowercase expected delivery UUID and never emits it', () => {
   const yaml = read(WORKFLOW)
   const doc = loadYaml(yaml)
   const validate = doc.jobs.run.steps.find((s) => s.name === 'Validate inputs and embedded scripts')
   assert.equal(validate.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
   assert.match(validate.run, /observe requires expected_delivery_id as a lowercase UUID/)
+  assert.match(validate.run, /expected_delivery_id is accepted only for action=observe/)
   assert.match(validate.run, /\[1-5\]\[0-9a-f\]\{3\}/)
   const remoteStep = doc.jobs.run.steps.find((s) => s.name === 'Run remote action')
   assert.equal(remoteStep.env.EXPECTED_DELIVERY_ID, '${{ inputs.expected_delivery_id }}')
   assert.match(remoteStep.run, /refusing invalid expected_delivery_id in remote execution step/)
-  assert.match(remoteStep.run, /case "\$ACTION" in status\|observe\|prepare\|on\|off/)
+  assert.match(remoteStep.run, /refusing expected_delivery_id outside action=observe/)
+  assert.match(remoteStep.run, /case "\$ACTION" in status\|observe\|prepare\|on\|off\|https-on\|https-off/)
+  assert.match(remoteStep.run, /refusing invalid deploy_sha in remote execution step/)
+  assert.match(remoteStep.run, /refusing invalid optional deploy_sha in remote execution step/)
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
   assert.match(observe, /grep -F -c "\$EXPECTED_DELIVERY_ID"/)
   assert.doesNotMatch(observe, /echo .*EXPECTED_DELIVERY_ID/)
+})
+
+test('workflow and remote preflights reject cross-action delivery-id injection before SSH construction', () => {
+  const doc = loadYaml(read(WORKFLOW))
+  const steps = doc.jobs.run.steps
+  const validate = steps.find((s) => s.name === 'Validate inputs and embedded scripts')
+  const remoteStep = steps.find((s) => s.name === 'Run remote action')
+  const remotePreflightEnd = remoteStep.run.indexOf('for pair in')
+  assert.ok(remotePreflightEnd > 0, 'remote preflight must precede path validation and SSH construction')
+  const remotePreflight = `${remoteStep.run.slice(0, remotePreflightEnd)}\nexit 0\n`
+  const sha = 'a'.repeat(40)
+  const deliveryId = '12345678-1234-4123-8123-123456789abc'
+
+  const runValidate = (action, deploySha, expectedDeliveryId) => spawnSync(
+    'bash',
+    ['-c', validate.run],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: action,
+        DEPLOY_SHA: deploySha,
+        EXPECTED_DELIVERY_ID: expectedDeliveryId,
+      },
+    },
+  )
+  const runRemotePreflight = (action, deploySha, expectedDeliveryId) => spawnSync(
+    'bash',
+    ['-c', remotePreflight],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: action,
+        DEPLOY_SHA: deploySha,
+        EXPECTED_DELIVERY_ID: expectedDeliveryId,
+        STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID: '',
+        STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET: '',
+        STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID: '',
+      },
+    },
+  )
+
+  for (const action of ['status', 'observe', 'prepare', 'on', 'off', 'https-on', 'https-off']) {
+    const deploySha = action === 'status' ? '' : sha
+    const expectedDeliveryId = action === 'observe' ? deliveryId : ''
+    assert.equal(runValidate(action, deploySha, expectedDeliveryId).status, 0, `validate ${action}`)
+    assert.equal(runRemotePreflight(action, deploySha, expectedDeliveryId).status, 0, `remote ${action}`)
+  }
+
+  for (const unsafe of [deliveryId, "'; touch /tmp/stream-uat-injection; #"]) {
+    assert.equal(runValidate('status', '', unsafe).status, 2)
+    assert.equal(runRemotePreflight('status', '', unsafe).status, 2)
+  }
+  assert.equal(runValidate('observe', sha, '').status, 2)
+  assert.equal(runRemotePreflight('observe', sha, '').status, 2)
+  assert.equal(runValidate('observe', sha, "'; touch /tmp/stream-uat-injection; #").status, 2)
+  assert.equal(runRemotePreflight('observe', sha, "'; touch /tmp/stream-uat-injection; #").status, 2)
+  assert.equal(runValidate('status', "'; touch /tmp/stream-uat-injection; #", '').status, 2)
+  assert.equal(runRemotePreflight('status', "'; touch /tmp/stream-uat-injection; #", '').status, 2)
+  assert.equal(runRemotePreflight('https-on', 'not-a-sha', '').status, 2)
 })
 
 test('remote script require_exact_deployed_sha used by every non-status action and not status', () => {
@@ -255,6 +322,8 @@ test('observe is read-only and emits values-free callback classes without raw lo
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
   assert.match(observe, /action=observe/)
+  assert.match(observe, /require_lifecycle_flags_off "observe"/)
+  assert.match(observe, /require_log_level_info_or_debug "observe"/)
   assert.match(observe, /header_event_corp_id_present=/)
   assert.match(observe, /body_corp_id_present=/)
   assert.match(observe, /latest_callback_outcome=/)
@@ -283,6 +352,74 @@ test('observe is read-only and emits values-free callback classes without raw lo
   assert.doesNotMatch(observe, /echo "callback_handler_error_count=/)
   assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
   assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
+})
+
+test('observe dynamically scopes Winston log evidence to the expected delivery', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-'))
+  const output = join(dir, 'output')
+  const logs = join(dir, 'backend.log')
+  const harness = join(dir, 'harness.sh')
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const other = '87654321-4321-4123-8123-cba987654321'
+  try {
+    writeFileSync(
+      logs,
+      [
+        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${other}","headerEventCorpIdPresent":false,"bodyCorpIdPresent":true}`,
+        `info: DingTalk interactive-card callback handled (stale delivery=${other})`,
+        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`,
+        `info: DingTalk interactive-card callback handled (operator_unresolved:missing_link delivery=${expected})`,
+        `info: DingTalk interactive-card callback handled (executed delivery=${expected})`,
+        'warn: DingTalk interactive-card callback failed (callback_handler_error)',
+        `warn: DingTalk approval-card terminal update failed (card_update_failed:Error) delivery=${expected}`,
+      ].join('\n') + '\n',
+    )
+    writeFileSync(
+      harness,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'log() { :; }',
+        'fail() { echo "$*" >&2; exit 1; }',
+        'assert_staging_only() { :; }',
+        'require_exact_deployed_sha() { :; }',
+        'require_lifecycle_flags_off() { :; }',
+        'require_log_level_info_or_debug() { :; }',
+        'register_ephemeral() { :; }',
+        'read_flag_from_container() { printf true; }',
+        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
+        'BACKEND_CONTAINER=metasheet-staging-backend',
+        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+        observe,
+        'action_observe',
+      ].join('\n'),
+    )
+    const result = spawnSync('bash', [harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        EXPECTED_DELIVERY_ID: expected,
+        LOG_FIXTURE: logs,
+        OUTPUT_DIR: output,
+        STREAM_UAT_PERSIST_DIR: dir,
+      },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
+    assert.match(artifact, /callback_anchor_log_count=1/)
+    assert.match(artifact, /header_event_corp_id_present=true/)
+    assert.match(artifact, /body_corp_id_present=false/)
+    assert.match(artifact, /callback_handled_count=2/)
+    assert.match(artifact, /latest_callback_outcome=executed/)
+    assert.match(artifact, /window_callback_handler_error_count=1/)
+    assert.match(artifact, /card_update_failed_count=1/)
+    assert.doesNotMatch(artifact, new RegExp(`${expected}|${other}`))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // --- secret demotion ------------------------------------------------------------------
