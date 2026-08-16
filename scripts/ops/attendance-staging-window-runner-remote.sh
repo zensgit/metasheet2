@@ -1487,7 +1487,19 @@ soak_seed_report_org() {
 soak_w4_walk_to_shadow() {
   # Walk ONE org's W4 rollout posture legacy->shadow through the REAL Gate C CLI
   # (plan -> fresh manifest -> apply). Idempotent: an org already at/past shadow is skipped.
-  local org="$1" org8="${org:0:8}"
+  #
+  # TWO STATEMENTS, NOT ONE — load-bearing, proven by real dispatch 31953379181: bash
+  # expands EVERY word of a `local` simple command BEFORE the builtin performs any
+  # assignment, so in `local org="$1" org8="${org:0:8}"` the `${org:0:8}` reads the
+  # CALLER's `org` — which in action_soak_seed is the seeding loop's local, left at ORG3
+  # after the loop. In that dispatch the CLI target/DB reads (`$org`) were correct (both
+  # rollout rows landed), but org2's label, plan/apply/manifest artifact FILENAMES, and
+  # the manifest's syntheticOrgRef suffix (all `$org8`) said org3 — org2's walk evidence
+  # was overwritten and misattributed. Splitting the statements makes `${org:0:8}` expand
+  # AFTER the local `org` is assigned. Pinned by the pipeline test (source shape + an
+  # executable bash leg reproducing the expansion order + a rejoin mutation leg).
+  local org="$1"
+  local org8="${org:0:8}"
   local state
   state="$(soak_psql_ta "SELECT COALESCE((SELECT state FROM attendance_calculation_rollout_state WHERE org_id = '${org}'), 'absent');")"
   case "$state" in
@@ -2054,6 +2066,14 @@ PY
   [[ "${pipe_status[1]}" == "0" ]] || fail "tee failed writing soak-run.log (rc=${pipe_status[1]})"
   docker cp "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/soak-run-summary.json" \
     "${OUTPUT_DIR}/soak-run-summary.json" 2>/dev/null || true
+  # Filtered backend-log slice, ALWAYS captured (same filtered_pipe contract as
+  # action_smoke): dispatch 31953571638 produced five INTERNAL_ERROR punch 500s on the
+  # W4-shadow org with zero artifact-side server evidence — the HTTP body says only
+  # "Failed to punch attendance", so without this slice a server-side punch failure is
+  # undiagnosable from the run's own artifact.
+  filtered_pipe "${OUTPUT_DIR}/soak-run-backend-log-slice.log" \
+    'attendance|punch|calculation|shadow|segment|boundary|error|Error' \
+    -- docker logs --since 30m "$BACKEND_CONTAINER"
   cleanup_soak_run
   trap - EXIT
   [[ "$gen_rc" == "0" ]] || fail "soak load generator exited rc=${gen_rc} (see soak-run.log)"
