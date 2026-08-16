@@ -939,10 +939,145 @@ test('HTTPS env-state detection is tri-state and fails closed on unknown reads',
 test('HTTPS env restore changes only the three URL keys and preserves intervening env changes', () => {
   const source = read(REMOTE_SH)
   const restore = actionBody(source, 'restore_https_env_backup', ['https_env_file_matches_gateway'])
+  assert.match(restore, /require_https_env_backup_integrity \|\| return 1/)
   assert.match(restore, /target_keys = \("PUBLIC_APP_URL", "CORS_ORIGIN", "DINGTALK_REDIRECT_URI"\)/)
   assert.match(restore, /read_lines\(current_path\)/)
   assert.match(restore, /backup_values/)
   assert.doesNotMatch(restore, /cp -p "\$HTTPS_ENV_BACKUP" "\$candidate"/)
+})
+
+test('HTTPS backup is checksum-sealed before gateway mutation and verified before restore', () => {
+  const source = read(REMOTE_SH)
+  const httpsOn = actionBody(source, 'action_https_on', ['action_https_off'])
+  const httpsOff = actionBody(source, 'action_https_off')
+  assert.match(httpsOn, /write_https_env_backup_checksum \|\| fail/)
+  assert.ok(
+    httpsOn.indexOf('write_https_env_backup_checksum') < httpsOn.indexOf('docker pull'),
+    'backup must be sealed before gateway mutation',
+  )
+  assert.match(httpsOff, /require_https_env_backup_integrity \|\| fail/)
+  assert.ok(
+    httpsOff.indexOf('require_https_env_backup_integrity') <
+      httpsOff.indexOf('restore_https_env_backup'),
+    'backup integrity must be verified before restore',
+  )
+  assert.match(httpsOff, /rm -f "\$HTTPS_ENV_BACKUP" "\$HTTPS_ENV_BACKUP_SHA256"/)
+})
+
+test('HTTPS backup checksum detects tampering without printing values', () => {
+  const source = read(REMOTE_SH)
+  const writeChecksum = actionBody(source, 'write_https_env_backup_checksum', [
+    'validate_legacy_https_env_backup',
+  ])
+  const validateLegacy = actionBody(source, 'validate_legacy_https_env_backup', [
+    'require_https_env_backup_integrity',
+  ])
+  const requireIntegrity = actionBody(source, 'require_https_env_backup_integrity', [
+    'restore_https_env_backup',
+  ])
+  const dir = mkdtempSync(join(tmpdir(), 'https-env-checksum-'))
+  const backup = join(dir, 'backup.env')
+  const checksum = join(dir, 'backup.env.sha256')
+  try {
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    const harness = `
+set -euo pipefail
+HTTPS_ENV_BACKUP="$1"
+HTTPS_ENV_BACKUP_SHA256="$2"
+HTTPS_GATEWAY_ORIGIN="https://gateway.example"
+HTTPS_GATEWAY_CALLBACK="https://gateway.example/login/dingtalk/callback"
+HTTPS_ENV_BACKUP_LEGACY_SEALED=false
+RUN_STAMP=test
+register_ephemeral() { :; }
+${writeChecksum}
+${validateLegacy}
+${requireIntegrity}
+write_https_env_backup_checksum
+require_https_env_backup_integrity
+printf '\\n# tampered\\n' >>"$HTTPS_ENV_BACKUP"
+if require_https_env_backup_integrity; then
+  exit 19
+fi
+`
+    const result = spawnSync('bash', ['-c', harness, 'bash', backup, checksum], {
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr, '')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('legacy HTTPS backup adoption accepts one coherent prior URL triplet and rejects ambiguity', () => {
+  const source = read(REMOTE_SH)
+  const validator = actionBody(source, 'validate_legacy_https_env_backup', [
+    'require_https_env_backup_integrity',
+  ])
+  const match = validator.match(/<<'PY'\n([\s\S]*?)\nPY/)
+  assert.ok(match, 'legacy backup validator must be extractable')
+  const dir = mkdtempSync(join(tmpdir(), 'https-legacy-backup-'))
+  const backup = join(dir, 'backup.env')
+  const run = () =>
+    spawnSync(
+      'python3',
+      [
+        '-c',
+        match[1],
+        backup,
+        'https://gateway.example',
+        'https://gateway.example/login/dingtalk/callback',
+      ],
+      { encoding: 'utf8' },
+    )
+  try {
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.equal(run().status, 0)
+
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=http://old.example',
+        'PUBLIC_APP_URL=http://other.example',
+        'CORS_ORIGIN=http://old.example',
+        'DINGTALK_REDIRECT_URI=http://old.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'duplicate URL keys must be rejected')
+
+    writeFileSync(
+      backup,
+      [
+        'PUBLIC_APP_URL=https://gateway.example',
+        'CORS_ORIGIN=https://gateway.example',
+        'DINGTALK_REDIRECT_URI=https://gateway.example/login/dingtalk/callback',
+      ].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'already-gateway snapshot must be rejected')
+
+    writeFileSync(
+      backup,
+      ['PUBLIC_APP_URL=http://old.example', 'CORS_ORIGIN=http://old.example'].join('\n') + '\n',
+    )
+    assert.notEqual(run().status, 0, 'truncated snapshot must be rejected')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('HTTPS restore helper dynamically restores only URL keys and removes backup-missing keys', () => {
@@ -999,8 +1134,9 @@ test('https-off verifies restored live env and fails closed until the gateway is
   assert.match(httpsOff, /require_https_live_env_matches_backup/)
   assert.match(httpsOff, /require_lifecycle_flags_off/)
   assert.match(httpsOff, /requires Stream OFF/)
+  assert.match(httpsOff, /HTTPS env backup integrity check failed/)
   assert.match(httpsOff, /remove_https_gateway_if_present \|\| fail/)
-  assert.match(httpsOff, /rm -f "\$HTTPS_ENV_BACKUP" \|\| fail/)
+  assert.match(httpsOff, /rm -f "\$HTTPS_ENV_BACKUP" "\$HTTPS_ENV_BACKUP_SHA256"/)
   assert.doesNotMatch(httpsOff, /docker rm -f[\s\S]*\|\| true/)
   assert.ok(
     httpsOff.indexOf('restore_https_env_backup') < httpsOff.indexOf('remove_https_gateway_if_present'),
