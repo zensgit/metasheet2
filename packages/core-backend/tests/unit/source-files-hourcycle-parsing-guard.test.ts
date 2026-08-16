@@ -266,7 +266,7 @@ const KNOWN_SITES: KnownSite[] = [
 ]
 
 function siteKey(s: { file: string; lineText: string }): string {
-  return `${s.file} ${s.lineText}`
+  return `${s.file}\0${s.lineText}`
 }
 
 interface CandidateSite {
