@@ -331,6 +331,15 @@ const KNOWN_SITES: KnownSite[] = [
     lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
     kind: 'display',
   },
+  {
+    // attendance-w4w7-soak-load-generator.mjs entry validation (#4932 gate round-2 P2-1) —
+    // dailyCapTimezone IANA-validity probe: construction-only inside try/catch (RangeError
+    // on an unknown zone), the formatter is discarded — never assigned, never `.format()`ed.
+    // Same idiom and classification as the loadConfig() timezone probe above. No hour option.
+    file: 'scripts/ops/attendance-w4w7-soak-load-generator.mjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: dailyCapTimezone })",
+    kind: 'display',
+  },
   // ---------------------------------------------------------------------------------
   // Sites found only once the domain/pattern widened to close the coverage gaps an
   // independent gate review identified: `.vue` files inside the existing domain
@@ -639,7 +648,7 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(candidates.length).toBe(KNOWN_SITES.length)
     // 22 = the original 20 (#4927) + the 2 display-class sites in the combined-soak load
     // generator (#4556 soak, PR #4929): its tz-validity probe and its en-CA date-key idiom.
-    expect(KNOWN_SITES.length).toBe(22)
+    expect(KNOWN_SITES.length).toBe(23)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {
