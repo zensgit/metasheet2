@@ -17,18 +17,24 @@
  *
  * Two copies of an arm-selection rule is exactly the drift the lock forbids,
  * and it is why this is a seam rather than a helper each producer calls
- * alongside its own logic. The closure is pinned mechanically by the re-formed
- * census in `tests/unit/attendance-w7-1a-inertness-sweep.test.ts`
- * (`W7_1B_PRODUCTION_IMPORTERS_V1` — exact-set importer closure over resolved
- * module paths, static AND dynamic `import()` — plus
- * `W7_1B_PRODUCTION_CALL_SITES_V1`, the empty direct-call-site set), because
- * "everyone remembered to call the seam" is not an invariant. (W7-2 doc
- * correction: an earlier revision of this header cited a
- * `attendance-w7-1b-issuance-seam-closure.test.ts` file that does not exist —
- * the census above is the real, running guard; the import-graph leg is what it
- * pins, and the adapter-graph/CJS-require coupling is carried by the boundary's
- * fail-closed adapter conjunction plus the host-port wiring legs, not by a
- * dedicated file of that name.)
+ * alongside its own logic.
+ * `tests/unit/attendance-w7-1b-issuance-seam-closure.test.ts` pins the
+ * closure mechanically — S1 TS import graph (only the seam imports op(i), by
+ * resolved module path, with a planted-importer positive control), S2 adapter
+ * graph (the boundary makes zero direct `adapters.buildShadowFrozenContext`
+ * calls and reaches the seam at exactly its enumerated sites), S3 CJS
+ * require/port graph (every plugin reference to the legacy builder is an
+ * adjudicated exception, count-derived), S4 (OD-W7-10 answers arm questions
+ * from the posture resolver, never by calling the seam), S0 non-vacuity —
+ * because "everyone remembered to call the seam" is not an invariant. The
+ * re-formed census in `tests/unit/attendance-w7-1a-inertness-sweep.test.ts`
+ * (`W7_1B_PRODUCTION_IMPORTERS_V1` exact-set importer closure,
+ * `W7_1B_PRODUCTION_CALL_SITES_V1` empty direct-call-site set) is the
+ * complementary outer ring over `w7-resolver/` as a whole. (W7-2 correction
+ * of a correction: this header briefly asserted the closure suite "does not
+ * exist" — false; the suite was added by 1b's own gate round and runs green.
+ * The W7-2 build carried a stale pre-gate-round anchor's negative forward
+ * without re-checking file existence at its actual base.)
  *
  * ---------------------------------------------------------------------------
  * PLACEMENT — a NAMED DEVIATION from the predecessor brief (owner fork O-3)

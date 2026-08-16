@@ -1237,12 +1237,17 @@ export interface PluginServices {
      * the shadow-compare posture states — the dual-run variant carrying the
      * served legacy context PLUS the unserved group comparison half. The
      * arm-selection rule exists ONLY inside the seam; a caller that re-derives
-     * it is the drift the lock forbids, pinned mechanically by the re-formed
-     * closure census in `tests/unit/attendance-w7-1a-inertness-sweep.test.ts`
-     * (exact-set production-importer and direct-call-site legs). (W7-2 doc
-     * correction: an earlier revision cited a
-     * `attendance-w7-1b-issuance-seam-closure.test.ts` file that never
-     * existed; the census above is the real, running guard.)
+     * it is the drift the lock forbids, and
+     * `tests/unit/attendance-w7-1b-issuance-seam-closure.test.ts` pins that
+     * mechanically (S1 TS import graph, S2 adapter graph, S3 CJS require/port
+     * graph, S4 the OD-W7-10 no-seam-call rule, S0 non-vacuity — each ban leg
+     * with its own positive control), with the re-formed census in
+     * `tests/unit/attendance-w7-1a-inertness-sweep.test.ts` as the
+     * complementary exact-set importer closure over `w7-resolver/`. (W7-2
+     * correction of a correction: this block briefly asserted the closure
+     * suite never existed — false; it was added by 1b's own gate round and
+     * runs green. The W7-2 build carried a stale pre-gate-round anchor's
+     * negative forward without re-checking file existence at its base.)
      *
      * `deps` is injected by the plugin because three of the four dependencies
      * are plugin-owned (the pure FSER derivation, the canonical producer-key
