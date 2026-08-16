@@ -30,6 +30,12 @@ import { up as addOffStatusUp } from '../../src/db/migrations/zzzz20260731120000
 // by the product. Applying the widening here is what makes the emission leg
 // below a test of the writer instead of a test of a stale schema.
 import { up as w7ProvenanceWideningUp } from '../../src/db/migrations/zzzz20260815120000_w7_1am_provenance_domain_widening'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -480,11 +486,45 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
   }, 90000)
 
   afterAll(async () => {
-    await db?.destroy()
-    await pool?.end()
-    await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
-    await adminPool?.end()
-  })
+    // #4820 recurrence: this suite owns both pools connected to the scratch database. Keep the
+    // exact administrator-termination handler scoped to teardown, then revoke new connections
+    // and drain before DROP instead of unconditionally killing idle clients with FORCE.
+    const teardownHandlers = [migrationPool, pool]
+      .filter((p): p is Pool => Boolean(p))
+      .map((p) => attachOwnedPoolTerminationHandler(p))
+    let closeError: unknown
+    let dropError: unknown
+    try {
+      try {
+        await db?.destroy()
+      } catch (error) {
+        closeError = error
+      }
+      try {
+        await pool?.end()
+      } catch (error) {
+        closeError ??= error
+      }
+      if (adminPool) {
+        try {
+          const outcome = await dropScratchDatabase(adminPool, scratchName)
+          console.log(formatScratchDropOutcome('w4c3a-canonical-import', outcome))
+        } catch (error) {
+          dropError = error
+          console.log(formatScratchDropFailure('w4c3a-canonical-import', error))
+        }
+      }
+    } finally {
+      try {
+        await adminPool?.end()
+      } catch (error) {
+        closeError ??= error
+      }
+      for (const handler of teardownHandlers) handler.detach()
+    }
+    if (closeError) throw closeError
+    if (dropError) throw dropError
+  }, 60000)
 
   async function execute(input: ReturnType<typeof fixture>): Promise<void> {
     const client = await pool.connect()
