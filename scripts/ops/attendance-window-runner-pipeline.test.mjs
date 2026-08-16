@@ -1348,6 +1348,111 @@ test('P2-1: a newline-injection payload in soak_opts is REJECTED by workflow val
   assert.match(r.stderr, /single-line/, 'rejection must name the single-line rule')
 })
 
+test('soak pair-ladder: runner derives per-org anchors from the DB and injects them; generator fails closed without them and sends explicit backdated occurredAt', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const generator = readFileSync(GENERATOR, 'utf8')
+  // Runner: anchor = day before the family's earliest punched work_date, family reached via
+  // the username join (NEVER a user_id prefix — the retired TEXT-id shape), fallback =
+  // yesterday in the org group's timezone; both injected into the run config copy.
+  assert.ok(
+    remote.includes("SELECT to_char(COALESCE((SELECT min(r.work_date) FROM attendance_records r WHERE r.org_id = '${cfg_org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%')) - 1, (now() AT TIME ZONE '${tzv}')::date - 1), 'YYYY-MM-DD');"),
+    'soak-run must derive each orgʼs ladder anchor from the familyʼs earliest punched work_date via the username join',
+  )
+  assert.ok(
+    remote.includes('entry["ladderAnchorDate"] = anchor') && remote.includes('entry["ladderTimezone"] = tz'),
+    'soak-run must inject ladderAnchorDate/ladderTimezone into every run-config entry',
+  )
+  assert.ok(
+    remote.includes('[soak-run] ladder anchor MISSING for org'),
+    'a config org without a derived anchor must fail the injection step, never run anchorless',
+  )
+  // Generator: both fields REQUIRED (fail-closed — the retired cadence is not selectable),
+  // anchor strictly before today, explicit occurredAt in the punch body, pair advance only
+  // on a CLEAN check_out, depth ceiling, and the h23 zoned construction (h24-midnight class).
+  assert.ok(
+    generator.includes('.ladderAnchorDate must be a YYYY-MM-DD date'),
+    'generator must refuse an entry without ladderAnchorDate',
+  )
+  assert.ok(
+    generator.includes('is not strictly before today'),
+    'generator must refuse an anchor that is today or future (server-clock race / future-punch guard)',
+  )
+  assert.match(
+    generator,
+    /const occurredAt = zonedDateTimeToUtcIso\(\n\s*ladderDate,\n\s*eventType === 'check_in' \? '00:00:00' : '23:59:00',/,
+    'check_in must land on the segment start and check_out on the segment end (zero-anomaly pairs — diff surface collapses to equal)',
+  )
+  assert.match(
+    generator,
+    /if \(eventType === 'check_out'\) picked\.pairCursor \+= 1/,
+    'the ladder must descend only on a CLEAN check_out',
+  )
+  assert.ok(
+    generator.includes('if (userState.pairCursor >= opts.ladderMaxDepthDays) return false'),
+    'the ladder depth ceiling must gate eligibility',
+  )
+  assert.match(
+    generator,
+    /hourCycle: 'h23',\n\s*year: 'numeric', month: '2-digit', day: '2-digit',\n\s*hour: '2-digit'/,
+    'the zoned instant construction must use hourCycle h23 (h24-midnight class)',
+  )
+  assert.ok(
+    generator.includes('if (hour === 24) hour = 0'),
+    'the zoned instant construction must carry the defensive 24->0 fold',
+  )
+  assert.match(generator, /body\.timezone = opts\.timezoneToSend/, 'sanity: timezone-body logic must survive the ladder edit')
+  const template = JSON.parse(readFileSync(join(HERE, 'attendance-w4w7-soak-config.template.json'), 'utf8'))
+  for (const entry of template.entries) {
+    assert.ok(typeof entry.ladderAnchorDate === 'string' && entry.ladderAnchorDate.includes('injected-by-soak-run'),
+      'template entries must document the injected ladderAnchorDate')
+    assert.ok(typeof entry.ladderTimezone === 'string' && entry.ladderTimezone.includes('injected-by-soak-run'),
+      'template entries must document the injected ladderTimezone')
+  }
+})
+
+test('EXECUTABLE (ladder): zonedDateTimeToUtcIso resolves wall times exactly — fixed-offset, UTC, and a DST-transition day', () => {
+  // Executes the REAL function text extracted from the shipped file (not a copy that could
+  // drift): the first draft of this util had a second-pass formula bug (subtracting from
+  // wallAsUtc instead of the candidate) that returned wall time UNADJUSTED for every
+  // non-UTC zone — this leg is the positive control that caught it.
+  const generator = readFileSync(GENERATOR, 'utf8')
+  const fnMatch = generator.match(/function zonedDateTimeToUtcIso[\s\S]*?\n\}/)
+  assert.ok(fnMatch, 'zonedDateTimeToUtcIso must exist in the generator')
+  // eslint-disable-next-line no-new-func
+  const zonedDateTimeToUtcIso = new Function(`${fnMatch[0]}; return zonedDateTimeToUtcIso`)()
+  assert.equal(zonedDateTimeToUtcIso('2026-08-12', '00:00:00', 'Asia/Shanghai'), '2026-08-11T16:00:00.000Z')
+  assert.equal(zonedDateTimeToUtcIso('2026-08-12', '23:59:00', 'Asia/Shanghai'), '2026-08-12T15:59:00.000Z')
+  assert.equal(zonedDateTimeToUtcIso('2026-08-12', '00:00:00', 'UTC'), '2026-08-12T00:00:00.000Z')
+  assert.equal(zonedDateTimeToUtcIso('2026-11-01', '00:00:00', 'America/New_York'), '2026-11-01T04:00:00.000Z')
+})
+
+test('MUTATION (ladder): dropping the anchor injection from soak-run turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const line = '        entry["ladderAnchorDate"] = anchor\n'
+  assert.ok(original.includes(line), 'mutation anchor must hit the injection line')
+  const mutated = original.replace(line, '')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  // The pin lives in the pair-ladder source-contract test above, not assertSoakContract —
+  // replay its check directly against the mutated text.
+  assert.ok(
+    !(mutated.includes('entry["ladderAnchorDate"] = anchor') && mutated.includes('entry["ladderTimezone"] = tz')),
+    'the injection pin must detect the dropped line',
+  )
+})
+
+test('MUTATION (ladder): reverting the generator to server-clock punches turns the pair-ladder pins red', () => {
+  const generator = readFileSync(GENERATOR, 'utf8')
+  const anchorLine = "const occurredAt = zonedDateTimeToUtcIso("
+  assert.ok(generator.includes(anchorLine), 'mutation anchor must hit the occurredAt construction')
+  const mutated = generator.replace(anchorLine, 'const occurredAt = undefined; void zonedDateTimeToUtcIso; const _unused = (')
+  assert.notEqual(mutated, generator, 'mutation must change the file')
+  assert.doesNotMatch(
+    mutated,
+    /const occurredAt = zonedDateTimeToUtcIso\(\n\s*ladderDate,\n\s*eventType === 'check_in' \? '00:00:00' : '23:59:00',/,
+    'the occurredAt pin must detect the reverted construction',
+  )
+})
+
 test('soak generator: committed tool keeps its reviewed guard rails (rate ceiling, dry-run default, ruled daily quota, upper-bound count semantics)', () => {
   const generator = readFileSync(GENERATOR, 'utf8')
   assert.ok(

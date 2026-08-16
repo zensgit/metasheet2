@@ -2057,6 +2057,26 @@ action_soak_run() {
   done
   IFS="$IFS_SAVE"
 
+  # Pair-ladder anchors (identity of each run's backdated work-date window). The generator's
+  # retired always-server-clock cadence packed every pair into ONE work date, which collided
+  # with the W4 calculator's ambiguity semantics (duplicate_check_in / ambiguous_segment_match
+  # -> review_required, a §4.2 CRITICAL diff class): soak-status 31962440160 counted 50+80
+  # critical rows from cadence alone, so that fixture could NEVER meet the ratified
+  # zero-critical criterion. The ladder gives each (user, work_date) exactly ONE in/out pair:
+  # anchor = day before the family's earliest already-punched work_date (DB is the cursor —
+  # no host state file), or yesterday in the org's group timezone on a fresh family.
+  soak_resolve_pg
+  local ladder_specs="" cfg_org anchor tzv
+  while IFS= read -r cfg_org; do
+    [[ -n "$cfg_org" ]] || continue
+    tzv="$(soak_psql_ta "SELECT g.timezone FROM attendance_groups g WHERE g.org_id = '${cfg_org}' AND g.name LIKE 'w4w7-soak%' LIMIT 1;")"
+    [[ -n "$tzv" ]] || fail "org ${cfg_org:0:8} has no w4w7-soak group — cannot derive the ladder timezone (run action=soak-seed first)"
+    anchor="$(soak_psql_ta "SELECT to_char(COALESCE((SELECT min(r.work_date) FROM attendance_records r WHERE r.org_id = '${cfg_org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%')) - 1, (now() AT TIME ZONE '${tzv}')::date - 1), 'YYYY-MM-DD');")"
+    [[ "$anchor" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "ladder anchor derivation returned '${anchor}' for org ${cfg_org:0:8} — refusing"
+    ladder_specs+="${cfg_org}=${anchor}=${tzv};"
+    log "soak-run: org ${cfg_org:0:8} pair-ladder anchor ${anchor} (tz ${tzv})"
+  done < <(python3 -c 'import json,sys; [print(e["orgId"]) for e in json.load(open(sys.argv[1]))["entries"]]' "$config_path")
+
   # Log every synthetic user in through the REAL login route; tokens go ONLY into a 0600
   # host temp config (deleted below) and are never echoed (per-user output is id + ok/fail).
   mkdir -p "$SOAK_PERSIST_DIR"
@@ -2069,11 +2089,17 @@ action_soak_run() {
   trap cleanup_soak_run EXIT
   local -a login_pipe_status
   set +e
-  SOAK_SYNTH_PASSWORD="$SOAK_SYNTH_PASSWORD" python3 - "$config_path" "$run_config_host" <<'PY' 2>&1 | tee "${OUTPUT_DIR}/soak-run-login.log"
+  SOAK_SYNTH_PASSWORD="$SOAK_SYNTH_PASSWORD" SOAK_LADDER_SPECS="$ladder_specs" python3 - "$config_path" "$run_config_host" <<'PY' 2>&1 | tee "${OUTPUT_DIR}/soak-run-login.log"
 import json, os, sys, urllib.request
 config_path, out_path = sys.argv[1], sys.argv[2]
 cfg = json.load(open(config_path))
 password = os.environ["SOAK_SYNTH_PASSWORD"]
+ladder = {}
+for spec in os.environ.get("SOAK_LADDER_SPECS", "").split(";"):
+    if not spec:
+        continue
+    org, anchor, tz = spec.split("=", 2)
+    ladder[org] = (anchor, tz)
 base = "http://127.0.0.1:8082"
 failures = 0
 for entry in cfg["entries"]:
@@ -2097,6 +2123,13 @@ for entry in cfg["entries"]:
             print(f"[soak-run] login FAILED: {user_id} ({getattr(err, 'code', type(err).__name__)})")
             failures += 1
     entry["tokenOrCreds"] = creds
+    if entry["orgId"] not in ladder:
+        print(f"[soak-run] ladder anchor MISSING for org {entry['orgId']}")
+        failures += 1
+    else:
+        anchor, tz = ladder[entry["orgId"]]
+        entry["ladderAnchorDate"] = anchor
+        entry["ladderTimezone"] = tz
 fd = os.open(out_path, os.O_WRONLY | os.O_TRUNC | os.O_CREAT, 0o600)
 with os.fdopen(fd, "w") as f:
     json.dump(cfg, f)

@@ -9,22 +9,38 @@
       "orgId": "<org1-lowercase-uuid legacy-only>",
       "posture": "legacy_only",
       "minCleanPunches": 20,
-      "userIds": ["synth-w4w7-<org1first8>-u01", "synth-w4w7-<org1first8>-u02"],
-      "tokenOrCreds": {}
+      "userIds": [
+        "synth-w4w7-<org1first8>-u01",
+        "synth-w4w7-<org1first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
+      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
     },
     {
       "orgId": "<org2-lowercase-uuid w4-only>",
       "posture": "w4_only_legacy_arm",
       "minCleanPunches": 20,
-      "userIds": ["synth-w4w7-<org2first8>-u01", "synth-w4w7-<org2first8>-u02"],
-      "tokenOrCreds": {}
+      "userIds": [
+        "synth-w4w7-<org2first8>-u01",
+        "synth-w4w7-<org2first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
+      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
     },
     {
       "orgId": "<org3-lowercase-uuid both-machines>",
       "posture": "both_machines_group_arm",
       "minCleanPunches": 20,
-      "userIds": ["synth-w4w7-<org3first8>-u01", "synth-w4w7-<org3first8>-u02"],
-      "tokenOrCreds": {}
+      "userIds": [
+        "synth-w4w7-<org3first8>-u01",
+        "synth-w4w7-<org3first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "ladderAnchorDate": "<injected-by-soak-run YYYY-MM-DD strictly before today>",
+      "ladderTimezone": "<injected-by-soak-run org group IANA timezone>"
     }
-  ]
+  ],
+  "$ladder_note": "PAIR LADDER: action=soak-run injects ladderAnchorDate (YYYY-MM-DD, strictly before today) and ladderTimezone (the org group's IANA timezone) into every entry from the DB (anchor = day before the family's earliest punched work_date). The generator fails closed without them — the retired always-server-clock cadence packed every pair into one work date, flooding §4.2-critical review_required diffs (soak-status 31962440160). Pair j for a user targets anchor-j: check_in 00:00:00, check_out 23:59:00 wall time; a healthy run's whole shadow-diff surface is 'equal'."
 }
