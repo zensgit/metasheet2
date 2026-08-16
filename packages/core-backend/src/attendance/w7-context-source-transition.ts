@@ -89,6 +89,9 @@ import {
   type AttendanceRequestSnapshotDefectCountsV1,
 } from './w4c3a-rollout-control'
 import {
+  readAttendanceW7CompareWindowStatusV1,
+} from './w7-compare-window-status'
+import {
   ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1,
   ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1,
   attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1,
@@ -341,6 +344,14 @@ export type AttendanceW7ContextSourceTransitionInputV1 = Readonly<{
   evidenceManifestSha256: string
   evidenceReferences: AttendanceW7EvidenceReferencesV1
   reasonCode: 'context_source_transition'
+  /**
+   * The compare window, required on the `group_shadow -> group_eligible` pair
+   * ONLY (design-lock §4.2: entry requires the compare window's exit criteria).
+   * Absent on every other pair, and REJECTED there — the key set is
+   * pair-dependent, exactly as the evidence-reference key set already is.
+   */
+  compareWindowFrom?: string
+  compareWindowTo?: string
 }>
 
 /**
@@ -362,8 +373,35 @@ const TRANSITION_INPUT_KEYS = [
   'reasonCode',
 ] as const
 
+/**
+ * The compare-window keys, required on the compare pair and forbidden
+ * everywhere else. Pair-dependent exactly like the resume-widened evidence
+ * reference keys — the same discipline, applied to the input object.
+ */
+const COMPARE_WINDOW_INPUT_KEYS = ['compareWindowFrom', 'compareWindowTo'] as const
+
 export const ATTENDANCE_W7_CONTEXT_SOURCE_TRANSITION_INPUT_KEYS_V1: readonly string[] =
   Object.freeze([...TRANSITION_INPUT_KEYS])
+
+export const ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_WINDOW_INPUT_KEYS_V1: readonly string[] =
+  Object.freeze([...COMPARE_WINDOW_INPUT_KEYS])
+
+/** The one pair whose entry criteria are the compare window's (design-lock §4.2). */
+function isCompareWindowPair(
+  from: AttendanceW7ContextSourcePostureStateV1,
+  to: AttendanceW7ContextSourcePostureStateV1,
+): boolean {
+  return from === 'group_shadow' && to === 'group_eligible'
+}
+
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+function requireCalendarDate(value: unknown): string {
+  if (typeof value !== 'string' || !CALENDAR_DATE.test(value)) {
+    fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_WINDOW_INVALID')
+  }
+  return value
+}
 
 function requireExactInputKeys(
   input: unknown,
@@ -377,6 +415,32 @@ function requireExactInputKeys(
   if (own.length !== keys.length) fail(code)
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(input, key)) fail(code)
+  }
+  return input as Record<string, unknown>
+}
+
+/**
+ * Phase-1 shape check: the base keys must ALL be present, and the only extra
+ * keys tolerated are the named optional ones. This is not a relaxation — phase 2
+ * re-checks the exact set for the resolved pair — it exists only so the pair can
+ * be read before the pair-dependent key set is known.
+ */
+function requireExactInputKeysAllowing(
+  input: unknown,
+  keys: readonly string[],
+  optional: readonly string[],
+  code: string,
+): Record<string, unknown> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) fail(code)
+  const prototype = Object.getPrototypeOf(input)
+  if (prototype !== Object.prototype && prototype !== null) fail(code)
+  const own = Object.getOwnPropertyNames(input)
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) fail(code)
+  }
+  const allowed = new Set<string>([...keys, ...optional])
+  for (const key of own) {
+    if (!allowed.has(key)) fail(code)
   }
   return input as Record<string, unknown>
 }
@@ -412,7 +476,10 @@ function requireExpectedVersion(value: unknown): number {
 }
 
 type NormalizedTransitionInput = AttendanceW7ContextSourceTransitionInputV1 &
-  Readonly<{ ladderRole: AttendanceW7ContextSourceLadderRoleV1 }>
+  Readonly<{
+    ladderRole: AttendanceW7ContextSourceLadderRoleV1
+    compareWindow: Readonly<{ from: string; to: string }> | null
+  }>
 
 /**
  * VALIDATION ORDER IS THE CONTRACT (cloned from `normalizeTransitionInput`,
@@ -436,9 +503,31 @@ type NormalizedTransitionInput = AttendanceW7ContextSourceTransitionInputV1 &
 function normalizeTransitionInput(
   rawInput: AttendanceW7ContextSourceTransitionInputV1,
 ): NormalizedTransitionInput {
-  const input = requireExactInputKeys(
+  // TWO-PHASE EXACT KEYS. The accepted key set depends on the PAIR, and the
+  // pair is itself carried in the input — so phase 1 accepts the base set with
+  // the window keys OPTIONAL (just enough to read the pair), and phase 2
+  // re-validates the exact set that pair actually requires. Neither phase is a
+  // superset check: phase 2 rejects a window on a non-compare pair just as
+  // firmly as it rejects a missing window on the compare pair.
+  const shape = requireExactInputKeysAllowing(
     rawInput,
     TRANSITION_INPUT_KEYS,
+    COMPARE_WINDOW_INPUT_KEYS,
+    'W7_CONTEXT_SOURCE_TRANSITION_INPUT_INVALID',
+  )
+  const pairFrom = requireW7ContextSourceState(
+    shape.expectedState,
+    'W7_CONTEXT_SOURCE_TRANSITION_EXPECTED_STATE_INVALID',
+  )
+  const pairTo = requireW7ContextSourceState(
+    shape.targetState,
+    'W7_CONTEXT_SOURCE_TRANSITION_INPUT_INVALID',
+  )
+  const input = requireExactInputKeys(
+    rawInput,
+    isCompareWindowPair(pairFrom, pairTo)
+      ? [...TRANSITION_INPUT_KEYS, ...COMPARE_WINDOW_INPUT_KEYS]
+      : TRANSITION_INPUT_KEYS,
     'W7_CONTEXT_SOURCE_TRANSITION_INPUT_INVALID',
   )
   if (input.reasonCode !== 'context_source_transition') {
@@ -471,6 +560,17 @@ function normalizeTransitionInput(
     expectedState,
     targetState,
   )
+  const compareWindow = isCompareWindowPair(expectedState, targetState)
+    ? Object.freeze({
+        from: requireCalendarDate(input.compareWindowFrom),
+        to: requireCalendarDate(input.compareWindowTo),
+      })
+    : null
+  // Ordered window, checked here rather than left to the reader: a reversed
+  // window silently matches zero rows and would report "zero critical diffs".
+  if (compareWindow && compareWindow.from > compareWindow.to) {
+    fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_WINDOW_INVALID')
+  }
   return Object.freeze({
     orgId,
     actorId,
@@ -482,7 +582,9 @@ function normalizeTransitionInput(
     evidenceManifestSha256,
     evidenceReferences,
     reasonCode: 'context_source_transition' as const,
+    ...(compareWindow ? { compareWindowFrom: compareWindow.from, compareWindowTo: compareWindow.to } : {}),
     ladderRole: row.ladderRole,
+    compareWindow,
   })
 }
 
@@ -827,6 +929,14 @@ async function evaluatePredicates(
   rowResolvable: boolean,
   legalPair: boolean,
   /**
+   * The operator-declared compare window, or `null` when the caller has none.
+   * The WRITER supplies it on the compare pair (it is pair-required input); the
+   * read-only PLAN never has one, so the two compare criteria are reported
+   * not-evaluated there rather than as passes the plan cannot justify — the
+   * same shape `RESUME_REPLAY_ARTIFACT` already uses.
+   */
+  compareWindow: Readonly<{ from: string; to: string }> | null,
+  /**
    * Whether the caller has already validated the resume evidence references.
    * The WRITER has (input-time `requireW7EvidenceReferences`, before any DB
    * access); the read-only PLAN never sees an evidence manifest at all, so it
@@ -995,15 +1105,77 @@ async function evaluatePredicates(
   // re-deriving the identical filter here. Two computations of one fact can
   // drift, which is the duplication this file's header argues against elsewhere.
   const undeliveredCompareEvidence = attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()
+  // ---------------------------------------------------------------------------
+  // The two compare-window exit criteria (design-lock §4.2), WIRED TO W7-2's
+  // REAL COUNTER READER now that it is in-tree.
+  //
+  // These shipped declared-undelivered with `count: null` at the pre-W7-2 base,
+  // which was always stated as temporary — "until W7-2 delivers them". W7-2
+  // shipped `readAttendanceW7CompareWindowStatusV1`, so reporting `null` here
+  // would now be the dishonest direction: a criterion that CAN be counted being
+  // reported as uncountable.
+  //
+  // Three honest outcomes, and the code distinguishes all three:
+  //   - producer undelivered (declaration false) -> fail, `count: null`;
+  //   - deliverable but no window (the PLAN) -> `evaluated: false, pass: null`;
+  //   - deliverable with a window (the WRITER) -> the REAL count from W7-2.
+  //
+  // SCOPE OF THE WINDOW, named rather than glossed: the window is OPERATOR
+  // DECLARED and recorded verbatim in the transition evidence. This boundary
+  // validates its SHAPE (calendar dates, ordered) and nothing more — it does
+  // NOT verify that the window actually covers the org's shadow period, and it
+  // cannot: `readAttendanceW7CompareWindowStatusV1` counts by `work_date`, and
+  // there is no org-level timezone in the schema to convert this machine's
+  // `changed_at` timestamps into work dates (group timezones are per-group and
+  // an org may hold several). A too-narrow window therefore reports zero
+  // critical diffs honestly and vacuously. Bounding that window is an
+  // UNRESOLVED question that belongs with the same owner answer as the compare
+  // window's own definition; it is disclosed here, not silently assumed away.
+  // ---------------------------------------------------------------------------
+  let compareStatus: Awaited<ReturnType<typeof readAttendanceW7CompareWindowStatusV1>> | null = null
+  const anyCompareProbeApplicable = ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.some(
+    (probe) => applicable.has(probe),
+  )
+  // SOME, not EVERY. The reader computes BOTH counters in one pass, so it is
+  // worth calling as soon as ONE probe has a producer. Requiring all of them
+  // was a real defect: withdrawing one probe's delivery made the OTHER — still
+  // delivered — collapse to not-evaluated and block first, so a test could not
+  // tell which criterion had actually failed. Caught by the distinct-codes leg.
+  const someCompareProducerDelivered = ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.some(
+    (probe) => isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe),
+  )
+  if (
+    canEvaluateDbPredicates &&
+    anyCompareProbeApplicable &&
+    someCompareProducerDelivered &&
+    compareWindow !== null
+  ) {
+    compareStatus = await readAttendanceW7CompareWindowStatusV1(trx, {
+      orgId,
+      from: compareWindow.from,
+      to: compareWindow.to,
+    })
+  }
+
   for (const probe of ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1) {
     if (!applicable.has(probe)) continue
-    const delivered = isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe)
-    // DECLARED-UNDELIVERED, never silently absent: the code is emitted, it is
-    // applicable for this pair, and it FAILS with `count: null` — "this
-    // criterion has no producer yet", which is not the same claim as "this
-    // criterion evaluated to zero". A count is reported only once W7-2 lands
-    // and supplies one.
-    verdicts.set(probe, evaluatedVerdict(probe, delivered, null))
+    if (!isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe)) {
+      // No producer for this criterion — the original declared-undelivered
+      // shape, retained because it is still the honest answer if a future
+      // ruling withdraws W7-2's counter.
+      verdicts.set(probe, evaluatedVerdict(probe, false, null))
+      continue
+    }
+    if (compareStatus === null) {
+      verdicts.set(probe, notEvaluatedVerdict(probe, true))
+      continue
+    }
+    // The REAL verdict and the REAL count, taken from W7-2's reader by matching
+    // predicate code. A missing code is a contract break between the two
+    // modules, not a pass: fail closed rather than default.
+    const w72 = compareStatus.predicates.find((predicate) => predicate.code === probe)
+    if (!w72) fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_EVIDENCE_UNAVAILABLE')
+    verdicts.set(probe, evaluatedVerdict(probe, w72.pass, w72.count))
   }
 
   // Resume (§5.3): satisfied by the widened evidence-reference key set, which is
@@ -1181,6 +1353,18 @@ async function lockContextSourceRowForBootstrapOrRead(
 export type AttendanceW7ContextSourceTransitionPlanInputV1 = Readonly<{
   orgId: string
   targetState: AttendanceW7ContextSourcePostureStateV1
+  /**
+   * OPTIONAL compare window. Supplying it lets the plan evaluate the two
+   * compare-window exit criteria for real (design-lock §4.2) instead of
+   * reporting them not-evaluated; omitting it is honest and stays honest.
+   *
+   * Optional here but REQUIRED on the writer's compare pair, deliberately: a
+   * plan is advisory and may legitimately be run before the operator has fixed
+   * a window, whereas a transition that claims those criteria passed must name
+   * the window it judged them over.
+   */
+  compareWindowFrom?: string
+  compareWindowTo?: string
 }>
 
 export type AttendanceW7ContextSourceTransitionPlanV1 = Readonly<{
@@ -1250,6 +1434,7 @@ async function buildContextSourcePlan(
   trx: AttendanceW4TransactionClientV1,
   orgId: string,
   targetState: AttendanceW7ContextSourcePostureStateV1,
+  compareWindow: Readonly<{ from: string; to: string }> | null,
 ): Promise<AttendanceW7ContextSourceTransitionPlanV1> {
   const orgAllowlisted = isAttendanceW7ContextSourceOrgAllowlistedV1(orgId)
   const persisted = await readContextSourceRowForPlan(trx, orgId)
@@ -1267,7 +1452,10 @@ async function buildContextSourcePlan(
     orgAllowlisted,
     rowResolvable,
     row !== undefined,
-    // The plan has no evidence manifest — see the parameter's doc comment.
+    // The window is whatever the caller supplied (often none); the plan never
+    // has an evidence manifest, so the resume criterion is always
+    // not-evaluated here.
+    compareWindow,
     false,
   )
 
@@ -1317,6 +1505,20 @@ export async function planAttendanceW7ContextSourceTransitionV1(
     rawInput.targetState,
     'W7_CONTEXT_SOURCE_TRANSITION_INPUT_INVALID',
   )
+  // Both window bounds or neither — a half-window is a caller mistake, never a
+  // silent "no window".
+  const hasFrom = rawInput.compareWindowFrom !== undefined
+  const hasTo = rawInput.compareWindowTo !== undefined
+  if (hasFrom !== hasTo) fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_WINDOW_INVALID')
+  const planCompareWindow = hasFrom
+    ? Object.freeze({
+        from: requireCalendarDate(rawInput.compareWindowFrom),
+        to: requireCalendarDate(rawInput.compareWindowTo),
+      })
+    : null
+  if (planCompareWindow && planCompareWindow.from > planCompareWindow.to) {
+    fail('W7_CONTEXT_SOURCE_TRANSITION_COMPARE_WINDOW_INVALID')
+  }
   await assertConnectionIsIdleV1(connection)
   await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
   try {
@@ -1324,7 +1526,7 @@ export async function planAttendanceW7ContextSourceTransitionV1(
       String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
     ])
     await insidePlanTransactionForTests?.(connection)
-    return await buildContextSourcePlan(connection, orgId, targetState)
+    return await buildContextSourcePlan(connection, orgId, targetState, planCompareWindow)
   } finally {
     await connection.query('ROLLBACK').catch(() => undefined)
   }
@@ -1405,6 +1607,9 @@ export async function transitionAttendanceW7ContextSourceV1(
         orgAllowlisted,
         true,
         true,
+        // Pair-required and shape-validated in phase 0; `null` on every pair
+        // that is not the compare pair.
+        input.compareWindow,
         // Phase 0 already validated the (resume-widened) reference set.
         true,
       )
@@ -1468,6 +1673,10 @@ export async function transitionAttendanceW7ContextSourceV1(
               suspendSourceWritersInFlight: evaluation.counts.suspendSourceWritersInFlight,
             },
             references: input.evidenceReferences,
+            // Recorded VERBATIM: the compare window is operator-declared
+            // evidence, and a promotion justified by a window nobody can later
+            // recover is not auditable. `null` on every non-compare pair.
+            compareWindow: input.compareWindow,
           }),
         ],
       )

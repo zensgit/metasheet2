@@ -96,6 +96,8 @@ const STATE_TABLE = 'attendance_calculation_context_source_state'
 const EVENT_TABLE = 'attendance_calculation_context_source_events'
 
 const MANIFEST = 'b'.repeat(64)
+/** The operator-declared compare window used by the compare-pair fixtures. */
+const COMPARE_WINDOW = Object.freeze({ from: '2026-08-01', to: '2026-08-31' })
 const BASE_REFS = Object.freeze({
   imageSha: 'sha256:bbbb',
   ownerAuthorizationRef: 'owner-ref-w73',
@@ -441,10 +443,22 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
     )
   }
 
+  /**
+   * Builds a transition input, PAIR-AWARE.
+   *
+   * `group_shadow -> group_eligible` requires the compare window (design-lock
+   * §4.2 entry criteria, wired to W7-2's counter reader); every other pair
+   * REJECTS it. The helper follows that rule so a caller cannot accidentally
+   * assert the wrong key set — the pair-dependence itself is asserted directly
+   * by its own legs, not left to this helper to imply.
+   */
   function input(
     orgId: string,
     overrides: Partial<AttendanceW7ContextSourceTransitionInputV1> = {},
   ): AttendanceW7ContextSourceTransitionInputV1 {
+    const expectedState = overrides.expectedState ?? 'off'
+    const targetState = overrides.targetState ?? 'group_shadow'
+    const comparePair = expectedState === 'group_shadow' && targetState === 'group_eligible'
     return {
       orgId,
       actorId: 'operator-w73',
@@ -456,6 +470,9 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       evidenceManifestSha256: MANIFEST,
       evidenceReferences: BASE_REFS,
       reasonCode: 'context_source_transition',
+      ...(comparePair
+        ? { compareWindowFrom: COMPARE_WINDOW.from, compareWindowTo: COMPARE_WINDOW.to }
+        : {}),
       ...overrides,
     } as AttendanceW7ContextSourceTransitionInputV1
   }
@@ -1035,9 +1052,28 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
   })
 
   describe('W7-3 declared-undelivered: the ladder cannot be walked forward at this head', () => {
-    it('promotion into every group state is refused by the SHIPPED declaration', async () => {
+    it('the SHIPPED declaration now PERMITS promotion — the gate is unchanged, reality is', async () => {
+      // RE-DERIVED, NOT DELETED. At the pre-W7-2 base this leg asserted that
+      // promotion into every group state was REFUSED by the shipped
+      // declaration, and the PR body leaned on that for its containment
+      // argument. The merge to post-W7-2 main delivered all three producers, so
+      // the honest assertion inverts: the gate no longer blocks here.
       const orgId = await preparedOrg()
-      // No delivery override: the shipped values are what is under test.
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+      })
+      expect(await stateRow(orgId)).toEqual({ state: 'group_shadow', priorState: 'off', version: 2 })
+      expect(await eventCount(orgId)).toBe(1)
+    })
+
+    it('the producer gate is STILL load-bearing: withdraw delivery and the same promotion is refused', async () => {
+      // The mechanism did not become decorative when reality changed — it is
+      // what will refuse a sixth state, or any state whose producer is later
+      // withdrawn (the seam's own [OWNER-CONFIRM B-3] could withdraw
+      // `group_eligible`). Proven by withdrawing delivery through the seam,
+      // with the permitted case above as the positive control.
+      const orgId = await preparedOrg()
+      __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: false })
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
@@ -1049,7 +1085,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       expect(await eventCount(orgId)).toBe(0)
     })
 
-    it('the compare-window pair is ALSO refused for its own reason once the producer is delivered', async () => {
+    it('the compare-window criteria are EVALUATED FOR REAL, and refuse only when W7-2 has no producer', async () => {
       const orgId = await preparedOrg()
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({
         group_shadow: true,
@@ -1058,36 +1094,12 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
       })
-      // With the producer declared delivered, the remaining blocker on
-      // `group_shadow -> group_eligible` is the W7-2 compare evidence — a
-      // DIFFERENT code, which is what makes the two declarations independent
-      // gates rather than one covering for the other.
-      await withClient(async (client) => {
-        await expect(
-          transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
-            input(orgId, {
-              expectedState: 'group_shadow',
-              targetState: 'group_eligible',
-              expectedVersion: 2,
-            }),
-          ),
-        ).rejects.toMatchObject({
-          // The FIRST compare probe in enumeration order. Distinct per probe
-          // since the fix round — a shared code proved only that one of the two
-          // fired, never which.
-          code: 'W7_CONTEXT_SOURCE_TRANSITION_CRITICAL_SHADOW_DIFF_NOT_DELIVERED',
-        })
-      })
-      expect((await stateRow(orgId))?.state).toBe('group_shadow')
-
-      // POSITIVE CONTROL: with BOTH declarations overridden, the same call
-      // succeeds — so the refusal above was the compare evidence and not some
-      // unrelated precondition.
-      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
-        W7_CRITICAL_SHADOW_DIFF: true,
-        W7_OFF_ROSTER_DIFF: true,
-      })
+      // RE-DERIVED at the post-W7-2 merge. These criteria used to FAIL with
+      // `count: null` because no producer existed. W7-2 shipped
+      // `readAttendanceW7CompareWindowStatusV1`, so the boundary now calls it
+      // for real over the operator-declared window: with no W7 compare rows in
+      // the window there are zero critical diffs and zero off-roster diffs, so
+      // the criteria PASS and the promotion proceeds.
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
           asTrx(client),
@@ -1098,11 +1110,49 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
           }),
         )
       })
-      expect(await stateRow(orgId)).toEqual({
-        state: 'group_eligible',
-        priorState: 'group_shadow',
-        version: 3,
+      expect((await stateRow(orgId))?.state).toBe('group_eligible')
+
+      // ...and the counts that reached the evidence are REAL zeroes from W7-2's
+      // reader, not the old `null` placeholder.
+      const evidence = await pool.query(
+        `SELECT evidence FROM ${EVENT_TABLE} WHERE org_id = $1 AND new_state = 'group_eligible'`,
+        [orgId],
+      )
+      expect((evidence.rows[0].evidence as Record<string, unknown>).compareWindow).toEqual({
+        from: COMPARE_WINDOW.from,
+        to: COMPARE_WINDOW.to,
       })
+
+      // NEGATIVE CONTROL: withdraw W7-2's delivery and the SAME call is refused
+      // with the criterion's own code — so the pass above is the reader's
+      // verdict, not an absent gate.
+      const withdrawn = await preparedOrg()
+      __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({
+        group_shadow: true,
+        group_eligible: true,
+      })
+      __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
+        W7_CRITICAL_SHADOW_DIFF: false,
+        W7_OFF_ROSTER_DIFF: true,
+      })
+      await withClient(async (client) => {
+        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(withdrawn))
+      })
+      await withClient(async (client) => {
+        await expect(
+          transitionAttendanceW7ContextSourceV1(
+            asTrx(client),
+            input(withdrawn, {
+              expectedState: 'group_shadow',
+              targetState: 'group_eligible',
+              expectedVersion: 2,
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: 'W7_CONTEXT_SOURCE_TRANSITION_CRITICAL_SHADOW_DIFF_NOT_DELIVERED',
+        })
+      })
+      expect((await stateRow(withdrawn))?.state).toBe('group_shadow')
     })
 
     it('the two EXITS are NOT gated by the declaration — a stuck org can always leave', async () => {
@@ -1243,6 +1293,10 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
 
       const evidence = row.evidence as Record<string, unknown>
       expect(Object.keys(evidence).sort()).toEqual([
+        // `compareWindow` is recorded VERBATIM on every transition (null off the
+        // compare pair): an operator-declared window that justified a promotion
+        // and cannot later be recovered is not auditable evidence.
+        'compareWindow',
         'correlationId',
         'ladderRole',
         'manifestSha256',
@@ -1251,6 +1305,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         'schemaVersion',
         'targetState',
       ])
+      expect(evidence.compareWindow, 'a non-compare pair records a null window').toBe(null)
       expect(evidence.schemaVersion).toBe(1)
       expect(evidence.manifestSha256).toBe(MANIFEST)
       expect(evidence.correlationId).toBe(correlationId)
@@ -1269,7 +1324,10 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         'unresolvedReviews',
       ])
       // The declaration counts really reached the blob, not zeroes.
-      expect(counts.undeliveredCompareEvidence).toBe(2)
+      // Both zero at the post-W7-2 head: every producer is delivered. These
+      // were 2 and 0 at the pre-W7-2 base; the counters are unchanged, the
+      // reality they measure is.
+      expect(counts.undeliveredCompareEvidence).toBe(0)
       expect(counts.undeliveredStateProducers).toBe(0)
     })
 
@@ -1605,6 +1663,11 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId,
           targetState: 'group_eligible',
+          // Supplying the window lets the plan evaluate the two compare
+          // criteria for real; without it they are honestly not-evaluated and
+          // the plan blocks (its own leg covers that).
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         expect(plan.predicates.find((p) => p.code === 'INCOMPLETE_OPERATION')).toMatchObject({
           applicable: true,
@@ -1628,6 +1691,8 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
           const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
             orgId,
             targetState: 'group_eligible',
+            compareWindowFrom: COMPARE_WINDOW.from,
+            compareWindowTo: COMPARE_WINDOW.to,
           })
           expect(
             plan.predicates.find((p) => p.code === 'DEFECTIVE_REQUEST_SNAPSHOT'),
@@ -1686,6 +1751,11 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId,
           targetState: 'group_eligible',
+          // Supplying the window lets the plan evaluate the two compare
+          // criteria for real; without it they are honestly not-evaluated and
+          // the plan blocks (its own leg covers that).
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         expect(plan.blocked).toBe(false)
       })
@@ -1858,6 +1928,11 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId,
           targetState: 'group_eligible',
+          // Supplying the window lets the plan evaluate the two compare
+          // criteria for real; without it they are honestly not-evaluated and
+          // the plan blocks (its own leg covers that).
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         expect(plan.orgAllowlisted, 'the fixture failed to make the org non-allowlisted').toBe(false)
 
@@ -1907,6 +1982,11 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId,
           targetState: 'group_eligible',
+          // Supplying the window lets the plan evaluate the two compare
+          // criteria for real; without it they are honestly not-evaluated and
+          // the plan blocks (its own leg covers that).
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         for (const code of ['W4_POSTURE_COHERENT', 'INCOMPLETE_OPERATION', 'UNRESOLVED_INGRESS_REVIEW', 'DEFECTIVE_REQUEST_SNAPSHOT'] as const) {
           const verdict = plan.predicates.find((predicate) => predicate.code === code)
@@ -2092,6 +2172,8 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId: blocked,
           targetState: 'group_eligible',
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         expect(plan.predicates.find((p) => p.code === 'INCOMPLETE_OPERATION')).toMatchObject({
           applicable: true,
@@ -2115,6 +2197,8 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
           orgId: blocked,
           targetState: 'group_eligible',
+          compareWindowFrom: COMPARE_WINDOW.from,
+          compareWindowTo: COMPARE_WINDOW.to,
         })
         expect(plan.predicates.find((p) => p.code === 'UNRESOLVED_INGRESS_REVIEW')).toMatchObject({
           applicable: true,
@@ -2185,7 +2269,9 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
       })
 
-      // Only OFF_ROSTER undelivered -> only its code.
+      // Withdraw ONE probe's delivery at a time and assert the survivor's own
+      // code. (At the post-W7-2 head both ship delivered, so isolation is by
+      // withdrawal rather than by grant — same one-at-a-time discipline.)
       __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
         W7_CRITICAL_SHADOW_DIFF: true,
         W7_OFF_ROSTER_DIFF: false,
@@ -2194,7 +2280,6 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         'W7_CONTEXT_SOURCE_TRANSITION_OFF_ROSTER_DIFF_NOT_DELIVERED',
       )
 
-      // Only CRITICAL_SHADOW undelivered -> only its code.
       __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests({
         W7_CRITICAL_SHADOW_DIFF: false,
         W7_OFF_ROSTER_DIFF: true,

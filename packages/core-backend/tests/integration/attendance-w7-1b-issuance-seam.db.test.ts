@@ -47,6 +47,7 @@ import http from 'http'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import { canonicalAttendanceJsonV1 } from '../../src/attendance/w4c0-fingerprints'
 import { isCoreIssuedGroupEffectiveContextV2 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
@@ -302,10 +303,19 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
     )
   }
 
+  /**
+   * W7-3 (#4556) landing-gate P1-1: the bare `(org_id, state, scope)` shape is
+   * ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes only
+   * -> P0001) and its four NOT NULL columns (-> 23502). Routed through the ONE shared
+   * legal fixture: bootstrap at `off`, then walk the ratified ladder. Never by
+   * dropping the trigger — that would run this suite's evidence against a schema
+   * production does not ship.
+   */
   const setPosture = (orgId: string, state: string) =>
-    pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-      [orgId.toLowerCase(), state],
+    seedAttendanceW7ContextSourcePostureV1(
+      pool,
+      orgId,
+      state,
     )
 
   const issue = (orgId: string, userId: string, shiftId: string, purpose: 'persist' | 'mirror' = 'persist') =>

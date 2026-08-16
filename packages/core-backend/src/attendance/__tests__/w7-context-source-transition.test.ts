@@ -24,7 +24,17 @@ import {
   type AttendanceW7ContextSourcePostureStateV1,
 } from '../w7-context-source-posture-contract'
 import {
+  ATTENDANCE_W7_COMPARE_PREDICATE_CODES_V1,
+  readAttendanceW7CompareWindowStatusV1,
+} from '../w7-compare-window-status'
+import {
+  ATTENDANCE_W7_BLOCKED_ARM_STATES_V1,
+  ATTENDANCE_W7_GROUP_ARM_STATES_V1,
+  ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1,
+} from '../w7-resolver/w7-frozen-context-issuance-seam'
+import {
   ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1,
+  ATTENDANCE_W7_CONTEXT_SOURCE_DELIVERY_DECLARATIONS_V1,
   ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1,
   attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1,
   attendanceW7ContextSourceUndeliveredStateProducerCountV1,
@@ -582,37 +592,127 @@ describe('W7-3 declared delivery: mechanical over the enumeration, honest at thi
     )
   })
 
-  it('the SHIPPED declaration at this head: `off` delivered, all three group states not', () => {
-    expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('off')).toBe(true)
-    for (const state of ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1) {
-      expect(isAttendanceW7ContextSourceStateProducerDeliveredV1(state), state).toBe(false)
+  it('the SHIPPED declaration at this POST-W7-2 head: every state delivered, undelivered count 0', () => {
+    // RE-DERIVED, NOT DELETED. This leg asserted the pre-1b/pre-W7-2 reality
+    // ("all three group states NOT delivered") and it was correct then. The
+    // merge to post-W7-2 main changed reality: the seam serves
+    // `group_authoritative`, W7-2's dual-run produces `group_shadow` /
+    // `group_eligible`, and `suspended` has a blocked arm. The correspondence
+    // leg above is what proves those values against the seam; this leg pins the
+    // resulting SHIPPED numbers so a silent flip in either direction is visible.
+    for (const state of ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1) {
+      expect(isAttendanceW7ContextSourceStateProducerDeliveredV1(state), state).toBe(true)
     }
-    expect(attendanceW7ContextSourceUndeliveredStateProducerCountV1()).toBe(3)
+    expect(attendanceW7ContextSourceUndeliveredStateProducerCountV1()).toBe(0)
   })
 
-  it('both W7-2-fed compare probes are declared undelivered at this head', () => {
+  it('both W7-2-fed compare probes are DELIVERED at this head (W7-2 shipped the counter reader)', () => {
+    // RE-DERIVED: these were declared-undelivered with `count: null` at the
+    // pre-W7-2 base, explicitly "until W7-2 delivers them". W7-2 shipped
+    // `readAttendanceW7CompareWindowStatusV1`, so continuing to report `null`
+    // would be the dishonest direction — a criterion that CAN be counted
+    // reported as uncountable.
     for (const probe of ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1) {
-      expect(isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe), probe).toBe(false)
+      expect(isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe), probe).toBe(true)
     }
-    expect(attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()).toBe(2)
+    expect(attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()).toBe(0)
+  })
+
+  it('COMPARE CORRESPONDENCE: declared delivered IFF the counter reader is IMPORT-REACHABLE from the writer', () => {
+    // REACHABILITY, NOT TREE PRESENCE — and the distinction is load-bearing.
+    //
+    // Presence would say "the module exists, so flip the probes true", which
+    // would unlock a promotion gate on evidence THE WRITER CANNOT READ. That is
+    // exactly the state this tree was in before this slice wired the reader in:
+    // `w7-compare-window-status.ts` existed, but its only production importer
+    // was `w4c2-live-scheduled-boundary.ts` and no import path carried it to the
+    // writer. Presence is also the criterion that reports 29 bogus "producers"
+    // for `suspended`; encoding it on a gate imports that weakness onto the gate.
+    //
+    // So the criterion is the one that actually matters: can the writer REACH
+    // the counters. Wiring the reader is therefore a deliberate act with its own
+    // leg, never a declaration flip.
+    const COMPARE_READER = 'packages/core-backend/src/attendance/w7-compare-window-status.ts'
+    const WRITER = 'packages/core-backend/src/attendance/w7-context-source-transition.ts'
+    const SPECIFIER_RE = /(?:\bimport\s*\(|\brequire\s*\(|\bfrom\s+)\s*['"]([^'"]+)['"]/g
+
+    function resolvedTargetsOf(rel: string): string[] {
+      const abs = path.join(REPO_ROOT, rel)
+      if (!fs.existsSync(abs)) return []
+      const out: string[] = []
+      for (const match of fs.readFileSync(abs, 'utf8').matchAll(SPECIFIER_RE)) {
+        const specifier = match[1]
+        if (!specifier.startsWith('.')) continue
+        const base = path.resolve(path.dirname(abs), specifier)
+        for (const candidate of [base, `${base}.ts`, `${base}.cjs`, `${base}.js`, `${base}.mjs`]) {
+          if (fs.existsSync(candidate) && fs.lstatSync(candidate).isFile()) {
+            out.push(path.relative(REPO_ROOT, candidate).split(path.sep).join('/'))
+            break
+          }
+        }
+      }
+      return out
+    }
+
+    function reachableFrom(root: string): Set<string> {
+      const seen = new Set<string>([root])
+      const stack = [root]
+      while (stack.length > 0) {
+        for (const target of resolvedTargetsOf(stack.pop() as string)) {
+          if (!seen.has(target)) {
+            seen.add(target)
+            stack.push(target)
+          }
+        }
+      }
+      return seen
+    }
+
+    const graph = reachableFrom(WRITER)
+    // NON-VACUITY: the walk really traversed a graph and really found the
+    // writer's known neighbours — a broken resolver would report "unreachable"
+    // for everything and make the biconditional pass by accident.
+    expect(graph.size).toBeGreaterThan(20)
+    expect(graph).toContain('packages/core-backend/src/attendance/w7-context-source-delivery.ts')
+    expect(graph).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
+
+    const readerReachable = graph.has(COMPARE_READER)
+    for (const probe of ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1) {
+      expect(
+        isAttendanceW7ContextSourceCompareEvidenceDeliveredV1(probe),
+        `${probe}: declared delivery must equal reader reachability ` +
+          `(reachable=${readerReachable}). Flipping the declaration without wiring the reader — ` +
+          `or wiring it without flipping — is the drift this leg exists to catch.`,
+      ).toBe(readerReachable)
+    }
+
+    // ...and the reader really produces THESE codes, so "reachable" is not
+    // satisfied by reaching some unrelated module.
+    expect(typeof readAttendanceW7CompareWindowStatusV1).toBe('function')
+    expect(ATTENDANCE_W7_COMPARE_PREDICATE_CODES_V1).toEqual(
+      expect.arrayContaining([...ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1]),
+    )
   })
 
   it('T-P8 the counts are MECHANICAL over their enumerations, not hand-coded', () => {
-    // Flip one key at a time and assert the count moves by exactly one — a
-    // hand-coded constant would not.
+    // RE-DERIVED for the post-W7-2 baseline. The shipped baseline is now 0
+    // undelivered on both enumerations, so the discriminating direction
+    // inverted: withdraw delivery one key at a time and assert the count RISES
+    // by exactly one. Same mechanical property, same one-at-a-time discipline;
+    // a hand-coded constant still cannot track it.
     for (let i = 0; i < ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1.length; i += 1) {
-      const flipped = ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1.slice(0, i + 1)
+      const withdrawn = ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1.slice(0, i + 1)
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests(
-        Object.fromEntries(flipped.map((s) => [s, true])) as never,
+        Object.fromEntries(withdrawn.map((s) => [s, false])) as never,
       )
-      expect(attendanceW7ContextSourceUndeliveredStateProducerCountV1()).toBe(3 - (i + 1))
+      expect(attendanceW7ContextSourceUndeliveredStateProducerCountV1()).toBe(i + 1)
     }
     for (let i = 0; i < ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.length; i += 1) {
-      const flipped = ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.slice(0, i + 1)
+      const withdrawn = ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1.slice(0, i + 1)
       __setAttendanceW7ContextSourceCompareEvidenceDeliveryOverrideForTests(
-        Object.fromEntries(flipped.map((p) => [p, true])) as never,
+        Object.fromEntries(withdrawn.map((p) => [p, false])) as never,
       )
-      expect(attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()).toBe(2 - (i + 1))
+      expect(attendanceW7ContextSourceUndeliveredCompareEvidenceCountV1()).toBe(i + 1)
     }
   })
 
@@ -625,76 +725,127 @@ describe('W7-3 declared delivery: mechanical over the enumeration, honest at thi
   })
 
   it('the override seam is PARTIAL: an unmentioned key falls through to the shipped value', () => {
-    __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
-    expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('group_shadow')).toBe(true)
-    expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('group_authoritative')).toBe(false)
+    // RE-DERIVED: with the shipped baseline now all-delivered, the partial
+    // override is exercised by WITHDRAWING one key — the unmentioned ones must
+    // still fall through to the shipped `true`.
+    __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: false })
+    expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('group_shadow')).toBe(false)
+    expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('group_authoritative')).toBe(true)
     expect(isAttendanceW7ContextSourceStateProducerDeliveredV1('off')).toBe(true)
   })
 
-  it('CORRESPONDENCE: a `true` group-state key must match a real producing module in the tree', () => {
-    // The W4C-2 discipline — "Never flip a key to `true` as a standalone change
-    // to unblock rollout; the correspondence test exists precisely to fail that
-    // change" — expressed without guessing what W7-2/W7-1b will name their
-    // files: a producer is a production module OUTSIDE the machine itself whose
-    // CODE names the state literal.
-    const MACHINE_MODULES = [
-      'packages/core-backend/src/attendance/w7-context-source-posture-contract.ts',
-      'packages/core-backend/src/attendance/w7-context-source-delivery.ts',
-      'packages/core-backend/src/attendance/w7-context-source-transition.ts',
-      'packages/core-backend/src/attendance/w7-resolver/w7-context-source-posture-resolver.ts',
-      'packages/core-backend/src/db/migrations/zzzz20260814120000_w7_attendance_context_source_posture_state.ts',
-      'packages/core-backend/src/db/migrations/zzzz20260816120000_w7_context_source_transition_writer.ts',
-    ]
-    // ANCHOR CHECK first: every machine module must really exist, or the
-    // exclusion list is stale and this leg measures nothing.
-    for (const rel of MACHINE_MODULES) {
-      expect(fs.existsSync(path.join(REPO_ROOT, rel)), `stale exclusion: ${rel}`).toBe(true)
+  it('CORRESPONDENCE: every declared value equals what the SEAM\'s exported arrays actually say', () => {
+    // REBUILT AT THE POST-W7-2 MERGE. This leg used to scan production files for
+    // the state LITERAL and treat a hit as "a producer exists". That proxy did
+    // its job — it caught the merge and refused to let a stale declaration ship
+    // — but it is weak in both directions: it cannot tell a module that SERVES a
+    // state from one that merely mentions the word, and for the common words
+    // `off` and `suspended` it matches 26 and 29 unrelated modules (multitable
+    // job status, DingTalk OAuth, k3 adapters...). Measured, not guessed.
+    //
+    // The seam publishes the truth as three CLOSED, EXPORTED arrays, and its own
+    // T-A4 leg proves they partition the state enumeration exactly. So this leg
+    // now asserts the thing that is actually this module's business: THE
+    // DECLARATION AGREES WITH THE SEAM. The seam's partition proof is consumed,
+    // not restated.
+    //
+    // The tests may import the seam; the production delivery module must NOT —
+    // it stays a leaf so the ops CLI and the server read the identical const.
+    const servedByGroupArm = new Set<string>(ATTENDANCE_W7_GROUP_ARM_STATES_V1)
+    const runsShadowCompare = new Set<string>(ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1)
+    const blocked = new Set<string>(ATTENDANCE_W7_BLOCKED_ARM_STATES_V1)
+
+    // Anchor check: the seam's arrays are non-empty and really name W7 states,
+    // so a renamed/emptied export cannot make every assertion below vacuous.
+    expect(servedByGroupArm.size).toBeGreaterThan(0)
+    expect(runsShadowCompare.size).toBeGreaterThan(0)
+    expect(blocked.size).toBeGreaterThan(0)
+    for (const state of [...servedByGroupArm, ...runsShadowCompare, ...blocked]) {
+      expect(ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1).toContain(state)
     }
 
-    const tracked = execFileSync('git', ['ls-files', '-z', '--cached'], {
-      cwd: REPO_ROOT,
-      maxBuffer: 64 * 1024 * 1024,
-    })
-      .toString('utf8')
-      .split('\0')
-      .filter((entry) => entry.length > 0)
-      .filter(
-        (rel) =>
-          (rel.startsWith('packages/core-backend/src/') ||
-            rel.startsWith('packages/openapi/src/') ||
-            rel.startsWith('apps/web/src/') ||
-            rel.startsWith('plugins/')) &&
-          /\.(ts|tsx|js|cjs|mjs)$/.test(rel) &&
-          !rel.includes('__tests__/') &&
-          !rel.includes('.test.') &&
-          !rel.includes('.spec.') &&
-          !MACHINE_MODULES.includes(rel),
-      )
-
-    // Non-vacuity: the scan really walked a large tree.
-    expect(tracked.length).toBeGreaterThan(200)
-
-    function producersOf(state: string): string[] {
-      return tracked
-        .filter((rel) => {
-          const code = fs
-            .readFileSync(path.join(REPO_ROOT, rel), 'utf8')
-            .replace(/\/\*[\s\S]*?\*\//g, ' ')
-            .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
-          return code.includes(`'${state}'`) || code.includes(`"${state}"`)
-        })
-        .sort()
-    }
-
-    for (const state of ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1) {
-      const producers = producersOf(state)
+    // COLLECT-THEN-ASSERT, deliberately. The previous shape asserted inside the
+    // loop, so it ABORTED on the first stale state and reported one failure
+    // while two more hid behind it — the merged tree had all three group states
+    // stale and CI showed exactly one. A fix guided by that output reds twice
+    // more. One run must now name every mismatch.
+    const mismatches: string[] = []
+    const kindMismatches: string[] = []
+    for (const state of ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1) {
+      const expected =
+        servedByGroupArm.has(state) ||
+        runsShadowCompare.has(state) ||
+        blocked.has(state) ||
+        state === 'off'
       const declared = isAttendanceW7ContextSourceStateProducerDeliveredV1(state)
-      expect(
-        declared,
-        `'${state}' is declared ${declared ? 'DELIVERED' : 'undelivered'} but the tree has ` +
-          `${producers.length} producing module(s): ${producers.join(', ') || '<none>'}`,
-      ).toBe(producers.length > 0)
+      const entry = ATTENDANCE_W7_CONTEXT_SOURCE_DELIVERY_DECLARATIONS_V1[state]
+      if (declared !== expected) {
+        mismatches.push(
+          `'${state}' declared ${declared ? 'DELIVERED' : 'undelivered'} but the seam says ` +
+            `${expected ? 'routed' : 'NOT routed'} ` +
+            `(groupArm=${servedByGroupArm.has(state)} compare=${runsShadowCompare.has(state)} ` +
+            `blocked=${blocked.has(state)}); reason: "${entry.reason}"`,
+        )
+      }
+      // The KIND must match the seam's own partition too — "delivered" is not
+      // one thing, and a served cutover must never be recorded as an unserved
+      // dual-run (or the reverse). Tree presence cannot tell these apart; this
+      // can.
+      const expectedKind = servedByGroupArm.has(state)
+        ? 'served'
+        : runsShadowCompare.has(state)
+          ? 'unserved_comparison'
+          : blocked.has(state)
+            ? 'blocked'
+            : 'legacy'
+      if (entry.kind !== expectedKind) {
+        kindMismatches.push(`'${state}' kind=${entry.kind} but the seam implies ${expectedKind}`)
+      }
+      expect(entry.reason.length, `'${state}' has no reason`).toBeGreaterThan(20)
     }
+    expect(mismatches, 'delivery declaration disagrees with the seam').toEqual([])
+    expect(kindMismatches, 'delivery KIND disagrees with the seam').toEqual([])
+  })
+
+  it('CORRESPONDENCE (forward-looking): a group-producer state routed NOWHERE by the seam must red', () => {
+    // The failure mode the previous version could not see: a future ruling that
+    // NARROWS the seam — the seam's own [OWNER-CONFIRM B-3] would remove
+    // `group_eligible` from the shadow-compare array — leaves that state routed
+    // nowhere while this module still declares it delivered. Simulated here by
+    // removing it from the derived sets rather than by editing the seam.
+    const narrowedCompare = ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1.filter(
+      (state) => state !== 'group_eligible',
+    )
+    const routedUnderNarrowing = new Set<string>([
+      ...ATTENDANCE_W7_GROUP_ARM_STATES_V1,
+      ...narrowedCompare,
+      ...ATTENDANCE_W7_BLOCKED_ARM_STATES_V1,
+      'off',
+    ])
+    // Anchor: the narrowing really removed something, or this proves nothing.
+    expect(narrowedCompare.length).toBe(ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1.length - 1)
+    expect(routedUnderNarrowing.has('group_eligible')).toBe(false)
+
+    // Under that narrowing the CURRENT declaration would be wrong for exactly
+    // one state — which is what the correspondence leg above would report.
+    const wouldMismatch = ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1.filter(
+      (state) =>
+        isAttendanceW7ContextSourceStateProducerDeliveredV1(state) !==
+        routedUnderNarrowing.has(state),
+    )
+    expect(wouldMismatch).toEqual(['group_eligible'])
+  })
+
+  it('the group-producer set is exactly the states the seam treats as group-arm or compare', () => {
+    // Ties THIS module's gate domain to the seam's partition: a state that the
+    // seam starts serving must not silently stay outside the producer gate.
+    const seamGroupStates = [
+      ...new Set([
+        ...ATTENDANCE_W7_GROUP_ARM_STATES_V1,
+        ...ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1,
+      ]),
+    ].sort()
+    expect([...ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1].sort()).toEqual(seamGroupStates)
   })
 })
 

@@ -13,36 +13,53 @@
  * MACHINE, from a closed declaration, rather than by a reviewer's memory of
  * which slice has landed.
  *
- * WHAT IS UNDELIVERED AT THIS HEAD, and why each is honest rather than
- * pessimistic:
+ * RE-DERIVED AT THE POST-W7-2 MERGE (catch-up head). Everything below was
+ * written pre-1b/pre-W7-2, when nothing in the tree produced a group-derived
+ * calculation. That is no longer the head this ships on, and the declaration
+ * was RE-DERIVED STATE BY STATE against the merged tree — announced by this
+ * module's own correspondence guard rather than discovered in production.
  *
- *  - `group_shadow` / `group_eligible`: W7-2 (the shadow-compare slice) has not
- *    landed. Nothing produces a group-derived shadow calculation, and nothing
- *    produces the compare-window artifacts the `group_shadow -> group_eligible`
- *    exit criteria count (see `ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1`
- *    below).
- *  - `group_authoritative`: W7-1b (the frozen-context issuance seam) has not
- *    landed. No seam mints a group context for that state.
- *  - `suspended`: W7-1b again. `suspended`'s runtime behaviour (design-lock §5.3 /
- *    OD-W7-4(a)) is a seam-side fail-close, and the seam does not exist here.
- *    It is declared undelivered for completeness and honesty — but NOTE that it
- *    is NOT what keeps `suspended` unreachable, because the producer gate is
- *    deliberately not applied to de-escalation targets (see
- *    `ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1`). `suspended` is
- *    unreachable at this head for a stronger structural reason: it is reachable
- *    ONLY from `group_authoritative` (OD-W7-4(a) closes every other edge into
- *    it), and `group_authoritative` is itself unreachable because its own
- *    producer is undelivered. The gate makes the whole group arm of the ladder
- *    unreachable, and `suspended` falls out of that.
- *  - `off`: delivered. `off` IS this machine's legacy-sourcing state — it is
- *    what every production org resolves to today, produced by the pre-existing
- *    legacy arm. Declaring it undelivered would be false and would also wedge
- *    every §5.2 rollback pair.
+ * The authority for each value is the SEAM's three closed, exported arrays
+ * (`w7-resolver/w7-frozen-context-issuance-seam.ts`), which partition the state
+ * enumeration exactly (its own T-A4 leg proves the partition; this module does
+ * not restate that proof, it consumes it):
  *
- * NEVER FLIP A KEY TO `true` AS A STANDALONE CHANGE "to unblock rollout" — the
- * correspondence test in `__tests__/w7-context-source-transition.test.ts` exists
- * precisely to fail that change: each `true` must correspond to the actual
- * presence of the producing slice's module in the tree.
+ *  - `group_shadow` / `group_eligible` -> DELIVERED. W7-2's dual-run compare
+ *    rung produces a group-derived UNSERVED comparison context for both
+ *    (`ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1`). The legacy arm stays the
+ *    SERVED producer byte for byte (W7-R3) — which is what these two states
+ *    mean; a producer exists, so the gate must not pretend otherwise.
+ *    CARRIED, NOT SETTLED: whether the comparison keeps running in
+ *    `group_eligible` is the seam's own [OWNER-CONFIRM B-3], still OPEN. A
+ *    ruling that freezes comparison there shrinks that array by one and this
+ *    declaration must be re-derived with it — which the correspondence guard
+ *    forces, because it reads the array rather than a copy of it.
+ *  - `group_authoritative` -> DELIVERED. The seam SERVES the group arm for it
+ *    (`ATTENDANCE_W7_GROUP_ARM_STATES_V1`, and that array is deliberately
+ *    `['group_authoritative']` only).
+ *  - `suspended` -> DELIVERED, and this is a behaviour, not a producer: the
+ *    seam routes it to a distinct BLOCKED arm
+ *    (`ATTENDANCE_W7_BLOCKED_ARM_STATES_V1`), which is the ratified
+ *    OD-W7-4(a) reading (`writePosture: 'blocked'`, never a legacy fallback).
+ *    It is excluded from the group-producer set below, so this value gates
+ *    nothing; it is recorded so the enumeration is honest end to end.
+ *  - `off` -> DELIVERED. The ladder's own legacy-sourcing state, served by the
+ *    pre-existing legacy arm.
+ *
+ * WHAT THIS MEANS FOR THE GATE, stated plainly because it is the opposite of
+ * what this file said before: the producer gate no longer blocks any promotion
+ * at this head. It is not thereby decorative — it is the mechanism that will
+ * refuse a SIXTH state, or any state whose producer is later withdrawn, and its
+ * refusal path is still exercised by the delivery-override legs. What changed is
+ * reality, not the mechanism.
+ *
+ * NEVER FLIP A KEY BY HAND IN EITHER DIRECTION. The correspondence test in
+ * `__tests__/w7-context-source-transition.test.ts` fails that change: each value
+ * must equal what the SEAM's exported arrays actually say. It used to compare
+ * against a text scan for the state literal, which was a weak proxy — it caught
+ * the W7-2 merge (correctly), but it also cannot distinguish a module that
+ * SERVES a state from one that merely mentions the word, and it is meaningless
+ * for common words like `off` and `suspended`. It now reads the seam's arrays.
  *
  * WHAT THIS MODULE DOES NOT DO: it does not probe, does not import, and has no
  * runtime dependency on any producer. It is a LEAF (its only import is the
@@ -94,15 +111,75 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_GROUP_PRODUCER_STATES_V1: readonly Att
  * missing key reads as `undefined !== true`, i.e. undelivered. Both directions
  * fail closed.
  */
+/**
+ * `kind` exists because "delivered" is NOT one thing, and flattening it to a
+ * boolean is the distinction a tree-presence scan cannot make:
+ *
+ *   - `served`              the group arm REPLACES the legacy producer
+ *                           (`group_authoritative` only);
+ *   - `unserved_comparison` the group arm additionally produces an UNSERVED
+ *                           comparison context while the legacy arm stays the
+ *                           served producer byte for byte (W7-R3) —
+ *                           `group_shadow` / `group_eligible`;
+ *   - `blocked`             no producer at all, by ruling (`suspended`);
+ *   - `legacy`             the ladder's own legacy-sourcing state (`off`).
+ *
+ * The producer GATE treats all four as "a producer exists" — which is correct,
+ * because each is a defined, implemented behaviour — but a reader of this
+ * record can still tell a cutover from a dual-run, and a future ruling that
+ * turns an unserved comparison into a served arm is a visible `kind` change
+ * rather than an invisible one.
+ */
+type DeliveryKindV1 = 'served' | 'unserved_comparison' | 'blocked' | 'legacy'
+
+type DeliveryDeclarationV1 = Readonly<{
+  delivered: boolean
+  kind: DeliveryKindV1
+  reason: string
+}>
+
+/**
+ * Total over the state enumeration (TypeScript enforces it) and REASONED: a
+ * bare boolean records the verdict but not the evidence, and this record has
+ * now been wrong once because reality moved underneath it. Each entry names the
+ * artifact that makes it true, so the next merge that changes reality has to
+ * argue with a citation rather than with a flipped bit.
+ */
 const DECLARED_DELIVERED_STATE_PRODUCERS: Readonly<
-  Record<AttendanceW7ContextSourcePostureStateV1, boolean>
+  Record<AttendanceW7ContextSourcePostureStateV1, DeliveryDeclarationV1>
 > = Object.freeze({
-  off: true,
-  group_shadow: false,
-  group_eligible: false,
-  group_authoritative: false,
-  suspended: false,
+  off: Object.freeze({
+    delivered: true,
+    kind: 'legacy' as const,
+    reason: "the ladder's own legacy-sourcing state; the seam's legacy arm serves it",
+  }),
+  group_shadow: Object.freeze({
+    delivered: true,
+    kind: 'unserved_comparison' as const,
+    reason: 'W7-2 dual-run compare rung — ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1',
+  }),
+  group_eligible: Object.freeze({
+    delivered: true,
+    kind: 'unserved_comparison' as const,
+    reason:
+      'W7-2 dual-run compare rung — ATTENDANCE_W7_SHADOW_COMPARE_STATES_V1 (seam B-3 OPEN: a ruling that freezes comparison here re-derives this)',
+  }),
+  group_authoritative: Object.freeze({
+    delivered: true,
+    kind: 'served' as const,
+    reason: 'W7-1b seam serves the group arm — ATTENDANCE_W7_GROUP_ARM_STATES_V1',
+  }),
+  suspended: Object.freeze({
+    delivered: true,
+    kind: 'blocked' as const,
+    reason:
+      'W7-1b seam routes it to the distinct BLOCKED arm — ATTENDANCE_W7_BLOCKED_ARM_STATES_V1 (a behaviour, not a producer; excluded from the group-producer set, so it gates nothing)',
+  }),
 })
+
+/** Exported for the correspondence guard, which asserts these against the seam. */
+export const ATTENDANCE_W7_CONTEXT_SOURCE_DELIVERY_DECLARATIONS_V1 =
+  DECLARED_DELIVERED_STATE_PRODUCERS
 
 /**
  * The two compare-window exit criteria that gate `group_shadow -> group_eligible`
@@ -129,11 +206,19 @@ export const ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1 = Object.fr
 export type AttendanceW7ContextSourceCompareEvidenceProbeV1 =
   (typeof ATTENDANCE_W7_CONTEXT_SOURCE_COMPARE_EVIDENCE_PROBES_V1)[number]
 
+/**
+ * RE-DERIVED at the post-W7-2 merge: both are DELIVERED. W7-2 shipped
+ * `readAttendanceW7CompareWindowStatusV1` (`w7-compare-window-status.ts`),
+ * which computes both counters for an org over a work-date window, and the W7-3
+ * boundary now calls it for real on the compare pair instead of reporting
+ * `count: null`. The null-count state was always declared temporary — "until
+ * W7-2 lands" — and W7-2 has landed.
+ */
 const DECLARED_DELIVERED_COMPARE_EVIDENCE: Readonly<
   Record<AttendanceW7ContextSourceCompareEvidenceProbeV1, boolean>
 > = Object.freeze({
-  W7_CRITICAL_SHADOW_DIFF: false,
-  W7_OFF_ROSTER_DIFF: false,
+  W7_CRITICAL_SHADOW_DIFF: true,
+  W7_OFF_ROSTER_DIFF: true,
 })
 
 // ---------------------------------------------------------------------------
@@ -178,7 +263,7 @@ function resolvedStateProducerDelivered(state: AttendanceW7ContextSourcePostureS
   ) {
     return stateProducerOverrideForTests[state] === true
   }
-  return DECLARED_DELIVERED_STATE_PRODUCERS[state] === true
+  return DECLARED_DELIVERED_STATE_PRODUCERS[state]?.delivered === true
 }
 
 function resolvedCompareEvidenceDelivered(

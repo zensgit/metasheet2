@@ -62,6 +62,7 @@ import {
   buildAttendanceW7MembershipTimelineLockKeyV1,
   buildAttendanceW7ScheduleFactsLockKeyV1,
 } from '../../src/attendance/w7-resolver/w7-composite-lock-order'
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 const {
@@ -686,9 +687,16 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
       afterEach(clearFoldRows)
 
       async function insertFoldPosture(state: string): Promise<void> {
-        await pool.query(
-          `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-          [FOLD_ORG, state],
+        // W7-3 (#4556) landing-gate P1-1: the bare `(org_id, state, scope)` shape is
+      // ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes
+      // only -> P0001) and its four NOT NULL columns (-> 23502). Seeded through the
+      // ONE shared legal fixture: bootstrap at `off`, then walk the ratified ladder.
+      // Never by dropping the trigger — that would run this evidence against a schema
+      // production does not ship.
+        await seedAttendanceW7ContextSourcePostureV1(
+          pool,
+          FOLD_ORG,
+          state,
         )
       }
 

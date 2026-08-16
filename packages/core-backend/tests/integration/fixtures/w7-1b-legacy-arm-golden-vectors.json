@@ -1,7 +1,7 @@
 {
   "_README": "CAPTURED AT THE PRE-1b BASE. Do not regenerate from a tree that already carries a behavioural change — a golden generated from the post-change code proves only that the code equals itself.",
   "capturedAtBaseSha": "348eccde90825591ed6af0b6e503d152fe3cc672",
-  "harnessSha256": "cf50b312655f53fc3b2434c1ef8d97b23956ff008136b8e26b9090d9e84200c5",
+  "harnessSha256": "46a0368578ed46b6cf6d0f17dc8ca15e0bef675ac0998c091727bf92eb317186",
   "entries": {
     "workday": {
       "context": "{\"absenceLateThresholdMinutes\":60,\"calculationGroupId\":null,\"holidayKind\":null,\"isWorkday\":true,\"orgId\":\"<redacted:orgId>\",\"roundingMinutes\":15,\"schemaVersion\":1,\"segments\":[{\"earlyLeaveGraceMinutes\":7,\"endDayOffset\":0,\"endTime\":\"18:00\",\"index\":0,\"lateGraceMinutes\":5,\"startDayOffset\":0,\"startTime\":\"09:00\"}],\"selector\":\"legacy\",\"severeLateThresholdMinutes\":30,\"shiftId\":\"<redacted:shiftId>\",\"timezone\":\"Asia/Shanghai\",\"userId\":\"<redacted:userId>\",\"workDate\":\"<redacted:workDate>\"}",
