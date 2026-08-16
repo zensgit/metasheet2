@@ -775,6 +775,23 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'policy_gate\', ref: \'overtimeSegmentation\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'record\', ref: \'approval_assignments\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'rule_live\', ref: \'attendance_overtime_rules\' },', rule: 'write_side_emitter' },
+  // ⚠️ W7-4 (#4556) read-side labeling: the FIRST live emitter of
+  // `group_policy_snapshot`. ONE ledger entry KEYS both emission sites (the
+  // authoritative and shadow basis returns in `readAttendanceW4DecisionBasis`)
+  // because the ledger key is `file::text` and both ternary `?` arms are this
+  // exact line — but the instrument has NO ARITY CHECK: neutering one arm
+  // while the other still matches leaves this diff green (gate probe G2), so
+  // this entry is a registration, not per-site coverage. Per-arm BEHAVIOR is
+  // pinned by the route legs instead (T-K6 + mutation M1 for the
+  // authoritative arm; T-K7/T-K7b + mutations M2/G3 for the shadow arm).
+  // `write_side_emitter` holds: the arm line TESTS nothing — the selection is
+  // made by the ternary CONDITION, which compares the calculation's own
+  // `contextSelector`, never the org posture and never a provenance value.
+  // The `: 'snapshot'` fallback arms are NOT derived sites (ambiguous member,
+  // and the enclosing declaration names no trace-family anchor), matching this
+  // function's three pre-existing `frozen_evidence_unavailable` emissions,
+  // which have never derived either.
+  { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '? ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'snapshot\', ref: \'approval_instances.metadata.approvalFlow\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: 'source: { kind: \'snapshot\', ref: \'approval_instances.requester_snapshot\' },', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/services/AttendanceDecisionTrace.ts', text: '| \'audit\'', rule: 'closed_set_member_list' },

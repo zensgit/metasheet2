@@ -39,6 +39,13 @@ import {
   readAttendanceW4TraceEvidence,
   type AttendanceW4TraceProjection,
 } from './AttendanceW4CalculationDetail'
+// W7-4 (#4556): the W7-owned trace provenance value, IMPORTED from the W7-0
+// record rather than re-typed, so the recorded spelling and the emitted
+// spelling cannot drift (same discipline as `w7-provenance-domain.ts`). This
+// module is the value's ONLY emitter. Runtime-cycle-free: the amendment
+// module's own imports are both `import type` (fully erased), so requiring it
+// from here loads no cycle back into this file.
+import { ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1 } from '../attendance/w7-read-side-provenance-amendment'
 
 // -------------------------------------------------------------------------------------------------
 // §4.2 read-only seam — verbatim reuse, not reimplementation (W5-0-G3).
@@ -101,11 +108,14 @@ export interface AttendanceDecisionTraceVersion {
 
 /**
  * W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713) widened
- * this live union with `'group_policy_snapshot'`. INERT: no basis builder in
- * this file emits the new kind — the producer seam is W7-1b. Kept as an
- * explicit literal union (not an alias of the backend domain array) so the W7-0
- * mutual-extends sync guard in `../attendance/w7-read-side-provenance-amendment.ts`
- * still compares two independently written member lists rather than itself.
+ * this live union with `'group_policy_snapshot'`. W7-4 (the read-side labeling
+ * slice) made it LIVE: `readAttendanceW4DecisionBasis` below emits the new kind
+ * for evidence whose persisted frozen-context `selector` is
+ * `'group_effective'` — conditioned on the CALCULATION'S OWN context, never on
+ * the org's current posture. Kept as an explicit literal union (not an alias of
+ * the backend domain array) so the W7-0 mutual-extends sync guard in
+ * `../attendance/w7-read-side-provenance-amendment.ts` still compares two
+ * independently written member lists rather than itself.
  */
 export type AttendanceDecisionTraceSourceKind =
   | 'record'
@@ -373,6 +383,15 @@ async function readAttendanceW4DecisionBasis(
         projection: null,
       }
     }
+    // W7-4 (#4556) CURRENT-FACT note (not an invariant): this guard is
+    // behaviourally unreachable TODAY, because the projection status domain
+    // (`DAILY_STATUSES`, AttendanceW4CalculationDetail.ts) and the record
+    // status domain (`ATTENDANCE_RECORD_STATUS_VALUES`, this file) are the
+    // same 8-member set — mechanically compared 2026-08-15, both-direction
+    // set difference empty. It stays as defense-in-depth: if the two sets
+    // ever diverge, this arm emits the SAME unavailable env as the two
+    // reachable siblings above (each of which is mutation-covered), so a
+    // divergence cannot mislabel — it degrades to unavailable.
     if (!isAttendanceRecordStatus(result.evidence.projection.status)) {
       return {
         basis: { source: { kind: 'snapshot', ref: 'frozen_evidence_unavailable' }, version: { posture: 'undeterminable' } },
@@ -383,7 +402,22 @@ async function readAttendanceW4DecisionBasis(
     }
     return {
       basis: {
-        source: { kind: 'snapshot', ref: 'attendance_record_calculations:authoritative' },
+        source: {
+          // W7-4 (#4556) design-lock §4.4 read-side labeling: the `kind` — and
+          // ONLY the `kind` — conditions on the CALCULATION'S OWN frozen-context
+          // selector (threaded through `AttendanceW4TraceEvidence`), NEVER on
+          // the org's current posture. A group-postured org's legacy-frozen
+          // record stays `'snapshot'`; a legacy-postured org's group-frozen
+          // record labels `'group_policy_snapshot'`. `ref` is deliberately
+          // unchanged: the row genuinely comes from that table, and re-spelling
+          // provenance in `ref` too would be OD-W7-5(b)'s rejected "second
+          // spelling of the same fact". Ternary arms on separate lines per the
+          // provenance-widening ledger's `write_side_emitter` rule.
+          kind: result.evidence.contextSelector === 'group_effective'
+            ? ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1
+            : 'snapshot',
+          ref: 'attendance_record_calculations:authoritative',
+        },
         version: { posture: 'snapshot_frozen', asOf: result.evidence.createdAt, snapshotVersion: '1' },
       },
       authoritative: true,
@@ -394,7 +428,18 @@ async function readAttendanceW4DecisionBasis(
   if (result.evidence?.mode === 'shadow') {
     return {
       basis: {
-        source: { kind: 'snapshot', ref: 'attendance_record_calculations:shadow' },
+        source: {
+          // W7-4 (#4556): same conditional as the authoritative emission above.
+          // Because it reads the CONTEXT'S selector (not the org posture), a
+          // future `group_shadow` posture's shadow evidence labels correctly
+          // with no further change here. `null` selector (the non-completed
+          // path — there is no parsable context to attribute) stays
+          // `'snapshot'`.
+          kind: result.evidence.contextSelector === 'group_effective'
+            ? ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1
+            : 'snapshot',
+          ref: 'attendance_record_calculations:shadow',
+        },
         version: { posture: 'current_live_no_history' },
       },
       authoritative: false,
