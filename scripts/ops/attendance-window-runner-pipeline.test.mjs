@@ -683,6 +683,30 @@ function assertSoakContract({ remote, workflow }) {
     'seed must refuse W7 targets beyond group_shadow (compare-window exit predicates need real soak evidence)',
   )
   assert.match(slices.seed, /suspended\)\s*\n\s*fail/, 'seed must fail closed on a suspended posture, never resume it')
+  // Per-org walk identity (real-dispatch 31953379181 defect): every word of a `local`
+  // simple command expands BEFORE the builtin assigns, so `local org="$1" org8="${org:0:8}"`
+  // derived org8 from the CALLER's `org` (the seeding loop's local, left at org3) — org2's
+  // walk ran against the right org but its label, artifact filenames, and the manifest's
+  // syntheticOrgRef suffix all said org3, and org2's plan/apply JSONs were overwritten.
+  // Pin the fixed two-statement shape and forbid the rejoined form.
+  assert.ok(
+    slices.seed.includes('  local org="$1"\n  local org8="${org:0:8}"'),
+    'the W4 walk must assign `org` and derive `org8` in TWO separate local statements (same-statement self-reference reads the CALLERʼs org — dispatch 31953379181)',
+  )
+  assert.doesNotMatch(
+    slices.seed,
+    // Statement-anchored (multiline): the fix's own explanatory COMMENT legitimately quotes
+    // the buggy spelling; only a real `local ...` statement at line start may not.
+    /^\s*local org="\$1" org8=/m,
+    'the W4 walk must never rejoin org/org8 into one local statement (org8 would expand against the callerʼs org)',
+  )
+  // ...and every CLI walk invocation must target the function-local loop arg, never a
+  // SOAK_ORG* literal reached past it.
+  assert.doesNotMatch(
+    slices.seed,
+    /--org "\$SOAK_ORG/,
+    'walk CLI invocations must use the function-local $org, never a SOAK_ORG* literal',
+  )
 
   // soak-flags: baseline-marker order gate BEFORE the override write; atomic
   // candidate->validate->rename via the SAME persistent override; backend-only recreate
@@ -796,6 +820,18 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.ok(slices.run.includes('cleanup_soak_run'), 'soak-run must delete the token-bearing temp config (trap cleanup)')
   assert.ok(slices.run.includes('max_consecutive_incidents'), 'soak-run must fail on the consecutive-incident halt (alert-class)')
+  // Dispatch 31953571638: five punch 500s with zero server-side evidence in the artifact —
+  // the backend-log slice (same filtered_pipe contract as action_smoke) is what makes a
+  // server-side punch failure diagnosable from the runʼs own artifact.
+  assert.ok(
+    slices.run.includes('soak-run-backend-log-slice.log'),
+    'soak-run must capture a filtered backend-log slice into the artifact',
+  )
+  assert.match(
+    slices.run,
+    /filtered_pipe "\$\{OUTPUT_DIR\}\/soak-run-backend-log-slice\.log"/,
+    'the backend-log slice must go through filtered_pipe (producer failure must fail the step; zero matches must not)',
+  )
   assert.ok(slices.run.includes('haltedReason is LOAD-BEARING'), 'soak-run must surface haltedReason semantics in its summary')
 
   // soak-status: the monitoring-pack Q-series labels must all be present, plus the W7-2
@@ -889,6 +925,44 @@ test('MUTATION: dropping the generator execute-confirmation from soak-run turns 
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /execute confirmation token/,
+  )
+})
+
+test('EXECUTABLE: bash expands a whole `local` statement before assigning — the org2-walk misattribution class (dispatch 31953379181) — and the split form fixes it', () => {
+  // Runs REAL bash (the same invocation shape as the workflow's remote command), not a
+  // paraphrase: the JOINED form must leak the callerʼs `org` into org8 (the defect — this
+  // half is the positive control proving the probe discriminates), and the SPLIT form the
+  // remote script now uses must derive org8 from the function argument.
+  const probe = [
+    'set -euo pipefail',
+    'joined() { local org="$1" org8="${org:0:8}"; echo "joined=$org8"; }',
+    'split() { local org="$1"; local org8="${org:0:8}"; echo "split=$org8"; }',
+    'caller() { local org="33333333-caller-org"; joined "22222222-arg-org"; split "22222222-arg-org"; }',
+    'caller',
+  ].join('\n')
+  const result = runPipefailBash(probe)
+  assert.equal(result.status, 0, `probe must run; stderr: ${result.stderr}`)
+  assert.match(
+    result.stdout,
+    /joined=33333333/,
+    'positive control: the joined form must expand org8 against the CALLERʼs org (the defect) — if this stops leaking, bash semantics changed and the pin should be re-examined',
+  )
+  assert.match(
+    result.stdout,
+    /split=22222222/,
+    'the split form (what the remote script uses) must derive org8 from the function argument',
+  )
+})
+
+test('MUTATION: rejoining the W4 walkʼs org/org8 into one local statement turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const fixed = '  local org="$1"\n  local org8="${org:0:8}"'
+  assert.ok(original.includes(fixed), 'mutation anchor must hit the fixed split shape')
+  const mutated = original.replace(fixed, '  local org="$1" org8="${org:0:8}"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /TWO separate local statements|never rejoin org\/org8/,
   )
 })
 
