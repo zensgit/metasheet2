@@ -177,6 +177,7 @@ closed with `ORG_TRANSFER_ADAPTER_UNAVAILABLE`; only tests register adapters, wh
 registers none. Do not
 describe the Transfer line as runtime-complete until a reviewed DingTalk adapter implements and
 registers the T3/T4 behavior and T5 closeout is complete.
+Durable tracker: [#4926](https://github.com/zensgit/metasheet2/issues/4926).
 
 ## 6. Test infrastructure lane
 
