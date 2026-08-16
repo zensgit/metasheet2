@@ -927,14 +927,75 @@ function assertSoakContract({ remote, workflow }) {
     slices.run.includes('is NOT in the live W7 allowlist'),
     'soak-run must fail closed when a both-machines config org is outside the live W7 allowlist',
   )
-  // P3-2/P3-3: a single soak-run is capped at one dayʼs clean-punch capacity so targets_met
-  // stays reachable and the run fits the job timeout.
+  // P3-2/P3-3 (revised for the pair cadence): a single soak-run is one DAILY BATCH capped
+  // at total_users x 2, so targets_met/daily_capacity_exhausted stay reachable inside the
+  // job timeout. The 2/user/day cap is LOAD-BEARING: same-day session packing (the old
+  // 8/day row) floods §4.2-critical review_required diffs (soak-status 31962440160), and
+  // backdated acceleration is rejected by the routeʼs global-latest punch ordering
+  // (#4932 gate P1-1) — the honest accelerator is users_per_org at seed time.
   assert.ok(
     slices.run.includes("one-day clean-punch capacity"),
-    'soak-run must cap punch_target at the configʼs one-day capacity (total_users x 8)',
+    'soak-run must cap punch_target at the configʼs one-day capacity (total_users x 2)',
+  )
+  assert.ok(
+    slices.run.includes('day_capacity=$(( total_users * 2 ))'),
+    'the one-day capacity must be total_users x 2 (one in/out pair per user per wall-day)',
   )
   assert.ok(slices.run.includes('--rate-limit-per-sec 1'), 'soak-run must pin the ruled <=1 req/sec global ceiling')
-  assert.ok(slices.run.includes('--punches-per-user-per-day 8'), 'soak-run must pin the ruled 8 punches/user/day quota')
+  assert.ok(
+    slices.run.includes('--punches-per-user-per-day 2'),
+    'soak-run must pin the 2 punches/user/day pair cadence (8/day floods critical review_required diffs)',
+  )
+  assert.doesNotMatch(
+    slices.run,
+    /--punches-per-user-per-day 8/,
+    'the retired 8/day session-packing quota must not come back',
+  )
+  // Gate round-2 P2-1: the generatorʼs daily cap is per-process, so the runner must refuse
+  // a second batch inside the same org-calendar day (marker written BEFORE the generator
+  // runs — a partial batch already punched some users) with an explicit override only.
+  assert.ok(
+    slices.seed.includes('"dailyCapTimezone": tz,'),
+    'soak-seed must write each entryʼs org cap timezone into the config',
+  )
+  assert.ok(
+    slices.run.includes('soak-run-last-batch-day'),
+    'soak-run must track the last batch day host-side',
+  )
+  assert.ok(
+    slices.run.includes('carries no dailyCapTimezone'),
+    'soak-run must refuse a config without dailyCapTimezone (stale-config silent revert)',
+  )
+  assert.doesNotMatch(
+    slices.run,
+    /\.get\("dailyCapTimezone"/,
+    'the runner batch-day derivation must have no UTC default',
+  )
+  assert.ok(
+    slices.run.includes('allow_same_day_rerun'),
+    'the same-day guard must have exactly the explicit override, never a silent bypass',
+  )
+  const guardIdx = slices.run.indexOf('a soak-run batch already ran')
+  const markerWriteIdx = slices.run.indexOf('> "$batch_marker"')
+  const generatorRunIdx = slices.run.indexOf('--punches-per-user-per-day 2')
+  assert.ok(guardIdx !== -1 && markerWriteIdx !== -1, 'the same-day guard and marker write must exist')
+  assert.ok(
+    guardIdx < markerWriteIdx && markerWriteIdx < generatorRunIdx,
+    'the guard must run before the marker write, and the marker must be written BEFORE the generator runs',
+  )
+  // Gate round-2 P2-3: exactly the two clean halts print ok; incidents FAIL; all others WARN.
+  assert.ok(
+    slices.run.includes('targets_met|daily_capacity_exhausted) echo "result=ok"'),
+    'only the two clean halt reasons may print result=ok',
+  )
+  assert.ok(
+    slices.run.includes('max_consecutive_incidents) echo "result=FAIL"'),
+    'the incident halt must print result=FAIL',
+  )
+  assert.ok(
+    slices.run.includes('*) echo "result=WARN"'),
+    'every other halt reason (stall, duration, safety cap) must print result=WARN, never ok',
+  )
   assert.ok(
     slices.run.includes('--confirm I_UNDERSTAND_THIS_DRIVES_SYNTHETIC_STAGING_TRAFFIC_ONLY'),
     'soak-run must carry the generatorʼs exact execute confirmation token',
@@ -1348,6 +1409,145 @@ test('P2-1: a newline-injection payload in soak_opts is REJECTED by workflow val
   assert.match(r.stderr, /single-line/, 'rejection must name the single-line rule')
 })
 
+/**
+ * Generator cadence contract — ONE assertion body shared by the source test AND its
+ * mutation legs (#4932 gate P2-2: legs that re-check a pin by hand instead of calling the
+ * pinned assertion are tautologies — deleting the pin left both legs green).
+ */
+function assertGeneratorCadenceContract(generator) {
+  assert.ok(
+    generator.includes("'SOAK_PUNCHES_PER_USER_PER_DAY', 2)"),
+    'the generator default must be 2 punches/user/day — one in/out pair per user per wall-day (8/day session packing floods §4.2-critical review_required diffs, soak-status 31962440160)',
+  )
+  assert.ok(
+    generator.includes("haltedReason = 'daily_capacity_exhausted'"),
+    'the scheduler must end a daily batch cleanly when every user is day-capped or org-satisfied, never idle to the stall timeout',
+  )
+  // Server-clock pin bound to the CODE, not a comment (#4932 gate round-2 P2-2: the earlier
+  // comment-string pin stayed green when occurredAt was re-introduced mid-object): extract
+  // the actual `const body = {...}` construction, STRIP comment lines, and assert the
+  // remaining code never mentions occurredAt in any spelling.
+  const bodyStart = generator.indexOf('const body = {')
+  assert.ok(bodyStart !== -1, 'the punch body construction must exist')
+  const bodyEnd = generator.indexOf('\n  }', bodyStart)
+  assert.ok(bodyEnd > bodyStart, 'the punch body construction must close')
+  const bodyCode = generator
+    .slice(bodyStart, bodyEnd)
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n')
+  assert.doesNotMatch(
+    bodyCode,
+    /occurredAt/,
+    'the punch body CODE must not carry occurredAt in any form — server clock only (backdating is rejected by enforcePunchConstraintsʼ global-latest ordering, #4932 gate P1-1)',
+  )
+  assert.doesNotMatch(
+    generator,
+    /body\.occurredAt/,
+    'no post-construction assignment may sneak occurredAt into the punch body',
+  )
+  // P2-1: the 2/day cap must count against the ORGʼS calendar day (per-entry
+  // dailyCapTimezone), and every daily-count site must resolve it via the one helper.
+  assert.ok(
+    generator.includes('function capTimezoneFor(entry, config)'),
+    'the per-entry cap-timezone resolver must exist',
+  )
+  // Round-3 P2-R3-1: REQUIRED, fail-closed — an optional field lets any stale config
+  // silently revert the cap (and the runner guard) to UTC days.
+  assert.ok(
+    generator.includes('.dailyCapTimezone is required'),
+    'dailyCapTimezone must be REQUIRED — a stale config must refuse, never silently revert to UTC days',
+  )
+  assert.doesNotMatch(
+    generator,
+    /entry\.dailyCapTimezone \|\|/,
+    'the cap-timezone resolver must have no fallback (a fallback is the silent-revert channel)',
+  )
+  assert.equal(
+    (generator.match(/capTimezoneFor\((?:candidate|picked|u)\.entry, config\)/g) || []).length,
+    3,
+    'all three daily-count sites (eligibility scan, all-capped halt, count increment) must key the day on the entryʼs cap timezone',
+  )
+}
+
+test('soak generator: pair-cadence contract (2/day default, daily-batch clean halt, server clock only)', () => {
+  assertGeneratorCadenceContract(readFileSync(GENERATOR, 'utf8'))
+})
+
+test('MUTATION (cadence): restoring the 8/day default turns the cadence contract red', () => {
+  const original = readFileSync(GENERATOR, 'utf8')
+  const anchor = "'SOAK_PUNCHES_PER_USER_PER_DAY', 2)"
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the daily-cap default')
+  const mutated = original.replace(anchor, "'SOAK_PUNCHES_PER_USER_PER_DAY', 8)")
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(() => assertGeneratorCadenceContract(mutated), /2 punches\/user\/day/)
+})
+
+test('MUTATION (cadence): deleting the daily-batch clean halt turns the cadence contract red', () => {
+  const original = readFileSync(GENERATOR, 'utf8')
+  const anchor = "haltedReason = 'daily_capacity_exhausted'"
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the clean-halt assignment')
+  const mutated = original.replace(anchor, "void 0")
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(() => assertGeneratorCadenceContract(mutated), /daily batch cleanly/)
+})
+
+test('MUTATION (cadence): re-introducing occurredAt into the punch body mid-object turns the cadence contract red', () => {
+  const original = readFileSync(GENERATOR, 'utf8')
+  // The exact green-while-mutated shape the round-2 gate demonstrated: occurredAt inserted
+  // MID-object, comment left in place.
+  const anchor = 'operationId, // idempotency key — same value reused across the retries below'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the body construction')
+  const mutated = original.replace(anchor, `${anchor}\n    occurredAt: new Date().toISOString(),`)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(() => assertGeneratorCadenceContract(mutated), /server clock only/)
+})
+
+test('MUTATION (cadence): re-keying a daily-count site off the entry cap timezone turns the cadence contract red', () => {
+  const original = readFileSync(GENERATOR, 'utf8')
+  const anchor = 'capTimezoneFor(picked.entry, config)'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the count-increment site')
+  const mutated = original.replace(anchor, 'config.timezone')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(() => assertGeneratorCadenceContract(mutated), /cap timezone/)
+})
+
+test('MUTATION (cadence): reverting the runner to the 8/day invocation turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = '--punches-per-user-per-day 2'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the runner invocation flag')
+  const mutated = original.replace(anchor, '--punches-per-user-per-day 8')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /pair cadence|8\/day session-packing/,
+  )
+})
+
+test('MUTATION (same-day guard): removing the batch-day refusal turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = 'a soak-run batch already ran'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the same-day refusal')
+  const mutated = original.replace(anchor, 'a prior batch note:')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /guard must run before the marker write|same-day guard/,
+  )
+})
+
+test('MUTATION (halt classes): letting a stall halt print result=ok turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = '*) echo "result=WARN"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the WARN default case')
+  const mutated = original.replace(anchor, '*) echo "result=ok"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /result=WARN, never ok/,
+  )
+})
+
 test('soak generator: committed tool keeps its reviewed guard rails (rate ceiling, dry-run default, ruled daily quota, upper-bound count semantics)', () => {
   const generator = readFileSync(GENERATOR, 'utf8')
   assert.ok(
@@ -1359,11 +1559,9 @@ test('soak generator: committed tool keeps its reviewed guard rails (rate ceilin
     /rateLimitPerSec <= 0 \|\| opts\.rateLimitPerSec > 1/,
     'the (0,1] global rate ceiling guard must survive promotion',
   )
-  assert.match(
-    generator,
-    /'SOAK_PUNCHES_PER_USER_PER_DAY', 8\)/,
-    'the ruled default of 8 punches/user/day (§2A.7/§2A.9 row) must be the default',
-  )
+  // The §2A.7 rowʼs 8/day default was REVISED to 2/day (a documented, owner-vetoable §2A.9
+  // deviation): the soak itself proved 8/day floods §4.2-critical review_required diffs
+  // (soak-status 31962440160). The 2/day pin lives in assertGeneratorCadenceContract above.
   assert.ok(generator.includes('UPPER-BOUNDS'), 'the HTTP-tally-upper-bounds-DB-count semantics note must survive')
   assert.ok(generator.includes("execute: readBoolOpt(args, 'execute', 'SOAK_EXECUTE', false)"), 'dry-run must stay the default')
   assert.doesNotMatch(generator, /dev-token\?/, 'the generator must never call the test-only dev-token endpoint')

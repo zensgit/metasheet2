@@ -779,6 +779,12 @@ export default defineConfig({
       // once both machines are on. Meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts',
+      // #4556 combined-soak shadow-diff FAMILY pins (transient partial-day
+      // late_minutes_mismatch lifecycle + the pair-ladder all-equal contract).
+      // Boots a real MetaSheetServer and drives the real punch route against a
+      // W4-shadow org — meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-soak-diff-families.db.test.ts',
       // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
       // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
       // values against real CHECK constraints and deferred triggers, walks the

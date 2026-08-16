@@ -322,11 +322,16 @@ function buildOptions(argv) {
     confirmToken: readOpt(args, 'confirm', 'SOAK_CONFIRM', ''),
     confirmOrgIds: readOpt(args, 'confirm-org-ids', 'SOAK_CONFIRM_ORG_IDS', ''),
     rateLimitPerSec: readNumberOpt(args, 'rate-limit-per-sec', 'SOAK_RATE_LIMIT_PER_SEC', 1),
-    // Default 8, per the runbook's ruled parameter row (§2A.7 recommended row, in effect per
-    // §2A.9's default+veto record): 10 users/org x 3 orgs x 8 punches/user/day = 240/day, which
-    // clears the ruled count criteria (N>=200 total, >=20/org, >=50/arm) inside one soak day.
-    // 8/user/day = check_in/check_out pairs across 4 sessions — still a real usage shape.
-    punchesPerUserPerDay: readNumberOpt(args, 'punches-per-user-per-day', 'SOAK_PUNCHES_PER_USER_PER_DAY', 8),
+    // Default 2 = ONE check_in/check_out pair per user per wall-clock day. This REVISES the
+    // §2A.7 recommended row's 8/day (a documented, owner-vetoable deviation per §2A.9): the
+    // soak itself proved 8/day structurally violates the ratified zero-critical criterion —
+    // 4 same-day sessions on one full-day segment are flagged duplicate/ambiguous by the W4
+    // calculator (review_required, a §4.2 CRITICAL class; soak-status 31962440160 counted
+    // 50+80 critical rows from cadence alone). Backdated multi-date acceleration was built
+    // and retired unmerged (#4932 gate P1-1: enforcePunchConstraints' global-latest ordering
+    // 429s every backdated check_out). The honest accelerator is users_per_org at seed time,
+    // never same-day session packing.
+    punchesPerUserPerDay: readNumberOpt(args, 'punches-per-user-per-day', 'SOAK_PUNCHES_PER_USER_PER_DAY', 2),
     targetTotal: readNumberOpt(args, 'target-total', 'SOAK_TARGET_TOTAL', 200), // §2A.3 C1
     targetPerOrg: readNumberOpt(args, 'target-per-org', 'SOAK_TARGET_PER_ORG', 20), // §2A.3 C2
     targetPerArm: readNumberOpt(args, 'target-per-arm', 'SOAK_TARGET_PER_ARM', 50), // §2A.3 C4
@@ -357,7 +362,6 @@ function buildOptions(argv) {
   if (opts.targetPerOrg <= 0) throw new ConfigError('--target-per-org must be > 0')
   if (opts.punchesPerUserPerDay <= 0) throw new ConfigError('--punches-per-user-per-day must be > 0')
   if (opts.minSecondsBetweenPunchesPerUser < 0) throw new ConfigError('--min-seconds-between-punches-per-user must be >= 0')
-
   return opts
 }
 
@@ -391,10 +395,13 @@ Common options (env var fallback in parentheses):
   --output <path>                     Final JSON summary path. (SOAK_OUTPUT_FILE)
   --help                              This message.
 
-Note: occurredAt is never sent — every punch uses the server's own clock. Backdating is not
-implemented in this draft (a bounded, config-supplied offset would be needed to avoid the
-route's own FUTURE_PUNCH_NOT_ALLOWED / WORK_DATE_ATTRIBUTION_AMBIGUOUS guards; left as a named
-gap rather than shipped half-working).
+Note: occurredAt is never sent — every punch uses the server's own clock, and the default
+daily cap of 2 gives each user exactly ONE in/out pair per wall-clock day. Same-day session
+packing (the old 8/day row) floods §4.2-critical review_required diffs (soak-status
+31962440160), and backdating was built and retired unmerged (#4932 gate P1-1:
+enforcePunchConstraints' global-latest ordering 429s every backdated check_out). Reaching
+the runbook's cumulative count criteria is therefore a MULTI-DAY affair by design; the
+honest accelerator is users_per_org at seed time.
 
 This script defaults to DRY RUN. See the file header "SAFETY / NO-DESTRUCTIVE-OPS DISCIPLINE"
 for the three conditions required to send real traffic, and 【OWNER】 markers throughout.
@@ -526,6 +533,27 @@ async function loadConfig(opts) {
       }
     }
 
+    // #4932 gate round-2 P2-1 / round-3 P2-R3-1: the one-pair-per-WORK-DATE invariant is
+    // only as good as the day boundary the cap counts against, and an OPTIONAL field would
+    // let any stale config silently revert to the UTC default (the exact silent-revert
+    // class the retired ladder fields were made required against). REQUIRED, fail-closed:
+    // soak-seed writes dailyCapTimezone per entry (the org group's IANA timezone);
+    // bookkeeping-only — NEVER sent in a punch body (that would override the org rule
+    // timezone server-side).
+    if (typeof rawEntry.dailyCapTimezone !== 'string' || !rawEntry.dailyCapTimezone.trim()) {
+      throw new ConfigError(
+        `${where}.dailyCapTimezone is required — the 2/day pair cap must count against the org's `
+        + 'calendar day, and a config without it (any seeding older than this contract) would '
+        + 'silently revert the cap to UTC days. Re-run action=soak-seed to rewrite the config.'
+      )
+    }
+    const dailyCapTimezone = rawEntry.dailyCapTimezone.trim()
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: dailyCapTimezone })
+    } catch {
+      throw new ConfigError(`${where}.dailyCapTimezone ${JSON.stringify(dailyCapTimezone)} is not a recognized IANA timezone.`)
+    }
+
     const minCleanPunches = Number.isFinite(rawEntry.minCleanPunches) && rawEntry.minCleanPunches > 0
       ? rawEntry.minCleanPunches
       : opts.targetPerOrg
@@ -554,6 +582,7 @@ async function loadConfig(opts) {
       minCleanPunches,
       userIds,
       tokenOrCreds,
+      dailyCapTimezone,
     }
   })
 
@@ -677,7 +706,13 @@ async function sendPunchWithRetry({ baseUrl, entry, userId, token, eventType, op
     source: opts.sourceTagResolved,
     // meta intentionally omitted (null) — see "meta IS NOT AN INERT BAG" in the file header.
     orgId: entry.orgId, // always explicit — never rely on the token's own org claim (getOrgId precedence)
-    // occurredAt intentionally omitted — server clock always (no backdate support in this draft).
+    // occurredAt intentionally omitted — server clock always. Backdating was BUILT and then
+    // RETIRED unmerged: enforcePunchConstraints compares each punch against the user's
+    // GLOBALLY LATEST event (ORDER BY occurred_at DESC LIMIT 1, index.cjs ~22465), so any
+    // check_out below an already-recorded later same-type event 429s (PUNCH_TOO_SOON) —
+    // the #4932 gate reproduced a descending backdate ladder jamming on exactly that from
+    // rung 1 onward. Same-day pacing is governed by punchesPerUserPerDay (default 2 = one
+    // in/out pair per user per wall-day) instead.
   }
   if (opts.timezoneToSend) {
     // Only sent when the config file explicitly declared a timezone — see the file header's
@@ -761,6 +796,14 @@ function buildUserPool(config) {
 function nextEventType(userState) {
   if (userState.lastEventType === 'check_in') return 'check_out'
   return 'check_in'
+}
+
+function capTimezoneFor(entry, config) {
+  // Per-entry org-day boundary — REQUIRED at config load, so no fallback exists here (a
+  // fallback would be the silent-revert channel the round-3 gate flagged). `config` stays
+  // in the signature so every call site routes through one auditable resolver.
+  void config
+  return entry.dailyCapTimezone
 }
 
 function userEligible(userState, opts, nowMs, timezone) {
@@ -949,17 +992,24 @@ async function runScheduler({ config, opts, willExecute }) {
       const idx = (cursor + i) % pool.length
       const candidate = pool[idx]
       if (!orgNeedsMorePunches(tally, candidate.entry, opts)) continue
-      if (!userEligible(candidate, opts, Date.now(), config.timezone)) continue
+      if (!userEligible(candidate, opts, Date.now(), capTimezoneFor(candidate.entry, config))) continue
       picked = candidate
       cursor = idx + 1
       break
     }
     if (!picked) {
-      // Nobody eligible right now (daily caps or per-user spacing cooldown, or — see
-      // assessFeasibility — a legitimate wait for the next calendar day to reset daily caps).
-      // Bounded by the stall-timeout check above, which does NOT false-fire on this: it only
-      // fires after opts.stallTimeoutMinutes of ZERO attempts, deliberately set longer than
-      // one calendar-day daily-cap reset.
+      // DAILY-BATCH clean halt: when every user is either day-capped or belongs to an org
+      // whose targets are already met, nothing more can happen until the next wall-clock
+      // day — end THIS invocation cleanly instead of idling to the stall timeout. The
+      // runbook's cumulative count criteria accrue across daily batches (DB-side
+      // soak-status judgments), so this is a success outcome, not a shortfall.
+      const allCapped = pool.every((u) =>
+        !orgNeedsMorePunches(tally, u.entry, opts)
+        || (u.dailyCounts.get(workDateInTimezone(new Date(), capTimezoneFor(u.entry, config))) || 0) >= opts.punchesPerUserPerDay)
+      if (allCapped) { haltedReason = 'daily_capacity_exhausted'; break }
+      // Otherwise somebody is only cooldown-ineligible (per-user spacing) — wait briefly.
+      // Bounded by the stall-timeout check above (fires only after stallTimeoutMinutes of
+      // ZERO attempts).
       await sleep(1000)
       continue
     }
@@ -1011,7 +1061,7 @@ async function runScheduler({ config, opts, willExecute }) {
       })
     }
 
-    const today = workDateInTimezone(new Date(), config.timezone)
+    const today = workDateInTimezone(new Date(), capTimezoneFor(picked.entry, config))
     picked.dailyCounts.set(today, (picked.dailyCounts.get(today) || 0) + 1)
 
     sinceLastPrint++
