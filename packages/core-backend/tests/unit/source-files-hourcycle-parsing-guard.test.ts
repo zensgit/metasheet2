@@ -196,8 +196,7 @@ const KNOWN_SITES: KnownSite[] = [
   },
   {
     // automation-timezone.ts `getFormatter()` -> `getZonedParts()` formatToParts,
-    // Number(part.value) per part. The issue text's own "display sites" sentence
-    // mis-groups this file; it is PARSING and already compliant.
+    // Number(part.value) per part. PARSING and already compliant.
     file: 'packages/core-backend/src/multitable/automation-timezone.ts',
     lineText: "fmt = new Intl.DateTimeFormat('en-US', {",
     kind: 'parsing',
@@ -830,11 +829,14 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
   })
 
   it('POSITIVE CONTROL: a brand-new Intl.DateTimeFormat site not in KNOWN_SITES reds the coverage leg (calls coverageDiff — the REAL leg\'s own function, not a re-implementation)', () => {
-    // This control calls `coverageDiff` — the exact function the leg above asserts on — so
-    // neutering that shared function (rather than just the outer `expect(...)` in the real
-    // leg) reds THIS test too. Re-verified by mutation: short-circuiting `coverageDiff` to
-    // always return `EMPTY_DIFF` fails this control (expected a non-empty onlyInCandidates,
-    // got the empty diff) — see the retraction/P2 commit message for the mutation ledger.
+    // This control calls `coverageDiff` — the exact function the leg above asserts on.
+    // Re-verified by mutation: short-circuiting `coverageDiff` to always return `EMPTY_DIFF`
+    // reds ONLY this control (expected a non-empty `onlyInCandidates`, got the empty diff);
+    // the real leg above stays GREEN under that same neuter, because on the actual healthy
+    // tree the correct `coverageDiff` result IS `EMPTY_DIFF` too — a stub that always returns
+    // it is indistinguishable from the real function there. That asymmetry is exactly why
+    // this control exists: it is the ONLY thing in this file that would catch a `coverageDiff`
+    // regression, precisely because its decoy has a genuinely non-empty expected diff.
     const probe = 'packages/core-backend/src/attendance/probe-unclassified.ts'
     const lineText = "const fmt = new Intl.DateTimeFormat('en-US', { hourCycle: 'h23' })"
     withDecoyTree({ [probe]: `${lineText}\n` }, (decoyRoot) => {
