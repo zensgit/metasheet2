@@ -25,13 +25,16 @@
 #             (human U12/U13).
 #   off     — fail-safe: flip Stream flag false, restart backend, prove worker
 #             stopped / not registered
+#   https-on  — provision a pinned Caddy TLS gateway on 443, atomically switch
+#               staging public/CORS/OAuth callback URLs, restart, verify
+#   https-off — restore the pre-HTTPS env and remove the gateway
 #
 # HARD SAFETY RAILS:
 #   * Staging compose + metasheet-staging-* containers only; no prod fallback.
 #   * Lifecycle flags (alias/pending/deprovision) are NEVER written by this lane.
 #   * Stream stays OFF except explicit action=on.
 #   * Secrets never appear in shell argv, exported env values, logs, or artifacts.
-#   * prepare/on/off require exact deployed 40-char lowercase SHA.
+#   * Every mutating action requires exact deployed 40-char lowercase SHA.
 #   * Artifacts: booleans / counts / reason enums / SHA only — no raw IDs/PII.
 #   * stream_connected is always unknown in this lane (no connect claim from logs).
 #   * U12/U13 remain human-gated (real callback / flag-off UAT); not automated.
@@ -41,7 +44,7 @@ set -euo pipefail
 log() { echo "[stream-uat] $*"; }
 fail() { echo "[stream-uat][error] $*" >&2; exit 1; }
 
-ACTION="${ACTION:?ACTION is required (status|prepare|on|off)}"
+ACTION="${ACTION:?ACTION is required (status|prepare|on|off|https-on|https-off)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
@@ -70,6 +73,13 @@ FLAG_ALIAS="AUTH_LOGIN_USE_ALIASES"
 FLAG_PENDING="DIRECTORY_PENDING_ACTIVATION_ENABLED"
 FLAG_DEPROVISION="DIRECTORY_DEPROVISION_ENABLED"
 
+HTTPS_GATEWAY_HOST="metasheet-staging.ddns.net"
+HTTPS_GATEWAY_EXPECTED_IP="23.254.236.11"
+HTTPS_GATEWAY_ORIGIN="https://${HTTPS_GATEWAY_HOST}"
+HTTPS_GATEWAY_CALLBACK="${HTTPS_GATEWAY_ORIGIN}/login/dingtalk/callback"
+HTTPS_GATEWAY_CONTAINER="metasheet-staging-https-gateway"
+HTTPS_GATEWAY_IMAGE="caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+
 # Ephemeral temp paths cleaned by trap (chmod 600 where secrets live).
 EPHEMERAL_PATHS=()
 INTEGRATION_ID_FILE=""
@@ -82,6 +92,10 @@ STREAM_ON_ROLLBACK_ARMED="false"
 STREAM_ON_SUCCESS="false"
 STREAM_ON_ROLLBACK_DONE="false"
 STREAM_ON_ROLLBACK_RESULT=""
+HTTPS_ON_ROLLBACK_ARMED="false"
+HTTPS_ON_SUCCESS="false"
+HTTPS_ON_ROLLBACK_DONE="false"
+HTTPS_ENV_WRITTEN="false"
 TRAP_IN_PROGRESS="false"
 
 cleanup_ephemeral() {
@@ -153,6 +167,241 @@ disarm_stream_on_fail_safe_rollback() {
   log "action=on fail-safe rollback DISARMED (on checks + artifact succeeded)"
 }
 
+write_https_env_backup_checksum() {
+  [[ -f "$HTTPS_ENV_BACKUP" ]] || return 1
+  local digest candidate
+  digest="$(sha256sum "$HTTPS_ENV_BACKUP" 2>/dev/null | awk '{print $1}')"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  candidate="${HTTPS_ENV_BACKUP_SHA256}.${RUN_STAMP}.tmp"
+  register_ephemeral "$candidate"
+  umask 077
+  printf '%s\n' "$digest" >"$candidate" || return 1
+  chmod 600 "$candidate"
+  mv -f "$candidate" "$HTTPS_ENV_BACKUP_SHA256"
+  chmod 600 "$HTTPS_ENV_BACKUP_SHA256"
+}
+
+validate_legacy_https_env_backup() {
+  # Compatibility for the one staging gateway created before checksum sealing
+  # existed. Accept only one coherent, non-gateway URL triplet; never print it.
+  [[ -f "$HTTPS_ENV_BACKUP" ]] || return 1
+  python3 - "$HTTPS_ENV_BACKUP" "$HTTPS_GATEWAY_ORIGIN" "$HTTPS_GATEWAY_CALLBACK" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+path, gateway_origin, gateway_callback = sys.argv[1:]
+keys = ("PUBLIC_APP_URL", "CORS_ORIGIN", "DINGTALK_REDIRECT_URI")
+values = {key: [] for key in keys}
+
+with open(path, encoding="utf-8", errors="strict") as fh:
+    for raw in fh:
+        line = raw.rstrip("\r\n")
+        if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in values:
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key].append(value.strip())
+
+if any(len(values[key]) != 1 for key in keys):
+    raise SystemExit(1)
+
+def parsed(value):
+    result = urlsplit(value)
+    if result.scheme not in ("http", "https") or not result.hostname:
+        raise SystemExit(1)
+    if result.username or result.password or result.fragment:
+        raise SystemExit(1)
+    return result
+
+public = parsed(values["PUBLIC_APP_URL"][0])
+cors = parsed(values["CORS_ORIGIN"][0])
+redirect = parsed(values["DINGTALK_REDIRECT_URI"][0])
+
+def origin(result):
+    return f"{result.scheme}://{result.netloc}".rstrip("/")
+
+if origin(public) != origin(cors) or origin(public) != origin(redirect):
+    raise SystemExit(1)
+if redirect.path.rstrip("/") != "/login/dingtalk/callback":
+    raise SystemExit(1)
+if values["PUBLIC_APP_URL"][0].rstrip("/") == gateway_origin.rstrip("/"):
+    raise SystemExit(1)
+if values["DINGTALK_REDIRECT_URI"][0].rstrip("/") == gateway_callback.rstrip("/"):
+    raise SystemExit(1)
+PY
+}
+
+require_https_env_backup_integrity() {
+  [[ -f "$HTTPS_ENV_BACKUP" ]] || return 1
+  if [[ ! -f "$HTTPS_ENV_BACKUP_SHA256" ]]; then
+    validate_legacy_https_env_backup || return 1
+    write_https_env_backup_checksum || return 1
+    HTTPS_ENV_BACKUP_LEGACY_SEALED="true"
+  fi
+
+  local expected actual line_count
+  line_count="$(wc -l <"$HTTPS_ENV_BACKUP_SHA256" | tr -d '[:space:]')"
+  [[ "$line_count" == "1" ]] || return 1
+  expected="$(tr -d '\r\n' <"$HTTPS_ENV_BACKUP_SHA256")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  actual="$(sha256sum "$HTTPS_ENV_BACKUP" 2>/dev/null | awk '{print $1}')"
+  [[ "$actual" =~ ^[0-9a-f]{64}$ && "$actual" == "$expected" ]]
+}
+
+restore_https_env_backup() {
+  [[ -f "$HTTPS_ENV_BACKUP" ]] || return 1
+  require_https_env_backup_integrity || return 1
+  local candidate py_script
+  candidate="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.https-restore.XXXXXX")"
+  register_ephemeral "$candidate"
+  py_script="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.https-restore-script.XXXXXX")"
+  register_ephemeral "$py_script"
+  cat >"$py_script" <<'PY'
+import os, sys
+
+current_path, backup_path, candidate_path = sys.argv[1:]
+target_keys = ("PUBLIC_APP_URL", "CORS_ORIGIN", "DINGTALK_REDIRECT_URI")
+
+def read_lines(path):
+    with open(path, encoding="utf-8", errors="strict") as fh:
+        return fh.read().splitlines()
+
+def key_for(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in line:
+        return None
+    return line.split("=", 1)[0].strip()
+
+backup_values = {key: None for key in target_keys}
+for line in read_lines(backup_path):
+    key = key_for(line)
+    if key in backup_values:
+        backup_values[key] = line.split("=", 1)[1]
+
+out = []
+emitted = set()
+for line in read_lines(current_path):
+    key = key_for(line)
+    if key not in backup_values:
+        out.append(line)
+        continue
+    if key not in emitted and backup_values[key] is not None:
+        out.append(f"{key}={backup_values[key]}")
+    emitted.add(key)
+
+for key in target_keys:
+    if key not in emitted and backup_values[key] is not None:
+        out.append(f"{key}={backup_values[key]}")
+
+with open(candidate_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out) + "\n")
+os.chmod(candidate_path, 0o600)
+PY
+  python3 "$py_script" "$STAGING_ENV_FILE" "$HTTPS_ENV_BACKUP" "$candidate" \
+    || { rm -f "$candidate" "$py_script"; return 1; }
+  chmod 600 "$candidate"
+  compose_staging_cmd_with_env_file "$candidate" config >/dev/null 2>&1 \
+    || { rm -f "$candidate" "$py_script"; return 1; }
+  if ! ( atomic_replace_staging_env "$candidate" ); then
+    rm -f "$candidate" "$py_script"
+    return 1
+  fi
+  rm -f "$candidate" "$py_script"
+}
+
+https_env_file_matches_gateway() {
+  local origin_digest callback_digest public_digest cors_digest redirect_digest
+  [[ -f "$STAGING_ENV_FILE" ]] || return 2
+  origin_digest="$(printf '%s' "$HTTPS_GATEWAY_ORIGIN" | sha256sum | awk '{print $1}')"
+  callback_digest="$(printf '%s' "$HTTPS_GATEWAY_CALLBACK" | sha256sum | awk '{print $1}')"
+  public_digest="$(read_env_file_value_digest PUBLIC_APP_URL "$STAGING_ENV_FILE")"
+  cors_digest="$(read_env_file_value_digest CORS_ORIGIN "$STAGING_ENV_FILE")"
+  redirect_digest="$(read_env_file_value_digest DINGTALK_REDIRECT_URI "$STAGING_ENV_FILE")"
+  if [[ "$public_digest" == "UNKNOWN" || "$cors_digest" == "UNKNOWN" || "$redirect_digest" == "UNKNOWN" ]]; then
+    return 2
+  fi
+  [[ "$public_digest" == "$origin_digest" \
+    && "$cors_digest" == "$origin_digest" \
+    && "$redirect_digest" == "$callback_digest" ]]
+}
+
+remove_https_gateway_if_present() {
+  if ! docker inspect "$HTTPS_GATEWAY_CONTAINER" >/dev/null 2>&1; then
+    return 0
+  fi
+  docker rm -f "$HTTPS_GATEWAY_CONTAINER" >/dev/null 2>&1 || return 1
+  ! docker inspect "$HTTPS_GATEWAY_CONTAINER" >/dev/null 2>&1
+}
+
+https_on_fail_safe_rollback() {
+  if [[ "$HTTPS_ON_ROLLBACK_ARMED" != "true" || "$HTTPS_ON_SUCCESS" == "true" || "$HTTPS_ON_ROLLBACK_DONE" == "true" ]]; then
+    return 0
+  fi
+  HTTPS_ON_ROLLBACK_DONE="true"
+  set +e
+  local env_rc=0 recreate_rc=0 gateway_rc=0 env_was_switched="false" env_match_rc=1
+  https_env_file_matches_gateway
+  env_match_rc=$?
+  if [[ "$HTTPS_ENV_WRITTEN" == "true" || "$env_match_rc" == "0" ]]; then
+    env_was_switched="true"
+    ( restore_https_env_backup ) || env_rc=1
+    if [[ "$env_rc" == "0" ]]; then
+      ( recreate_backend_only ) || recreate_rc=1
+    else
+      recreate_rc=1
+    fi
+  elif [[ "$env_match_rc" == "2" ]]; then
+    # Unknown is not evidence of "not switched". Preserve both recovery assets.
+    env_was_switched="unknown"
+    env_rc=1
+    recreate_rc=1
+  elif [[ -f "$HTTPS_ENV_BACKUP" ]]; then
+    # No env write occurred. Keep the snapshot until gateway removal succeeds,
+    # so a failed removal never strands an unmanaged container without evidence.
+    :
+  fi
+  if [[ "$env_was_switched" == "false" || ( "$env_rc" == "0" && "$recreate_rc" == "0" ) ]]; then
+    remove_https_gateway_if_present || gateway_rc=1
+  else
+    # Keep the still-required gateway online when env rollback failed.
+    gateway_rc=2
+  fi
+  if [[ "$env_was_switched" == "true" && "$env_rc" == "0" && "$recreate_rc" == "0" && "$gateway_rc" == "0" ]]; then
+    rm -f "$HTTPS_ENV_BACKUP" "$HTTPS_ENV_BACKUP_SHA256" || env_rc=1
+  fi
+  if [[ "$env_was_switched" == "false" && "$gateway_rc" == "0" && -f "$HTTPS_ENV_BACKUP" ]]; then
+    rm -f "$HTTPS_ENV_BACKUP" "$HTTPS_ENV_BACKUP_SHA256" || env_rc=1
+  fi
+  rm -f "${STREAM_UAT_PERSIST_DIR}/app.staging.env.backup-${RUN_STAMP}" >/dev/null 2>&1 || env_rc=1
+  {
+    echo "https_on_fail_safe_rollback=true"
+    echo "https_env_restore_ok=$([[ "$env_rc" == "0" ]] && echo true || echo false)"
+    echo "https_backend_restore_ok=$([[ "$recreate_rc" == "0" ]] && echo true || echo false)"
+    case "$gateway_rc" in
+      0) echo "https_gateway_remove_result=removed_or_absent" ;;
+      1) echo "https_gateway_remove_result=failed" ;;
+      2) echo "https_gateway_remove_result=skipped_env_not_restored" ;;
+    esac
+  } >> "${OUTPUT_DIR}/summary.txt" 2>/dev/null
+  set -e
+}
+
+arm_https_on_fail_safe_rollback() {
+  HTTPS_ON_ROLLBACK_ARMED="true"
+  HTTPS_ON_SUCCESS="false"
+  HTTPS_ON_ROLLBACK_DONE="false"
+  HTTPS_ENV_WRITTEN="false"
+}
+
+disarm_https_on_fail_safe_rollback() {
+  HTTPS_ON_SUCCESS="true"
+  HTTPS_ON_ROLLBACK_ARMED="false"
+}
+
 # Unified trap: optional on-rollback, then ephemeral cleanup.
 # Do NOT register cleanup_ephemeral alone on signal traps — a return-only signal
 # handler lets the main script continue after a fatal signal. Every trapped fatal
@@ -180,6 +429,8 @@ on_script_trap() {
   set +e
   # Armed action=on window: force Stream OFF + recreate before process ends.
   stream_on_fail_safe_rollback
+  # Armed action=https-on window: restore env + remove TLS gateway.
+  https_on_fail_safe_rollback
   cleanup_ephemeral
   set -e
 
@@ -254,6 +505,10 @@ STAGING_ENV_FILE="${STAGING_DIR}/docker/app.staging.env"
 STREAM_UAT_PERSIST_DIR="${HOME}/.metasheet2/stream-uat"
 mkdir -p "$STREAM_UAT_PERSIST_DIR"
 chmod 700 "$STREAM_UAT_PERSIST_DIR" 2>/dev/null || true
+HTTPS_GATEWAY_PERSIST_DIR="${HOME}/.metasheet2/staging-https-gateway"
+HTTPS_ENV_BACKUP="${HTTPS_GATEWAY_PERSIST_DIR}/app.staging.env.before-https"
+HTTPS_ENV_BACKUP_SHA256="${HTTPS_ENV_BACKUP}.sha256"
+HTTPS_ENV_BACKUP_LEGACY_SEALED="false"
 
 is_truthy() {
   local v
@@ -1229,6 +1484,147 @@ require_stream_prerequisites_for_on() {
 }
 
 # --- artifact writers -----------------------------------------------------------------
+probe_tcp_listener() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    if ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .; then
+      printf 'true'
+    else
+      printf 'false'
+    fi
+    return 0
+  fi
+  printf 'unknown'
+}
+
+docker_publishers_for_port() {
+  local port="$1"
+  local publishers
+  publishers="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
+    | awk -F '|' -v needle=":${port}->" 'index($2, needle) { print $1 }' \
+    | sort -u \
+    | paste -sd, -)"
+  if [[ -z "$publishers" ]]; then
+    printf 'none'
+    return 0
+  fi
+  if [[ ! "$publishers" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "$publishers"
+}
+
+probe_https_gateway_status() {
+  HTTPS_PORT_80_LISTENER="$(probe_tcp_listener 80)"
+  HTTPS_PORT_443_LISTENER="$(probe_tcp_listener 443)"
+  HTTPS_PORT_80_DOCKER_PUBLISHERS="$(docker_publishers_for_port 80)"
+  HTTPS_PORT_443_DOCKER_PUBLISHERS="$(docker_publishers_for_port 443)"
+  if sudo -n true >/dev/null 2>&1; then
+    HTTPS_SUDO_NONINTERACTIVE="true"
+  else
+    HTTPS_SUDO_NONINTERACTIVE="false"
+  fi
+  if command -v nginx >/dev/null 2>&1; then HTTPS_HOST_NGINX_PRESENT="true"; else HTTPS_HOST_NGINX_PRESENT="false"; fi
+  if command -v caddy >/dev/null 2>&1; then HTTPS_HOST_CADDY_PRESENT="true"; else HTTPS_HOST_CADDY_PRESENT="false"; fi
+  if command -v certbot >/dev/null 2>&1; then HTTPS_HOST_CERTBOT_PRESENT="true"; else HTTPS_HOST_CERTBOT_PRESENT="false"; fi
+  if docker inspect -f '{{.State.Running}}' "$HTTPS_GATEWAY_CONTAINER" 2>/dev/null | grep -qx true; then
+    HTTPS_GATEWAY_CONTAINER_RUNNING="true"
+  else
+    HTTPS_GATEWAY_CONTAINER_RUNNING="false"
+  fi
+  if [[ "$(docker inspect -f '{{.Config.Image}}' "$HTTPS_GATEWAY_CONTAINER" 2>/dev/null || true)" == "$HTTPS_GATEWAY_IMAGE" ]]; then
+    HTTPS_GATEWAY_IMAGE_MATCH="true"
+  else
+    HTTPS_GATEWAY_IMAGE_MATCH="false"
+  fi
+  if [[ -f "$HTTPS_ENV_BACKUP" ]]; then HTTPS_ENV_BACKUP_PRESENT="true"; else HTTPS_ENV_BACKUP_PRESENT="false"; fi
+  if curl -fsS --max-time 5 --resolve "${HTTPS_GATEWAY_HOST}:443:127.0.0.1" \
+      "${HTTPS_GATEWAY_ORIGIN}/api/health" >/dev/null 2>&1; then
+    HTTPS_GATEWAY_HEALTH="true"
+  else
+    HTTPS_GATEWAY_HEALTH="false"
+  fi
+  local expected_origin_digest expected_callback_digest
+  expected_origin_digest="$(printf '%s' "$HTTPS_GATEWAY_ORIGIN" | sha256sum | awk '{print $1}')"
+  expected_callback_digest="$(printf '%s' "$HTTPS_GATEWAY_CALLBACK" | sha256sum | awk '{print $1}')"
+  if [[ "$(env_key_digest_in_container PUBLIC_APP_URL)" == "$expected_origin_digest" ]]; then HTTPS_PUBLIC_URL_MATCH="true"; else HTTPS_PUBLIC_URL_MATCH="false"; fi
+  if [[ "$(env_key_digest_in_container CORS_ORIGIN)" == "$expected_origin_digest" ]]; then HTTPS_CORS_ORIGIN_MATCH="true"; else HTTPS_CORS_ORIGIN_MATCH="false"; fi
+  if [[ "$(env_key_digest_in_container DINGTALK_REDIRECT_URI)" == "$expected_callback_digest" ]]; then HTTPS_DINGTALK_REDIRECT_MATCH="true"; else HTTPS_DINGTALK_REDIRECT_MATCH="false"; fi
+}
+
+resolve_staging_web_network() {
+  local networks
+  mapfile -t networks < <(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$WEB_CONTAINER" 2>/dev/null | sed '/^[[:space:]]*$/d' | sort -u)
+  [[ "${#networks[@]}" -eq 1 ]] || fail "staging web must have exactly one Docker network for isolated HTTPS gateway (count=${#networks[@]})"
+  [[ "${networks[0]}" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "staging web network name contains unsafe characters"
+  printf '%s' "${networks[0]}"
+}
+
+write_https_caddyfile() {
+  mkdir -p "$HTTPS_GATEWAY_PERSIST_DIR/data" "$HTTPS_GATEWAY_PERSIST_DIR/config"
+  chmod 700 "$HTTPS_GATEWAY_PERSIST_DIR" "$HTTPS_GATEWAY_PERSIST_DIR/data" "$HTTPS_GATEWAY_PERSIST_DIR/config"
+  local candidate="${HTTPS_GATEWAY_PERSIST_DIR}/.Caddyfile.${RUN_STAMP}.tmp"
+  register_ephemeral "$candidate"
+  cat >"$candidate" <<EOF
+{
+  auto_https disable_redirects
+}
+
+${HTTPS_GATEWAY_HOST} {
+  tls {
+    issuer acme {
+      disable_http_challenge
+    }
+  }
+  reverse_proxy ${WEB_CONTAINER}:80
+}
+EOF
+  chmod 600 "$candidate"
+  docker run --rm --pull never --network none \
+    -v "${candidate}:/etc/caddy/Caddyfile:ro" \
+    "$HTTPS_GATEWAY_IMAGE" caddy validate --config /etc/caddy/Caddyfile >/dev/null
+  mv -f "$candidate" "${HTTPS_GATEWAY_PERSIST_DIR}/Caddyfile"
+  chmod 600 "${HTTPS_GATEWAY_PERSIST_DIR}/Caddyfile"
+}
+
+wait_for_https_gateway() {
+  local i
+  for ((i = 1; i <= 45; i += 1)); do
+    if curl -fsS --max-time 5 --resolve "${HTTPS_GATEWAY_HOST}:443:127.0.0.1" \
+        "${HTTPS_GATEWAY_ORIGIN}/api/health" >/dev/null 2>&1; then
+      if echo | openssl s_client -connect 127.0.0.1:443 -servername "$HTTPS_GATEWAY_HOST" 2>/dev/null \
+          | openssl x509 -checkend 86400 -noout >/dev/null 2>&1; then
+        log "HTTPS gateway health and certificate valid (attempt ${i}/45)"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "https_gateway_failure_class=health_or_certificate_timeout" \
+    > "${OUTPUT_DIR}/https-gateway-failure.txt"
+  return 1
+}
+
+require_https_live_env_matches() {
+  local origin_digest callback_digest
+  origin_digest="$(printf '%s' "$HTTPS_GATEWAY_ORIGIN" | sha256sum | awk '{print $1}')"
+  callback_digest="$(printf '%s' "$HTTPS_GATEWAY_CALLBACK" | sha256sum | awk '{print $1}')"
+  [[ "$(env_key_digest_in_container PUBLIC_APP_URL)" == "$origin_digest" ]] || fail "live PUBLIC_APP_URL does not match HTTPS gateway"
+  [[ "$(env_key_digest_in_container CORS_ORIGIN)" == "$origin_digest" ]] || fail "live CORS_ORIGIN does not match HTTPS gateway"
+  [[ "$(env_key_digest_in_container DINGTALK_REDIRECT_URI)" == "$callback_digest" ]] || fail "live DINGTALK_REDIRECT_URI does not match HTTPS callback"
+}
+
+require_https_live_env_matches_backup() {
+  local key backup_digest live_digest
+  for key in PUBLIC_APP_URL CORS_ORIGIN DINGTALK_REDIRECT_URI; do
+    backup_digest="$(read_env_file_value_digest "$key" "$HTTPS_ENV_BACKUP")"
+    live_digest="$(env_key_digest_in_container "$key")"
+    [[ "$backup_digest" == "$live_digest" ]] \
+      || fail "live ${key} does not match the pre-HTTPS backup (digest mismatch; values not printed)"
+  done
+}
+
 write_status_artifact() {
   local reason="${1:-ok}"
   local live_sha stream_on cid csec tmpl integ lifecycle health worker
@@ -1251,6 +1647,7 @@ write_status_artifact() {
   eligible_count="$(parse_probe_field "$probe" eligible_anchor_count)"
   linked="$(parse_probe_field "$probe" linked_users)"
   ready="$(parse_probe_field "$probe" ready)"
+  probe_https_gateway_status
 
   local sha_match="unknown"
   if [[ -n "$DEPLOY_SHA" ]]; then
@@ -1264,7 +1661,7 @@ write_status_artifact() {
   fi
 
   {
-    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v2"
+    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v3"
     echo "action=${ACTION}"
     echo "reason=${reason}"
     echo "deployed_sha=${live_sha}"
@@ -1287,10 +1684,25 @@ write_status_artifact() {
     echo "worker_state=${worker}"
     # Never claim connected from startup logs; human U12/U13 only.
     echo "stream_connected=${STREAM_CONNECTED_UNKNOWN}"
+    echo "https_port_80_listener=${HTTPS_PORT_80_LISTENER}"
+    echo "https_port_443_listener=${HTTPS_PORT_443_LISTENER}"
+    echo "https_port_80_docker_publishers=${HTTPS_PORT_80_DOCKER_PUBLISHERS}"
+    echo "https_port_443_docker_publishers=${HTTPS_PORT_443_DOCKER_PUBLISHERS}"
+    echo "https_sudo_noninteractive=${HTTPS_SUDO_NONINTERACTIVE}"
+    echo "https_host_nginx_present=${HTTPS_HOST_NGINX_PRESENT}"
+    echo "https_host_caddy_present=${HTTPS_HOST_CADDY_PRESENT}"
+    echo "https_host_certbot_present=${HTTPS_HOST_CERTBOT_PRESENT}"
+    echo "https_gateway_container_running=${HTTPS_GATEWAY_CONTAINER_RUNNING}"
+    echo "https_gateway_health=${HTTPS_GATEWAY_HEALTH}"
+    echo "https_gateway_image_match=${HTTPS_GATEWAY_IMAGE_MATCH}"
+    echo "https_env_backup_present=${HTTPS_ENV_BACKUP_PRESENT}"
+    echo "https_public_url_match=${HTTPS_PUBLIC_URL_MATCH}"
+    echo "https_cors_origin_match=${HTTPS_CORS_ORIGIN_MATCH}"
+    echo "https_dingtalk_redirect_match=${HTTPS_DINGTALK_REDIRECT_MATCH}"
   } > "${OUTPUT_DIR}/stream-uat-status.txt"
 
   {
-    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v2"
+    echo "schema=dingtalk-interactive-card-stream-staging-uat-status-v3"
     echo "action=${ACTION}"
     echo "reason=${reason}"
     echo "stream_enabled=${stream_on}"
@@ -1474,6 +1886,116 @@ action_off() {
   log "action=off complete (stream OFF; worker stopped/not registered; stream_connected still unknown)"
 }
 
+action_https_on() {
+  assert_staging_only
+  require_compose_v2
+  require_exact_deployed_sha "https-on"
+  pin_live_backend_image_for_transition
+  require_lifecycle_flags_off "https-on"
+  require_staging_env_file
+
+  local live_stream
+  live_stream="$(read_flag_from_container "$FLAG_STREAM" || echo unknown)"
+  [[ "$live_stream" == "false" ]] || fail "action=https-on requires Stream OFF (got ${live_stream})"
+  if [[ -e "$HTTPS_ENV_BACKUP" || -e "$HTTPS_ENV_BACKUP_SHA256" ]] \
+      && docker inspect "$HTTPS_GATEWAY_CONTAINER" >/dev/null 2>&1; then
+    fail "managed HTTPS gateway is already active; use status or https-off"
+  fi
+  if [[ -e "$HTTPS_ENV_BACKUP" || -e "$HTTPS_ENV_BACKUP_SHA256" ]] \
+      || docker inspect "$HTTPS_GATEWAY_CONTAINER" >/dev/null 2>&1; then
+    fail "incomplete/unmanaged HTTPS gateway state; inspect backup and pinned container identity before retry"
+  fi
+  [[ "$(probe_tcp_listener 443)" == "false" ]] || fail "port 443 is already occupied; refuse gateway install"
+
+  local resolved_ip
+  resolved_ip="$(getent ahostsv4 "$HTTPS_GATEWAY_HOST" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+  [[ "$resolved_ip" == "$HTTPS_GATEWAY_EXPECTED_IP" ]] || fail "HTTPS gateway DNS does not resolve to expected staging IP"
+  command -v curl >/dev/null 2>&1 || fail "curl is required for HTTPS verification"
+  command -v openssl >/dev/null 2>&1 || fail "openssl is required for certificate verification"
+
+  local web_network
+  web_network="$(resolve_staging_web_network)"
+  mkdir -p "$HTTPS_GATEWAY_PERSIST_DIR"
+  chmod 700 "$HTTPS_GATEWAY_PERSIST_DIR"
+  arm_https_on_fail_safe_rollback
+  cp -p "$STAGING_ENV_FILE" "$HTTPS_ENV_BACKUP"
+  chmod 600 "$HTTPS_ENV_BACKUP"
+  write_https_env_backup_checksum || fail "failed to seal pre-HTTPS env backup"
+
+  docker pull "$HTTPS_GATEWAY_IMAGE" >/dev/null
+  write_https_caddyfile
+  docker run -d \
+    --name "$HTTPS_GATEWAY_CONTAINER" \
+    --restart unless-stopped \
+    --network "$web_network" \
+    -p 443:443/tcp \
+    -p 443:443/udp \
+    -v "${HTTPS_GATEWAY_PERSIST_DIR}/Caddyfile:/etc/caddy/Caddyfile:ro" \
+    -v "${HTTPS_GATEWAY_PERSIST_DIR}/data:/data" \
+    -v "${HTTPS_GATEWAY_PERSIST_DIR}/config:/config" \
+    "$HTTPS_GATEWAY_IMAGE" >/dev/null
+
+  wait_for_https_gateway || fail "HTTPS gateway did not obtain a valid certificate/health response"
+
+  atomic_upsert_env_keys_from_files \
+    PUBLIC_APP_URL "@literal:${HTTPS_GATEWAY_ORIGIN}" \
+    CORS_ORIGIN "@literal:${HTTPS_GATEWAY_ORIGIN}" \
+    DINGTALK_REDIRECT_URI "@literal:${HTTPS_GATEWAY_CALLBACK}"
+  HTTPS_ENV_WRITTEN="true"
+  rm -f "${STREAM_UAT_PERSIST_DIR}/app.staging.env.backup-${RUN_STAMP}"
+
+  recreate_backend_only || fail "backend restart failed after HTTPS env switch"
+  require_exact_deployed_sha "https-on-post-restart"
+  require_https_live_env_matches
+  require_lifecycle_flags_off "https-on-post"
+  [[ "$(read_flag_from_container "$FLAG_STREAM" || echo unknown)" == "false" ]] || fail "Stream flag changed during HTTPS transition"
+  wait_for_https_gateway || fail "HTTPS gateway failed post-restart verification"
+
+  write_status_artifact "https_on_ok"
+  {
+    echo "https_gateway_enabled=true"
+    echo "https_certificate_valid=true"
+    echo "https_env_switched=true"
+    echo "stream_enabled=false"
+    echo "lifecycle_flags_all_off=true"
+  } >> "${OUTPUT_DIR}/summary.txt"
+  disarm_https_on_fail_safe_rollback
+  log "action=https-on complete (HTTPS ready; Stream/lifecycle flags remain OFF)"
+}
+
+action_https_off() {
+  assert_staging_only
+  require_compose_v2
+  require_exact_deployed_sha "https-off"
+  pin_live_backend_image_for_transition
+  require_lifecycle_flags_off "https-off"
+  require_staging_env_file
+  [[ -f "$HTTPS_ENV_BACKUP" ]] || fail "HTTPS env backup missing; refuse ambiguous rollback"
+  require_https_env_backup_integrity || fail "HTTPS env backup integrity check failed; refuse ambiguous rollback"
+  [[ "$(read_flag_from_container "$FLAG_STREAM" || echo unknown)" == "false" ]] \
+    || fail "action=https-off requires Stream OFF; run action=off first"
+
+  restore_https_env_backup || fail "failed to restore pre-HTTPS staging env"
+  recreate_backend_only || fail "backend restart failed after HTTPS env restore"
+  require_exact_deployed_sha "https-off-post-restart"
+  require_https_live_env_matches_backup
+  require_lifecycle_flags_off "https-off-post"
+  [[ "$(read_flag_from_container "$FLAG_STREAM" || echo unknown)" == "false" ]] \
+    || fail "Stream flag changed during HTTPS rollback"
+  remove_https_gateway_if_present || fail "HTTPS gateway removal failed or container still exists"
+  rm -f "$HTTPS_ENV_BACKUP" "$HTTPS_ENV_BACKUP_SHA256" \
+    || fail "HTTPS rollback verified but backup cleanup failed"
+  write_status_artifact "https_off_ok"
+  {
+    echo "https_gateway_enabled=false"
+    echo "https_env_restored=true"
+    echo "https_legacy_backup_sealed=${HTTPS_ENV_BACKUP_LEGACY_SEALED}"
+    echo "stream_enabled=false"
+    echo "lifecycle_flags_all_off=true"
+  } >> "${OUTPUT_DIR}/summary.txt"
+  log "action=https-off complete (pre-HTTPS env restored; gateway removed)"
+}
+
 # --- main -----------------------------------------------------------------------------
 mkdir -p "$OUTPUT_DIR"
 chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
@@ -1483,7 +2005,9 @@ case "$ACTION" in
   prepare) action_prepare ;;
   on) action_on ;;
   off) action_off ;;
-  *) fail "invalid ACTION='${ACTION}' (expected status|prepare|on|off)" ;;
+  https-on) action_https_on ;;
+  https-off) action_https_off ;;
+  *) fail "invalid ACTION='${ACTION}' (expected status|prepare|on|off|https-on|https-off)" ;;
 esac
 
 log "done action=${ACTION}"

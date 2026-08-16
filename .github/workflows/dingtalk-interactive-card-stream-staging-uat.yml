@@ -6,7 +6,7 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 # One dispatch = ONE action. Stream stays OFF except explicit action=on.
 # Lifecycle flags are NEVER written by this lane.
 #
-# EXECUTABLE: status | prepare | on | off
+# EXECUTABLE: status | prepare | on | off | https-on | https-off
 #   status  = read-only values-free snapshot (booleans / counts / reason classes)
 #   prepare = transport Stream credentials (chmod-600 files), derive exactly one
 #             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
@@ -18,8 +18,11 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 #             Does NOT prove SDK connected (connect resolves + retries forever);
 #             stream_connected stays unknown until real callback UAT.
 #   off     = fail-safe Stream flag false + backend restart + worker stop proof
+#   https-on  = provision a pinned Caddy TLS gateway on 443, atomically switch
+#               staging public/CORS/OAuth callback URLs, restart backend, verify
+#   https-off = restore the pre-HTTPS staging env and remove the TLS gateway
 #
-# Exact deployed FULL 40-char lowercase SHA required for prepare/on/off.
+# Exact deployed FULL 40-char lowercase SHA required for every mutating action.
 # Secrets (prepare only): STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID /
 #   _CLIENT_SECRET / _TEMPLATE_ID — demoted + file transport; never argv/env
 #   persistence beyond the materialize window. Integration id is derived on host.
@@ -33,14 +36,14 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status (read-only) | prepare (creds + force Stream OFF) | on (Stream ON) | off (fail-safe Stream OFF)'
+        description: 'status | prepare | on | off | https-on | https-off'
         required: true
         type: choice
         # Quote 'on'/'off' — YAML 1.1 bare on/off become booleans.
-        options: [status, prepare, 'on', 'off']
+        options: [status, prepare, 'on', 'off', https-on, https-off]
         default: status
       deploy_sha:
-        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for prepare/on/off; optional for status exact-match reporting.'
+        description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for mutating actions; optional for status.'
         required: false
         default: ''
 
@@ -70,12 +73,12 @@ jobs:
           # (bash -n and other children must not inherit raw secret env).
         run: |
           set -euo pipefail
-          case "$ACTION" in status|prepare|on|off) ;; *)
+          case "$ACTION" in status|prepare|on|off|https-on|https-off) ;; *)
             echo "invalid action: $ACTION" >&2; exit 2
           ;; esac
 
-          # prepare/on/off require exact full SHA.
-          if [[ "$ACTION" == "prepare" || "$ACTION" == "on" || "$ACTION" == "off" ]]; then
+          # Every mutating action requires exact full SHA.
+          if [[ "$ACTION" != "status" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=${ACTION}, got: '$DEPLOY_SHA'" >&2
               exit 2
@@ -317,11 +320,12 @@ jobs:
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
-            echo "**Executable:** status / prepare / on / off."
+            echo "**Executable:** status / prepare / on / off / https-on / https-off."
             echo "prepare forces Stream OFF after writing credentials + derived integration id."
             echo "on flips ONLY Stream flag true after prerequisite + LOG_LEVEL checks; proves worker_started only."
             echo "stream_connected is always unknown here (SDK connect resolves + retries forever; not log-proven)."
             echo "off is fail-safe Stream OFF + worker stop proof."
+            echo "https-on/off manage only the pinned staging TLS gateway and three public URL keys."
             echo "Lifecycle flags are never written by this lane."
             echo "Does not implement human U1–U13 clicks; U12/U13 remain human-gated."
             echo "Artifacts are values-free (booleans / counts / reason classes / SHA only)."
