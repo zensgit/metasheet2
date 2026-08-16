@@ -7,6 +7,8 @@
 #
 # EXECUTABLE:
 #   status  — read-only snapshot (booleans / counts / reason classes / SHA only)
+#   observe — read-only callback/corp-anchor/card-update result classes for one
+#             validated expected delivery UUID; never emits raw logs or ids
 #   prepare — transport Stream credentials via chmod-600 files, derive exactly
 #             one active integration for live DINGTALK_CORP_ID with >=2 active
 #             linked local users, atomically write the four credential/id env
@@ -34,7 +36,7 @@
 #   * Lifecycle flags (alias/pending/deprovision) are NEVER written by this lane.
 #   * Stream stays OFF except explicit action=on.
 #   * Secrets never appear in shell argv, exported env values, logs, or artifacts.
-#   * Every mutating action requires exact deployed 40-char lowercase SHA.
+#   * Every non-status action requires exact deployed 40-char lowercase SHA.
 #   * Artifacts: booleans / counts / reason enums / SHA only — no raw IDs/PII.
 #   * stream_connected is always unknown in this lane (no connect claim from logs).
 #   * U12/U13 remain human-gated (real callback / flag-off UAT); not automated.
@@ -44,8 +46,9 @@ set -euo pipefail
 log() { echo "[stream-uat] $*"; }
 fail() { echo "[stream-uat][error] $*" >&2; exit 1; }
 
-ACTION="${ACTION:?ACTION is required (status|prepare|on|off|https-on|https-off)}"
+ACTION="${ACTION:?ACTION is required (status|observe|prepare|on|off|https-on|https-off)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
+EXPECTED_DELIVERY_ID="${EXPECTED_DELIVERY_ID:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
@@ -811,6 +814,7 @@ classify_log_level() {
 }
 
 require_log_level_info_or_debug() {
+  local context="${1:-on}"
   classify_log_level
   if [[ "$LOG_LEVEL_READY" == "true" ]]; then
     case "$LOG_LEVEL_REASON" in
@@ -820,7 +824,7 @@ require_log_level_info_or_debug() {
         ;;
     esac
   fi
-  fail "action=on requires LOG_LEVEL info/debug (got ready=${LOG_LEVEL_READY} reason=${LOG_LEVEL_REASON})"
+  fail "action=${context} requires LOG_LEVEL info/debug (got ready=${LOG_LEVEL_READY} reason=${LOG_LEVEL_REASON})"
 }
 
 # --- lifecycle flags (read only; never written) --------------------------------------
@@ -1725,6 +1729,82 @@ action_status() {
   log "action=status complete (read-only)"
 }
 
+action_observe() {
+  assert_staging_only
+  require_exact_deployed_sha "observe"
+  require_lifecycle_flags_off "observe"
+  require_log_level_info_or_debug "observe"
+  [[ "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+    || fail "action=observe requires expected_delivery_id as a lowercase UUID"
+
+  local live_flag
+  live_flag="$(read_flag_from_container "$FLAG_STREAM" || echo unknown)"
+  [[ "$live_flag" == "true" ]] \
+    || fail "action=observe requires live Stream ON (got stream_enabled=${live_flag})"
+
+  local tmp anchor_count handled_count window_handler_error_count update_failed_count
+  local header_present="unknown" body_present="unknown" handled_outcome="unknown"
+  tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
+  register_ephemeral "$tmp"
+  chmod 600 "$tmp"
+  docker logs "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
+    || fail "action=observe could not read current backend container logs"
+
+  anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  # The worker's catch log intentionally carries no delivery id. Keep it as a
+  # window-level diagnostic; it must never be presented as scoped evidence for
+  # EXPECTED_DELIVERY_ID.
+  window_handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
+  update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+
+  if [[ "$anchor_count" -gt 0 ]]; then
+    local anchor_line
+    anchor_line="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
+    [[ "$anchor_line" == *'headerEventCorpIdPresent=true'* || "$anchor_line" == *'"headerEventCorpIdPresent":true'* ]] \
+      && header_present="true"
+    [[ "$anchor_line" == *'headerEventCorpIdPresent=false'* || "$anchor_line" == *'"headerEventCorpIdPresent":false'* ]] \
+      && header_present="false"
+    [[ "$anchor_line" == *'bodyCorpIdPresent=true'* || "$anchor_line" == *'"bodyCorpIdPresent":true'* ]] \
+      && body_present="true"
+    [[ "$anchor_line" == *'bodyCorpIdPresent=false'* || "$anchor_line" == *'"bodyCorpIdPresent":false'* ]] \
+      && body_present="false"
+  fi
+
+  if [[ "$handled_count" -gt 0 ]]; then
+    local handled_line
+    handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
+    case "$handled_line" in
+      *'(ignored_unsupported_action out_track_id='*) handled_outcome="ignored_unsupported_action" ;;
+      *'(delivery_not_found out_track_id='*) handled_outcome="delivery_not_found" ;;
+      *'(executed delivery='*) handled_outcome="executed" ;;
+      *'(stale delivery='*) handled_outcome="stale" ;;
+      *'(operator_unresolved:'*) handled_outcome="operator_unresolved" ;;
+      *'(link_secret_unavailable delivery='*) handled_outcome="link_secret_unavailable" ;;
+      *'(engine_rejected:'*) handled_outcome="engine_rejected" ;;
+      *'(wrapper_not_found delivery='*) handled_outcome="wrapper_not_found" ;;
+      *) handled_outcome="other" ;;
+    esac
+  fi
+
+  rm -f "$tmp"
+  {
+    echo "schema=dingtalk-interactive-card-stream-callback-observer-v1"
+    echo "action=observe"
+    echo "reason=ok"
+    echo "stream_enabled=true"
+    echo "callback_anchor_log_count=${anchor_count}"
+    echo "header_event_corp_id_present=${header_present}"
+    echo "body_corp_id_present=${body_present}"
+    echo "callback_handled_count=${handled_count}"
+    echo "latest_callback_outcome=${handled_outcome}"
+    echo "window_callback_handler_error_count=${window_handler_error_count}"
+    echo "card_update_failed_count=${update_failed_count}"
+  } > "${OUTPUT_DIR}/callback-observer.txt"
+  cp "${OUTPUT_DIR}/callback-observer.txt" "${OUTPUT_DIR}/summary.txt"
+  log "action=observe complete (values-free callback classes only)"
+}
+
 action_prepare() {
   assert_staging_only
   require_compose_v2
@@ -1805,7 +1885,7 @@ action_on() {
   require_exact_deployed_sha "on"
   pin_live_backend_image_for_transition
   require_lifecycle_flags_off "on"
-  require_log_level_info_or_debug
+  require_log_level_info_or_debug "on"
   require_stream_prerequisites_for_on
   require_staging_env_file
 
@@ -2002,12 +2082,13 @@ chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
 
 case "$ACTION" in
   status) action_status ;;
+  observe) action_observe ;;
   prepare) action_prepare ;;
   on) action_on ;;
   off) action_off ;;
   https-on) action_https_on ;;
   https-off) action_https_off ;;
-  *) fail "invalid ACTION='${ACTION}' (expected status|prepare|on|off|https-on|https-off)" ;;
+  *) fail "invalid ACTION='${ACTION}' (expected status|observe|prepare|on|off|https-on|https-off)" ;;
 esac
 
 log "done action=${ACTION}"
