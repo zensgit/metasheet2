@@ -34,11 +34,11 @@
  * options object, three statements away from the actual `new Intl.DateTimeFormat(`. A
  * same-statement or same-function textual derivation would either miss all three real sites
  * or require a bespoke special case for this one file. The table below instead enumerates
- * every real site by hand (verified against this commit, not trusted from the issue text —
- * the issue's own "display sites" sentence mis-groups `automation-timezone.ts` and is
- * corrected here) and the guard asserts MECHANICALLY that the table's site set exactly
- * matches what a live scan finds (see "COVERAGE" below), so a genuinely new site — whether
- * a brand new `new Intl.DateTimeFormat(` anywhere in domain, or a new caller of the shared
+ * every real site by hand, verified against this commit — including `automation-timezone.ts`,
+ * which traces to a genuine PARSING site (`getFormatter` -> `getZonedParts`, `formatToParts`
+ * + `Number(part.value)` per part) — and the guard asserts MECHANICALLY that the table's
+ * site set exactly matches what a live scan finds (see "COVERAGE" below), so a genuinely new
+ * site — whether a brand new construction anywhere in domain, or a new caller of the shared
  * factory — reds the guard until a human classifies it.
  *
  * SITE IDENTITY IS THE SOURCE LINE'S TEXT, NEVER ITS LINE NUMBER.
@@ -50,19 +50,39 @@
  * table's key. Line numbers appear only inside comments, computed for a reader, never
  * compared.
  *
- * SCOPE. Domain = every tracked `.ts` / `.cjs` / `.mjs` file under
- * `packages/core-backend/src/`, `plugins/`, or `scripts/` — 1664 files at the time of
- * writing (measure yourself: `git ls-files | grep -E '\.(ts|cjs|mjs)$' | grep -E
+ * SCOPE. Domain = every tracked `.ts` / `.cjs` / `.mjs` / `.vue` file under
+ * `packages/core-backend/src/`, `plugins/`, or `scripts/` — 1675 files at the time of writing
+ * (measure yourself: `git ls-files | grep -E '\.(ts|cjs|mjs|vue)$' | grep -E
  * '^(packages/core-backend/src/|plugins/|scripts/)' | wc -l`). `.js` was swept across the
  * same three directories too (18 tracked files) and contains zero `Intl.DateTimeFormat`
- * constructions — the 3-extension domain is not hiding a `.js` site today, but that is a
+ * constructions — the 4-extension domain is not hiding a `.js` site today, but that is a
  * measured fact about this commit, not a standing guarantee; whoever adds a `.js` producer
  * under these directories should re-check.
  *
+ * SPELLINGS COVERED. `(new )?Intl.DateTimeFormat(` (the `new` keyword is optional at the call
+ * site and a bare-call site is live in-domain: `AuditService.ts`'s zero-arg
+ * `Intl.DateTimeFormat().resolvedOptions().timeZone`), plus `.toLocale(Time|Date)?String(`
+ * (same `(locales, options)` shape, same hazard under a different name — live in-domain at
+ * `formula/engine.ts:632`, `Number.prototype.toLocaleString`, numeric-only, and
+ * `IntelligentRestoreView.vue:218`, `Date.prototype.toLocaleString`, no options at all).
+ * `.vue` was widened INTO the domain (not just swept) because it is one of the three
+ * directory prefixes above: `packages/core-backend/src/components/workflow-designer/*.vue`
+ * (10 files) and `plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue` — the
+ * latter is where the `toLocaleString` site above lives. This closes a coverage regression:
+ * the sibling guard this file's structure is modelled on
+ * (`source-files-no-raw-control-bytes.test.ts`) was itself widened to `.vue` in this branch's
+ * own parent commit (`eadd2dd88b`, #4908/#4915) with a dedicated `.vue` positive control; an
+ * earlier revision of this file forked from that guard's shape without carrying the same
+ * extension, an independent adversarial gate review (2026-08-15) caught it, and both the
+ * extension and a `.vue`-domain positive control are in this file now (see "control: a .vue
+ * file inside the domain is scanned").
+ *
  * DELIBERATELY OUT OF SCOPE: `apps/web/**` (frontend, not the production backend surface
- * #4922 is about). It was swept anyway while building this table and holds 7 more
- * `Intl.DateTimeFormat` sites, NONE reclassified here — a deliberate deferral, not a claim
- * they are clean:
+ * #4922 is about). It holds 17 `Intl.DateTimeFormat` sites across 9 files, NONE reclassified
+ * here — a deliberate deferral, not a claim they are clean. The count and the 5 `.vue`-file
+ * rows below are the same independent gate review's finding (it hand-read all of them as
+ * display-only; re-verified here for the two rows this docstring quotes directly, not
+ * re-derived independently for the other three):
  *   - `apps/web/src/composables/useCalendarDays.ts` — 4 sites (`formatCalendarMonthLabel`
  *     ×2 fallback pair, `formatLunarDayLabel` ×2 fallback pair) — all date/month-only, no
  *     `hour` component, on manual read.
@@ -74,18 +94,45 @@
  *   - `apps/web/src/views/attendance/attendanceTimezones.ts:121` — requests `hour` but only
  *     ever reads the `timeZoneName` part (`shortOffset`), not the `hour` part; the `hour`
  *     option is present only to force a correct offset computation, not parsed itself.
+ *   - `apps/web/src/views/AfterSalesView.vue:2889` — `dateStyle`/`timeStyle` + `hour12: false`,
+ *     `.format(parsed)` returned directly from `formatRecordDate()` — display (RE-VERIFIED
+ *     here: the return value is never split/Number-parsed in this file).
+ *   - `apps/web/src/views/AttendanceView.vue` (4 sites) — month/day labels, lunar label, a
+ *     timezone probe — display, per the gate's hand-read.
+ *   - `apps/web/src/views/CalendarView.vue` (3 sites) — date/weekday labels — display, per
+ *     the gate's hand-read.
+ *   - `apps/web/src/views/FormView.vue:840` — `hour`/`minute` present, NEITHER `hour12` NOR
+ *     `hourCycle` (the worst-case default this guard's own docstring warns about) —
+ *     `.format(new Date(date))` returned directly from `formatDate()` — display (RE-VERIFIED
+ *     here: the return value is never split/Number-parsed in this file).
+ *   - `apps/web/src/views/GalleryView.vue:470` — date-only — display, per the gate's
+ *     hand-read.
+ *
+ * KNOWN UNMODELED PATTERNS (disclosed follow-ups, not covered by this guard): untracked files
+ * (`git ls-files --cached` cannot see them locally; CI always checks out a full index, so the
+ * gate itself is intact — only local pre-`git add` feedback lags); a caller of the shared
+ * `getCachedIntlDateTimeFormat` factory living OUTSIDE `plugin-attendance/index.cjs` (none
+ * exists today — verified: zero references elsewhere); and `packages/core-backend/tests/**`,
+ * which is out of domain and holds a live `hour12: false` parsing site at
+ * `tests/integration/attendance-plugin.test.ts:6886` — safe today (it folds with `% 24`) but
+ * a test ORACLE computed with the defective idiom is exactly the kind of thing that could mask
+ * a real regression.
  *
  * WHY EVERY NON-EXCEPTION DISPLAY SITE MUST CARRY NO `hour:` OPTION AT ALL, NOT JUST
  * "NO hour12". A display site with an `hour` option and NO parsing today could gain
  * `.formatToParts()` / split-and-`Number()` consumption tomorrow without adding a single new
- * `new Intl.DateTimeFormat(` anywhere — same site, same line, just a new caller reading its
- * output — which the coverage leg below (keyed on construction sites) would never see. Every
- * display entry is therefore additionally required to have NO `hour:` key, with exactly one
- * named, audited exception: `interactive-card-update.ts`'s `CARD_TIME_FORMATTER`, whose
- * `hour12: false` result is traced (by hand, below) into a `已同意${suffix}` / `已驳回${suffix}`
+ * construction anywhere — same site, same line, just a new caller reading its output — which
+ * the coverage leg below (keyed on construction/call sites) would never see. Every display
+ * entry is therefore additionally required to have NO `hour:` key, with exactly one named,
+ * audited exception: `interactive-card-update.ts`'s `CARD_TIME_FORMATTER`, whose `hour12:
+ * false` result is traced (by hand, below) into a `已同意${suffix}` / `已驳回${suffix}`
  * template-string interpolation and never parsed — issue #4922 calls this one "cosmetic at
  * worst, optional tidy-up", so this guard leaves it alone but keeps a live check on the one
- * consumption pathway (`.formatToParts(`) that would turn it into a real hazard.
+ * consumption pathway (`.formatToParts(`) that would turn it into a real hazard. The exception
+ * accepts EITHER `hour12: false` (the audited-today shape) OR `hourCycle: 'h23'` (the fix this
+ * docstring itself prescribes) — it does not require the hazardous spelling to stay in place;
+ * a guard that reds when its own recommended remediation is applied is testing the wrong
+ * thing.
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -96,7 +143,7 @@ import { describe, expect, it } from 'vitest'
 const REPO_ROOT = path.resolve(__dirname, '../../../../')
 const ISSUE = '#4922'
 
-const SOURCE_EXTENSIONS = new Set(['.ts', '.cjs', '.mjs'])
+const SOURCE_EXTENSIONS = new Set(['.ts', '.cjs', '.mjs', '.vue'])
 const DOMAIN_PREFIXES = ['packages/core-backend/src/', 'plugins/', 'scripts/']
 
 /** Domain DERIVED from git, never a hand-maintained list — same idiom as
@@ -263,11 +310,64 @@ const KNOWN_SITES: KnownSite[] = [
     lineText: "const parts = new Intl.DateTimeFormat('en-US', {",
     kind: 'display',
   },
+
+  // ---------------------------------------------------------------------------------
+  // Sites found only once the domain/pattern widened to close the coverage gaps an
+  // independent gate review identified: `.vue` files inside the existing domain
+  // prefixes, bare `Intl.DateTimeFormat(` (no `new`), and `.toLocale*String(`.
+  // ---------------------------------------------------------------------------------
+  {
+    // AuditService.ts — `Intl.DateTimeFormat().resolvedOptions().timeZone`: a bare, zero-arg
+    // construction used only to read the RUNTIME's default timezone name. No options object
+    // at all, so structurally no hour component is possible.
+    file: 'packages/core-backend/src/audit/AuditService.ts',
+    lineText: 'timezone: Intl.DateTimeFormat().resolvedOptions().timeZone',
+    kind: 'display',
+  },
+  {
+    // formula/engine.ts `textFormat()` — `Number.prototype.toLocaleString('en-US', {
+    // minimumFractionDigits, maximumFractionDigits })`: numeric grouping only, no date/time
+    // component exists for this overload, so no `hour` is possible.
+    file: 'packages/core-backend/src/formula/engine.ts',
+    lineText:
+      "if (grouped) { const dp = grouped[1] ? grouped[1].length : 0; return n.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp }) }",
+    kind: 'display',
+  },
+  {
+    // IntelligentRestoreView.vue `formatTime()` — `Date.prototype.toLocaleString('zh-CN')`
+    // with no options object at all (implicit locale default, which DOES include time —
+    // worse than h24, same as the docstring's "no option" hazard in the abstract) but its
+    // return value is only ever read at the two `{{ formatTime(...) }}` template
+    // interpolations in this same file (verified: `formatTime` has no other reference) —
+    // display-only, never parsed.
+    file: 'plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue',
+    lineText: "return new Date(timestamp).toLocaleString('zh-CN')",
+    kind: 'display',
+  },
 ]
 
 function siteKey(s: { file: string; lineText: string }): string {
   return `${s.file}\0${s.lineText}`
 }
+
+/** THE coverage-comparison logic, called by both the real leg and its positive control (see
+ *  "COVERAGE LEG SHARES ITS LOGIC WITH ITS CONTROL" below) — a diff, not a boolean, so a
+ *  failure names exactly which sites are unaccounted for on either side. */
+function coverageDiff(
+  known: readonly KnownSite[],
+  candidates: readonly CandidateSite[],
+): { onlyInCandidates: string[]; onlyInKnown: string[] } {
+  const knownKeys = known.map(siteKey).sort()
+  const candidateKeys = candidates.map(siteKey).sort()
+  const knownSet = new Set(knownKeys)
+  const candidateSet = new Set(candidateKeys)
+  return {
+    onlyInCandidates: candidateKeys.filter((k) => !knownSet.has(k)),
+    onlyInKnown: knownKeys.filter((k) => !candidateSet.has(k)),
+  }
+}
+
+const EMPTY_DIFF = { onlyInCandidates: [] as string[], onlyInKnown: [] as string[] }
 
 interface CandidateSite {
   file: string
@@ -275,12 +375,26 @@ interface CandidateSite {
   callText: string
 }
 
-const RAW_CONSTRUCTION_RE = /new Intl\.DateTimeFormat\(/g
+/** `new Intl.DateTimeFormat(` OR bare `Intl.DateTimeFormat(` — the `new` keyword is optional
+ *  at the call site (both are valid ways to invoke a constructor with `[Symbol.hasInstance]`
+ *  semantics here) and a bare-call site is live in-domain today (`AuditService.ts`'s
+ *  zero-arg `Intl.DateTimeFormat().resolvedOptions().timeZone` probe). The two spellings
+ *  cannot both match at the same position (the optional group is greedy), so widening this
+ *  cannot double-count an existing `new` site. */
+const RAW_CONSTRUCTION_RE = /(?:new\s+)?Intl\.DateTimeFormat\(/g
 /** The shared per-timezone formatter factory unique to `plugin-attendance/index.cjs` (see
  *  docstring). Its definition line is itself a raw construction site (tracked above as
  *  'display' — its own literal options never carry hour12/hourCycle); its CALLERS carry the
  *  real options and are found by this second pattern, definition line excluded. */
 const FACTORY_CALL_RE = /getCachedIntlDateTimeFormat\(/g
+/** `Date.prototype.toLocaleString` / `toLocaleTimeString` / `toLocaleDateString` take the
+ *  identical `(locales, options)` shape as `Intl.DateTimeFormat` and are the same h24-midnight
+ *  hazard under a different spelling — `hour12`/`hourCycle` in the options bag resolve
+ *  identically. `Number.prototype.toLocaleString` (no date/time options exist for it) also
+ *  matches this pattern textually; that is harmless since it can never carry an `hour:` key,
+ *  so it always lands in the DISPLAY, no-hour-option bucket rather than needing a separate
+ *  receiver-type check. */
+const TO_LOCALE_RE = /\.toLocale(?:Time|Date)?String\(/g
 
 function lineTextAt(content: string, matchIndex: number): string {
   const lineStart = content.lastIndexOf('\n', matchIndex) + 1
@@ -314,15 +428,32 @@ function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
 }
 
-/** Mechanical candidate-site finder: every raw `new Intl.DateTimeFormat(` construction, plus
- *  (in a file that defines it) every CALLER of the shared `getCachedIntlDateTimeFormat`
- *  factory. Parameterised by root + file list so the positive controls exercise this exact
- *  function against a decoy tree, never a re-typed copy of it. */
+/** `hourCycle: 'h23'` — quote-style tolerant (backreference matches either `'h23'` or
+ *  `"h23"`). Quote style is not part of the h24-midnight hazard's semantics (both spellings
+ *  are the identical runtime value); a strict single-quote-only match would red on a harmless
+ *  double-quoted spelling with a misleading "neither hour12 nor hourCycle" message. */
+function hasHourCycleH23(callText: string): boolean {
+  return /\bhourCycle\s*:\s*(['"])h23\1/.test(callText)
+}
+
+/** Mechanical candidate-site finder: every raw `(new )?Intl.DateTimeFormat(` construction,
+ *  every `.toLocale(Time|Date)?String(` call, plus (in a file that defines it) every CALLER
+ *  of the shared `getCachedIntlDateTimeFormat` factory. Parameterised by root + file list so
+ *  the positive controls exercise this exact function against a decoy tree, never a
+ *  re-typed copy of it. */
 function findCandidateSites(files: readonly string[], root: string = REPO_ROOT): CandidateSite[] {
   const out: CandidateSite[] = []
   for (const rel of files) {
     const content = fs.readFileSync(path.join(root, rel), 'utf8')
     for (const match of content.matchAll(RAW_CONSTRUCTION_RE)) {
+      const openParenIndex = match.index! + match[0].length - 1
+      out.push({
+        file: rel,
+        lineText: lineTextAt(content, match.index!),
+        callText: extractCallText(content, openParenIndex),
+      })
+    }
+    for (const match of content.matchAll(TO_LOCALE_RE)) {
       const openParenIndex = match.index! + match[0].length - 1
       out.push({
         file: rel,
@@ -363,18 +494,20 @@ function computeViolations(sites: readonly KnownSite[], candidates: readonly Can
     }
     const callText = stripComments(matches[0].callText)
     const overlapCount =
-      (callText.match(/new Intl\.DateTimeFormat\(/g)?.length ?? 0) +
-      (callText.match(/getCachedIntlDateTimeFormat\(/g)?.length ?? 0)
+      (callText.match(RAW_CONSTRUCTION_RE)?.length ?? 0) +
+      (callText.match(TO_LOCALE_RE)?.length ?? 0) +
+      (callText.match(FACTORY_CALL_RE)?.length ?? 0)
     if (overlapCount > 1) {
       violations.push(
         `${site.file}: "${site.lineText}" — call-text extraction overran into a neighboring ` +
-          `Intl.DateTimeFormat/getCachedIntlDateTimeFormat call (a paren-balance bug in the guard ` +
-          `itself, not necessarily a source defect) — fix extractCallText before trusting this site.`,
+          `Intl.DateTimeFormat/toLocale*String/getCachedIntlDateTimeFormat call (a paren-balance bug ` +
+          `in the guard itself, not necessarily a source defect) — fix extractCallText before trusting ` +
+          `this site.`,
       )
       continue
     }
     if (site.kind === 'parsing') {
-      const hasCorrectHourCycle = /\bhourCycle\s*:\s*'h23'/.test(callText)
+      const hasCorrectHourCycle = hasHourCycleH23(callText)
       const hasHour12 = /\bhour12\s*:/.test(callText)
       if (hasHour12) {
         violations.push(
@@ -386,21 +519,39 @@ function computeViolations(sites: readonly KnownSite[], candidates: readonly Can
             `\`hour === 24 ? 0 : hour\` fold after parsing. See ${ISSUE}.`,
         )
       } else if (!hasCorrectHourCycle) {
+        // Message text tracks which of the two distinct hazards actually applies — "no
+        // hourCycle at all" (inherits en-US h12) is a different defect from "hourCycle
+        // present but not h23" (e.g. 'h24' reproduces THIS guard's own defect class), and
+        // conflating them here previously produced a false "neither hour12 nor hourCycle"
+        // claim on a site that plainly had an hourCycle key, just the wrong value.
+        const hasAnyHourCycle = /\bhourCycle\s*:/.test(callText)
+        const reason = hasAnyHourCycle
+          ? `has an hourCycle option that is not 'h23' — a non-h23 hourCycle value (e.g. 'h24') ` +
+            `can reproduce the exact midnight-renders-as-'24' defect this guard exists for`
+          : `has neither hour12 nor hourCycle, which inherits the en-US h12 default — WORSE than h24 ` +
+            `for a parser expecting 24-hour digits`
         violations.push(
-          `${site.file}: "${site.lineText}" is a PARSING site without hourCycle: 'h23' — a formatter ` +
-            `with neither hour12 nor hourCycle inherits the en-US h12 default, which is WORSE than h24 ` +
-            `for a parser expecting 24-hour digits (and a non-h23 hourCycle value reproduces the same ` +
-            `midnight defect this guard exists for). Fix: add hourCycle: 'h23' explicitly and a ` +
-            `defensive \`hour === 24 ? 0 : hour\` fold after parsing. See ${ISSUE}.`,
+          `${site.file}: "${site.lineText}" is a PARSING site that ${reason}. ` +
+            `Fix: set hourCycle: 'h23' explicitly and add a defensive ` +
+            `\`hour === 24 ? 0 : hour\` fold after parsing. See ${ISSUE}.`,
         )
       }
     } else {
       if (site.allowsHourOption) {
-        if (!/\bhour12\s*:\s*false/.test(callText)) {
+        // The invariant at this one named exception is "not parsed", never "still spells the
+        // hazardous hour12". Accept EITHER the audited hour12:false shape OR the docstring's
+        // own prescribed fix (hourCycle:'h23') — requiring hour12 specifically would red the
+        // guard for applying its own remediation, which is the "tests freeze the change,
+        // not approve it" failure mode. A quote-style variant of h23 is fine too — see the
+        // parsing-branch regex helper below for why the value match tolerates either quote.
+        const stillAuditedHour12 = /\bhour12\s*:\s*false\b/.test(callText)
+        const remediatedToH23 = hasHourCycleH23(callText)
+        if (!stillAuditedHour12 && !remediatedToH23) {
           violations.push(
-            `${site.file}: "${site.lineText}" is the one documented display-only hour12 exception and ` +
-              `its options no longer match the audited shape (hour12: false) — re-audit whether its ` +
-              `output is still unparsed before updating this table. See ${ISSUE}.`,
+            `${site.file}: "${site.lineText}" is the one documented display-only hour exception and its ` +
+              `options no longer match either audited shape (hour12: false, or the prescribed fix ` +
+              `hourCycle: 'h23') — re-audit whether its output is still unparsed before updating this ` +
+              `table. See ${ISSUE}.`,
           )
         }
       } else if (/\bhour\s*:/.test(callText)) {
@@ -457,16 +608,21 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // the "empty read is not an absence" failure this repo's other source-scan guards exist
     // to avoid, one level up.
     const files = trackedDomainFiles()
-    expect(files.length).toBeGreaterThan(1500)
+    expect(files.length).toBeGreaterThan(1600)
     expect(files).toContain('plugins/plugin-attendance/index.cjs')
     expect(files).toContain('packages/core-backend/src/multitable/automation-timezone.ts')
+    // Proves the .vue widening (P2-5a) is actually reached, not just declared in
+    // SOURCE_EXTENSIONS — same idiom as the sibling NUL guard's own .vue proof line.
+    expect(files).toContain('packages/core-backend/src/components/workflow-designer/WorkflowDesigner.vue')
+    expect(files).toContain('plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue')
     const candidates = findCandidateSites(files)
     expect(candidates.length).toBe(KNOWN_SITES.length)
+    expect(KNOWN_SITES.length).toBe(20)
   })
 
-  it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality — a new site reds this until classified)', () => {
+  it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {
     const candidates = findCandidateSites(trackedDomainFiles())
-    expect(candidates.map(siteKey).sort()).toEqual(KNOWN_SITES.map(siteKey).sort())
+    expect(coverageDiff(KNOWN_SITES, candidates)).toEqual(EMPTY_DIFF)
   })
 
   it('every PARSING site carries explicit hourCycle:\'h23\' (never hour12), and every non-exception DISPLAY site carries no hour: option', () => {
@@ -476,6 +632,42 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
 
   it('the one audited DISPLAY exception (CARD_TIME_FORMATTER) shows no sign of being parsed via formatToParts', () => {
     expect(cardFormatterConsumptionViolations()).toEqual([])
+  })
+
+  it('POSITIVE CONTROL: CARD_TIME_FORMATTER consumed via formatToParts reds the exception-consumption check', () => {
+    // Exercises cardFormatterConsumptionViolations's own `root` parameter — previously
+    // untested (the check could be neutered to `return []` with nothing catching it).
+    const file = 'packages/core-backend/src/integrations/dingtalk/interactive-card-update.ts'
+    withDecoyTree(
+      {
+        [file]:
+          "const CARD_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', { hour12: false })\n" +
+          'const parts = CARD_TIME_FORMATTER.formatToParts(new Date())\n',
+      },
+      (decoyRoot) => {
+        const violations = cardFormatterConsumptionViolations(decoyRoot)
+        expect(violations.length).toBe(1)
+        expect(violations[0]).toContain(file)
+        expect(violations[0]).toContain(ISSUE)
+      },
+    )
+  })
+
+  it('control: a decoy CARD_TIME_FORMATTER matching the real display-only shape does NOT red the exception-consumption check', () => {
+    // Proves the check discriminates rather than always redding: same file path, same
+    // formatter, but consumed only via `.format(` (as the real file does), never
+    // `.formatToParts(`.
+    const file = 'packages/core-backend/src/integrations/dingtalk/interactive-card-update.ts'
+    withDecoyTree(
+      {
+        [file]:
+          "const CARD_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', { hour12: false })\n" +
+          'function formatCardTime(d) { return CARD_TIME_FORMATTER.format(d) }\n',
+      },
+      (decoyRoot) => {
+        expect(cardFormatterConsumptionViolations(decoyRoot)).toEqual([])
+      },
+    )
   })
 
   it('POSITIVE CONTROL: a planted hour12:false PARSING site reds the leg, naming the file, the fix, and the issue', () => {
@@ -544,6 +736,78 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     )
   })
 
+  it('POSITIVE CONTROL: a hazardous site spelled WITHOUT `new` (bare Intl.DateTimeFormat(...)) is still found and reds', () => {
+    // Closes the "construction without new" gap: findCandidateSites previously matched only
+    // `new Intl.DateTimeFormat(`, so this exact shape (hour12:false, formatToParts-parsed)
+    // was invisible to the coverage leg entirely.
+    const probe = 'packages/core-backend/src/attendance/probe-no-new-parsing.ts'
+    withDecoyTree(
+      {
+        [probe]:
+          "const fmt = Intl.DateTimeFormat('en-US', { hour12: false, hour: '2-digit' })\n" +
+          'const parts = fmt.formatToParts(new Date())\n' +
+          "const hour = Number(parts.find((p) => p.type === 'hour')?.value)\n",
+      },
+      (decoyRoot) => {
+        const site: KnownSite = {
+          file: probe,
+          lineText: "const fmt = Intl.DateTimeFormat('en-US', { hour12: false, hour: '2-digit' })",
+          kind: 'parsing',
+        }
+        const candidates = findCandidateSites([probe], decoyRoot)
+        expect(candidates.length).toBe(1)
+        const violations = computeViolations([site], candidates)
+        expect(violations.length).toBe(1)
+        expect(violations[0]).toContain(probe)
+        expect(violations[0]).toContain(ISSUE)
+      },
+    )
+  })
+
+  it('POSITIVE CONTROL: a hazardous toLocaleTimeString(...) site is found and reds — same hazard, different spelling', () => {
+    // Closes the "toLocale*String" gap: Date.prototype.toLocaleTimeString takes the identical
+    // (locales, options) shape as Intl.DateTimeFormat and was previously invisible entirely.
+    const probe = 'packages/core-backend/src/attendance/probe-tolocale-parsing.ts'
+    withDecoyTree(
+      {
+        [probe]:
+          "const text = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })\n" +
+          "const hour = Number(text.split(':')[0])\n",
+      },
+      (decoyRoot) => {
+        const site: KnownSite = {
+          file: probe,
+          lineText:
+            "const text = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })",
+          kind: 'parsing',
+        }
+        const candidates = findCandidateSites([probe], decoyRoot)
+        expect(candidates.length).toBe(1)
+        const violations = computeViolations([site], candidates)
+        expect(violations.length).toBe(1)
+        expect(violations[0]).toContain(probe)
+        expect(violations[0]).toContain(ISSUE)
+      },
+    )
+  })
+
+  it('control: a .vue file inside the domain is scanned (proves the widened SOURCE_EXTENSIONS is actually reached, not just declared)', () => {
+    const probe = 'packages/core-backend/src/components/workflow-designer/probe.vue'
+    withDecoyTree(
+      {
+        [probe]:
+          '<script setup lang="ts">\n' +
+          "const fmt = new Intl.DateTimeFormat('en-US', { hour12: false, hour: '2-digit' })\n" +
+          '</script>\n<template><div /></template>\n',
+      },
+      (decoyRoot) => {
+        const candidates = findCandidateSites([probe], decoyRoot)
+        expect(candidates.length).toBe(1)
+        expect(candidates[0].callText).toContain('hour12')
+      },
+    )
+  })
+
   it('POSITIVE CONTROL: a DISPLAY site that gains an hour: option reds (must be re-classified before it can be parsed)', () => {
     const probe = 'packages/core-backend/src/attendance/probe-display-gains-hour.ts'
     withDecoyTree(
@@ -565,14 +829,25 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     )
   })
 
-  it('POSITIVE CONTROL: a brand-new Intl.DateTimeFormat site not in KNOWN_SITES reds the coverage leg', () => {
+  it('POSITIVE CONTROL: a brand-new Intl.DateTimeFormat site not in KNOWN_SITES reds the coverage leg (calls coverageDiff — the REAL leg\'s own function, not a re-implementation)', () => {
+    // This control calls `coverageDiff` — the exact function the leg above asserts on — so
+    // neutering that shared function (rather than just the outer `expect(...)` in the real
+    // leg) reds THIS test too. Re-verified by mutation: short-circuiting `coverageDiff` to
+    // always return `EMPTY_DIFF` fails this control (expected a non-empty onlyInCandidates,
+    // got the empty diff) — see the retraction/P2 commit message for the mutation ledger.
     const probe = 'packages/core-backend/src/attendance/probe-unclassified.ts'
     const lineText = "const fmt = new Intl.DateTimeFormat('en-US', { hourCycle: 'h23' })"
     withDecoyTree({ [probe]: `${lineText}\n` }, (decoyRoot) => {
-      const candidateKeys = new Set(findCandidateSites([probe], decoyRoot).map(siteKey))
-      const knownKeys = new Set(KNOWN_SITES.map(siteKey))
-      const unclassified = [...candidateKeys].filter((k) => !knownKeys.has(k))
-      expect(unclassified).toEqual([siteKey({ file: probe, lineText })])
+      const candidates = findCandidateSites([probe], decoyRoot)
+      // Compared against an EMPTY known-set, not the real KNOWN_SITES: this control isolates
+      // "does coverageDiff correctly flag a candidate with no matching known entry" from "does
+      // the real 20-site inventory match today's tree" (that is the leg above's job). Using
+      // the real KNOWN_SITES here would trivially also report all 20 real sites as
+      // `onlyInKnown` (since only the single probe file was scanned) and drown the signal.
+      expect(coverageDiff([], candidates)).toEqual({
+        onlyInCandidates: [siteKey({ file: probe, lineText })],
+        onlyInKnown: [],
+      })
     })
   })
 })
