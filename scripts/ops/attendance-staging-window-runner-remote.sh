@@ -1956,6 +1956,10 @@ action_soak_run() {
   total_users="$(python3 -c 'import json,sys; print(sum(len(e["userIds"]) for e in json.load(open(sys.argv[1]))["entries"]))' "$config_path")"
   [[ "$total_users" =~ ^[1-9][0-9]*$ ]] || fail "could not derive the synthetic user count from ${config_path}"
   day_capacity=$(( total_users * 8 ))
+  # Past ~60 users the GLOBAL <=1 req/sec ceiling binds instead of the per-user spacing, so a
+  # large-config capacity (e.g. 99x3x8=2376) would overrun the 40-minute job. 1800 = 30 min of
+  # active load at 1/s, leaving margin for logins/docker cp/artifact scp inside the timeout.
+  (( day_capacity > 1800 )) && day_capacity=1800
   [[ "$punch_target" -le "$day_capacity" ]] \
     || fail "punch_target=${punch_target} exceeds this config's one-day clean-punch capacity (${total_users} users x 8/user/day = ${day_capacity}); a larger target can never reach targets_met in one invocation and would only idle to the stall timeout. Lower punch_target, raise users_per_org at seed time, or run multiple soak-run invocations across days"
   local IFS_SAVE="$IFS"

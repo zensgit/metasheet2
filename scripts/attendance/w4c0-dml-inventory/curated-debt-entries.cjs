@@ -74,6 +74,15 @@ function byW4C3aImportRollback(site) {
 // Exact P16 allowlist: relPath::enclosingSymbol::table::verb (W4C-3c hard zero-bypass).
 // Enumerated from the live HEAD census of intended staging tooling writers only.
 const P16_EXACT_ALLOWLIST = new Set([
+  // W4+W7 combined-soak seeder (#4556 soak, PR #4929): the ONE tracked DML site in the
+  // window-runner's soak-seed heredoc SQL — an idempotent (NOT EXISTS-guarded) INSERT of a
+  // published group-produced assignment, mirroring the trigger-legal shape of the W7-1b e2e
+  // fixture. Staging-only synthetic seeding: runs only behind assert_staging_only against
+  // metasheet-staging-postgres, only for orgs the seeder has just verified hold exclusively
+  // synth-w4w7-* content (customerData preflight), and never touches a posture table (those
+  // go through the Gate C / W7-3 CLIs). Same class as the a2-smoke assignments insert below.
+  // enclosingSymbol is (module-scope): shell heredocs have no enclosing function.
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::insert",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_events::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_batches::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_items::delete",
