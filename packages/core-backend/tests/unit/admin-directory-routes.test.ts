@@ -720,6 +720,51 @@ describe('adminDirectoryRouter', () => {
     },
   )
 
+  it('rejects a malformed deprovision preview integration id before querying', async () => {
+    const response = await invokeRoute(
+      'get',
+      '/deprovision/preview/:userId',
+      {
+        params: { userId: 'user-1' },
+        query: { integrationId: 'not-a-uuid' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DEPROVISION_INTEGRATION_ID_INVALID' },
+    })
+    expect(deprovisionMocks.previewDeprovisionForUser).not.toHaveBeenCalled()
+  })
+
+  it('does not expose database details from an unexpected preview failure', async () => {
+    deprovisionMocks.previewDeprovisionForUser.mockRejectedValueOnce(
+      Object.assign(
+        new Error('invalid input syntax at localhost:5432 for private_table'),
+        { code: '22P02' },
+      ),
+    )
+    const response = await invokeRoute(
+      'get',
+      '/deprovision/preview/:userId',
+      {
+        params: { userId: 'user-1' },
+        query: { integrationId: DEPROVISION_INTEGRATION_ID },
+        user: { id: 'admin-1', role: 'admin' },
+      },
+    )
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      error: { code: 'DEPROVISION_PREVIEW_FAILED', message: 'Preview failed' },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /22P02|invalid input syntax|localhost|5432|private_table/i,
+    )
+  })
+
   it('does not expose database details from unexpected event, effect, or restore failures', async () => {
     const databaseError = Object.assign(
       new Error('duplicate key at localhost:5432 for private_table'),

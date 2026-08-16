@@ -1612,6 +1612,15 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 400, 'INTEGRATION_ID_REQUIRED', 'integrationId is required')
         return
       }
+      if (!UUID_SHAPE_RE.test(integrationId)) {
+        jsonError(
+          res,
+          400,
+          'DEPROVISION_INTEGRATION_ID_INVALID',
+          'integrationId must be a UUID',
+        )
+        return
+      }
       const data = await previewDeprovisionForUser(req.params.userId, integrationId)
       jsonOk(res, data)
     } catch (error) {
@@ -1620,7 +1629,7 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 404, code, (error as Error).message)
         return
       }
-      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', readErrorMessage(error, 'Preview failed'))
+      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', 'Preview failed')
     }
   })
 
