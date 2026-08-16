@@ -76,6 +76,11 @@ import {
   ATTENDANCE_W7_TRACE_SOURCE_KIND_GROUP_VALUE_V1,
   ATTENDANCE_W7_PROJECTION_OWNER_GROUP_VALUE_V1,
 } from '../../src/attendance/w7-read-side-provenance-amendment'
+// W7-3 (#4918) landed a BEFORE-ROW transition guard + NOT NULL writer columns
+// on the posture table; a bare (org_id, state, scope) seed is now rejected.
+// This shared helper is THE one legal fixture path: bootstrap at 'off', then
+// walk the ratified legal ladder to the target state, asserting it landed.
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -386,10 +391,9 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
        VALUES ($1, $2, $3, '2026-01-01', NULL, 'w7-4-labeling', 'seed', $4)`,
       [orgId, userId, groupId, `w7-4-labeling-${groupId}`],
     )
-    await pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, $2, 'synthetic_staging')`,
-      [orgId.toLowerCase(), postureState],
-    )
+    // W7-3 transition-writer schema: seeded via the shared legal-ladder helper
+    // (bootstrap at 'off', walk to the target), never a bare INSERT.
+    await seedAttendanceW7ContextSourcePostureV1(pool, orgId, postureState)
   }
 
   async function seedPlainAssignment(
@@ -650,10 +654,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
 
     // PRE-GROUP org becomes group-postured only AFTER its record was frozen
     // under the legacy producer (T-K4 half A's premise).
-    await pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_authoritative', 'synthetic_staging')`,
-      [preGroupOrg.toLowerCase()],
-    )
+    await seedAttendanceW7ContextSourcePostureV1(pool, preGroupOrg, 'group_authoritative')
 
     // CORRUPT org: seed the corrupt shadow row ABOVE the real one. The context
     // is the REAL seam-issued group context minus `selector`; the row satisfies
@@ -829,13 +830,28 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
   // can never be satisfied by "nothing ran").
   // -------------------------------------------------------------------------
 
+  // DIGEST HISTORY (the honest record, because the digest below has ONCE been
+  // re-pinned without a re-capture): the `entries` were captured at
+  // `capturedAtBaseSha` (the frozen pre-W7-4 1b head, which PREDATES the W7-3
+  // posture-fixture helper — a literal re-capture there cannot even import it).
+  // When the W7-3 rebase forced this file's posture seeds onto the shared
+  // helper (landing-gate P1-1), the fixture-only edit provably did not move
+  // the trace bytes (the T-K1 leg below passed against the UNCHANGED entries
+  // before the digest was touched), so the sanctioned fix was a DIGEST-ONLY
+  // re-pin under a programmatic assertion that `entries` and
+  // `capturedAtBaseSha` stayed byte-identical. That is the ONLY legal repin
+  // shape: if any `entries` value moves, the edit was behavioural and the
+  // whole capture-vs-verify argument must be rebuilt at a helper-bearing base.
   it('harness digest: the committed T-K1 vectors were produced by THIS EXACT FILE', () => {
     if (EMIT) return
     const vectors = JSON.parse(fs.readFileSync(VECTOR_PATH, 'utf8'))
     expect(
       vectors.harnessSha256,
-      'Vectors were captured by a DIFFERENT version of this harness. Re-capture ' +
-        'at the recorded base SHA with W7_4_EMIT_GOLDEN=1 — do NOT edit the digest.',
+      'Vectors were pinned against a DIFFERENT version of this harness. Either ' +
+        're-capture at a helper-bearing base with W7_4_EMIT_GOLDEN=1, or — ONLY ' +
+        'if the harness edit provably does not move the entries (T-K1 must pass ' +
+        'against the unchanged entries first) — re-pin the digest alone, ' +
+        'asserting entries and capturedAtBaseSha are byte-identical.',
     ).toBe(harnessDigest)
     expect(vectors.capturedAtBaseSha).toMatch(/^[0-9a-f]{40}$/)
   })
@@ -966,15 +982,13 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
       [W4_ENV]: w4Allowlist(),
       [W7_ENV]: `${w7Allowlist()},${legacyOrg.toLowerCase()}`,
     }
-    await pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope) VALUES ($1, 'group_shadow', 'synthetic_staging')`,
-      [legacyOrg.toLowerCase()],
-    )
+    await seedAttendanceW7ContextSourcePostureV1(pool, legacyOrg, 'group_shadow')
     try {
       const shadowPosture = await withEnv(withLegacyAllowlisted, () => under('group_shadow'))
-      await pool.query(`UPDATE ${POSTURE_TABLE} SET state = 'group_eligible' WHERE org_id = $1`, [
-        legacyOrg.toLowerCase(),
-      ])
+      // Rebuild at 'group_eligible' via the helper (the sanctioned idiom for a
+      // state flip: the ladder is deliberately not strongly connected, and the
+      // state table carries no append-only trigger).
+      await seedAttendanceW7ContextSourcePostureV1(pool, legacyOrg, 'group_eligible')
       const eligiblePosture = await withEnv(withLegacyAllowlisted, () => under('group_eligible'))
       for (const category of TRACE_CATEGORIES) {
         expect(shadowPosture[category], `group_shadow/${category} bytes moved`).toBe(noPosture[category])
@@ -1014,10 +1028,9 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
 
   it('T-K4b: a NON-group-postured org whose record was frozen under the GROUP producer still labels group_policy_snapshot', async () => {
     // Flip the org's read-time posture OFF two ways at once: posture row state
-    // 'off' AND the org removed from the W7 allowlist.
-    await pool.query(`UPDATE ${POSTURE_TABLE} SET state = 'off' WHERE org_id = $1`, [
-      groupOrg.toLowerCase(),
-    ])
+    // 'off' (rebuilt via the shared legal-ladder helper) AND the org removed
+    // from the W7 allowlist.
+    await seedAttendanceW7ContextSourcePostureV1(pool, groupOrg, 'off')
     try {
       await withEnv(
         {
@@ -1042,9 +1055,7 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
         },
       )
     } finally {
-      await pool.query(`UPDATE ${POSTURE_TABLE} SET state = 'group_authoritative' WHERE org_id = $1`, [
-        groupOrg.toLowerCase(),
-      ])
+      await seedAttendanceW7ContextSourcePostureV1(pool, groupOrg, 'group_authoritative')
     }
   })
 
