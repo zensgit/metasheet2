@@ -348,22 +348,12 @@ describeIfDatabase('W7-1a resolvers (real PG)', () => {
    * walk unreachable and throws here instead of silently taking a stale route.
    */
   async function insertPosture(state: string): Promise<void> {
-    await pool.query(
-      postureFixtureInsert("'off'", "'synthetic_staging'"),
-      [orgId],
-    )
-    for (const step of legalLadderPathTo(state)) {
-      await pool.query(
-        `UPDATE ${POSTURE_TABLE}
-            SET state = $2, prior_state = state, version = version + 1
-          WHERE org_id = $1`,
-        [orgId, step],
-      )
-    }
-    // The walk must have LANDED. An unasserted walk would let every leg below
-    // run against whatever state the row happened to stop at.
-    const landed = await pool.query(`SELECT state FROM ${POSTURE_TABLE} WHERE org_id = $1`, [orgId])
-    expect(landed.rows[0]?.state, `ladder walk to ${state} did not land`).toBe(state)
+    // Converged onto the ONE shared legal fixture (W7-3 landing-gate P1-1).
+    // This used to carry its own bootstrap + ladder walk; a second copy of that
+    // walk is the two-hand-maintained-copies trap the shared helper exists to
+    // remove. The helper derives the path from the same ratified constant and
+    // asserts the walk landed.
+    await seedAttendanceW7ContextSourcePostureV1(pool, orgId, state)
   }
 
   async function resolvePosture(org: string = orgId) {

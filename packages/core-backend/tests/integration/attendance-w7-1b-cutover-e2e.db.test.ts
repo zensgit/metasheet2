@@ -324,10 +324,15 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     await insertActiveUser(suspendedUser, suspendedOrg)
     await seedAuthoritativeRollout(suspendedOrg)
     await seedShiftAndEffectiveGroup(suspendedOrg, suspendedUser, suspendedShift, suspendedGroup)
-    await pool.query(
-      `UPDATE ${POSTURE_TABLE} SET state = 'suspended' WHERE org_id = $1`,
-      [suspendedOrg.toLowerCase()],
-    )
+    // W7-3 (#4556) landing-gate P1-1, UPDATE half: this bare `SET state =
+    // 'suspended'` is illegal under `trg_accss_state_guard`'s UPDATE branch too
+    // — it carries no `prior_state` and no `version` increment, so the trigger
+    // raises `prior_state must record the previous state`. (The gate's list
+    // enumerated INSERT fixtures; a repo-wide sweep for UPDATEs found this
+    // seventh site.) Routed through the shared legal fixture, which rebuilds
+    // the row by walking the ratified ladder — the final row is exactly what
+    // the production writer would have produced for a suspended org.
+    await seedAttendanceW7ContextSourcePostureV1(pool, suspendedOrg, 'suspended')
 
     await insertActiveUser(incoherentUser, incoherentOrg)
     await seedLegacyRollout(incoherentOrg)
