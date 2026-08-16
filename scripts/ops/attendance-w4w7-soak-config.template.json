@@ -13,7 +13,8 @@
         "synth-w4w7-<org1first8>-u01",
         "synth-w4w7-<org1first8>-u02"
       ],
-      "tokenOrCreds": {}
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
     },
     {
       "orgId": "<org2-lowercase-uuid w4-only>",
@@ -23,7 +24,8 @@
         "synth-w4w7-<org2first8>-u01",
         "synth-w4w7-<org2first8>-u02"
       ],
-      "tokenOrCreds": {}
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
     },
     {
       "orgId": "<org3-lowercase-uuid both-machines>",
@@ -33,7 +35,8 @@
         "synth-w4w7-<org3first8>-u01",
         "synth-w4w7-<org3first8>-u02"
       ],
-      "tokenOrCreds": {}
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
     }
   ],
   "$cadence_note": "CADENCE: the generator default is 2 punches/user/wall-day = exactly ONE check_in/check_out pair per user per day (server clock; occurredAt never sent). Same-day session packing (the old 8/day row) floods §4.2-critical review_required diffs (soak-status 31962440160), and backdated acceleration is rejected by the route's global-latest punch ordering (#4932 gate P1-1) — the honest accelerator is users_per_org at seed time; the runbook's cumulative count criteria accrue across daily soak-run batches (DB-side soak-status judgments)."

@@ -2068,7 +2068,8 @@ action_soak_run() {
   # entry's dailyCapTimezone (all soak orgs share one); override only for a deliberate
   # halt-retry with soak_opts allow_same_day_rerun=true (documented critical-shape risk).
   local batch_tz batch_day last_batch_day
-  batch_tz="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entries"][0].get("dailyCapTimezone", "UTC"))' "$config_path")"
+  batch_tz="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entries"][0]["dailyCapTimezone"])' "$config_path" 2>/dev/null)" \
+    || fail "config at ${config_path} carries no dailyCapTimezone — it predates the org-day cap contract and would silently revert the 2/day cap and the same-day guard to UTC days; re-run action=soak-seed first"
   batch_day="$(TZ="$batch_tz" date +%Y-%m-%d)"
   local batch_marker="${SOAK_PERSIST_DIR}/soak-run-last-batch-day"
   if [[ -f "$batch_marker" ]]; then

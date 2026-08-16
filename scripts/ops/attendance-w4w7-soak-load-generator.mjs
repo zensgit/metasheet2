@@ -533,22 +533,25 @@ async function loadConfig(opts) {
       }
     }
 
-    // #4932 gate round-2 P2-1: the one-pair-per-WORK-DATE invariant is only as good as the
-    // day boundary the cap counts against. config.timezone defaults to UTC while the soak
-    // orgs' work dates are org-timezone days, so the cap must key on the ORG'S day: soak-seed
-    // writes dailyCapTimezone per entry (the org group's IANA timezone). Bookkeeping-only —
-    // NEVER sent in a punch body (that would override the org rule timezone server-side).
-    let dailyCapTimezone = null
-    if (rawEntry.dailyCapTimezone !== undefined) {
-      if (typeof rawEntry.dailyCapTimezone !== 'string' || !rawEntry.dailyCapTimezone.trim()) {
-        throw new ConfigError(`${where}.dailyCapTimezone must be a non-empty IANA timezone string when present.`)
-      }
-      dailyCapTimezone = rawEntry.dailyCapTimezone.trim()
-      try {
-        new Intl.DateTimeFormat('en-US', { timeZone: dailyCapTimezone })
-      } catch {
-        throw new ConfigError(`${where}.dailyCapTimezone ${JSON.stringify(dailyCapTimezone)} is not a recognized IANA timezone.`)
-      }
+    // #4932 gate round-2 P2-1 / round-3 P2-R3-1: the one-pair-per-WORK-DATE invariant is
+    // only as good as the day boundary the cap counts against, and an OPTIONAL field would
+    // let any stale config silently revert to the UTC default (the exact silent-revert
+    // class the retired ladder fields were made required against). REQUIRED, fail-closed:
+    // soak-seed writes dailyCapTimezone per entry (the org group's IANA timezone);
+    // bookkeeping-only — NEVER sent in a punch body (that would override the org rule
+    // timezone server-side).
+    if (typeof rawEntry.dailyCapTimezone !== 'string' || !rawEntry.dailyCapTimezone.trim()) {
+      throw new ConfigError(
+        `${where}.dailyCapTimezone is required — the 2/day pair cap must count against the org's `
+        + 'calendar day, and a config without it (any seeding older than this contract) would '
+        + 'silently revert the cap to UTC days. Re-run action=soak-seed to rewrite the config.'
+      )
+    }
+    const dailyCapTimezone = rawEntry.dailyCapTimezone.trim()
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: dailyCapTimezone })
+    } catch {
+      throw new ConfigError(`${where}.dailyCapTimezone ${JSON.stringify(dailyCapTimezone)} is not a recognized IANA timezone.`)
     }
 
     const minCleanPunches = Number.isFinite(rawEntry.minCleanPunches) && rawEntry.minCleanPunches > 0
@@ -796,8 +799,11 @@ function nextEventType(userState) {
 }
 
 function capTimezoneFor(entry, config) {
-  // Per-entry org-day boundary; config.timezone (default UTC) only as a fallback.
-  return entry.dailyCapTimezone || config.timezone
+  // Per-entry org-day boundary — REQUIRED at config load, so no fallback exists here (a
+  // fallback would be the silent-revert channel the round-3 gate flagged). `config` stays
+  // in the signature so every call site routes through one auditable resolver.
+  void config
+  return entry.dailyCapTimezone
 }
 
 function userEligible(userState, opts, nowMs, timezone) {

@@ -963,6 +963,15 @@ function assertSoakContract({ remote, workflow }) {
     'soak-run must track the last batch day host-side',
   )
   assert.ok(
+    slices.run.includes('carries no dailyCapTimezone'),
+    'soak-run must refuse a config without dailyCapTimezone (stale-config silent revert)',
+  )
+  assert.doesNotMatch(
+    slices.run,
+    /\.get\("dailyCapTimezone"/,
+    'the runner batch-day derivation must have no UTC default',
+  )
+  assert.ok(
     slices.run.includes('allow_same_day_rerun'),
     'the same-day guard must have exactly the explicit override, never a silent bypass',
   )
@@ -1442,6 +1451,17 @@ function assertGeneratorCadenceContract(generator) {
   assert.ok(
     generator.includes('function capTimezoneFor(entry, config)'),
     'the per-entry cap-timezone resolver must exist',
+  )
+  // Round-3 P2-R3-1: REQUIRED, fail-closed — an optional field lets any stale config
+  // silently revert the cap (and the runner guard) to UTC days.
+  assert.ok(
+    generator.includes('.dailyCapTimezone is required'),
+    'dailyCapTimezone must be REQUIRED — a stale config must refuse, never silently revert to UTC days',
+  )
+  assert.doesNotMatch(
+    generator,
+    /entry\.dailyCapTimezone \|\|/,
+    'the cap-timezone resolver must have no fallback (a fallback is the silent-revert channel)',
   )
   assert.equal(
     (generator.match(/capTimezoneFor\((?:candidate|picked|u)\.entry, config\)/g) || []).length,
