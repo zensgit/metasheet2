@@ -472,6 +472,39 @@ describeIfDatabase('#4791 scratch-database teardown drain', () => {
         expect(src, file).toMatch(/if \(poolCaptureError\) throw poolCaptureError/)
       }
     })
+
+    it('source contract: W4C-3a canonical import drains both owned pools before dropping scratch DB', () => {
+      const dir = dirname(fileURLToPath(import.meta.url))
+      const src = readFileSync(join(dir, 'attendance-w4c3a-canonical-import-kernel.db.test.ts'), 'utf8')
+      const teardownAt = src.indexOf('// #4820 recurrence:')
+      const teardownEnd = src.indexOf('\n  }, 60000)', teardownAt)
+
+      expect(teardownAt).toBeGreaterThan(-1)
+      expect(teardownEnd).toBeGreaterThan(teardownAt)
+
+      const teardown = src.slice(teardownAt, teardownEnd)
+      const migrationCloseAt = teardown.indexOf('await db?.destroy()')
+      const poolCloseAt = teardown.indexOf('await pool?.end()')
+      const helperAt = teardown.indexOf('dropScratchDatabase(adminPool, scratchName)')
+      const adminCloseAt = teardown.indexOf('await adminPool?.end()')
+      const detachAt = teardown.indexOf('for (const handler of teardownHandlers) handler.detach()')
+      const closeRethrowAt = teardown.indexOf('if (closeError) throw closeError')
+      const dropRethrowAt = teardown.indexOf('if (dropError) throw dropError')
+
+      expect(teardown).toMatch(
+        /const teardownHandlers = \[migrationPool, pool\]\s*\.filter\([\s\S]*?\.map\(\(p\) => attachOwnedPoolTerminationHandler\(p\)\)/,
+      )
+      expect(migrationCloseAt).toBeGreaterThan(-1)
+      expect(poolCloseAt).toBeGreaterThan(migrationCloseAt)
+      expect(helperAt).toBeGreaterThan(poolCloseAt)
+      expect(teardown).toMatch(/formatScratchDropOutcome\('w4c3a-canonical-import'/)
+      expect(teardown).toMatch(/formatScratchDropFailure\('w4c3a-canonical-import'/)
+      expect(adminCloseAt).toBeGreaterThan(helperAt)
+      expect(detachAt).toBeGreaterThan(adminCloseAt)
+      expect(closeRethrowAt).toBeGreaterThan(detachAt)
+      expect(dropRethrowAt).toBeGreaterThan(closeRethrowAt)
+      expect(teardown).not.toMatch(/WITH\s*\(FORCE\)/i)
+    })
   })
 
   // ==============================================================================================
