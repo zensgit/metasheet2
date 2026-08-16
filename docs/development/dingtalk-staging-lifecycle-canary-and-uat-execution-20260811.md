@@ -1,9 +1,11 @@
-# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/15)
+# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/16)
 
 - Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / STREAM ON-OFF WINDOW EXECUTED AND RETURNED OFF / DEPROVISION-DENIAL BROWSER CHECKPOINT NOT EXECUTED / U1-U13 HUMAN CLICK MATRIX NOT EXECUTED**
-- Repository evidence head: `cc69791604f338a90e07dc07da8118a2d7a68188`
-- Lifecycle staging deploy SHA: `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`
-- Production-readiness inventory deploy SHA: `cc69791604f338a90e07dc07da8118a2d7a68188`
+- Repository evidence head: `2468b37b9456ddbe2a0ec39219929864e1aa45f0`
+- Historical lifecycle canary deploy SHA: `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`
+- Current staging deploy SHA from read-only run `31937073799`: `d201aff394867d1e776d4e393a7ae71d3df45e44`
+- Historical production-readiness inventory SHA: `cc69791604f338a90e07dc07da8118a2d7a68188`
+- Latest production-readiness inventory SHA from run `31931759414`: `eadd2dd88bf084bf20318fd4b4513c721654f4b9`
 - Owner instruction: keep all lifecycle flags OFF after every canary; do not convert missing real-enterprise evidence into PASS.
 
 This is a values-free execution record. It contains counts, booleans, reason enums, SHAs,
@@ -199,8 +201,10 @@ Two independently configured deployment roots were observed and must not be conf
 
 | Evidence lane | Deployed SHA | Purpose |
 |---|---|---|
-| Lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1` | Exact lifecycle status, deprovision apply/restore, OAuth correlation, and terminal OFF proof |
-| Production-readiness inventory (`DEPLOY_PATH`) | `cc69791604f338a90e07dc07da8118a2d7a68188` | Read-only DingTalk integration, account, Stream, and flag inventory |
+| Historical lifecycle staging canary (`STAGING_DEPLOY_PATH`) | `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1` | Exact lifecycle status, deprovision apply/restore, OAuth correlation, and terminal OFF proof |
+| Current staging read-only inventory (`STAGING_DEPLOY_PATH`) | `d201aff394867d1e776d4e393a7ae71d3df45e44` | UAT3 prepare/status, exact-SHA health, Stream OFF, disabled worker, and lifecycle flags OFF |
+| Historical production-readiness inventory (`DEPLOY_PATH`) | `cc69791604f338a90e07dc07da8118a2d7a68188` | Earlier read-only DingTalk integration, account, Stream, and flag inventory |
+| Latest production-readiness inventory (`DEPLOY_PATH`) | `eadd2dd88bf084bf20318fd4b4513c721654f4b9` | Latest read-only integration/account inventory; production Stream inputs remain absent and all flags OFF |
 
 The differing code SHAs are not used to infer shared runtime state between the two roots; each
 runtime fact below is tied to its own workflow run and artifact. Production enablement remains a
@@ -502,7 +506,7 @@ simulated.
 | Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31865647626`/`31865699179` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
 | P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
-| P3 real corp + two linked users | **READY for controlled staging `on` window** | Historical runs `31854315133`/`31854359627` proved the anchor; UAT3 prepare/status runs `31931539040`/`31931575188` and latest read-only status `31937073799` reconfirm one eligible anchor, two linked local users, exact deployed SHA, healthy backend, Stream OFF, disabled worker, and lifecycle flags OFF |
+| P3 real corp + two linked users | **READY for controlled staging `on` window** | Historical runs `31854315133`/`31854359627` proved the anchor; UAT3 prepare/status runs `31931539040`/`31931575188` and latest read-only status `31937073799` reconfirm one eligible anchor, two linked local users, exact deployed SHA `d201aff394867d1e776d4e393a7ae71d3df45e44`, healthy backend, Stream OFF, disabled worker, and lifecycle flags OFF |
 | P4 `LOG_LEVEL=info|debug` | **READY** | Inventory reported `log_level_ready=true`, reason `missing`; `core/logger.ts` defaults an unset/empty value to `info` |
 
 Historical Stream inventory from run `31579935836` (superseded for staging readiness by
@@ -529,7 +533,7 @@ Required external action: use the published replacement template `MetaSheetCanar
 fresh card in a short owner-approved callback window while the linked assignee and a non-assignee
 are both available. Execute the canonical U1-U13 procedure, capture only values-free
 booleans/status enums, and execute `off` before the window ends. Publication and prepare evidence
-(`31931478708 -> 31931539040 -> 31931575188`, reconfirmed by read-only status `31937073799`) live in draft #4920; they prove the safe OFF-state
+(`31931478708 -> 31931539040 -> 31931575188`, reconfirmed at exact deployed SHA `d201aff394867d1e776d4e393a7ae71d3df45e44` by read-only status `31937073799`) live in draft #4920; they prove the safe OFF-state
 configuration, not a fresh card or callback. Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates

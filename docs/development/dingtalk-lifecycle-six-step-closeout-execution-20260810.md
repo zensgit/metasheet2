@@ -1,10 +1,10 @@
 # DingTalk lifecycle six-step closeout execution
 
 - Date: 2026-08-10
-- Updated: 2026-08-15
+- Updated: 2026-08-16
 - Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-ACTIVATION/POST-RESTORE OAUTH + STREAM START/STOP PROVEN / APPLY-TIME BROWSER DENIAL + U1-U13 HUMAN CLICK MATRIX + PRODUCTION GATES NOT EXECUTED**
 - Implementation baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
-- Repository evidence head: `origin/main @ cc69791604f338a90e07dc07da8118a2d7a68188`
+- Repository evidence head: `origin/main @ 2468b37b9456ddbe2a0ec39219929864e1aa45f0`
 - Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
 - Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status`, transient `alias -> off`, pending admit, SSO-activate intent, pre-ledger recoveries, destructive deprovision apply/restore, and the owned subject's post-restore OAuth positive executed; terminal OFF re-proved
 
