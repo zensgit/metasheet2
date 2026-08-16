@@ -618,6 +618,44 @@ jobs:
           fi
           echo "W4C-5 tooling unit tests: exactly $lib_tests subtests ran."
 
+      # #4556 W7-3: the context-source operator tooling's pure lib (manifest shape + the five
+      # literal-pinned environment attestations, injected-clock freshness, the pair-dependent
+      # manifest key sets, the exact confirmation token, the ten-field apply args and the
+      # ABSENCE of any force/ready/skip/override flag, the plan digest's per-field sensitivity
+      # sweep, and the idempotency-before-digest ordering with its priorState conjunct).
+      #
+      # Same shape and same reasons as the W4C-5 step immediately above: `tsx --test` because
+      # the module is TypeScript; `if: matrix.node-version == '20.x'` because 20.x is the
+      # required leg and this is unproven on 18.x; and an EXACT subtest count because
+      # `node --test` treats a child that exits 0 as a PASSING FILE, so a collection-time abort
+      # before any subtest body runs would silently report a green zero-test file.
+      #
+      # The real-PostgreSQL half of W7-3 is
+      # tests/integration/attendance-w7-3-context-source-transition.db.test.ts, wired into the
+      # "Run attendance integration tests" step below.
+      - name: Run W7-3 context-source operator tooling unit tests
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_W7_LIB_TESTS=25
+          if ! w7_out="$(pnpm exec tsx --test scripts/ops/attendance-w7-context-source-transition-lib.test.ts 2>&1)"; then
+            printf '%s\n' "$w7_out"
+            echo "W7-3 tooling unit tests: tsx --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$w7_out"
+          w7_tests="$(printf '%s\n' "$w7_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$w7_tests" ]; then
+            echo "W7-3 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$w7_tests" -ne "$EXPECTED_W7_LIB_TESTS" ]; then
+            echo "W7-3 tooling unit tests: $w7_tests subtests ran, expected exactly $EXPECTED_W7_LIB_TESTS" >&2
+            exit 1
+          fi
+          echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
+
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
       # EXCLUDE constraint on purpose and proves the runtime integrity guard is
       # independently load-bearing. Keep whole-file execution explicit.
@@ -1386,6 +1424,7 @@ jobs:
             tests/integration/attendance-w6-group-effective-policy.db.test.ts \
             tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts \
             tests/integration/attendance-w7-1a-resolver.db.test.ts \
+            tests/integration/attendance-w7-3-context-source-transition.db.test.ts \
             tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
             tests/integration/attendance-settlement-table-v1-5a.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
@@ -1423,6 +1462,8 @@ jobs:
             tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts \
             tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts \
             tests/integration/attendance-w7-1b-lock-census.db.test.ts \
+            tests/integration/attendance-w7-2-compare-window-status.db.test.ts \
+            tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts \
             tests/integration/attendance-w7-4-read-side-labeling.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot

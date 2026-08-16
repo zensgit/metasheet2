@@ -132,6 +132,18 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_import_rollback_restore_witnesses: 'w4_canonical',
   attendance_record_target_revisions: 'w4_canonical',
   attendance_group_effect_revisions: 'w4_canonical',
+
+  // --- w4_canonical: W7-3 context-source posture machine (#4556, design-lock §7 OD-W7-3(a),
+  // red line W7-R4). A SECOND, independent org-keyed posture machine, structurally the same
+  // kind of object as the W4 rollout state/event pair above — org-keyed control-plane state
+  // plus its append-only event log, never calculation source/effect/result truth. Written
+  // ONLY by the single transition boundary named in W4_CANONICAL_PATH_PREFIXES below (three
+  // sites: the bootstrap INSERT, the event INSERT, the state UPDATE), and additionally
+  // backstopped in the database by `attendance_w7_context_source_state_guard` /
+  // `attendance_w4_deny_mutation`. Classified here rather than left out because an
+  // unclassified table is a HARD FAIL by design, not a silent pass. -------------------------
+  attendance_calculation_context_source_state: 'w4_canonical',
+  attendance_calculation_context_source_events: 'w4_canonical',
 })
 
 // P25 is a classification contract in addition to a table bucket.  In particular, the
@@ -303,6 +315,15 @@ const W4_CANONICAL_PATH_PREFIXES = Object.freeze([
   'packages/core-backend/src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union',
   'packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts',
   'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts',
+  // W7-3 (#4556): the context-source transition boundary — the ONE writer of the two
+  // `attendance_calculation_context_source_*` tables (design-lock red line W7-R4).
+  //
+  // An EXACT FILE PATH, deliberately, not a `.../w7-` prefix. A prefix entry would
+  // pre-authorize every future `w7-*` module in that directory to write w4_canonical tables
+  // without review, which is precisely the prefix-claim the P16 exact-allowlist discipline in
+  // curated-debt-entries.cjs forbids. A second W7 writer must add its own line here and
+  // justify it.
+  'packages/core-backend/src/attendance/w7-context-source-transition.ts',
 ])
 
 function classifyTable(tableName) {

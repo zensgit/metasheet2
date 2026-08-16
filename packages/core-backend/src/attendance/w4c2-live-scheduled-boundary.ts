@@ -174,6 +174,7 @@ import {
   type AttendanceW4ComparableDailyProjection,
 } from '../services/AttendanceW4CalculationDetail'
 import { isExpectedAttendanceShadowDifferenceV1 } from './w4c2-shadow-expected-differences'
+import { ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1 } from './w7-compare-window-status'
 // Gate D2 (#4556 / #4844) — the authoritative live-punch writer's collaborators.
 import {
   AttendanceW4AuthoritativeCalculationError,
@@ -485,14 +486,28 @@ export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
       holidayKind: string | null
       purpose: 'persist' | 'mirror'
     },
-  ): Promise<{
-    // `blocked` is OD-W7-4(a)'s suspended posture: NO calculation is produced.
-    // It is a distinct arm rather than a null context precisely so the caller
-    // cannot unwrap it into a review row.
-    arm: 'legacy' | 'group' | 'blocked'
-    context: FrozenAttendanceContextV1 | null
-    reason: string | null
-  }>
+  ): Promise<
+    | {
+        // `blocked` is OD-W7-4(a)'s suspended posture: NO calculation is produced.
+        // It is a distinct arm rather than a null context precisely so the caller
+        // cannot unwrap it into a review row.
+        arm: 'legacy' | 'group' | 'blocked'
+        context: FrozenAttendanceContextV1 | null
+        reason: string | null
+      }
+    | {
+        // W7-2 dual-run (shadow-compare posture states): `context` is the
+        // LEGACY arm's served context, byte-identical to the legacy variant
+        // (W7-R3); the group half rides alongside as the UNSERVED comparison
+        // context (a V2 shape, typed opaquely here — the boundary validates
+        // it through the calculator's own discriminant routing, never by
+        // trusting this declaration) or a closed fail-close reason.
+        arm: 'legacy_with_group_shadow'
+        context: FrozenAttendanceContextV1 | null
+        shadowContext: Record<string, unknown> | null
+        shadowReason: string | null
+      }
+  >
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,7 +1167,11 @@ interface ShadowCalculationRowInput {
   recordId: string
   version: number
   entrypoint: 'live' | 'scheduled'
-  operationId: string
+  /** NULL exactly for the W7 group-shadow comparison record (whose producing
+   *  operation travels in the provenance marker — `chk_arc_operation_id`'s
+   *  marker disjunct enforces the pairing); every served-path shadow row
+   *  carries its operation id as before. */
+  operationId: string | null
   attribution: AttendanceAttributionSnapshotV1
   context: FrozenAttendanceContextV1 | null
   segmentSnapshot: unknown[]
@@ -1341,6 +1360,245 @@ async function insertShadowCalculation(
     }
   }
   return { calculationId, semanticFingerprint, provenanceFingerprint }
+}
+
+// ---------------------------------------------------------------------------
+// W7-2 (#4556) — the `group_shadow` / `group_eligible` comparison recorder
+// (design lock §4.2: "Alongside it, the W7 resolver produces a group-derived
+// frozen context and a shadow calculation, recorded through the existing
+// shadow machinery with the existing closed diff codes").
+// ---------------------------------------------------------------------------
+
+/** The seam's dual-run group half, as surfaced by `issueThroughW7Seam`. */
+type W7GroupShadowHalfV1 = {
+  shadowContext: Record<string, unknown> | null
+  shadowReason: string | null
+}
+
+/**
+ * The served daily projection at recording time, read from the parent record
+ * row with the exact projection/cast shape `lockShadowParentRecord` uses.
+ * Used by the AUTHORITATIVE producer sites (P1/P3a), where the served result
+ * is the W4 calculation the core just wrote through the parent row — the
+ * comparison's "legacy side" is defined as THE SERVED PROJECTION, which on
+ * the W4-shadow sites (P2/P3b) is the already-locked `parent` row.
+ */
+async function readServedComparableProjection(
+  trx: AttendanceW4TransactionClientV1,
+  orgId: string,
+  recordId: string,
+): Promise<AttendanceW4ComparableDailyProjection> {
+  const result = await trx.query(
+    `SELECT work_date::text AS "workDate", status,
+            first_in_at AS "firstInAt", last_out_at AS "lastOutAt",
+            work_minutes AS "workMinutes", late_minutes AS "lateMinutes",
+            early_leave_minutes AS "earlyLeaveMinutes"
+       FROM attendance_records
+      WHERE id = $1::uuid AND org_id = $2`,
+    [recordId, orgId],
+  )
+  if (result.rows.length !== 1) {
+    boundaryFail('W4C2_W7_COMPARE_PARENT_UNRESOLVED', 500)
+  }
+  return result.rows[0] as unknown as AttendanceW4ComparableDailyProjection
+}
+
+/**
+ * Record ONE W7 group-comparison row for a producing operation, through the
+ * EXISTING shadow writer (`insertShadowCalculation` — `mode='shadow'`,
+ * `projection_effect='none'`, `chk_arc_shadow_effect` as the DB-level W7-R8
+ * guarantee; the served projection and the parent pointer are untouched by
+ * construction).
+ *
+ *  - GROUP CONTEXT PRESENT: the pure calculator runs with the group-derived
+ *    V2 context over the SAME attribution/evidence the served path used, and
+ *    the row's shadow diff compares that result against the SERVED projection.
+ *  - GROUP RESOLUTION FAILED CLOSED (`shadowReason` non-null, context null):
+ *    the calculator's own null-context review path
+ *    (`review('missing_frozen_context')`) produces the recorded per-target
+ *    comparison record — the design-lock §5 item 1 posture: a recorded
+ *    outcome carrying the reason (in the marker), never an org-wide wedge and
+ *    never a silently substituted legacy result. It deliberately does NOT
+ *    claim a `attendance_scheduled_run_target_outcomes` slot: that table is
+ *    UNIQUE per target and its run-completion guard requires the SERVED leg's
+ *    own terminal outcome there — the shadow half of a dual-run must not
+ *    contend for it ([OWNER-CONFIRM B-2, OPEN] — see the W7-2 PR body: both
+ *    of the brief's B-2 options break `uq_asrto_target` + the completion
+ *    guard for a target whose served leg completes, so the recommended-(b)
+ *    RECORDING INTENT — causes stay distinguishable, closed reason set — is
+ *    delivered through the shadow ledger instead; the owner may still rule a
+ *    dedicated surface).
+ *
+ * Every record carries the writer-controlled `input_provenance` marker
+ * (`ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1`): its `operationId`
+ * member is the identity key of `uq_arc_w7_comparison_identity` (one
+ * comparison record per producing operation) and its `shadowReason` member
+ * drives the fail-close counter. The compare-row domain is pinned by the
+ * marker PLUS the context's own `selector='group_effective'` (total on
+ * persisted contexts) — see `w7-compare-window-status.ts`.
+ *
+ * `identityDrift` mirrors the served path's own drift override (D2): when the
+ * served row was forced to review `context_mismatch`, the comparison is
+ * unsound for the same reason and records the same review shape.
+ */
+interface W7GroupShadowComparisonInputV1 {
+  orgId: string
+  recordId: string
+  entrypoint: 'live' | 'scheduled'
+  /** The PRODUCING operation. Carried in the provenance MARKER, never in the
+   *  row's `operation_id` column: the comparison record is not the operation's
+   *  RESULT (the seal points at the served calculation), so it leaves the
+   *  `uq_arc_operation` domain entirely — the gate-refuted index split is
+   *  thereby unnecessary and the global one-served-row-per-operation
+   *  invariant stands untouched. */
+  producingOperationId: string
+  attribution: AttendanceAttributionSnapshotV1
+  evidence: AttendanceEvidenceV1[]
+  provenanceRef: AttendanceInputProvenanceRefV1
+  w7GroupShadow: W7GroupShadowHalfV1
+  identityDrift: boolean
+  actorId: string
+  correlationId: string
+  /** `'read_served_row'` makes the recorder read the served projection from
+   *  the parent row INSIDE the containment savepoint (P1/P3a) — evaluating it
+   *  in the caller's argument list would let its failure escape containment. */
+  legacyProjection: AttendanceW4ComparableDailyProjection | 'read_served_row'
+}
+
+async function recordW7GroupShadowComparisonV1(
+  trx: AttendanceW4TransactionClientV1,
+  input: W7GroupShadowComparisonInputV1,
+): Promise<{ calculationId: string }> {
+  const { shadowContext, shadowReason } = input.w7GroupShadow
+  if (shadowContext === null && shadowReason === null) {
+    // Unrepresentable by seam construction; asserted rather than assumed.
+    boundaryFail('W4C2_W7_GROUP_SHADOW_HALF_INVALID', 500)
+  }
+  const legacyProjection =
+    input.legacyProjection === 'read_served_row'
+      ? await readServedComparableProjection(trx, input.orgId, input.recordId)
+      : input.legacyProjection
+  const calculation = calculateAttendanceSegmentsV1({
+    attribution: input.attribution,
+    // Opaquely-typed at the adapter boundary; the calculator admits it (or
+    // reviews it out) through its OWN discriminant routing — the declaration
+    // is never the admission.
+    context: shadowContext as unknown as FrozenAttendanceContextV1 | null,
+    evidence: input.evidence,
+    approvedFacts: [],
+  })
+  const outcome = input.identityDrift ? 'review_required' : calculation.outcome
+  const outcomeReasonCode = input.identityDrift ? 'context_mismatch' : calculation.outcomeReasonCode
+  const version = await nextCalculationVersion(trx, input.recordId)
+  const inserted = await insertShadowCalculation(trx, {
+    orgId: input.orgId,
+    recordId: input.recordId,
+    version,
+    entrypoint: input.entrypoint,
+    // NULL BY DESIGN (chk_arc_operation_id's marker disjunct REQUIRES it):
+    // the producing operation travels in the marker below.
+    operationId: null,
+    attribution: input.attribution,
+    context: shadowContext as unknown as FrozenAttendanceContextV1 | null,
+    segmentSnapshot: shadowContext ? (shadowContext.segments as unknown as unknown[]) : [],
+    evidence: input.evidence as unknown as unknown[],
+    approvedFacts: [],
+    inputProvenance: {
+      ...input.provenanceRef,
+      [ATTENDANCE_W7_GROUP_SHADOW_PROVENANCE_MARKER_V1]: {
+        schemaVersion: 1,
+        operationId: input.producingOperationId,
+        shadowReason,
+      },
+    },
+    provenanceRef: input.provenanceRef,
+    mergePolicy: 'append',
+    outcome,
+    outcomeReasonCode,
+    segments: input.identityDrift || calculation.outcome !== 'completed' ? [] : calculation.segments,
+    dailyProjection:
+      input.identityDrift || calculation.outcome !== 'completed' ? null : calculation.dailyProjection,
+    actorId: input.actorId,
+    correlationId: input.correlationId,
+    legacyProjection,
+  })
+  return { calculationId: inserted.calculationId }
+}
+
+/** `uq_arc_w7_comparison_identity` fired: a committed comparison record
+ *  already exists for this producing operation. Constructor-free structural
+ *  check (SQLSTATE + constraint name), matching the core's own
+ *  `isUniqueViolationOnConstraintV1` discipline. */
+function isW7ComparisonIdentityConflictV1(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '23505' &&
+    (error as { constraint?: unknown }).constraint === 'uq_arc_w7_comparison_identity'
+  )
+}
+
+/**
+ * W7-2 gate P1-2 — the containment boundary around the UNSERVED half.
+ *
+ * Design-lock §5 item 1 + W7-R3: a comparison-side failure must become a
+ * recorded per-target fact, NEVER an org-wide wedge and never a change to the
+ * served result — and the recorder's failure classes (a `23505` on the
+ * comparison identity index, `W4C2_W7_COMPARE_PARENT_UNRESOLVED`, anything
+ * unexpected) all fall OUTSIDE `ATTENDANCE_W4C2_SCHEDULED_CONTAINED_REFUSAL_CLASSES_V1`
+ * by design (that set contains served-path business refusals). So the
+ * comparison recorder gets its OWN savepoint and an explicit disposition:
+ *
+ *  1. success — release, done;
+ *  2. identity-index conflict — a committed comparison record already exists
+ *     for this producing operation (the core's replay path re-entered the
+ *     recorder): idempotent success, nothing to record;
+ *  3. anything else — roll back the partial comparison write and record ONE
+ *     degraded fail-close comparison record (`shadowReason:
+ *     'recorder-error'`, null context — the same shadowReason-class surface
+ *     the resolver fail-closes use, so the compare window BLOCKS on it via
+ *     `W7_GROUP_RESOLUTION_FAILCLOSE` rather than the failure vanishing);
+ *  4. if even the degraded record fails — roll back and emit one values-free
+ *     warning; the served run always proceeds.
+ *
+ * This function never throws (a savepoint-statement failure means the outer
+ * transaction is already dead, and that failure propagates as itself).
+ */
+async function recordW7GroupShadowComparisonContainedV1(
+  trx: AttendanceW4TransactionClientV1,
+  input: W7GroupShadowComparisonInputV1,
+): Promise<void> {
+  const savepoint = 'attendance_w7_compare_recorder'
+  await trx.query(`SAVEPOINT ${savepoint}`)
+  try {
+    await recordW7GroupShadowComparisonV1(trx, input)
+    await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
+    return
+  } catch (error) {
+    await trx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+    if (isW7ComparisonIdentityConflictV1(error)) {
+      // Disposition 2 — replay of the producing operation; the comparison is
+      // already durably recorded. RELEASE (rollback does not pop the slot —
+      // the Gate D2 carry-forward lesson) and continue.
+      await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
+      return
+    }
+    try {
+      // Disposition 3 — the degraded fail-close record.
+      await recordW7GroupShadowComparisonV1(trx, {
+        ...input,
+        w7GroupShadow: { shadowContext: null, shadowReason: 'recorder-error' },
+      })
+      await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
+    } catch {
+      // Disposition 4 — double failure. Values-free by doctrine: no ids.
+      await trx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+      await trx.query(`RELEASE SAVEPOINT ${savepoint}`)
+      console.warn(
+        '[attendance:w7-2] group-shadow comparison recorder failed twice; the served result is unaffected and the comparison for this target is unrecorded',
+      )
+    }
+  }
 }
 
 /** Attribution for a non-V2-castable resolution (never review-free). */
@@ -1616,11 +1874,17 @@ export function createAttendanceLiveScheduledBoundaryV1(
    * `(org, work_date)`. `purpose: 'persist'` on all four arms — these are
    * persisting producers, not the fingerprint-only mirror.
    *
-   * The `.context` unwrap keeps every call site's downstream code identical to
+   * The `.context` half keeps every call site's downstream code identical to
    * the pre-1b shape (`FrozenAttendanceContextV1 | null`), so the legacy arm's
    * control flow is unchanged byte-for-byte. The group arm's fail-closed `null`
    * (O-9 review-out) travels the SAME path the legacy builder's own `null`
    * already travelled, which is why no new review branch is needed here.
+   *
+   * W7-2: under the shadow-compare posture states the seam returns the
+   * DUAL-RUN variant; its group half is surfaced as `w7GroupShadow` so each
+   * producer site records the comparison through
+   * `recordW7GroupShadowComparisonV1` — `context` remains the served legacy
+   * half in that variant, byte-identical (W7-R3).
    */
   async function issueThroughW7Seam(
     pluginTrx: AttendancePluginShapedTrxV1,
@@ -1633,7 +1897,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
       isWorkday: boolean
       holidayKind: string | null
     },
-  ): Promise<FrozenAttendanceContextV1 | null> {
+  ): Promise<{
+    context: FrozenAttendanceContextV1 | null
+    w7GroupShadow: W7GroupShadowHalfV1 | null
+  }> {
     const issued = await adapters.issueFrozenContext(pluginTrx, { ...args, purpose: 'persist' })
     // OD-W7-4(a): a SUSPENDED org produces NO calculation. Unwrapping `.context`
     // here would yield `null`, which the calculator turns into a durable
@@ -1645,7 +1912,16 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (issued.arm === 'blocked') {
       boundaryFail('W4C2_W7_CONTEXT_SOURCE_SUSPENDED', 409)
     }
-    return issued.context
+    if (issued.arm === 'legacy_with_group_shadow') {
+      return {
+        context: issued.context,
+        w7GroupShadow: {
+          shadowContext: issued.shadowContext ?? null,
+          shadowReason: issued.shadowReason ?? null,
+        },
+      }
+    }
+    return { context: issued.context, w7GroupShadow: null }
   }
 
   async function withConnection<T>(body: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
@@ -1971,8 +2247,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
             nowIso: authoritativeNowIso,
           })
           let authoritativeContext: FrozenAttendanceContextV1 | null = null
+          let authoritativeW7GroupShadow: W7GroupShadowHalfV1 | null = null
           if (authoritativeAttribution.posture === 'resolved_v2') {
-            authoritativeContext = await issueThroughW7Seam(pluginTrx, {
+            const issued = await issueThroughW7Seam(pluginTrx, {
               orgId: envelope.orgId,
               userId: input.userId,
               workDate: authoritativeAttribution.value.workDate,
@@ -1981,6 +2258,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
               isWorkday: input.isWorkday,
               holidayKind: input.holidayKind,
             })
+            authoritativeContext = issued.context
+            authoritativeW7GroupShadow = issued.w7GroupShadow
           }
           // Evidence is loaded AFTER the split INSERT so this punch is inside its own evidence
           // set — otherwise a day's first check-in could never produce a completed segment.
@@ -2149,6 +2428,33 @@ export function createAttendanceLiveScheduledBoundaryV1(
           }
           const authoritativeRecord = persistedParent.rows[0] as Record<string, unknown>
 
+          // W7-2 (P1): record the group comparison AFTER the core's own write
+          // and pointer update, against the SERVED projection as persisted —
+          // the row this response ships. Shadow-only by construction
+          // (`insertShadowCalculation` => mode='shadow', projection_effect
+          // 'none'); the pointer and the sealed response are untouched.
+          // CONTAINED (gate P1-2): the unserved half runs in its own
+          // savepoint and can never abort the served punch. SKIPPED on the
+          // core's replay return: the original execution already recorded the
+          // comparison (and the identity-index catch inside the wrapper
+          // backstops the race where it had not yet committed).
+          if (authoritativeW7GroupShadow && authoritativeWritten.kind !== 'replay') {
+            await recordW7GroupShadowComparisonContainedV1(trx, {
+              orgId: envelope.orgId,
+              recordId: authoritativeParent.id,
+              entrypoint: 'live',
+              producingOperationId: identity.id,
+              attribution: authoritativeAttribution,
+              evidence: authoritativeEvidence,
+              provenanceRef: authoritativeProvenanceRef,
+              w7GroupShadow: authoritativeW7GroupShadow,
+              identityDrift: authoritativeIdentityDrift,
+              actorId: authorization.actorId,
+              correlationId: envelope.correlationId,
+              legacyProjection: 'read_served_row',
+            })
+          }
+
           // `authoritativeWorkDateResolution` was derived in Step 4, BEFORE the core's writes —
           // see the ordering note there. Deriving it here instead would let it observe the open
           // record this operation's own pointer UPDATE just created.
@@ -2294,8 +2600,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
             nowIso,
           })
           let context: FrozenAttendanceContextV1 | null = null
+          let w7GroupShadow: W7GroupShadowHalfV1 | null = null
           if (attribution.posture === 'resolved_v2') {
-            context = await issueThroughW7Seam(pluginTrx, {
+            const issued = await issueThroughW7Seam(pluginTrx, {
               orgId: envelope.orgId,
               userId: input.userId,
               workDate: attribution.value.workDate,
@@ -2311,6 +2618,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
               isWorkday: input.isWorkday,
               holidayKind: input.holidayKind,
             })
+            context = issued.context
+            w7GroupShadow = issued.w7GroupShadow
           }
           // Section 5.3 (:936): evidence is anchored to the FROZEN
           // attribution's own work date, not the boundary's (possibly
@@ -2563,6 +2872,32 @@ export function createAttendanceLiveScheduledBoundaryV1(
           calculationId = inserted.calculationId
           semanticFingerprint = inserted.semanticFingerprint
           provenanceFingerprint = inserted.provenanceFingerprint
+
+          // W7-2 (P2): the dual-run's group half, recorded AFTER the W4 shadow
+          // row. The comparison record carries the producing operation in its
+          // MARKER (its `operation_id` column is NULL by design), so the W4
+          // row keeps its `uq_arc_operation` slot untouched. The legacy side
+          // of the comparison is the SAME served `parent` row the W4 row
+          // compared against. The seal below keeps referencing the W4 row's
+          // calculationId/fingerprints — the comparison row is never the
+          // operation's result. CONTAINED (gate P1-2): its failure can never
+          // abort the served punch.
+          if (w7GroupShadow) {
+            await recordW7GroupShadowComparisonContainedV1(trx, {
+              orgId: envelope.orgId,
+              recordId: parent.id,
+              entrypoint: 'live',
+              producingOperationId: identity.id,
+              attribution,
+              evidence,
+              provenanceRef,
+              w7GroupShadow,
+              identityDrift,
+              actorId: authorization.actorId,
+              correlationId,
+              legacyProjection: parent,
+            })
+          }
         }
 
         // Outbox BEFORE seal (lock 8.2 steps 14-15): the lifecycle event this
@@ -3090,8 +3425,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
                     nowIso: authoritativeNowIso,
                   })
                   let authoritativeContext: FrozenAttendanceContextV1 | null = null
+                  let authoritativeW7GroupShadow: W7GroupShadowHalfV1 | null = null
                   if (authoritativeAttribution.posture === 'resolved_v2') {
-                    authoritativeContext = await issueThroughW7Seam(pluginTrx, {
+                    const issued = await issueThroughW7Seam(pluginTrx, {
                       orgId: orgKey,
                       userId,
                       workDate,
@@ -3100,6 +3436,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
                       isWorkday: input.isWorkday !== false,
                       holidayKind: input.holidayKind ?? null,
                     })
+                    authoritativeContext = issued.context
+                    authoritativeW7GroupShadow = issued.w7GroupShadow
                   }
                   const authoritativeEvidence: AttendanceEvidenceV1[] = [
                     { kind: 'scheduled_absence', ref: runId },
@@ -3159,6 +3497,30 @@ export function createAttendanceLiveScheduledBoundaryV1(
                     actorId: authorization.actorId,
                     correlationId: envelope.correlationId,
                   })
+                  // W7-2 (P3a): the dual-run's group half. CONTAINED in its
+                  // OWN savepoint (gate P1-2) — a recorder failure records a
+                  // degraded fail-close comparison and the target still
+                  // completes; it never re-enters the per-target containment
+                  // as an uncontained raw error. SKIPPED on the core's replay
+                  // return (already recorded by the original execution).
+                  // Legacy side = the SERVED projection as persisted by the
+                  // core's write, read INSIDE the containment savepoint.
+                  if (authoritativeW7GroupShadow && authoritativeWritten.kind !== 'replay') {
+                    await recordW7GroupShadowComparisonContainedV1(trx, {
+                      orgId: orgKey,
+                      recordId: authoritativeParent.id,
+                      entrypoint: 'scheduled',
+                      producingOperationId: identity.id,
+                      attribution: authoritativeAttribution,
+                      evidence: authoritativeEvidence,
+                      provenanceRef: authoritativeProvenanceRef,
+                      w7GroupShadow: authoritativeW7GroupShadow,
+                      identityDrift: false,
+                      actorId: authorization.actorId,
+                      correlationId: envelope.correlationId,
+                      legacyProjection: 'read_served_row',
+                    })
+                  }
                   await trx.query(`RELEASE SAVEPOINT ${authoritativeSavepoint}`)
                   // §6.3 default: `inserted:true` ⇔ the pointer moved (an authoritative "generated
                   // absence day"), keeping `generated_count`'s meaning intact; a review outcome (or
@@ -3267,8 +3629,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
                 nowIso,
               })
               let context: FrozenAttendanceContextV1 | null = null
+              let w7GroupShadow: W7GroupShadowHalfV1 | null = null
               if (attribution.posture === 'resolved_v2') {
-                context = await issueThroughW7Seam(pluginTrx, {
+                const issued = await issueThroughW7Seam(pluginTrx, {
                   orgId: orgKey,
                   userId,
                   workDate,
@@ -3277,6 +3640,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
                   isWorkday: input.isWorkday !== false,
                   holidayKind: input.holidayKind ?? null,
                 })
+                context = issued.context
+                w7GroupShadow = issued.w7GroupShadow
               }
               const evidence: AttendanceEvidenceV1[] = [{ kind: 'scheduled_absence', ref: runId }]
               const calculation = calculateAttendanceSegmentsV1({
@@ -3316,6 +3681,27 @@ export function createAttendanceLiveScheduledBoundaryV1(
                 legacyProjection: parent,
               })
               calculationId = insertedCalc.calculationId
+
+              // W7-2 (P3b): the dual-run's group half beside the W4 shadow
+              // row — producing operation carried in the marker, own identity
+              // index; legacy side = the same served `parent` row. CONTAINED
+              // (gate P1-2): its failure can never abort the scheduled run.
+              if (w7GroupShadow) {
+                await recordW7GroupShadowComparisonContainedV1(trx, {
+                  orgId: orgKey,
+                  recordId: parent.id,
+                  entrypoint: 'scheduled',
+                  producingOperationId: identity.id,
+                  attribution,
+                  evidence,
+                  provenanceRef,
+                  w7GroupShadow,
+                  identityDrift: false,
+                  actorId: authorization.actorId,
+                  correlationId: envelope.correlationId,
+                  legacyProjection: parent,
+                })
+              }
             }
           }
 

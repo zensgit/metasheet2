@@ -617,6 +617,13 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
   assert.deepEqual(
     bucketMembers,
     [
+      // W7-3 (#4556): the OD-W7-3(a) context-source posture machine — a SECOND,
+      // independent org-keyed control-plane state table plus its append-only
+      // event log, structurally the same kind of object as the W4 rollout pair
+      // below and written only by the single transition boundary named in
+      // W4_CANONICAL_PATH_PREFIXES.
+      'attendance_calculation_context_source_events',
+      'attendance_calculation_context_source_state',
       'attendance_calculation_rollout_events',
       'attendance_calculation_rollout_state',
       'attendance_group_effect_revisions',

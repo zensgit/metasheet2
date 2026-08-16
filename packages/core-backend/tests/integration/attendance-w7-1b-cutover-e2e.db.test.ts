@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
+import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -233,11 +234,13 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
        VALUES ($1, $2, $3, '2026-01-01', NULL, 'w7-1b-e2e', 'seed', $4)`,
       [orgId, userId, groupId, `w7-1b-e2e-${groupId}`],
     )
-    await pool.query(
-      `INSERT INTO ${POSTURE_TABLE} (org_id, state, scope)
-       VALUES ($1, 'group_authoritative', 'synthetic_staging')`,
-      [orgId.toLowerCase()],
-    )
+    // W7-3 (#4556) landing-gate P1-1: the bare `(org_id, state, scope)` shape is
+      // ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes
+      // only -> P0001) and its four NOT NULL columns (-> 23502). Seeded through the
+      // ONE shared legal fixture: bootstrap at `off`, then walk the ratified ladder.
+      // Never by dropping the trigger — that would run this evidence against a schema
+      // production does not ship.
+    await seedAttendanceW7ContextSourcePostureV1(pool, orgId, 'group_authoritative')
   }
 
   beforeAll(async () => {
@@ -321,10 +324,15 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
     await insertActiveUser(suspendedUser, suspendedOrg)
     await seedAuthoritativeRollout(suspendedOrg)
     await seedShiftAndEffectiveGroup(suspendedOrg, suspendedUser, suspendedShift, suspendedGroup)
-    await pool.query(
-      `UPDATE ${POSTURE_TABLE} SET state = 'suspended' WHERE org_id = $1`,
-      [suspendedOrg.toLowerCase()],
-    )
+    // W7-3 (#4556) landing-gate P1-1, UPDATE half: this bare `SET state =
+    // 'suspended'` is illegal under `trg_accss_state_guard`'s UPDATE branch too
+    // — it carries no `prior_state` and no `version` increment, so the trigger
+    // raises `prior_state must record the previous state`. (The gate's list
+    // enumerated INSERT fixtures; a repo-wide sweep for UPDATEs found this
+    // seventh site.) Routed through the shared legal fixture, which rebuilds
+    // the row by walking the ratified ladder — the final row is exactly what
+    // the production writer would have produced for a suspended org.
+    await seedAttendanceW7ContextSourcePostureV1(pool, suspendedOrg, 'suspended')
 
     await insertActiveUser(incoherentUser, incoherentOrg)
     await seedLegacyRollout(incoherentOrg)

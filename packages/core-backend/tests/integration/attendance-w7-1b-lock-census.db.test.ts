@@ -91,14 +91,17 @@ const W7_1B_LOCK_CENSUS_V1 = Object.freeze([
   Object.freeze({
     producer: 'P1 live authoritative',
     file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
-    anchor: 'authoritativeContext = await issueThroughW7Seam(pluginTrx, {',
+    // W7-2 re-anchor: the call sites now destructure the dual-run result
+    // (`const issued = await issueThroughW7Seam(...)`), so the anchor is the
+    // adjacent served-half unwrap line, which stays producer-pair-distinct.
+    anchor: 'authoritativeContext = issued.context',
     heldWhenSeamRuns: 'org rollout SHARED advisory + parent FOR UPDATE',
     parentLockRelativePosition: 'BEFORE the seam',
   }),
   Object.freeze({
     producer: 'P2 live shadow',
     file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
-    anchor: 'context = await issueThroughW7Seam(pluginTrx, {',
+    anchor: 'context = issued.context',
     // CORRECTED (gate P2-5): `lockShadowParentRecord` at :2207 PRECEDES the seam
     // call at :2285. The earlier 'AFTER' was wrong.
     heldWhenSeamRuns: 'org rollout SHARED advisory + parent FOR UPDATE',
@@ -107,14 +110,14 @@ const W7_1B_LOCK_CENSUS_V1 = Object.freeze([
   Object.freeze({
     producer: 'P3a scheduled authoritative (added by D3)',
     file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
-    anchor: 'authoritativeContext = await issueThroughW7Seam(pluginTrx, {',
+    anchor: 'authoritativeContext = issued.context',
     heldWhenSeamRuns: 'org rollout SHARED advisory + run-state guard + per-target SAVEPOINT + parent FOR UPDATE',
     parentLockRelativePosition: 'BEFORE the seam',
   }),
   Object.freeze({
     producer: 'P3b scheduled shadow',
     file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
-    anchor: 'context = await issueThroughW7Seam(pluginTrx, {',
+    anchor: 'context = issued.context',
     heldWhenSeamRuns: 'org rollout SHARED advisory + run-state guard',
     parentLockRelativePosition: 'BEFORE the seam',
   }),
@@ -297,7 +300,13 @@ describeDb('W7-1b — B9 composite-lock re-census over the seven-producer realit
     const boundarySource = read('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts')
     const lines = boundarySource.split('\n')
     const shadowParent = lines.findIndex((l) => l.includes('const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)'))
-    const shadowSeam = lines.findIndex((l) => l.includes('context = await issueThroughW7Seam(pluginTrx, {') && !l.includes('authoritative'))
+    // W7-2 re-anchor: all four boundary sites now spell the seam call
+    // identically (`const issued = await issueThroughW7Seam(...)`), so the P2
+    // site is identified positionally — the FIRST seam call AFTER P2's parent
+    // lock line (P1's call precedes that line; P3a/P3b follow later).
+    const shadowSeam = lines.findIndex(
+      (l, index) => index > shadowParent && l.includes('= await issueThroughW7Seam(pluginTrx, {'),
+    )
     expect(shadowParent, 'shadow parent lock not found').toBeGreaterThan(-1)
     expect(shadowSeam, 'shadow seam call not found').toBeGreaterThan(-1)
     expect(shadowParent, 'the shadow arm must lock the parent BEFORE the seam').toBeLessThan(shadowSeam)
