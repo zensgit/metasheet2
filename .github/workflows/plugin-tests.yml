@@ -1465,6 +1465,7 @@ jobs:
             tests/integration/attendance-w7-2-compare-window-status.db.test.ts \
             tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts \
             tests/integration/attendance-w7-4-read-side-labeling.db.test.ts \
+            tests/integration/attendance-soak-diff-families.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 
