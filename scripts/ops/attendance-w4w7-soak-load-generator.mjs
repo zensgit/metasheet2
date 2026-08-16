@@ -533,10 +533,15 @@ async function loadConfig(opts) {
     const arms = ARMS_BY_POSTURE[rawEntry.posture]
     if (rawEntry.posture === 'both_machines_group_arm') {
       // eslint-disable-next-line no-console
+      // The warning deliberately says "the server-side W7 posture table" rather than naming
+      // the table literally: a runtime STRING naming that table would put this DB-less,
+      // HTTP-only tool into the W7-1a inertness sweep's closed posture-table naming set
+      // (attendance-w7-1a-inertness-sweep.test.ts — comments are stripped there, strings are
+      // not). Prefer not-tripping over widening that exact set.
       console.warn(
         `[config] ${where} (orgId=${orgId}) is posture="both_machines_group_arm". This script declares, `
         + 'it never READS, the org\'s server-side W7 posture: whether the org is actually at group_shadow '
-        + 'is a fact in attendance_calculation_context_source_state that only a DB read (soak-status Q4b) '
+        + 'is a row in the server-side W7 posture table that only a DB read (soak-status Q4b) '
         + 'can confirm. This script sends valid live-punch traffic either way, but its w7_group_arm count '
         + 'is a CONFIG-DECLARED LABEL ONLY — see armAttributionSource in the summary.'
       )

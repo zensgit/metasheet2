@@ -81,7 +81,11 @@ const P16_EXACT_ALLOWLIST = new Set([
   // metasheet-staging-postgres, only for orgs the seeder has just verified hold exclusively
   // synth-w4w7-* content (customerData preflight), and never touches a posture table (those
   // go through the Gate C / W7-3 CLIs). Same class as the a2-smoke assignments insert below.
-  // enclosingSymbol is (module-scope): shell heredocs have no enclosing function.
+  // enclosingSymbol is (module-scope): shell heredocs have no enclosing function — which
+  // means this key's effective granularity is file+table+verb, broader than the
+  // symbol-scoped smoke-script entries around it: ANY second module-scope assignments
+  // INSERT added to this script would be absorbed by this same key, so additions to this
+  // script's seed SQL must be reviewed against this claim, not assumed newly gated.
   "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::insert",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_events::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_batches::delete",

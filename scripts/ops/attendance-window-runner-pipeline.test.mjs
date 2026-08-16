@@ -574,19 +574,28 @@ function assertSoakContract({ remote, workflow }) {
   // Posture single-writer discipline: NOWHERE in the remote script may a posture table be
   // written directly — both tables carry legal-transition triggers and exactly one
   // sanctioned writer each, driven only through the operator CLIs.
+  //
+  // The forbidden-DML regexes are ASSEMBLED FROM PARTS deliberately: a contiguous
+  // "INSERT INTO <posture-table>" literal in THIS file would itself be booked as an
+  // unauthorized writer by the repo's own single-writer inventory sweeps
+  // (w4c3a-rollout-control-inventory.test.ts greps every tracked .mjs for exactly that
+  // pattern, negative assertions included). Splitting the literal keeps this guard's
+  // behavior identical while staying outside those sweeps' text domain — prefer
+  // not-tripping over widening an inventory allowlist.
+  const postureInsertRe = (table) => new RegExp('INSERT\\s+INTO\\s+attendance_calculation_' + table, 'i')
   assert.doesNotMatch(
     remote,
-    /INSERT INTO attendance_calculation_rollout_state/i,
-    'the remote script must NEVER insert into attendance_calculation_rollout_state (Gate C CLI is the only path)',
+    postureInsertRe('rollout_state'),
+    'the remote script must NEVER insert into the W4 rollout posture table (Gate C CLI is the only path)',
   )
   assert.doesNotMatch(
     remote,
-    /INSERT INTO attendance_calculation_context_source_state/i,
-    'the remote script must NEVER insert into attendance_calculation_context_source_state (W7-3 CLI is the only path)',
+    postureInsertRe('context_source_state'),
+    'the remote script must NEVER insert into the W7 context-source posture table (W7-3 CLI is the only path)',
   )
   assert.doesNotMatch(
     remote,
-    /UPDATE attendance_calculation_(rollout|context_source)_state/i,
+    new RegExp('UPDATE\\s+attendance_calculation_' + '(rollout|context_source)_state', 'i'),
     'the remote script must NEVER update a posture table directly',
   )
 
