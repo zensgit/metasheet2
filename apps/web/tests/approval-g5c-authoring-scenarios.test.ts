@@ -322,6 +322,12 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
       join(__dirname, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
       'utf8',
     )
+    // F0 extraction (delta §5 F0): the field palette markup moved verbatim onto
+    // ApprovalFormInlineEditor.vue, same pattern as the PR4 canvas/inspector shells above.
+    const formEditorShell = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFormInlineEditor.vue'),
+      'utf8',
+    )
     expect(src).toMatch(/data-testid="approval-view-list"/)
     expect(src).toMatch(/辅助编辑模式/)
     // Undo/redo + edge insert live on extracted ApprovalFlowCanvas (PR4).
@@ -334,8 +340,8 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
     expect(inspectorShell).toMatch(/data-testid="approval-canvas-inspector-topology"/)
     expect(src).not.toMatch(/class="template-authoring__canvas-node-actions"/)
     expect(canvasShell).not.toMatch(/class="template-authoring__canvas-node-actions"/)
-    // D6-f2 palette.
-    expect(src).toMatch(/data-testid="approval-field-palette"/)
+    // D6-f2 palette (F0: markup lives on the extracted ApprovalFormInlineEditor.vue).
+    expect(formEditorShell).toMatch(/data-testid="approval-field-palette"/)
     expect(src).toMatch(/addFieldOfType/)
     // PR4 extract: shell components owned under approvals/components
     expect(src).toMatch(/ApprovalFlowCanvas/)
