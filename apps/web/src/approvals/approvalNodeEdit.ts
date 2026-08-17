@@ -82,9 +82,11 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
   for (const node of graph.nodes) {
     if (!hasAssigneeSources(node.config)) continue
     if (node.type === 'approval') {
+      // `nodeType` is deliberately OMITTED for approval edits — absent ≡ 'approval', keeping the
+      // approval seed byte-identical to before this slice (no round-trip churn). Only handler edits
+      // carry the discriminator (validate() reads it; the rebuild keys on the graph node's own type).
       edits[node.key] = {
         nodeKey: node.key,
-        nodeType: 'approval',
         assigneeSources: cloneJson(node.config.assigneeSources),
         ...(node.config.approvalMode !== undefined ? { approvalMode: node.config.approvalMode } : {}),
         ...(node.config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: node.config.emptyAssigneePolicy } : {}),

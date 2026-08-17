@@ -289,6 +289,12 @@ export default defineConfig({
       // sha256-pinned provenance input, so it is deliberately not extended). Two-point wiring —
       // both points land in the SAME commit, per the PR #4952 adversarial gate (P2-1).
       'tests/integration/approval-requester-choice.db.test.ts',
+      // Lock-3 handler-node real-DB acceptance (G-4/G-6/G-7/G-8/G-9/G-10/G-11/G-12/G-16/G-17/G-18 +
+      // the §1.5/G-13 backend registry). DATABASE_URL-gated; excluded here so the no-DB default job
+      // cannot collect-and-skip-green it, and carried by the DEDICATED
+      // .github/workflows/approval-realdb-handler.yml workflow (standalone per the same s6a precedent —
+      // plugin-tests.yml is left byte-identical). Two-point wiring, both points in the SAME commit.
+      'tests/integration/approval-handler-node.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
