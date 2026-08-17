@@ -1,7 +1,7 @@
-# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/16)
+# DingTalk staging lifecycle canary and UAT execution record (2026-08-11/17)
 
-- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / STREAM ON-OFF WINDOW EXECUTED AND RETURNED OFF / DEPROVISION-DENIAL BROWSER CHECKPOINT NOT EXECUTED / U1-U13 HUMAN CLICK MATRIX NOT EXECUTED**
-- Repository evidence head: `2468b37b9456ddbe2a0ec39219929864e1aa45f0`
+- Status: **STAGING SERVER-SIDE CANARIES COMPLETE / ALIAS PASS / PENDING ADMIT + SSO-ACTIVATE INTENT + POST-ACTIVATION OAUTH PASS / DEPROVISION APPLY + RESTORE + POST-RESTORE OAUTH PASS / STREAM ON-OFF WINDOW EXECUTED AND RETURNED OFF / U1 DELIVERY + U4 CALLBACK PASS / DEPROVISION-DENIAL BROWSER CHECKPOINT + U2-U3 + U5-U13 + U11-A CORP-ANCHOR INCOMPLETE**
+- Repository evidence base: `cc4409b3a1bb1c2f2533bb0724ae9036d15500a4`
 - Historical lifecycle canary deploy SHA: `12f1f8c466ddf0fcbfcf2ea07902528ac02430f1`
 - Current staging deploy SHA from read-only run `31937073799`: `d201aff394867d1e776d4e393a7ae71d3df45e44`
 - Historical production-readiness inventory SHA: `cc69791604f338a90e07dc07da8118a2d7a68188`
@@ -102,8 +102,8 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     `worker_state=started`, one eligible configured-corp anchor with two linked local users, and
     all lifecycle flags OFF. The two linked local users were also checked in the staging admin UI
     as distinct DingTalk identities before the window.
-13. While that window was open, the operator created `AP-100010` for linked assignee `GH UI Smoke`
-    (directory display name `周华`). The automation execution failed before send in 16 ms with the
+13. While that window was open, the operator created `AP-100010` for the linked synthetic assignee
+    `GH UI Smoke`. The automation execution failed before send in 16 ms with the
     fixed error that `APPROVAL_CARD_LINK_SECRET` or the assignee integration's stored approval-card
     link secret was required. The selected `Staging DingTalk E4 HMR validation` integration then
     showed its one-tap card secret status as `未生成`. Therefore the missing DingTalk card is
@@ -152,13 +152,14 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     [status 31864575172](https://github.com/zensgit/metasheet2/actions/runs/31864575172) proved exact
     deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, and all
     lifecycle flags OFF.
-18. A later read-only HTTPS inventory used draft PR #4890's status-only probe:
+18. A later read-only HTTPS inventory used PR #4890's status-only probe:
     [31865023926](https://github.com/zensgit/metasheet2/actions/runs/31865023926). It found the
     digest-pinned staging Caddy gateway running and healthy, ports 80/443 listening, all three live
     URL settings matching the managed HTTPS origin/callback, and the pre-HTTPS backup still present.
     Stream and all lifecycle flags remained OFF. This is an honest pending operational state, not a
-    production enablement: PR #4890 is still draft/unmerged, and no `https-off` mutation is
-    authorized by this evidence record.
+    production enablement: #4890 later merged as
+    `285c6a7c388a0d0f80244c88ee7fbc365c4066c3`, but no `https-off` mutation is authorized by this
+    evidence record.
 19. After the assignee confirmed receipt of `AP-100012`, a bounded callback attempt used fresh
     [status 31865394031](https://github.com/zensgit/metasheet2/actions/runs/31865394031), fresh
     [storage health 31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905), and
@@ -183,8 +184,9 @@ run or runtime observation. Historical run descriptions remain unchanged as prov
     [status 31866437330](https://github.com/zensgit/metasheet2/actions/runs/31866437330) proved exact
     deployed SHA match, healthy backend, `stream_enabled=false`, `worker_state=disabled`, one
     eligible configured-corp anchor, and all lifecycle flags OFF.
-21. Because the card still displayed its pre-action presentation, draft PR #4913 added a
-    read-only, values-free callback observer. A diagnostic duplicate-click window used
+21. Because the card still displayed its pre-action presentation, PR #4913 added a read-only,
+    values-free callback observer and later merged as
+    `f8497b261e69ec83ba457e746ce0a0309a2e4938`. A diagnostic duplicate-click window used
     [on 31867195160](https://github.com/zensgit/metasheet2/actions/runs/31867195160). The assignee did
     not complete a second click before the bounded observation point, and
     [observe 31867282493](https://github.com/zensgit/metasheet2/actions/runs/31867282493) reported zero
@@ -501,9 +503,9 @@ simulated.
 
 | Gate | Result | Blocking evidence |
 |---|---|---|
-| U1-U13 (including U3-a and U11-b) | **PARTIAL; NOT ACCEPTED** | The first three windows exposed and closed configuration/permission blockers. After `Card.Instance.Write` was published, the fourth window's `AP-100012` automation completed with `deliveryKind=interactive_card`; the assignee later confirmed real receipt, satisfying U1's delivery observation. Card-body inspection, callback, duplicate/non-assignee behavior, OA fallback, and the remaining human matrix are still unexecuted |
-| U11-a real callback corp-anchor | **NOT EXECUTED** | No real card callback frame has been captured; configuration readiness is not callback evidence |
-| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31865647626`/`31865699179` prove clean operational stops and disabled worker; post-OFF OA fallback send and the full human callback sequence remain unexecuted |
+| U1-U13 (including U3-a and U11-b) | **PARTIAL; NOT ACCEPTED** | The first three windows exposed and closed configuration/permission blockers. After `Card.Instance.Write` was published, the fourth window's `AP-100012` automation completed with `deliveryKind=interactive_card`; the assignee confirmed real receipt (U1), and a later click advanced MetaSheet to terminal approved (U4). U2-U3, U5-U13, card-body retirement, duplicate/non-assignee behavior, and OA fallback remain incomplete |
+| U11-a real callback corp-anchor | **NOT EXECUTED** | The real U4 business callback occurred, but no values-free corp-anchor log frame was captured; the business outcome is not a substitute for the required anchor evidence |
+| Operational worker-stop/OFF control (not a U12/U13 acceptance verdict) | **PASS** | Runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, and `31865647626`/`31865699179` prove clean operational stops and disabled worker; post-OFF OA fallback send and the remaining human callback matrix remain unexecuted |
 | P1 latest storage-health precondition | **PASS at latest window start** | `Attendance Remote Storage Health (Prod)` run [31865438905](https://github.com/zensgit/metasheet2/actions/runs/31865438905) was successful before Stream `on` |
 | P2 exact target SHA | known per environment | See Section 1; do not mix the two deployment roots |
 | P3 real corp + two linked users | **READY for controlled staging `on` window** | Historical runs `31854315133`/`31854359627` proved the anchor; UAT3 prepare/status runs `31931539040`/`31931575188` and latest read-only status `31937073799` reconfirm one eligible anchor, two linked local users, exact deployed SHA `d201aff394867d1e776d4e393a7ae71d3df45e44`, healthy backend, Stream OFF, disabled worker, and lifecycle flags OFF |
@@ -533,7 +535,7 @@ Required external action: use the published replacement template `MetaSheetCanar
 fresh card in a short owner-approved callback window while the linked assignee and a non-assignee
 are both available. Execute the canonical U1-U13 procedure, capture only values-free
 booleans/status enums, and execute `off` before the window ends. Publication and prepare evidence
-(`31931478708 -> 31931539040 -> 31931575188`, reconfirmed at exact deployed SHA `d201aff394867d1e776d4e393a7ae71d3df45e44` by read-only status `31937073799`) live in draft #4920; they prove the safe OFF-state
+(`31931478708 -> 31931539040 -> 31931575188`, reconfirmed at exact deployed SHA `d201aff394867d1e776d4e393a7ae71d3df45e44` by read-only status `31937073799`) landed with the runbook in #4920 as `881e8efd8a97ddefcbb9f2574ed071e7cda91b69`; they prove the safe OFF-state
 configuration, not a fresh card or callback. Secrets must not be pasted into this document or chat.
 
 ## 7. Production and transfer gates
