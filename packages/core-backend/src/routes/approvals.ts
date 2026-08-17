@@ -1373,6 +1373,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
           OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
         )`,
+        // Lock-3 §2.2 — a handler (办理) seat is NOT an approval task and must not inflate the member's
+        // pending-APPROVAL badge (approve/reject 409 on it). Exclude any assignment whose node is a
+        // `handler` node in the instance's frozen runtime graph. `@>` containment never errors on a
+        // null/empty graph (unlike jsonb_array_elements) and is GIN-index-friendly.
+        `NOT EXISTS (
+          SELECT 1 FROM approval_published_definitions pd
+          WHERE pd.id = i.published_definition_id
+            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
+        )`,
       ]
       const params: unknown[] = [userId, actorRolesParam, actorPermissionsParam]
 
@@ -1993,7 +2002,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.status(400).json({
           error: {
             code: 'VALIDATION_ERROR',
-            message: 'action must be approve, reject, transfer, revoke, comment, return, add_sign, or reduce_sign',
+            // Lock-3 §2.1: `handle` is the handler-node submit verb (guard keys on APPROVAL_ACTION_TYPES).
+            message: 'action must be approve, reject, transfer, revoke, comment, return, add_sign, reduce_sign, or handle',
           },
         })
       }
@@ -2002,6 +2012,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
       const targetNodeKey = typeof req.body?.targetNodeKey === 'string' ? req.body.targetNodeKey.trim() : undefined
+      // Lock-3 §3: forward the RESERVED `fieldWrites` key ONLY when the client actually sent it, so the
+      // service can reject a `handle` submission carrying it (non-empty / `{}` / `null`) with a
+      // values-free 422 by key PRESENCE (`'fieldWrites' in request`). Absent ⇒ never forwarded ⇒ succeeds.
+      const hasFieldWrites = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'fieldWrites')
       // P1-B add_sign: approver user IDs to pull into the current node.
       const targetUserIds = Array.isArray(req.body?.targetUserIds)
         ? req.body.targetUserIds
@@ -2074,6 +2088,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               targetUserIds,
               addSignMode,
               targetAssignmentUserId,
+              // Lock-3 §3: present ONLY when the client sent the key, so the service's key-presence
+              // rejection (422 APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED) fires for `null`/`{}` too.
+              ...(hasFieldWrites ? { fieldWrites: req.body.fieldWrites } : {}),
             },
             actor,
           )

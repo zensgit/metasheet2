@@ -333,6 +333,36 @@ export function appendCcNode(graph: ApprovalGraph, afterNodeKey: string, name = 
   }
 }
 
+// Lock-3 §1.1 — starter config for a fresh handler node. Mirrors the approval default (a non-empty,
+// valid roster so the draft saves): `requester` is one of the SEVEN admitted handler kinds and maps to
+// corpus 提交人本人. `handlerMode` is omitted (absent ≡ 'all', 会签); the author reconfigures the roster.
+function defaultHandlerConfig() {
+  return { assigneeSources: [{ kind: 'requester' as const }] }
+}
+
+/**
+ * Lock-3 §1.5 — insert a handler (办理) node on a linear segment (same single-out splice as cc). A
+ * handler is a NON-approval business node; the executor pauses on it and completes on submit.
+ */
+export function appendHandlerNode(graph: ApprovalGraph, afterNodeKey: string, name = '办理'): ApprovalGraph {
+  const after = graph.nodes.find((n) => n.key === afterNodeKey)
+  if (!after) throw new Error(`appendHandlerNode: node ${afterNodeKey} not found`)
+  const outs = outEdges(graph, afterNodeKey)
+  if (outs.length !== 1) throw new Error(`appendHandlerNode: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+  const out = outs[0]
+  const newKey = uniqueKey('handler', nodeKeys(graph))
+  const eKeys = edgeKeys(graph)
+  const e1 = uniqueKey('edge', eKeys); eKeys.add(e1)
+  const newNode: ApprovalNode = { key: newKey, type: 'handler', name, config: defaultHandlerConfig() }
+  return {
+    nodes: [...graph.nodes.map(clone), newNode],
+    edges: graph.edges.map((edge) => {
+      if (edge.key !== out.key) return clone(edge)
+      return { ...clone(edge), source: newKey }
+    }).concat([{ key: e1, source: afterNodeKey, target: newKey }]),
+  }
+}
+
 /**
  * Insert a condition gateway on a linear segment. The original `after → target` edge keeps its
  * identity and becomes `after → condition`; the gateway then owns one configurable branch and

@@ -158,3 +158,9 @@ outside this public ledger, and owner sign-off.
 private prerequisites, and owner sign-off. It may
 say `PRODUCT FINAL` only after P7-E records staged enablement, rollback evidence, accepted residuals,
 and explicit owner sign-off.
+
+## 9. Errata
+
+| Date | Lock / clause | Correction | Provenance |
+|---|---|---|---|
+| 2026-08-17 | Lock-3 §2.2 (Batch / 秒批 exclusion) | The claim that handler-task batch exclusion "falls out of §2.1 rather than needing new code" was FALSE — the member 待办 center listed/badged/batch-selected any active pending seat with no node-type filter, so a handler seat surfaced an inert `approve`/`reject` control (409, M7). Corrected in the lock: the exclusion is enforced by an EXPLICIT node-type gate landed in P4-A / PR #4956 (pending-list DTO `currentNodeType` + `isRowBatchSelectable` gate + pending-count exclusion). The ratified property is now TRUE against the code. | goal-set instruction (2026-08-17); adversarial-gate finding P2-1 on PR #4956 |

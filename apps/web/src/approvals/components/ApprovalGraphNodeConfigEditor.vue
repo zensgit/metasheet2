@@ -380,11 +380,15 @@
 
     <!-- G-5: editable approval node — approver SOURCE only (assigneeSources[0]). The node's
          approvalMode / emptyAssigneePolicy / autoApprovalPolicy + edges are preserved. Legacy
-         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. -->
+         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below.
+         Lock-3 §1.5: the SAME section renders a `handler` node (办理节点) — it reuses the exact roster
+         radio-grid + per-kind typed pickers (registry-driven per node TYPE), swapping only the
+         type-specific labels + the mode/opinion controls (handler has NO empty-policy / self-approval /
+         fallback — M7 no inert controls). -->
     <div
-      v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
+      v-else-if="(node.type === 'approval' || node.type === 'handler') && approvalNodeEditFor(node.key)"
       class="template-authoring__approval-node"
-      data-testid="approval-node-editor"
+      :data-testid="node.type === 'handler' ? 'handler-node-editor' : 'approval-node-editor'"
       :data-approval-node="node.key"
     >
     <!-- Lock-0 L0-1: this section renders alone when inside the canvas inspector's tabbed
@@ -398,11 +402,11 @@
       <!-- Lock-0 L0-2: registry-driven radio-grid roster (replaces the single el-select). §10.3
            constrains the picker to be ONE component with plain labels + a configured summary
            echo, not a specific control shape — a radio grid needs no further delta. -->
-      <el-form-item label="审批人来源">
+      <el-form-item :label="node.type === 'handler' ? '办理人来源' : '审批人来源'">
         <div
           class="approval-node-source-roster"
           role="radiogroup"
-          aria-label="审批人来源"
+          :aria-label="node.type === 'handler' ? '办理人来源' : '审批人来源'"
           data-testid="approval-node-source-roster"
         >
           <label
@@ -625,7 +629,10 @@
         title="此为占位审批角色，发布前请替换为真实角色 ID"
         description="占位角色无人可认领，未替换将无法发布该模板。"
       />
-      <div class="template-authoring__grid template-authoring__approval-node-policy">
+      <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
+           these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
+           self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
+      <div v-if="node.type === 'approval'" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -658,6 +665,30 @@
             data-testid="approval-node-merge-with-requester"
             @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
           >发起人自动通过（自审合并）</el-checkbox>
+        </el-form-item>
+      </div>
+      <!-- Lock-3 §1.1 — handler-node controls: 办理模式 (会签/或签) + 办理意见 (opt-in). NO empty policy,
+           NO self-approval, NO fallback control renders here (M7). -->
+      <div v-else-if="node.type === 'handler'" class="template-authoring__grid template-authoring__approval-node-policy">
+        <el-form-item label="办理模式">
+          <el-select
+            :model-value="handlerNodeMode(node.key)"
+            :disabled="readOnly"
+            class="ms-w-100pct"
+            data-testid="handler-node-mode"
+            @update:model-value="(mode: HandlerMode) => setHandlerNodeMode(node.key, mode)"
+          >
+            <el-option label="会签（全部提交）" value="all" />
+            <el-option label="或签（任一提交）" value="any" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="办理意见">
+          <el-checkbox
+            :model-value="handlerNodeOpinionRequired(node.key)"
+            :disabled="readOnly"
+            data-testid="handler-node-opinion-required"
+            @update:model-value="(required: boolean) => setHandlerNodeOpinionRequired(node.key, required)"
+          >提交时必须填写办理意见</el-checkbox>
         </el-form-item>
       </div>
     </section>
@@ -743,6 +774,7 @@ import type {
   ApprovalMode,
   ApprovalNode,
   EmptyAssigneePolicy,
+  HandlerMode,
   NodeFieldAccess,
   ParallelNodeConfig,
   RequesterChoiceAssigneeSource,
@@ -851,6 +883,11 @@ const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
 const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
 const setApprovalNodeMergeWithRequester = api.setApprovalNodeMergeWithRequester
+// Lock-3 §1.1 — handler-only controls (办理模式 / 办理意见).
+const handlerNodeMode = api.handlerNodeMode
+const setHandlerNodeMode = api.setHandlerNodeMode
+const handlerNodeOpinionRequired = api.handlerNodeOpinionRequired
+const setHandlerNodeOpinionRequired = api.setHandlerNodeOpinionRequired
 const approvalNodeFieldAccess = api.approvalNodeFieldAccess
 const setApprovalNodeFieldAccess = api.setApprovalNodeFieldAccess
 const nodeConfigSummary = api.nodeConfigSummary

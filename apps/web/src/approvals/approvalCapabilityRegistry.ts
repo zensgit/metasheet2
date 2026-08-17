@@ -1,4 +1,5 @@
 import type { ApprovalAssigneeSourceKind, ApprovalNodeType } from '../types/approval'
+import { HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval'
 
 /**
  * Lock-0 L0-2 — capability-registry-driven assignee roster + L0-1's `操作权限` tab-membership gate.
@@ -77,6 +78,13 @@ export interface ApprovalCapabilityRegistry {
 export const DEFAULT_APPROVAL_CAPABILITY_REGISTRY: ApprovalCapabilityRegistry = {
   assigneeSourcesByNodeType: {
     approval: SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER.map((kind) => ({
+      kind,
+      label: APPROVAL_ASSIGNEE_SOURCE_LABELS[kind],
+    })),
+    // Lock-3 §1.5 / OD-L3-6(a) — the handler node's SEVEN-member roster (M4 per-node-type registry).
+    // Reuses the ratified §10.3 labels; `continuous_managers`/`requester_choice`/etc. are absent (G-13
+    // pins this exact set). Order follows HANDLER_ASSIGNEE_SOURCE_KINDS.
+    handler: HANDLER_ASSIGNEE_SOURCE_KINDS.map((kind) => ({
       kind,
       label: APPROVAL_ASSIGNEE_SOURCE_LABELS[kind],
     })),

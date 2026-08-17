@@ -63,13 +63,17 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     )
   })
 
-  it('flow cards expose type chrome, summary, and a circular edge + (no 办理人)', () => {
+  it('flow cards expose type chrome, summary, a circular edge +, and the 办理人 edge-insert item (Lock-3 §1.5)', () => {
     expect(CANVAS_SRC).toMatch(/template-authoring__canvas-node-kind/)
     expect(CANVAS_SRC).toMatch(/canvasNodeSummary\(pos\.key\)/)
     expect(CANVAS_SRC).toMatch(/template-authoring__canvas-edge-insert-btn/)
     expect(CANVAS_SRC).toMatch(/border-radius: 50%/)
     expect(CANVAS_SRC).toMatch(/插入抄送节点/)
-    expect(CANVAS_SRC).not.toMatch(/办理人/)
+    // Lock-3 §1.5: the canvas gains a fifth edge-insert item — 办理人 — beside 审批人/抄送人/条件分支/
+    // 并行分支, emitting `edge-insert-handler` with the `approval-canvas-edge-insert-handler` testid,
+    // hidden on edges inside a parallel region (`canInsertHandlerOnEdge`).
+    expect(CANVAS_SRC).toMatch(/data-testid="approval-canvas-edge-insert-handler"/)
+    expect(CANVAS_SRC).toMatch(/插入办理节点/)
     // Insert chrome is painted after node cards so the open menu receives the click.
     const nodeIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-node"')
     const insertIdx = CANVAS_SRC.lastIndexOf('data-testid="approval-canvas-edge-insert"')

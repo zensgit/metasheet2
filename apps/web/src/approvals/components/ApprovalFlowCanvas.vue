@@ -3,7 +3,7 @@
  * Canvas V2 flow surface (PR4 extract) — pure presentation.
  * Parent owns draft/history and all topology/command mutations.
  */
-import { Connection, FullScreen, Promotion, Rank, Share, User, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { Connection, FullScreen, Promotion, Rank, Share, Tickets, User, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
 import { ref, type CSSProperties } from 'vue'
 import type { ApprovalNode } from '../../types/approval'
 import type { GraphLayout, NodeLayout } from '../graphLayout'
@@ -48,6 +48,8 @@ const props = defineProps<{
   canvasNodeByKey: (nodeKey: string) => ApprovalNode | undefined
   canMoveCanvasNode: (nodeKey: string) => boolean
   canInsertParallelOnEdge: (edgeKey: string) => boolean
+  // Lock-3 §1.3/§1.5: hide 办理人 on any edge inside a parallel region (a handler is linear-only in v1).
+  canInsertHandlerOnEdge: (edgeKey: string) => boolean
   canvasMoveTargetLabel: (edgeKey: string) => string
 }>()
 
@@ -70,6 +72,8 @@ const emit = defineEmits<{
   'edge-insert-cc': [edgeKey: string]
   'edge-insert-condition': [edgeKey: string]
   'edge-insert-parallel': [edgeKey: string]
+  // Lock-3 §1.5 — insert a 办理 (handler) node on this edge.
+  'edge-insert-handler': [edgeKey: string]
 }>()
 
 const canvasViewportRef = ref<HTMLElement | null>(null)
@@ -329,6 +333,19 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
                     <el-icon><Connection /></el-icon>
                   </span>
                   并行分支
+                </button>
+                <button
+                  v-if="canInsertHandlerOnEdge(line.key)"
+                  type="button"
+                  role="menuitem"
+                  aria-label="插入办理节点"
+                  data-testid="approval-canvas-edge-insert-handler"
+                  @click.stop="emit('edge-insert-handler', line.key)"
+                >
+                  <span class="template-authoring__canvas-edge-insert-icon is-handler" aria-hidden="true">
+                    <el-icon><Tickets /></el-icon>
+                  </span>
+                  办理人
                 </button>
               </div>
             </div>

@@ -342,6 +342,7 @@
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
             :can-insert-parallel-on-edge="canInsertParallelOnEdge"
+            :can-insert-handler-on-edge="canInsertHandlerOnEdge"
             :canvas-move-target-label="canvasMoveTargetLabel"
             @undo="onCanvasUndo"
             @redo="onCanvasRedo"
@@ -361,6 +362,7 @@
             @edge-insert-cc="onEdgeInsertCc"
             @edge-insert-condition="onEdgeInsertCondition"
             @edge-insert-parallel="onEdgeInsertParallel"
+            @edge-insert-handler="onEdgeInsertHandler"
           />
           <ApprovalCanvasNodeInspector
             v-if="selectedCanvasInspectorNode"
@@ -1119,6 +1121,7 @@ import {
   adjacentLinearNodeMoveTarget,
   appendApprovalNode,
   appendCcNode,
+  appendHandlerNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
@@ -1175,6 +1178,7 @@ import type {
   CcNodeConfig,
   ConditionNodeConfig,
   EmptyAssigneePolicy,
+  HandlerMode,
   FormField,
   NodeFieldAccess,
   ParallelJoinMode,
@@ -1410,6 +1414,8 @@ const NODE_TYPE_LABELS: Record<string, string> = {
   cc: '抄送',
   condition: '条件分支',
   parallel: '并行分支',
+  // Lock-3 §1.5 — handler (办理) node card label.
+  handler: '办理',
   end: '结束',
 }
 function nodeTypeLabel(type: string): string {
@@ -1777,6 +1783,23 @@ function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): v
   else delete policy.mergeWithRequester
   edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
 }
+// Lock-3 §1.1 — handler-only mode + opinion accessors (same edit model, keyed by nodeKey).
+function handlerNodeMode(nodeKey: string): HandlerMode {
+  return approvalNodeEditFor(nodeKey)?.handlerMode ?? 'all'
+}
+function setHandlerNodeMode(nodeKey: string, mode: HandlerMode): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (edit) edit.handlerMode = mode
+}
+function handlerNodeOpinionRequired(nodeKey: string): boolean {
+  return Boolean(approvalNodeEditFor(nodeKey)?.opinionRequired)
+}
+function setHandlerNodeOpinionRequired(nodeKey: string, required: boolean): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (required) edit.opinionRequired = true
+  else delete edit.opinionRequired
+}
 function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAccess {
   return approvalNodeEditFor(nodeKey)?.fieldPermissions?.find((permission) => permission.fieldId === fieldId)?.access ?? 'editable'
 }
@@ -2035,6 +2058,11 @@ function onInsertApprovalAfter(nodeKey: string): void {
 function onInsertCcAfter(nodeKey: string): void {
   const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
   runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
+}
+function onInsertHandlerAfter(nodeKey: string): void {
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendHandlerNode(graph, nodeKey), { kind: 'none' })
   selectInsertedNode(beforeKeys)
 }
 function onInsertConditionAfter(nodeKey: string): void {
@@ -2314,6 +2342,12 @@ function canInsertParallelOnEdge(edgeKey: string): boolean {
   const source = edgeSourceNode(edgeKey)
   return Boolean(source && canInsertParallelAfter(source))
 }
+// Lock-3 §1.3/§1.5: a handler is linear-only in v1 — allowed on a normal linear edge, hidden on any
+// edge inside a parallel region (its source node is in the region key set).
+function canInsertHandlerOnEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  return Boolean(source && canInsertOnCanvasEdge(edgeKey) && !parallelRegionKeys.value.has(source.key))
+}
 function canInsertOnCanvasEdge(edgeKey: string): boolean {
   const source = edgeSourceNode(edgeKey)
   if (!source || source.type === 'end') return false
@@ -2357,6 +2391,15 @@ function onEdgeInsertParallel(edgeKey: string): void {
     return
   }
   onInsertParallelAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertHandler(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertHandlerOnEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
+  onInsertHandlerAfter(source.key)
   closeEdgeInsertMenu()
 }
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
@@ -2609,6 +2652,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,
   setApprovalNodeMergeWithRequester,
+  handlerNodeMode,
+  setHandlerNodeMode,
+  handlerNodeOpinionRequired,
+  setHandlerNodeOpinionRequired,
   approvalNodeFieldAccess,
   setApprovalNodeFieldAccess,
   nodeConfigSummary,

@@ -7,7 +7,9 @@ import type { NodeFieldPermission } from '../types/approval-product'
  * re-validation on the read path (and without a circular import on the bridge).
  */
 export interface RedactableRuntimeGraph {
-  nodes?: Array<{ key?: unknown; config?: unknown } | null | undefined> | null
+  // `type` is read by the bridge DTO to surface `currentNodeType` (Lock-3 §2.2 — tell a 办理 task
+  // apart from an approval task on the member surface). Still a raw JSONB view; no re-validation.
+  nodes?: Array<{ key?: unknown; type?: unknown; config?: unknown } | null | undefined> | null
 }
 
 /**

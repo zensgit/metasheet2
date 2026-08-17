@@ -7,7 +7,7 @@
 
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
-import type { FormSchema } from '../types/approval-product'
+import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -33,6 +33,11 @@ export interface UnifiedApprovalDTO {
   // so the read renders detail rows from the FROZEN schema, not the live template.
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
+  /**
+   * Lock-3 §2.2 — the current node's TYPE (from the frozen runtime graph). The member 待办 surface
+   * reads it to withhold approve/reject on a 办理 (handler) task. Absent ≡ not-a-handler.
+   */
+  currentNodeType?: ApprovalNodeType | null
   /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
