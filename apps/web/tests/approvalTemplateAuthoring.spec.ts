@@ -946,16 +946,17 @@ describe('TemplateAuthoringView', () => {
 
     // editor renders for the seeded approval node, hydrated to its current source
     expect(container!.querySelector('[data-approval-node="approval_1"]')).not.toBeNull()
-    const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
-    expect(kindSelect).not.toBeNull()
-    expect(kindSelect.value).toBe('direct_manager')
+    const currentKindRadio = container!.querySelector(
+      '[data-testid="approval-node-source-kind-direct_manager"]',
+    ) as HTMLInputElement
+    expect(currentKindRadio).not.toBeNull()
+    expect(currentKindRadio.checked).toBe(true)
 
     // change the source kind through the REAL control (direct_manager → dept_head — both valid
     // no-ID kinds; a static_* target would need IDs the multi-select stub can't drive, and that ID
     // logic is helper-covered. Note: switching to an EMPTY static_role correctly BLOCKS save via the
     // validation preview — proving validation is wired too), then save.
-    kindSelect.value = 'dept_head'
-    kindSelect.dispatchEvent(new Event('change'))
+    ;(container!.querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).click()
     await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1040,9 +1041,7 @@ describe('TemplateAuthoringView', () => {
       expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-node-source-ids-text"]')).toBeNull()
 
-      const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
-      kindSelect.value = 'static_user'
-      kindSelect.dispatchEvent(new Event('change'))
+      ;(container!.querySelector('[data-testid="approval-node-source-kind-static_user"]') as HTMLInputElement).click()
       await flushUi()
 
       expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()

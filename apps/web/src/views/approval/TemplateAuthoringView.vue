@@ -1700,14 +1700,41 @@ function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource):
 function approvalSourceKind(nodeKey: string): ApprovalAssigneeSourceKind {
   return approvalNodeFirstSource(nodeKey)?.kind ?? 'requester'
 }
+// Gate P1-1 fix: the roster is a native `role="radiogroup"` (APG requires arrows to move AND
+// select, so commit-on-arrow stays — see the L0-2 radio grid), which means an accidental
+// ArrowUp/ArrowDown traversal calls this on every focus step. Naively replacing
+// `assigneeSources[0]` with a fresh, empty-payload object per kind (the pre-fix behaviour) is
+// therefore destructive: one arrow out and one arrow back silently discarded a configured
+// `userIds`/`roleIds`/`fieldId`/`levels`/`level` with no undo (canvas history never records a
+// per-keystroke config edit — A-8) and no save path (the stripped payload fails node validation).
+// Fix: cache the outgoing payload per (nodeKey, kind) for this editing session BEFORE switching,
+// and restore it verbatim if the author switches back to a previously-configured kind. Cleared by
+// `resetApprovalSourceKindCache()` whenever the draft is reseeded from a fresh template/graph (see
+// `reseedCanvasHistoryFromDraft`) — the cache is a session convenience, never persisted.
+const approvalSourceKindCache = ref<Record<string, Partial<Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource>>>>({})
+function resetApprovalSourceKindCache(): void {
+  approvalSourceKindCache.value = {}
+}
+function cloneAssigneeSource(source: ApprovalAssigneeSource): ApprovalAssigneeSource {
+  return JSON.parse(JSON.stringify(source)) as ApprovalAssigneeSource
+}
+function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): ApprovalAssigneeSource {
+  return kind === 'static_user' ? { kind, userIds: [] }
+    : kind === 'static_role' ? { kind, roleIds: [] }
+      : kind === 'form_field_user' ? { kind, fieldId: '' }
+        : kind === 'continuous_managers' ? { kind, levels: 1 }
+          : kind === 'manager_at_level' ? { kind, level: 1 }
+            : { kind }
+}
 function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
-  const next: ApprovalAssigneeSource =
-    kind === 'static_user' ? { kind, userIds: [] }
-      : kind === 'static_role' ? { kind, roleIds: [] }
-        : kind === 'form_field_user' ? { kind, fieldId: '' }
-          : kind === 'continuous_managers' ? { kind, levels: 1 }
-            : kind === 'manager_at_level' ? { kind, level: 1 }
-              : { kind }
+  const current = approvalNodeFirstSource(nodeKey)
+  if (current && current.kind !== kind) {
+    const cacheForNode = approvalSourceKindCache.value[nodeKey] ?? {}
+    cacheForNode[current.kind] = cloneAssigneeSource(current)
+    approvalSourceKindCache.value = { ...approvalSourceKindCache.value, [nodeKey]: cacheForNode }
+  }
+  const cached = approvalSourceKindCache.value[nodeKey]?.[kind]
+  const next: ApprovalAssigneeSource = cached ? cloneAssigneeSource(cached) : defaultApprovalSourceForKind(kind)
   setApprovalNodeSource(nodeKey, next)
 }
 function approvalSourceIds(nodeKey: string): string[] {
@@ -1834,6 +1861,10 @@ function reseedCanvasHistoryFromDraft(): void {
     draft.value,
     currentCanvasSelection(),
   )
+  // P1-1 fix: every call site is a fresh draft/graph seed (load / save / preset / linear→graph
+  // promotion) — the per-kind assignee-source cache is session state for the PRIOR graph and must
+  // not leak into a differently-keyed node in a new one.
+  resetApprovalSourceKindCache()
 }
 
 function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
@@ -2299,10 +2330,25 @@ const userFields = computed(() => draft.value.fields.filter((field) => field.typ
 const fieldPermissionFields = computed(() => draft.value.fields.filter((field) => field.id.trim()))
 // Form fields that DRIVE routing (a form_field_user assignee source references them). Hiding one is
 // allowed — redaction is echo-only, so resolution is unaffected — but the UI surfaces a hint.
+//
+// Gate P2-1/D5 fix: this MUST read both authoring models, not just `draft.steps` (the linear step
+// list). Once a draft is promoted to graph authoring, `steps` is always `[]` — see
+// `draftFromEditedGraph` / `draftFromTemplate`'s `complex` branch — and the per-node source instead
+// lives on `draft.approvalNodeEdits[key].assigneeSources`. The canvas inspector mounts ONLY on
+// complex graphs, so a linear-only read left this computed structurally empty on exactly the
+// surface D5 targets (measured: `draft.steps.length === 0` there). One computed, unioning both
+// models, shared verbatim by the linear step editor (below) and the canvas graph inspector via
+// `nodeConfigEditorApi.routingDriverFieldIds` — the two surfaces render the hint under the identical
+// condition because they read the identical Set, not two independently-derived ones.
 const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
   for (const step of draft.value.steps) {
     if (step.sourceKind === 'form_field_user' && step.fieldId.trim()) ids.add(step.fieldId.trim())
+  }
+  for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    for (const source of edit.assigneeSources) {
+      if (source.kind === 'form_field_user' && source.fieldId.trim()) ids.add(source.fieldId.trim())
+    }
   }
   return ids
 })
@@ -2443,6 +2489,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalNodeFieldAccess,
   setApprovalNodeFieldAccess,
   nodeConfigSummary,
+  // Gate P2-1/D5: the graph-wide computed above (unions `draft.steps` + `draft.approvalNodeEdits`),
+  // not a node-local approximation — see that computed's comment for why a node-local read would be
+  // a narrower predicate than the linear editor's.
+  routingDriverFieldIds,
   onUserSearch,
   directoryUsers: directory.users,
   directoryUsersLoading: directory.usersLoading,

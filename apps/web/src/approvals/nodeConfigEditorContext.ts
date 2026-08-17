@@ -74,6 +74,21 @@ export interface ApprovalNodeConfigEditorApi {
   approvalNodeFieldAccess: (nodeKey: string, fieldId: string) => NodeFieldAccess
   setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: NodeFieldAccess) => void
   nodeConfigSummary: (node: ApprovalNode) => string[]
+  /**
+   * Lock-0 L0-6/D5 — graph-wide field ids referenced by ANY node's `form_field_user` assignee
+   * source (not just the node currently being edited). WIRED: `TemplateAuthoringView.vue` provides
+   * its `routingDriverFieldIds` computed here. That computed unions TWO models —
+   * `draft.steps` (linear authoring) and `draft.approvalNodeEdits[key].assigneeSources` (graph
+   * authoring) — because a naive pass-through of the pre-existing linear-only computed does NOT
+   * work: once a draft is promoted to graph authoring, `draft.steps` is always `[]` (see
+   * `draftFromEditedGraph` / `draftFromTemplate`'s `complex` branch), and the canvas inspector this
+   * field feeds mounts ONLY on complex graphs — so a linear-only read is structurally empty on
+   * exactly the surface D5 targets (measured: `draft.steps.length === 0` there, while
+   * `approvalNodeEdits` carries the live `form_field_user` sources). OPTIONAL only so
+   * component-level tests that don't need D5 (most of the suite) can omit it — the property is
+   * always present on the shipped app's api object.
+   */
+  routingDriverFieldIds?: ComputedRef<Set<string>> | Ref<Set<string>> | Set<string>
   onUserSearch: (query: string) => void | Promise<void>
   directoryUsers: ComputedRef<Array<{ id: string }>> | Ref<Array<{ id: string }>> | Array<{ id: string }>
   directoryUsersLoading: ComputedRef<boolean> | Ref<boolean> | boolean
