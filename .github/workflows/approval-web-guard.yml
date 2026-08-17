@@ -169,6 +169,12 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
+      # the presentational pane, its pure generation-counter race-guard controller, and both specs.
+      - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
+      - 'apps/web/src/approvals/approvalCenterDetailPaneController.ts'
+      - 'apps/web/tests/approval-center-master-detail.spec.ts'
+      - 'apps/web/tests/approval-center-detail-pane-controller.test.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -384,6 +390,12 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
+      # the presentational pane, its pure generation-counter race-guard controller, and both specs.
+      - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
+      - 'apps/web/src/approvals/approvalCenterDetailPaneController.ts'
+      - 'apps/web/tests/approval-center-master-detail.spec.ts'
+      - 'apps/web/tests/approval-center-detail-pane-controller.test.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -578,4 +590,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff --reporter=dot
