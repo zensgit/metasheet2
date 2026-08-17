@@ -496,8 +496,19 @@ export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
 // nested link semantics are undefined — top-level only). `date_range` is v1-excluded from detail
-// (Lock-8 OD-L8-4, a POSITIVE edit — this filter is what B-4's mutation removes to prove the
-// exclusion is load-bearing, not a default).
+// (Lock-8 OD-L8-4, a POSITIVE edit) — belt-and-suspenders with the explicit `nested` guard inside
+// `normalizeFormField`'s date_range block below (`if (nested) failValidation(...)`). CORRECTION
+// (PR #4964 gate F3): that explicit guard fires FIRST for a nested date_range column — it throws
+// before `normalizeDetailFieldParts` ever reaches this set's `.has()` check below — so removing
+// ONLY this filter's date_range exclusion is NOT observable through the public create/update API
+// (the earlier guard pre-empts it) and B-4's test (`.rejects.toThrow(/date_range cannot nest.../)`)
+// pins THAT guard's message, not this one. This filter's own date_range exclusion is confirmed
+// independently load-bearing only in combination — removing BOTH guards together genuinely admits
+// date_range as a detail column (mutation-verified); removing only the explicit guard makes THIS
+// filter the one that rejects (with its own, different message) — see approval-lock8-date-range
+// .test.ts's OD-L8-4 describe block for the full mutation log. Earlier PR-body language claiming
+// this filter alone is "what B-4's mutation removes to prove load-bearing" was imprecise and has
+// been corrected.
 const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
     (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range',

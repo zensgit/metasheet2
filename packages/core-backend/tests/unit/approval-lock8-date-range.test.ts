@@ -188,6 +188,31 @@ describe('Lock-8 L8-B date_range field contract (approval-lock8-field-vocabulary
     expect(Object.prototype.hasOwnProperty.call(field.props, 'durationLabel')).toBe(false)
   })
 
+  // Double guard (belt-and-suspenders, mirrors record-link): `normalizeFormField`'s explicit
+  // `if (nested) failValidation('date_range cannot nest inside a detail group (v1)')` AND
+  // `ApprovalProductService.ts`'s module-private `DETAIL_LEAF_FIELD_TYPES` set (which excludes
+  // date_range) both independently reject a date_range detail column. PR #4964 gate F3 correction:
+  // for THIS specific input, the explicit guard always fires first — `normalizeDetailFieldParts`
+  // calls `normalizeFormField(column, ..., nested=true)` before it ever reaches its own
+  // `DETAIL_LEAF_FIELD_TYPES.has()` check, so the explicit guard throws before that line runs.
+  // Consequently, mutation-testing this single test below (cp-backup + sha256 restore each time):
+  //   - removing ONLY the DETAIL_LEAF_FIELD_TYPES exclusion → test STAYS GREEN (the mutated line
+  //     is never reached for this input — the explicit guard pre-empts it, not "redundantly
+  //     catches the same case", but literally unreachable code for this call);
+  //   - removing ONLY the explicit `if (nested)` guard → test REDS, but NOT because date_range was
+  //     admitted — control now reaches DETAIL_LEAF_FIELD_TYPES.has('date_range') === false, which
+  //     independently rejects with a DIFFERENT message ("...type is not a valid leaf sub-field")
+  //     that doesn't match this test's `/date_range cannot nest inside a detail group/` regex;
+  //   - removing BOTH → date_range is genuinely admitted as a detail column (number positive
+  //     control below stays green throughout).
+  // So this test pins the EXPLICIT guard's message specifically, not the filter's — an earlier
+  // PR-body/code-comment claim that the filter "is what B-4's mutation removes to prove
+  // load-bearing" was imprecise and has been corrected. No standalone test asserts the filter's
+  // rejection message directly: `DETAIL_LEAF_FIELD_TYPES` has exactly one call site
+  // (`normalizeDetailFieldParts`), always downstream of the explicit guard for a date_range
+  // column, so that message is not reachable through the public create/update API while both
+  // guards coexist — asserting "the filter alone rejects" as a green, always-passing test would
+  // misrepresent reachability (not written, per house rule against fabricating evidence).
   describe('OD-L8-4: detail-column eligibility — date_range EXCLUDED (positive edit)', () => {
     it('date_range as a detail column FAILS publish', async () => {
       await expect(create(wrap({
