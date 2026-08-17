@@ -3,6 +3,7 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 
 /**
  * Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 (docs/development/approval-lock4-flow-policies-20260817.md
@@ -350,5 +351,234 @@ describeIfDatabase('Approval dedup round-scoping — a return invalidates pre-re
     // only tolerates a single return.
     const afterP3 = await act.p({ action: 'approve', comment: 'P r3' })
     expect(afterP3.currentNodeKey).toBe('approval_c')
+  })
+
+  // Adversarial-gate P2-1 (PR #4965 review): every test above returns TO the node whose OWN
+  // dedup evaluation the assertion checks, so that evaluation runs through the RETURN call site's
+  // `[]` seed — NOT the durable `to_version` floor in `loadApprovalHistory`. Reverting ONLY the
+  // floor (keeping the `[]` seed) therefore left all three prior tests green: they never exercised
+  // the floor at all. This test isolates the floor specifically: the return targets an EARLIER
+  // node (B), so the node under test (C) is re-reached via a NORMAL forward advance in round 2 —
+  // through `loadApprovalHistory`, the floor-guarded path — not through the return's own seed.
+  it('ISOLATED floor proof: a return to an EARLIER node still round-scopes a node reached later via ordinary forward advance', async () => {
+    const p = `dedup-rs-p-${TS}-iso`
+    const q = `dedup-rs-q-${TS}-iso`
+    const r = `dedup-rs-r-${TS}-iso`
+    const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-iso`)
+    const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-iso`)
+    await grantWrite(`dedup-rs-req-${TS}-iso`)
+    const pTok = await authToken(baseUrl, p)
+    const qTok = await authToken(baseUrl, q)
+    const rTok = await authToken(baseUrl, r)
+
+    const templateId = await publishGraphTemplate(adminToken, buildHistoricalGraph(p, q, r), { dedupeHistoricalApprover: true })
+    const inst = await createApproval(requesterToken, templateId, 'r')
+    expect(inst.currentNodeKey).toBe('approval_a')
+    const act = { p: actor(pTok, inst.id), q: actor(qTok, inst.id), r: actor(rTok, inst.id) }
+
+    // Round 1: P approves A; B (Q) has no match; Q approves B; C (P) auto-dedupes against A ->
+    // advances to D (R, no match, stays pending). Positive control that the mechanism fires at all.
+    await act.p({ action: 'approve', comment: 'P r1' })
+    const afterQ1 = await act.q({ action: 'approve', comment: 'Q r1' })
+    expect(afterQ1.currentNodeKey).toBe('approval_d')
+
+    // R (at D) returns to B — EARLIER than C, the node whose evaluation this test isolates. B's
+    // OWN re-entry (protected by the `[]` seed, already covered elsewhere) is not the assertion
+    // here; only a light sanity check.
+    const afterReturn = await act.r({ action: 'return', targetNodeKey: 'approval_b', comment: 'send back to B' })
+    expect(afterReturn.status).toBe('pending')
+    expect(afterReturn.currentNodeKey).toBe('approval_b')
+
+    // Round 2: Q approves B (a GENUINE, non-seeded dispatch call). C activates and its dedupe
+    // check runs through `loadApprovalHistory` — the FLOOR-guarded path. A_round1:P predates the
+    // return and must be excluded; round 2 has recorded no P-actor approval yet, so C must stay
+    // PENDING. Without the floor (P2-1's isolated mutation), C would wrongly re-dedupe against the
+    // stale A_round1:P entry and leak forward to D.
+    const afterQ2 = await act.q({ action: 'approve', comment: 'Q r2' })
+    expect(afterQ2.status).toBe('pending')
+    expect(afterQ2.currentNodeKey).toBe('approval_c')
+  })
+
+  // Adversarial-gate P2-2 (PR #4965 review, live-reproduced): `applyNodeTimeoutEffect`'s jump
+  // effect reaches its target through the SAME `resolveReturnToNode` resolver a manual return
+  // uses, but stamped `action:'jump'`. A BACKWARD jump (target already visited) is exactly as
+  // nullifying as an unfloored manual return if the floor only recognizes `action='return'`. A
+  // FORWARD jump (skipping ahead) is legitimate progress — matching admin jump's structurally
+  // forward-only design (`isReachableDownstream`) — and must NOT re-floor.
+  describe('timeout-jump direction-aware re-entry (Lock-4 OD-L4-10(a) corrected boundary: backward re-entry, not literal return)', () => {
+    async function forceDeadlineOverdue(instanceId: string, effect: string): Promise<void> {
+      let prev = ''
+      let stable = 0
+      for (let attempt = 0; attempt < 60 && stable < 3; attempt++) {
+        const row = await pool().query<{ current_node_deadline_at: unknown; current_node_timeout_effect: string | null }>(
+          `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1`,
+          [instanceId],
+        )
+        const sig = `${row.rows[0]?.current_node_timeout_effect ?? 'null'}|${row.rows[0]?.current_node_deadline_at ? 'set' : 'null'}`
+        stable = sig === prev ? stable + 1 : 0
+        prev = sig
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(stable).toBeGreaterThanOrEqual(3)
+      const updated = await pool().query(
+        `UPDATE approval_metrics
+           SET current_node_deadline_at = now() - INTERVAL '1 minute',
+               current_node_timeout_effect = $2
+         WHERE instance_id = $1
+         RETURNING instance_id`,
+        [instanceId, effect],
+      )
+      expect(updated.rows).toHaveLength(1)
+    }
+
+    function buildBackwardJumpGraph(p: string, q: string) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          approvalNode('approval_a', p),
+          approvalNode('approval_b', p),
+          {
+            key: 'approval_c',
+            type: 'approval',
+            config: {
+              assigneeType: 'user',
+              assigneeIds: [q],
+              approvalMode: 'single',
+              timeout: { afterMinutes: 1, effect: 'jump', jumpToNodeKey: 'approval_a' },
+            },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_a' },
+          { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+          { key: 'e-b-c', source: 'approval_b', target: 'approval_c' },
+          { key: 'e-c-end', source: 'approval_c', target: 'end' },
+        ],
+      }
+    }
+
+    it('GATE: a BACKWARD timeout-jump does NOT nullify — the re-entered node stays PENDING, not silently re-merged against stale history', async () => {
+      const p = `dedup-rs-p-${TS}-bwjump`
+      const q = `dedup-rs-q-${TS}-bwjump`
+      const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-bwjump`)
+      const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-bwjump`)
+      await grantWrite(`dedup-rs-req-${TS}-bwjump`)
+      const pTok = await authToken(baseUrl, p)
+
+      const templateId = await publishGraphTemplate(adminToken, buildBackwardJumpGraph(p, q), { mergeAdjacentApprover: true })
+      const inst = await createApproval(requesterToken, templateId, 'r')
+      expect(inst.currentNodeKey).toBe('approval_a')
+      const act = { p: actor(pTok, inst.id) }
+
+      // Positive control: P approves A; B (also P) auto-merges as adjacent -> C.
+      const afterP1 = await act.p({ action: 'approve', comment: 'P r1' })
+      expect(afterP1.currentNodeKey).toBe('approval_c')
+
+      // C's timeout fires and jumps BACKWARD to A (already visited).
+      await forceDeadlineOverdue(inst.id, 'jump')
+      const service = new ApprovalProductService()
+      const outcome = await service.applyNodeTimeoutEffect(inst.id, 'jump')
+      expect(outcome).toBe('applied')
+
+      const afterJump = await pool().query<{ status: string; current_node_key: string | null }>(
+        `SELECT status, current_node_key FROM approval_instances WHERE id = $1`,
+        [inst.id],
+      )
+      // GATE: A must stay PENDING, not silently re-merge against B's stale round-1 approval.
+      expect(afterJump.rows[0]?.status).toBe('pending')
+      expect(afterJump.rows[0]?.current_node_key).toBe('approval_a')
+
+      // The jump row is stamped for the floor to key on.
+      const jumpRecord = await pool().query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'jump' ORDER BY created_at DESC LIMIT 1`,
+        [inst.id],
+      )
+      expect(jumpRecord.rows[0]?.metadata?.backwardReentry).toBe(true)
+
+      // Continuation: a genuine round-2 approval at A lets the same adjacent-merge fire again.
+      const afterP2 = await act.p({ action: 'approve', comment: 'P r2' })
+      expect(afterP2.currentNodeKey).toBe('approval_c')
+    })
+
+    // A(P) -> B(X, timeout: FORWARD jump to D, skipping C) -> C(Y) -> D(P) -> E(Z). P approves A
+    // (creating the only history entry) and B — NOT A — is left the genuinely active/pending node
+    // whose own timeout fires, so `applyNodeTimeoutEffect` re-validates against B's OWN config
+    // (matching `instance.current_node_key` at fire time) rather than skipping stale. D auto-dedupes
+    // against A (composing across the forward jump) and advances to E — pending, not terminal, so
+    // this test does not depend on the separately-gated QS-b terminal-cascade flag.
+    function buildForwardJumpGraph(p: string, x: string, y: string, z: string) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          approvalNode('approval_a', p),
+          {
+            key: 'approval_b',
+            type: 'approval',
+            config: {
+              assigneeType: 'user',
+              assigneeIds: [x],
+              approvalMode: 'single',
+              timeout: { afterMinutes: 1, effect: 'jump', jumpToNodeKey: 'approval_d' },
+            },
+          },
+          approvalNode('approval_c', y),
+          approvalNode('approval_d', p),
+          approvalNode('approval_e', z),
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_a' },
+          { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+          { key: 'e-b-c', source: 'approval_b', target: 'approval_c' },
+          { key: 'e-c-d', source: 'approval_c', target: 'approval_d' },
+          { key: 'e-d-e', source: 'approval_d', target: 'approval_e' },
+          { key: 'e-e-end', source: 'approval_e', target: 'end' },
+        ],
+      }
+    }
+
+    it('POSITIVE CONTROL: a FORWARD timeout-jump is legitimate progress and still composes — it does NOT re-floor', async () => {
+      const p = `dedup-rs-p-${TS}-fwjump`
+      const x = `dedup-rs-x-${TS}-fwjump`
+      const y = `dedup-rs-y-${TS}-fwjump`
+      const z = `dedup-rs-z-${TS}-fwjump`
+      const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-fwjump`)
+      const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-fwjump`)
+      await grantWrite(`dedup-rs-req-${TS}-fwjump`)
+      const pTok = await authToken(baseUrl, p)
+
+      const templateId = await publishGraphTemplate(adminToken, buildForwardJumpGraph(p, x, y, z), { dedupeHistoricalApprover: true })
+      const inst = await createApproval(requesterToken, templateId, 'r')
+      expect(inst.currentNodeKey).toBe('approval_a')
+      const act = { p: actor(pTok, inst.id) }
+
+      // P approves A (the ONLY history entry) -> B activates (assignee X, no match) and is left the
+      // genuinely PENDING current node. B's OWN timeout jumps FORWARD to D, skipping C.
+      const afterP1 = await act.p({ action: 'approve', comment: 'P r1' })
+      expect(afterP1.currentNodeKey).toBe('approval_b')
+      await forceDeadlineOverdue(inst.id, 'jump')
+      const service = new ApprovalProductService()
+      const outcome = await service.applyNodeTimeoutEffect(inst.id, 'jump')
+      expect(outcome).toBe('applied')
+
+      // The jump row is NOT stamped backward.
+      const jumpRecord = await pool().query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'jump' ORDER BY created_at DESC LIMIT 1`,
+        [inst.id],
+      )
+      expect(jumpRecord.rows[0]?.metadata?.backwardReentry).toBeUndefined()
+
+      // D's assignee is the SAME P who approved A — dedupeHistoricalApprover composes across the
+      // forward jump exactly as the pre-existing "compose after the jump" behavior promises: D
+      // auto-dedupes immediately (skipping straight to E, pending). A floored/blocked forward jump
+      // would instead leave D pending — the discriminating difference from the backward case above.
+      const afterJump = await pool().query<{ status: string; current_node_key: string | null }>(
+        `SELECT status, current_node_key FROM approval_instances WHERE id = $1`,
+        [inst.id],
+      )
+      expect(afterJump.rows[0]?.status).toBe('pending')
+      expect(afterJump.rows[0]?.current_node_key).toBe('approval_e')
+    })
   })
 })
