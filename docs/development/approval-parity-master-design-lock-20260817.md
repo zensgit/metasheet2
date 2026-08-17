@@ -156,7 +156,7 @@ work until its named lock is drafted, reviewed, and explicitly ratified by the o
 | Lock-5 | per-node operation and member-action policy | NOT DRAFTED | owner |
 | Lock-6 | requester and global approval/document policy | NOT DRAFTED | owner |
 | Lock-7 | server-enforced readonly/editable field semantics for a named edit surface | NOT DRAFTED | owner |
-| Lock-8 | bounded additional field vocabulary, excluding department/contact, exact money, and number FWB | NOT DRAFTED | owner |
+| Lock-8 | bounded additional field vocabulary, excluding department/contact, exact money, and number FWB | RATIFIED — `approval-lock8-field-vocabulary-20260817.md` §4 (2026-08-17, goal-set provenance; nine ODs per document recommendations) | owner |
 
 ### M1 - No graph or renderer rewrite
 
