@@ -434,6 +434,49 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
   })
 
   // -------------------------------------------------------------------------
+  // G-B2-16 — pre-existing auto-sum 大写 caption, gap-closure (adversarial gate on #4959, P3-1):
+  // `amountWordsFor` was refactored from `(fieldId: string)` to `(field: FormField)` by the L8-C
+  // slice above, and the auto-sum branch's call shape was asserted "byte-identical" in that PR's
+  // own comment, but no test anywhere (base OR this PR) rendered the auto-summed-total 大写 caption
+  // in the view — mutation-proof below.
+  // -------------------------------------------------------------------------
+  it('G-B2-16: the auto-summed-total field (isAutoSummedTotal branch of amountWordsFor) renders the 大写 caption', async () => {
+    // `amount.defaultValue: 300` matches the declared detail rows' sum (100+200) so the asserted
+    // caption is correct under EITHER path this harness can exercise: the real `useAutoSumTotal`
+    // recompute (this describe block's `ElTable`/`ElTableColumn` stubs are dumb pass-throughs that
+    // don't render row content, so detail-row reactivity can't be independently observed here) or
+    // the defaultValue seed — both converge on the same total, so the assertion is not sensitive to
+    // which one wins. `useAutoSumTotal`'s OWN auto-sum computation is already covered exhaustively
+    // in `useAutoSumTotal.test.ts`; this test's job is narrower — proving `isAutoSummedTotal(id) ===
+    // true` alone (confirmed independently below via the pre-existing "由明细自动汇总" hint) drives
+    // `amountWordsFor` into its FIRST branch and the view renders the resulting caption.
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_autosum_words',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '总额', required: true, defaultValue: 300 } as FormField,
+          {
+            id: 'items', type: 'detail', label: '明细', required: false,
+            defaultValue: [{ amount: 100 }, { amount: 200 }],
+            columns: [{ id: 'amount', type: 'number', label: '金额', required: true }],
+          } as FormField,
+        ],
+        amountConsistencyCheck: { totalFieldId: 'amount', detailFieldId: 'items', amountColumnId: 'amount' },
+      } as any,
+    })
+    await mountView()
+    await flushUi()
+    // Confirms isAutoSummedTotal('amount') is true (the pre-existing, unrelated read-only hint
+    // shares that same predicate) — so the caption below is proven trigger-selected, not a
+    // coincidence of some other condition.
+    expect(container!.innerHTML).toContain('由明细自动汇总，无需手填')
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('叁佰圆整')
+  })
+
+  // -------------------------------------------------------------------------
   // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display —
   // currency/thousands caption + the per-field 大写 trigger, additive to the pre-existing
   // auto-summed-total trigger (§0.4 — neither replaces the other).
