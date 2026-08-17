@@ -87,8 +87,9 @@ runtime reads one, and a switch nothing reads is master M8 theater.
 **Submit-time validation closes a fail-open.** `validateFieldType` (`ApprovalGraphExecutor.ts:412-413`) ends
 `default: return null` and `validateFieldConstraints` (`:552-553`) ends `default: return []`, so a new member
 is **auto-admitted with no value validation whatsoever**. The slice adds an explicit `case 'department'`
-structural parse in the `record-link` mould (`parseRecordLinkFormValue`, `:403-411`): an array of `{ id }`
-objects, non-blank, no duplicates, no extra keys, length 1 under `single`, ≤ `maxSelections` under `multi`.
+structural parse in the `record-link` mould (`parseRecordLinkFormValue`, defined `:422-431` and called from the
+`case 'record-link'` arm at `:403-411`): an array of `{ id }` objects, non-blank, no duplicates, no extra keys,
+length 1 under `single`, ≤ `maxSelections` under `multi`.
 
 **Existence and corp scoping is async, and needs an anchor the create path lacks (OD-L2-8).**
 `directory_departments` carries **no `org_id` and no `corp_id`** (migration `:44-57`); tenancy is transitive
@@ -174,18 +175,26 @@ C-3's third option, 联系人自己, is the **shipped `form_field_user`** and ge
 **Field-anchored, not requester-anchored — that is the whole boundary with Lock-1.** Lock-1 K4/K5-b address
 the same two pointers and its §K4 establishes they are genuinely different pointers on different trees; what
 differs here is only the **anchor**. Stated precisely so no reader infers a shipped walker:
-`external_parent_department_id` is referenced **nowhere** in `ApprovalDirectoryOrg.ts` at this baseline — the
-only recursive parent walk in the repo is `directory/local-directory-org.ts` (`:109-114`, `:311+`), serving
-the `provider='local'` directory CRUD subsystem, not approval routing. The parent-tree walker is therefore
-Lock-1 K4's to BUILD, this document re-anchors it to take an anchor department rather than deriving one from
-the requester, and `form_field_dept_head` is sequenced after K4 rather than duplicating it. The multi-head
+`external_parent_department_id` is referenced **nowhere** in `ApprovalDirectoryOrg.ts` at this baseline, and no
+reusable **upward/ancestor** walker over that column exists anywhere — the recursive traversals that do exist
+walk DESCENDANTS for role-delegation scoping (`routes/admin-users.ts:1477`, `:1532`, `:1631`) or serve the
+`provider='local'` directory CRUD subsystem (`directory/local-directory-org.ts:109-114`, `:311+`); none is an
+ancestor walk and none is on an approval-routing path. The parent-tree walker is therefore Lock-1 K4's to
+BUILD, this document re-anchors it to take an anchor department rather than deriving one from the requester,
+and `form_field_dept_head` is sequenced after K4 rather than duplicating it. **Lock-1 §K4's empty-level
+posture is RATIFIED and binds that walker and this document's re-anchored use of it:** a level whose manager
+list is empty or resolves to no linked user contributes nothing and the walk CONTINUES upward. That is
+buildable on the parent tree precisely because the next level comes from the structural parent pointer rather
+than from the current level's occupants (§4 records one citation imprecision in Lock-1's supporting precedent;
+it changes no behavior and re-opens nothing). The multi-head
 "primary" rule is inherited byte-identically from shipped `dept_head` (*first external id in `raw` order,
 excluding the requester, that resolves to a LINKED local user*, `:466-478`) via Lock-1 K4 and is not
 re-specified. `dept_manager_userid_list` is a key inside the department's `raw` JSONB, not a column, and
 `parseDeptManagerExternalIds` (`:137-147`) accepts both spellings (`:139`).
 
-**Levels.** `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` (`ApprovalDirectoryOrg.ts:101`, default 10
-at `:76`) at the authoring choke exactly as the shipped kinds are — never coerced, never defaulted;
+**Levels.** `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` at the authoring choke exactly as the shipped
+kinds are (`ApprovalProductService.ts:616-631`, explicit `failValidation` and "never silently defaulted"; the
+constant is `ApprovalDirectoryOrg.ts:101`, default 10 at `:76`) — never coerced, never defaulted;
 `level: 1` is the chosen anchor's own manager or listed head. **Upward only in v1**: per C-5 the corpus
 spells out 向上加 n / 向下减 n for the requester-keyed kinds but says only 可指定层级 for the form-field rows,
 which per M11 is absence of evidence about direction, not evidence of unidirectionality — and Lock-1 OD-L1-6
@@ -217,9 +226,11 @@ payload inside `validateApprovalFormData`, and pruning a controlling value can f
 passes, but a field with no rule is visible in both passes regardless of data. **Severity, honestly:**
 `emptyAssigneePolicy` absent ≡ `'error'` and both executor arms test `=== 'auto-approve'` (`:1019-1035`,
 `:1311-1327`), so the silent-approval outcome requires an author to have opted in; the wrong-approver and
-no-approver outcomes do not. **Provenance:** Lock-1 does not address this — its §K2 is `requester_choice`,
-and neither its K-sections nor its §2 mention `form_field_user` or a required pin. The hole is this
-document's finding at this baseline; its retrofit is OD-L2-4.
+no-approver outcomes do not. **Provenance:** Lock-1 does not address this — its §K2 is `requester_choice`, and
+neither its K-sections nor its §2 mention `form_field_user` or a required pin. The hole is this document's
+finding **relative to the lock lineage**, not an absolute first sighting: the 2026-08-16 corpus digest (a
+scratchpad working note, not a lock) already recorded *"form_field_user 无 required pin(静默空洞)"*. What is
+new here is that no ratified document owns it; the retrofit is OD-L2-4.
 
 **Empty, unresolvable, and failed reads are three different things.** Value ABSENT is made impossible by pins
 (3)+(4) and additionally rejected by the independent create-time door in §2.2. Value PRESENT but resolving
@@ -372,7 +383,11 @@ Decision: <RATIFY | REQUEST CHANGES | REJECT>
 Owner:
 Date:
 Document SHA:
-Independent review: (none recorded)
+Independent review: independent adversarial review of head a30970af13 returned REQUEST-CHANGES with one
+  P1 (this block's Lock-1 §K4 disposition), one P2 (OD-L2-8(a)'s omitted cost), one P3 and four NITs; it
+  refuted no code claim and spot-verified 15 load-bearing claim groups against origin/main. All seven were
+  applied in the fix round that produced this text. This field records the review only — the decision,
+  owner, date, and SHA above remain blank for the owner.
 Decisions required ([R] = this document's recommendation; rejected options carry their citation so
 they are not re-proposed):
 
@@ -402,28 +417,39 @@ they are not re-proposed):
            well, a fourth kind, and `CcNodeConfig` is a separate contract (Lock-1 §K1 / OD-L1-7) · (b) admit
            the approval-node shape on cc now [narrows a corpus-evidenced capability silently] · (c) design
            the fourth kind here
-  OD-L2-7  `user` `selection: 'multi'` and the single-valued reader — (a)[R] array support lands in the SAME
-           slice as the prop; until then publish rejects a multi-selection `user` field referenced by any
-           assignee source · (b) ship the prop first [rejected §L2-B: widening
+  OD-L2-7  `user` `selection: 'multi'` and the single-valued reader — **a confirm-or-veto, not a choice**: arm
+           (b) is rejected in its own text, so what is asked of the owner is confirmation of (a) — (a)[R] array
+           support lands in the SAME slice as the prop; until then publish rejects a multi-selection `user`
+           field referenced by any assignee source · (b) ship the prop first [rejected §L2-B: widening
            `ApprovalGraphExecutor.ts:351-355` without extending `resolveFormUserValue`
            (`ApprovalAssigneeResolver.ts:44-51`, arrays → null) resolves the node to NOBODY, and an
            author-selected `emptyAssigneePolicy:'auto-approve'` then auto-approves silently]
   OD-L2-8  When the department existence/corp check runs, given the create path passes no `orgId` (`:4794`) —
            (a)[R] on every `department` field, anchored to the create's canonical integration, accepting one
            org resolution for templates that carry the control but route on nothing (otherwise unvalidated
-           uuids enter the snapshot and the print surface) · (b) only when a field-derived source references
-           the field, leaving unrouted values unvalidated · (c) start passing `orgId` on the create path — a
-           separate decision changing requester-relation resolution for every approval
+           uuids enter the snapshot and the print surface). **Accepted cost the owner must see before choosing
+           (a):** a requester with no directory account, or an org with no integration, has NO anchor, so under
+           (a) every submitted department id fails values-free and **any template merely carrying a department
+           control becomes unsubmittable for that requester** — including display-only templates that route on
+           nothing. Arm (b) confines that blast radius to routed fields. · (b) only when a field-derived source
+           references the field, leaving unrouted values unvalidated but keeping unlinked requesters able to
+           submit display-only department fields · (c) start passing `orgId` on the create path — a separate
+           decision changing requester-relation resolution for every approval
 
 Unverified at this baseline, recorded so no later document treats it as settled:
   - Whether any persisted `user` form field carries `props` today (OD-L2-2's census is a slice deliverable,
     not a finding here), and whether `is_active=false` department rows arise from the sync writer's normal
     path or only from deprovision (gate A-3 asserts the behavior either way).
-  - Whether Lock-1 K4's parent-tree walk continues past a level with no resolvable manager. Lock-1 §K4
-    asserts it does, citing `resolveManagerChain`'s dense-chain posture; that function walks the LEADER
-    pointer, breaks at `ApprovalDirectoryOrg.ts:601` when a hop is absent, and never reads
-    `external_parent_department_id`. The parent-tree walker does not exist yet, so this is K4's to settle
-    when it is built — recorded only so the two documents are not read as agreeing.
+  - A Lock-1 ERRATUM CANDIDATE, owner-side, with no behavior at stake and nothing re-opened. Lock-1 §K4's
+    rule — a level whose manager list is empty or resolves to no linked user contributes nothing and the walk
+    CONTINUES upward — is RATIFIED, is expressly marked "not an owner enum", and §L2-C above treats it as
+    BINDING on the to-be-built parent-tree walker. The narrow imprecision is only in its supporting cite:
+    `resolveManagerChain` (`ApprovalDirectoryOrg.ts:585-615`) walks the LEADER pointer, and `:605-608`
+    evidences dense-chain continue for the hop-found-but-UNLINKED arm only; the empty-list analogue in that
+    walk necessarily `break`s at `:601`, because an absent leader removes the next anchor itself. On the parent
+    tree there is no such coupling — the next level comes from `external_parent_department_id` — so Lock-1's
+    rule is coherent and buildable and rests on its own ratified authority rather than on that precedent.
+    Recorded so the two documents are not read as disagreeing; correcting the cite is the owner's call.
   - Lock-8's MS-1…MS-13 census and its invariant 2.6 note that no FE per-type property editor exists are
     cited from a PROPOSED branch document and are not re-verified site-by-site here; the five sites §2.7
     names WERE read at this baseline.
