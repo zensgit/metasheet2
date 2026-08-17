@@ -2593,6 +2593,10 @@ function toApprovalTemplateDetailDTO(bundle: TemplateBundle): ApprovalTemplateDe
     ...toApprovalTemplateListItemDTO(bundle.template),
     formSchema: asFormSchema(bundle.version.form_schema),
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
+    // L6-P1 carrier fix — the active published definition's policy, or null pre-publish. Every
+    // caller of this builder passes an honest `publishedDefinition` (never a hardcoded stand-in),
+    // so this is the single point that turns "was there a publish" into the authoring-facing field.
+    policy: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph).policy : null,
   }
 }
 
@@ -4172,6 +4176,15 @@ export class ApprovalProductService {
         version = bundle?.version ?? null
       }
 
+      // L6-P1 carrier fix — was hardcoded `publishedDefinition: null` regardless of whether the
+      // template has an active published definition. That hardcode is the second half of the
+      // shipped defect: `persistDraft()` re-hydrates the FE draft from THIS response
+      // (`draft.value = draftFromTemplate(updated)`), immediately before `confirmPublish` reads
+      // the draft back to build the next publish payload — so a wrong-null here silently dropped
+      // any policy field the editor doesn't own (e.g. `autoApproval`) one step before the
+      // republish that was supposed to carry it forward.
+      const publishedDefinition = await this.loadActivePublishedDefinition(client, template)
+
       await client.query('COMMIT')
 
       if (!version) {
@@ -4181,7 +4194,7 @@ export class ApprovalProductService {
       return toApprovalTemplateDetailDTO({
         template,
         version,
-        publishedDefinition: null,
+        publishedDefinition,
       })
     } catch (error) {
       await rollbackQuietly(client)
@@ -8165,6 +8178,31 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion, actor)
+  }
+
+  /**
+   * L6-P1 carrier fix — the template's ACTIVE published definition (keyed by
+   * `template.active_version_id`), independent of whichever version an in-flight edit is
+   * building. `updateTemplate` needs this: it may be returning a NEW (never-published) draft
+   * version, and the previously-active policy must still surface on that response so
+   * `persistDraft()` → `draftFromTemplate` does not clobber the FE draft's carried-forward
+   * policy with a hardcoded absence right before a republish reads it back off. Returns null for
+   * a template that has never been published (`active_version_id` absent).
+   */
+  private async loadActivePublishedDefinition(
+    client: { query: typeof pool.query },
+    template: TemplateRow,
+  ): Promise<PublishedDefinitionRow | null> {
+    if (!template.active_version_id) return null
+    const result = await client.query<PublishedDefinitionRow>(
+      `SELECT *
+       FROM approval_published_definitions
+       WHERE template_version_id = $1
+       ORDER BY is_active DESC, published_at DESC
+       LIMIT 1`,
+      [template.active_version_id],
+    )
+    return result.rows[0] || null
   }
 
   /**

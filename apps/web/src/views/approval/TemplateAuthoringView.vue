@@ -1079,6 +1079,7 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildPublishPolicy,
   buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
@@ -3072,7 +3073,10 @@ async function confirmPublish() {
     // payload identical to pre-B3-09 publishes when the admin typed nothing.
     const note = publishNote.value.trim()
     await publishTemplate(saved.id, {
-      policy: { allowRevoke: draft.value.allowRevoke },
+      // L6-P1 carrier fix — was `{ allowRevoke: draft.value.allowRevoke }`, a REPLACE that
+      // destroyed any sibling policy field (e.g. `autoApproval`) set only through the publish
+      // API. `buildPublishPolicy` merges onto the persisted `originalPolicy` instead.
+      policy: buildPublishPolicy(draft.value),
       ...(note ? { note } : {}),
     })
     ElMessage.success('模板已发布')

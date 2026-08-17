@@ -83,6 +83,8 @@ function mockTemplateDetail(id: string): ApprovalTemplateDetailDTO {
     category: '请假',
     status: 'published',
     activeVersionId: 'ver_1_1',
+    // L6-P1 carrier fix — dev-mode fixture now mirrors the real DTO shape (previously omitted).
+    policy: { allowRevoke: true },
     formSchema: { fields: mockFormFields() },
     approvalGraph: {
       nodes: [
