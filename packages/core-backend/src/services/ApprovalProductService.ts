@@ -3297,6 +3297,15 @@ function evaluateAutoApprovalAssignment(
 ): AutoApprovalEvaluation | null {
   if (assignment.assignmentType !== 'user') return null
 
+  // Lock-3 §2.4 — HANDLER nodes are EXEMPT from auto-approval / dedup: no handler node is ever
+  // auto-completed, and a requester who is themself a handler (提交人本人) must keep their handler
+  // seat rather than have merge-with-requester dispose of it. Return BEFORE reading the effective
+  // policy (a TEMPLATE-level policy applies to every node) and BEFORE `getApprovalMode`, which would
+  // throw for a handler key — so a handler + a template-level auto-approval policy never crashes the
+  // cascade. `getEffectiveAutoApprovalPolicy` already returns node-`source` only for `approval` nodes.
+  const node = runtimeGraph.nodes.find((entry) => entry.key === assignment.nodeKey)
+  if (node?.type === 'handler') return null
+
   const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
   if (!effectivePolicy) return null
 

@@ -590,6 +590,59 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect(approveRowsAtHandler).toHaveLength(0)
   })
 
+  // ── G-15 — dedup / auto-approval exemption (§2.4) — a requester's handler seat is never merged ─
+  it('G-15: with template mergeWithRequester ON, a requester handler seat is NOT auto-disposed (pending, no crash); the adjacent approval node IS auto-approved', async () => {
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        { key: 'handler_H', type: 'handler', name: '办理', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'approval_M', type: 'approval', name: 'M', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 's2h', source: 'start', target: 'handler_H' },
+        { key: 'h2m', source: 'handler_H', target: 'approval_M' },
+        { key: 'm2e', source: 'approval_M', target: 'end' },
+      ],
+    }
+    const tid = await createTemplateId(`${KEYPFX}-g15`, graph)
+    // TEMPLATE-level auto-approval policy (applies to every node — the crash trap for a handler).
+    const pub = await req(base, `/api/approval-templates/${tid}/publish`, reqTok, { method: 'POST', body: { policy: { allowRevoke: true, autoApproval: { mergeWithRequester: true } } } })
+    expect(pub.status, await pub.clone().text()).toBe(200)
+    // REQ is the requester. Create must SUCCEED (no crash) and PAUSE at the handler — the requester's
+    // handler seat is exempt from merge-with-requester (§2.4), never auto-disposed.
+    const iid = await createInstance(tid)
+    const row = await instanceRow(iid)
+    expect(row.status).toBe('pending')
+    expect(row.current_node_key).toBe('handler_H')
+    expect((await activeAssignees(iid)).filter((s) => s.node_key === 'handler_H').map((s) => s.assignee_id)).toEqual([REQ])
+    // POSITIVE CONTROL: the merge IS active (exemption is node-type-selected, not flag-blind). The
+    // requester handles the handler → advances to approval_M, where the SAME requester's APPROVAL seat
+    // IS auto-merged → the instance completes to approved with no manual approve.
+    expect((await act(iid, reqTok, { action: 'handle' })).status).toBe(200)
+    expect((await instanceRow(iid)).status).toBe('approved')
+  })
+
+  // ── G-5 — old (pre-Lock-3) graphs unchanged: a handler-free graph executes byte-identically ───
+  it('G-5(regression): a handler-FREE graph creates + dispatches unchanged (additive guards never fire on it)', async () => {
+    const legacy = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        { key: 'approval_1', type: 'approval', name: 'a', config: { assigneeSources: staticUser([GATE]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 's2a', source: 'start', target: 'approval_1' },
+        { key: 'a2e', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const tid = await createPublished(`${KEYPFX}-g5`, legacy)
+    const iid = await createInstance(tid)
+    expect((await instanceRow(iid)).current_node_key).toBe('approval_1')
+    expect((await act(iid, gateTok, { action: 'approve' })).status).toBe(200)
+    expect((await instanceRow(iid)).status).toBe('approved')
+  })
+
   // ── G-18 — values-free errors ──────────────────────────────────────────────────────────────────
   it('G-18: the handler 422/409 error bodies carry nodeKey and never a person id', async () => {
     const tid = await createPublished(`${KEYPFX}-g18`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]), opinionRequired: true }))
