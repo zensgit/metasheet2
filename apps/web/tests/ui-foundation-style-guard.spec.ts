@@ -30,6 +30,9 @@ const TARGET_FILES = [
   'src/views/approval/TemplateDetailView.vue',
   // FWB record-link picker is part of the approval authoring surface and starts token-only.
   'src/approvals/components/ApprovalRecordLinkPicker.vue',
+  // F0 (docs/development/approval-form-builder-parity-delta-design-20260811.md §5 F0): extracted
+  // from the already-token-only TemplateAuthoringView.vue verbatim, so it starts clean too.
+  'src/approvals/components/ApprovalFormInlineEditor.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',

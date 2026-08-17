@@ -73,10 +73,17 @@ describe('record-link — FormFieldType / authoring parity', () => {
       join(__dirname, '../src/views/approval/TemplateAuthoringView.vue'),
       'utf8',
     )
+    // F0 extraction (delta §5 F0): the retry BUTTON markup moved verbatim onto
+    // ApprovalFormInlineEditor.vue. Catalog state/loading/retry OWNERSHIP (this whole
+    // ensureRecordLinkCatalog function, asserted below) remains parent-owned per Gate F0 #2.
+    const childSrc = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFormInlineEditor.vue'),
+      'utf8',
+    )
     // Catch path must leave loaded=false and surface values-free error + retry.
     expect(src).toMatch(/recordLinkCatalogLoaded\.value\s*=\s*false/)
     expect(src).toContain('关联表目录加载失败，请重试')
-    expect(src).toContain('approval-record-link-catalog-retry')
+    expect(childSrc).toContain('approval-record-link-catalog-retry')
     expect(src).toContain('retryRecordLinkCatalog')
     // Must not permanently mark loaded on catch (the sticky-failure bug).
     const catchBlock = src.slice(src.indexOf('} catch {'), src.indexOf('} finally {', src.indexOf('} catch {')))
