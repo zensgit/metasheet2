@@ -1245,6 +1245,9 @@ import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
   buildRecordLinkBaseSelectOptions,
   buildRecordLinkSheetSelectOptions,
+  dateRangeVisibilityEndpointOptions,
+  dateRangeVisibilityFieldId,
+  visibilityReferenceBaseFieldId,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1636,12 +1639,18 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 }
 
 // Field options for a rule's fieldId picker — exclude record-link/detail (server v1 reject).
+// Lock-8 L8-B OD-L8-5(c) [accepted residual]: date_range is excluded from graph condition rules
+// ENTIRELY (unlike visibility rules, which admit its .start/.end endpoints — see
+// visibilityFieldOptions below) — its `{start,end}` value has no per-type predicate for MS-9 in
+// this slice, and `validateConditionEdits` (conditionEdit.ts) rejects any rule that references one.
+// Offering it here would be an M7 inert control: always selectable, never publishable.
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => (
       field.id.trim()
       && field.type !== 'record-link'
       && field.type !== 'detail'
+      && field.type !== 'date_range'
     ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
@@ -2927,33 +2936,68 @@ function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
 
 // Visibility-rule depends-on options: other fields that have an id (excludes self).
 // FWB-0 Layer 2 P1-2: record-link / detail cannot be visibility dependencies (server fail-closed).
+// Lock-8 L8-B OD-L8-5(a) [R]: date_range is never offered as a single bare dependency (its
+// `{start,end}` value is non-scalar — server rejects it, matching record-link/detail) but its two
+// ENDPOINTS are separately selectable, each producing the dotted `${fieldId}.start`/`.end` address
+// `resolveVisibilityFieldReference` (ApprovalGraphExecutor.ts / fieldVisibility.ts) resolves at
+// runtime and `validateFormFieldVisibilityRules` accepts at publish. M7: this is what makes the
+// `dateRangeVisibilityEndpointOptions` affordance reachable — without it, selecting a date_range
+// field here would either be impossible (silent narrowing to OD-L8-5(c)) or always fail publish
+// (an inert control worse than absence).
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
-  return draft.value.fields
-    .filter((field) => (
-      field.localId !== current.localId
-      && field.id.trim().length > 0
-      && field.type !== 'record-link'
-      && field.type !== 'detail'
-    ))
-    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
+  const options: Array<{ localId: string; id: string; label: string }> = []
+  for (const field of draft.value.fields) {
+    if (field.localId === current.localId) continue
+    if (!field.id.trim()) continue
+    if (field.type === 'record-link' || field.type === 'detail') continue
+    if (field.type === 'date_range') {
+      const fieldId = field.id.trim()
+      const label = fieldDisplayLabel(field)
+      for (const endpoint of dateRangeVisibilityEndpointOptions(field.type)) {
+        options.push({
+          localId: `${field.localId}#${endpoint.endpoint}`,
+          id: dateRangeVisibilityFieldId(fieldId, endpoint.endpoint),
+          label: `${label}(${endpoint.label})`,
+        })
+      }
+      continue
+    }
+    options.push({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) })
+  }
+  return options
 }
 
 /**
  * When a field is retyped to/from record-link (or detail), drop stale visibility deps and
  * condition rules that referenced it — otherwise the UI would keep a now-illegal dependency
  * that only fails at server save.
+ *
+ * Lock-8 L8-B: date_range needs BOTH directions handled, unlike record-link/detail which only
+ * need the "became banned" direction (nothing could validly have depended on them before, since
+ * they were never offered by visibilityFieldOptions/conditionFieldOptions). date_range's
+ * endpoints ARE validly selectable while the field IS date_range, so retyping AWAY from
+ * date_range can orphan a dotted `${id}.start`/`.end` dependency — that direction is checked via
+ * `visibilityReferenceBaseFieldId` (base-id match with a dotted suffix) rather than an exact
+ * string match, and is only cleared when the field is no longer date_range.
  */
 function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft) {
   const changedId = changedField.id.trim()
   if (!changedId) return
-  const banned = changedField.type === 'record-link' || changedField.type === 'detail'
-  if (!banned) return
+  const bareBanned =
+    changedField.type === 'record-link' || changedField.type === 'detail' || changedField.type === 'date_range'
+  const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
-    if (field.visibility.dependsOnFieldId.trim() === changedId) {
+    const dependsOn = field.visibility.dependsOnFieldId.trim()
+    if (!dependsOn) continue
+    const baseId = visibilityReferenceBaseFieldId(dependsOn)
+    if (baseId !== changedId) continue
+    const isDottedEndpoint = baseId !== dependsOn
+    const shouldClear = isDottedEndpoint ? !stillDateRange : bareBanned
+    if (shouldClear) {
       field.visibility = { dependsOnFieldId: '', operator: 'eq', valueText: '' }
     }
   }
-  if (draft.value.conditionEdits) {
+  if (bareBanned && draft.value.conditionEdits) {
     for (const edit of Object.values(draft.value.conditionEdits)) {
       for (const branch of edit.branches) {
         for (const rule of branch.rules) {

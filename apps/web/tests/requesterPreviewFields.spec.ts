@@ -79,4 +79,40 @@ describe('computeRequesterPreviewFields', () => {
     expect(computeRequesterPreviewFields(s, { kind: 'other' }).hidden).toHaveLength(0)
     expect(computeRequesterPreviewFields(s, { kind: 'x' }).hidden).toHaveLength(1)
   })
+
+  // Lock-8 L8-B (OD-L8-5(a)) regression: `rule.fieldId` may be a dotted date_range endpoint
+  // address (`${id}.start`/`${id}.end`). `visibleIds` only ever holds BASE field ids — no field
+  // literally has a dotted id — so BEFORE this fix `visibleIds.has(rule.fieldId)` was unconditionally
+  // false for a dotted address, which misreported EVERY endpoint-dependent field as "hidden because
+  // its dependency is hidden" even when the base date_range field was plainly visible, and the
+  // fallback `labelOf` lookup leaked the raw `trip.start` internal address into requester-facing copy.
+  it('date_range endpoint dependency: a field hidden by its OWN rule is described by that rule, not misreported as chain-hidden, when the base date_range field is visible', () => {
+    const s = schema([
+      { id: 'trip', type: 'date_range', label: '行程日期' },
+      { id: 'reason', type: 'text', label: '说明', visibilityRule: { fieldId: 'trip.start', operator: 'notEmpty' } },
+    ] as FormSchema['fields'])
+    // `trip` carries no rule of its own -> always visible. `reason`'s own rule (trip.start
+    // notEmpty) fails because the sample's start endpoint is blank -> reason is hidden, but NOT
+    // via the chain (its dependency, trip, is visible).
+    const r = computeRequesterPreviewFields(s, { trip: { start: '', end: '' } })
+    expect(r.visible.map((f) => f.id)).toEqual(['trip'])
+    expect(r.hidden).toHaveLength(1)
+    expect(r.hidden[0]!.field.id).toBe('reason')
+    // Must come from describeFieldVisibilityRule (its own rule), never the chain-hidden template —
+    // and must never leak the raw dotted address.
+    expect(r.hidden[0]!.reason).not.toContain('依赖的字段')
+    expect(r.hidden[0]!.reason).not.toContain('trip.start')
+    expect(r.hidden[0]!.reason).toContain('行程日期(起始)')
+    expect(r.hidden[0]!.reason).toContain('不为空时显示')
+  })
+
+  it('date_range endpoint dependency: a satisfied endpoint rule keeps the dependent field visible', () => {
+    const s = schema([
+      { id: 'trip', type: 'date_range', label: '行程日期' },
+      { id: 'reason', type: 'text', label: '说明', visibilityRule: { fieldId: 'trip.start', operator: 'notEmpty' } },
+    ] as FormSchema['fields'])
+    const r = computeRequesterPreviewFields(s, { trip: { start: '2026-01-01', end: '2026-01-05' } })
+    expect(r.visible.map((f) => f.id)).toEqual(['trip', 'reason'])
+    expect(r.hidden).toEqual([])
+  })
 })

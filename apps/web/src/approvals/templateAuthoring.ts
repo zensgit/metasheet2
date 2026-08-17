@@ -1464,9 +1464,20 @@ export function validateTemplateFormFields(
   // validateFormFieldVisibilityRules): dependency must reference an existing field,
   // not itself; `in` needs >=1 value; and the dependency graph must be acyclic.
   // FWB-0 Layer 2 P1-2: record-link is v1-excluded as a visibility dependency (object values).
+  // Lock-8 L8-B OD-L8-5(a): `dependsOn` may also be a dotted date_range endpoint address
+  // (`${id}.start`/`${id}.end`) — mirrors the runtime resolver (fieldVisibility.ts
+  // `resolveVisibilityFieldReference`) without importing it, since this validator works over
+  // `FieldAuthoringDraft` (not `FormField`) and only needs id/type, which the draft already
+  // carries. A bare reference straight at a date_range field is refused (its `{start,end}` value
+  // is non-scalar, same reason as record-link); a dotted reference is accepted ONLY when its base
+  // resolves to an actual date_range field — an unresolvable dotted address is "does not exist",
+  // same as a bare id that isn't in `fieldIdSet`.
   const fieldIdSet = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
   const recordLinkFieldIds = new Set(
     draft.fields.filter((field) => field.type === 'record-link').map((field) => field.id.trim()).filter(Boolean),
+  )
+  const dateRangeFieldIds = new Set(
+    draft.fields.filter((field) => field.type === 'date_range').map((field) => field.id.trim()).filter(Boolean),
   )
   const visibilityDeps = new Map<string, string>()
   draft.fields.forEach((field) => {
@@ -1474,15 +1485,27 @@ export function validateTemplateFormFields(
     if (!dependsOn) return
     const fieldId = field.id.trim()
     const label = field.label.trim() || fieldId || '(未命名)'
-    if (!fieldIdSet.has(dependsOn)) {
+    const dotIndex = dependsOn.lastIndexOf('.')
+    const dottedSuffix = dotIndex > 0 && dotIndex < dependsOn.length - 1 ? dependsOn.slice(dotIndex + 1) : ''
+    const isDottedEndpoint = dottedSuffix === 'start' || dottedSuffix === 'end'
+    const dependencyBaseId = isDottedEndpoint ? dependsOn.slice(0, dotIndex) : dependsOn
+    if (isDottedEndpoint) {
+      if (!dateRangeFieldIds.has(dependencyBaseId)) {
+        errors.push(`字段 ${label} 的显隐依赖字段不存在`)
+        return
+      }
+    } else if (!fieldIdSet.has(dependsOn)) {
       errors.push(`字段 ${label} 的显隐依赖字段不存在`)
       return
+    } else if (dateRangeFieldIds.has(dependsOn)) {
+      errors.push(`字段 ${label} 的显隐规则不能依赖日期区间字段的整体值（请选择起始或结束）`)
+      return
     }
-    if (dependsOn === fieldId) {
+    if (dependencyBaseId === fieldId) {
       errors.push(`字段 ${label} 的显隐规则不能依赖自身`)
       return
     }
-    if (recordLinkFieldIds.has(dependsOn)) {
+    if (recordLinkFieldIds.has(dependencyBaseId)) {
       errors.push(`字段 ${label} 的显隐规则不能依赖关联记录字段（v1）`)
       return
     }
@@ -1490,7 +1513,7 @@ export function validateTemplateFormFields(
       && field.visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean).length === 0) {
       errors.push(`字段 ${label} 的显隐"包含"规则需要至少一个值`)
     }
-    if (fieldId) visibilityDeps.set(fieldId, dependsOn)
+    if (fieldId) visibilityDeps.set(fieldId, dependencyBaseId)
   })
   const cycleState = new Map<string, 0 | 1 | 2>()
   let cycleReported = false
