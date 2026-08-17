@@ -1,4 +1,12 @@
-import type { NodeFieldPermission } from '../types/approval-product'
+import type { NodeFieldAccess, NodeFieldPermission } from '../types/approval-product'
+
+// Lock-7 L7-A — most-restrictive-wins ordering across nodes: hidden ≻ readonly ≻ editable.
+// Higher rank is more restrictive. Absent from the matrix ≡ `editable` (OD-L7-9, rank 0).
+const NODE_FIELD_ACCESS_RANK: Record<NodeFieldAccess, number> = {
+  editable: 0,
+  readonly: 1,
+  hidden: 2,
+}
 
 /**
  * Structurally-minimal view of a stored runtime graph for redaction purposes.
@@ -46,28 +54,78 @@ export interface RedactableRuntimeGraph {
  * snapshot and the byte path can never drift on what "hidden" means (no separate hidden decision).
  * Pure, allocation-cheap (empty Set on any degenerate input), never throws.
  */
+/**
+ * Lock-7 L7-A / OD-L7-5 — the SINGLE derivation of "this actor's / this instance's access to a
+ * field", over the given node set. Returns a `Map<fieldId, NodeFieldAccess>` holding, per field, the
+ * MOST-RESTRICTIVE access across every supplied node (`hidden` ≻ `readonly` ≻ `editable`). A field
+ * ABSENT from the returned map ≡ `editable` (OD-L7-9, legacy default). Pure, allocation-cheap on
+ * degenerate input, never throws.
+ *
+ * Three consumers, each supplying its own node set (L7-A table): the snapshot echo and attachment
+ * byte gate pass the INSTANCE-active node set (precedence preserved, read behaviour byte-identical);
+ * the NEW write mask passes exactly `[nodeKey]` — the actor's single claimed seat — where precedence
+ * is unobservable (one element) and only the absent-key default and the per-field access matter.
+ * Re-expressing `collectHiddenFieldIds` over THIS function is what keeps the three consumers from
+ * drifting on what "hidden" means (L7-A; G-1a asserts a single-node mutation reds all three).
+ */
+export function resolveFieldAccessAtNodes(
+  runtimeGraph: RedactableRuntimeGraph | null,
+  nodeKeys: ReadonlyArray<string | null | undefined>,
+): Map<string, NodeFieldAccess> {
+  const access = new Map<string, NodeFieldAccess>()
+  if (!runtimeGraph || !Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) {
+    return access
+  }
+  const targetKeys = new Set(
+    nodeKeys.filter((key): key is string => typeof key === 'string' && key.length > 0),
+  )
+  if (targetKeys.size === 0) return access
+
+  for (const node of runtimeGraph.nodes) {
+    if (!node || typeof node.key !== 'string' || !targetKeys.has(node.key)) continue
+    const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] } | undefined)?.fieldPermissions
+    if (!Array.isArray(permissions)) continue
+    for (const permission of permissions) {
+      if (!permission || typeof permission.fieldId !== 'string') continue
+      const candidate = permission.access
+      if (candidate !== 'editable' && candidate !== 'readonly' && candidate !== 'hidden') continue
+      const existing = access.get(permission.fieldId)
+      // Most-restrictive-wins: keep the higher rank. First-seen wins ties (identical rank).
+      if (existing === undefined || NODE_FIELD_ACCESS_RANK[candidate] > NODE_FIELD_ACCESS_RANK[existing]) {
+        access.set(permission.fieldId, candidate)
+      }
+    }
+  }
+  return access
+}
+
+/**
+ * Lock-7 L7-A — resolve one field's effective access at the given node set, defaulting ABSENT ≡
+ * `editable` (OD-L7-9). This is the write consumer's single read point (`[nodeKey]`) so the write
+ * mask and the read-DTO access map (OD-L7-10) never disagree — both go through this function.
+ */
+export function fieldAccessAtNodes(
+  runtimeGraph: RedactableRuntimeGraph | null,
+  nodeKeys: ReadonlyArray<string | null | undefined>,
+  fieldId: string,
+): NodeFieldAccess {
+  return resolveFieldAccessAtNodes(runtimeGraph, nodeKeys).get(fieldId) ?? 'editable'
+}
+
+/**
+ * The set of field ids the active node(s) mark `access: 'hidden'` — now DERIVED over
+ * `resolveFieldAccessAtNodes` (L7-A R-5) rather than a second traversal, so the hidden axis stays
+ * byte-identical to the shipped union while the snapshot echo, the attachment byte gate and the
+ * write mask all read one matrix. Byte-identical because most-restrictive-wins reduces to "hidden at
+ * ANY active node ⇒ hidden", which is exactly the prior union.
+ */
 export function collectHiddenFieldIds(
   runtimeGraph: RedactableRuntimeGraph | null,
   activeNodeKeys: ReadonlyArray<string | null | undefined>,
 ): Set<string> {
   const hiddenFieldIds = new Set<string>()
-  if (!runtimeGraph || !Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) {
-    return hiddenFieldIds
-  }
-  const activeKeys = new Set(
-    activeNodeKeys.filter((key): key is string => typeof key === 'string' && key.length > 0),
-  )
-  if (activeKeys.size === 0) return hiddenFieldIds
-
-  for (const node of runtimeGraph.nodes) {
-    if (!node || typeof node.key !== 'string' || !activeKeys.has(node.key)) continue
-    const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] } | undefined)?.fieldPermissions
-    if (!Array.isArray(permissions)) continue
-    for (const permission of permissions) {
-      if (permission && permission.access === 'hidden' && typeof permission.fieldId === 'string') {
-        hiddenFieldIds.add(permission.fieldId)
-      }
-    }
+  for (const [fieldId, access] of resolveFieldAccessAtNodes(runtimeGraph, activeNodeKeys)) {
+    if (access === 'hidden') hiddenFieldIds.add(fieldId)
   }
   return hiddenFieldIds
 }

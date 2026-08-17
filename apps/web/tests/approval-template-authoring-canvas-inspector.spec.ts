@@ -24,10 +24,7 @@ import {
   assigneeSourceRoster,
   type ApprovalCapabilityRegistry,
 } from '../src/approvals/approvalCapabilityRegistry'
-import {
-  FIELD_PERMISSION_READONLY_HINT,
-  FIELD_PERMISSION_ROUTING_HINT,
-} from '../src/approvals/fieldPermissionHonestyCopy'
+import { FIELD_PERMISSION_ROUTING_HINT } from '../src/approvals/fieldPermissionHonestyCopy'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHILD_EDITOR_SOURCE = readFileSync(
@@ -1147,8 +1144,28 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(appB.config.assigneeSources[0]).toEqual({ kind: 'static_role', roleIds: ['legal'] })
   })
 
-  it('A-9: readonly field-permission honesty copy is byte-identical to the linear editor; editable/hidden do not render it', async () => {
-    routeParams = { id: 'tpl_a9' }
+  it('Lock-7 G-13: the readonly honesty copy is retired atomically in BOTH authoring surfaces; selecting readonly renders no hint; the routing hint stays', async () => {
+    // L0-6 one-change rule: the retired strings/markers must be absent from BOTH surface sources
+    // (linear + canvas). Asserting on BOTH blobs is what reds if the copy is re-added to EITHER
+    // surface (a one-sided re-add). The `（T1-4b）` marker is pinned separately from the full string.
+    const retired = [
+      '只读将在后续版本（T1-4b）生效，当前保存但暂不强制', // FIELD_PERMISSION_READONLY_HINT
+      '（T1-4b）', // the marker
+      '「只读」将在后续版本生效', // the section-copy clause
+    ]
+    for (const marker of retired) {
+      expect(PARENT_AUTHORING_SOURCE).not.toContain(marker)
+      expect(CHILD_EDITOR_SOURCE).not.toContain(marker)
+    }
+    // The honesty-copy module no longer exports the readonly hint (a re-import would be a build error).
+    expect(CHILD_EDITOR_SOURCE).not.toContain('FIELD_PERMISSION_READONLY_HINT')
+    // The routing hint is NOT retired (OD-L7-8(a)/G-13 arm-conditional) — still exported, still true.
+    expect(FIELD_PERMISSION_ROUTING_HINT).toBe('该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析')
+
+    // DOM: selecting `readonly` renders NO readonly hint in the canvas inspector (readonly is now
+    // enforced, not disclosed-as-pending). Positive control that the tab + selector still work: the
+    // routing hint path (a different span) is exercised by the D5 test below.
+    routeParams = { id: 'tpl_g13' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1164,29 +1181,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
 
     access.value = 'readonly'
-    access.dispatchEvent(new Event('change'))
-    await flushUi()
-    const hint = container!.querySelector('[data-testid="approval-node-field-readonly-hint"]') as HTMLElement
-    expect(hint).not.toBeNull()
-    expect(hint.textContent).toBe(FIELD_PERMISSION_READONLY_HINT)
-    expect(hint.textContent).toBe('只读将在后续版本（T1-4b）生效，当前保存但暂不强制')
-    // Gate A-9/probe-6a fix: `.toContain` is a SUBSTRING check — APPENDING drift to the linear
-    // editor's hint (e.g. "…暂不强制。详见发布说明") still contains the original text as a prefix,
-    // so it stayed green (probe 6a: 115/115). Anchor to the linear span's own data-testid and read
-    // its exact text out of source, then assert EQUALITY against the canvas hint — an append on
-    // either side now reds because the two strings genuinely differ.
-    const linearReadonlyHintMatch = PARENT_AUTHORING_SOURCE.match(
-      /data-testid="approval-step-field-readonly-hint"\s*>([^<]*)<\/span>/,
-    )
-    expect(linearReadonlyHintMatch).not.toBeNull()
-    expect(linearReadonlyHintMatch![1]).toBe(hint.textContent)
-
-    access.value = 'hidden'
-    access.dispatchEvent(new Event('change'))
-    await flushUi()
-    expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
-
-    access.value = 'editable'
     access.dispatchEvent(new Event('change'))
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()

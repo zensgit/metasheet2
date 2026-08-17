@@ -563,6 +563,41 @@ export function approvalConditionFormulaHasDynamicDependency(expression: string)
   return astHasDynamicDependency(parseFormula(expression))
 }
 
+function collectAstFieldIds(ast: FormulaAst, into: Set<string>): void {
+  switch (ast.kind) {
+    case 'field':
+    case 'aggregate':
+      // `path[0]` is the TOP-LEVEL field id (`path` addresses a sub-column for aggregates); the
+      // routing-driver pin (Lock-7 OD-L7-8) operates on top-level ids, matching the top-level-only
+      // fieldPermissions cross-reference set.
+      if (ast.path.length > 0 && ast.path[0]) into.add(ast.path[0])
+      return
+    case 'unary':
+      collectAstFieldIds(ast.expr, into)
+      return
+    case 'binary':
+    case 'compare':
+      collectAstFieldIds(ast.left, into)
+      collectAstFieldIds(ast.right, into)
+      return
+    default:
+      // number / string / boolean / null / requester / membership carry no FORM field reference.
+      return
+  }
+}
+
+/**
+ * Lock-7 OD-L7-8 — the set of TOP-LEVEL form field ids a condition formula reads (a routing driver:
+ * an edit to it would re-route branch selection). Used by the server-side publish pin that forbids a
+ * driver being `editable` at any node. Throws (via `parseFormula`) on a malformed expression, which
+ * the publish path already rejects earlier through `normalizeConditionFormulaPredicate`.
+ */
+export function extractApprovalConditionFormulaFieldIds(expression: string): string[] {
+  const fieldIds = new Set<string>()
+  collectAstFieldIds(parseFormula(expression), fieldIds)
+  return [...fieldIds]
+}
+
 type FormulaTruth = 'always_true' | 'always_false' | 'unknown'
 type NumericRange = { min: number; max: number }
 

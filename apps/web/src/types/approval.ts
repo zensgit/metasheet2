@@ -91,11 +91,11 @@ export interface HandlerNodeConfig {
   fieldPermissions?: NodeFieldPermission[]
 }
 
-// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:51-56 (P1-C node-level
-// field permissions). `editable` (the absent default) === current behavior. Only `hidden` is
-// enforced at runtime (server-side echo-redaction — already shipped in #2799); `readonly`/`editable`
-// are contract-stable but runtime-inert (readonly enforcement is deferred to T1-4b). The authoring
-// editor may set `hidden`/`readonly`; both round-trip, `readonly` carries a "not-yet-enforced" hint.
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts NodeFieldAccess (P1-C
+// node-level field permissions). `editable` (the absent default) === current behavior. `hidden` and
+// `readonly` are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a
+// write; `readonly` refuses a write at that node. The authoring editor sets `hidden`/`readonly`; both
+// round-trip and are enforced.
 export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
 export interface NodeFieldPermission {
   fieldId: string

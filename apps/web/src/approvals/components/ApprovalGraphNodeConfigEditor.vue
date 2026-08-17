@@ -721,17 +721,13 @@
             <el-option label="只读" value="readonly" />
             <el-option label="隐藏" value="hidden" />
           </el-select>
-          <!-- L0-6: linear editor's honesty copy, verbatim (fieldPermissionHonestyCopy.ts). -->
+          <!-- Lock-7 G-13: the readonly honesty copy is retired here in the SAME change as the linear
+               editor (L0-6 one-change rule) — `只读`/`隐藏` are now enforced server-side. -->
+          <!-- D5: same render condition as the linear editor — WIRED: renders whenever a hidden field
+               is a routing driver (graph-wide routingDriverFieldIds is provided via the api). Accurate
+               under OD-L7-8(a): a driver can never be editable, so hiding only affects the echo. -->
           <span
-            v-if="approvalNodeFieldAccess(node.key, field.id) === 'readonly'"
-            class="template-authoring__hint"
-            data-testid="approval-node-field-readonly-hint"
-          >{{ FIELD_PERMISSION_READONLY_HINT }}</span>
-          <!-- D5: same render condition as the linear editor — inert (never renders) until the
-               graph-wide routingDriverFieldIds field is wired through nodeConfigEditorContext
-               (see that file's comment; out of scope for this slice). -->
-          <span
-            v-else-if="approvalNodeFieldAccess(node.key, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+            v-if="approvalNodeFieldAccess(node.key, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
             class="template-authoring__hint template-authoring__hint--warn"
             data-testid="approval-node-field-routing-hint"
           >{{ FIELD_PERMISSION_ROUTING_HINT }}</span>
@@ -795,10 +791,7 @@ import {
   type ApprovalCapabilityRegistry,
 } from '../approvalCapabilityRegistry'
 import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
-import {
-  FIELD_PERMISSION_READONLY_HINT,
-  FIELD_PERMISSION_ROUTING_HINT,
-} from '../fieldPermissionHonestyCopy'
+import { FIELD_PERMISSION_ROUTING_HINT } from '../fieldPermissionHonestyCopy'
 
 const props = defineProps<{
   node: ApprovalNode

@@ -764,14 +764,15 @@
               </el-checkbox>
             </el-form-item>
           </div>
-          <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` is
-               enforced at runtime (server echo-redaction); `只读` round-trips but is not yet enforced
-               (T1-4b). A field left `可编辑` carries no persisted entry (absent === editable). -->
+          <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` and
+               `只读` are BOTH enforced server-side (Lock-7 P4-B: 隐藏 redacts the read echo + blocks a
+               write; 只读 blocks a write at this node). A field left `可编辑` carries no persisted
+               entry (absent === editable). -->
           <div class="template-authoring__field-perms" data-testid="approval-step-field-permissions">
             <div class="template-authoring__field-perms-head">
               <strong>字段权限</strong>
               <span class="template-authoring__hint">
-                「隐藏」在审批到该节点时对所有查看者隐藏该字段（仅回显隐藏，不影响审批人解析与条件路由）；「只读」将在后续版本生效。字段默认为「可编辑」。
+                「隐藏」在审批到该节点时对所有查看者隐藏该字段（仅回显隐藏，不影响审批人解析与条件路由）；「只读」表示该字段在本节点仅可查看、不可编辑。字段默认为「可编辑」。
               </span>
             </div>
             <div v-if="fieldPermissionFields.length === 0" class="template-authoring__hint">
@@ -797,12 +798,7 @@
                 <el-option label="隐藏" value="hidden" />
               </el-select>
               <span
-                v-if="stepFieldAccess(step, field.id) === 'readonly'"
-                class="template-authoring__hint"
-                data-testid="approval-step-field-readonly-hint"
-              >只读将在后续版本（T1-4b）生效，当前保存但暂不强制</span>
-              <span
-                v-else-if="stepFieldAccess(step, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+                v-if="stepFieldAccess(step, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
                 class="template-authoring__hint template-authoring__hint--warn"
                 data-testid="approval-step-field-routing-hint"
               >该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析</span>

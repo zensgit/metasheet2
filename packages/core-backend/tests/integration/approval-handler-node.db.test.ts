@@ -9,7 +9,8 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  * end-to-end acceptance. Harness mirrors approval-requester-choice.db.test.ts.
  *
  * Gates covered here (behaviourally testable end-to-end): G-4 totalSteps invariance, G-6 unknown-type
- * fail-closed, G-7 choke prohibitions, G-8 topology, G-9 field-write fail-closed, G-10 action
+ * fail-closed, G-7 choke prohibitions, G-8 topology, G-9 field-write channel (Lock-7 P4-B lands the
+ * write; malformed payloads stay 4xx), G-10 action
  * authorization, G-11 transfer/epoch, G-12 mode semantics, G-16 audit + action verb (incl. the DB
  * CHECK), G-17 preview distinguishability, G-18 values-free errors, plus the §1.5/G-13 backend
  * registry rejection. Every absence assertion carries a positive control (Lock-3 §4).
@@ -392,22 +393,35 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect(seats.every((s) => Number(s.source_step) > row.total_steps)).toBe(true)
   })
 
-  // ── G-9 — field-write fail-closed (§3) ───────────────────────────────────────────────────────
-  it('G-9: a handle carrying fieldWrites (non-empty / {} / null) is 422 with zero handle rows and NO advance; without the key it advances', async () => {
-    for (const fieldWrites of [{ reason: 'edited' }, {}, null] as unknown[]) {
+  // ── G-9 — field-write channel (§3; Lock-7 P4-B lands the write — malformed payloads stay 4xx) ──
+  it('G-9 (Lock-7 P4-B lands the write): a malformed fieldWrites payload (null / non-object) is a values-free 400 with zero handle rows and NO advance; an editable-field write advances; a handle without the key advances', async () => {
+    // Lock-7 L7-C widens the P4-A reserved key from an unconditional 422 into an accepted payload. The
+    // handler node here carries NO fieldPermissions, so `reason` is editable (absent ≡ editable).
+    // Malformed payloads (null / non-object) are still refused — now a values-free 400, not the 422.
+    for (const fieldWrites of [null, [1, 2]] as unknown[]) {
       const tid = await createPublished(`${KEYPFX}-g9-${Math.random().toString(16).slice(2, 8)}`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]) }))
       const iid = await createInstance(tid)
       const res = await act(iid, h1Tok, { action: 'handle', fieldWrites })
-      expect(res.status, JSON.stringify(fieldWrites)).toBe(422)
+      expect(res.status, JSON.stringify(fieldWrites)).toBe(400)
       const body = (await res.json()) as ErrorBody
-      expect(errorCode(body)).toBe('APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED')
+      expect(errorCode(body)).toBe('APPROVAL_FIELD_WRITE_PAYLOAD_INVALID')
       // zero handle rows, no advance (still pending at the handler).
       expect(await records(iid, 'handle')).toHaveLength(0)
       const row = await instanceRow(iid)
       expect(row.status).toBe('pending')
       expect(row.current_node_key).toBe('handler_h')
     }
-    // positive control: a handle WITHOUT the key succeeds and advances past the handler.
+    // An editable-field write is now ACCEPTED (200) and advances past the handler, recording the
+    // changed field ids on the values-free audit row.
+    const tidWrite = await createPublished(`${KEYPFX}-g9-write`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]) }))
+    const iidWrite = await createInstance(tidWrite)
+    const write = await act(iidWrite, h1Tok, { action: 'handle', fieldWrites: { reason: 'edited' } })
+    expect(write.status, await write.clone().text()).toBe(200)
+    expect((await instanceRow(iidWrite)).current_node_key).toBe('approval_final')
+    const handleRows = await records(iidWrite, 'handle')
+    expect(handleRows).toHaveLength(1)
+    expect((handleRows[0]!.metadata ?? {}).changedFieldIds).toEqual(['reason'])
+    // positive control: a handle WITHOUT the key succeeds and advances past the handler (byte-stable).
     const tidOk = await createPublished(`${KEYPFX}-g9-ok`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]) }))
     const iidOk = await createInstance(tidOk)
     const ok = await act(iidOk, h1Tok, { action: 'handle' })

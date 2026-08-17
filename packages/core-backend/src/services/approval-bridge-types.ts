@@ -7,7 +7,7 @@
 
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
-import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
+import type { ApprovalNodeType, FormSchema, NodeFieldAccess } from '../types/approval-product'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -38,6 +38,16 @@ export interface UnifiedApprovalDTO {
    * reads it to withhold approve/reject on a 办理 (handler) task. Absent ≡ not-a-handler.
    */
   currentNodeType?: ApprovalNodeType | null
+  /**
+   * Lock-7 OD-L7-10 — the ACTOR-SCOPED per-field access map for THIS viewer at their claimed
+   * seat(s): fieldId → one NodeFieldAccess value. Present ONLY on the DETAIL read
+   * (`getApproval`) — the list DTO stays byte-identical. Derived from the SAME
+   * `resolveFieldAccessAtNodes` the write mask uses, so a field reported `editable` here is exactly a
+   * field the write path accepts (never over-reports: a seatless / role-only viewer gets no map, and
+   * multi-seat is most-restrictive). Absent from the map ≡ `editable` (OD-L7-9). The FE grid uses it
+   * to render `readonly` fields read-only; it is presentation only — enforcement is server-side.
+   */
+  fieldAccess?: Record<string, NodeFieldAccess> | null
   /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
