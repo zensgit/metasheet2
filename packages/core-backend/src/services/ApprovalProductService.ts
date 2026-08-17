@@ -638,6 +638,16 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'manager_at_level', level }
       }
+      case 'continuous_dept_heads': {
+        // Lock-1 §K4: `levels` validated byte-identically to `continuous_managers` — an
+        // out-of-range / non-integer / missing `levels` is rejected, never silently
+        // defaulted (enum-strictness).
+        const levels = source.levels
+        if (typeof levels !== 'number' || !Number.isInteger(levels) || levels < 1 || levels > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.levels must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'continuous_dept_heads', levels }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)
@@ -1538,6 +1548,8 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_managers:${source.levels}`
     case 'manager_at_level':
       return `manager_at_level:${source.level}`
+    case 'continuous_dept_heads':
+      return `continuous_dept_heads:${source.levels}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId}`
     case 'static_user':
@@ -3127,6 +3139,26 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
 }
 
 /**
+ * Lock-1 §K4: true when any approval node's assignee sources include `continuous_dept_heads`.
+ * Used at create time to decide whether to walk the (more expensive) department-head chain into
+ * the requester snapshot — a SEPARATE opt-in gate from `runtimeGraphUsesManagerChain` above,
+ * because `continuous_dept_heads` bakes a DIFFERENT snapshot field (`deptHeadChainIds`, a
+ * different walk over a different pointer — see the union member's doc comment) via a DIFFERENT
+ * option (`includeDeptHeadChain`), so an unrelated template never pays for either walk. `kind` is
+ * read structurally so this works before the kind is added to the typed union (same posture as
+ * `runtimeGraphUsesManagerChain`).
+ */
+export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'approval') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some((source) => isRecord(source) && source.kind === 'continuous_dept_heads')
+  })
+}
+
+/**
  * B5-b owner P1: does the graph use ANY org-derived assignee source? All four kinds resolve from
  * `orgRelations` — so when the org read FAILED (transient) or the routing POLICY is misconfigured,
  * an empty `orgRelations` is not "requester has no manager", it is "we could not find out". Letting
@@ -3135,6 +3167,13 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
  * on this detector fail-closes instead: 422 for the persistent policy config error, 503 for the
  * transient read failure — with NO instance and NO assignment created. Genuine data absence (the
  * read SUCCEEDED, the requester simply has no manager) still follows `emptyAssigneePolicy`.
+ *
+ * Lock-1 §2.1 EXTENSION (K4): `continuous_dept_heads` is EXTENDED into this detector alongside the
+ * four shipped org-derived kinds. Leaving it unextended would reproduce exactly the B5-b fail-open
+ * this guard closed: an org read failure plus `emptyAssigneePolicy: 'auto-approve'` would silently
+ * auto-approve instead of fail-closing at create. (K5-b `dept_head_at_level` is NOT added here —
+ * it is not implemented in this slice; §2.3 admits its registry row only once K4 has landed, and
+ * this detector must not claim a kind that does not exist yet.)
  */
 export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
@@ -3153,7 +3192,8 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
         (source.kind === 'direct_manager' ||
           source.kind === 'dept_head' ||
           source.kind === 'continuous_managers' ||
-          source.kind === 'manager_at_level'),
+          source.kind === 'manager_at_level' ||
+          source.kind === 'continuous_dept_heads'),
     )
   })
 }
@@ -5217,6 +5257,9 @@ export class ApprovalProductService {
       ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
+    // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
+    // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
+    const needsDeptHeadChain = runtimeGraphUsesDeptHeadChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
@@ -5229,6 +5272,7 @@ export class ApprovalProductService {
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
+        includeDeptHeadChain: needsDeptHeadChain,
       })
     } catch (error) {
       orgReadFailed = true
@@ -5406,6 +5450,8 @@ export class ApprovalProductService {
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
+      // Lock-1 §K4: freeze the department-head chain baked above (opt-in, needsDeptHeadChain).
+      ...(orgRelations.deptHeadChainIds ? { deptHeadChainIds: orgRelations.deptHeadChainIds } : {}),
       ...(Object.keys(delegationMap).length > 0 ? { delegations: delegationMap } : {}),
       // Lock-1 §K2: freeze the validated submit-time choices (node key → chosen local user
       // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.

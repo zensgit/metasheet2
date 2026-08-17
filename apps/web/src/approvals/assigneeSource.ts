@@ -26,6 +26,7 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
     case 'dept_head': return '部门主管'
     case 'continuous_managers': return `连续多级上级（${source.levels} 级）`
     case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`
+    case 'continuous_dept_heads': return `连续多级部门负责人（${source.levels} 级）`
     // Lock-1 §K2: pre-choice placeholder — the approver is unknowable until the requester
     // chooses at submit time, so the flow/route preview says exactly that.
     case 'requester_choice': return '提交人自选（提交时选择）'

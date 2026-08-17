@@ -251,6 +251,29 @@ export function resolveApprovalAssignees(
         })
         break
       }
+      case 'continuous_dept_heads': {
+        // Lock-1 §K4: resolve to the requester's DEPARTMENT-HEAD chain (levels 1..source.levels),
+        // frozen in the snapshot at create — a DIFFERENT pointer from continuous_managers'
+        // managerChainIds (the leader_in_dept LEADER pointer). This walks the department PARENT
+        // tree reading dept_manager_userid_list at each level
+        // (ApprovalDirectoryOrg.resolveDeptHeadChain), which — unlike managerChainIds — CONTINUES
+        // past a level whose head is unresolved (the ratified continue-past-empty-level posture,
+        // ratified Lock-1 §K4 / confirmed BINDING by Lock-2), since the chain-build's next hop is
+        // the department's own parent pointer, never a resolved manager. No live directory
+        // re-query happens HERE either way: this arm is a pure slice over the frozen chain,
+        // mirroring continuous_managers exactly (same self-exclusion, same dedup-via-pushResolved,
+        // same emptyAssigneePolicy fallthrough on an empty result).
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.deptHeadChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        chain.slice(0, source.levels).forEach((entry) => {
+          const headId = normalizeId(entry)
+          if (headId && headId !== requesterId) {
+            pushResolved('user', headId, source, sourceIndex)
+          }
+        })
+        break
+      }
       default:
         throw new ServiceError(
           `Approval node ${options.nodeKey} has an unsupported assignee source`,

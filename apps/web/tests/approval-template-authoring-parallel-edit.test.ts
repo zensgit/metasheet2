@@ -398,6 +398,16 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toHaveLength(1)
   })
 
+  it('Lock-1 §K4: flags identical continuous_dept_heads levels — the fingerprint mirror is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'continuous_dept_heads', levels: 2 }], [{ kind: 'continuous_dept_heads', levels: 2 }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT levels are NOT flagged (parameterized, not kind-blanket).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'continuous_dept_heads', levels: 1 }], [{ kind: 'continuous_dept_heads', levels: 3 }]),
+    )).toEqual([])
+  })
+
   it('Lock-1 §K2 / G-17: requester_choice × requester_choice is NOT flagged (null fingerprint DELIBERATE — same-person collision is the runtime 409 guard\'s job)', () => {
     // Two requester_choice sources on parallel branches are NOT provably identical — the
     // requester may pick different people per branch — so the publish preflight must not block
@@ -421,6 +431,11 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toEqual([])
     expect(parallelDynamicAssigneeConflicts(
       withBranchSources([{ kind: 'continuous_managers', levels: 1 }], [{ kind: 'continuous_managers', levels: 3 }]),
+    )).toEqual([])
+    // Lock-1 §K4: continuous_managers and continuous_dept_heads are DIFFERENT kinds (a different
+    // pointer, per §K4) — same `levels` value must not collide even though the shapes are alike.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'continuous_managers', levels: 2 }], [{ kind: 'continuous_dept_heads', levels: 2 }]),
     )).toEqual([])
   })
 

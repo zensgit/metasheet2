@@ -977,7 +977,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all nine assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all ten assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -990,11 +990,14 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // Lock-1 §K2 (RATIFIED 2026-08-17) — the 提交人自选 registry row, admitted in the SAME
       // slice that lands scope validation + the submit-time chooser (Lock-1 §2.3 table).
       requester_choice: '提交人自选',
+      // Lock-1 §K4 (RATIFIED 2026-08-17) — the 连续多级部门负责人 registry row, admitted in the
+      // SAME slice that lands the deptHeadChainIds snapshot + resolver arm (Lock-1 §2.3 table).
+      continuous_dept_heads: '连续多级部门负责人',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 10th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 11th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(9)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(10)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1403,7 +1406,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
               : kind === 'form_field_user' ? { kind, fieldId: '' }
                 : kind === 'continuous_managers' ? { kind, levels: 1 }
                   : kind === 'manager_at_level' ? { kind, level: 1 }
-                    : { kind }
+                    // Lock-1 §K4: same default shape as continuous_managers.
+                    : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                      : { kind }
         edit.assigneeSources = [next, ...edit.assigneeSources.slice(1)]
       },
       syncApprovalNodeOptions: () => {},
@@ -1431,6 +1436,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         if (!source) return
         if (source.kind === 'manager_at_level') source.level = value
         else if (source.kind === 'continuous_managers') source.levels = value
+        else if (source.kind === 'continuous_dept_heads') source.levels = value
       },
       approvalSourceIsPlaceholder: () => false,
       approvalNodeMode: () => 'single',
@@ -1623,10 +1629,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the nine-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the ten-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
-    // SAME commit that lands each kind — K2 `requester_choice` is the first admitted row.
-    const CANONICAL_NINE = [
+    // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`.
+    const CANONICAL_TEN = [
+      'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
       'direct_manager',
@@ -1640,7 +1647,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_NINE)
+    expect(roster).toEqual(CANONICAL_TEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1653,7 +1660,26 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_NINE)
+    expect(rendered).toEqual(CANONICAL_TEN)
+    unmount()
+  })
+
+  // Lock-1 §K4 — continuous_dept_heads authoring sub-form (canvas/graph inspector surface,
+  // ApprovalGraphNodeConfigEditor.vue — distinct from the linear TemplateAuthoringView.vue steps
+  // editor covered in approvalTemplateAuthoring.spec.ts): registry-admitted, renders EDITABLE with
+  // the shared level-count input, no unknown-kind hint.
+  it('K4: continuous_dept_heads renders EDITABLE with the level-count input (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_dh')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_dh: { assigneeSources: [{ kind: 'continuous_dept_heads', levels: 2 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-continuous_dept_heads"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
     unmount()
   })
 

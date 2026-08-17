@@ -34,6 +34,10 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // Lock-1 §K2 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the scope
   // validation + submit-time chooser end to end (registry table row: 提交人自选 / approval).
   requester_choice: '提交人自选',
+  // Lock-1 §K4 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the
+  // deptHeadChainIds snapshot + resolver arm end to end (registry table row:
+  // 连续多级部门负责人 / approval).
+  continuous_dept_heads: '连续多级部门负责人',
 }
 
 /** Display order matches parent §10.3's listed order. Kept as an explicit array (rather than
@@ -50,6 +54,8 @@ const SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER: readonly ApprovalAssigneeSourceKind[] 
   'manager_at_level',
   // Lock-1 §K2: ratified kinds append after the original eight-member §10.3 order.
   'requester_choice',
+  // Lock-1 §K4: appended after K2.
+  'continuous_dept_heads',
 ]
 
 export interface ApprovalAssigneeSourceCapability {

@@ -508,8 +508,8 @@
         </el-select>
       </el-form-item>
       <el-form-item
-        v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
-        :label="approvalSourceKind(node.key) === 'manager_at_level' ? '指定上级层级' : '上级层级数'"
+        v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers' || approvalSourceKind(node.key) === 'continuous_dept_heads'"
+        :label="approvalSourceKind(node.key) === 'manager_at_level' ? '指定上级层级' : approvalSourceKind(node.key) === 'continuous_dept_heads' ? '部门负责人层级数' : '上级层级数'"
       >
         <el-input-number
           :model-value="approvalSourceLevel(node.key)"

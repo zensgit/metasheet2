@@ -229,6 +229,17 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'both', scope: { type: 'company' } } as never] },
     })[0]).toMatch(/requester_choice/)
   })
+  it('Lock-1 §K4: continuous_dept_heads — a positive integer levels passes; 0/non-integer is flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 3 }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 0 }] },
+    })[0]).toMatch(/continuous_dept_heads/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 1.5 }] },
+    })[0]).toMatch(/continuous_dept_heads/)
+  })
 })
 
 describe('G-5 fail-closed — complex approval-node config must stay within the BACKEND allowlist', () => {
@@ -316,5 +327,17 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
       fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
     })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+
+  // Lock-1 §K4 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: continuous_dept_heads must be
+  // ALLOWED (present in the allowlist) on the complex path, and an extra key on it must still be
+  // caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K4: continuous_dept_heads is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'continuous_dept_heads', levels: 3 }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K4: a continuous_dept_heads source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'continuous_dept_heads', levels: 3, futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })
