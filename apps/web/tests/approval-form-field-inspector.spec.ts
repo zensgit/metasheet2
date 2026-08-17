@@ -533,6 +533,24 @@ describe('ApprovalFormFieldInspector — option rows preserve values; one action
     expect(inspector.session().history.undoStack).toHaveLength(1)
   })
 
+  it('the SETTLE path preserves option values too: a dirty option label settles as ONE command with the value intact (P2-3)', async () => {
+    const inspector = await mountInspector([selectField(), field(2)])
+    await inspector.typeText('approval-form-field-inspector-option-label-0', '甲改')
+    expect(inspector.commands).toHaveLength(0)
+    // Settle WITHOUT blurring — the selection-switch path, not commitOptionLabel.
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { optionsText: '甲改:a\n乙:b' },
+      },
+    ])
+    // Hand-authored value 'a' preserved byte-identical; exactly one entry.
+    expect(inspector.session().draft.fields[0].optionsText).toBe('甲改:a\n乙:b')
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+  })
+
   it('a BLANK option label is an invalid buffer: blur commits nothing and shows values-free copy', async () => {
     const inspector = await mountInspector([selectField(), field(2)])
     await inspector.typeText('approval-form-field-inspector-option-label-0', ' ')

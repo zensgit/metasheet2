@@ -653,6 +653,13 @@ export interface FormDetailColumnPropertyPatch {
  * adapter turns one successful call into at most ONE history entry; a
  * value-identical patch is a zero-entry no-op by history construction).
  * Identity and type are untouched by construction of the patch type.
+ *
+ * Fail-closed boundaries (F3 gate P3-1/P3-4): a field whose CURRENT type is
+ * not authorable (`attachment` or unknown persisted types) rejects every
+ * property edit at the command level — §3.4's whole-template lock must not
+ * depend on the UI `readOnly` prop alone. Row-bound keys are `detail`-only:
+ * patching them onto any other type is rejected rather than parked as latent
+ * state a later retype could resurrect.
  */
 export function updateFormFieldProperties(
   draft: TemplateAuthoringDraft,
@@ -662,6 +669,13 @@ export function updateFormFieldProperties(
   const index = draft.fields.findIndex((field) => field.localId === localId)
   if (index === -1) return rejected('field_not_found')
   const current = draft.fields[index]
+  if (!AUTHORABLE_FIELD_TYPES.has(current.type))
+    return rejected('unsupported_field_type')
+  if (
+    (patch.minRowsText !== undefined || patch.maxRowsText !== undefined) &&
+    current.type !== 'detail'
+  )
+    return rejected('unsupported_field_type')
   const next: FieldAuthoringDraft = {
     ...current,
     ...(patch.label !== undefined ? { label: patch.label } : {}),
@@ -744,11 +758,23 @@ export function collectFormFieldRetypeDependencies(
   const field = draft.fields.find((candidate) => candidate.localId === localId)
   if (!field || field.type === nextType) return []
   const dependencies = collectFormFieldDependencies(draft, field.id, inventory)
-  if (field.type === 'detail' && detailFieldCarriesConfiguration(field)) {
-    dependencies.push({
-      kind: 'detail_config',
-      location: `fields.${field.localId}.detailColumns`,
+  if (field.type === 'detail') {
+    // Leaving `detail` destroys every column, so each column's OWN reference
+    // set (dotted `{field.column}` formulas/rules, amount `amountColumnId`,
+    // preserved payload tokens) blocks the retype too (F3 gate P3-2 —
+    // `formulaReferencesField` already catches dotted FORMULA tokens above;
+    // this fold adds the exact-equality dotted rule/graph shapes).
+    field.detailColumns.forEach((column) => {
+      dependencies.push(
+        ...collectFormDetailColumnDependencies(draft, field.id, column.id),
+      )
     })
+    if (detailFieldCarriesConfiguration(field)) {
+      dependencies.push({
+        kind: 'detail_config',
+        location: `fields.${field.localId}.detailColumns`,
+      })
+    }
   }
   if (field.type === 'record-link' && recordLinkCarriesConfiguration(field)) {
     dependencies.push({
@@ -791,9 +817,9 @@ export function retypeFormField(
   const index = draft.fields.findIndex((field) => field.localId === localId)
   if (index === -1) return rejected('field_not_found')
   const current = draft.fields[index]
-  if (nextType === current.type) {
-    return successful({ ...draft, fields: draft.fields.slice() }, localId)
-  }
+  // Boundary checks run BEFORE the same-type no-op (F3 gate P3-1): an
+  // `attachment`→`attachment` "retype" must be the named boundary refusal and
+  // an unknown persisted type must stay fail-closed, never a silent success.
   if (nextType === 'attachment') {
     return rejected('field_type_incompatible_with_references', [
       { kind: 'attachment_boundary', location: 'fieldType.attachment' },
@@ -801,6 +827,11 @@ export function retypeFormField(
   }
   if (!AUTHORABLE_FIELD_TYPES.has(nextType as AuthorableFieldType))
     return rejected('unsupported_field_type')
+  if (!AUTHORABLE_FIELD_TYPES.has(current.type))
+    return rejected('unsupported_field_type')
+  if (nextType === current.type) {
+    return successful({ ...draft, fields: draft.fields.slice() }, localId)
+  }
   const target = nextType as AuthorableFieldType
 
   const dependencies = collectFormFieldRetypeDependencies(
@@ -834,6 +865,11 @@ export function retypeFormField(
     ...current,
     // Identity preservation by construction: `id`/`localId` are carried from
     // `current` and never reassigned here.
+    //
+    // DELIBERATE (not an accident — F3 gate NIT-2): `optionsText` is kept
+    // across retype so select→other→select round-trips restore the options;
+    // `buildFormSchema` already omits `options` for non-select types, so the
+    // emitted schema stays clean while the draft preserves the admin's work.
     type: target,
     detailColumns,
     ...(target !== 'detail' ? { minRowsText: '', maxRowsText: '' } : {}),
@@ -956,7 +992,12 @@ function withReplacedColumn(
   return successful({ ...draft, fields }, located.owner.localId)
 }
 
-/** One committed inspector edit of one detail column's properties (FB-D7). */
+/**
+ * One committed inspector edit of one detail column's properties (FB-D7).
+ * A column whose CURRENT type is outside the leaf allowlist (hostile/broken
+ * persisted data) rejects edits fail-closed (P3-1 posture, same as the
+ * field-level command).
+ */
 export function updateFormDetailColumn(
   draft: TemplateAuthoringDraft,
   fieldLocalId: string,
@@ -965,6 +1006,8 @@ export function updateFormDetailColumn(
 ): FormCommandResult {
   const located = locateDetailColumn(draft, fieldLocalId, columnLocalId)
   if (isRejection(located)) return located
+  if (!DETAIL_LEAF_FIELD_TYPES.includes(located.column.type))
+    return rejected('unsupported_field_type')
   const next: DetailColumnDraft = {
     ...located.column,
     ...(patch.label !== undefined ? { label: patch.label } : {}),
@@ -995,6 +1038,10 @@ export function retypeFormDetailColumn(
   const located = locateDetailColumn(draft, fieldLocalId, columnLocalId)
   if (isRejection(located)) return located
   const { owner, column } = located
+  // Fail-closed on a non-leaf CURRENT column type (P3-1 posture) before the
+  // same-type no-op, mirroring the field-level ordering.
+  if (!DETAIL_LEAF_FIELD_TYPES.includes(column.type))
+    return rejected('unsupported_field_type')
   if (nextType === column.type) {
     return successful({ ...draft, fields: draft.fields.slice() }, owner.localId)
   }

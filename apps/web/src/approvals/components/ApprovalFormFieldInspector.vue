@@ -603,6 +603,26 @@ function serializeOptionRows(rows: readonly OptionRow[]): string {
   return rows.map((row) => `${row.label}:${row.value}`).join('\n')
 }
 
+/**
+ * The ONE implementation of §3.4 option-label editing (F3 gate P2-3): apply
+ * pending label edits by row index while PRESERVING each row's hand-authored/
+ * generated `value` — a label edit must never regenerate a value. Both commit
+ * paths (blur/Enter via `commitOptionLabel` and the selection-switch settle via
+ * `settlePendingEdits`) route through here so the preservation rule cannot
+ * drift between them.
+ */
+function applyOptionLabelEdits(
+  rows: readonly OptionRow[],
+  edits: Readonly<Record<number, string>>,
+): OptionRow[] {
+  return rows.map((row, rowIndex) => {
+    const pending = edits[rowIndex]
+    return pending !== undefined && pending !== row.label
+      ? { label: pending.trim(), value: row.value }
+      : row
+  })
+}
+
 const optionRows = computed<OptionRow[]>(() =>
   field.value ? parseOptionRows(field.value.optionsText) : [],
 )
@@ -829,10 +849,9 @@ function commitOptionLabel(index: number): void {
     return
   }
   // Value PRESERVED: only the label changes; the hand-authored/generated
-  // value is never regenerated (§3.4).
-  const next = rows.map((row, rowIndex) =>
-    rowIndex === index ? { label: value.trim(), value: row.value } : row,
-  )
+  // value is never regenerated (§3.4) — one shared rule, see
+  // `applyOptionLabelEdits`.
+  const next = applyOptionLabelEdits(rows, { [index]: value })
   if (commitPatch({ optionsText: serializeOptionRows(next) })) {
     const { [index]: _committed, ...rest } = buffer.optionLabels
     buffer.optionLabels = rest
@@ -1016,14 +1035,10 @@ function settlePendingEdits(): boolean {
       valueText: buffer.text.valueText,
     }
   }
-  const dirtyOptionEntries = Object.entries(buffer.optionLabels)
-  if (dirtyOptionEntries.length > 0) {
-    const rows = optionRows.value.map((row, rowIndex) => {
-      const pending = buffer.optionLabels[rowIndex]
-      return pending !== undefined && pending !== row.label
-        ? { label: pending.trim(), value: row.value }
-        : row
-    })
+  if (Object.keys(buffer.optionLabels).length > 0) {
+    // Same value-preserving rule as the blur/Enter path (P2-3): one shared
+    // implementation, so the settle path cannot silently regenerate values.
+    const rows = applyOptionLabelEdits(optionRows.value, buffer.optionLabels)
     const nextText = serializeOptionRows(rows)
     if (nextText !== current.optionsText) patch.optionsText = nextText
   }

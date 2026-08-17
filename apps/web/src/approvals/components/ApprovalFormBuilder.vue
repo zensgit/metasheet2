@@ -746,9 +746,15 @@ onBeforeUnmount(() => {
   unsubscribe()
 })
 
+// The exposed programmatic command surface. Each member carries its OWN
+// mutation-time read-only re-check, and each re-check is individually pinned
+// by the read-only gate tests (P2-1): a caller arriving here — programmatic
+// or a future UI path without its own gate — hits the same boundary as the
+// interactive paths.
 defineExpose({
   appendField,
   insertFieldAt,
+  moveFieldToAnchor,
   removeField,
   getSession: () => sessionRef.value,
   getDragSession: () => dragSession,

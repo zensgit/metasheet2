@@ -134,6 +134,7 @@ function dispatchDrag(
 interface BuilderExposed {
   appendField(type: AuthorableFieldType): boolean
   insertFieldAt(anchor: unknown, type: AuthorableFieldType): boolean
+  moveFieldToAnchor(movingLocalId: string, anchor: unknown): void
   removeField(localId: string): boolean
   getSession(): FormAuthoringSession
   getDragSession(): ApprovalFormDragSession
@@ -809,6 +810,36 @@ describe('ApprovalFormBuilder — F3B selected-field inspector wiring (FB-D7)', 
     expect(INSPECTOR_INVALID_BUFFER_MESSAGE).not.toMatch(/local_|field_|字段 \d/)
   })
 
+  it('P2-3 SETTLE PATH: a dirty option-label buffer settles on selection switch with the option VALUE preserved (never regenerated)', async () => {
+    const builder = await mountBuilder([
+      field(1, { type: 'select', optionsText: '甲:a\n乙:b' }),
+      field(2),
+    ])
+    const optionInput = builder.q(
+      '[data-testid="approval-form-field-inspector-option-label-0"]',
+    ) as HTMLInputElement
+    optionInput.value = '甲改'
+    optionInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    // Switch selection WITHOUT blurring: the settle path commits the buffer.
+    ;(
+      builder.root.querySelector(
+        '[data-field-local-id="local_2"]',
+      ) as HTMLElement
+    ).click()
+    await nextTick()
+    // ONE entry; label changed; the hand-authored VALUE 'a' survived byte-identical.
+    expect(builder.vm.getSession().draft.fields[0].optionsText).toBe(
+      '甲改:a\n乙:b',
+    )
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(1)
+    expect(
+      builder.root
+        .querySelector('[data-field-local-id="local_2"]')
+        ?.getAttribute('data-selected'),
+    ).toBe('true')
+  })
+
   it('an invalid buffer also blocks slot drops and keyboard moves (no mutation past a pending invalid edit)', async () => {
     const builder = await mountBuilder([field(1), field(2)])
     await typeInspectorLabel(builder, ' ')
@@ -884,7 +915,19 @@ describe('ApprovalFormBuilder — F3B selected-field inspector wiring (FB-D7)', 
   })
 })
 
-// --- P3-2 regression: read-only drop guard at MUTATION time -----------------
+// --- P3-2 regression: read-only guards at MUTATION time ---------------------
+//
+// Coverage shape (stated honestly, per the F3 gate's P2-1): the drop path has
+// THREE redundant read-only gates (`onSlotDrop`'s early return, then the
+// mutation-time re-checks in `insertFieldAt` / `moveFieldToAnchor`). On the
+// jsdom DROP path the early return fires first, so the A5 drop test alone
+// cannot discriminate the deeper gates. The per-gate tests below therefore
+// arrive via the NON-drop callers — the exposed programmatic command surface,
+// a retained move button, and a retained inspector input — so deleting any
+// single deeper re-check (F2's M4/M5) or the `runInspectorCommand` gate turns
+// exactly its own test red. `onSlotDrop`'s early return ALONE remains pure
+// redundant shielding: deleting only it stays green BY CONSTRUCTION because
+// the individually-pinned deeper gates catch the drop.
 
 describe('ApprovalFormBuilder — P3-2: a drop racing a readOnly flip cannot insert (PROBE A5)', () => {
   it('a drop on a RETAINED slot node after the readOnly flip has propagated is a zero-mutation no-op (palette AND move payloads)', async () => {
@@ -918,6 +961,62 @@ describe('ApprovalFormBuilder — P3-2: a drop racing a readOnly flip cannot ins
     expect(builder.draftChanges).toHaveLength(0)
     // The read-only drop still cleared transient drag state (§3.1 trigger 5/1).
     expect(dragSession.active()).toBeNull()
+  })
+
+  it('PER-GATE A: each programmatic command re-check refuses AFTER the flip — appendField / insertFieldAt (M4) / moveFieldToAnchor (M5) individually load-bearing', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    // Each call hits ONLY its own mutation-time re-check — no drop handler,
+    // no onSlotDrop early return, in front of it. Deleting any single
+    // re-check makes that call mutate and this test red.
+    expect(builder.vm.appendField('text')).toBe(false)
+    expect(builder.vm.insertFieldAt({ kind: 'start' }, 'select')).toBe(false)
+    builder.vm.moveFieldToAnchor('local_2', { kind: 'start' })
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+  })
+
+  it('PER-GATE B: a RETAINED move button clicked after the flip cannot reorder (onMoveByOffset re-check)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    // Retain the live button node BEFORE the flip removes it from the DOM.
+    const retainedButton = builder.q(
+      '[data-testid="approval-form-builder-move-up-local_2"]',
+    )
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    retainedButton.click()
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+  })
+
+  it('PER-GATE C: a dirty inspector buffer blurred after the flip cannot commit (runInspectorCommand read-only gate)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    const retainedInput = builder.q(
+      '[data-testid="approval-form-field-inspector-label"]',
+    ) as HTMLInputElement
+    retainedInput.value = '越权改名'
+    retainedInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    // The retained (now-detached) input's blur handler still runs commit →
+    // execute → runInspectorCommand, whose read-only gate must refuse.
+    retainedInput.dispatchEvent(new Event('blur'))
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.vm.getSession().draft.fields[0].label).toBe('字段 1')
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
   })
 })
 

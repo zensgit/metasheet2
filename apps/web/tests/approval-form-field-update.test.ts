@@ -37,6 +37,7 @@ import {
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import type { DetailColumnDraft } from '../src/approvals/detailField'
+import type { FormField } from '../src/types/approval'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -349,28 +350,77 @@ describe('retypeFormField - named incompatible-type refusal for EVERY dependency
     assertOk(retypeFormField(draftWith([field(1), field(2)]), 'local_1', 'date'))
   })
 
-  it('detail_config (NEW kind): leaving detail with REAL configuration refuses; a pristine fresh detail field is the positive control', () => {
-    // Two columns = real configuration that a retype away would destroy.
-    const configured = field(1, {
-      type: 'detail',
-      detailColumns: [column(1, { label: '子字段 1' }), column(2)],
-    })
-    expectRefusal(draftWith([configured, field(2)]), 'detail_config', 'text')
-    // A single edited column (options/required/type/label/original) also counts.
-    const editedColumn = field(1, {
-      type: 'detail',
-      detailColumns: [column(1, { label: '品名', required: true })],
-    })
-    expectRefusal(draftWith([editedColumn, field(2)]), 'detail_config', 'text')
-    // Row bounds count as configuration too.
-    const rowBounds = field(1, {
-      type: 'detail',
-      detailColumns: [column(1, { label: '子字段 1' })],
-      minRowsText: '1',
-    })
-    expectRefusal(draftWith([rowBounds, field(2)]), 'detail_config', 'text')
-    // Positive control: the pristine fresh detail field retypes away cleanly,
-    // identity preserved, detail keys cleared.
+  // P2-2 per-arm discipline (析取式判定逐项单删): every disjunct arm of
+  // `detailFieldCarriesConfiguration` gets a SINGLE-PROPERTY fixture, so
+  // deleting exactly that arm turns exactly its own case red while every
+  // other case stays green. `pristineColumn()` differs from the pristine
+  // shape in ONE property per case.
+  function pristineColumn(
+    overrides: Partial<DetailColumnDraft> = {},
+  ): DetailColumnDraft {
+    return {
+      localId: 'col_local_9',
+      id: 'col_9',
+      type: 'text',
+      label: '子字段 1',
+      required: false,
+      optionsText: '',
+      ...overrides,
+    }
+  }
+  const DETAIL_FIELD_ORIGINAL: FormField = {
+    id: 'field_1',
+    type: 'detail',
+    label: '明细',
+  }
+  const COLUMN_ORIGINAL: FormField = { id: 'col_9', type: 'text', label: '子字段' }
+  const RECORD_LINK_ORIGINAL: FormField = {
+    id: 'field_1',
+    type: 'record-link',
+    label: '关联记录',
+  }
+
+  it.each<[string, Partial<FieldAuthoringDraft>]>([
+    [
+      'field.original (hydrated persisted detail, columns otherwise pristine)',
+      { original: DETAIL_FIELD_ORIGINAL, detailColumns: [pristineColumn()] },
+    ],
+    [
+      'row bounds (minRowsText only)',
+      { detailColumns: [pristineColumn()], minRowsText: '1' },
+    ],
+    [
+      'column count != 1 (second otherwise-pristine column)',
+      {
+        detailColumns: [
+          pristineColumn(),
+          pristineColumn({ localId: 'col_local_8', id: 'col_8' }),
+        ],
+      },
+    ],
+    [
+      'column.original only',
+      { detailColumns: [pristineColumn({ original: COLUMN_ORIGINAL })] },
+    ],
+    ['column.type only', { detailColumns: [pristineColumn({ type: 'number' })] }],
+    ['column.required only', { detailColumns: [pristineColumn({ required: true })] }],
+    [
+      'column.optionsText only',
+      { detailColumns: [pristineColumn({ optionsText: '甲:a' })] },
+    ],
+    ['column.label only', { detailColumns: [pristineColumn({ label: '品名' })] }],
+  ])(
+    'detail_config (NEW kind) arm — %s → named refusal on its single-property fixture',
+    (_name, overrides) => {
+      expectRefusal(
+        draftWith([field(1, { type: 'detail', ...overrides }), field(2)]),
+        'detail_config',
+        'text',
+      )
+    },
+  )
+
+  it('detail_config positive control: the pristine fresh detail field retypes away cleanly (identity preserved, detail keys cleared)', () => {
     const ok = retypeFormField(
       draftWith([pristineDetailField(1), field(2)]),
       'local_1',
@@ -387,13 +437,27 @@ describe('retypeFormField - named incompatible-type refusal for EVERY dependency
     })
   })
 
-  it('record_link_config (NEW kind): leaving a CONFIGURED record-link refuses; an unconfigured one is the positive control', () => {
-    const configured = field(1, {
-      type: 'record-link',
-      recordLinkBaseId: 'base_x',
-      recordLinkSheetId: 'sheet_y',
-    })
-    expectRefusal(draftWith([configured, field(2)]), 'record_link_config', 'text')
+  // P2-2: all three arms of `recordLinkCarriesConfiguration`, one
+  // single-property fixture each.
+  it.each<[string, Partial<FieldAuthoringDraft>]>([
+    [
+      'field.original (persisted record-link with BLANK pins)',
+      { original: RECORD_LINK_ORIGINAL },
+    ],
+    ['recordLinkBaseId only', { recordLinkBaseId: 'base_x' }],
+    ['recordLinkSheetId only', { recordLinkSheetId: 'sheet_y' }],
+  ])(
+    'record_link_config (NEW kind) arm — %s → named refusal on its single-property fixture',
+    (_name, overrides) => {
+      expectRefusal(
+        draftWith([field(1, { type: 'record-link', ...overrides }), field(2)]),
+        'record_link_config',
+        'text',
+      )
+    },
+  )
+
+  it('record_link_config positive control: an unconfigured fresh record-link retypes away cleanly', () => {
     const unconfigured = field(1, { type: 'record-link' })
     assertOk(
       retypeFormField(draftWith([unconfigured, field(2)]), 'local_1', 'text'),
@@ -500,6 +564,133 @@ describe('retypeFormField - retype INTO detail mints only the first-column ident
     const detail = result.session.draft.fields[0]
     expect(detail.id).toBe('field_1')
     expect(detail.detailColumns[0].id).not.toBe(`dcol_${HEX_A}`)
+  })
+})
+
+// --- fail-closed on un-authorable current types + dotted column refs ---------
+
+describe('F3 gate hardening — un-authorable current types fail closed at the COMMAND level (P3-1/P3-4)', () => {
+  it('property edits on an attachment or unknown-typed field are rejected — the whole-template lock is not only a UI prop', () => {
+    const source = draftWith([
+      field(1, { type: 'attachment' as never }),
+      field(2, { type: 'signature' as never }),
+      field(3),
+    ])
+    expect(
+      updateFormFieldProperties(source, 'local_1', { label: 'HACKED' }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(
+      updateFormFieldProperties(source, 'local_2', { required: true }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    // Positive control: the authorable sibling still edits.
+    assertOk(updateFormFieldProperties(source, 'local_3', { label: '正常' }))
+    expect(source.fields[0].label).toBe('字段 1')
+  })
+
+  it('a same-type attachment "retype" is the NAMED boundary refusal, and an unknown current type is fail-closed (boundary checks precede the no-op)', () => {
+    const source = draftWith([
+      field(1, { type: 'attachment' as never }),
+      field(2, { type: 'signature' as never }),
+      field(3),
+    ])
+    const attachment = retypeFormField(source, 'local_1', 'attachment')
+    expect(attachment).toMatchObject({
+      ok: false,
+      reason: 'field_type_incompatible_with_references',
+    })
+    expect(dependencyKinds(attachment)).toEqual(['attachment_boundary'])
+    expect(retypeFormField(source, 'local_2', 'text')).toMatchObject({
+      ok: false,
+      reason: 'unsupported_field_type',
+    })
+    expect(retypeFormField(source, 'local_2', 'signature' as never)).toMatchObject(
+      { ok: false, reason: 'unsupported_field_type' },
+    )
+    // Positive control: the authorable sibling still same-type no-ops.
+    assertOk(retypeFormField(source, 'local_3', 'text'))
+  })
+
+  it('row-bound patch keys are detail-only (P3-4): patching them onto a text field is rejected; the detail positive control succeeds', () => {
+    const source = draftWith([
+      field(1),
+      field(2, { id: 'items', type: 'detail', detailColumns: [column(1)] }),
+    ])
+    expect(
+      updateFormFieldProperties(source, 'local_1', {
+        minRowsText: '9',
+        maxRowsText: '2',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(source.fields[0].minRowsText).toBe('')
+    assertOk(updateFormFieldProperties(source, 'local_2', { minRowsText: '1' }))
+  })
+
+  it('detail-column edits on a NON-LEAF current column type are rejected (update and retype)', () => {
+    const source = draftWith([
+      field(1, {
+        id: 'items',
+        type: 'detail',
+        detailColumns: [column(1, { type: 'attachment' as never }), column(2)],
+      }),
+      field(2),
+    ])
+    expect(
+      updateFormDetailColumn(source, 'local_1', 'col_local_1', { label: 'x' }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(
+      retypeFormDetailColumn(source, 'local_1', 'col_local_1', 'text'),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    // Positive control: the leaf sibling column still edits.
+    assertOk(
+      updateFormDetailColumn(source, 'local_1', 'col_local_2', { label: '正常' }),
+    )
+  })
+
+  it('P3-2 fold: retyping a detail field away also collects each COLUMN\'s dotted references (rule + preserved-graph shapes)', () => {
+    // Pristine detail field (so detail_config does NOT fire) whose column is
+    // referenced by the exact-equality dotted shapes the field-level walk
+    // alone cannot see.
+    const source = draftWith([pristineDetailField(1), field(2)])
+    source.conditionEdits = {
+      condition_1: {
+        nodeKey: 'condition_1',
+        defaultEdgeKey: '',
+        branches: [
+          {
+            edgeKey: 'e1',
+            predicateMode: 'rules',
+            conjunction: 'and',
+            rules: [{ fieldId: 'field_1.col_9', operator: 'eq', value: 1 }],
+            formulaExpression: '',
+          },
+        ],
+      },
+    }
+    source.preservedGraph = {
+      nodes: [
+        {
+          key: 'x_1',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'e2', rules: [{ fieldId: 'field_1.col_9' }] }],
+          },
+        },
+      ],
+      edges: [],
+    }
+    const refused = retypeFormField(source, 'local_1', 'text')
+    expect(refused).toMatchObject({
+      ok: false,
+      reason: 'field_type_incompatible_with_references',
+    })
+    const kinds = new Set(dependencyKinds(refused))
+    expect(kinds).toContain('condition_rule')
+    expect(kinds).toContain('preserved_graph_reference')
+    // Positive control: without the dotted references the pristine field
+    // retypes away.
+    assertOk(
+      retypeFormField(draftWith([pristineDetailField(1), field(2)]), 'local_1', 'text'),
+    )
   })
 })
 
