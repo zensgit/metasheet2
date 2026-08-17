@@ -116,8 +116,7 @@ carries the `nodeEntryEpoch` round-scoping and Lock-4 gate D-3 with it. This is 
 slice, not a discovery: it is the ratified condition on the nomination being usable.
 
 **First-node vacuity, stated so the copy cannot overclaim.** The create-time cascade is handed an EMPTY
-history (Lock-4 F4-D), so neither history flag can fire at the first approval node; a template tier
-affects nodes 2..N only.
+history (Lock-4 F4-D), so neither history flag can fire at the first approval node — a template tier affects nodes 2..N only.
 
 **Enforcement provenance is pre-existing.** The L6-A PR lands authoring, carrier, projection and
 round-scoping — it does **not** land the dedup enforcement. Gate A-2 is still mandatory: with the dedup
@@ -212,9 +211,12 @@ Corpus 2217-2228: 该流程数据不纳入效率统计, default unchecked, cover
 a real subject — `approval_metrics` rows carry `template_id`, so a template-scoped exclusion is
 expressible as a filter on the aggregate readers. Its honest cost: a new column on `approval_templates`
 (which is itself created by a `zzzz` migration, `zzzz20260411120100_approval_templates_and_instance_extensions.ts`,
-so the new column must also be `zzzz`-prefixed to order correctly), plus filters added to the five
-aggregate reader methods (`:541`, `:663`, `:737`, `:741`, `:745`) in one slice. **Boundary, locked:** the
-exclusion covers aggregate/统计 readers ONLY. SLA breach detection and notification (`checkSlaBreaches:507`,
+so the new column must also be `zzzz`-prefixed to order correctly), plus filters added in ONE slice to the
+three INDEPENDENT readers — `getMetricsSummary:541` (`:585`, `:618`), `getMetricsByDimension:663` (`:712`),
+`getMetricsReport:745` (`:786`, `:811`). `getMetricsByRequester:737`/`getMetricsByDepartment:741` are
+one-line wrappers over the second, NOT edit sites; counting them makes a per-reader mutation gate vacuous.
+**Boundary, locked:** the exclusion covers aggregate/统计 readers ONLY. SLA breach detection and
+notification (`checkSlaBreaches:507`,
 `listBreachesPendingNotification:873`, `listActiveBreaches:904`) and per-instance metrics
 (`getInstanceMetrics:853`) are NOT excluded — the corpus speaks about 效率诊断 dimensions and evidences no
 suppression of breach alerting, and silently muting an operator alert from a template checkbox would be
@@ -233,11 +235,10 @@ field with NO server default — `assertRuntimePolicy:2688` requires the boolean
 that rather than inventing one.
 
 **2.3 One carrier, four sites, one slice.** A new template-policy key must move together: the publish
-validator (`assertRuntimePolicy:2683-2705`), the compiler (`buildRuntimeGraph:2734-2747`), the detail
-read that L6-P1 adds, and the draft hydrate/serialize pair. Node-config keys additionally hit the
-backend rebuild's fixed field list and the two frontend allowlists (`templateAuthoring.ts:588-596`,
-`:613`, `:757-770`) — L6-A adds no node key and so stays clear of that hazard, and the bar there is that
-the template stays EDITABLE, not merely round-trip-safe.
+validator (`assertRuntimePolicy:2683-2705`), the compiler (`buildRuntimeGraph:2734-2747`), the detail read
+L6-P1 adds, and the draft hydrate/serialize pair. Node-config keys additionally hit the backend rebuild's
+fixed field list and the two frontend allowlists (`templateAuthoring.ts:588-596`, `:613`, `:757-770`) —
+L6-A adds no node key, and the bar there is that the template stays EDITABLE, not just round-trip-safe.
 
 **2.4 The echo never becomes authoritative.** `policy_snapshot` (`:5224`) and the DTO's `policy` (`:2433`)
 are display inputs; enforcement always reads the instance's frozen published runtime graph (`:6616`).
@@ -250,8 +251,7 @@ by `insertAutoApprovalEvents:7882` — an observable no node-level policy can pr
 gate A-3 discriminating. Any later policy reuses that metadata pattern.
 
 **2.6 Unknown persisted values stay read-only (M4).** A persisted tier combination outside the projected
-set — today, both booleans ON — renders read-only and saves unchanged; it is never flattened to a
-default. The same rule governs any future enum value.
+set — today, both booleans ON — renders read-only and saves unchanged, never flattened to a default. The same rule governs any future enum value.
 
 **2.7 Fifth-step activation mechanics (M7 / L0-4).** Activation is a typed change to the
 `AuthoringSectionId` union and the `authoringSections` array (`TemplateAuthoringView.vue:1215-1225`),
@@ -294,7 +294,7 @@ Backend gates land in the required backend lane; frontend gates extend the requi
 | M-2 | No inert control | every switch rendered in `更多设置` maps to a named enforcement test; a rendered switch with no such test fails the gate | the one shipped switch has one — the census is not vacuous |
 | X-1 | Unknown persisted value (M4) | a persisted both-ON tier state renders read-only and saves unchanged | a known single-tier value renders editable — the branch is value-selected |
 | X-2 | Echo never authoritative | with the instance `policy_snapshot` mutated to `allowRevoke:true` on a template published `false`, revoke still 409s `APPROVAL_REVOKE_DISABLED` | the same instance under a template published `true` revokes — the refusal is runtime-graph-selected |
-| F-1 | L6-F2 (second slice only) | an excluded template's instances are absent from all five aggregate readers, and removing the filter from any ONE of them turns a named test red | a non-excluded template appears in all five |
+| F-1 | L6-F2 (second slice only) | an excluded template's instances are absent from every aggregate query site, and removing the filter from any ONE of the three INDEPENDENT readers turns a named test red — never from a wrapper, which has no filter to remove | a non-excluded template appears at every one of those query sites |
 | F-2 | L6-F2 SLA boundary | an excluded template's SLA breaches are still detected and still listed for notification | a genuine non-breach is still absent — the presence assertion is not trivially true |
 
 ## 4. Owner ratification block
