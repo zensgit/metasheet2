@@ -125,6 +125,10 @@ on:
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      # F0 (2026-08-17, PR #4939): ApprovalFormInlineEditor.vue extraction (form section pulled out
+      # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
+      - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
+      - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -319,6 +323,10 @@ on:
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      # F0 (2026-08-17, PR #4939): ApprovalFormInlineEditor.vue extraction (form section pulled out
+      # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
+      - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
+      - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -473,6 +481,7 @@ jobs:
             approval-flow-canvas-a11y \
             approval-canvas-inspector-a11y \
             approval-form-palette-focus \
+            approval-form-inline-editor-extract \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

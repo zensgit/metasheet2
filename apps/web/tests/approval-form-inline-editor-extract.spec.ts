@@ -8,7 +8,7 @@
  * DOM), and pins the component's props/events contract shape.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { computed, createApp, defineComponent, h, inject, nextTick, provide, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import ApprovalFormInlineEditor from '../src/approvals/components/ApprovalFormInlineEditor.vue'
 import type { ApprovalTemplateDetailDTO } from '../src/types/approval'
@@ -154,19 +154,31 @@ const ElCheckbox = defineComponent({
   },
 })
 
+// Detail-column probe (FIX 3, PR #4939 gate fix round): unlike the generic no-op ElTableColumn
+// stub used elsewhere in this repo's approval specs (which never renders scoped-slot content),
+// this pair actually iterates `data` and invokes each column's `#default="{ row, $index }"` slot
+// per row — required so the 明细 (detail) column table's per-row 删除 button is a real, clickable
+// DOM node, making `@remove-detail-column` observably load-bearing (not just a static assertion).
+const ELEMENT_TABLE_DATA = Symbol('element-table-data-stub')
+
 const ElTable = defineComponent({
   name: 'ElTable',
-  props: { data: Array },
-  render() {
-    return h('div', { 'data-testid': (this.$attrs as any)?.['data-testid'] }, this.$slots.default?.())
+  props: { data: { type: Array, default: () => [] } },
+  setup(props, { slots, attrs }) {
+    provide(ELEMENT_TABLE_DATA, computed(() => (props.data ?? []) as unknown[]))
+    return () => h('div', { 'data-testid': (attrs as any)?.['data-testid'] }, slots.default?.())
   },
 })
 
 const ElTableColumn = defineComponent({
   name: 'ElTableColumn',
   props: { label: String },
-  render() {
-    return h('div')
+  setup(_props, { slots }) {
+    const rows = inject(ELEMENT_TABLE_DATA, computed(() => [] as unknown[]))
+    return () => h(
+      'div',
+      rows.value.map((row, $index) => h('div', { key: $index }, slots.default?.({ row, $index }))),
+    )
   },
 })
 
@@ -379,7 +391,7 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
 
     // The catalog fetch was triggered by adding the record-link field and failed — the CHILD
     // renders the parent-owned error + retry affordance (never a second fetch owner).
-    expect(listBasesSpy.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(listBasesSpy).toHaveBeenCalledTimes(1)
     expect(container!.querySelector('[data-testid="approval-record-link-catalog-error"]')).not.toBeNull()
     const retryButton = container!.querySelector('[data-testid="approval-record-link-catalog-retry"]') as HTMLButtonElement
     expect(retryButton).not.toBeNull()
@@ -498,5 +510,184 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
 
     standaloneApp.unmount()
     standaloneContainer.remove()
+  })
+
+  // FIX 3 (PR #4939 gate fix round): the remaining 10 of 14 parent listeners on the
+  // `<ApprovalFormInlineEditor>` tag were not load-bearing — deleting any of them left every test
+  // above green. Each case below mounts the REAL PARENT (mountView(), not the standalone child
+  // harness in (c) above) and drives the child's DOM so the emit reaches the parent's actual
+  // `@listener="handler"` binding; the assertion only holds if that specific binding fired.
+
+  function previewRows(): HTMLElement[] {
+    return Array.from(container!.querySelectorAll('.template-authoring__form-preview-row'))
+  }
+  function previewRowTestIds(): (string | null)[] {
+    return previewRows().map((el) => el.getAttribute('data-testid'))
+  }
+  function focusedFieldRow(): HTMLElement {
+    return container!.querySelector(
+      '[data-testid="approval-template-field-row"][data-selected="true"]',
+    ) as HTMLElement
+  }
+
+  it('(d) move-field reorders the preview list in both directions (上移/下移)', async () => {
+    await mountView()
+    const before = previewRowTestIds()
+    expect(before.length).toBe(1)
+
+    // Add a second field — it lands last and is auto-focused (structural push + focusFormFieldRow).
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+    const afterAdd = previewRowTestIds()
+    expect(afterAdd).toEqual([before[0], expect.any(String)])
+    const newFieldTestId = afterAdd[1]
+
+    // 上移: the focused (new) field's toolbar button at index 0 within its own row.
+    const toolbarButtons = () => focusedFieldRow().querySelectorAll('.template-authoring__item-toolbar button')
+    const upButton = toolbarButtons()[0] as HTMLButtonElement
+    expect(upButton.disabled).toBe(false)
+    upButton.click()
+    await flushUi()
+    expect(previewRowTestIds()).toEqual([newFieldTestId, before[0]])
+
+    // 下移: same focused row (key-stable across the reorder), move back down.
+    const downButton = toolbarButtons()[1] as HTMLButtonElement
+    expect(downButton.disabled).toBe(false)
+    downButton.click()
+    await flushUi()
+    expect(previewRowTestIds()).toEqual([before[0], newFieldTestId])
+  })
+
+  it('(e) native drag-and-drop reorders fields via field-drag-start + field-drop', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+    const before = previewRowTestIds()
+    expect(before.length).toBe(2)
+
+    const rows = previewRows()
+    rows[0].dispatchEvent(new Event('dragstart'))
+    rows[1].dispatchEvent(new Event('drop'))
+    await flushUi()
+
+    expect(previewRowTestIds()).toEqual([before[1], before[0]])
+  })
+
+  it('(f) palette drag-and-drop onto the stage adds the dragged type via palette-drag-start + preview-drop', async () => {
+    await mountView()
+    expect(previewRowTestIds().length).toBe(1)
+
+    const paletteChip = container!.querySelector('[data-testid="approval-field-palette-record-link"]') as HTMLButtonElement
+    paletteChip.dispatchEvent(new Event('dragstart'))
+    const stage = container!.querySelector('.template-authoring__form-preview-stage') as HTMLElement
+    stage.dispatchEvent(new Event('drop'))
+    await flushUi()
+
+    const rows = previewRows()
+    expect(rows.length).toBe(2)
+    expect(rows[1].querySelector('.template-authoring__form-preview-type')?.textContent).toBe('关联记录')
+  })
+
+  it('(g) remove-field deletes the field and shrinks the preview list', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewRowTestIds().length).toBe(2)
+
+    const removeButton = focusedFieldRow().querySelectorAll('.template-authoring__item-toolbar button')[2] as HTMLButtonElement
+    expect(removeButton.disabled).toBe(false)
+    removeButton.click()
+    await flushUi()
+
+    expect(previewRowTestIds().length).toBe(1)
+  })
+
+  it('(h) select-field-focus moves the selected/focused row without reordering fields', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+    const order = previewRowTestIds()
+    const originalRowTestId = order[0]
+    const newRowLocalId = order[1]!.replace('approval-form-preview-row-', '')
+    // Sanity: the newly-added field (not the original) is currently focused.
+    expect(focusedFieldRow().getAttribute('data-field-local-id')).toBe(newRowLocalId)
+
+    // Click the ORIGINAL preview row to move selection back onto it.
+    ;(previewRows()[0] as HTMLButtonElement).click()
+    await flushUi()
+
+    // Field order is untouched (select-field-focus never pushes to the structural history stack).
+    expect(previewRowTestIds()).toEqual(order)
+    // Focus moved to the field behind the clicked row (data-field-local-id ties the preview row
+    // clicked to the inspector row now marked data-selected="true").
+    const originalLocalId = originalRowTestId!.replace('approval-form-preview-row-', '')
+    expect(focusedFieldRow().getAttribute('data-field-local-id')).toBe(originalLocalId)
+  })
+
+  it('(i) add-detail-column / remove-detail-column mutate the field detail-column list', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-detail"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // addFieldOfType seeds exactly ONE detail column by default (parent-owned, unrelated to
+    // add-detail-column/remove-detail-column — this is just the starting state).
+    const detailConfig = () => container!.querySelector('[data-testid="approval-detail-config"]') as HTMLElement
+    expect(detailConfig()).not.toBeNull()
+    const columnDeleteButtons = () => detailConfig().querySelectorAll('.template-authoring__detail-table button')
+    expect(columnDeleteButtons().length).toBe(1)
+
+    // add-detail-column: "添加子字段" appends a second column.
+    const addColumnButton = detailConfig().querySelector('[data-testid="approval-detail-add-column"]') as HTMLButtonElement
+    addColumnButton.click()
+    await flushUi()
+    expect(columnDeleteButtons().length).toBe(2)
+
+    // remove-detail-column: the first row's own 删除 button drops the count back to one.
+    ;(columnDeleteButtons()[0] as HTMLButtonElement).click()
+    await flushUi()
+    expect(columnDeleteButtons().length).toBe(1)
+  })
+
+  it('(j) invalidate-record-link-deps clears a stale visibility dependency when the depended-on field is retyped to record-link', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // The newly-added field is focused; give it a visibility rule depending on the ORIGINAL
+    // (create-mode default, index-1) field — still type='text' at this point, an eligible
+    // dependency (non-empty id, not record-link/detail). Read the option's value rather than
+    // hardcoding the default field's auto-generated id.
+    const dependentRow = focusedFieldRow()
+    const dependsSelect = dependentRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    const dependencyOption = dependsSelect.querySelector('option:not([value=""])') as HTMLOptionElement
+    expect(dependencyOption).not.toBeNull()
+    const dependencyValue = dependencyOption.value
+    dependsSelect.value = dependencyValue
+    dependsSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(dependsSelect.value).toBe(dependencyValue)
+    // Ground-truth signal for the underlying `field.visibility.dependsOnFieldId` model value: the
+    // operator select only renders `v-if="field.visibility.dependsOnFieldId"`. (NOT the native
+    // <select>'s own `.value` getter after the option disappears below — a <select> whose model
+    // value no longer matches any <option> silently coerces `.value` to '' even though the
+    // underlying reactive string is untouched, which would make this assertion pass whether or
+    // not invalidateStaleRecordLinkDependencies actually ran — a false-positive verified while
+    // authoring this test.)
+    const operatorSelect = () => dependentRow.querySelector('[data-testid="approval-field-visibility-operator"]')
+    expect(operatorSelect()).not.toBeNull()
+
+    // Retype the ORIGINAL field (the dependency target) to record-link — the other field row
+    // (not the one just focused/dependent).
+    const allRows = Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]'))
+    const targetRow = allRows.find((row) => row !== dependentRow) as HTMLElement
+    const typeSelect = targetRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'record-link'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The dependent field's stale visibility rule was cleared by the parent's
+    // invalidateStaleRecordLinkDependencies (server would fail-close on an illegal dependency):
+    // the operator select's v-if condition (`field.visibility.dependsOnFieldId`) is now falsy.
+    expect(operatorSelect()).toBeNull()
   })
 })

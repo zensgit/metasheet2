@@ -85,6 +85,13 @@ describe('TemplateAuthoringView form palette focus-return (structural)', () => {
     expect(CHILD_SRC).not.toMatch(/计算公式/)
     expect(CHILD_SRC).not.toMatch(/控件组/)
     expect(CHILD_SRC).not.toMatch(/approval-field-palette-attachment/)
+    // Parent still OWNS the palette constants (FIELD_PALETTE_LABELS / FIELD_PALETTE_MARKS /
+    // fieldPaletteGroups, TemplateAuthoringView.vue ~:2475/:2490/:2503) — the extraction only moved
+    // the rendering markup to the child. These field kinds must stay out of scope in BOTH files.
+    expect(VIEW_SRC).not.toMatch(/金额/)
+    expect(VIEW_SRC).not.toMatch(/计算公式/)
+    expect(VIEW_SRC).not.toMatch(/控件组/)
+    expect(VIEW_SRC).not.toMatch(/approval-field-palette-attachment/)
   })
 
   it('structural field mutations still go through form history (undo/redo safe)', () => {

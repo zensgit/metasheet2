@@ -137,6 +137,13 @@
 # Previously ran in NO CI lane, so the client↔server rules-version parity pin and the prototype-pollution
 # guard could never go red. Bare basename token; unique (no existing token is a substring of it, nor it of
 # any existing token).
+#
+# F0 (2026-08-17, PR #4939): `approval-form-inline-editor-extract` — behavior-equivalence spec for the
+# ApprovalFormInlineEditor.vue extraction (the form section pulled out of TemplateAuthoringView.vue,
+# 14 emitted events, parent handlers unchanged). Added to the always-on Canvas V2 residual block below
+# alongside the other approval-form-* canaries. Bare basename token; verified unique — no existing
+# `approval-form-*` token (approval-form-commands / approval-form-authoring-history /
+# approval-form-palette-focus / approval-form-draft) is a substring of it or vice versa.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -151,6 +158,7 @@ npx vitest run \
   approval-flow-canvas-a11y \
   approval-canvas-inspector-a11y \
   approval-form-palette-focus \
+  approval-form-inline-editor-extract \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
