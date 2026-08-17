@@ -955,7 +955,8 @@ test('W4C-3b P26 generates the action/fixture matrix and classifies every assign
   )
   assert.deepEqual(contract.fixtureKinds, ['normal', 'adversary'])
   assert.deepEqual(contract.timeoutEffects, ['transfer', 'jump'])
-  assert.equal(contract.actions.length, 8)
+  // Lock-3 §2.1 (P4-A): APPROVAL_ACTION_TYPES gained `handle` — the union is now nine members.
+  assert.equal(contract.actions.length, 9)
 })
 
 test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or additions', () => {
