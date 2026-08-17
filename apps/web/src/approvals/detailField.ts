@@ -500,6 +500,18 @@ function formatDisplayValue(field: FormField, value: unknown): string {
       }
       return '-'
     }
+    case 'date_range': {
+      // Lock-8 L8-B MS-12: `date_range` is excluded from detail columns (OD-L8-4), but a TOP-LEVEL
+      // date_range still flows through `buildDisplayFields` below — without this arm it would fall
+      // through to the `default: String(value)` case and print "[object Object]" (M8 honesty).
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const { start, end } = value as { start?: unknown; end?: unknown }
+        if (start !== undefined && end !== undefined) {
+          return `${formatDisplayDate(start)} ~ ${formatDisplayDate(end)}`
+        }
+      }
+      return '-'
+    }
     default:
       return String(value)
   }

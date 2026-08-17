@@ -209,8 +209,87 @@ function isEmptyValue(value: unknown): boolean {
     || (Array.isArray(value) && value.length === 0)
 }
 
-function evaluateVisibilityRule(rule: FormFieldVisibilityRule, formData: Record<string, unknown>): boolean {
-  const value = formData[rule.fieldId]
+// Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): the
+// granularity enum `date_range.props.dateType` declares. Exactly D-2's two shipped value contracts
+// are reused — 'date' compares as the strict lexicographic civil-date string
+// (`isValidIsoCalendarDate`); 'date_half_day' and 'date_minute' BOTH compare as Date.parse-able
+// instants (§1.2: "each arm reuses D-2's shipped value contract rather than inventing a third" —
+// the corpus's 3-way granularity enum maps onto our 2 value contracts, not a third).
+export const DATE_RANGE_DATE_TYPES = new Set(['date', 'date_half_day', 'date_minute'])
+
+function isDateRangeEndpointValid(dateType: unknown, value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  if (dateType === 'date') return isValidIsoCalendarDate(value)
+  if (dateType === 'date_half_day' || dateType === 'date_minute') {
+    return !Number.isNaN(Date.parse(value))
+  }
+  // Fail closed: an absent/off-enum dateType (should never survive publish, §1.2's props gate)
+  // accepts nothing — never falls through to the permissive instant branch.
+  return false
+}
+
+/** -1 / 0 / 1 per the arm's own comparison rule (lexicographic for 'date', epoch otherwise). */
+function compareDateRangeEndpoints(dateType: unknown, a: string, b: string): number {
+  if (dateType === 'date') {
+    return a < b ? -1 : a > b ? 1 : 0
+  }
+  const left = Date.parse(a)
+  const right = Date.parse(b)
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+/**
+ * Lock-8 L8-B OD-L8-5(a) — a visibility/condition rule's `fieldId` may reference a field's whole
+ * value directly, OR — for a `date_range` field ONLY — one of its two endpoints via the dotted
+ * address `${fieldId}.start` / `${fieldId}.end` (extending the shipped `{fieldId.columnId}` detail
+ * formula-token grammar — `conditionEdit.ts` FE / `ApprovalConditionFormula.ts` BE — to visibility).
+ * A bare reference to a date_range field's own id is REFUSED: "never as one comparable value" — a
+ * range is not a scalar. Every other type keeps the plain whole-field form; `null` on any
+ * unresolvable input (unknown field, malformed address, non-date_range base for a dotted suffix,
+ * or a bare date_range id) — callers treat that identically to "field not found" (fail-closed).
+ */
+export interface VisibilityFieldReference {
+  field: FormField
+  endpoint?: 'start' | 'end'
+}
+
+export function resolveVisibilityFieldReference(
+  rawFieldId: string,
+  fields: readonly FormField[],
+): VisibilityFieldReference | null {
+  const fieldMap = new Map(fields.map((field) => [field.id, field]))
+  const direct = fieldMap.get(rawFieldId)
+  if (direct) {
+    return direct.type === 'date_range' ? null : { field: direct }
+  }
+  const dot = rawFieldId.lastIndexOf('.')
+  if (dot <= 0 || dot === rawFieldId.length - 1) return null
+  const suffix = rawFieldId.slice(dot + 1)
+  if (suffix !== 'start' && suffix !== 'end') return null
+  const base = fieldMap.get(rawFieldId.slice(0, dot))
+  if (!base || base.type !== 'date_range') return null
+  return { field: base, endpoint: suffix }
+}
+
+/** Read the value a resolved visibility reference points at (whole field, or one date_range endpoint). */
+export function readVisibilityReferenceValue(
+  reference: VisibilityFieldReference,
+  formData: Record<string, unknown>,
+): unknown {
+  const raw = formData[reference.field.id]
+  if (!reference.endpoint) return raw
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)[reference.endpoint]
+    : undefined
+}
+
+function evaluateVisibilityRule(
+  rule: FormFieldVisibilityRule,
+  formData: Record<string, unknown>,
+  fields: readonly FormField[],
+): boolean {
+  const reference = resolveVisibilityFieldReference(rule.fieldId, fields)
+  const value = reference ? readVisibilityReferenceValue(reference, formData) : undefined
   switch (rule.operator) {
     case 'eq':
       return value === rule.value
@@ -257,12 +336,18 @@ function buildVisibilityLookup(formSchema: FormSchema, formData: Record<string, 
       return false
     }
 
+    // OD-L8-5(a): the dependency's OWN visibility is checked against its BASE field id — a dotted
+    // `${id}.start`/`${id}.end` endpoint address resolves to the date_range field itself for this
+    // purpose (there is no separate "endpoint field" to recurse into). An unresolvable address
+    // (never published, but defensive against a stale/older graph) is treated as "not visible",
+    // matching the pre-existing missing-field fail-closed behavior below.
+    const reference = resolveVisibilityFieldReference(field.visibilityRule.fieldId, formSchema.fields)
     stack.add(fieldId)
-    const dependentFieldVisible = isVisible(field.visibilityRule.fieldId)
+    const dependentFieldVisible = reference ? isVisible(reference.field.id) : false
     stack.delete(fieldId)
 
     const visible = dependentFieldVisible
-      ? evaluateVisibilityRule(field.visibilityRule, formData)
+      ? evaluateVisibilityRule(field.visibilityRule, formData, formSchema.fields)
       : false
     cache.set(fieldId, visible)
     return visible
@@ -433,6 +518,22 @@ export function validateFieldType(
         ? null
         : `${field.id} must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)`
     }
+    case 'date_range': {
+      // Lock-8 L8-B MS-3: structural shape is exactly `{ start, end }`, both non-blank strings
+      // valid for the field's declared `dateType` granularity — no arrays, no extra keys. `dateType`
+      // is required-with-no-absent-default at publish (§1.2); a value validated against a missing
+      // or off-enum dateType is rejected here too (`isDateRangeEndpointValid` fails closed).
+      if (!isRecord(value)) return `${field.id} must be an object`
+      const keys = Object.keys(value)
+      if (keys.length !== 2 || !keys.includes('start') || !keys.includes('end')) {
+        return `${field.id} must be exactly { start, end }`
+      }
+      const dateType = field.props?.dateType
+      if (!isDateRangeEndpointValid(dateType, value.start) || !isDateRangeEndpointValid(dateType, value.end)) {
+        return `${field.id} start and end must be valid dates for the declared date type`
+      }
+      return null
+    }
     default:
       return null
   }
@@ -574,6 +675,23 @@ export function validateFieldConstraints(field: FormField, value: unknown): stri
         errors.push(`${field.id} must be on or before ${max}`)
       }
       return errors
+    }
+    case 'date_range': {
+      // Lock-8 L8-B B-1: `start <= end`, the ONE cross-endpoint check. Values-free (Lock-5 §2.4 /
+      // §2.3): the message carries the field id ONLY — never either endpoint — because this array
+      // is serialized verbatim into `ServiceError.details` and returned to the client
+      // (ApprovalProductService.ts submit path). The shape was already type-validated by
+      // `validateFieldType` before constraints run; a malformed value here is silently skipped
+      // (same non-enforced precedent as an invalid `pattern`/min/max above) rather than duplicating
+      // that check.
+      if (!isRecord(value) || typeof value.start !== 'string' || typeof value.end !== 'string') return []
+      const dateType = field.props?.dateType
+      if (!isDateRangeEndpointValid(dateType, value.start) || !isDateRangeEndpointValid(dateType, value.end)) {
+        return []
+      }
+      return compareDateRangeEndpoints(dateType, value.start, value.end) > 0
+        ? [`${field.id} start must not be after end`]
+        : []
     }
     default:
       return []

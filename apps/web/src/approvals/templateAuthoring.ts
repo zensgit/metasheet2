@@ -90,6 +90,8 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'user',
   'detail',
   'record-link',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): start+end date pair.
+  'date_range',
 ]
 
 /**
@@ -136,6 +138,19 @@ export interface FieldAuthoringDraft {
   numberCurrencySymbol: string
   numberThousandsSeparator: boolean
   numberUppercaseCny: boolean
+  /**
+   * L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-8): date_range draft
+   * carrier. Meaningful only when `type === 'date_range'`. `dateRangeDateType` mirrors C-7/C-6's
+   * required 3-way granularity enum and has NO absent-default — `''` is the "not yet chosen" draft
+   * state (publish rejects it, §1.2), never silently coerced to a default arm. `dateRangeStartLabel`
+   * / `dateRangeEndLabel` are the required C-7 控件名称 1/2; `dateRangeDurationLabel` is an OPTIONAL
+   * custom label for the ALWAYS-rendered derived duration (OD-L8-8) — its absence does not turn the
+   * duration display off, only its label falls back to a default.
+   */
+  dateRangeDateType: '' | 'date' | 'date_half_day' | 'date_minute'
+  dateRangeStartLabel: string
+  dateRangeEndLabel: string
+  dateRangeDurationLabel: string
   original?: FormField
 }
 
@@ -269,6 +284,10 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     numberCurrencySymbol: '',
     numberThousandsSeparator: false,
     numberUppercaseCny: false,
+    dateRangeDateType: '',
+    dateRangeStartLabel: '',
+    dateRangeEndLabel: '',
+    dateRangeDurationLabel: '',
   }
 }
 
@@ -468,6 +487,18 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     numberCurrencySymbol: field.type === 'number' && typeof props.currencySymbol === 'string' ? props.currencySymbol : '',
     numberThousandsSeparator: field.type === 'number' && props.thousandsSeparator === true,
     numberUppercaseCny: field.type === 'number' && props.uppercaseCny === true,
+    // L8-B: typeof/enum-guarded per key, mirroring L8-C's discipline — a malformed stored value
+    // hydrates to the "unset" default rather than throwing or coercing. The backend type/enum
+    // validates these at publish (ApprovalProductService.ts), so a freshly-saved template can never
+    // reach this hydration path with a malformed value; this stays defensive for out-of-band data.
+    dateRangeDateType:
+      field.type === 'date_range' &&
+      (props.dateType === 'date' || props.dateType === 'date_half_day' || props.dateType === 'date_minute')
+        ? props.dateType
+        : '',
+    dateRangeStartLabel: field.type === 'date_range' && typeof props.startLabel === 'string' ? props.startLabel : '',
+    dateRangeEndLabel: field.type === 'date_range' && typeof props.endLabel === 'string' ? props.endLabel : '',
+    dateRangeDurationLabel: field.type === 'date_range' && typeof props.durationLabel === 'string' ? props.durationLabel : '',
     original: field,
   }
 }
@@ -1039,16 +1070,36 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         if (field.numberUppercaseCny) props.uppercaseCny = true
         if (Object.keys(props).length === 0) delete next.props
         else next.props = props
+      } else if (field.type === 'date_range') {
+        // L8-B (§1.2): a BRAND NEW type — unlike number, no pre-existing template could carry
+        // unrelated date_range props, so props are built fresh (mirrors record-link's discipline,
+        // never spreading `next.props`/`original`, not L8-C's preserve-then-overlay one — there is
+        // nothing legacy here to preserve). `dateType` has NO absent-default (§1.2): an unset draft
+        // emits no `dateType` key at all, so publish's required-key check rejects it rather than
+        // the client silently picking an arm.
+        const props: Record<string, unknown> = {}
+        if (field.dateRangeDateType) props.dateType = field.dateRangeDateType
+        const startLabel = field.dateRangeStartLabel.trim()
+        if (startLabel) props.startLabel = startLabel
+        const endLabel = field.dateRangeEndLabel.trim()
+        if (endLabel) props.endLabel = endLabel
+        const durationLabel = field.dateRangeDurationLabel.trim()
+        if (durationLabel) props.durationLabel = durationLabel
+        next.props = props
       } else if (next.props && typeof next.props === 'object') {
-        // Drop record-link pins + L8-C display keys when type changes away; keep other
-        // type-specific props only if still meaningful (do not leave baseId/sheetId or a
-        // formatted-number display flag on a text field).
+        // Drop record-link pins + L8-C display keys + L8-B date_range keys when type changes away;
+        // keep other type-specific props only if still meaningful (do not leave baseId/sheetId, a
+        // formatted-number display flag, or a date_range prop on a text field).
         const props = { ...next.props } as Record<string, unknown>
         delete props.baseId
         delete props.sheetId
         delete props.currencySymbol
         delete props.thousandsSeparator
         delete props.uppercaseCny
+        delete props.dateType
+        delete props.startLabel
+        delete props.endLabel
+        delete props.durationLabel
         if (Object.keys(props).length === 0) delete next.props
         else next.props = props
       }

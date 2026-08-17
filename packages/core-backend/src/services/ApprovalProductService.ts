@@ -56,6 +56,8 @@ import {
   validateFieldType,
   validateFieldConstraints,
   validateDetailFieldValue,
+  DATE_RANGE_DATE_TYPES,
+  resolveVisibilityFieldReference,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
@@ -451,6 +453,10 @@ const FORM_FIELD_TYPES = new Set([
   'detail',
   // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
   'record-link',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4): a start+end date pair.
+  // Top-level only — explicitly excluded from DETAIL_LEAF below (OD-L8-4: two-to-three sub-values
+  // in a single-leaf column structure ripples into lineDerivation/FWB-per-column/diff-granularity).
+  'date_range',
 ])
 
 // L8-C (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7): the
@@ -474,12 +480,28 @@ export const NUMBER_FIELD_ALLOWED_PROP_KEYS = new Set([
   'uppercaseCny',
 ])
 
+// Lock-8 L8-B (§1.2): the allowlist of props keys permitted on `date_range`. `dateType` is
+// REQUIRED with no absent-default (a range whose granularity is implicit cannot be compared or
+// diffed unambiguously); `startLabel`/`endLabel` are required (C-7's 控件名称 1/2); `durationLabel`
+// is optional (a custom override for the always-rendered derived duration, OD-L8-8 — its ABSENCE
+// does not turn the duration display off, only its label falls back to a default).
+export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'dateType',
+  'startLabel',
+  'endLabel',
+  'durationLabel',
+])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
-// nested link semantics are undefined — top-level only).
+// nested link semantics are undefined — top-level only). `date_range` is v1-excluded from detail
+// (Lock-8 OD-L8-4, a POSITIVE edit — this filter is what B-4's mutation removes to prove the
+// exclusion is load-bearing, not a default).
 const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
+  [...FORM_FIELD_TYPES].filter(
+    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range',
+  ),
 )
 
 // Lock-3 §1.1 R-1 (mirror site 3 of 3): `handler` joins the runtime admission set. Enumerated, not
@@ -984,6 +1006,65 @@ function normalizeFormField(
     }
   }
 
+  // Lock-8 L8-B (§1.2, OD-L8-4/OD-L8-7-style strict allowlist): date_range is top-level only
+  // (already excluded from DETAIL_LEAF above; this direct check gives a named, field-index-scoped
+  // rejection rather than relying solely on the derived-list path in `normalizeDetailFieldParts`,
+  // mirroring record-link's own belt-and-suspenders nested guard). `dateType`/`startLabel`/
+  // `endLabel` are REQUIRED with NO absent-default — "a range whose granularity is implicit cannot
+  // be compared or diffed unambiguously" (§1.2) — `durationLabel` is optional. Unlike L8-C's
+  // props-are-already-in-the-wild allowlist, `date_range` is a BRAND NEW type: no pre-existing
+  // template can carry these keys, so canonicalizing in this function's own fixed key order (rather
+  // than filtering over `Object.keys(props)`'s original order) creates no spurious version-diff.
+  let dateRangeProps: Record<string, unknown> | undefined
+  if (value.type === 'date_range') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] date_range cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DATE_RANGE_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props may only contain ${[...DATE_RANGE_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const dateType = props?.dateType
+    if (typeof dateType !== 'string' || !DATE_RANGE_DATE_TYPES.has(dateType)) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.dateType must be one of ${[...DATE_RANGE_DATE_TYPES].join(', ')}`,
+      )
+    }
+    const startLabel = props?.startLabel
+    if (typeof startLabel !== 'string' || !startLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.startLabel is required`)
+    }
+    const endLabel = props?.endLabel
+    if (typeof endLabel !== 'string' || !endLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.endLabel is required`)
+    }
+    if (
+      props?.durationLabel !== undefined &&
+      (typeof props.durationLabel !== 'string' || !props.durationLabel.trim())
+    ) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.durationLabel must be a non-blank string when present`,
+      )
+    }
+    const canonical: Record<string, unknown> = {
+      dateType,
+      startLabel: (startLabel as string).trim(),
+      endLabel: (endLabel as string).trim(),
+    }
+    if (typeof props?.durationLabel === 'string' && props.durationLabel.trim()) {
+      canonical.durationLabel = props.durationLabel.trim()
+    }
+    dateRangeProps = canonical
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -1006,9 +1087,11 @@ function normalizeFormField(
       ? { props: pinnedProps }
       : numberProps !== undefined
         ? { props: numberProps }
-        : isRecord(value.props)
-          ? { props: { ...value.props } }
-          : {}),
+        : dateRangeProps
+          ? { props: dateRangeProps }
+          : isRecord(value.props)
+            ? { props: { ...value.props } }
+            : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -1189,29 +1272,52 @@ function validateFormFieldVisibilityRules(
     if (!rule) return
 
     const target = fieldMap.get(rule.fieldId)
-    if (!target) {
+    if (target) {
+      // Whole-field reference — the existing type-based denylist, extended by Lock-8 L8-B
+      // (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-5(a)) per-type predicate: every
+      // OTHER type keeps this plain whole-field form; `date_range` is refused HERE — "never as one
+      // comparable value" — its ONLY legal reference is the dotted `.start`/`.end` endpoint address
+      // resolved in the branch below.
+      if (rule.fieldId === field.id) {
+        failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
+      }
+      if (target.type === 'detail') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+        )
+      }
+      // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
+      // operators compare against scalar strings and would silently fail-open / never match.
+      // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
+      if (target.type === 'record-link') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
+        )
+      }
+      if (target.type === 'date_range') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a date_range field as a single value — reference its .start or .end endpoint (Lock-8 OD-L8-5)`,
+        )
+      }
+      return
+    }
+
+    // Lock-8 L8-B OD-L8-5(a): the ONLY other legal `fieldId` shape is a date_range endpoint
+    // address `${fieldId}.start` / `${fieldId}.end` — every other unresolvable string (unknown
+    // field, malformed address, a dotted suffix off a non-date_range base) is rejected the same
+    // way "field must reference an existing field" always was.
+    const reference = resolveVisibilityFieldReference(rule.fieldId, fields)
+    if (!reference) {
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId must reference an existing field`,
       )
     }
-    if (rule.fieldId === field.id) {
+    if (reference.field.id === field.id) {
       failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
-    }
-    if (target.type === 'detail') {
-      failValidation(
-        context,
-        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
-      )
-    }
-    // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
-    // operators compare against scalar strings and would silently fail-open / never match.
-    // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
-    if (target.type === 'record-link') {
-      failValidation(
-        context,
-        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
-      )
     }
   })
 
@@ -1225,7 +1331,12 @@ function validateFormFieldVisibilityRules(
 
     visitState.set(fieldId, 1)
     const field = fieldMap.get(fieldId)
-    const dependencyId = field?.visibilityRule?.fieldId
+    // OD-L8-5(a): a dotted endpoint address resolves to its BASE field id for cycle-walk purposes
+    // — there is no separate "endpoint field" to visit, only the date_range field that owns it.
+    const rawDependencyId = field?.visibilityRule?.fieldId
+    const dependencyId = rawDependencyId
+      ? resolveVisibilityFieldReference(rawDependencyId, fields)?.field.id
+      : undefined
     if (dependencyId) {
       visit(dependencyId, [...path, fieldId])
     }
@@ -2012,18 +2123,33 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: 
  * v1 fail-closed: reject any condition rule (or formula field ref) that targets a record-link field
  * at create/update/publish. Formula type-inference already marks record-link unsupported; this
  * guard makes the simple-rules path equally fail-closed with an explicit message.
+ *
+ * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2) extends the SAME fail-closed
+ * reasoning to `date_range`: its value is `{ start, end }`, also non-scalar, also silently
+ * never-matching under `===`/`gt`/`lt`. Graph CONDITION rules (branching) are a separate mechanism
+ * from field `visibilityRule` (OD-L8-5 governs the latter with a dotted `.start`/`.end` endpoint
+ * address); this lock does not extend endpoint addressing to condition branches — `date_range` is
+ * simply excluded from them, exactly like record-link, rather than left auto-admitted and
+ * fail-open (§0.3's governing fact: a new member auto-admits into every hand-maintained gate).
  */
-function validateRecordLinkNotUsedInConditions(
+function validateNonScalarFieldsNotUsedInConditions(
   approvalGraph: ApprovalGraph,
   formSchema: FormSchema,
   context: ValidationContext,
 ): void {
-  const recordLinkFieldIds = new Set(
-    (formSchema.fields ?? [])
-      .filter((field) => field.type === 'record-link')
-      .map((field) => field.id),
+  const nonScalarFieldTypes: ReadonlyArray<{ type: FormField['type']; label: string }> = [
+    { type: 'record-link', label: 'record-link' },
+    { type: 'date_range', label: 'date_range' },
+  ]
+  const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
+  const nonScalarFieldIds = new Set(
+    nonScalarFieldTypes.flatMap(({ type }) =>
+      (formSchema.fields ?? []).filter((field) => field.type === type).map((field) => field.id),
+    ),
   )
-  if (recordLinkFieldIds.size === 0) return
+  if (nonScalarFieldIds.size === 0) return
+  const labelFor = (fieldId: string): string =>
+    nonScalarFieldTypes.find((entry) => entry.type === fieldTypeById.get(fieldId))?.label ?? 'non-scalar'
 
   for (const node of approvalGraph.nodes) {
     if (node.type !== 'condition') continue
@@ -2036,24 +2162,24 @@ function validateRecordLinkNotUsedInConditions(
       const rules = Array.isArray(branch.rules) ? branch.rules : []
       for (const rule of rules) {
         const fieldId = typeof rule?.fieldId === 'string' ? rule.fieldId.trim() : ''
-        if (fieldId && recordLinkFieldIds.has(fieldId)) {
+        if (fieldId && nonScalarFieldIds.has(fieldId)) {
           failValidation(
             context,
-            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference record-link field ${fieldId} (v1)`,
+            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
           )
         }
       }
-      // Formula path: reject explicit `{fieldId}` references to record-link fields with a clear
+      // Formula path: reject explicit `{fieldId}` references to non-scalar fields with a clear
       // message (type inference would also fail; keep the error explicit for authors).
       const expression = typeof branch.formula?.expression === 'string' ? branch.formula.expression : ''
       if (expression) {
-        for (const fieldId of recordLinkFieldIds) {
+        for (const fieldId of nonScalarFieldIds) {
           // Token-aware enough for authoring: `{fieldId}` or `{ fieldId }` field refs.
           const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
           if (re.test(expression)) {
             failValidation(
               context,
-              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference record-link field ${fieldId} (v1)`,
+              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
             )
           }
         }
@@ -4275,7 +4401,7 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
     validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
@@ -4440,7 +4566,7 @@ export class ApprovalProductService {
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateRecordLinkNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateNonScalarFieldsNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
         validateHandlerNodePlacement(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
@@ -4574,7 +4700,7 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
-      validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
       validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)

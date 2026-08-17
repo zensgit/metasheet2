@@ -105,6 +105,15 @@ export type FormFieldType =
   | 'detail'
   /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
   | 'record-link'
+  /**
+   * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): a
+   * start+end date pair. Value is `{ start: string; end: string }`; props carry a REQUIRED
+   * `dateType` granularity (no absent-default) plus `startLabel`/`endLabel` and an optional
+   * `durationLabel`. Excluded from detail columns (OD-L8-4) and never selectable as a whole-value
+   * visibility/condition dependency (OD-L8-5) — only its `${fieldId}.start`/`${fieldId}.end`
+   * endpoints are.
+   */
+  | 'date_range'
 
 export interface ApprovalNode {
   key: string

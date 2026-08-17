@@ -512,6 +512,13 @@ describe('legacy length-derived helpers - frozen fallback baseline (delta §5 F1
       numberCurrencySymbol: '',
       numberThousandsSeparator: false,
       numberUppercaseCny: false,
+      // L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): same deliberate-widening,
+      // neutral-defaults discipline — meaningless until retyped to `date_range`. `dateRangeDateType`
+      // is `''`, not an arm, matching §1.2's no-absent-default (never a silently-picked granularity).
+      dateRangeDateType: '',
+      dateRangeStartLabel: '',
+      dateRangeEndLabel: '',
+      dateRangeDurationLabel: '',
     })
     expect(localId).toMatch(/^field_\d+_[0-9a-f]{1,6}$/)
     // Default-arg pin: the historical `index = 1` default stays intact.

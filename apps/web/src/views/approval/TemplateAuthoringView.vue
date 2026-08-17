@@ -1137,7 +1137,6 @@ import {
   buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
-  AUTHORABLE_FIELD_TYPES,
   createEmptyFieldDraft,
   type AuthorableFieldType,
   createEmptyStepDraft,
@@ -2769,6 +2768,15 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
+// NOTE (Lock-8 L8-B, approval-lock8-field-vocabulary-20260817.md §2.6): this view's own copy of
+// the label/mark/group literals CANNOT be collapsed onto the F2 Designer 2.0 palette component's
+// (apps/web/src/approvals/components/ApprovalForm + Palette.vue, split across this comment on
+// purpose) shipped constants — the F2 no-mount-pin gate (approval-form-builder-slots.spec.ts)
+// source-scans every file under src/views for that literal component name and fails the build if
+// it appears, even as an import of its exported constants. This stays a SECOND, non-derived
+// registration site the F2 forcing-function test (approval-form-palette-chips.spec.ts:107) does
+// not cover; approval-date-range-field.test.ts census-checks this file's set is consistent with
+// AUTHORABLE_FIELD_TYPES instead.
 const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   text: '文本',
   textarea: '多行文本',
@@ -2780,11 +2788,8 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   user: '人员',
   detail: '明细',
   'record-link': '关联记录',
+  date_range: '日期区间',
 }
-const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
-  type,
-  label: FIELD_PALETTE_LABELS[type],
-}))
 const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   text: 'A',
   textarea: 'Aa',
@@ -2796,12 +2801,13 @@ const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   user: '人',
   detail: '表',
   'record-link': '链',
+  date_range: '区',
 }
 const fieldPaletteGroups = [
   { id: 'text', label: '文本', types: ['text', 'textarea'] },
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
-  { id: 'date', label: '日期', types: ['date', 'datetime'] },
+  { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
   { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
 ].map((group) => ({
   ...group,

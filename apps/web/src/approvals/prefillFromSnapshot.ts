@@ -60,6 +60,14 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       // metadata. Without a proven identical baseId+sheetId on the prior instance we cannot
       // know the value still targets the CURRENT field's pin — so never prefill record-link.
       return false
+    case 'date_range':
+      // Lock-8 L8-B: a CONSCIOUS v1 decision, not silent fallthrough — 再次提交 prefill is deferred
+      // (not contracted by TESTS §; a prior snapshot's `dateType` granularity is not re-verified
+      // against the CURRENT field's declared `dateType` here the way `date`/`datetime` re-check
+      // their own value shape, so a stale-granularity value could otherwise silently repopulate a
+      // picker of the wrong kind). Safe by construction: the field just keeps its normal blank/
+      // default-seeded value, same as any other never-prefilled type.
+      return false
     default:
       return false
   }

@@ -262,6 +262,14 @@ on:
       - 'apps/web/tests/approval-center.spec.ts'
       - 'apps/web/tests/approvalMetricsView.spec.ts'
       - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
+      # L8-B (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.2): date_range (日期区间).
+      # dateRangeField.ts is new; fieldVisibility.ts joins the guarded set here (OD-L8-5(a) dotted
+      # .start/.end endpoint resolver landed in this slice — it had no path entry before).
+      - 'apps/web/src/approvals/dateRangeField.ts'
+      - 'apps/web/src/approvals/fieldVisibility.ts'
+      - 'apps/web/tests/approval-date-range-field.test.ts'
+      - 'apps/web/tests/approval-date-range-visibility.test.ts'
+      - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -493,6 +501,13 @@ on:
       - 'apps/web/tests/approval-center.spec.ts'
       - 'apps/web/tests/approvalMetricsView.spec.ts'
       - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
+      # L8-B (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.2): date_range (same set
+      # as the pull_request block above).
+      - 'apps/web/src/approvals/dateRangeField.ts'
+      - 'apps/web/src/approvals/fieldVisibility.ts'
+      - 'apps/web/tests/approval-date-range-field.test.ts'
+      - 'apps/web/tests/approval-date-range-visibility.test.ts'
+      - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -557,6 +572,9 @@ jobs:
             approval-form-builder-slots \
             approval-form-field-update \
             approval-form-field-inspector \
+            approval-date-range-field \
+            approval-date-range-visibility \
+            approval-date-range-inline-editor \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

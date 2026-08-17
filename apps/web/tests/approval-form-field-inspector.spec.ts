@@ -337,6 +337,8 @@ describe('ApprovalFormFieldInspector — surface (§3.4)', () => {
         'user',
         'detail',
         'record-link',
+        // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
+        'date_range',
       ]),
     )
     expect(values).not.toContain('attachment')

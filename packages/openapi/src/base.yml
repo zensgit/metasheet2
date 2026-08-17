@@ -3688,7 +3688,7 @@ components:
           type: string
         type:
           type: string
-          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail]
+          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail, date_range]
         label:
           type: string
         required:
@@ -3764,6 +3764,7 @@ components:
           user: '#/components/schemas/FormFieldGeneric'
           attachment: '#/components/schemas/FormFieldGeneric'
           detail: '#/components/schemas/FormFieldGeneric'
+          date_range: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:
