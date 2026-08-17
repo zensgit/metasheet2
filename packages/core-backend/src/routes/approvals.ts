@@ -1373,6 +1373,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
           OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
         )`,
+        // Lock-3 §2.2 — a handler (办理) seat is NOT an approval task and must not inflate the member's
+        // pending-APPROVAL badge (approve/reject 409 on it). Exclude any assignment whose node is a
+        // `handler` node in the instance's frozen runtime graph. `@>` containment never errors on a
+        // null/empty graph (unlike jsonb_array_elements) and is GIN-index-friendly.
+        `NOT EXISTS (
+          SELECT 1 FROM approval_published_definitions pd
+          WHERE pd.id = i.published_definition_id
+            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
+        )`,
       ]
       const params: unknown[] = [userId, actorRolesParam, actorPermissionsParam]
 

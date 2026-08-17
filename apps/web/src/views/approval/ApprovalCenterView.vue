@@ -865,8 +865,16 @@ function waitClass(createdAt: string): string {
 
 // Only platform-native pending rows are batch-actionable here; attendance-backed approvals live in the
 // attendance module (their row-click routes away), so excluding them keeps the batch honest.
+// Lock-3 §2.2: a 办理 (handler) task is NOT an approval task — it has no member 同意/拒绝 decision (an
+// approve/reject would 409). Exclude it from the approve/reject action surface entirely so no inert
+// control is offered (M7). This gate feeds the checkbox `:selectable`, the inline 通过/驳回 (`v-if`),
+// and the batch selection (`rows.filter(isRowBatchSelectable)`), so all three surfaces are covered.
+// The handler row stays VISIBLE (informational); the member 办理 surface itself is P5.
+function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
+  return row.currentNodeType === 'handler'
+}
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
-  return row.status === 'pending' && !isAttendanceApproval(row)
+  return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single

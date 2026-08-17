@@ -492,6 +492,15 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the TYPE of the instance's current node, resolved from the frozen runtime graph.
+   * Lets the member 待办 surface tell a handler (办理) task apart from an approval task so it can
+   * withhold the approve/reject action affordance (a handler node has no member decision — 同意/拒绝
+   * would 409). Absent/`null` for bridged/external instances (no node config) and non-platform rows;
+   * consumers treat absent as "not a handler" (the safe default: an ordinary approval task stays
+   * actionable). Values-free (a node-type token, never an id/value).
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in
    * parallel state (length ≥ 2). For non-parallel state this equals
    * `[currentNodeKey]` or is omitted. Callers that don't care about

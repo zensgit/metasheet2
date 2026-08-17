@@ -194,8 +194,15 @@ inserts assignments, the instance waits. It differs in what may then happen.
 - **`approve` / `reject` / `return` / `add_sign` / `reduce_sign`** — REJECTED with a values-free 409; per
   corpus C-9 a handler has no decision to make, so 驳回 has no handler meaning in v1 (a blocked handler
   transfers, or an admin moves the instance). `comment` and `revoke` are instance-level and unchanged.
-- **Batch / 秒批 / quick-card surfaces** exclude handler tasks (corpus C-8); the shipped center batch
-  paths operate on `approve`/`reject`, so exclusion falls out of §2.1 rather than needing new code.
+- **Batch / 秒批 / quick-card surfaces** exclude handler tasks (corpus C-8). **ERRATUM (2026-08-17,
+  goal-set instruction; landed in P4-A / PR #4956):** this exclusion does NOT "fall out of §2.1" — the
+  shipped member 待办 center lists, badges, and batch-selects every active `pending` seat with **no
+  node-type filter**, so a handler seat would surface an inert `approve`/`reject` control that 409s
+  (`APPROVAL_HANDLER_ACTION_NOT_ALLOWED`), an M7 violation. The exclusion is enforced by an **explicit
+  node-type gate** added in P4-A: the pending-list DTO carries `currentNodeType` (resolved from the
+  frozen runtime graph), `isRowBatchSelectable` withholds the approve/reject surface (checkbox + inline
+  通过/驳回 + batch) on a handler row, and the pending-APPROVAL count query excludes handler seats. The
+  handler row stays visible as informational; the member 办理 action surface itself is P5.
 
 Empty resolution at dispatch terminates at the shipped `APPROVAL_ASSIGNEE_EMPTY` 400 carrying
 `{ nodeKey }`. **Seam, named not designed:** corpus C-4's two arms (指定人员办理 / 转交给审批管理员) are

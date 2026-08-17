@@ -299,6 +299,12 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the current node's TYPE (mirrors backend). The member 待办 center reads this to
+   * withhold the approve/reject action surface on a 办理 (handler) task (it is not an approval task;
+   * the member 办理 UI is P5). Absent ≡ not-a-handler (safe default keeps ordinary tasks actionable).
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
    * Parallel gateway (并行分支) — surfaced only when the instance is inside
    * a parallel region (length ≥ 2). Absent on linear state.
    */

@@ -662,6 +662,34 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect((await instanceRow(iid)).status).toBe('approved')
   })
 
+  // ── §2.2 member surface — DTO carries currentNodeType; handler seat excluded from pending count ─
+  it('§2.2: the pending-list DTO carries currentNodeType=handler and the handler seat is excluded from the pending-APPROVAL count', async () => {
+    const countOf = async (token: string): Promise<number> => {
+      const res = await req(base, '/api/approvals/pending-count', token)
+      expect(res.status, await res.clone().text()).toBe(200)
+      return ((await res.json()) as { count: number }).count
+    }
+    const rowFor = async (token: string, id: string): Promise<{ id: string; currentNodeType?: string } | undefined> => {
+      const res = await req(base, '/api/approvals?tab=pending&sourceSystem=platform&limit=200', token)
+      expect(res.status, await res.clone().text()).toBe(200)
+      return ((await res.json()) as { data: Array<{ id: string; currentNodeType?: string }> }).data.find((r) => r.id === id)
+    }
+    const beforeH1 = await countOf(h1Tok)
+    const tid = await createPublished(`${KEYPFX}-member`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]) }))
+    const iid = await createInstance(tid) // paused at handler_h, H1 seat
+    // (1) the DTO surfaces the handler node type so the member UI can withhold approve/reject.
+    expect((await rowFor(h1Tok, iid))?.currentNodeType).toBe('handler')
+    // (2) COUNT: H1's pending-APPROVAL badge is UNCHANGED by the handler seat (excluded).
+    expect(await countOf(h1Tok)).toBe(beforeH1)
+    // POSITIVE CONTROL: handling advances to approval_final (FINAL seat) — FINAL's count goes UP by
+    // one (an approval task IS counted, so the exclusion is node-type-selected, not blanket), and the
+    // DTO now reads currentNodeType='approval'.
+    const beforeFinal = await countOf(finalTok)
+    expect((await act(iid, h1Tok, { action: 'handle' })).status).toBe(200)
+    expect(await countOf(finalTok)).toBe(beforeFinal + 1)
+    expect((await rowFor(finalTok, iid))?.currentNodeType).toBe('approval')
+  })
+
   // ── G-18 — values-free errors ──────────────────────────────────────────────────────────────────
   it('G-18: the handler 422/409 error bodies carry nodeKey and never a person id', async () => {
     const tid = await createPublished(`${KEYPFX}-g18`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1]), opinionRequired: true }))
