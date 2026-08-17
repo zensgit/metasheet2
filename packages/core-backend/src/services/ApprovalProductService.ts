@@ -16,6 +16,7 @@ import type {
   ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalNodeType,
   ApprovalRequesterSnapshot,
   ConditionFormulaPredicate,
   CreateApprovalRequest,
@@ -26,6 +27,8 @@ import type {
   FormSchema,
   FormFieldVisibilityOperator,
   FormFieldVisibilityRule,
+  HandlerMode,
+  HandlerNodeConfig,
   NodeFieldAccess,
   NodeFieldPermission,
   SignaturePolicy,
@@ -38,7 +41,7 @@ import type {
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
+import { APPROVAL_TERMINAL_STATUSES, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -452,7 +455,10 @@ const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
 )
 
-const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
+// Lock-3 §1.1 R-1 (mirror site 3 of 3): `handler` joins the runtime admission set. Enumerated, not
+// permissive — an unknown type like `handlerx` is still rejected (G-6). Keep in sync with the
+// `ApprovalNodeType` union and the FE `apps/web/src/types/approval.ts` node-type list.
+const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end', 'handler'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
 const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
@@ -702,7 +708,10 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
   // would be ambiguous as a single approver). See approval-detail-subform-design-lock §1.
   const fieldById = new Map(formSchema.fields.map((field) => [field.id, field]))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-10: handler nodes ALSO carry `assigneeSources` (incl. form_field_user), so a handler's
+    // sources must be schema-checked too — WITHOUT this, a handler's form_field_user would never be
+    // validated (silent skip). Both approval and handler share this guard.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
       if (source.kind !== 'form_field_user') continue
@@ -778,12 +787,16 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
 function assertNoUnconfiguredPlaceholderRoles(approvalGraph: ApprovalGraph): void {
   for (const node of approvalGraph.nodes) {
-    if (node.type !== 'approval') continue
+    // Lock-3 R-11: a handler ALSO carries static_role sources, so an untouched-preset SENTINEL role on a
+    // handler must fail-fast at publish too — otherwise a handler could publish carrying an unclaimable
+    // placeholder role (silent skip). The 节点 label branches so the message names the right node type.
+    if (node.type !== 'approval' && node.type !== 'handler') continue
+    const nodeLabel = node.type === 'handler' ? '办理节点' : '审批节点'
     const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
     for (const source of sources) {
       if (source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)) {
         throw new ServiceError(
-          `审批节点「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
+          `${nodeLabel}「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
           400,
           'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
           { nodeKey: node.key },
@@ -1300,7 +1313,10 @@ function validateNodeFieldPermissionsAgainstFormSchema(
 ): void {
   const fieldIds = new Set(formSchema.fields.map((field) => field.id))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-12: a handler's `fieldPermissions` must be schema-checked too — §3 makes a handler's field
+    // permissions load-bearing (Lock-7 enforces them), so a permission referencing a deleted field must
+    // fail at authoring rather than being silently skipped.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { fieldPermissions?: NodeFieldPermission[] }
     for (const permission of config.fieldPermissions ?? []) {
       if (!fieldIds.has(permission.fieldId)) {
@@ -1462,6 +1478,45 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
       }
     } else if (transferToUserId !== undefined || jumpToNodeKey !== undefined) {
       failTarget(`timeout target fields are not allowed on the '${effect}' effect`)
+    }
+  }
+}
+
+/**
+ * Lock-3 §1.3 — handler topology legality (publish/author-time 400). A handler is LEGAL on the main
+ * path between start and end, and inside a `condition` branch body. It is ILLEGAL in v1 inside a
+ * parallel region and as a parallel `joinNodeKey`: `collectAllBranchAssignees` and the fingerprint
+ * gate both skip non-`approval` nodes, so a handler in one branch sharing an assignee with a sibling is
+ * invisible to every publish-time cross-branch gate and would collide only at runtime (§1.4). Checked
+ * with the SHIPPED `collectParallelRegionNodeKeys` primitive plus a `joinNodeKey` equality test — no
+ * new walker. Widening is OD-L3-1(b) and must first extend those two gates. Distinct ServiceError codes
+ * so the two illegal placements are individually testable (G-8).
+ */
+function validateHandlerNodePlacement(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  const joinNodeKeys = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const joinNodeKey = (node.config as { joinNodeKey?: unknown }).joinNodeKey
+    if (typeof joinNodeKey === 'string' && joinNodeKey.trim()) joinNodeKeys.add(joinNodeKey.trim())
+  }
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'handler') continue
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node is not supported inside a parallel region in v1`,
+        400,
+        'APPROVAL_HANDLER_IN_PARALLEL',
+        { nodeKey: node.key },
+      )
+    }
+    if (joinNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node cannot be a parallel join node in v1`,
+        400,
+        'APPROVAL_HANDLER_AS_JOIN',
+        { nodeKey: node.key },
+      )
     }
   }
 }
@@ -1994,6 +2049,105 @@ function normalizeApprovalGraph(
           ...(isNonEmptyString(node.config.defaultEdgeKey)
             ? { defaultEdgeKey: node.config.defaultEdgeKey.trim() }
             : {}),
+        }
+        break
+      case 'handler':
+        {
+          // Lock-3 §1.2 R-2 (D-1 fix): a handler node MUST have an explicit case here. WITHOUT it a
+          // handler falls to `default: config = {}` and its whole roster/mode is SILENTLY DROPPED — the
+          // exact D-1 defect (non-approval nodes hit the empty-config default). The choke enforces §1.2's
+          // prohibitions: the criterion is "would a misconfiguration be REJECTED today", not "would we
+          // author it". Distinct ServiceError codes (not failValidation, which collapses to the shared
+          // graph-invalid code) so callers/tests branch on the cause. All checks read the RAW config.
+          const handlerPath = `approvalGraph.nodes[${index}].config`
+          const rawConfig = node.config
+          // §1.2: approval-node keys on a handler make it read as an approval node by every config-shape
+          // reader. `emptyAssigneePolicy` (any value, incl. 'auto-approve') is inadmissible — auto-skipping
+          // 财务打款/盖章 is a genuine fail-open (§1.2 / OD-L3-2a). `timeout` is CONFIRM-EXCLUDE (the scanner's
+          // single-cursor model is untested for a non-approvalNodeOrder type). Rejecting on key PRESENCE is
+          // what keeps v1 free of a second vocabulary.
+          for (const forbiddenKey of ['assigneeType', 'assigneeIds', 'approvalMode', 'approvalThreshold', 'autoApprovalPolicy', 'emptyAssigneePolicy', 'timeout', 'signaturePolicy'] as const) {
+            if (rawConfig[forbiddenKey] !== undefined) {
+              throw new ServiceError(
+                `${handlerPath}.${forbiddenKey} is not allowed on a handler node`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: `handlerMode` is a NEW key ∈ {'all','any'}; absent ≡ 'all'. `'single'`/`'threshold'`/
+          // `'sequential'` are named-rejected (corpus C-3 evidences neither) — never coerced.
+          let handlerMode: HandlerMode | undefined
+          if (rawConfig.handlerMode !== undefined) {
+            if (rawConfig.handlerMode !== 'all' && rawConfig.handlerMode !== 'any') {
+              throw new ServiceError(
+                `${handlerPath}.handlerMode must be 'all' or 'any'`,
+                400,
+                'APPROVAL_HANDLER_MODE_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            handlerMode = rawConfig.handlerMode
+          }
+          // §1.1: `assigneeSources` is the ONLY assignee carrier and is REQUIRED — a handler with nobody
+          // to handle it is a publish-time error, never a dispatch-time surprise. An empty array is
+          // rejected by normalizeApprovalAssigneeSources; `undefined` is rejected here.
+          if (rawConfig.assigneeSources === undefined) {
+            throw new ServiceError(
+              `${handlerPath}.assigneeSources is required on a handler node`,
+              400,
+              'APPROVAL_HANDLER_CONFIG_INVALID',
+              { nodeKey: normalizedNode.key },
+            )
+          }
+          const assigneeSources = normalizeApprovalAssigneeSources(
+            rawConfig.assigneeSources,
+            context,
+            `${handlerPath}.assigneeSources`,
+          )!
+          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the SEVEN kinds
+          // in HANDLER_ASSIGNEE_SOURCE_KINDS. `continuous_managers` (corpus C-2 approver-only) and every
+          // forward Lock-1 kind (requester_choice, user_group, …) are rejected until their own slice
+          // admits them (§1.5 "each row lands in the same slice as its kind"). Rejecting on the KIND, not
+          // silently dropping it, is the fail-closed gate G-13 tests.
+          for (const source of assigneeSources) {
+            if (!(HANDLER_ASSIGNEE_SOURCE_KINDS as readonly string[]).includes(source.kind)) {
+              throw new ServiceError(
+                `${handlerPath}.assigneeSources kind '${source.kind}' is not supported on a handler node`,
+                400,
+                'APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: 办理意见 opt-in; absent ≡ false (OD-L3-3a). Boolean only — never a coerced default.
+          let opinionRequired: boolean | undefined
+          if (rawConfig.opinionRequired !== undefined) {
+            if (typeof rawConfig.opinionRequired !== 'boolean') {
+              throw new ServiceError(
+                `${handlerPath}.opinionRequired must be a boolean`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            opinionRequired = rawConfig.opinionRequired
+          }
+          // §1.1/§3: fieldPermissions share the approval-node shape (ENFORCEMENT is Lock-7); normalized +
+          // round-tripped so authoring persists the intent, cross-checked against the form schema by
+          // validateNodeFieldPermissionsAgainstFormSchema (R-12).
+          const fieldPermissions = normalizeNodeFieldPermissions(
+            rawConfig.fieldPermissions,
+            context,
+            `${handlerPath}.fieldPermissions`,
+          )
+          normalizedNode.config = {
+            assigneeSources,
+            ...(handlerMode ? { handlerMode } : {}),
+            ...(opinionRequired !== undefined ? { opinionRequired } : {}),
+            ...(fieldPermissions ? { fieldPermissions } : {}),
+          }
         }
         break
       default:
@@ -2955,7 +3109,10 @@ function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | nu
  */
 export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    // Lock-3 R-13: a handler using `manager_at_level` must ALSO bake the manager chain into the snapshot,
+    // else it resolves empty at dispatch (silent skip). (`continuous_managers` is not admitted on a
+    // handler per §1.5, but keeping the shared predicate node-type-symmetric is harmless and future-proof.)
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
@@ -2977,7 +3134,12 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
  */
 export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    // Lock-3 R-14 (P1): a handler using an org-derived source (direct_manager / dept_head /
+    // manager_at_level) MUST also arm the create-time org-read fail-closed guard. Leaving it approval-only
+    // reproduces the exact B5-b fail-open — a failed/misconfigured org read yields empty `orgRelations`,
+    // which for a handler would resolve empty and (§2.2) fail APPROVAL_ASSIGNEE_EMPTY only if lucky, or
+    // worse mask a routing error. Include handler so create fails 422/503 with ZERO rows (G-3).
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
@@ -3272,6 +3434,9 @@ function buildApprovalAssignmentResolver(options: {
 export interface ApprovalRoutePreviewResult {
   route: Array<{
     nodeKey: string
+    // Lock-3 R-19: the row carries its node TYPE so a handler renders as 办理 (distinguishable from an
+    // approver) instead of an indistinguishable assignee row. Absent-safe for old clients (additive).
+    nodeType: ApprovalNodeType
     nodeLabel: string
     assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
     resolveError?: string
@@ -3737,6 +3902,7 @@ export class ApprovalProductService {
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
@@ -3803,6 +3969,7 @@ export class ApprovalProductService {
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
@@ -3967,6 +4134,7 @@ export class ApprovalProductService {
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateRecordLinkNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateHandlerNodePlacement(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
@@ -4091,6 +4259,7 @@ export class ApprovalProductService {
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
       validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
@@ -4363,6 +4532,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     const newName = `${source.template.name} (副本)`
@@ -5303,8 +5473,12 @@ export class ApprovalProductService {
       const node = runtimeGraph.nodes.find((entry) => entry.key === key)
       return (node?.name && String(node.name).trim()) || key
     }
+    // Lock-3 R-19: resolve a frontier node's TYPE so the preview row is distinguishable (办理 vs 审批).
+    const nodeTypeOf = (key: string): ApprovalNodeType =>
+      (runtimeGraph.nodes.find((entry) => entry.key === key)?.type ?? 'approval')
     const route: Array<{
       nodeKey: string
+      nodeType: ApprovalNodeType
       nodeLabel: string
       assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
       resolveError?: string
@@ -5334,6 +5508,7 @@ export class ApprovalProductService {
         const assignments = resolution.assignments.filter((entry) => entry.nodeKey === nodeKey)
         route.push({
           nodeKey,
+          nodeType: nodeTypeOf(nodeKey),
           nodeLabel: nodeLabel(nodeKey),
           assignees: assignments.map((entry) => ({ id: entry.assigneeId, name: entry.assigneeId, assignmentType: entry.assignmentType })),
           ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
@@ -5342,8 +5517,13 @@ export class ApprovalProductService {
       // Parallel frontier: advancing a multi-branch region node-by-node through
       // resolveAfterApprove mirrors the runtime, but the preview only promises the FIRST-PASS
       // node set — advance from the primary cursor; if the executor cannot advance, truncate.
+      // Lock-3 R-19: `resolveAfterApprove` throws for a HANDLER cursor (its config accessor rejects a
+      // handler key), so advance a handler frontier with `resolveAfterHandle` — otherwise a graph with a
+      // handler would truncate at the handler row instead of previewing past it.
       try {
-        const next = executor.resolveAfterApprove(resolution.currentNodeKey)
+        const next = nodeTypeOf(resolution.currentNodeKey) === 'handler'
+          ? executor.resolveAfterHandle(resolution.currentNodeKey)
+          : executor.resolveAfterApprove(resolution.currentNodeKey)
         if (next.currentNodeKey && visited.has(next.currentNodeKey) && next.status !== 'approved') {
           truncated = true
           break
@@ -6590,6 +6770,52 @@ export class ApprovalProductService {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
       }
 
+      // Lock-3 §3 (field-write fail-closed, G-9): a `handle` request carrying the RESERVED `fieldWrites`
+      // key — non-empty, `{}`, or `null` — is rejected with a values-free 422 BEFORE any row is written or
+      // node advanced. Lock-7 owns the write surface; until it lands a handler submit carries NO field
+      // writes (财务打款/盖章/归档 nodes work with no form mutation). Detected by key PRESENCE so `null`/`{}`
+      // are caught. Placed before every write arm so the rejection is payload-selected and side-effect-free.
+      if (request.action === 'handle' && Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+        throw new ServiceError(
+          'Field writes at a handler node are not supported yet',
+          422,
+          'APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // Lock-3 §2.2 (G-10 action authorization): the ACTION VERBS legal at a handler node differ from an
+      // approval node. `handle` is meaningful ONLY at a handler; a handler has no decision to make, so
+      // approve/reject/return/add_sign/reduce_sign have no handler meaning (a blocked handler transfers,
+      // or an admin moves the instance). `transfer`/`comment`/`revoke` are node-type-agnostic and stay.
+      const currentNodeType: ApprovalNodeType | null = currentNodeKey
+        ? (runtimeGraph.nodes.find((entry) => entry.key === currentNodeKey)?.type ?? null)
+        : null
+      if (currentNodeType === 'handler') {
+        if (
+          request.action === 'approve'
+          || request.action === 'reject'
+          || request.action === 'return'
+          || request.action === 'add_sign'
+          || request.action === 'reduce_sign'
+        ) {
+          throw new ServiceError(
+            `Action ${request.action} is not permitted at a handler node`,
+            409,
+            'APPROVAL_HANDLER_ACTION_NOT_ALLOWED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+      } else if (request.action === 'handle') {
+        // `handle` was routed at a node that is not a handler — reject rather than misapply the verb.
+        throw new ServiceError(
+          'Handle is only permitted at a handler node',
+          409,
+          'APPROVAL_HANDLE_NODE_MISMATCH',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
       // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
       // (ApprovalCardDeliveryAction.buildSummary) runs OUTSIDE this FOR UPDATE txn, so a concurrent
       // advance can slip a card issued for a PRIOR node/round past it and into the engine — where
@@ -6969,6 +7195,183 @@ export class ApprovalProductService {
 
       if (!currentNodeKey) {
         throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      }
+
+      if (request.action === 'handle') {
+        // Lock-3 §2.2 — a handler completes by SUBMITTING (submit-only, per corpus C-3/C-9; the
+        // handler-action guard above already rejected approve/reject/return/add_sign/reduce_sign). 会签
+        // 'all' completes when every resolved seat submits; 或签 'any' completes on the first. The tally
+        // is the LIVE active-seat count, which is epoch-safe by construction (§2.4): a re-entered handler
+        // node inserts a FRESH round of active seats, so prior-round (deactivated) seats never satisfy
+        // the new round's 'all' tally (G-12). Field writes are already rejected (§3 fail-closed) above.
+        const handlerConfig = executor.getHandlerNodeConfig(currentNodeKey)
+        const handlerMode = executor.getHandlerMode(currentNodeKey)
+        // §2.2: `opinionRequired: true` makes a blank 办理意见 a values-free 422.
+        if (handlerConfig.opinionRequired === true && !request.comment?.trim()) {
+          throw new ServiceError(
+            'Handler opinion is required',
+            422,
+            'APPROVAL_HANDLER_OPINION_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+        // nodeEntryEpoch (§2.4): capture the node's current round epoch NOW, while the actor's seat is
+        // still active (the read fails closed on empty/mixed), and stamp the handle record with it so a
+        // later re-entry (a fresh epoch) never re-counts this submission.
+        const handlerNodeEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        // Deactivate the actor's own seat first (会签/或签 both consume it).
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+
+        if (handlerMode === 'all' && remainingAssignments > 0) {
+          // 会签: not every seat has submitted — record this partial handle, keep the node pending.
+          await client.query(
+            `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'handle',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              handlerMode,
+              aggregateComplete: false,
+              remainingAssignments,
+              ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+            },
+          }, actor)
+          await client.query('COMMIT')
+          return (await this.getApproval(id, actor.userId))!
+        }
+
+        // Completion. 或签 'any' first-wins: cancel the remaining pending sibling seats (audit-preserved).
+        let handlerCancelledAssigneeIds: string[] = []
+        if (handlerMode === 'any') {
+          const siblingAssignments = currentNodeAssignments.filter((assignment) =>
+            !assignmentMatchesActor(assignment, actor.userId, actorRoles))
+          handlerCancelledAssigneeIds = Array.from(
+            new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+          )
+          if (siblingAssignments.length > 0) {
+            await client.query(
+              `UPDATE approval_assignments
+               SET is_active = FALSE,
+                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                     'handlerCancelledBy', $3::text,
+                     'handlerCancelledAt', now()::text,
+                     'handlerMode', 'any'
+                   ),
+                   updated_at = now()
+               WHERE instance_id = $1
+                 AND node_key = $2
+                 AND is_active = TRUE
+                 AND id = ANY($4::uuid[])`,
+              [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
+            )
+          }
+        }
+
+        // Advance PAST the handler node. A handler carries no auto-approval policy of its own, but the
+        // NEXT node it advances into may be an approval node with one — run the same cascade the approve
+        // arm does so an empty-assignee/merge on the next node resolves identically.
+        let resolution = executor.resolveAfterHandle(currentNodeKey)
+        if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+          const requesterId = requesterSnapshot?.id
+          resolution = this.applyAutoApprovalCascade(
+            id,
+            runtimeGraph,
+            executor,
+            resolution,
+            typeof requesterId === 'string' ? requesterId : null,
+            await this.loadApprovalHistory(client, id),
+          )
+        }
+        await client.query(
+          `UPDATE approval_instances
+           SET status = $2,
+               version = $3,
+               current_node_key = $4,
+               current_step = $5,
+               total_steps = $6,
+               updated_at = now()
+           WHERE id = $1`,
+          [
+            id,
+            resolution.status,
+            nextVersion,
+            resolution.currentNodeKey,
+            resolution.currentStep ?? instance.total_steps,
+            resolution.totalSteps,
+          ],
+        )
+        // ACTIVATION (nodeEntryEpoch §4·A): completing the handler activates the NEXT node — a new epoch.
+        const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+        const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+        await this.insertApprovalRecord(client, id, {
+          action: 'handle',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            nextNodeKey: resolution.currentNodeKey,
+            handlerMode,
+            aggregateComplete: true,
+            ...(handlerCancelledAssigneeIds.length > 0 ? { handlerCancelledAssignees: handlerCancelledAssigneeIds } : {}),
+            ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+          },
+        }, actor)
+        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, advanceEntryEpoch)
+        await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        const completionEvent = resolution.status === 'approved'
+          ? this.buildCompletionEvent(
+              instance,
+              {
+                // Terminal transition to `approved` reached via a handler submission; the instance-level
+                // completion event marks the instance approved (the audit ROW above is `action:'handle'`).
+                action: 'approve',
+                fromStatus: instance.status,
+                toStatus: 'approved',
+                fromVersion: instance.version,
+                toVersion: nextVersion,
+                nodeKey: currentNodeKey,
+              },
+              { id: actor.userId, name: actorName },
+            )
+          : null
+        if (completionEvent) {
+          await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        }
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
+        await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents)
+        // Lock-3 §2.5 / OD-L3-4(a): handler wall-clock is EXCLUDED from the per-node breakdown — NO
+        // `emitNodeDecisionMetric` for the handler node (it is not approver latency). The instance-level
+        // `duration_seconds` (emitTerminalMetric) unavoidably includes it; the SLA view states the split.
+        if (completionEvent) {
+          emitApprovalCompletionEvent(completionEvent)
+          this.emitTerminalMetric(id, 'approved')
+        }
+        if (resolution.currentNodeKey) {
+          this.emitNodeActivationMetric(
+            id,
+            resolution.currentNodeKey,
+            resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)),
+            nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey),
+          )
+        }
+        return (await this.getApproval(id, actor.userId))!
       }
 
       if (request.action === 'return') {

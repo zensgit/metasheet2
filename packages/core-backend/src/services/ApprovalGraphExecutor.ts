@@ -10,6 +10,8 @@ import type {
   FormField,
   FormFieldVisibilityRule,
   FormSchema,
+  HandlerMode,
+  HandlerNodeConfig,
   ParallelNodeConfig,
   RuntimeGraph,
 } from '../types/approval-product'
@@ -153,6 +155,24 @@ function isParallelNodeConfig(config: unknown): config is ParallelNodeConfig {
     && typeof config.joinNodeKey === 'string'
     && config.joinNodeKey.trim().length > 0
     && (config.joinMode === 'all' || config.joinMode === 'any')
+}
+
+// Lock-3 §1.1 — a normalized handler config always carries an `assigneeSources` array (empty arrays
+// are rejected at authoring, so a runtime handler node always has ≥1 source). Structural only: the
+// normalize choke (ApprovalProductService) owns the seven-member registry + prohibition gates.
+function isHandlerNodeConfig(config: unknown): config is HandlerNodeConfig {
+  return isRecord(config) && Array.isArray(config.assigneeSources)
+}
+
+/**
+ * Lock-3 §1.1 — handler aggregation mode. Fails CLOSED from line one (unlike `normalizeApprovalMode`,
+ * which silently maps any unrecognized mode to `'single'`): only the two evidenced values survive;
+ * anything else — including a hand-malformed runtime graph — collapses to `'all'`, the stronger
+ * guarantee. Absent ≡ `'all'`. Authoring already rejects out-of-set values (APPROVAL_HANDLER_MODE_INVALID),
+ * so this is the runtime backstop, never the primary gate.
+ */
+function normalizeHandlerMode(value: unknown): HandlerMode {
+  return value === 'any' ? 'any' : 'all'
 }
 
 function looksLikeComparableDateString(value: string): boolean {
@@ -649,6 +669,10 @@ export class ApprovalGraphExecutor {
   private readonly nodeMap = new Map<string, ApprovalNode>()
   private readonly outgoingEdges = new Map<string, ApprovalEdge[]>()
   private readonly approvalNodeOrder: string[]
+  // Lock-3 §1.4 / OD-L3-5(b): handler nodes in graph order, for the SEPARATE handler ordinal used
+  // ONLY as `approval_assignments.source_step` — so each handler seat gets a distinct, stable ordinal
+  // WITHOUT touching `approvalNodeOrder`, `stepIndexForNode`, or `totalSteps` (all byte-identical).
+  private readonly handlerNodeOrder: string[]
 
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
@@ -665,6 +689,9 @@ export class ApprovalGraphExecutor {
     }
     this.approvalNodeOrder = runtimeGraph.nodes
       .filter((node) => node.type === 'approval')
+      .map((node) => node.key)
+    this.handlerNodeOrder = runtimeGraph.nodes
+      .filter((node) => node.type === 'handler')
       .map((node) => node.key)
   }
 
@@ -703,6 +730,31 @@ export class ApprovalGraphExecutor {
       }
     }
     return this.resolveFromNode(next, completionContext)
+  }
+
+  /**
+   * Lock-3 §2.2 — advance PAST a handler node once its aggregation (会签 all / 或签 first) is
+   * satisfied. A handler completes by SUBMISSION, not approval, and is NOT a counted approval step,
+   * so the resolution carries NO aggregate mode (`null`) — the caller writes an `action:'handle'`
+   * audit row, never an `approve`. Structurally identical to `resolveAfterApprove`'s advance but keyed
+   * on a handler node (whose config `getApprovalNodeConfig` would reject).
+   */
+  resolveAfterHandle(currentNodeKey: string): ApprovalGraphResolution {
+    const next = this.firstTargetForNode(currentNodeKey)
+    if (!next) {
+      return {
+        status: 'approved',
+        currentNodeKey: null,
+        currentStep: this.totalSteps,
+        totalSteps: this.totalSteps,
+        assignments: [],
+        ccEvents: [],
+        autoApprovalEvents: [],
+        aggregateMode: null,
+        aggregateComplete: true,
+      }
+    }
+    return this.resolveFromNode(next, { aggregateMode: null, aggregateComplete: true })
   }
 
   /**
@@ -816,6 +868,11 @@ export class ApprovalGraphExecutor {
     return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
   }
 
+  // Lock-3 §2.2 — handler aggregation mode, fail-closed to `'all'` (see `normalizeHandlerMode`).
+  getHandlerMode(nodeKey: string): HandlerMode {
+    return normalizeHandlerMode(this.getHandlerNodeConfig(nodeKey).handlerMode)
+  }
+
   /**
    * T2-4 N-of-M threshold for a `'threshold'`-mode node: the number of DISTINCT approver
    * identities required to resolve the node APPROVED. Defaults to 1 if absent/invalid — a
@@ -874,6 +931,15 @@ export class ApprovalGraphExecutor {
         continue
       }
 
+      // Lock-3 R-3: a handler is a NON-approval node — it never joins the return-target trail. WITHOUT
+      // this arm an unhandled type leaves `nextNodeKey` unchanged and the next iteration throws
+      // `cycle near X` — loud but MISATTRIBUTED (the return would report a phantom cycle). Pass through
+      // to the next node exactly as `cc` does; a handler is never itself a legal return target.
+      if (node.type === 'handler') {
+        nextNodeKey = this.firstTargetForNode(node.key)
+        continue
+      }
+
       if (node.type === 'approval') {
         approvalTrail.push(node.key)
         if (node.key === currentNodeKey) {
@@ -905,7 +971,9 @@ export class ApprovalGraphExecutor {
   }
 
   buildTransferAssignments(currentNodeKey: string, targetUserId: string): ApprovalGraphAssignment[] {
-    const currentStep = this.stepIndexForNode(currentNodeKey)
+    // Lock-3 §1.4: a transfer at a HANDLER node carries the disjoint handler ordinal; an approval-node
+    // transfer keeps the unchanged approval step index (byte-identical to before this slice).
+    const currentStep = this.sourceStepForNode(currentNodeKey)
     return [{
       assignmentType: 'user',
       assigneeId: targetUserId,
@@ -1038,6 +1106,41 @@ export class ApprovalGraphExecutor {
           status: 'pending',
           currentNodeKey: node.key,
           currentStep: sourceStep,
+          totalSteps: this.totalSteps,
+          assignments,
+          ccEvents,
+          autoApprovalEvents,
+          aggregateMode: context.aggregateMode,
+          aggregateComplete: context.aggregateComplete,
+        }
+      }
+
+      // Lock-3 §2.2 R-4: a handler PAUSES the instance exactly as an approval node does — resolve its
+      // roster from the FROZEN snapshot (same `assignmentResolver`), insert assignments, wait. It differs
+      // in what may then happen (submit-only; §2.2 is in the route dispatch). NO auto-pass arm: a handler
+      // carries no empty-assignee/fallback key (§1.2), so an empty RESOLUTION at dispatch is the shipped
+      // APPROVAL_ASSIGNEE_EMPTY 400 — never a silent skip of 财务打款/盖章. `source_step` uses the SEPARATE
+      // handler ordinal (§1.4 / OD-L3-5b); the display `currentStep` is approval steps completed so far
+      // (a handler is not a counted step — `totalSteps` unchanged, G-4).
+      if (node.type === 'handler') {
+        const handlerConfig = isHandlerNodeConfig(node.config) ? node.config : null
+        if (!handlerConfig) {
+          throw new Error(`Handler node ${node.key} has invalid config`)
+        }
+        const sourceStep = this.handlerSourceStepForNode(node.key)
+        const assignments = this.resolveAssignmentsForHandlerNode(node.key, handlerConfig, sourceStep)
+        if (assignments.length === 0) {
+          throw new ServiceError(
+            `Handler node ${node.key} has no assignees`,
+            400,
+            'APPROVAL_ASSIGNEE_EMPTY',
+            { nodeKey: node.key },
+          )
+        }
+        return {
+          status: 'pending',
+          currentNodeKey: node.key,
+          currentStep: this.approvalStepsCompletedBefore(node.key),
           totalSteps: this.totalSteps,
           assignments,
           ccEvents,
@@ -1339,6 +1442,15 @@ export class ApprovalGraphExecutor {
         throw new Error(`Nested parallel nodes are not supported in v1 (at ${node.key})`)
       }
 
+      // Lock-3 §1.3 R-5 (CONFIRM-EXCLUDE): a handler inside a parallel region is a PUBLISH-time 400
+      // (validateHandlerNodePlacement). This throw is the deliberately-RETAINED second door — if a
+      // pre-gate stored graph somehow carried one, it fails loudly here rather than colliding at runtime
+      // with a sibling branch's assignee (§1.4). Widening handlers into parallel regions is OD-L3-1(b)
+      // and must FIRST extend collectAllBranchAssignees + the fingerprint gate, not just delete a check.
+      if (node.type === 'handler') {
+        throw new Error(`Handler nodes are not supported inside a parallel region in v1 (at ${node.key})`)
+      }
+
       if (node.type === 'end') {
         throw new Error(`Parallel branch terminated at an end node before reaching join ${joinNodeKey}`)
       }
@@ -1363,6 +1475,40 @@ export class ApprovalGraphExecutor {
     return index >= 0 ? index + 1 : 0
   }
 
+  /**
+   * Lock-3 §1.4 / OD-L3-5(b) — the SEPARATE handler ordinal used ONLY as `approval_assignments.source_step`.
+   * `stepIndexForNode` returns `0` for every node absent from `approvalNodeOrder`, so with option (a) all
+   * handler seats would collide in one `source_step = 0` bucket (which AttendanceDecisionTrace groups on).
+   * Instead each handler node gets a distinct ordinal in a range DISJOINT from approval step indices
+   * (`0` and `[1..totalSteps]`): `totalSteps + 1 + handlerIndex`. Stable within a frozen runtime graph.
+   * `stepIndexForNode` and `totalSteps` stay byte-identical (G-4). A non-handler key falls back to
+   * `totalSteps + 1` (never used in practice — the callers gate on node type).
+   */
+  private handlerSourceStepForNode(nodeKey: string): number {
+    const index = this.handlerNodeOrder.indexOf(nodeKey)
+    return this.totalSteps + 1 + (index >= 0 ? index : 0)
+  }
+
+  // Lock-3 §1.4 — the source_step an assignment at `nodeKey` carries: the SEPARATE handler ordinal for a
+  // handler node, else the unchanged approval step index. Used by `buildTransferAssignments` so a handler
+  // transfer seat (§2.2) also lands in the disjoint handler bucket rather than the `source_step = 0` one.
+  private sourceStepForNode(nodeKey: string): number {
+    return this.nodeMap.get(nodeKey)?.type === 'handler'
+      ? this.handlerSourceStepForNode(nodeKey)
+      : this.stepIndexForNode(nodeKey)
+  }
+
+  // Lock-3 §2.2 — display progress while PAUSED at a handler: how many approval steps are already behind
+  // it. A handler is not a counted step, so this stays in `[0..totalSteps]` and never reads as ">M".
+  private approvalStepsCompletedBefore(nodeKey: string): number {
+    let count = 0
+    for (const node of this.runtimeGraph.nodes) {
+      if (node.key === nodeKey) break
+      if (node.type === 'approval') count += 1
+    }
+    return count
+  }
+
   private getApprovalNodeConfig(nodeKey: string): ApprovalNodeConfig {
     const node = this.nodeMap.get(nodeKey)
     if (!node || node.type !== 'approval') {
@@ -1373,6 +1519,40 @@ export class ApprovalGraphExecutor {
       throw new Error(`Approval node ${node.key} has invalid config`)
     }
     return approvalConfig
+  }
+
+  // Lock-3 §2.2 R-8 — handler config accessor (the approval accessor throws for a handler key). Used by
+  // the route dispatch's `handle` arm to read `handlerMode` / `opinionRequired`.
+  getHandlerNodeConfig(nodeKey: string): HandlerNodeConfig {
+    const node = this.nodeMap.get(nodeKey)
+    if (!node || node.type !== 'handler') {
+      throw new Error(`Handler node ${nodeKey} is not registered in the runtime graph`)
+    }
+    const handlerConfig = isHandlerNodeConfig(node.config) ? node.config : null
+    if (!handlerConfig) {
+      throw new Error(`Handler node ${node.key} has invalid config`)
+    }
+    return handlerConfig
+  }
+
+  /**
+   * Lock-3 §2.2 R-9 — resolve a handler node's seats through the SAME frozen-snapshot
+   * `assignmentResolver` the approval nodes use (a PURE function over the create-time snapshot — no live
+   * directory read at dispatch). The handler config's `assigneeSources` is the only assignee carrier, so
+   * the resolver input shape is identical; threshold reachability is approval-only and never runs here.
+   */
+  private resolveAssignmentsForHandlerNode(
+    nodeKey: string,
+    handlerConfig: HandlerNodeConfig,
+    sourceStep: number,
+  ): ApprovalGraphAssignment[] {
+    if (this.options.assignmentResolver) {
+      return this.options.assignmentResolver({ nodeKey, sourceStep, config: handlerConfig as unknown as ApprovalNodeConfig })
+    }
+    // No resolver injected (unit-level executor without the service resolver): a handler carries no
+    // legacy assigneeIds pair, so there is nothing to resolve statically — fail closed to empty, which
+    // the PAUSE arm turns into APPROVAL_ASSIGNEE_EMPTY.
+    return []
   }
 
   private resolveAssignmentsForApprovalNode(

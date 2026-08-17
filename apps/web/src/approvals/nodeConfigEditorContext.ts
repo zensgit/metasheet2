@@ -5,6 +5,7 @@ import type {
   ApprovalMode,
   ApprovalNode,
   EmptyAssigneePolicy,
+  HandlerMode,
   NodeFieldAccess,
   ParallelJoinMode,
 } from '../types/approval'
@@ -71,6 +72,12 @@ export interface ApprovalNodeConfigEditorApi {
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
   approvalNodeMergeWithRequester: (nodeKey: string) => boolean
   setApprovalNodeMergeWithRequester: (nodeKey: string, enabled: boolean) => void
+  // Lock-3 §1.1 — handler-node mode (会签/或签) + 办理意见 required. Reuse the shared source helpers
+  // (approvalSourceKind/…) for the roster; these two are the handler-only controls.
+  handlerNodeMode: (nodeKey: string) => HandlerMode
+  setHandlerNodeMode: (nodeKey: string, mode: HandlerMode) => void
+  handlerNodeOpinionRequired: (nodeKey: string) => boolean
+  setHandlerNodeOpinionRequired: (nodeKey: string, required: boolean) => void
   approvalNodeFieldAccess: (nodeKey: string, fieldId: string) => NodeFieldAccess
   setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: NodeFieldAccess) => void
   nodeConfigSummary: (node: ApprovalNode) => string[]

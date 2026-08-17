@@ -13,12 +13,33 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by the preset publish test).
 export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
+// Lock-3 R-1 (FE mirror site 2 of 3): `handler` (办理节点) — mirrors backend
+// packages/core-backend/src/types/approval-product.ts. Keep in sync with that union and the runtime
+// `APPROVAL_NODE_TYPES` admission set.
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
+// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
+// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
+// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
+  'static_user',
+  'static_role',
+  'requester',
+  'form_field_user',
+  'direct_manager',
+  'dept_head',
+  'manager_at_level',
+] as const
+export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
+// Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
+export type HandlerMode = 'all' | 'any'
+
 export type ApprovalActionType =
   | 'approve'
   | 'reject'
@@ -28,6 +49,8 @@ export type ApprovalActionType =
   | 'return'
   | 'add_sign'
   | 'reduce_sign'
+  // Lock-3 §2.1 — handler-node submit verb.
+  | 'handle'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
@@ -55,7 +78,17 @@ export interface ApprovalNode {
     | ConditionNodeConfig
     | CcNodeConfig
     | ParallelNodeConfig
+    | HandlerNodeConfig
     | Record<string, never>
+}
+
+// Lock-3 §1.1 — handler / 办理节点 config (mirrors backend HandlerNodeConfig). `assigneeSources` is the
+// ONLY assignee carrier; NO empty/fallback key exists (§1.2). `fieldPermissions` ENFORCEMENT is Lock-7.
+export interface HandlerNodeConfig {
+  assigneeSources: ApprovalAssigneeSource[]
+  handlerMode?: HandlerMode
+  opinionRequired?: boolean
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:51-56 (P1-C node-level

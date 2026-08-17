@@ -211,7 +211,9 @@ export interface TemplateAuthoringDraft {
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
 // graph containing them is load-preserved verbatim (read-only graph view), never flattened.
-const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+// Lock-3 R-22 (CONFIRM-EXCLUDE): a graph containing a `handler` is COMPLEX (canvas-only); the linear
+// steps editor is deliberately NOT taught the node type, so a handler graph is preserved verbatim.
+const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel', 'handler'])
 
 /**
  * True when a graph can't be edited through the linear `steps` model and so must be
@@ -587,6 +589,9 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
   'condition',
   'parallel',
   'end',
+  // Lock-3 R-20: `handler` is recognised + load-preserved. WITHOUT this row a handler graph would
+  // (correctly) force the whole template read-only with save blocked — the fail-closed positive control.
+  'handler',
 ])
 
 /**
@@ -715,6 +720,9 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
 // start/end → {}. Formula branches are FC-2 authorable and round-trip through `conditionEdit.ts`.
 const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
 const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
+// Lock-3 R-21 — the handler config keys the backend `normalizeApprovalGraph` (case 'handler') re-emits.
+// Any other key is silently dropped on save, so it must trip the backend-drop check (fail-closed).
+const BACKEND_HANDLER_CONFIG_KEYS = ['assigneeSources', 'handlerMode', 'opinionRequired', 'fieldPermissions']
 const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
 const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules', 'formula']
 const BACKEND_CONDITION_FORMULA_KEYS = ['expression']
@@ -734,6 +742,9 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
       return complexApprovalConfigHasBackendDrop(config)
     case 'cc':
       return hasKeyOutside(config, BACKEND_CC_CONFIG_KEYS)
+    case 'handler':
+      // Lock-3 R-21: a handler key outside the backend allowlist is a silent backend-drop.
+      return hasKeyOutside(config, BACKEND_HANDLER_CONFIG_KEYS)
     case 'parallel':
       return hasKeyOutside(config, BACKEND_PARALLEL_CONFIG_KEYS)
     case 'condition': {

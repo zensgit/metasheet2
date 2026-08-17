@@ -10,10 +10,42 @@ export const APPROVAL_PRODUCT_PERMISSIONS = [
 
 export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[number]
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
+// Lock-3 §1.1 R-1: `handler` (办理节点) is the seventh node type — a NON-approval business
+// operation node with its own roster + submit-only completion. Three mirror sites must move
+// together (this union, `apps/web/src/types/approval.ts`, and the `APPROVAL_NODE_TYPES` runtime
+// admission set in ApprovalProductService.ts) or the type is unpublishable.
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
+
+/**
+ * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry: exactly SEVEN of the
+ * shipped kinds. `continuous_managers` is excluded (corpus C-2 lists 连续多级上级 for approvers, not
+ * handlers), and `requester_choice` — though now shipped (Lock-1 K2) and §1.5 says it ADMITS once
+ * Lock-1 lands — is NOT added here: §1.5 says "each row lands in the SAME slice as its kind", and
+ * gate G-13 freezes the seven-member set by exact-set equality (adding a kind must FAIL). Widening
+ * to requester_choice is a separate follow-up decision, not P4-A. This is the per-node-type M4
+ * fail-closed registry: a handler config carrying any kind outside this set is rejected at authoring.
+ */
+export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
+  'static_user',
+  'static_role',
+  'requester',
+  'form_field_user',
+  'direct_manager',
+  'dept_head',
+  'manager_at_level',
+] as const
+export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
+
+/**
+ * Lock-3 §1.1 — handler aggregation mode. A NEW key (not a reuse of `ApprovalMode`, which drags
+ * `single`/`threshold` the corpus evidences none of for handlers, and inherits the fail-OPEN
+ * `normalizeApprovalMode`). `'all'` (会签, every handler submits) / `'any'` (或签, first submits).
+ * Absent ≡ `'all'` (the stronger guarantee; corpus states no default).
+ */
+export type HandlerMode = 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export const APPROVAL_ACTION_TYPES = [
@@ -25,6 +57,10 @@ export const APPROVAL_ACTION_TYPES = [
   'return',
   'add_sign',
   'reduce_sign',
+  // Lock-3 §2.1 — a handler completes by SUBMITTING; the verb is `handle`. Three sites move together:
+  // this const, the route dispatch guard (routes/approvals.ts), and the `approval_records_action_check`
+  // DB migration (a `handle` audit INSERT would violate the shipped 14-member CHECK otherwise).
+  'handle',
 ] as const
 export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
@@ -79,7 +115,24 @@ export interface ApprovalNode {
     | ConditionNodeConfig
     | CcNodeConfig
     | ParallelNodeConfig
+    | HandlerNodeConfig
     | Record<string, never>
+}
+
+/**
+ * Lock-3 §1.1 — handler / 办理节点 config. `assigneeSources` is the ONLY assignee carrier (no legacy
+ * assigneeType/assigneeIds pair). Deliberately carries NO empty-assignee/fallback key in v1 (§1.2 /
+ * OD-L3-2(a)): a handler mints no second vocabulary for Lock-4 to supersede and no inert switch reaches
+ * the inspector (M4/M7). Empty resolution at dispatch terminates at the shipped APPROVAL_ASSIGNEE_EMPTY
+ * 400 (§2.2). `fieldPermissions` share the approval-node shape; ENFORCEMENT is Lock-7 (a handler submit
+ * carries no field writes until then — §3, fail-closed 422).
+ */
+export interface HandlerNodeConfig {
+  assigneeSources: ApprovalAssigneeSource[]
+  handlerMode?: HandlerMode
+  /** 办理意见; absent ≡ false (corpus C-7 default / OD-L3-3(a)). */
+  opinionRequired?: boolean
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 // T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wired `remind`
@@ -503,6 +556,15 @@ export interface ApprovalActionRequest {
    * Only rows stamped `metadata.addSign === true` are removable.
    */
   targetAssignmentUserId?: string
+  /**
+   * Lock-3 §3 — RESERVED field-write channel for a handler `handle` submission. The Lock-7
+   * field-edit-enforcement slice will own which fields are writable and the apply transaction; UNTIL
+   * then a `handle` request carrying this key (non-empty, `{}`, or `null`) is rejected with a
+   * values-free 422 `APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED` before any row is written. Reserving it
+   * now makes the rejection testable (G-9) and makes Lock-7 a widening rather than a rename. Detected by
+   * key PRESENCE (`'fieldWrites' in request`), so an explicit `null`/`{}` is still caught.
+   */
+  fieldWrites?: unknown
 }
 
 export interface ApprovalTemplateListItemDTO {
