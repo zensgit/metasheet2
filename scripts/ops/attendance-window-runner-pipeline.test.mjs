@@ -970,8 +970,8 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.doesNotMatch(
     slices.run,
-    /\.get\("dailyCapTimezone", ?"/,
-    'the batch-day derivation must have no fallback default (a defaulted .get is the silent-revert channel)',
+    /\.get\("dailyCapTimezone"/,
+    'no .get on dailyCapTimezone may exist in the run slice at all — subscript access is the by-construction fail-closed shape, and any .get re-introduction is the silent-revert channel (#4933 gate P2-1: an `or "UTC"` fallback slipped past the narrowed form)',
   )
   assert.ok(
     slices.run.includes('allow_same_day_rerun'),
@@ -1669,7 +1669,13 @@ test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch 
     writeFileSync(marker, `${rewound.join('\n')}\n`)
     r = run('soak_batch_guard_check', cfg, marker, 'false')
     assert.equal(r.status, 1, 'org1 crossing midnight must NOT admit a batch while org2/org3 are still on their punched local day')
-    assert.match(r.stdout, /bbbbbbbb|cccccccc/, 'the refusal must come from a non-first org')
+    // org2 ONLY (#4933 gate P2-2): entries order makes org2 the first same-day match under
+    // correct code at EVERY wall-clock instant, while under a first-entry-only derivation
+    // org2 (Pago Pago, 25h from Kiritimati — never the same calendar day) can NEVER refuse;
+    // the old /bbbbbbbb|cccccccc/ disjunction let org3 (Shanghai, same date as Kiritimati
+    // 18h/day) mask that mutation 75% of the time.
+    assert.match(r.stdout, /bbbbbbbb/, 'the refusal must come from org2 (the 25h-offset org)')
+    assert.doesNotMatch(r.stdout, /cccccccc/, 'org3 must not be the refusing org while org2 precedes it in entry order')
     // All orgs rewound one day: the batch may proceed.
     const allRewound = lines.map((line) => {
       const [org, tz, day] = line.split('=')
@@ -1689,6 +1695,48 @@ test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch 
     r = run('soak_batch_guard_check', cfg, marker, 'false')
     assert.equal(r.status, 1, 'a legacy single-date marker must refuse fail-closed')
     assert.match(r.stdout, /unrecognized batch-marker line/)
+    // BEHAVIOURAL stale-config refusal (#4933 gate P2-1: a text pin alone was neuterable —
+    // an `or "UTC"` fallback kept the pinned string while silently reverting): a config
+    // whose entry lacks dailyCapTimezone must refuse through the REAL function, whatever
+    // the source spelling.
+    const staleCfg = join(dir, 'stale-config.json')
+    writeFileSync(staleCfg, JSON.stringify({
+      entries: [
+        { orgId: 'aaaaaaaa-0000-0000-0000-000000000001', dailyCapTimezone: 'Asia/Shanghai' },
+        { orgId: 'bbbbbbbb-0000-0000-0000-000000000002' },
+      ],
+    }))
+    rmSync(marker, { force: true })
+    r = run('soak_batch_guard_check', staleCfg, marker, 'false')
+    assert.equal(r.status, 1, 'a config entry without dailyCapTimezone must refuse — never default to UTC days')
+    assert.match(r.stdout, /is missing orgId\/dailyCapTimezone/)
+    // LEGACY-PATH MIGRATION (#4933 gate P2-3: the marker was renamed -day -> -days; a
+    // pre-rename marker at the old path must be migrated conservatively, never silently
+    // ignored). The migrated day counts for EVERY org, so a same-day batch refuses...
+    const legacyMarker = join(dir, 'marker-day')
+    const migratedMarker = join(dir, 'marker-days')
+    const orgToday = (tz) => {
+      const r2 = spawnSync('bash', ['-c', `TZ=${tz} date +%Y-%m-%d`], { encoding: 'utf8' })
+      return r2.stdout.trim()
+    }
+    rmSync(migratedMarker, { force: true })
+    writeFileSync(legacyMarker, `${orgToday('Pacific/Pago_Pago')}\n`)
+    r = run('soak_batch_guard_check', cfg, migratedMarker, 'false')
+    assert.equal(r.status, 1, 'a legacy same-day marker must migrate AND refuse')
+    assert.ok(!existsSync(legacyMarker), 'the legacy marker must be consumed by migration')
+    assert.ok(existsSync(migratedMarker), 'migration must write the per-org marker')
+    assert.equal(
+      readFileSync(migratedMarker, 'utf8').trim().split('\n').length,
+      3,
+      'migration must attribute the legacy day to EVERY org (conservative fail-closed)',
+    )
+    // ...and unrecognized legacy content refuses without migrating.
+    rmSync(migratedMarker, { force: true })
+    writeFileSync(legacyMarker, 'not-a-date\n')
+    r = run('soak_batch_guard_check', cfg, migratedMarker, 'false')
+    assert.equal(r.status, 1, 'unrecognized legacy marker content must refuse fail-closed')
+    assert.match(r.stdout, /legacy batch marker .* holds unrecognized content/)
+    assert.ok(existsSync(legacyMarker), 'an unrecognized legacy marker must be left in place for inspection')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

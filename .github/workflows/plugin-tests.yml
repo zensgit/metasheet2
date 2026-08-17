@@ -720,6 +720,15 @@ jobs:
             git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7
           node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
 
+      # #4556 combined-soak: the window-runner pipeline contract (guard/classifier
+      # executable legs + mutation legs). A node:test .test.mjs like the collector above —
+      # invisible to every workspace test chain, so it must be named explicitly here or it
+      # runs ONLY as the workflow_dispatch preflight and never gates a PR (the #4933 gate
+      # demonstrated two mutation escapes merging ungated exactly this way).
+      - name: Run attendance window-runner pipeline contract
+        run: |
+          node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |

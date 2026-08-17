@@ -2011,7 +2011,10 @@ soak_batch_guard_entries() {
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 for e in cfg["entries"]:
-    org = e.get("orgId"); tz = e.get("dailyCapTimezone")
+    try:
+        org, tz = e["orgId"], e["dailyCapTimezone"]
+    except KeyError:
+        sys.stderr.write("entry missing orgId/dailyCapTimezone\n"); sys.exit(1)
     if not org or not tz:
         sys.stderr.write("entry missing orgId/dailyCapTimezone\n"); sys.exit(1)
     print(f"{org}\t{tz}")
@@ -2028,6 +2031,26 @@ soak_batch_guard_check() {
   local line org tz today rec_day entries
   entries="$(soak_batch_guard_entries "$config_path")" \
     || { echo "config at ${config_path} is missing orgId/dailyCapTimezone — it predates the org-day cap contract; re-run action=soak-seed first"; return 1; }
+  # LEGACY MARKER MIGRATION (#4933 gate P2-3): the pre-per-org guard wrote ONE global day
+  # to the singular path; silently ignoring it would re-open the same-day duplicate window
+  # for a marker written by the previous code. Migrate CONSERVATIVELY — the legacy day is
+  # attributed to EVERY org (it was derived from entries[0]'s timezone; over-refusing for up
+  # to one day is the fail-closed direction, and it self-heals at each org's next local day).
+  local legacy_marker="${marker%-days}-day"
+  if [[ "$legacy_marker" != "$marker" && -f "$legacy_marker" && ! -f "$marker" ]]; then
+    local legacy_day
+    legacy_day="$(head -1 "$legacy_marker" | tr -d '[:space:]')"
+    if [[ "$legacy_day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      while IFS=$'\t' read -r org tz; do
+        printf '%s=%s=%s\n' "$org" "$tz" "$legacy_day" >> "$marker"
+      done <<< "$entries"
+      rm -f "$legacy_marker"
+      echo "migrated legacy single-day batch marker (${legacy_day}) to the per-org set — the legacy day counts for EVERY org (conservative fail-closed)" >&2
+    else
+      echo "legacy batch marker at ${legacy_marker} holds unrecognized content '${legacy_day}' — refusing fail-closed; inspect and remove it manually if a batch is genuinely due"
+      return 1
+    fi
+  fi
   [[ -f "$marker" ]] || return 0
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
