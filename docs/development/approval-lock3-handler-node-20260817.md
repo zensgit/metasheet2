@@ -1,7 +1,6 @@
 # Lock-3 — Handler / Business-Operation Node and Its Mutation Boundary (2026-08-17)
 
-**Status:** PROPOSED — NOT RATIFIED. This document authorizes nothing; §5 is blank until an explicit
-owner decision names it and its SHA.
+**Status:** RATIFIED (2026-08-17 — §5 record; design authorization only, slices still gated)
 **Baseline:** `origin/main@2f4bf6ce3ea49ea01b31c352aab70d32d162b9f7`. Every anchor below was READ AT
 THIS BASELINE, which is newer than the master lock (`d33a6a0fa1`), Lock-0 (`5b31cb4349`) and Lock-1
 (`0e8ed11671`); line numbers are exact here and may differ from those documents' own citations.
@@ -336,13 +335,15 @@ Every mutation row must name the test it turns red and assert the anchor was act
 
 ## 5. Owner ratification block
 
-Intentionally blank until an explicit owner decision names this document and its SHA.
-
 ```text
-Decision: <RATIFY | REQUEST CHANGES | REJECT>
-Owner:
-Date:
-Document SHA:
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+  Independent pre-ratify review: Claude (fable) — spot-verified the approval-only keying of
+  runtimeGraphUsesOrgAssigneeSource (:2922-2937, the P1 silent-skip hazard) and the partial-index
+  identity correction; drafted by opus with advisor corrections applied pre-finalize.
+Date: 2026-08-17
+Document SHA: drafted 2e850553c1; this record lands on top.
 Decisions required ([R] = this document's recommendation; rejected options are listed so they are
 not re-proposed):
 
@@ -367,8 +368,14 @@ not re-proposed):
   OD-L3-7  Handler reject verb — (a)[R] submit-only, per corpus C-3/C-9 · (b) add a handler-reject
            verb on the strength of the single conflicting 办理意见 sentence quoted in §0
 
-Deltas:
-Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design only.
-  No flag, no UAT, no deployment, no runtime capability. Lock-7 remains NOT DRAFTED and this
-  document does not discharge Lock-4's 内容变更 forward obligation.
+Decisions recorded: OD-L3-1 (a) main path + condition branches only · OD-L3-2 (a) v1 no fallback
+  key, adopt Lock-4 F4-B handler arm when ratified · OD-L3-3 (a) opinion not required by default ·
+  OD-L3-4 (a) excluded from per-node metrics with the split stated in SLA copy · OD-L3-5 (b) separate
+  handler ordinal for source_step, totalSteps untouched · OD-L3-6 (a) seven-of-eight roster ·
+  OD-L3-7 (a) submit-only (the corpus's single conflicting sentence loses to its aggregation rows and
+  the member handbook) — all seven per this document's recommendations.
+Deltas: (none)
+Runtime authorization: NONE — design only. Each slice needs its own PR, required checks, adversarial
+  gate, and ledger row. Lock-7 remains NOT DRAFTED; Lock-4's 内容变更 forward obligation is not
+  discharged. No flag, no UAT, no deployment.
 ```
