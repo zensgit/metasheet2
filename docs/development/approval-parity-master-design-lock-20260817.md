@@ -1,6 +1,7 @@
 # Approval Parity Master Design Lock (2026-08-17)
 
-**Status:** PROPOSED - owner ratification is required before any new runtime capability starts
+**Status:** RATIFIED (2026-08-17 — see §9; ratification approves the design program only and grants
+no runtime, UAT, deployment, or flag authorization; every Lock-0..8 and phase gate keeps its own owner decision)
 **Baseline:** `origin/main@d33a6a0fa120452b721ea76d449dfa1463727463`
 **Scope:** ordinary-user approval form authoring, process authoring, enterprise assignee semantics,
 node policies, member experience, version governance, and approval-to-multitable data closure
@@ -494,13 +495,19 @@ separate ledger entries. None implies the next.
 
 ## 9. Owner ratification record
 
-This section is intentionally blank until an explicit owner decision names this document and its SHA.
-
 ```text
-Decision: NOT RECORDED
-Owner:
-Date:
-Document SHA:
-Deltas:
-Runtime authorization: NONE
+Decision: RATIFY
+Owner: zensgit — explicit in-session instruction on 2026-08-17 to execute the recorded
+  recommendation (owner requested execution twice and merged #4935 personally), following
+  Codex + independent Grok review, Claude independent adversarial review (APPROVE-with-nits;
+  nits resolved in the REV-2 fix round), and the owner's own REQUEST-CHANGES round
+  (2 P2 + 2 P3, all applied before this ratification).
+Date: 2026-08-17
+Document SHA: reviewed single-commit 217b56137e28729c15f671ff4984908e275a8406, landed on main
+  as squash 5b31cb4349 (#4935); all three documents verified blob-identical between the
+  reviewed and merged SHAs.
+Deltas: (none)
+Runtime authorization: NONE — no runtime capability, tenant UAT, deployment, or feature-flag
+  change is authorized by this ratification. Lock-0..8 and every phase gate retain their own
+  owner decisions.
 ```
