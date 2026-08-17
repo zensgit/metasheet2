@@ -610,12 +610,13 @@ export interface ApprovalActionRequest {
    */
   targetAssignmentUserId?: string
   /**
-   * Lock-3 §3 — RESERVED field-write channel for a handler `handle` submission. The Lock-7
-   * field-edit-enforcement slice will own which fields are writable and the apply transaction; UNTIL
-   * then a `handle` request carrying this key (non-empty, `{}`, or `null`) is rejected with a
-   * values-free 422 `APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED` before any row is written. Reserving it
-   * now makes the rejection testable (G-9) and makes Lock-7 a widening rather than a rename. Detected by
-   * key PRESENCE (`'fieldWrites' in request`), so an explicit `null`/`{}` is still caught.
+   * Lock-3 §3 / Lock-7 L7-C — the field-write channel for a handler `handle` submission. Lock-7 P4-B
+   * lands the write: a plain object `{ fieldId: value }` is applied under the actor's single-node mask
+   * (`editable` writes; `readonly`/`hidden`/unknown/detail-sub-column refuse values-free), validated
+   * against the FROZEN version schema, then UPDATEs `form_snapshot` in place inside the handle
+   * transaction plus append-only revision rows (OD-L7-6). `{}` is an accepted zero-write no-op;
+   * `null` / a non-object is a values-free 400 `APPROVAL_FIELD_WRITE_PAYLOAD_INVALID`. Meaningful only
+   * on `handle` — present on any other action it is a values-free 400. Detected by key PRESENCE.
    */
   fieldWrites?: unknown
 }

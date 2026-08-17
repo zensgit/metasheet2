@@ -175,9 +175,9 @@ export interface ApprovalStepDraft {
   // T1-4 node-level field permissions (linear editor). One entry per NON-editable form field
   // (`editable` is the absent default, so a field left editable carries no entry). Hydrated from
   // `config.fieldPermissions` and re-emitted by `buildStepConfig`, which prunes entries whose field
-  // was deleted (backend cross-ref safety) and drops any `editable` entry. `hidden` is enforced at
-  // runtime (server echo-redaction, shipped #2799); `readonly` round-trips but is runtime-inert
-  // (enforcement deferred to T1-4b).
+  // was deleted (backend cross-ref safety) and drops any `editable` entry. `hidden` and `readonly`
+  // are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a write;
+  // `readonly` refuses a write at that node.
   fieldPermissions: NodeFieldPermission[]
 }
 

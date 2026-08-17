@@ -27,6 +27,7 @@ import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
+  resolveFieldAccessAtNodes,
   type RedactableRuntimeGraph,
 } from './approval-form-redaction'
 import {
@@ -651,11 +652,29 @@ export class ApprovalBridgeService {
 
     const assignmentsByInstance = await this.loadAssignments([id])
     const runtimeGraphsByDefinition = await this.loadRuntimeGraphs([row.published_definition_id])
+    const instanceAssignments = assignmentsByInstance.get(id) || []
+    const detailRuntimeGraph = row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null
     const dto = toUnifiedDTO(
       row,
-      assignmentsByInstance.get(id) || [],
-      row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null,
+      instanceAssignments,
+      detailRuntimeGraph,
     )
+    // Lock-7 OD-L7-10 — DETAIL-only actor-scoped per-field access map. Computed from the viewer's
+    // ACTIVE user-typed seats (the same seats the write path claims), over the SAME
+    // `resolveFieldAccessAtNodes` derivation as the write mask, so `editable` here ⊆ writable there
+    // (never over-reported). A seatless / role-only / queue-only viewer gets no map (fail-closed —
+    // nothing editable). Multi-seat is most-restrictive-wins. NOT added to `toUnifiedDTO` (kept
+    // byte-identical for the list path, which shares that function). Absent ≡ editable (OD-L7-9).
+    if (dto && viewerUserId && detailRuntimeGraph) {
+      const actorNodeKeys = instanceAssignments
+        .filter((assignment) => assignment.is_active && assignment.assignment_type === 'user' && assignment.assignee_id === viewerUserId)
+        .map((assignment) => assignment.node_key)
+        .filter((nodeKey): nodeKey is string => typeof nodeKey === 'string' && nodeKey.length > 0)
+      if (actorNodeKeys.length > 0) {
+        const accessMap = resolveFieldAccessAtNodes(detailRuntimeGraph, actorNodeKeys)
+        if (accessMap.size > 0) dto.fieldAccess = Object.fromEntries(accessMap)
+      }
+    }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
     if (dto && row.template_version_id) {

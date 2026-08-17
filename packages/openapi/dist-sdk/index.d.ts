@@ -16604,6 +16604,17 @@ export interface components {
             formSnapshot?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * @description Lock-7 OD-L7-10 — the actor-scoped per-field access map for the viewer
+             *     at their claimed handler seat(s): fieldId → editable | readonly |
+             *     hidden. Present ONLY on the DETAIL read (getApproval); absent on the
+             *     list. A field absent from the map is editable (legacy default, OD-L7-9).
+             *     Presentation only — enforcement is server-side (a masked field write is
+             *     refused regardless of what the client renders).
+             */
+            fieldAccess?: {
+                [key: string]: "editable" | "readonly" | "hidden";
+            } | null;
             currentNodeKey?: string | null;
             /**
              * @description Parallel gateway (并行分支) runtime frontier. Present only when

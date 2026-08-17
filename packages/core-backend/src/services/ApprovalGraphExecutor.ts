@@ -359,7 +359,11 @@ export interface ApprovalFormValidationOptions {
   attachmentValueMode?: 'legacy' | 'ids'
 }
 
-function validateFieldType(
+// Lock-7 L7-C — exported so the handler field-write path (applyHandlerFieldWrites) re-runs the SAME
+// per-value validators against the FROZEN version schema (create-path validation, one function). This
+// inherits Lock-8 MS-3's fail-open default verbatim (`default: return null` below) — asserted, not
+// fixed, by Lock-7 G-6.
+export function validateFieldType(
   field: FormField,
   value: unknown,
   options: ApprovalFormValidationOptions,
@@ -486,7 +490,9 @@ function getFieldPropString(field: FormField, key: string): string | null {
   return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
 }
 
-function validateFieldConstraints(field: FormField, value: unknown): string[] {
+// Lock-7 L7-C — exported for applyHandlerFieldWrites (see validateFieldType above). MS-3 fail-open
+// default (`default: return []`) is inherited and asserted by G-6, not fixed here.
+export function validateFieldConstraints(field: FormField, value: unknown): string[] {
   if (value === undefined || value === null) {
     return []
   }
@@ -583,7 +589,9 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 // Attachment top-level-only (flag-ON / attachmentValueMode:'ids'): an attachment-typed leaf inside
 // a detail group is rejected. Flag-OFF / legacy mode keeps detail-leaf attachment values
 // legacy-valid (string/record) for byte compatibility with pre-feature snapshots.
-function validateDetailFieldValue(
+// Lock-7 L7-C — exported for applyHandlerFieldWrites: a `detail` field write re-runs this against the
+// frozen sub-schema (per-row visibility + required, same as create).
+export function validateDetailFieldValue(
   field: FormField,
   value: unknown,
   options: ApprovalFormValidationOptions,

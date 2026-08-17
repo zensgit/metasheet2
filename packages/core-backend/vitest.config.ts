@@ -295,6 +295,12 @@ export default defineConfig({
       // .github/workflows/approval-realdb-handler.yml workflow (standalone per the same s6a precedent —
       // plugin-tests.yml is left byte-identical). Two-point wiring, both points in the SAME commit.
       'tests/integration/approval-handler-node.db.test.ts',
+      // Lock-7 (docs/development/approval-lock7-field-edit-enforcement-20260817.md) field-edit
+      // enforcement real-DB suite. Excluded here so the no-DB `test (18.x/20.x)` job does not
+      // collect-and-skip-green it; it EXECUTES in the dedicated approval-realdb-field-edit.yml lane
+      // (EXPECT_DB=1 arms the anti-skip sentinel). Two-point wiring, both points in the SAME commit;
+      // plugin-tests.yml (the s6a sha256-pinned provenance input) is left byte-identical.
+      'tests/integration/approval-field-edit-enforcement.db.test.ts',
       // L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1) policy
       // carrier fix — real-DB, whole-HTTP-stack publish/hydrate/PATCH/republish round trip
       // (gates P-1/P-2/P-3). DATABASE_URL-gated (describeIfDatabase); excluded here so the no-DB

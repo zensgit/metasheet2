@@ -18,6 +18,7 @@ import type {
   ApprovalMode,
   ApprovalNodeType,
   ApprovalRequesterSnapshot,
+  ConditionBranch,
   ConditionFormulaPredicate,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
@@ -52,7 +53,11 @@ import {
   canonicalizeRecordLinkFormData,
   pruneHiddenFormData,
   validateApprovalFormData,
+  validateFieldType,
+  validateFieldConstraints,
+  validateDetailFieldValue,
 } from './ApprovalGraphExecutor'
+import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
@@ -70,6 +75,7 @@ import {
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
+  extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
@@ -1411,6 +1417,132 @@ function validateNodeFieldPermissionsAgainstFormSchema(
       }
     }
   })
+  // Lock-7 L7-B (R-4) — the field-edit-enforcement publish pins land HERE, so all five authoring entry
+  // points (restore/create/update/publish/clone) raise them and the dispatch re-normalize path (which
+  // does NOT call this function) never does, keeping in-flight instances dispatchable (§2.1).
+  validateFieldEditEnforcementPins(approvalGraph, formSchema, context)
+}
+
+/**
+ * Lock-7 L7-B pins 1 & 3 — the NEW publish-time fail-closed field-edit-enforcement pins, raised at all
+ * FIVE authoring entry points beside `validateNodeFieldPermissionsAgainstFormSchema` (restore, create,
+ * update, publish, clone). NOT called on the dispatch re-normalize path (`asRuntimeGraph`), so it never
+ * makes an in-flight instance undispatchable (§2.1). Pin 2 (editable on a non-write-capable node type)
+ * lives in `normalizeApprovalGraph` — it must inspect the raw per-type config BEFORE the switch drops
+ * the key. This function reads the NORMALIZED graph: `editable` entries survive only on approval /
+ * handler nodes, and driver references survive on approval / handler / condition nodes, so it has
+ * everything it needs.
+ */
+/**
+ * Lock-7 OD-L7-8 — the set of TOP-LEVEL form field ids that DRIVE routing: any field referenced by a
+ * `form_field_user` assignee source (on an approval/handler node), by a `ConditionRule.fieldId`, or by
+ * a condition-formula operand. Editing such a field mid-flight re-routes the graph (the executor +
+ * assignment resolver are rebuilt from the instance's CURRENT form_snapshot at every dispatch,
+ * `:6059-6065` / `:6270-6276`), so an approver editing it is choosing their own downstream reviewer /
+ * branch.
+ *
+ * SHARED by BOTH the publish pin (which rejects a driver marked `editable`, an authoring-time check)
+ * AND the runtime write guard in `applyHandlerFieldWrites` (which refuses a WRITE to any driver field
+ * INDEPENDENT of the matrix — because OD-L7-9's absent≡editable otherwise leaves a driver simply
+ * OMITTED from a handler's matrix default-editable and therefore writable). Factored so the two can
+ * never drift.
+ */
+function collectRoutingDriverFieldIds(
+  nodes: ReadonlyArray<{ type: ApprovalNodeType; config: unknown }>,
+): Set<string> {
+  const driverFieldIds = new Set<string>()
+  for (const node of nodes) {
+    const config = node.config as {
+      assigneeSources?: ApprovalAssigneeSource[]
+      branches?: ConditionBranch[]
+    }
+    if (node.type === 'approval' || node.type === 'handler') {
+      for (const source of config.assigneeSources ?? []) {
+        // form_field_user is the shipped driver kind. Lock-2's field-derived kinds
+        // (manager_at_level etc.) are conditionally drivers too, but Lock-2 is not on main and
+        // OD-L7-8 cites them without re-adjudicating — deferred to when Lock-2 lands.
+        if (source.kind === 'form_field_user' && typeof source.fieldId === 'string' && source.fieldId) {
+          driverFieldIds.add(source.fieldId)
+        }
+      }
+    }
+    if (node.type === 'condition') {
+      for (const branch of config.branches ?? []) {
+        for (const rule of branch.rules ?? []) {
+          if (typeof rule.fieldId === 'string' && rule.fieldId) driverFieldIds.add(rule.fieldId)
+        }
+        if (branch.formula?.expression) {
+          for (const fieldId of extractApprovalConditionFormulaFieldIds(branch.formula.expression)) {
+            driverFieldIds.add(fieldId)
+          }
+        }
+      }
+    }
+  }
+  return driverFieldIds
+}
+
+function validateFieldEditEnforcementPins(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  // --- Pin 1 (OD-L7-8(a) / G-4): a routing driver may not be `editable` at ANY node. ---
+  // The load-bearing pin: it closes a privilege-escalation path that opens the moment writes land.
+  // Authoring-time half — reject a driver marked EXPLICITLY `editable`. The runtime write guard in
+  // applyHandlerFieldWrites closes the DEFAULT-editable (absent-matrix) case that absent≡editable
+  // (OD-L7-9) leaves open, since an authoring-time "reject absent driver" would be a §2.1 narrowing.
+  const routingDriverFieldIds = collectRoutingDriverFieldIds(approvalGraph.nodes)
+  if (routingDriverFieldIds.size > 0) {
+    for (const node of approvalGraph.nodes) {
+      if (node.type !== 'approval' && node.type !== 'handler') continue
+      const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
+      for (const permission of permissions) {
+        if (permission.access === 'editable' && routingDriverFieldIds.has(permission.fieldId)) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`,
+          )
+        }
+      }
+    }
+  }
+
+  // --- Pin 3 (G-5): an unfillable required × hidden field. ---
+  // A `required: true` field is unfillable iff it is NOT guaranteed-filled-at-create AND `hidden` at
+  // EVERY write-capable node (approval + handler). "Guaranteed-filled-at-create" = required with NO
+  // `visibilityRule`: AGE's `getVisibleFormFieldIds` no-rule-≡-visible arm (AGE:250-251, re-read at
+  // this baseline) makes such a field always visible, and `validateApprovalFormData` (AGE:649) forces
+  // a required-visible field to be filled at create. A field carrying a `visibilityRule` MAY be
+  // create-hidden, so if it is also hidden at every write node, nobody can ever fill it. We
+  // deliberately OVER-reject a `visibilityRule` that is provably always-visible (there is no shipped
+  // always-visible analyzer for `visibilityRule`, unlike formulas) — fail-closed per master M4. A node
+  // with NO entry for the field ≡ `editable` (OD-L7-9) ⇒ fillable there ⇒ not unfillable.
+  const writeCapableNodes = approvalGraph.nodes.filter((node) => node.type === 'approval' || node.type === 'handler')
+  for (const field of formSchema.fields) {
+    if (field.required !== true) continue
+    if (!field.visibilityRule) continue
+    if (writeCapableNodes.length === 0) continue
+    let firstHidingNodeKey: string | null = null
+    let hiddenEverywhere = true
+    for (const node of writeCapableNodes) {
+      const entry = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions
+        ?.find((permission) => permission.fieldId === field.id)
+      if (entry?.access === 'hidden') {
+        // Deterministic node key for the error (graph order) — the field is hidden at several.
+        if (!firstHidingNodeKey) firstHidingNodeKey = node.key
+      } else {
+        hiddenEverywhere = false
+        break
+      }
+    }
+    if (hiddenEverywhere && firstHidingNodeKey) {
+      failValidation(
+        context,
+        `formSchema field ${field.id} is required but hidden at every write-capable node (node ${firstHidingNodeKey}); it is unfillable (Lock-7 G-5)`,
+      )
+    }
+  }
 }
 
 /**
@@ -1958,6 +2090,29 @@ function normalizeApprovalGraph(
       type: node.type as ApprovalGraph['nodes'][number]['type'],
       ...(typeof node.name === 'string' && node.name.trim().length > 0 ? { name: node.name.trim() } : {}),
       config: {} as Record<string, unknown>,
+    }
+
+    // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12) — `editable` on a node type with NO write surface is a 400,
+    // not the shipped SILENT drop (defect D-1). The switch below rebuilds cc/parallel/condition from a
+    // whitelist and sends start/end to `default: config = {}`, dropping `fieldPermissions` with no error
+    // — an author who marks a field editable on a cc node gets no effect and no warning. Lock-7 must not
+    // inherit that for the WRITE axis, so `editable` here fails closed. ONLY `editable` is rejected;
+    // `readonly`/`hidden` on these types stay silently dropped (D-1's read axis is a SEPARATE fix slice,
+    // §2.7 — Lock-7 neither fixes nor inherits it). Gated OFF for the dispatch re-normalize
+    // (STORED_RUNTIME_CONTEXT): a stored graph already had the key dropped at publish, so re-rejecting
+    // would make an in-flight instance undispatchable (§2.1).
+    if (node.type !== 'approval' && node.type !== 'handler' && context !== STORED_RUNTIME_CONTEXT) {
+      const rawPermissions = (node.config as { fieldPermissions?: unknown }).fieldPermissions
+      if (Array.isArray(rawPermissions)) {
+        for (const permission of rawPermissions) {
+          if (isRecord(permission) && permission.access === 'editable') {
+            failValidation(
+              context,
+              `approvalGraph.nodes[${index}].config.fieldPermissions marks a field editable on a ${node.type} node, which has no write surface (Lock-7 OD-L7-4)`,
+            )
+          }
+        }
+      }
     }
 
     switch (node.type) {
@@ -3598,6 +3753,13 @@ export class ApprovalProductService {
     client: { query: typeof pool.query },
     instanceId: string,
   ): Promise<ApprovalHistoryEntry[]> {
+    // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation for edits landed by PRIOR transactions: a
+    // handler field edit appended revision rows whose `audit_record_id` (the `handle` row's id) is the
+    // content-edit ordinal in `approval_records.id` (BIGSERIAL) space. Exclude any prior approval whose
+    // audit ordinal PRECEDES the latest content edit — those approvals predate the current form and
+    // must not seed an auto-approval skip. This is the NEW per-edit marker (NOT `nodeEntryEpoch`,
+    // which never bumps on a same-round edit). The single-call edit+complete case is handled by the
+    // caller passing `[]` (this txn's edit is not yet persisted here).
     const result = await client.query<{
       id: string | number
       actor_id: string
@@ -3607,6 +3769,10 @@ export class ApprovalProductService {
        FROM approval_records
        WHERE instance_id = $1
          AND action = 'approve'
+         AND id > COALESCE(
+           (SELECT MAX(audit_record_id) FROM approval_form_field_revisions WHERE instance_id = $1),
+           0
+         )
        ORDER BY occurred_at ASC, id ASC`,
       [instanceId],
     )
@@ -6927,16 +7093,16 @@ export class ApprovalProductService {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
       }
 
-      // Lock-3 §3 (field-write fail-closed, G-9): a `handle` request carrying the RESERVED `fieldWrites`
-      // key — non-empty, `{}`, or `null` — is rejected with a values-free 422 BEFORE any row is written or
-      // node advanced. Lock-7 owns the write surface; until it lands a handler submit carries NO field
-      // writes (财务打款/盖章/归档 nodes work with no form mutation). Detected by key PRESENCE so `null`/`{}`
-      // are caught. Placed before every write arm so the rejection is payload-selected and side-effect-free.
-      if (request.action === 'handle' && Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+      // Lock-7 L7-C / OD-L7-3(a): `fieldWrites` is meaningful ONLY on a `handle` submission at a
+      // handler node (the sole ratified write surface). On any OTHER action a present `fieldWrites`
+      // key is a values-free 400 — fail-closed, never a silent ignore. The `handle` path below
+      // applies the masked, frozen-schema-validated write inside this transaction (P4-B replaces
+      // P4-A's blanket 422 APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED). Detected by key PRESENCE.
+      if (request.action !== 'handle' && Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
         throw new ServiceError(
-          'Field writes at a handler node are not supported yet',
-          422,
-          'APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED',
+          'Field writes are only permitted on a handler submission',
+          400,
+          'APPROVAL_FIELD_WRITE_ACTION_NOT_ALLOWED',
           { nodeKey: currentNodeKey },
         )
       }
@@ -7376,6 +7542,28 @@ export class ApprovalProductService {
         // still active (the read fails closed on empty/mixed), and stamp the handle record with it so a
         // later re-entry (a fresh epoch) never re-counts this submission.
         const handlerNodeEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        // Lock-7 L7-C step (2) "apply" — the masked field write. `applyHandlerFieldWrites` masks each
+        // write at the actor's SINGLE claimed node, validates against the FROZEN version schema, and
+        // UPDATEs form_snapshot IN PLACE (OD-L7-6(a)); any refusal throws values-free and rolls the
+        // whole transaction back (G-3/G-7/G-15). The edit is a SAME-ROUND mutation: it does NOT bump
+        // node_activation_seq (no `bumpNodeActivationSeq` here), so `handlerNodeEpoch` and the current
+        // node's quorum tally (`:6981`, Lock-3 G-12) are unchanged by the edit (G-16 companion).
+        let handlerFieldWrite: { changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> } = { changedFieldIds: [], revisions: [] }
+        if (Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+          const schemaResult = await client.query<{ form_schema: Record<string, unknown> }>(
+            `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+            [instance.template_version_id],
+          )
+          const frozenFormSchema = schemaResult.rows[0]?.form_schema as unknown as FormSchema | undefined
+          if (!frozenFormSchema) {
+            throw new ServiceError('Frozen form schema not found', 409, 'APPROVAL_FROZEN_SCHEMA_NOT_FOUND', { nodeKey: currentNodeKey })
+          }
+          handlerFieldWrite = await this.applyHandlerFieldWrites(client, id, currentNodeKey, request.fieldWrites, {
+            runtimeGraph,
+            formSchema: frozenFormSchema,
+            frozenSnapshot: formSnapshot,
+          })
+        }
         // Deactivate the actor's own seat first (会签/或签 both consume it).
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
@@ -7386,7 +7574,7 @@ export class ApprovalProductService {
             `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
             [id, nextVersion],
           )
-          await this.insertApprovalRecord(client, id, {
+          const partialAuditId = await this.insertApprovalRecord(client, id, {
             action: 'handle',
             actorId: actor.userId,
             actorName,
@@ -7402,8 +7590,13 @@ export class ApprovalProductService {
               aggregateComplete: false,
               remainingAssignments,
               ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+              // Lock-7 OD-L7-7 — values-free: the changed field IDS only, never before/after values.
+              ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
             },
           }, actor)
+          if (handlerFieldWrite.revisions.length > 0) {
+            await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
+          }
           await client.query('COMMIT')
           return (await this.getApproval(id, actor.userId))!
         }
@@ -7447,7 +7640,13 @@ export class ApprovalProductService {
             executor,
             resolution,
             typeof requesterId === 'string' ? requesterId : null,
-            await this.loadApprovalHistory(client, id),
+            // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation. THIS transaction's edit is not yet
+            // visible in the DB (the audit + revision rows are inserted below), so a single-call
+            // edit+complete would otherwise auto-approve the next node on a PRE-edit approval. When
+            // this submit edited a field, EVERY persisted approval necessarily precedes the edit ⇒
+            // drop the whole history. Prior-transaction edits are handled inside loadApprovalHistory
+            // (it excludes approvals whose audit ordinal precedes the latest content-edit revision).
+            handlerFieldWrite.changedFieldIds.length > 0 ? [] : await this.loadApprovalHistory(client, id),
           )
         }
         await client.query(
@@ -7471,7 +7670,7 @@ export class ApprovalProductService {
         // ACTIVATION (nodeEntryEpoch §4·A): completing the handler activates the NEXT node — a new epoch.
         const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
         const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
-        await this.insertApprovalRecord(client, id, {
+        const completionAuditId = await this.insertApprovalRecord(client, id, {
           action: 'handle',
           actorId: actor.userId,
           actorName,
@@ -7487,8 +7686,13 @@ export class ApprovalProductService {
             aggregateComplete: true,
             ...(handlerCancelledAssigneeIds.length > 0 ? { handlerCancelledAssignees: handlerCancelledAssigneeIds } : {}),
             ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+            // Lock-7 OD-L7-7 — values-free: changed field IDs only.
+            ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
           },
         }, actor)
+        if (handlerFieldWrite.revisions.length > 0) {
+          await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, completionAuditId, handlerFieldWrite.revisions)
+        }
         await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, advanceEntryEpoch)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
         const completionEvent = resolution.status === 'approved'
@@ -8792,16 +8996,218 @@ export class ApprovalProductService {
     }
   }
 
+  // Lock-7 L7-C / OD-L7-6(a) — the handler-node field write. Callable ONLY from step (2) of Lock-3
+  // §3's handle transaction (claim → apply → bump version → audit → resolve). The mask reads exactly
+  // `[nodeKey]` — the actor's SINGLE claimed seat, never a re-derivation (L7-A) — so `editable` ⇒
+  // writable and `readonly`/`hidden` ⇒ a values-free refusal that rolls back the whole transaction
+  // (G-3/G-15). Values are validated against the FROZEN version schema (create-path validators,
+  // G-6). Returns the changed field ids + before/after revisions so the caller writes the
+  // values-free `handle` audit row (changedFieldIds, no values — OD-L7-7) and the append-only
+  // revision rows. The `form_snapshot` UPDATE is IN PLACE (OD-L7-6(a)): every existing reader (DTO
+  // echo, FWB projection at `status='approved'`, condition routing) is then automatically correct
+  // with no composition step (G-17 — a delta table read-composed by each reader would be fail-OPEN
+  // by omission). Drivers can never be `editable` (publish pin 1 / OD-L7-8(a)), so the in-memory
+  // executor built from the pre-edit snapshot resolves the next node identically — an edit never
+  // re-routes.
+  private async applyHandlerFieldWrites(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    rawWrites: unknown,
+    context: {
+      runtimeGraph: RuntimeGraph
+      formSchema: FormSchema
+      frozenSnapshot: Record<string, unknown>
+    },
+  ): Promise<{ changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> }> {
+    // Payload must be a plain object of fieldId → value. `null` / array / scalar ⇒ values-free 400.
+    if (!isRecord(rawWrites)) {
+      throw new ServiceError('Field writes payload is invalid', 400, 'APPROVAL_FIELD_WRITE_PAYLOAD_INVALID', { nodeKey })
+    }
+    const writeEntries = Object.entries(rawWrites)
+    // An empty `{}` is an accepted payload with zero writes — the handle proceeds, no UPDATE, no rows.
+    if (writeEntries.length === 0) {
+      return { changedFieldIds: [], revisions: [] }
+    }
+    const schemaFields = new Map((context.formSchema.fields ?? []).map((field) => [field.id, field]))
+    const attachmentValueMode = isApprovalAttachmentsEnabled() ? 'ids' as const : 'legacy' as const
+    // Lock-7 OD-L7-8 RUNTIME driver guard (defense-in-depth, matrix-INDEPENDENT). The publish pin only
+    // rejects an EXPLICIT `editable` driver, but OD-L7-9's absent≡editable makes a driver simply OMITTED
+    // from this handler's matrix default-editable — and the mask below would then permit the write, so
+    // an approver could edit a `form_field_user` / `ConditionRule` / condition-formula field and choose
+    // their own downstream reviewer/branch (master §P4 exit: "cannot be bypassed by HTTP calls"). Refuse
+    // a write to ANY field in the instance's FROZEN-graph driver set regardless of its access
+    // (editable/readonly/hidden/absent), values-free. Same shared collection the pin uses (no drift).
+    // The collection re-parses each condition formula, but that cannot introduce a NEW in-flight break:
+    // the same dispatch already ran `asRuntimeGraph` (`:6794`) → `normalizeConditionFormulaPredicate`
+    // over the identical stored formulas, so an unparseable stored formula throws THERE first, before
+    // this guard is reached (§2.1 — no formula reaches here that has not already been re-parsed OK).
+    const routingDriverFieldIds = collectRoutingDriverFieldIds(context.runtimeGraph.nodes)
+    const revisions: Array<{ fieldId: string; before: unknown; after: unknown }> = []
+    const merge: Record<string, unknown> = {}
+    for (const [fieldId, value] of writeEntries) {
+      const field = schemaFields.get(fieldId)
+      // Unknown top-level field id. This is ALSO the OD-L7-12 detail sub-column case: a
+      // `fieldId.columnId` address is never a top-level schema id, so it lands here — v1 excludes
+      // per-sub-column access (the cross-reference set is top-level only). Fail-closed 400.
+      if (!field) {
+        throw new ServiceError('Field write references an unknown field', 400, 'APPROVAL_FIELD_WRITE_UNKNOWN_FIELD', { nodeKey, fieldId })
+      }
+      // Routing driver — never writable at any node, whatever the matrix says (see the guard note above).
+      if (routingDriverFieldIds.has(fieldId)) {
+        throw new ServiceError('Field write to a routing driver is not permitted', 403, 'APPROVAL_FIELD_WRITE_DRIVER_FORBIDDEN', { nodeKey, fieldId })
+      }
+      const access = fieldAccessAtNodes(context.runtimeGraph, [nodeKey], fieldId)
+      if (access !== 'editable') {
+        // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
+        throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
+      }
+      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` writes need binding+authz
+      // that Lock-7's named validators (validateFieldType/Constraints/Detail) do NOT cover —
+      // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
+      // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
+      // approval-node write surface (OD-L7-3's named next slice) carries the binding surfaces.
+      if (field.type === 'record-link' || field.type === 'attachment') {
+        throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
+      }
+      // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a
+      // field type with no explicit `validateFieldType` arm returns null ⇒ written unvalidated.
+      const errors = field.type === 'detail'
+        ? validateDetailFieldValue(field, value, { attachmentValueMode })
+        : [validateFieldType(field, value, { attachmentValueMode }), ...validateFieldConstraints(field, value)]
+            .filter((error): error is string => Boolean(error))
+      if (errors.length > 0) {
+        throw new ServiceError('Field write value is invalid', 400, 'APPROVAL_FIELD_WRITE_INVALID', { nodeKey, fieldId })
+      }
+      revisions.push({
+        fieldId,
+        before: Object.prototype.hasOwnProperty.call(context.frozenSnapshot, fieldId) ? context.frozenSnapshot[fieldId] : null,
+        after: value,
+      })
+      merge[fieldId] = value
+    }
+    // IN-PLACE UPDATE (OD-L7-6(a), R-10) — the first and only UPDATE of `form_snapshot`. `||` merges
+    // the written fields over the create-time snapshot, preserving untouched fields.
+    await client.query(
+      `UPDATE approval_instances
+          SET form_snapshot = COALESCE(form_snapshot, '{}'::jsonb) || $2::jsonb,
+              updated_at = now()
+        WHERE id = $1`,
+      [instanceId, JSON.stringify(merge)],
+    )
+    return { changedFieldIds: revisions.map((revision) => revision.fieldId), revisions }
+  }
+
+  // Lock-7 OD-L7-6(a) — append the per-field revision rows, each stamped with the `handle` audit
+  // row's id (`auditRecordId`) so `MAX(audit_record_id)` is the 内容变更 dedup ordinal (G-16). Values
+  // (before/after) live ONLY here, behind the mask-aware read — never on the broadly-scoped audit
+  // surface (OD-L7-7).
+  private async insertFormFieldRevisions(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    actorId: string,
+    nodeEntryEpoch: number | null,
+    auditRecordId: string,
+    revisions: Array<{ fieldId: string; before: unknown; after: unknown }>,
+  ): Promise<void> {
+    for (const revision of revisions) {
+      await client.query(
+        `INSERT INTO approval_form_field_revisions
+         (instance_id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)`,
+        [
+          instanceId,
+          nodeKey,
+          revision.fieldId,
+          revision.before === undefined ? null : JSON.stringify(revision.before),
+          revision.after === undefined ? null : JSON.stringify(revision.after),
+          actorId,
+          nodeEntryEpoch,
+          auditRecordId,
+        ],
+      )
+    }
+  }
+
+  /**
+   * Lock-7 OD-L7-7 / G-8 — the mask-aware revision read surface. Before/after VALUES live here (never
+   * on the broadly-scoped audit/history surface), and a field currently `hidden` at the instance's
+   * active node(s) has its before/after REDACTED (fail-closed), so a hidden field's value cannot leak
+   * through the revision surface either. WHO may call this at all (instance-detail read scope) is the
+   * OPEN owner question D-5 — Lock-7 deliberately does NOT settle it and adds no HTTP route here; the
+   * `actor` parameter is reserved for a later actor-scoped read once D-5 resolves.
+   */
+  async getFormFieldRevisions(
+    instanceId: string,
+    _actor?: { userId: string; roles?: string[] } | null,
+  ): Promise<Array<{ id: string; nodeKey: string; fieldId: string; before: unknown; after: unknown; actorId: string; nodeEntryEpoch: number | null; auditRecordId: string; redacted: boolean }>> {
+    if (!pool) throw new Error('Database not available')
+    const instanceResult = await pool.query<{ current_node_key: string | null; metadata: Record<string, unknown> | null; published_definition_id: string | null }>(
+      `SELECT current_node_key, metadata, published_definition_id FROM approval_instances WHERE id = $1`,
+      [instanceId],
+    )
+    const instance = instanceResult.rows[0]
+    let hiddenFieldIds = new Set<string>()
+    if (instance?.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: Record<string, unknown> }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtimeGraph = runtimeResult.rows[0]?.runtime_graph
+      if (runtimeGraph) {
+        hiddenFieldIds = collectHiddenFieldIds(
+          runtimeGraph as unknown as { nodes?: Array<{ key?: unknown; type?: unknown; config?: unknown } | null> },
+          collectActiveNodeKeys(instance.current_node_key, instance.metadata),
+        )
+      }
+    }
+    const revisionsResult = await pool.query<{
+      id: string | number
+      node_key: string
+      field_id: string
+      before_value: unknown
+      after_value: unknown
+      actor_id: string
+      node_entry_epoch: number | null
+      audit_record_id: string | number
+    }>(
+      `SELECT id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id
+         FROM approval_form_field_revisions
+        WHERE instance_id = $1
+        ORDER BY id ASC`,
+      [instanceId],
+    )
+    return revisionsResult.rows.map((row) => {
+      const redacted = hiddenFieldIds.has(row.field_id)
+      return {
+        id: String(row.id),
+        nodeKey: row.node_key,
+        fieldId: row.field_id,
+        before: redacted ? null : row.before_value,
+        after: redacted ? null : row.after_value,
+        actorId: row.actor_id,
+        nodeEntryEpoch: row.node_entry_epoch,
+        auditRecordId: String(row.audit_record_id),
+        redacted,
+      }
+    })
+  }
+
+  // Returns the inserted `approval_records.id` (decimal string). Lock-7 OD-L7-6(a) needs the `handle`
+  // row's id as the per-field revision rows' `audit_record_id` (the 内容变更 dedup ordinal, G-16) —
+  // callers that ignore the return value are unaffected (pure widening; RETURNING adds no round-trip).
   private async insertApprovalRecord(
     client: { query: typeof pool.query },
     instanceId: string,
     record: ApprovalRecordInsert,
     actor?: { ip?: string | null; userAgent?: string | null },
-  ): Promise<void> {
-    await client.query(
+  ): Promise<string> {
+    const result = await client.query<{ id: string | number }>(
       `INSERT INTO approval_records
        (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id`,
       [
         instanceId,
         record.action,
@@ -8818,6 +9224,12 @@ export class ApprovalProductService {
         actor?.userAgent || null,
       ],
     )
+    // Production: `RETURNING id` on a successful single-row INSERT always yields exactly one row, so
+    // this is the `handle` row's id (the revision rows' audit_record_id, OD-L7-6(a)). The `?? ''`
+    // guard covers ONLY unit mocks whose fake query returns an empty `rows` for this INSERT — those
+    // paths never insert revision rows (no field writes), so the empty id is never consumed.
+    const insertedId = result?.rows?.[0]?.id
+    return insertedId != null ? String(insertedId) : ''
   }
 }
 

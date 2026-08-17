@@ -20,7 +20,6 @@ import {
   assigneeSourceRoster,
   type ApprovalCapabilityRegistry,
 } from '../src/approvals/approvalCapabilityRegistry'
-import { FIELD_PERMISSION_READONLY_HINT } from '../src/approvals/fieldPermissionHonestyCopy'
 import { HANDLER_ASSIGNEE_SOURCE_KINDS, type ApprovalNode } from '../src/types/approval'
 
 // ── element-plus stubs (compact, mirrors approval-template-authoring-canvas-inspector.spec) ─────
@@ -215,11 +214,13 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     expect(c.querySelector('[data-testid="approval-node-merge-with-requester"]')).toBeNull()
   })
 
-  it('field-permission honesty copy renders VERBATIM when a handler field is set to readonly', () => {
+  it('Lock-7 G-13: a handler field set to readonly renders NO readonly honesty hint (readonly is enforced server-side, not disclosed-as-pending)', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }], fieldPermissions: [{ fieldId: 'amount', access: 'readonly' }] } })
     const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
-    const hint = c.querySelector('[data-testid="approval-node-field-readonly-hint"]')
-    expect(hint?.textContent?.trim()).toBe(FIELD_PERMISSION_READONLY_HINT)
+    // The field-permissions section still renders (the selector remains functional)...
+    expect(c.querySelector('[data-testid="approval-node-field-permissions"]')).toBeTruthy()
+    // ...but the retired "只读将在后续版本…" not-yet-enforced hint no longer appears (G-13).
+    expect(c.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
   })
 
   it('the mode picker writes the handler edit model (会签→或签)', async () => {

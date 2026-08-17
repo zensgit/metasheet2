@@ -2012,9 +2012,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
       const targetNodeKey = typeof req.body?.targetNodeKey === 'string' ? req.body.targetNodeKey.trim() : undefined
-      // Lock-3 §3: forward the RESERVED `fieldWrites` key ONLY when the client actually sent it, so the
-      // service can reject a `handle` submission carrying it (non-empty / `{}` / `null`) with a
-      // values-free 422 by key PRESENCE (`'fieldWrites' in request`). Absent ⇒ never forwarded ⇒ succeeds.
+      // Lock-3 §3 / Lock-7 L7-C: forward the `fieldWrites` key ONLY when the client actually sent it,
+      // so the service applies the masked write on a `handle` (or rejects a malformed payload / a
+      // non-handle action) by key PRESENCE (`'fieldWrites' in request`). Absent ⇒ never forwarded.
       const hasFieldWrites = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'fieldWrites')
       // P1-B add_sign: approver user IDs to pull into the current node.
       const targetUserIds = Array.isArray(req.body?.targetUserIds)
@@ -2088,8 +2088,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               targetUserIds,
               addSignMode,
               targetAssignmentUserId,
-              // Lock-3 §3: present ONLY when the client sent the key, so the service's key-presence
-              // rejection (422 APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED) fires for `null`/`{}` too.
+              // Lock-3 §3 / Lock-7 L7-C: present ONLY when the client sent the key, so the service
+              // applies the masked write (or refuses a malformed payload) by key presence.
               ...(hasFieldWrites ? { fieldWrites: req.body.fieldWrites } : {}),
             },
             actor,

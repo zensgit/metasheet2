@@ -1169,7 +1169,7 @@ describe('TemplateAuthoringView', () => {
     expect(amountAccess.value).toBe('hidden') // hydrated from the stored fieldPermission
   })
 
-  it('T1-4 write wire: selecting readonly through the SFC control writes {fieldId,access:readonly} to the save payload AND renders the readonly hint', async () => {
+  it('T1-4 write wire (Lock-7 G-13): selecting readonly through the SFC control writes {fieldId,access:readonly} to the save payload; the retired readonly hint never renders', async () => {
     // The default template is LINEAR (fields amount + reviewer) so the field-permissions editor is
     // live. This drives the @update:model-value → onStepFieldAccessChange → setStepFieldPermission →
     // save-payload wire that a pure-helper test can't see (wire-vs-fixture discipline).
@@ -1178,7 +1178,7 @@ describe('TemplateAuthoringView', () => {
     await mountView()
     await flushUi()
 
-    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).toBeNull() // no hint yet
+    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).toBeNull() // retired (G-13)
 
     const amountAccess = container!.querySelector('[data-testid="approval-step-field-access-amount"]') as HTMLSelectElement
     expect(amountAccess).not.toBeNull()
@@ -1186,7 +1186,9 @@ describe('TemplateAuthoringView', () => {
     amountAccess.dispatchEvent(new Event('change'))
     await flushUi()
 
-    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).not.toBeNull() // hint now renders
+    // Lock-7 G-13: readonly is now enforced server-side, so the "not-yet-enforced" hint is retired —
+    // selecting readonly renders NO hint (still persists to the payload below, so the control is live).
+    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).toBeNull()
 
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
