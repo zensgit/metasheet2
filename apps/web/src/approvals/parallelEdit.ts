@@ -164,6 +164,13 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
     case 'static_user':
     case 'static_role':
       return null
+    case 'requester_choice':
+      // Lock-1 §K2: `null` DELIBERATELY (backend mirror — keep in lockstep). Two
+      // requester_choice sources on parallel branches are NOT provably identical: the requester
+      // may pick different people per branch, so a same-person collision is the RUNTIME 409
+      // guard's job (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`), which sees the actual
+      // chosen ids. Authoring/publish cannot, and must not block the shape.
+      return null
     default: {
       const _exhaustive: never = source
       return _exhaustive

@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, provide, ref, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import type { ApprovalNode, ApprovalTemplateDetailDTO } from '../src/types/approval'
 // Lock-0 P1-A (docs/development/approval-lock0-d0-interaction-delta-20260817.md) — direct-mount
@@ -977,7 +977,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all eight assignee-source labels equal the ratified §10.3 map by exact object equality', () => {
+  it('D1 (P2-2): all nine assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -987,11 +987,14 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       dept_head: '部门负责人',
       continuous_managers: '连续多级上级',
       manager_at_level: '指定层级上级',
+      // Lock-1 §K2 (RATIFIED 2026-08-17) — the 提交人自选 registry row, admitted in the SAME
+      // slice that lands scope validation + the submit-time chooser (Lock-1 §2.3 table).
+      requester_choice: '提交人自选',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 9th entry (which would still satisfy `toEqual` on the 8 keys
+    // Also pin the count so a stray 10th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(8)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(9)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1349,7 +1352,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
   function createStubConfigApi(
     seed: Record<string, { assigneeSources: Array<Record<string, unknown>>; fieldPermissions?: Array<{ fieldId: string; access: string }> }>,
   ): ApprovalNodeConfigEditorApi {
-    const edits: Record<string, { nodeKey: string; assigneeSources: Array<Record<string, unknown>>; fieldPermissions: Array<{ fieldId: string; access: string }> }> = {}
+    // Reactive so a sub-form edit (e.g. the K2 requester_choice scope switch) re-renders the
+    // mounted component the same way the production draft model does.
+    const edits: Record<string, { nodeKey: string; assigneeSources: Array<Record<string, unknown>>; fieldPermissions: Array<{ fieldId: string; access: string }> }> = reactive({})
     for (const [key, value] of Object.entries(seed)) {
       edits[key] = {
         nodeKey: key,
@@ -1618,21 +1623,24 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the eight-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
-    const CANONICAL_EIGHT = [
+  it('A-3: roster equals the nine-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+    // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
+    // SAME commit that lands each kind — K2 `requester_choice` is the first admitted row.
+    const CANONICAL_NINE = [
       'continuous_managers',
       'dept_head',
       'direct_manager',
       'form_field_user',
       'manager_at_level',
       'requester',
+      'requester_choice',
       'static_role',
       'static_user',
     ]
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_EIGHT)
+    expect(roster).toEqual(CANONICAL_NINE)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1645,7 +1653,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_EIGHT)
+    expect(rendered).toEqual(CANONICAL_NINE)
     unmount()
   })
 
@@ -1739,5 +1747,110 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
     const saveButton = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement | null
     if (saveButton) expect(saveButton.disabled).toBe(true)
+  })
+
+  // ── Lock-1 §K2 — requester_choice authoring sub-form + G-16 positive arm ─────────────────────
+  it('K2 (G-16 positive arm): requester_choice renders EDITABLE with its typed summary — mode radio + scope select, no unknown-kind hint', () => {
+    const api = createStubConfigApi({
+      approval_rc: { assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] },
+    })
+    const { container: c, unmount } = mountDirectInspector({
+      node: makeApprovalNode('approval_rc'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    // Registry-known (the row landed in the SAME slice): roster radio checked + enabled, no A-4 hint.
+    const rosterRadio = c.querySelector('[data-testid="approval-node-source-kind-requester_choice"]') as HTMLInputElement
+    expect(rosterRadio).not.toBeNull()
+    expect(rosterRadio.checked).toBe(true)
+    expect(rosterRadio.disabled).toBe(false)
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    // D2 typed summary echo — mode + scope, count-only wording (no raw ids anywhere).
+    expect(
+      c.querySelector('[data-testid="approval-node-source-configured-summary"]')?.textContent,
+    ).toBe('已配置：提交人自选（单选 · 全公司）')
+    // Sub-form: mode radios reflect the model; company scope renders NO id picker at all.
+    const single = c.querySelector('[data-testid="approval-node-requester-choice-mode-single"]') as HTMLInputElement
+    const multi = c.querySelector('[data-testid="approval-node-requester-choice-mode-multi"]') as HTMLInputElement
+    expect(single.checked).toBe(true)
+    expect(multi.checked).toBe(false)
+    expect(c.querySelector('[data-testid="approval-node-requester-choice-scope"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-requester-choice-user-picker"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-requester-choice-role-picker"]')).toBeNull()
+    unmount()
+  })
+
+  it('K2: mode radio + scope select write the SHARED edit model; members/role scopes swap in their typed pickers (no raw-ID input)', async () => {
+    const api = createStubConfigApi({
+      approval_rc: { assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] },
+    })
+    // The typed pickers list directory options only — no free-text id entry exists anywhere in
+    // the sub-form (D0 §10.2).
+    ;(api as { directoryUsers: Array<{ id: string; name?: string; email?: string }> }).directoryUsers = [
+      { id: 'u_alpha', name: 'Alpha', email: 'a@x.test' },
+    ]
+    ;(api as { directoryRoles: Array<{ id: string; name?: string }> }).directoryRoles = [
+      { id: 'role_fin', name: '财务' },
+    ]
+    const { container: c, unmount } = mountDirectInspector({
+      node: makeApprovalNode('approval_rc'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+
+    // mode single → multi via the native radio.
+    const multi = c.querySelector('[data-testid="approval-node-requester-choice-mode-multi"]') as HTMLInputElement
+    multi.checked = true
+    multi.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeEditFor('approval_rc')?.assigneeSources[0]).toEqual({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'company' },
+    })
+
+    // scope company → members: the typed USER picker appears, and the switch starts from an
+    // EMPTY id list (userIds/roleIds are different id domains — never carried across).
+    const scopeSelect = c.querySelector('[data-testid="approval-node-requester-choice-scope"]') as HTMLSelectElement
+    scopeSelect.value = 'members'
+    scopeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(api.approvalNodeEditFor('approval_rc')?.assigneeSources[0]).toEqual({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'members', userIds: [] },
+    })
+    const userPicker = c.querySelector('[data-testid="approval-node-requester-choice-user-picker"]') as HTMLSelectElement
+    expect(userPicker).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-requester-choice-role-picker"]')).toBeNull()
+
+    // Picking a member writes scope.userIds into the SAME shared edit model.
+    userPicker.value = 'u_alpha'
+    userPicker.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeEditFor('approval_rc')?.assigneeSources[0]).toEqual({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'members', userIds: ['u_alpha'] },
+    })
+
+    // scope members → role: ROLE picker replaces the user picker, id list resets again.
+    scopeSelect.value = 'role'
+    scopeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(api.approvalNodeEditFor('approval_rc')?.assigneeSources[0]).toEqual({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'role', roleIds: [] },
+    })
+    expect(c.querySelector('[data-testid="approval-node-requester-choice-user-picker"]')).toBeNull()
+    const rolePicker = c.querySelector('[data-testid="approval-node-requester-choice-role-picker"]') as HTMLSelectElement
+    expect(rolePicker).not.toBeNull()
+    rolePicker.value = 'role_fin'
+    rolePicker.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeEditFor('approval_rc')?.assigneeSources[0]).toEqual({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'role', roleIds: ['role_fin'] },
+    })
+    unmount()
   })
 })

@@ -32,6 +32,7 @@ import type {
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
+  RequesterChoiceAssigneeSource,
   RestoreApprovalTemplateVersionRequest,
   RuntimeGraph,
   RuntimePolicy,
@@ -639,6 +640,52 @@ function normalizeApprovalAssigneeSources(
           kind: 'form_field_user',
           fieldId: source.fieldId.trim(),
         }
+      case 'requester_choice': {
+        // Lock-1 §K2 + G-1: exact-shape validation — mode enum, scope discriminated by type,
+        // and (stricter than the shipped kinds, per the Lock-1 G-1 gate for NEW kinds) unknown
+        // extra keys on the source or its scope are REJECTED, never silently dropped.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'mode', 'scope'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for requester_choice`)
+        }
+        const mode = source.mode
+        if (mode !== 'single' && mode !== 'multi') {
+          failValidation(context, `${sourcePath}.mode must be single or multi`)
+        }
+        const scope = source.scope
+        if (!isRecord(scope) || !isNonEmptyString(scope.type)) {
+          failValidation(context, `${sourcePath}.scope.type is required`)
+        }
+        switch (scope.type) {
+          case 'company':
+            if (Object.keys(scope).some((key) => key !== 'type')) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the company scope`)
+            }
+            return { kind: 'requester_choice', mode, scope: { type: 'company' } }
+          case 'members':
+            if (Object.keys(scope).some((key) => !['type', 'userIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the members scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'members', userIds: normalizeStringArray(scope.userIds, context, `${sourcePath}.scope.userIds`) },
+            }
+          case 'role':
+            if (Object.keys(scope).some((key) => !['type', 'roleIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the role scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'role', roleIds: normalizeStringArray(scope.roleIds, context, `${sourcePath}.scope.roleIds`) },
+            }
+          default:
+            // `return` of the never-returning failValidation makes the exhaustiveness explicit
+            // for both TS and eslint's no-fallthrough (every scope branch returns or throws).
+            return failValidation(context, `${sourcePath}.scope.type must be company, members, or role`)
+        }
+      }
       default:
         failValidation(context, `${sourcePath}.kind is invalid`)
     }
@@ -1441,6 +1488,15 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
     case 'static_user':
     case 'static_role':
       // Statics are owned by collectBranchAssignees' duplicate check, not this gate.
+      return null
+    case 'requester_choice':
+      // Lock-1 §K2: `null` DELIBERATELY, not an oversight — the `_exhaustive` guard below forces
+      // this entry to exist, and this is the recorded decision. Two `requester_choice` sources on
+      // parallel branches are NOT provably identical: the requester may pick different people per
+      // branch, so per this gate's own rule (only provably-identical sources are publish-blocked)
+      // the same-person collision belongs to the RUNTIME
+      // `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` 409 guard
+      // (`assertNoActiveAssignmentConflicts`), which sees the actual chosen ids. Publish cannot.
       return null
     default: {
       const _exhaustive: never = source
@@ -2934,6 +2990,30 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
           source.kind === 'manager_at_level'),
     )
   })
+}
+
+/**
+ * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
+ * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
+ * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
+ */
+export function collectRuntimeGraphRequesterChoiceSources(
+  runtimeGraph: RuntimeGraph,
+): Map<string, RequesterChoiceAssigneeSource[]> {
+  const byNodeKey = new Map<string, RequesterChoiceAssigneeSource[]>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'requester_choice') continue
+      const existing = byNodeKey.get(node.key)
+      if (existing) existing.push(source as unknown as RequesterChoiceAssigneeSource)
+      else byNodeKey.set(node.key, [source as unknown as RequesterChoiceAssigneeSource])
+    }
+  }
+  return byNodeKey
 }
 
 /**
@@ -4611,6 +4691,163 @@ export class ApprovalProductService {
   }
 
   /**
+   * Lock-1 §K2 — validate the submit-time requester choices against every published
+   * `requester_choice` node's configured scope, and return the FROZEN map (node key → chosen
+   * local user ids) the requester snapshot carries. Every rejection is a values-free 422
+   * (node keys and template-authored config only — never the chosen person ids) raised BEFORE
+   * any instance/assignment insert; a failed scope read is a retryable 503 (fail-closed,
+   * mirroring APPROVAL_REQUESTER_ORG_UNRESOLVED — an unverifiable choice must never freeze).
+   *
+   * Scope semantics (§K2, verbatim): `company` accepts any ACTIVE local user; `members`
+   * accepts only ids in the configured list (still active-checked — company is the widest
+   * scope and members/role only narrow it); `role` accepts only ids holding a configured
+   * role at create time, read FRESH from `user_roles`. That role read deliberately does NOT
+   * reuse `resolveApprovalRequesterRoleIds`: that helper INNER-JOINs `roles` on
+   * `approval_usable = true`, a curation flag governing the `requester.role` ROUTING
+   * predicate — importing it here would silently fail every choice scoped to a non-curated
+   * role. K2's role scope is plain role membership.
+   */
+  private async validateAndFreezeRequesterChoices(
+    payload: Record<string, string[]> | undefined,
+    sourcesByNode: Map<string, RequesterChoiceAssigneeSource[]>,
+    requireComplete: boolean,
+  ): Promise<Record<string, string[]>> {
+    if (!pool) throw new Error('Database not available')
+    // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
+    // values-free 422 (the offending VALUE is never echoed — only the node key).
+    const normalized = new Map<string, string[]>()
+    if (payload !== undefined) {
+      if (!isRecord(payload)) {
+        throw new ServiceError('requesterChoices must be an object of node key to user-id arrays', 422, 'APPROVAL_REQUESTER_CHOICE_INVALID')
+      }
+      for (const [rawNodeKey, rawList] of Object.entries(payload)) {
+        const nodeKey = rawNodeKey.trim()
+        if (!sourcesByNode.has(nodeKey)) {
+          // An entry for a node the published route does not resolve by requester choice cannot
+          // be validated against any scope — fail-closed, never silently dropped.
+          throw new ServiceError(
+            `requesterChoices references a node that has no requester_choice source`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_UNKNOWN_NODE',
+            { nodeKey },
+          )
+        }
+        if (!Array.isArray(rawList) || rawList.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+          throw new ServiceError(
+            `requesterChoices entries must be non-empty string arrays`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_INVALID',
+            { nodeKey },
+          )
+        }
+        // Trim + order-preserving dedupe; cardinality applies to the deduped list.
+        const ids: string[] = []
+        const seen = new Set<string>()
+        for (const entry of rawList) {
+          const id = entry.trim()
+          if (!seen.has(id)) {
+            seen.add(id)
+            ids.push(id)
+          }
+        }
+        normalized.set(nodeKey, ids)
+      }
+    }
+
+    const frozen: Record<string, string[]> = {}
+    // Batched activity check across every node's choices (company baseline for ALL scopes).
+    const allChosenIds = new Set<string>()
+    for (const ids of normalized.values()) for (const id of ids) allChosenIds.add(id)
+    let activeIds = new Set<string>()
+    if (allChosenIds.size > 0) {
+      try {
+        const activeResult = await pool.query<{ id: string }>(
+          `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+          [[...allChosenIds]],
+        )
+        activeIds = new Set(activeResult.rows.map((row) => row.id))
+      } catch (error) {
+        metricsLogger.warn(
+          `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
+        )
+        throw new ServiceError(
+          'Could not verify the chosen approvers for this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+        )
+      }
+    }
+
+    for (const [nodeKey, sources] of sourcesByNode) {
+      const ids = normalized.get(nodeKey)
+      if (!ids || ids.length === 0) {
+        if (requireComplete) {
+          // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
+          // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
+          throw new ServiceError(
+            `A requester choice is required for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_REQUIRED',
+            { nodeKey },
+          )
+        }
+        continue // read-only preview without choices: the node walks as EMPTY_ASSIGNEES, honestly.
+      }
+      for (const source of sources) {
+        // Mode cardinality — values-free 422 BEFORE any insert.
+        if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
+          throw new ServiceError(
+            source.mode === 'single'
+              ? `This approval node requires exactly one chosen approver`
+              : `This approval node requires at least one chosen approver`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
+            { nodeKey, mode: source.mode },
+          )
+        }
+        const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
+          throw new ServiceError(
+            `A chosen approver is outside the scope configured for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
+            { nodeKey, scopeType },
+          )
+        }
+        // Baseline for every scope: each chosen id is an ACTIVE local user.
+        if (ids.some((id) => !activeIds.has(id))) outOfScope(source.scope.type)
+        if (source.scope.type === 'members') {
+          const allowed = new Set(source.scope.userIds.map((id) => id.trim()))
+          if (ids.some((id) => !allowed.has(id))) outOfScope('members')
+        } else if (source.scope.type === 'role') {
+          // FRESH plain `user_roles` membership — see the method doc for why this must NOT go
+          // through resolveApprovalRequesterRoleIds (approval_usable is routing-predicate
+          // curation, not approver selection).
+          let holders: Set<string>
+          try {
+            const holderResult = await pool.query<{ user_id: string }>(
+              `SELECT DISTINCT user_id FROM user_roles WHERE user_id = ANY($1::varchar[]) AND role_id = ANY($2::varchar[])`,
+              [ids, source.scope.roleIds],
+            )
+            holders = new Set(holderResult.rows.map((row) => row.user_id))
+          } catch (error) {
+            metricsLogger.warn(
+              `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
+            )
+            throw new ServiceError(
+              'Could not verify the chosen approvers for this approval template. Please retry.',
+              503,
+              'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+            )
+          }
+          if (ids.some((id) => !holders.has(id))) outOfScope('role')
+        }
+      }
+      frozen[nodeKey] = ids
+    }
+    return frozen
+  }
+
+  /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
    * construction lives here so preview can NEVER drift from create (the same normalization,
@@ -4618,10 +4855,17 @@ export class ApprovalProductService {
    * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
    */
   private async assembleCreationContext(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       whitelistFormDataToSchema?: boolean
+      // Lock-1 §K2: the READ-ONLY previews (B3-05/B3-06) may walk a `requester_choice` route
+      // WITHOUT the submit-time choices — the affected node then previews honestly as
+      // EMPTY_ASSIGNEES instead of 422-blocking the preview. The CREATE path (default) keeps
+      // the fail-closed contract: a published requester_choice node with no entry in the
+      // payload is a values-free 422 BEFORE any insert. Choices that ARE supplied are
+      // scope/cardinality-validated identically on every path (preview cannot drift).
+      requesterChoicePresence?: 'require' | 'optional'
       // RP-3 (B3-06 authoring 试运行): source the runtime graph from the LATEST (possibly draft)
       // version, compiled on the fly with the SAME buildRuntimeGraph the publish path uses (no
       // parallel impl) — lets an author dry-run un-published edits. Default 'active' = the
@@ -4920,6 +5164,21 @@ export class ApprovalProductService {
       )
     }
 
+    // Lock-1 §K2 (requester_choice) — validate the submitter's choices against each published
+    // node's configured scope and freeze them. Placed HERE, with the org/role wedge guards
+    // above and BEFORE any instance/assignment insert (mirroring the B5-b fail-closed
+    // placement): every rejection is a values-free 422 with zero rows persisted. OPT-IN — a
+    // graph without a requester_choice source (and a payload without choices) does no work.
+    const requesterChoiceSourcesByNode = collectRuntimeGraphRequesterChoiceSources(runtimeGraph)
+    let frozenRequesterChoices: Record<string, string[]> | undefined
+    if (requesterChoiceSourcesByNode.size > 0 || request.requesterChoices !== undefined) {
+      frozenRequesterChoices = await this.validateAndFreezeRequesterChoices(
+        request.requesterChoices,
+        requesterChoiceSourcesByNode,
+        options.requesterChoicePresence !== 'optional',
+      )
+    }
+
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
     // template + the create instant) into the snapshot BEFORE the executor resolves the
     // initial state, so the resolver's pushResolved substitution reads a frozen set and an
@@ -4956,6 +5215,11 @@ export class ApprovalProductService {
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
       ...(Object.keys(delegationMap).length > 0 ? { delegations: delegationMap } : {}),
+      // Lock-1 §K2: freeze the validated submit-time choices (node key → chosen local user
+      // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.
+      ...(frozenRequesterChoices && Object.keys(frozenRequesterChoices).length > 0
+        ? { requesterChoices: frozenRequesterChoices }
+        : {}),
     }
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
       assignmentResolver: buildApprovalAssignmentResolver({
@@ -4992,12 +5256,15 @@ export class ApprovalProductService {
    * admin variant threads its sampleRequester through the same method under its own guard.
    */
   async previewApprovalRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
   ): Promise<ApprovalRoutePreviewResult> {
     // B3-05: the requester IS the session actor; publish gate applies (active runtime graph).
+    // §K2: choices are OPTIONAL on the read-only preview (a not-yet-chosen requester_choice
+    // node previews as EMPTY_ASSIGNEES); supplied choices are validated + resolved to names.
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
+      requesterChoicePresence: 'optional',
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
   }
@@ -5011,7 +5278,7 @@ export class ApprovalProductService {
    * (owner order ③). `actor` still authorizes template visibility inside assembleCreationContext.
    */
   async previewTemplateRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
@@ -5022,6 +5289,7 @@ export class ApprovalProductService {
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
       previewSource: 'draft',
+      requesterChoicePresence: 'optional',
       ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
     })
     return this.walkPreviewRoute(runtimeGraph, executor)

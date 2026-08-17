@@ -398,6 +398,17 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toHaveLength(1)
   })
 
+  it('Lock-1 §K2 / G-17: requester_choice × requester_choice is NOT flagged (null fingerprint DELIBERATE — same-person collision is the runtime 409 guard\'s job)', () => {
+    // Two requester_choice sources on parallel branches are NOT provably identical — the
+    // requester may pick different people per branch — so the publish preflight must not block
+    // the shape, even for byte-identical configs. Mirrors the backend null fingerprint.
+    const rc: ApprovalAssigneeSource = { kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }
+    expect(parallelDynamicAssigneeConflicts(withBranchSources([rc], [{ ...rc }]))).toEqual([])
+    // Positive control (the assertion is kind-selected, not a dead walk): the SAME fixture with
+    // a provably-identical dynamic source on both branches IS flagged.
+    expect(parallelDynamicAssigneeConflicts(withBranchSources([{ kind: 'requester' }], [{ kind: 'requester' }]))).toHaveLength(1)
+  })
+
   it('does NOT flag different dynamic kinds or different parameters (negative control — no false positives)', () => {
     expect(parallelDynamicAssigneeConflicts(
       withBranchSources([{ kind: 'requester' }], [{ kind: 'direct_manager' }]),

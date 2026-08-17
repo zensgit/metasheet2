@@ -1263,15 +1263,29 @@ export interface ApprovalDirectoryUser {
   email: string
 }
 
+/**
+ * Lock-1 §K2 — optional scope narrowing for the submit-time requester-choice chooser. Both
+ * filters AND onto the base active-user search server-side (`userIds` = the members scope's
+ * configured list; `roleIds` = plain user_roles membership for the role scope). Candidate
+ * convenience only — createApproval re-validates the actual submitted choice fail-closed.
+ */
+export interface ApprovalDirectoryUserSearchScope {
+  userIds?: string[]
+  roleIds?: string[]
+}
+
 export async function searchApprovalDirectoryUsers(
   q: string,
   limit = 20,
+  scope: ApprovalDirectoryUserSearchScope = {},
 ): Promise<ApprovalDirectoryUser[]> {
   try {
     const params = new URLSearchParams()
     const normalized = q.trim()
     if (normalized) params.set('q', normalized)
     params.set('limit', String(limit))
+    if (scope.userIds && scope.userIds.length > 0) params.set('userIds', scope.userIds.join(','))
+    if (scope.roleIds && scope.roleIds.length > 0) params.set('roleIds', scope.roleIds.join(','))
     const response = await apiFetch(`/api/approvals/directory/users?${params.toString()}`)
     if (!response.ok) return []
     const payload = await response.json().catch(() => null) as { users?: unknown } | null

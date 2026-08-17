@@ -464,6 +464,101 @@
           @update:model-value="(value: number) => setApprovalSourceLevel(node.key, value ?? 1)"
         />
       </el-form-item>
+      <!-- Lock-1 §K2 (提交人自选) authoring sub-form: mode radio (单选/多选) + scope select
+           (全公司/指定成员/指定角色) with TYPED pickers only (D0 §10.2 — no raw-ID input).
+           The submit-time chooser itself lives in ApprovalNewView; this only authors the
+           mode + scope the server validates the requester's choice against. -->
+      <template v-else-if="approvalSourceKind(node.key) === 'requester_choice'">
+        <el-form-item label="选择方式">
+          <div
+            class="approval-node-source-roster"
+            role="radiogroup"
+            aria-label="选择方式"
+            data-testid="approval-node-requester-choice-mode"
+          >
+            <label class="approval-node-source-roster-option">
+              <input
+                type="radio"
+                :name="`approval-node-requester-choice-mode-${node.key}`"
+                :checked="requesterChoiceMode(node.key) === 'single'"
+                :disabled="readOnly"
+                data-testid="approval-node-requester-choice-mode-single"
+                @change="() => setRequesterChoiceMode(node.key, 'single')"
+              />
+              <span>单选（提交时选一人）</span>
+            </label>
+            <label class="approval-node-source-roster-option">
+              <input
+                type="radio"
+                :name="`approval-node-requester-choice-mode-${node.key}`"
+                :checked="requesterChoiceMode(node.key) === 'multi'"
+                :disabled="readOnly"
+                data-testid="approval-node-requester-choice-mode-multi"
+                @change="() => setRequesterChoiceMode(node.key, 'multi')"
+              />
+              <span>多选（提交时可选多人）</span>
+            </label>
+          </div>
+        </el-form-item>
+        <el-form-item label="可选范围">
+          <el-select
+            :model-value="requesterChoiceScopeType(node.key)"
+            size="small"
+            :disabled="readOnly"
+            class="ms-w-240"
+            data-testid="approval-node-requester-choice-scope"
+            @update:model-value="(type: 'company' | 'members' | 'role') => setRequesterChoiceScopeType(node.key, type)"
+          >
+            <el-option label="全公司（任意成员）" value="company" />
+            <el-option label="指定成员" value="members" />
+            <el-option label="指定角色的成员" value="role" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="requesterChoiceScopeType(node.key) === 'members'" label="可选成员">
+          <el-select
+            :model-value="requesterChoiceScopeIds(node.key)"
+            multiple
+            filterable
+            remote
+            :remote-method="onUserSearch"
+            :loading="directoryUsersLoading"
+            size="small"
+            :disabled="readOnly"
+            class="ms-w-360"
+            placeholder="搜索用户名 / 邮箱"
+            data-testid="approval-node-requester-choice-user-picker"
+            @update:model-value="(ids: string[] | string) => setRequesterChoiceScopeIds(node.key, ids)"
+            @visible-change="(visible: boolean) => visible && onUserSearch('')"
+          >
+            <el-option
+              v-for="user in directoryUsers"
+              :key="user.id"
+              :label="formatUserLabel(user)"
+              :value="user.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-else-if="requesterChoiceScopeType(node.key) === 'role'" label="可选角色">
+          <el-select
+            :model-value="requesterChoiceScopeIds(node.key)"
+            multiple
+            filterable
+            size="small"
+            :disabled="readOnly"
+            class="ms-w-360"
+            placeholder="选择角色"
+            data-testid="approval-node-requester-choice-role-picker"
+            @update:model-value="(ids: string[] | string) => setRequesterChoiceScopeIds(node.key, ids)"
+          >
+            <el-option
+              v-for="role in directoryRoles"
+              :key="role.id"
+              :label="formatRoleLabel(role)"
+              :value="role.id"
+            />
+          </el-select>
+        </el-form-item>
+      </template>
       <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
            so the admin replaces it before publish (rather than hitting the publish-time 400). -->
       <el-alert
@@ -596,6 +691,7 @@ import type {
   EmptyAssigneePolicy,
   NodeFieldAccess,
   ParallelNodeConfig,
+  RequesterChoiceAssigneeSource,
 } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
@@ -724,6 +820,58 @@ const isKnownAssigneeSourceKind = computed(() =>
   isRegisteredAssigneeSourceKind(registry.value, props.node.type, approvalSourceKind(props.node.key)),
 )
 
+// ── Lock-1 §K2 requester_choice sub-form ────────────────────────────────────────────────────
+// Reads/writes the PRIMARY source of the SHARED approvalNodeEditFor edit model directly (the
+// same live model the roster's kind switch mutates), so no new context-api surface is needed
+// and both presentations (canvas inspector tabs / flat structured list) stay one source.
+function requesterChoiceSourceFor(nodeKey: string): RequesterChoiceAssigneeSource | null {
+  const source = approvalNodeEditFor(nodeKey)?.assigneeSources[0]
+  return source?.kind === 'requester_choice' ? source : null
+}
+function replaceRequesterChoiceSource(nodeKey: string, next: RequesterChoiceAssigneeSource): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.assigneeSources = [next, ...edit.assigneeSources.slice(1)]
+}
+function requesterChoiceMode(nodeKey: string): 'single' | 'multi' {
+  return requesterChoiceSourceFor(nodeKey)?.mode ?? 'single'
+}
+function setRequesterChoiceMode(nodeKey: string, mode: 'single' | 'multi'): void {
+  const source = requesterChoiceSourceFor(nodeKey)
+  if (!source || source.mode === mode) return
+  replaceRequesterChoiceSource(nodeKey, { ...source, mode })
+}
+function requesterChoiceScopeType(nodeKey: string): 'company' | 'members' | 'role' {
+  return requesterChoiceSourceFor(nodeKey)?.scope.type ?? 'company'
+}
+function setRequesterChoiceScopeType(nodeKey: string, type: 'company' | 'members' | 'role'): void {
+  const source = requesterChoiceSourceFor(nodeKey)
+  if (!source || source.scope.type === type) return
+  // A scope switch starts with an EMPTY id list deliberately: userIds and roleIds are different
+  // id domains, so carrying one list into the other scope would author wrong config.
+  const scope: RequesterChoiceAssigneeSource['scope'] =
+    type === 'members' ? { type: 'members', userIds: [] }
+      : type === 'role' ? { type: 'role', roleIds: [] }
+        : { type: 'company' }
+  replaceRequesterChoiceSource(nodeKey, { ...source, scope })
+}
+function requesterChoiceScopeIds(nodeKey: string): string[] {
+  const source = requesterChoiceSourceFor(nodeKey)
+  if (source?.scope.type === 'members') return source.scope.userIds
+  if (source?.scope.type === 'role') return source.scope.roleIds
+  return []
+}
+function setRequesterChoiceScopeIds(nodeKey: string, ids: string[] | string): void {
+  const source = requesterChoiceSourceFor(nodeKey)
+  if (!source) return
+  const list = Array.isArray(ids) ? ids : ids ? [ids] : []
+  if (source.scope.type === 'members') {
+    replaceRequesterChoiceSource(nodeKey, { ...source, scope: { type: 'members', userIds: list } })
+  } else if (source.scope.type === 'role') {
+    replaceRequesterChoiceSource(nodeKey, { ...source, scope: { type: 'role', roleIds: list } })
+  }
+}
+
 /** D2: configured summary echo. Reads the LIVE edit model (not `node.config`, which is the stale
  *  pre-edit snapshot in list mode — `TemplateAuthoringView.vue`'s `graphPreviewNodes` is sourced
  *  from `draft.preservedGraph`, not the live effective graph) so it stays correct in both
@@ -758,6 +906,16 @@ const configuredSourceSummaryLine = computed(() => {
   }
   if (source.kind === 'manager_at_level') {
     return `已配置：${label}（第 ${source.level} 级）`
+  }
+  if (source.kind === 'requester_choice') {
+    // §K2 echo — mode + scope, count-only (same no-raw-id rule as static_user/static_role).
+    const mode = source.mode === 'multi' ? '多选' : '单选'
+    const scope = source.scope.type === 'members'
+      ? `指定成员${source.scope.userIds.length ? `（${source.scope.userIds.length} 人）` : '（未选择）'}`
+      : source.scope.type === 'role'
+        ? `指定角色${source.scope.roleIds.length ? `（${source.scope.roleIds.length} 个）` : '（未选择）'}`
+        : '全公司'
+    return `已配置：${label}（${mode} · ${scope}）`
   }
   return `已配置：${label}`
 })

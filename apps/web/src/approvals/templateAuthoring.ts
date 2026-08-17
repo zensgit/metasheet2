@@ -143,6 +143,13 @@ export interface ApprovalStepDraft {
   // Single 1-based management level the `manager_at_level` source resolves;
   // meaningful only when `sourceKind === 'manager_at_level'`. Same backend cap as `levels`.
   level: number
+  // Lock-1 §K2 (提交人自选) — meaningful only when `sourceKind === 'requester_choice'`.
+  // `single` = the requester picks exactly one approver at submit; `multi` = one or more.
+  requesterChoiceMode: 'single' | 'multi'
+  // §K2 scope discriminator. `company` = any active user; `members` / `role` narrow the
+  // chooser to a configured list, carried in the SAME `idsText` chip carrier the static
+  // pickers use (userIds for members, roleIds for role) — sourceFromStep re-shapes it.
+  requesterChoiceScopeType: 'company' | 'members' | 'role'
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
   // Self-approver authoring: the editable toggle (merge the requester in as an
@@ -280,6 +287,8 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     fieldId: '',
     levels: 2,
     level: 1,
+    requesterChoiceMode: 'single',
+    requesterChoiceScopeType: 'company',
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
@@ -445,6 +454,8 @@ function stepDraftFromApprovalNode(
   let fieldId = ''
   let levels = 2
   let level = 1
+  let requesterChoiceMode: 'single' | 'multi' = 'single'
+  let requesterChoiceScopeType: 'company' | 'members' | 'role' = 'company'
   if (source?.kind === 'static_user') {
     sourceKind = 'static_user'
     idsText = formatIds(source.userIds)
@@ -466,6 +477,14 @@ function stepDraftFromApprovalNode(
   } else if (source?.kind === 'manager_at_level') {
     sourceKind = 'manager_at_level'
     level = source.level
+  } else if (source?.kind === 'requester_choice') {
+    // Lock-1 §K2: hydrate mode + scope; a members/role scope's id list rides the shared
+    // idsText chip carrier (sourceFromStep re-shapes it back per scope type).
+    sourceKind = 'requester_choice'
+    requesterChoiceMode = source.mode
+    requesterChoiceScopeType = source.scope.type
+    if (source.scope.type === 'members') idsText = formatIds(source.scope.userIds)
+    else if (source.scope.type === 'role') idsText = formatIds(source.scope.roleIds)
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -496,6 +515,8 @@ function stepDraftFromApprovalNode(
     fieldId,
     levels,
     level,
+    requesterChoiceMode,
+    requesterChoiceScopeType,
     approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
@@ -599,7 +620,9 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
 //   - assigneeSources[] per kind (ApprovalProductService.ts:408-453)
 //   - autoApprovalPolicy (:371-376) — 4 fields
 //   - fieldPermissions[] (:786-799) — { fieldId, access }
-// All three bottom out in primitives / string-arrays (no deeper objects), so this 2-level check is complete.
+// autoApprovalPolicy / fieldPermissions bottom out in primitives / string-arrays; assigneeSources
+// does too EXCEPT the Lock-1 §K2 `requester_choice` source, whose `scope` is a nested object —
+// `requesterChoiceSourceHasBackendDrop` below carries that third level, so the check stays complete.
 const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   static_user: ['kind', 'userIds'],
   static_role: ['kind', 'roleIds'],
@@ -609,6 +632,30 @@ const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   continuous_managers: ['kind', 'levels'],
   manager_at_level: ['kind', 'level'],
   form_field_user: ['kind', 'fieldId'],
+  // Lock-1 §K2: `scope` is the ONE nested object in the source union (see
+  // requesterChoiceSourceHasBackendDrop below for its per-type key check — the flat 2-level
+  // allowlist alone cannot see inside it).
+  requester_choice: ['kind', 'mode', 'scope'],
+}
+
+// Lock-1 §K2 — the requester_choice `scope` shapes the backend accepts (normalize REJECTS any
+// other key/type rather than dropping it, but the FE posture is the same either way: a shape the
+// backend won't re-emit verbatim must force read-only, never silently flatten on save).
+const BACKEND_REQUESTER_CHOICE_SCOPE_KEYS_BY_TYPE: Record<string, string[]> = {
+  company: ['type'],
+  members: ['type', 'userIds'],
+  role: ['type', 'roleIds'],
+}
+
+function requesterChoiceSourceHasBackendDrop(source: Record<string, unknown>): boolean {
+  if (source.mode !== 'single' && source.mode !== 'multi') return true
+  const scope = source.scope
+  if (!isPlainRecord(scope)) return true
+  const allowedScopeKeys = BACKEND_REQUESTER_CHOICE_SCOPE_KEYS_BY_TYPE[scope.type as string]
+  if (!allowedScopeKeys || hasKeyOutside(scope, allowedScopeKeys)) return true
+  if (scope.type === 'members' && !Array.isArray(scope.userIds)) return true
+  if (scope.type === 'role' && !Array.isArray(scope.roleIds)) return true
+  return false
 }
 const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
 const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
@@ -647,6 +694,8 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
       if (!isPlainRecord(source)) return true
       const allowed = BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND[source.kind as string]
       if (!allowed || hasKeyOutside(source, allowed)) return true
+      // Lock-1 §K2: the nested `scope` object needs its own per-type key/shape check.
+      if (source.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source)) return true
     }
   }
   if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
@@ -772,7 +821,10 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice'].includes(source?.kind)) return true
+      // Lock-1 §K2: a malformed requester_choice shape must fail-closed to read-only here too —
+      // hydrate would otherwise re-derive a default mode/scope and silently flatten it on save.
+      if (source?.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source as unknown as Record<string, unknown>)) return true
     }
     // T1-4: `buildStepConfig` re-emits only { fieldId, access } per entry (the backend allowlist),
     // so a linear node carrying an ARRAY-shaped fieldPermissions with an extra key or non-object
@@ -952,6 +1004,16 @@ export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource 
   }
   if (step.sourceKind === 'manager_at_level') {
     return { kind: 'manager_at_level', level: step.level }
+  }
+  if (step.sourceKind === 'requester_choice') {
+    // Lock-1 §K2: re-shape the shared idsText carrier into the per-scope id list.
+    const scope =
+      step.requesterChoiceScopeType === 'members'
+        ? { type: 'members' as const, userIds: parseIdsText(step.idsText) }
+        : step.requesterChoiceScopeType === 'role'
+          ? { type: 'role' as const, roleIds: parseIdsText(step.idsText) }
+          : { type: 'company' as const }
+    return { kind: 'requester_choice', mode: step.requesterChoiceMode, scope }
   }
   return { kind: 'requester' }
 }
@@ -1247,6 +1309,15 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
     }
     if (step.sourceKind === 'form_field_user' && !userFieldIds.has(step.fieldId.trim())) {
       errors.push(`${label} 的表单用户字段无效`)
+    }
+    // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
+    // at least one configured id — the backend rejects an empty scope list the same way.
+    if (
+      step.sourceKind === 'requester_choice'
+      && (step.requesterChoiceScopeType === 'members' || step.requesterChoiceScopeType === 'role')
+      && parseIdsText(step.idsText).length === 0
+    ) {
+      errors.push(`${label} 的提交人自选范围需要选择成员/角色`)
     }
   })
   return errors
