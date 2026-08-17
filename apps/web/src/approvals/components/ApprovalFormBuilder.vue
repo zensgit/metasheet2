@@ -1,11 +1,13 @@
 <template>
   <div
+    ref="rootRef"
     class="approval-form-builder"
     data-testid="approval-form-builder"
     :data-drag-active="activeDrag ? 'true' : undefined"
     @dragover="onCanvasDragOver"
     @drop="onCanvasDrop"
   >
+    <div class="approval-form-builder__canvas">
     <div class="approval-form-builder__list" role="list" aria-label="表单字段">
       <template
         v-for="(descriptor, index) in slotDescriptors"
@@ -23,6 +25,7 @@
             :data-testid="`approval-form-builder-slot-${descriptor.key}`"
             :data-slot-position="descriptor.position"
             :aria-label="`在位置 ${descriptor.position + 1} 插入字段`"
+            aria-haspopup="menu"
             :aria-expanded="insertMenuSlotKey === descriptor.key"
             @click.stop="onSlotClick(descriptor)"
             @dragenter="onSlotDragOver(descriptor, $event)"
@@ -39,6 +42,7 @@
             role="menu"
             aria-label="选择要插入的字段类型"
             data-testid="approval-form-builder-slot-menu"
+            @keydown="onSlotMenuKeydown(descriptor, $event)"
           >
             <button
               v-for="option in insertTypeOptions"
@@ -129,6 +133,18 @@
     >
       {{ statusMessage }}
     </p>
+    </div>
+    <!-- F3B: selected-field inspector — same ONE adapter path via the typed
+         command seam; selection switches settle its dirty buffer first. -->
+    <ApprovalFormFieldInspector
+      ref="inspectorRef"
+      class="approval-form-builder__inspector"
+      :field="selectedField"
+      :references="selectedFieldReferences"
+      :visibility-options="visibilityOptions"
+      :read-only="readOnly"
+      :execute="runInspectorCommand"
+    />
   </div>
 </template>
 
@@ -170,7 +186,14 @@ export const GENERIC_RETRY_MESSAGE = '操作未完成，请重试。'
  *   or outside), dragend, Escape, route change (unmount), and the read-only
  *   transition.
  * - The move HANDLE initiates existing-field drag, not the whole card (§3.3).
- * - Read-only mode renders no slots, handles, or move buttons.
+ * - Read-only mode renders no slots, handles, or move buttons. The read-only
+ *   guard is ALSO re-checked at mutation time on the drop path (P3-2: a drop
+ *   racing a readOnly flip must not insert).
+ * - F3B: hosts `ApprovalFormFieldInspector` for the selected field. Inspector
+ *   edits run through `runInspectorCommand` — the SAME one adapter path — and
+ *   every selection switch settles the inspector's dirty buffer first (FB-D7:
+ *   a valid buffer commits as ONE entry; an invalid buffer BLOCKS the switch;
+ *   never a silent discard).
  */
 import {
   computed,
@@ -205,6 +228,9 @@ import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
 } from './ApprovalFormPalette.vue'
+import ApprovalFormFieldInspector, {
+  type FormFieldInspectorCommand,
+} from './ApprovalFormFieldInspector.vue'
 
 interface InsertionSlotDescriptor {
   key: string
@@ -250,6 +276,11 @@ const activeDrag = shallowRef<ApprovalFormDragPayload | null>(
 )
 const dropTargetKey = ref<string | null>(null)
 const insertMenuSlotKey = ref<string | null>(null)
+const rootRef = ref<HTMLElement | null>(null)
+const inspectorRef = ref<{
+  settlePendingEdits(): boolean
+  isDirty(): boolean
+} | null>(null)
 
 const typeLabels = APPROVAL_FORM_FIELD_TYPE_LABELS
 const insertTypeOptions = APPROVAL_FORM_PALETTE_GROUPS.flatMap(
@@ -257,6 +288,117 @@ const insertTypeOptions = APPROVAL_FORM_PALETTE_GROUPS.flatMap(
 )
 
 const fields = computed(() => sessionRef.value.draft.fields)
+
+// --- F3B inspector wiring ---------------------------------------------------
+
+const selectedField = computed<FieldAuthoringDraft | null>(
+  () =>
+    sessionRef.value.draft.fields.find(
+      (field) => field.localId === selectedLocalId.value,
+    ) ?? null,
+)
+
+/** FB-D6 reference provider output for the selected field (business summary). */
+const selectedFieldReferences = computed(() =>
+  selectedLocalId.value
+    ? adapter.listFieldReferences(sessionRef.value, selectedLocalId.value)
+    : [],
+)
+
+/**
+ * Visibility depends-on candidates: other fields with an id, excluding
+ * `record-link`/`detail` (server fail-closed as visibility dependencies).
+ * Option TEXT is the business label only — ids ride the non-visible value.
+ */
+const visibilityOptions = computed(() => {
+  const current = selectedField.value
+  if (!current) return []
+  return sessionRef.value.draft.fields
+    .filter(
+      (field) =>
+        field.localId !== current.localId &&
+        field.id.trim().length > 0 &&
+        field.type !== 'record-link' &&
+        field.type !== 'detail',
+    )
+    .map((field) => ({
+      id: field.id.trim(),
+      label: field.label.trim() || typeLabels[field.type],
+    }))
+})
+
+/**
+ * FB-D7: settle the inspector's dirty buffer before any selection-changing
+ * action. A valid buffer commits as ONE history entry; an invalid buffer
+ * BLOCKS the action (the inspector shows values-free copy). Never a silent
+ * discard.
+ */
+function settleInspector(): boolean {
+  const inspector = inspectorRef.value
+  if (!inspector) return true
+  return inspector.settlePendingEdits()
+}
+
+/**
+ * F3B: the ONE command path for inspector edits (FB-D4). Each typed command
+ * maps to exactly one adapter call; the result is applied here (the single
+ * session writer) and returned SYNCHRONOUSLY so the inspector can render
+ * named refusals. Inspector commits keep DOM focus in the inspector
+ * (moveFocus: false); a successful delete moves focus to the next card.
+ */
+function runInspectorCommand(
+  command: FormFieldInspectorCommand,
+): FormAdapterResult | null {
+  if (props.readOnly) return null
+  const session = sessionRef.value
+  let result: FormAdapterResult
+  switch (command.kind) {
+    case 'update-properties':
+      result = adapter.updateFieldProperties(
+        session,
+        command.localId,
+        command.patch,
+      )
+      break
+    case 'retype':
+      result = adapter.retypeField(session, command.localId, command.nextType)
+      break
+    case 'remove-field':
+      result = adapter.removeField(session, command.localId)
+      break
+    case 'add-detail-column':
+      result = adapter.addDetailColumn(session, command.fieldLocalId)
+      break
+    case 'update-detail-column':
+      result = adapter.updateDetailColumn(
+        session,
+        command.fieldLocalId,
+        command.columnLocalId,
+        command.patch,
+      )
+      break
+    case 'retype-detail-column':
+      result = adapter.retypeDetailColumn(
+        session,
+        command.fieldLocalId,
+        command.columnLocalId,
+        command.nextType,
+      )
+      break
+    case 'remove-detail-column':
+      result = adapter.removeDetailColumn(
+        session,
+        command.fieldLocalId,
+        command.columnLocalId,
+      )
+      break
+  }
+  applyResult(result, {
+    moveFocus: command.kind === 'remove-field',
+    surfaceStatus: false,
+  })
+  return result
+}
 
 // FB-D3: N+1 slots for N fields, identified by current neighbors, never a
 // persisted index/pixel. The anchor is bound to the slot at RENDER; the
@@ -289,6 +431,9 @@ function cardAccessibleName(field: FieldAuthoringDraft, index: number): string {
 }
 
 function selectField(localId: string): void {
+  if (selectedLocalId.value === localId) return
+  // FB-D7: a dirty inspector buffer settles (ONE entry) or BLOCKS the switch.
+  if (!settleInspector()) return
   selectedLocalId.value = localId
 }
 
@@ -296,13 +441,22 @@ function selectField(localId: string): void {
  * Commit one adapter result: success updates session/selection and (only for a
  * value-changing edit) emits `draft-change`; rejection surfaces a VALUES-FREE
  * retry message and leaves session, draft, and history untouched (FB-D4).
+ * Inspector-originated commands keep DOM focus in the inspector
+ * (`moveFocus: false`) and render their own refusal copy (`surfaceStatus:
+ * false` keeps the canvas status line quiet for them).
  */
-function applyResult(result: FormAdapterResult): boolean {
+function applyResult(
+  result: FormAdapterResult,
+  options: { moveFocus?: boolean; surfaceStatus?: boolean } = {},
+): boolean {
+  const { moveFocus = true, surfaceStatus = true } = options
   if (!result.ok) {
-    statusMessage.value =
-      result.reason === 'target_not_found' || result.reason === 'field_not_found'
-        ? STALE_SLOT_RETRY_MESSAGE
-        : GENERIC_RETRY_MESSAGE
+    if (surfaceStatus) {
+      statusMessage.value =
+        result.reason === 'target_not_found' || result.reason === 'field_not_found'
+          ? STALE_SLOT_RETRY_MESSAGE
+          : GENERIC_RETRY_MESSAGE
+    }
     return false
   }
   sessionRef.value = result.session
@@ -311,7 +465,7 @@ function applyResult(result: FormAdapterResult): boolean {
   if (result.changed) {
     emit('draft-change', result.session.draft, result.focusLocalId)
   }
-  if (result.focusLocalId) void focusCard(result.focusLocalId)
+  if (moveFocus && result.focusLocalId) void focusCard(result.focusLocalId)
   return true
 }
 
@@ -326,22 +480,29 @@ async function focusCard(localId: string): Promise<void> {
 /** Palette click path: append (§3.1), same adapter as every other path. */
 function appendField(type: AuthorableFieldType): boolean {
   if (props.readOnly) return false
+  if (!settleInspector()) return false
   return applyResult(adapter.addField(sessionRef.value, type))
 }
 
-/** Slot click/keyboard path: exact-anchor insert via the same adapter. */
+/**
+ * Slot click/keyboard path: exact-anchor insert via the same adapter. The
+ * read-only check here executes AT MUTATION TIME — the drop path routes
+ * through this function, so deleting the early `onSlotDrop` guard alone
+ * cannot re-open a read-only insert (P3-2).
+ */
 function insertFieldAt(
   anchor: FormInsertionAnchor,
   type: AuthorableFieldType,
 ): boolean {
   if (props.readOnly) return false
+  if (!settleInspector()) return false
   return applyResult(adapter.addField(sessionRef.value, type, anchor))
 }
 
 /**
- * Adapter passthrough (reference-aware, last-field-forbidden). No F2 UI mounts
- * it — the delete affordance arrives with the F3 inspector — but the command
- * surface stays the ONE adapter path.
+ * Adapter passthrough (reference-aware, last-field-forbidden) — the F3
+ * inspector's delete affordance also routes here via `runInspectorCommand`;
+ * the command surface stays the ONE adapter path.
  */
 function removeField(localId: string): boolean {
   if (props.readOnly) return false
@@ -350,6 +511,7 @@ function removeField(localId: string): boolean {
 
 function onMoveByOffset(localId: string, offset: -1 | 1): void {
   if (props.readOnly) return
+  if (!settleInspector()) return
   applyResult(adapter.moveFieldByOffset(sessionRef.value, localId, offset))
 }
 
@@ -357,8 +519,66 @@ function onMoveByOffset(localId: string, offset: -1 | 1): void {
 
 function onSlotClick(descriptor: InsertionSlotDescriptor): void {
   if (props.readOnly) return
-  insertMenuSlotKey.value =
-    insertMenuSlotKey.value === descriptor.key ? null : descriptor.key
+  const opening = insertMenuSlotKey.value !== descriptor.key
+  insertMenuSlotKey.value = opening ? descriptor.key : null
+  // Menu keyboard semantics (aria-haspopup="menu"): focus moves into the menu
+  // on open; arrows cycle items; Escape closes and returns to the trigger.
+  if (opening) void focusInsertMenuItem(0)
+}
+
+async function focusInsertMenuItem(index: number): Promise<void> {
+  await nextTick()
+  const items = insertMenuItems()
+  items[((index % items.length) + items.length) % items.length]?.focus()
+}
+
+function insertMenuItems(): HTMLButtonElement[] {
+  return Array.from(
+    rootRef.value?.querySelectorAll<HTMLButtonElement>(
+      '.approval-form-builder__slot-menu-item',
+    ) ?? [],
+  )
+}
+
+function closeInsertMenu(refocusTrigger: boolean): void {
+  const slotKey = insertMenuSlotKey.value
+  insertMenuSlotKey.value = null
+  if (refocusTrigger && slotKey) {
+    rootRef.value
+      ?.querySelector<HTMLButtonElement>(
+        `[data-testid="approval-form-builder-slot-${slotKey}"]`,
+      )
+      ?.focus()
+  }
+}
+
+function onSlotMenuKeydown(
+  _descriptor: InsertionSlotDescriptor,
+  event: KeyboardEvent,
+): void {
+  const items = insertMenuItems()
+  if (items.length === 0) return
+  const activeIndex = items.indexOf(
+    document.activeElement as HTMLButtonElement,
+  )
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    void focusInsertMenuItem(activeIndex + 1)
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    void focusInsertMenuItem(activeIndex <= 0 ? items.length - 1 : activeIndex - 1)
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    void focusInsertMenuItem(0)
+  } else if (event.key === 'End') {
+    event.preventDefault()
+    void focusInsertMenuItem(items.length - 1)
+  } else if (event.key === 'Escape') {
+    // Handled here (close + focus return); stop it from ALSO reaching the
+    // window listener, which would clear without restoring focus.
+    event.stopPropagation()
+    closeInsertMenu(true)
+  }
 }
 
 function onInsertMenuPick(
@@ -404,6 +624,11 @@ function onSlotDragLeave(descriptor: InsertionSlotDescriptor): void {
  * render-time SEMANTIC anchor goes to the adapter, which re-resolves it
  * against the current draft (FB-D3). Transient drag state clears on both
  * success and failure.
+ *
+ * P3-2 (F2 gate): the early read-only check below is a fast path only —
+ * `props.readOnly` is RE-CHECKED at mutation time inside `insertFieldAt` /
+ * `moveFieldToAnchor`, so a drop dispatched on a retained slot node while a
+ * readOnly flip is landing cannot insert even if this early return is lost.
  */
 function onSlotDrop(
   descriptor: InsertionSlotDescriptor,
@@ -415,7 +640,8 @@ function onSlotDrop(
   if (props.readOnly) return
   if (!payload) return // foreign/malformed/generic payload: never a command
   if (payload.kind === 'palette') {
-    applyResult(adapter.addField(sessionRef.value, payload.fieldType, descriptor.anchor))
+    // Same mutation-time guarded path as slot click/keyboard (FB-D4 + P3-2).
+    insertFieldAt(descriptor.anchor, payload.fieldType)
     return
   }
   moveFieldToAnchor(payload.localId, descriptor.anchor)
@@ -425,12 +651,16 @@ function onSlotDrop(
  * Existing-field drop: resolve the semantic anchor against the CURRENT draft
  * and call the same canonical `moveField` the keyboard path uses (§3.3).
  * Dropping a field on one of its own adjacent slots is a value-identical
- * boundary no-op (zero history entries) by adapter construction.
+ * boundary no-op (zero history entries) by adapter construction. The
+ * read-only re-check runs HERE, at mutation time, immediately before the
+ * anchor-resolving adapter call (P3-2).
  */
 function moveFieldToAnchor(
   movingLocalId: string,
   anchor: FormInsertionAnchor,
 ): void {
+  if (props.readOnly) return
+  if (!settleInspector()) return
   if (anchor.kind === 'start') {
     const first = sessionRef.value.draft.fields[0]
     if (!first) return
@@ -528,12 +758,26 @@ defineExpose({
 <style scoped>
 .approval-form-builder {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
   min-height: 240px;
   padding: 16px;
   background: var(--el-fill-color-lighter);
   border-radius: 12px;
+}
+
+.approval-form-builder__canvas {
+  display: flex;
+  flex: 1 1 420px;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.approval-form-builder__inspector {
+  flex: 0 1 320px;
+  min-width: 260px;
 }
 
 .approval-form-builder__list {
