@@ -5,6 +5,7 @@ import {
   pruneHiddenFormData,
   validateApprovalFormData,
 } from '../../src/services/ApprovalGraphExecutor'
+import { resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -593,6 +594,73 @@ describe('ApprovalGraphExecutor', () => {
       code: 'APPROVAL_ASSIGNEE_EMPTY',
       statusCode: 400,
     }))
+  })
+
+  // Lock-1 §K5-b: this is the REAL resolveApprovalAssignees wired into the REAL executor (not a
+  // fake resolver returning `[]`) — the exact integration point the real-DB acceptance suite
+  // exercises over real SQL (approval-dept-head-at-level.db.test.ts's out-of-range leg), run here
+  // as a local, no-DB oracle for the SAME assertion: a `level` valid in contract but past the end
+  // of the frozen deptHeadChainIds resolves EMPTY via the resolver's own positional slice, and the
+  // executor's existing (unmodified) empty-assignee branching decides what happens next — never a
+  // crash, never a silently-materialized assignee. Positive control pair, per §K5's own text
+  // ("resolves EMPTY and falls to emptyAssigneePolicy, which is the shipped manager_at_level
+  // behavior, unchanged"): 'error' throws APPROVAL_ASSIGNEE_EMPTY; 'auto-approve' auto-approves —
+  // both are the SAME shipped emptyAssigneePolicy branch every other kind already goes through.
+  it('Lock-1 §K5-b: dept_head_at_level level past the end of the frozen deptHeadChainIds resolves EMPTY through the REAL resolver, and the executor applies the node emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve auto-approves) — never a crash, never a silent assignee', () => {
+    const requesterSnapshot = { id: 'requester-1', deptHeadChainIds: ['head-1', 'head-2'] }
+    const realResolver = ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: any }) =>
+      resolveApprovalAssignees({ nodeKey, sourceStep, config, formSnapshot: {}, requesterSnapshot })
+
+    const outOfRangeGraph = (emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'dhal-oor',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'dept_head_at_level', level: 5 }],
+            emptyAssigneePolicy,
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-oor', source: 'start', target: 'dhal-oor' },
+        { key: 'edge-oor-final', source: 'dhal-oor', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Positive control FIRST: an IN-RANGE level resolves a real assignee through the SAME real
+    // resolver + executor wiring (proves the fixture itself is capable of a non-empty result —
+    // the out-of-range legs below are not vacuously empty because of a broken fixture).
+    const inRangeExecutor = new ApprovalGraphExecutor(
+      { ...outOfRangeGraph('error'), nodes: outOfRangeGraph('error').nodes.map((n) => n.key === 'dhal-oor' ? { ...n, config: { assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }], emptyAssigneePolicy: 'error' } } : n) },
+      {},
+      { assignmentResolver: realResolver },
+    )
+    expect(inRangeExecutor.resolveInitialState().assignments).toEqual([
+      { assignmentType: 'user', assigneeId: 'head-1', nodeKey: 'dhal-oor', sourceStep: 1, metadata: { resolvedFrom: { kind: 'dept_head_at_level', sourceIndex: 0 } } },
+    ])
+
+    // 'error': out-of-range level (5) against a 2-entry chain -> empty resolution -> throws.
+    const errorExecutor = new ApprovalGraphExecutor(outOfRangeGraph('error'), {}, { assignmentResolver: realResolver })
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve': the SAME empty resolution, but the node's own policy governs — the shipped,
+    // unmodified `emptyAssigneePolicy: 'auto-approve'` branch fires (never a silent NOBODY: it is
+    // an EXPLICIT, audited autoApprovalEvents entry, not an unassigned pending node).
+    const autoExecutor = new ApprovalGraphExecutor(outOfRangeGraph('auto-approve'), {}, { assignmentResolver: realResolver })
+    const autoInitial = autoExecutor.resolveInitialState()
+    expect(autoInitial.currentNodeKey).toBe('final-review')
+    expect(autoInitial.autoApprovalEvents).toEqual([
+      { nodeKey: 'dhal-oor', sourceStep: 1, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
   })
 
   it('tags resolveAfterApprove resolutions with the resolved-away node aggregate mode', () => {
