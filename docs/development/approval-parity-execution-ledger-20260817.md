@@ -49,7 +49,7 @@ reviewable behavior.
 | P1-B | P1 | Existing multi-source inspector | existing runtime + D0 delta | — | — | NOT STARTED | remove single-source lock; shipped union exact-set; all sources round-trip; no flatten | implementation authorization |
 | P1-C | P1 | Shipped timeout + threshold frontend compatibility | D3-p/G1-p bounded owner decision | — | — | NOT STARTED | prevent mode flatten; types/allowlists/node-edit/summary/restore/linear-only/dynamic-M tests | ratify bounded decision |
 | P1-D | P1 | Canvas residual + editor version entry | D0 delta | — | — | NOT STARTED | migrate shipped type ribbons to the ratified flat-card grammar; browser/a11y; no graph semantic delta | implementation authorization |
-| P2-A | P2 | New enterprise assignee semantics | Lock-1 | — | — | NOT DRAFTED | directory/corp/empty-resolution matrix | ratify lock |
+| P2-A | P2 | New enterprise assignee semantics | Lock-1 (PROPOSED, `approval-lock1-enterprise-assignees-20260817.md`) | #4940 | `7fb53514d7...` docs-only | LOCK PROPOSED — NOT RATIFIED | directory/corp/empty-resolution matrix; §3 gates G-1..G-20; OD-L1-1..7 owner decisions | ratify lock |
 | P2-B | P2 | Department/contact fields and routing | Lock-2 | — | — | NOT DRAFTED | field schema plus routing, snapshot/live, corp, authz tests | ratify lock |
 | P3-A | P3 | Missing flow policies only; preserve shipped merge flags | Lock-4 | — | — | NOT DRAFTED | server-enforced fallback/automatic-decision/departure-policy mutations plus merge non-regression | ratify lock |
 | P3-B | P3 | More settings first functional group | D0 delta + Lock-4 + selected Lock-6 subset | — | — | BLOCKED ON P3-A + GLOBAL POLICY | no inert controls, browser tests | selected global capability landed |

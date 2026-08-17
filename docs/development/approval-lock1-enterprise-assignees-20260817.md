@@ -65,9 +65,11 @@ any option: **does it reject a cross-boundary group at publish without depending
   (`platform-member-groups-delegated-scope-design-20260409.md`); hand-created groups have no
   authoritative backfill source and the globally-unique-name contract would need revision.
 - **(c) derive org from the projection marker** — REJECTED, recorded so it is not re-proposed:
-  `dingtalk-sync-group:<integrationId>:<externalDeptId>` lives in the free-text `description` column
-  (`directory-sync.ts:1689-1691`, written at `:6360-6366`), is admin-editable, and exists only for
-  projected groups. A boundary on free text is not a boundary.
+  `dingtalk-sync-group:<integrationId>:<externalDeptId>` lives in the unconstrained free-text
+  `description` column (`directory-sync.ts:1689-1691`, written at `:6360-6366`), which the admin group
+  API accepts client-supplied at creation (`routes/admin-users.ts:2174-2179`) — so a hand-created group
+  can carry a forged marker, and only projected groups carry a real one. A boundary on free text is not
+  a boundary.
 - **(d) single-org gate** — refuse `user_group` when more than one org exists: cheapest and
   fail-closed, but unavailable to exactly the deployments that need it.
 
@@ -79,9 +81,11 @@ document does not claim it retro-fixes `static_role`.
 `{ targetType: 'user' | 'role'; targetIds: string[] }` (`types/approval-product.ts:213-216`) and cc
 nodes never call `resolveApprovalAssignees` — both executor cc branches hard-throw on any other
 `targetType` (`ApprovalGraphExecutor.ts:993-1003`, `:1285-1295`). The cc half needs its own normalize
-path, registry treatment, and acceptance row (§3 G-4). Whether it ships by widening `targetType` to
-`'group'` or by adding `ccSources[]` belongs to the implementing slice; what is LOCKED is that the cc
-half may not be declared delivered by the approver half's tests.
+path, registry treatment, and acceptance row (§3 G-4). Its shape is OD-L1-7: widen `targetType` to
+include `'group'` (recommended — the smaller surface, and cc has no source array to reuse) or add a
+`ccSources[]` array (duplicates the assignee-source machinery on a node type that resolves nothing
+else). What is LOCKED either way is that the cc half may not be declared delivered by the approver
+half's tests.
 
 Empty group ⇒ EMPTY resolution, falling to `emptyAssigneePolicy` like an unresolvable manager
 (`ApprovalGraphExecutor.ts:1017-1033`, `:1309-1325`); a group id that does not exist or is outside the
@@ -105,9 +109,14 @@ as `requesterChoices?: Record<string, string[]>` (node key → chosen local user
 only that frozen map, so it stays pure and no live directory or role read happens at dispatch.
 
 Scope validation at create: `company` accepts any active local user; `members` accepts only ids in the
-configured list; `role` accepts only ids holding a configured role at create time, resolved by a fresh
-read on the `resolveApprovalRequesterRoleIds` seam (`ApprovalRequesterRoles.ts:32-52`) and never from
-the actor's token claims. `mode:'single'` rejects length ≠ 1; `'multi'` rejects length 0. Each
+configured list; `role` accepts only ids holding a configured role at create time, read fresh from
+`user_roles` and never from the actor's token claims. **That read must NOT reuse
+`resolveApprovalRequesterRoleIds`** (`ApprovalRequesterRoles.ts:32-52`): it INNER-JOINs `roles` on
+`approval_usable = true` (`:38-39`), so importing it here would make every choice scoped to a
+non-curated role fail validation — silently, and for a curation flag that governs the
+`requester.role` ROUTING PREDICATE rather than approver selection (§K1 honesty note; `static_role`'s
+own picker returns all roles, `approval-directory.ts:58-63`). K2's `role` scope is plain role
+membership. `mode:'single'` rejects length ≠ 1; `'multi'` rejects length 0. Each
 rejection is a values-free 422 BEFORE any instance/assignment insert, mirroring the org-read
 fail-closed placement at `ApprovalProductService.ts:4846-4859`. A published node with a
 `requester_choice` source and NO entry for its key in the create payload is likewise a create-time 422,
@@ -141,11 +150,13 @@ access is added.
 Legal references (publish-time): the target MUST be an `approval` node strictly upstream on EVERY
 runtime-reachable path to the referencing node. "Every path" is load-bearing — a node reachable only
 through one condition branch resolves empty on the other, and a node inside a parallel region
-referenced from outside it may not have decided when the referencing node activates. Validation reuses
-the traversal already written for the parallel-conflict gate
-(`assertNoParallelDynamicAssigneeConflicts`, `ApprovalProductService.ts:1484+`, documented to enumerate
-every runtime-reachable path and cut cycles with a per-branch visited set); a failing reference is a
-publish-time 400 in the same family as the other authoring config errors.
+referenced from outside it may not have decided when the referencing node activates. **This is a
+DOMINANCE check and no shipped gate performs it** — `assertNoParallelDynamicAssigneeConflicts`
+(`ApprovalProductService.ts:1484+`) walks FORWARD from a branch entry to a join node unioning
+fingerprints, which is a different predicate. What is reusable is its primitives
+(`runtimeSuccessorTargets`, the edge maps, the per-branch visited set), not the gate; the implementing
+slice writes a new predicate over them. A failing reference is a publish-time 400 in the same family
+as the other authoring config errors.
 
 Skipped / auto-approved target — **decided by shipped precedent, not an enum**: an auto-approval
 writes `actor_id = 'system:auto-approval'` unless `actorMode: 'original_approver'`
@@ -254,7 +265,10 @@ shipped `manager_at_level` behavior, unchanged.
 
 `sequential` is `all` plus an ordering constraint on WHEN each seat becomes actionable: only the head
 of the remaining queue holds an active assignment, and the next seat activates when the head approves.
-A reject at any position terminates the node exactly as under `all`.
+A reject at any position terminates the node exactly as under `all`. **Placement: linear-only in v1**,
+mirroring `threshold`'s shipped restriction (`types/approval-product.ts:113-120`) — a sequential node
+inside a parallel region is rejected at publish until the runtime slice demonstrates the join
+semantics are unaffected. Stated here because the implementer meets it on day one.
 
 Ordering source, locked: (1) `assigneeSources[]` array order — which master M5 declares display order
 and this kind additionally makes semantic **for `sequential` nodes only** — then (2) within a source,
@@ -318,7 +332,20 @@ present in the registry for that node type (master M4). Unratified kinds are not
 value outside the registry renders read-only and round-trips unchanged. The registry exact-set test
 (Lock-0 A-3) grows from eight members to eight-plus-ratified-K-kinds in the SAME commit that lands each
 kind — a kind landing without its registry row is an incomplete slice. Because Lock-0 is not on main at
-this baseline, a slice starting before it lands must state which registry it writes into.
+this baseline, a slice starting before it lands must state which registry it writes into. Roster labels
+follow Lock-0's D1 disposition (parent §10.3 wording is authoritative over incidental shipped strings).
+The six rows, each admitted only when its own OD is decided and its slice is implemented end to end:
+
+| Registry row | Roster label | Node types | Admitted when |
+|---|---|---|---|
+| `user_group` | 用户组 | `approval` | OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed |
+| `user_group` (cc) | 用户组 | `cc` | OD-L1-7 decided; cc normalize path landed (a separate row — the approver row does not admit it) |
+| `requester_choice` | 提交人自选 | `approval` | scope validation + submit-time chooser landed |
+| `prior_node_approver` | 节点审批人 | `approval` | OD-L1-3 + OD-L1-4 decided; dominance validator landed |
+| `continuous_dept_heads` | 连续多级部门负责人 | `approval` | OD-L1-5 decided; `deptHeadChainIds` snapshot landed |
+| `dept_head_at_level` (K5-b) | 指定层级部门负责人 | `approval` | K4 landed; OD-L1-6 governs only the downward variant |
+
+K5-a gets NO new row — it is the shipped `manager_at_level`, already in the eight-member union.
 
 **2.4 Fingerprints.** `dynamicAssigneeSourceFingerprint` (`ApprovalProductService.ts:1429-1450`) closes
 over the union with `_exhaustive: never` (`:1445-1448`), and its FE mirror does the same
@@ -416,6 +443,8 @@ not re-proposed):
   OD-L1-6  K5-c downward (最高-n) — (a)[R] add a chain-termination/completeness snapshot field and
            fail closed on an incomplete chain · (b) defer downward addressing to a later lock ·
            (c) ship against the raw array [rejected §K5]
+  OD-L1-7  K1 cc shape — (a)[R] widen CcNodeConfig.targetType to include 'group' · (b) add a
+           ccSources[] array (duplicates assignee-source machinery on a node that resolves nothing else)
 
 Deltas:
 Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design only.
