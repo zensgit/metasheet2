@@ -132,10 +132,12 @@ against a second vocabulary for a later lock to supersede, and five sites alread
 Shape normalization is already fail-closed and needs no change: `normalizeNodeFieldPermissions:1119-1148`
 rejects a non-array, a missing/blank `fieldId`, an out-of-enum `access`, and a duplicate `fieldId` with
 `failValidation(400)`, keeps `editable` entries through, and returns `undefined` for an empty array so the
-key is omitted (`:1128`, emitted `:1852`). The access enum has **four hand copies, none exhaustiveness-forced**:
-`types/approval-product.ts:53`, `NODE_FIELD_ACCESS_VALUES:460` (`Set<NodeFieldAccess>` — members are typed,
-but a fifth union member would not fail the build), FE `apps/web/src/types/approval.ts:66`, and FE literal
-`apps/web/src/approvals/approvalNodeEdit.ts:177`.
+key is omitted (`:1128`, emitted `:1852`). The access enum has **five hand copies, none exhaustiveness-forced**
+(mechanically swept at this baseline, not counted from memory): `types/approval-product.ts:53`,
+`NODE_FIELD_ACCESS_VALUES:460` (`Set<NodeFieldAccess>` — members are typed, but a fourth union member would not
+fail the build), FE `apps/web/src/types/approval.ts:66`, FE literal
+`apps/web/src/approvals/approvalNodeEdit.ts:177`, and the FE type guard `isNodeFieldAccess`
+(`apps/web/src/approvals/templateAuthoring.ts:375-377`, consumed by the backend-drop allowlist at `:633`).
 
 Cross-reference already runs at five entry points — `restoreTemplateVersion:3657`, `createTemplate:3722`,
 `updateTemplate:3886`, `publishTemplate:4004`, `cloneTemplate:4283` — through
@@ -197,8 +199,9 @@ reads the write path as validated for every type.
 
 **What the write mutates (OD-L7-6).** Two facts Lock-3 handed over, both re-verified here.
 `approval_instances.form_snapshot` is written ONCE, by the create INSERT at `:5205-5216`, and has **no UPDATE
-path anywhere** in `packages/core-backend/src` — all 32 references are reads, comments, migrations, or the
-one INSERT. The FWB / projection readers rely on that: `automation-executor.ts:3192-3194` reads it under the
+path anywhere**: swept mechanically at this baseline over `packages`, `apps` and `plugins` for both query
+syntaxes with tests excluded, the 32 `packages/core-backend/src` references are reads, comments, migrations,
+or that one INSERT, and no writer matches `UPDATE`/`SET` on the column. The FWB / projection readers rely on that: `automation-executor.ts:3192-3194` reads it under the
 comment *"immutable form_snapshot + pinned template-version schema are the ONLY sources of truth"* (also
 `:3077-3084`, `:3232`), and the attendance snapshot module states the same posture
 (`attendance/w4c3b-request-snapshots.ts:1219`, `:1232`). Lock-7 creates the first mutation, so those readers
@@ -249,7 +252,7 @@ current code neither throws nor logs.
 
 | # | Site | Anchor | Disposition |
 |---|---|---|---|
-| R-1 | Access enum, four hand copies | `types/approval-product.ts:53`; `:460`; `apps/web/src/types/approval.ts:66`; `approvalNodeEdit.ts:177` | CONFIRM — no new member in v1; G-14 pins the four by exact set |
+| R-1 | Access enum, five hand copies | `types/approval-product.ts:53`; `:460`; `apps/web/src/types/approval.ts:66`; `approvalNodeEdit.ts:177`; `templateAuthoring.ts:375-377` | CONFIRM — no new member in v1; G-14 pins the five by exact set |
 | R-2 | Shape normalizer | `:1119-1148`, called only in `case 'approval':` at `:1825-1829` | EXTEND — widen-only per §2.1 |
 | R-3 | Per-type config switch | `:1764`; `cc` `:1858-1867`; `default: config = {}` `:1943-1945` | **SILENT** — `fieldPermissions` dropped on every non-approval type (defect D-1); §L7-B pin 2 |
 | R-4 | Form-schema cross-reference | `:1249-1267`, `node.type !== 'approval'` `:1256`, top-level ids `:1254` | EXTEND — Lock-3 R-12 already claims this function for the handler; the pins of §L7-B land here |
@@ -302,7 +305,7 @@ with a named owner — a re-transfer is a decision the owner makes, not a silenc
 | # | Finding | Anchor | Honest classification |
 |---|---|---|---|
 | D-1 | `fieldPermissions` on a `cc` / `start` / `end` / `condition` / `parallel` node is silently discarded at normalize — no error, no effect; the author believes the field is hidden | `:1858-1867`; `default:` `:1943-1945` | Real shipped defect. Not a live *bypass* (no such node reads the mask today), but a configuration-loss class: the same shape that would be honored on an approval node is dropped elsewhere. Independent of Lock-7; §L7-B pin 2 keeps Lock-7 from inheriting it |
-| D-2 | `approvals:admin-data` ("Approval Data Recovery Admin") is declared and seeded but has **zero** enforcement sites in the repository | `types/approval-product.ts:7`; `db/migrations/zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts:16-19` | Declared-inert, **not** a vulnerability — granting it confers nothing, so the failure direction is closed. Recorded because it is the obvious carrier for a later admin data-repair surface and must not be adopted by inference |
+| D-2 | `approvals:admin-data` ("Approval Data Recovery Admin") is declared and seeded but has **zero** enforcement sites — a repo-wide sweep at this baseline (excluding `node_modules` and build output) returns exactly the two declaration sites and no guard, route, or check | `types/approval-product.ts:7`; `db/migrations/zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts:16-19` | Declared-inert, **not** a vulnerability — granting it confers nothing, so the failure direction is closed. Recorded because it is the obvious carrier for a later admin data-repair surface and must not be adopted by inference |
 | D-3 | Legacy `POST /api/approvals/:id/approve` and `/reject` terminate an instance with a raw status UPDATE, bypassing the graph executor and any assignment check, on `approvals:act` alone | `routes/approvals.ts:2097`, `:2247`; UPDATEs `:2180`, `:2337` | Pre-existing, out of Lock-7's scope, and **cannot bypass a field mask today because they write no form data**. Stated so the row is not read as a live field-write bypass; locked forward: no field write may ever be added on these paths |
 | D-4 | Two divergent participant predicates with no shared helper | `approval-attachment-runtime.ts:201-243`; `routes/approval-metrics.ts:193-215` | Pre-existing divergence. Lock-7 adds no third; its authorization is the active-seat check |
 | D-5 | `GET /api/approvals/:id` is guarded by `approvals:read` alone — `getApproval` (`ApprovalBridgeService.ts:615-660`) applies no participant scoping — and `GET /api/approvals/:id/history` is guarded by `authenticate` alone | `routes/approvals.ts:2404`; `routes/approval-history.ts:43` | **EXTERNAL DEPENDENCY, OPEN owner question, deliberately not settled here.** Lock-7 does not narrow or widen the read scope; it only refuses to add a values channel to the wider of the two surfaces (OD-L7-7). Any later document must resolve read scope on its own authority |
@@ -328,7 +331,7 @@ turns red and asserts the anchor was actually hit.
 | G-11 | Legacy default | a template with no `fieldPermissions` behaves byte-identically before and after the slice: every field writable at a write-capable node, nothing redacted | a template WITH a matrix diverges in the same fixture — absent-≡-editable is default-selected, not accidental |
 | G-12 | Non-approval node types | `editable` on a `cc` / `start` / `end` / `condition` / `parallel` node is REJECTED at publish, not dropped | the pre-slice behavior is pinned first (the key is silently discarded, asserted on the SAVED graph) so the mutation shows the change; and `hidden` on an approval node still round-trips |
 | G-13 | Honesty copy retires atomically, both surfaces | when enforcement lands, neither `FIELD_PERMISSION_READONLY_HINT` nor the `（T1-4b）` marker appears in either authoring surface or in `fieldPermissionHonestyCopy.ts`, and the routing hint is corrected | before the enforcement commit the SAME test asserts both strings ARE present in both surfaces; deleting the copy from only one surface reds a named test (Lock-0 L0-6's one-change rule) |
-| G-14 | Enum mirror sites | the four access-enum copies are asserted equal by exact set (not count, not subset) | dropping a member from any one of the four reds a distinct named test — the four are hand copies, so nothing else catches it |
+| G-14 | Enum mirror sites | the FIVE access-enum copies (R-1) are asserted equal by exact set — not count, not subset — and the site list itself is asserted, so a sixth copy added later fails the census rather than passing unnoticed | dropping a member from any ONE of the five reds a distinct named test; they are hand copies, so the compiler catches none of it. The count is a swept finding, not a remembered figure: an earlier draft of this document said four and missed `templateAuthoring.ts:375-377` |
 | G-15 | Direct-HTTP bypass matrix | for each write-refusal reason (no active seat, wrong node, `readonly`, `hidden`, unknown field, detail sub-column, non-write-capable node type) a direct API call is refused values-free with zero rows | one fully-compliant call succeeds in the same fixture — refusal is reason-selected; and the legacy `/approve` `/reject` routes are asserted to accept NO field payload |
 | G-16 | Dedup invalidation (OD-L7-11(a) only) | with a dedup tier ON, an edited instance does not auto-approve a later node on a pre-edit approval by the same actor | with no edit, the same fixture DOES auto-approve — the invalidation is edit-selected, not flag-blind. Under arm (b) this gate is replaced by a ledger row naming the transferee |
 
