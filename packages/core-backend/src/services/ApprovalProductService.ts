@@ -3897,6 +3897,23 @@ export class ApprovalProductService {
     // must not seed an auto-approval skip. This is the NEW per-edit marker (NOT `nodeEntryEpoch`,
     // which never bumps on a same-round edit). The single-call edit+complete case is handled by the
     // caller passing `[]` (this txn's edit is not yet persisted here).
+    //
+    // Lock-4 OD-L4-10(a) / F4-D 回退 invalidation, priced into Lock-6 L6-A (gate A-7): a return must
+    // invalidate every dedup-relevant approval that predates it, or `mergeAdjacentApprover` /
+    // `dedupeHistoricalApprover` re-merge a re-entered node against a stale pre-return decision and
+    // silently nullify the return. Scope by `to_version` rather than the literal `nodeEntryEpoch` int:
+    // `to_version` is a per-instance monotonic counter stamped on EVERY approval_records row (manual
+    // approves AND `insertAutoApprovalEvents` rows alike) with no legacy-NULL case, so it needs no
+    // cutoff-fallback branch the way the T2-4 threshold tally's epoch reader does (:8000ish, "Dual-read
+    // fallback (§6)") — the SAME round-boundary idea that machinery already proves out for the
+    // threshold tally, applied here without inventing a second bookkeeping column or a new metadata key
+    // on the return's own audit row. `>=` (not `>`): the RETURN action's OWN same-transaction cascade
+    // events (`insertAutoApprovalEvents` stamps them with the SAME `toVersion` as the `action:'return'`
+    // row, §L6-A round-scoping) must stay visible to LATER evaluations, not just future actions strictly
+    // after this version. The return call site itself does not depend on this predicate — at the moment
+    // a return's own cascade evaluates, its `action:'return'` row is not committed yet, so that call
+    // passes `[]` directly (mirrors the create-cascade pattern below) rather than relying on this floor
+    // to self-exclude a not-yet-existing row.
     const result = await client.query<{
       id: string | number
       actor_id: string
@@ -3908,6 +3925,10 @@ export class ApprovalProductService {
          AND action = 'approve'
          AND id > COALESCE(
            (SELECT MAX(audit_record_id) FROM approval_form_field_revisions WHERE instance_id = $1),
+           0
+         )
+         AND to_version >= COALESCE(
+           (SELECT MAX(to_version) FROM approval_records WHERE instance_id = $1 AND action = 'return'),
            0
          )
        ORDER BY occurred_at ASC, id ASC`,
@@ -7899,6 +7920,16 @@ export class ApprovalProductService {
         await this.deactivateAllActiveAssignments(client, id)
         const returnResolution = executor.resolveReturnToNode(targetNodeKey)
         const requesterId = requesterSnapshot?.id
+        // Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 — this return's own `action:'return'` row has not
+        // committed yet, so `loadApprovalHistory`'s new `to_version >=` return-floor (above) cannot see
+        // it and would still surface every PRE-return approval (e.g. an adjacent node's stale approval
+        // by the same person the target node is re-assigned to). Seed this synchronous cascade with an
+        // EMPTY history instead — the same pattern the create-cascade already uses (`:5905` — a brand
+        // new instance starts empty too) — so mergeAdjacentApprover / dedupeHistoricalApprover cannot
+        // re-merge against anything that predates this return. Auto-approval events THIS cascade itself
+        // produces are still chained correctly: `applyAutoApprovalCascade` appends each event into this
+        // same array as it evaluates, and `insertAutoApprovalEvents` below persists them with the SAME
+        // `toVersion` as the `action:'return'` row, so later evaluations see them via the floor query.
         const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
           ? this.applyAutoApprovalCascade(
               id,
@@ -7906,7 +7937,7 @@ export class ApprovalProductService {
               executor,
               returnResolution,
               typeof requesterId === 'string' ? requesterId : null,
-              await this.loadApprovalHistory(client, id),
+              [],
             )
           : returnResolution
         await client.query(
