@@ -1154,6 +1154,9 @@ import {
   validateTemplateBasicInfo,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
+  isPlaceholderRoleSource,
+  addAssigneeSourceCard,
+  removeAssigneeSourceCard,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1828,8 +1831,10 @@ function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
 function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefined {
   return draft.value.approvalNodeEdits?.[nodeKey]
 }
-function approvalNodeFirstSource(nodeKey: string): ApprovalAssigneeSource | undefined {
-  return approvalNodeEditFor(nodeKey)?.assigneeSources[0]
+// P1-B: replaces the old assigneeSources[0]-only accessor — every card is addressed by its own
+// sourceIndex now (see nodeConfigEditorContext.ts's doc comment on the required-index posture).
+function approvalNodeSourceAt(nodeKey: string, sourceIndex: number): ApprovalAssigneeSource | undefined {
+  return approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
 }
 function approvalNodeMode(nodeKey: string): ApprovalMode {
   return approvalNodeEditFor(nodeKey)?.approvalMode ?? 'single'
@@ -1885,29 +1890,47 @@ function setApprovalNodeFieldAccess(nodeKey: string, fieldId: string, access: No
   if (access !== 'editable') next.push({ fieldId, access })
   edit.fieldPermissions = next
 }
-// Replace ONLY the primary (first) source; preserve any extra sources verbatim (no flatten).
-function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource): void {
+// P1-B: replace ONLY the card AT sourceIndex; every other card (and every other node field) is
+// preserved verbatim (no flatten). Out-of-range indexes are refused as a no-op.
+function setApprovalNodeSourceAt(nodeKey: string, sourceIndex: number, source: ApprovalAssigneeSource): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
-  edit.assigneeSources = [source, ...edit.assigneeSources.slice(1)]
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  const next = edit.assigneeSources.slice()
+  next[sourceIndex] = source
+  edit.assigneeSources = next
 }
-function approvalSourceKind(nodeKey: string): ApprovalAssigneeSourceKind {
-  return approvalNodeFirstSource(nodeKey)?.kind ?? 'requester'
+function approvalSourceKind(nodeKey: string, sourceIndex: number): ApprovalAssigneeSourceKind {
+  return approvalNodeSourceAt(nodeKey, sourceIndex)?.kind ?? 'requester'
 }
 // Gate P1-1 fix: the roster is a native `role="radiogroup"` (APG requires arrows to move AND
 // select, so commit-on-arrow stays — see the L0-2 radio grid), which means an accidental
-// ArrowUp/ArrowDown traversal calls this on every focus step. Naively replacing
-// `assigneeSources[0]` with a fresh, empty-payload object per kind (the pre-fix behaviour) is
-// therefore destructive: one arrow out and one arrow back silently discarded a configured
-// `userIds`/`roleIds`/`fieldId`/`levels`/`level` with no undo (canvas history never records a
-// per-keystroke config edit — A-8) and no save path (the stripped payload fails node validation).
-// Fix: cache the outgoing payload per (nodeKey, kind) for this editing session BEFORE switching,
-// and restore it verbatim if the author switches back to a previously-configured kind. Cleared by
-// `resetApprovalSourceKindCache()` whenever the draft is reseeded from a fresh template/graph (see
-// `reseedCanvasHistoryFromDraft`) — the cache is a session convenience, never persisted.
+// ArrowUp/ArrowDown traversal calls this on every focus step. Naively replacing a card with a
+// fresh, empty-payload object per kind (the pre-fix behaviour) is therefore destructive: one arrow
+// out and one arrow back silently discarded a configured `userIds`/`roleIds`/`fieldId`/`levels`/
+// `level` with no undo (canvas history never records a per-keystroke config edit — A-8) and no
+// save path (the stripped payload fails node validation).
+// Fix: cache the outgoing payload per (nodeKey, sourceIndex, kind) for this editing session BEFORE
+// switching, and restore it verbatim if the author switches back to a previously-configured kind on
+// THAT card. P1-B: keyed by card, not just node — two cards on one node cache independently, and
+// `resetApprovalSourceKindCache()` (draft reseed) still clears the whole session cache. Any
+// structural change to a node's source list (add/remove a card) also drops that node's cache slice
+// — see `addApprovalSourceCard`/`removeApprovalSourceCard` — because indexes shift and a stale
+// per-index cache entry would otherwise attribute one card's cached payload to a different card.
 const approvalSourceKindCache = ref<Record<string, Partial<Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource>>>>({})
 function resetApprovalSourceKindCache(): void {
   approvalSourceKindCache.value = {}
+}
+function approvalSourceKindCacheKey(nodeKey: string, sourceIndex: number): string {
+  return `${nodeKey}:${sourceIndex}`
+}
+function clearApprovalSourceKindCacheForNode(nodeKey: string): void {
+  const prefix = `${nodeKey}:`
+  const next: typeof approvalSourceKindCache.value = {}
+  for (const [key, value] of Object.entries(approvalSourceKindCache.value)) {
+    if (!key.startsWith(prefix)) next[key] = value
+  }
+  approvalSourceKindCache.value = next
 }
 function cloneAssigneeSource(source: ApprovalAssigneeSource): ApprovalAssigneeSource {
   return JSON.parse(JSON.stringify(source)) as ApprovalAssigneeSource
@@ -1926,30 +1949,66 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
                 : kind === 'dept_head_at_level' ? { kind, level: 1 }
                   : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
-function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
-  const current = approvalNodeFirstSource(nodeKey)
+function setApprovalSourceKind(nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind): void {
+  const cacheKey = approvalSourceKindCacheKey(nodeKey, sourceIndex)
+  const current = approvalNodeSourceAt(nodeKey, sourceIndex)
   if (current && current.kind !== kind) {
-    const cacheForNode = approvalSourceKindCache.value[nodeKey] ?? {}
-    cacheForNode[current.kind] = cloneAssigneeSource(current)
-    approvalSourceKindCache.value = { ...approvalSourceKindCache.value, [nodeKey]: cacheForNode }
+    const cacheForCard = approvalSourceKindCache.value[cacheKey] ?? {}
+    cacheForCard[current.kind] = cloneAssigneeSource(current)
+    approvalSourceKindCache.value = { ...approvalSourceKindCache.value, [cacheKey]: cacheForCard }
   }
-  const cached = approvalSourceKindCache.value[nodeKey]?.[kind]
+  const cached = approvalSourceKindCache.value[cacheKey]?.[kind]
   const next: ApprovalAssigneeSource = cached ? cloneAssigneeSource(cached) : defaultApprovalSourceForKind(kind)
-  setApprovalNodeSource(nodeKey, next)
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, next)
 }
-function approvalSourceIds(nodeKey: string): string[] {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceIds(nodeKey: string, sourceIndex: number): string[] {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   if (source?.kind === 'static_user') return source.userIds
   if (source?.kind === 'static_role') return source.roleIds
   return []
 }
-// G-5 sentinel hint: true when the source is a static_role still carrying the starter-preset
+// G-5 sentinel hint: true when THIS card is a static_role still carrying the starter-preset
 // placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
-// in the editor so the admin replaces it first. Non-blocking — the draft still saves. Delegates to
-// the shared `placeholderRoleNodeKeys` (B2-03) so the per-node hint and the aggregate publish
-// checklist item share one predicate.
-function approvalSourceIsPlaceholder(nodeKey: string): boolean {
-  return publishPlaceholderRoleKeys.value.includes(nodeKey)
+// in the editor so the admin replaces it first. Non-blocking — the draft still saves. Computed
+// directly off the card at sourceIndex (not the aggregate `publishPlaceholderRoleKeys` list) so a
+// node with N cards points the hint at the EXACT offending card rather than lighting up all of them.
+// Delegates to the SAME `isPlaceholderRoleSource` predicate `placeholderRoleNodeKeys` uses, so the
+// per-card hint and the aggregate publish checklist item can never disagree on what counts.
+function approvalSourceIsPlaceholder(nodeKey: string, sourceIndex: number): boolean {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  return Boolean(source && isPlaceholderRoleSource(source))
+}
+// P1-B: card count for the v-for + the "keep ≥1" remove-guard's disabled state.
+function approvalSourceCount(nodeKey: string): number {
+  return approvalNodeEditFor(nodeKey)?.assigneeSources.length ?? 0
+}
+// P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
+// editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
+// button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
+// unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
+// kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
+// the end), so a card the author already configured-then-switched-away-from keeps its cached
+// payload intact across an unrelated add — clearing here would silently re-open the exact P1-1
+// config-loss bug in a new sequence (configure → switch away → add a card → switch back → cache
+// gone → empty payload, no undo).
+function addApprovalSourceCard(nodeKey: string, defaultKind: ApprovalAssigneeSourceKind): void {
+  const edits = draft.value.approvalNodeEdits
+  if (!edits) return
+  addAssigneeSourceCard(edits, nodeKey, defaultApprovalSourceForKind(defaultKind))
+}
+// P1-B fail-closed remove: a node must always keep ≥1 assignee source. Delegates to the pure,
+// independently unit-tested `removeAssigneeSourceCard` (approvalNodeEdit.ts), which refuses at
+// length<=1 REGARDLESS of the remove button's `disabled` attribute — see that function's doc
+// comment for why disabled-button DOM testing alone cannot prove this guard. Clears the P1-1
+// kind-switch cache for this node HERE (unlike add): removing a card SHIFTS every subsequent card's
+// index, so a stale per-index cache entry would otherwise attribute one card's cached payload to a
+// now-different card at the same index — clearing avoids that misattribution. It is a session-only
+// UX convenience (never persisted), so losing it on remove is a strictly safe/conservative choice.
+function removeApprovalSourceCard(nodeKey: string, sourceIndex: number): void {
+  const edits = draft.value.approvalNodeEdits
+  if (!edits) return
+  clearApprovalSourceKindCacheForNode(nodeKey)
+  removeAssigneeSourceCard(edits, nodeKey, sourceIndex)
 }
 
 // ── Topology authoring (graphTopologyEdit + authoring session history) ──
@@ -2507,10 +2566,10 @@ function onCanvasNodeDrop(event: DragEvent, edgeKey: string): void {
   event.stopPropagation()
   applyCanvasNodeMove(edgeKey)
 }
-function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
-  else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
+function setApprovalSourceIds(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  const kind = approvalSourceKind(nodeKey, sourceIndex)
+  if (kind === 'static_user') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, userIds: ids })
+  else if (kind === 'static_role') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, roleIds: ids })
 }
 // G-B2-18 manual-ID advanced fallback for the complex-node picker. Unlike the linear step (whose
 // idsText is a real persisted draft field — the SOLE carrier, only parsed into ids at save time),
@@ -2521,18 +2580,18 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // buffer is the raw carrier instead (never part of node.config / the saved graph): read back
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
-function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
-  setApprovalSourceIds(nodeKey, ids)
+function setApprovalSourceIdsFromPicker(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  setApprovalSourceIds(nodeKey, sourceIndex, ids)
 }
-function approvalSourceFieldId(nodeKey: string): string {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceFieldId(nodeKey: string, sourceIndex: number): string {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   return source?.kind === 'form_field_user' ? source.fieldId : ''
 }
-function setApprovalSourceFieldId(nodeKey: string, fieldId: string): void {
-  setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
+function setApprovalSourceFieldId(nodeKey: string, sourceIndex: number, fieldId: string): void {
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'form_field_user', fieldId })
 }
-function approvalSourceLevel(nodeKey: string): number {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   if (source?.kind === 'manager_at_level') return source.level
   if (source?.kind === 'continuous_managers') return source.levels
   // Lock-1 §K4: same shared-field shape as continuous_managers.
@@ -2541,12 +2600,12 @@ function approvalSourceLevel(nodeKey: string): number {
   if (source?.kind === 'dept_head_at_level') return source.level
   return 1
 }
-function setApprovalSourceLevel(nodeKey: string, value: number): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
-  else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
-  else if (kind === 'continuous_dept_heads') setApprovalNodeSource(nodeKey, { kind, levels: value })
-  else if (kind === 'dept_head_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
+function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: number): void {
+  const kind = approvalSourceKind(nodeKey, sourceIndex)
+  if (kind === 'manager_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
+  else if (kind === 'continuous_managers') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
+  else if (kind === 'continuous_dept_heads') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
+  else if (kind === 'dept_head_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
@@ -2611,10 +2670,8 @@ async function onUserSearch(query: string): Promise<void> {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   }
-  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
-    if (approvalSourceKind(nodeKey) !== 'static_user') continue
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
-  }
+  // P1-B: a node may carry N cards now — sync EVERY card's chips, not just card 0.
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
   for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) {
     const edit = ccEditFor(nodeKey)
     if (!edit || edit.targetType !== 'user') continue
@@ -2644,24 +2701,26 @@ function syncAllStepOptions(): void {
 }
 
 // G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to complex-graph
-// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey).
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey). P1-B: loops EVERY card on
+// the node — a node with N sources needs N cards' worth of chips kept visible, not just card 0.
 function syncApprovalNodeOptions(nodeKey: string): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'static_user') {
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
-  } else if (kind === 'static_role') {
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
-  } else if (kind === 'requester_choice') {
-    // §K2: keep the configured scope list's chips visible in the sub-form pickers.
-    const source = approvalNodeEditFor(nodeKey)?.assigneeSources[0]
-    if (source?.kind === 'requester_choice') {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.assigneeSources.forEach((source, sourceIndex) => {
+    const kind = source.kind
+    if (kind === 'static_user') {
+      for (const id of approvalSourceIds(nodeKey, sourceIndex)) directory.ensureUserOptionVisible(id)
+    } else if (kind === 'static_role') {
+      for (const id of approvalSourceIds(nodeKey, sourceIndex)) directory.ensureRoleOptionVisible(id)
+    } else if (kind === 'requester_choice') {
+      // §K2: keep the configured scope list's chips visible in the sub-form pickers.
       if (source.scope.type === 'members') {
         for (const id of source.scope.userIds) directory.ensureUserOptionVisible(id)
       } else if (source.scope.type === 'role') {
         for (const id of source.scope.roleIds) directory.ensureRoleOptionVisible(id)
       }
     }
-  }
+  })
 }
 
 function syncAllApprovalNodeOptions(): void {
@@ -2731,6 +2790,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalSourceLevel,
   setApprovalSourceLevel,
   approvalSourceIsPlaceholder,
+  approvalSourceCount,
+  addApprovalSourceCard,
+  removeApprovalSourceCard,
   approvalNodeMode,
   setApprovalNodeMode,
   approvalNodeEmptyPolicy,

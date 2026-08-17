@@ -156,7 +156,16 @@ const ElSelect = defineComponent({
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
       onChange: (event: Event) => {
-        const value = (event.target as HTMLSelectElement).value
+        const target = event.target as HTMLSelectElement
+        // P1-B/P2(b) stub fidelity fix (test-only): a real el-select `multiple` emits an ARRAY of
+        // selected values via `update:model-value`, not the native `<select>.value` single string.
+        // Every existing multi-select consumer in this file either already expects an array
+        // (requester_choice scope ids, via its own `Array.isArray(ids) ? ids : [ids]` coercion —
+        // unaffected either way) or is a non-multiple select (unaffected — this branch is gated on
+        // the `multiple` DOM attribute, which Vue's attr-fallthrough already sets from the real
+        // `multiple` template binding). Verified: no test in this file asserted a single-STRING
+        // written value for a genuinely multi-attributed select before this fix.
+        const value = target.multiple ? Array.from(target.selectedOptions).map((option) => option.value) : target.value
         this.$emit('update:modelValue', value)
         this.$emit('change', value)
       },
@@ -1144,6 +1153,109 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(appB.config.assigneeSources[0]).toEqual({ kind: 'static_role', roleIds: ['legal'] })
   })
 
+  // P1-B / P1-1 interaction: adding a NEW card must NOT clear the P1-1 kind-switch cache for
+  // EXISTING cards. Append never shifts card 0's index, so a naive "clear on any structural change"
+  // implementation would needlessly re-open the exact P1-1 config-loss bug in a new sequence.
+  it('P1-B: adding a 2nd card does NOT clear card 0\'s P1-1 kind-switch cache — switching card 0 away then back still restores its configured roleIds', async () => {
+    routeParams = { id: 'tpl_p1b_add_preserves_cache' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // app_b: static_role, roleIds:['legal'] at card 0 (the same P1-1 fixture as above).
+    clickCanvasNode('app_b')
+    await flushUi()
+    let cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(1)
+
+    // Switch card 0 away from static_role (caches roleIds:['legal'] under card index 0).
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).click()
+    await flushUi()
+
+    // NOW add a 2nd card — this must NOT clear card 0's just-cached payload.
+    ;(container!.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(2)
+
+    // Switch card 0 BACK to static_role — the cached roleIds must be restored, not emptied.
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    const rolePickerAfter = cards[0].querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+    expect(rolePickerAfter.value).toBe('legal') // restored — the add did NOT wipe the cache
+    const echo = cards[0].querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo?.textContent).toBe('已配置：指定角色（1 个）')
+    expect(echo?.textContent).not.toBe('已配置：指定角色（未选择）')
+  })
+
+  // P2(a) — adversarial gate (docs/development pinned MD, 2026-08-17): the OPPOSITE direction of
+  // the add-preserves-cache test above. `removeApprovalSourceCard` clears the WHOLE node's
+  // kind-switch cache before removing (`clearApprovalSourceKindCacheForNode`) precisely because
+  // removal SHIFTS every subsequent card's index — a survivor that slides into a REMOVED card's old
+  // index must NOT inherit that removed card's stale per-index cached payload. This was load-bearing
+  // but had zero coverage (mutation: deleting the clear-on-remove call left all 186 tests green).
+  it('P1-B / P2(a): removing card 0 does NOT leak its cached kind-switch payload into the survivor that slides into its old index', async () => {
+    routeParams = { id: 'tpl_p1b_remove_clears_cache' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // app_b: static_role, roleIds:['legal'] at card 0.
+    clickCanvasNode('app_b')
+    await flushUi()
+    let cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(1)
+
+    // Switch card 0 AWAY from static_role — this caches roleIds:['legal'] under the node's
+    // INDEX-0 cache slot (keyed `nodeKey:0`), exactly like the add-preserves-cache test above.
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).click()
+    await flushUi()
+
+    // Add a 2nd card — genuinely fresh, has NEVER held any roleIds. This becomes the survivor.
+    ;(container!.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(2)
+
+    // Remove card 0 — its CURRENT content is `requester` (switched above), but it still carries the
+    // STALE index-0 cache entry `{static_role: {roleIds:['legal']}}` from that switch. Card 1 (the
+    // fresh card) shifts DOWN into index 0.
+    ;(cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(1)
+    expect((cards[0].querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).checked).toBe(true)
+
+    // Switch the SURVIVOR (now at index 0, a card that NEVER held 'legal') to static_role. If the
+    // remove had not cleared the per-index cache, the survivor would wrongly inherit the REMOVED
+    // card's stale cached roleIds — a silent wrong-approver reaching Save.
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    const rolePicker = cards[0].querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+    expect(rolePicker.value).not.toBe('legal') // must NOT inherit the removed card's cached role
+    expect(rolePicker.value).toBe('') // clean — a genuinely fresh static_role, no pre-selection
+    const echo2 = cards[0].querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo2?.textContent).toBe('已配置：指定角色（未选择）')
+    expect(echo2?.textContent).not.toBe('已配置：指定角色（1 个）')
+    // NOTE: this test deliberately stops at the DOM/model assertions above rather than also
+    // round-tripping a Save. An empty `static_role` (the CORRECT, leak-free outcome this test
+    // proves) fails its own orthogonal `isAssigneeSourceValid` gate (`roleIds.some(...)`, a
+    // completely different concern from this cache leak) inside `persistDraft`'s `validate()` —
+    // `canSave`/the Save button's `disabled` state does NOT check per-source validity (only
+    // `unsupportedReason`), so the button stays clickable, but the click's `validate()` call
+    // correctly refuses to persist an unconfigured role and no `updateTemplate` call happens. That
+    // is expected, orthogonal behavior, not something this leak-freedom test should route around by
+    // picking a non-empty role (which would need a directory-backed picker option this full-mount
+    // section does not stub) — the picker value and configured-summary echo above are the complete,
+    // load-bearing, unambiguous proof that 'legal' did not leak into the survivor.
+  })
+
   it('Lock-7 G-13: the readonly honesty copy is retired atomically in BOTH authoring surfaces; selecting readonly renders no hint; the routing hint stays', async () => {
     // L0-6 one-change rule: the retired strings/markers must be absent from BOTH surface sources
     // (linear + canvas). Asserting on BOTH blobs is what reds if the copy is re-added to EITHER
@@ -1394,10 +1506,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       ccTargetTypeLabel: () => '用户',
       setCcTargetIds: () => {},
       syncCcOptions: () => {},
-      approvalSourceKind: (nodeKey: string) => (edits[nodeKey]?.assigneeSources[0]?.kind as any) ?? 'requester',
-      setApprovalSourceKind: (nodeKey: string, kind: any) => {
+      // P1-B: every per-source accessor now takes an explicit sourceIndex (one card in the array).
+      approvalSourceKind: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.kind as any) ?? 'requester',
+      setApprovalSourceKind: (nodeKey: string, sourceIndex: number, kind: any) => {
         const edit = edits[nodeKey]
-        if (!edit) return
+        if (!edit || sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
         const next: Record<string, unknown> =
           kind === 'static_user' ? { kind, userIds: [] }
             : kind === 'static_role' ? { kind, roleIds: [] }
@@ -1409,30 +1522,32 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                       // Lock-1 §K5-b: same default shape as manager_at_level.
                       : kind === 'dept_head_at_level' ? { kind, level: 1 }
                         : { kind }
-        edit.assigneeSources = [next, ...edit.assigneeSources.slice(1)]
+        const nextSources = edit.assigneeSources.slice()
+        nextSources[sourceIndex] = next
+        edit.assigneeSources = nextSources
       },
       syncApprovalNodeOptions: () => {},
-      approvalSourceIds: (nodeKey: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceIds: (nodeKey: string, sourceIndex: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         return (source?.userIds as string[]) ?? (source?.roleIds as string[]) ?? []
       },
-      setApprovalSourceIdsFromPicker: (nodeKey: string, ids: string[]) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      setApprovalSourceIdsFromPicker: (nodeKey: string, sourceIndex: number, ids: string[]) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (!source) return
         if (source.kind === 'static_user') source.userIds = ids
         else if (source.kind === 'static_role') source.roleIds = ids
       },
-      approvalSourceFieldId: (nodeKey: string) => (edits[nodeKey]?.assigneeSources[0]?.fieldId as string) ?? '',
-      setApprovalSourceFieldId: (nodeKey: string, fieldId: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.fieldId as string) ?? '',
+      setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (source && source.kind === 'form_field_user') source.fieldId = fieldId
       },
-      approvalSourceLevel: (nodeKey: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceLevel: (nodeKey: string, sourceIndex: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         return (source?.level as number) ?? (source?.levels as number) ?? 1
       },
-      setApprovalSourceLevel: (nodeKey: string, value: number) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      setApprovalSourceLevel: (nodeKey: string, sourceIndex: number, value: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (!source) return
         if (source.kind === 'manager_at_level') source.level = value
         else if (source.kind === 'continuous_managers') source.levels = value
@@ -1440,6 +1555,26 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         else if (source.kind === 'dept_head_at_level') source.level = value
       },
       approvalSourceIsPlaceholder: () => false,
+      approvalSourceCount: (nodeKey: string) => edits[nodeKey]?.assigneeSources.length ?? 0,
+      addApprovalSourceCard: (nodeKey: string, defaultKind: any) => {
+        const edit = edits[nodeKey]
+        if (!edit) return
+        const next: Record<string, unknown> =
+          defaultKind === 'static_user' ? { kind: defaultKind, userIds: [] }
+            : defaultKind === 'static_role' ? { kind: defaultKind, roleIds: [] }
+              : defaultKind === 'form_field_user' ? { kind: defaultKind, fieldId: '' }
+                : defaultKind === 'continuous_managers' ? { kind: defaultKind, levels: 1 }
+                  : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 }
+                    : defaultKind === 'continuous_dept_heads' ? { kind: defaultKind, levels: 1 }
+                      : defaultKind === 'dept_head_at_level' ? { kind: defaultKind, level: 1 }
+                        : { kind: defaultKind }
+        edit.assigneeSources = [...edit.assigneeSources, next]
+      },
+      removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => {
+        const edit = edits[nodeKey]
+        if (!edit || edit.assigneeSources.length <= 1) return
+        edit.assigneeSources = edit.assigneeSources.filter((_, index) => index !== sourceIndex)
+      },
       approvalNodeMode: () => 'single',
       setApprovalNodeMode: () => {},
       approvalNodeEmptyPolicy: () => 'error',
@@ -1900,5 +2035,215 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       scope: { type: 'role', roleIds: ['role_fin'] },
     })
     unmount()
+  })
+
+  // P1-B — master §P1-B: multi-source assignee cards. The engine already unions + dedups
+  // `assigneeSources[]` (ApprovalAssigneeResolver.ts, verified unchanged by this slice); these
+  // tests cover the FE-ONLY surface — rendering N cards, add/remove wiring, and the M8 honesty
+  // copy. The fail-closed "keep ≥1 source" GUARD itself is unit-tested directly against the pure
+  // `removeAssigneeSourceCard` in approval-template-authoring-approval-node-edit.test.ts (a native
+  // `disabled` button cannot dispatch a click event at all, so DOM-level mutation testing of the
+  // guard is not meaningful here — this file proves the WIRING: the button reaches that function
+  // and the `disabled` attribute reflects the count correctly).
+  describe('P1-B: multi-source assignee cards', () => {
+    it('positive control: a SINGLE-source node renders exactly 1 card, remove disabled, no union hint (byte-identical to pre-P1-B shape)', () => {
+      const node = makeApprovalNode('approval_single')
+      const api = createStubConfigApi({ approval_single: { assigneeSources: [{ kind: 'direct_manager' }] } })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((c.querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(true)
+      expect(c.querySelector('[data-testid="approval-node-source-union-hint"]')).toBeNull() // M8: no dedup-honesty copy for a trivial single-source node
+      expect(c.querySelector('[data-testid="approval-node-source-add"]')).not.toBeNull()
+      // every existing single-source testid still resolves exactly once — the old shape survives.
+      expect(c.querySelectorAll('[data-testid="approval-node-source-roster"]')).toHaveLength(1)
+      expect((c.querySelector('[data-testid="approval-node-source-kind-direct_manager"]') as HTMLInputElement).checked).toBe(true)
+      unmount()
+    })
+
+    it('hydrate: a node seeded with 2 sources renders exactly 2 cards, each showing its OWN kind (mutation: hydrate only [0] → this reds)', () => {
+      const node = makeApprovalNode('approval_two')
+      const api = createStubConfigApi({
+        approval_two: { assigneeSources: [{ kind: 'direct_manager' }, { kind: 'dept_head' }] },
+      })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(2)
+      expect((cards[0].querySelector('[data-testid="approval-node-source-kind-direct_manager"]') as HTMLInputElement).checked).toBe(true)
+      expect((cards[1].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).checked).toBe(true)
+      // remove is ENABLED once there is more than one card.
+      expect((cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(false)
+      expect((cards[1].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(false)
+      // M8 honesty: the union/dedup hint renders (count > 1) and does not claim the FE itself dedups.
+      const hint = c.querySelector('[data-testid="approval-node-source-union-hint"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent).toContain('并集')
+      expect(hint!.textContent).toMatch(/系统运行时自动去重|运行时/) // attributes dedup to the RUNTIME, not this editor
+      unmount()
+    })
+
+    it('"＋添加审批人" appends a registry-defaulted card; the existing card is untouched; the model has 2 sources', async () => {
+      const node = makeApprovalNode('approval_add')
+      const api = createStubConfigApi({ approval_add: { assigneeSources: [{ kind: 'direct_manager' }] } })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      ;(c.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources).toHaveLength(2)
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' }) // untouched
+      // the new card defaults to `requester` — NOT the roster's raw first entry (`static_user`,
+      // whose zero-config shape `{ kind: 'static_user', userIds: [] }` fails validation and would
+      // disable Save on every single click of "＋添加审批人"). `requester` is valid with zero
+      // further configuration, same convention as a brand-new node (graphTopologyEdit.ts).
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[1]).toEqual({ kind: 'requester' })
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(2)
+      unmount()
+    })
+
+    it('remove drops the RIGHT card — the SURVIVOR is the other one, not a stale re-render of the removed card (not a count-only assertion)', async () => {
+      const node = makeApprovalNode('approval_rm')
+      const api = createStubConfigApi({
+        approval_rm: { assigneeSources: [{ kind: 'direct_manager' }, { kind: 'dept_head' }] },
+      })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const removeCard0 = c.querySelectorAll('[data-testid="approval-node-source-card"]')[0]
+        .querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement
+      removeCard0.click()
+      await flushUi()
+
+      expect(api.approvalNodeEditFor('approval_rm')?.assigneeSources).toEqual([{ kind: 'dept_head' }])
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((cards[0].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).checked).toBe(true)
+      // remove is disabled again now that exactly 1 remains — the UX signal tracks the guard.
+      expect((cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(true)
+      unmount()
+    })
+
+    // A `handler` node's own "add defaults from the seven-member handler roster" case is covered in
+    // approval-handler-node-config.spec.ts's stub, which (unlike this file's createStubConfigApi)
+    // already implements handlerNodeMode/handlerNodeOpinionRequired — required for a handler node
+    // to render at all through THIS harness's `installStubs`.
+
+    // P2(b) — adversarial gate: the SIX non-kind write setters (`setApprovalSourceIdsFromPicker`,
+    // `setApprovalSourceFieldId`, `setApprovalSourceLevel`, `setRequesterChoiceMode`,
+    // `setRequesterChoiceScopeType`, `setRequesterChoiceScopeIds`) were never exercised at
+    // `sourceIndex >= 1` — every existing test either only READS card ≥1 (kind-checked, count,
+    // remove-disabled) or edits its KIND radio, never its typed sub-form. A regression hardcoding
+    // any of these six template callsites' `sourceIndex` argument to `0` left ALL 186 tests green.
+    // These two specs drive every one of the six at index >= 1 (one node with an index-0 CONTROL
+    // card that must stay byte-identical throughout) and assert the write lands on the card it was
+    // aimed at, not card 0.
+    it('P1-B / P2(b): setApprovalSourceIdsFromPicker / setApprovalSourceFieldId / setApprovalSourceLevel at sourceIndex >= 1 land on the RIGHT card — the index-0 control card stays byte-identical', () => {
+      const node = makeApprovalNode('approval_p2b_pickers')
+      const api = createStubConfigApi({
+        approval_p2b_pickers: {
+          assigneeSources: [
+            { kind: 'direct_manager' }, // 0: CONTROL — must be untouched by every write below
+            { kind: 'static_user', userIds: [] }, // 1: setApprovalSourceIdsFromPicker target (user branch)
+            { kind: 'static_role', roleIds: [] }, // 2: setApprovalSourceIdsFromPicker target (role branch)
+            { kind: 'form_field_user', fieldId: '' }, // 3: setApprovalSourceFieldId target
+            { kind: 'manager_at_level', level: 1 }, // 4: setApprovalSourceLevel target
+          ],
+        },
+      })
+      ;(api as { directoryUsers: Array<{ id: string }> }).directoryUsers = [{ id: 'u_only' }]
+      ;(api as { directoryRoles: Array<{ id: string }> }).directoryRoles = [{ id: 'r_only' }]
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(5)
+
+      // setApprovalSourceIdsFromPicker at index 1 (static_user).
+      const userPicker = cards[1].querySelector('[data-testid="approval-node-source-user-picker"]') as HTMLSelectElement
+      userPicker.value = 'u_only'
+      userPicker.dispatchEvent(new Event('change'))
+
+      // setApprovalSourceIdsFromPicker at index 2 (static_role — the SAME setter, different kind).
+      const rolePicker = cards[2].querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+      rolePicker.value = 'r_only'
+      rolePicker.dispatchEvent(new Event('change'))
+
+      // setApprovalSourceFieldId at index 3. `userFields` defaults to [{id:'reviewer',...}] in the stub.
+      const fieldPicker = cards[3].querySelector('[data-testid="approval-node-source-field"]') as HTMLSelectElement
+      fieldPicker.value = 'reviewer'
+      fieldPicker.dispatchEvent(new Event('change'))
+
+      // setApprovalSourceLevel at index 4.
+      const levelInput = cards[4].querySelector('[data-testid="approval-node-source-level"]') as HTMLInputElement
+      levelInput.value = '4'
+      levelInput.dispatchEvent(new Event('input'))
+
+      const sources = api.approvalNodeEditFor('approval_p2b_pickers')?.assigneeSources as Array<Record<string, unknown>>
+      // CONTROL untouched by all FOUR writes above — proves none of them mis-targeted index 0.
+      expect(sources[0]).toEqual({ kind: 'direct_manager' })
+      expect(sources[1]).toEqual({ kind: 'static_user', userIds: ['u_only'] })
+      expect(sources[2]).toEqual({ kind: 'static_role', roleIds: ['r_only'] })
+      expect(sources[3]).toEqual({ kind: 'form_field_user', fieldId: 'reviewer' })
+      expect(sources[4]).toEqual({ kind: 'manager_at_level', level: 4 })
+      unmount()
+    })
+
+    it('P1-B / P2(b): the requester_choice sub-form — setRequesterChoiceMode / ScopeType / ScopeIds — at sourceIndex >= 1 lands on the RIGHT card — the index-0 control card stays byte-identical', async () => {
+      const node = makeApprovalNode('approval_p2b_rc')
+      const api = createStubConfigApi({
+        approval_p2b_rc: {
+          assigneeSources: [
+            { kind: 'direct_manager' }, // 0: CONTROL — must be untouched by every write below
+            { kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }, // 1: target
+          ],
+        },
+      })
+      ;(api as { directoryUsers: Array<{ id: string; name?: string; email?: string }> }).directoryUsers = [
+        { id: 'u_alpha', name: 'Alpha', email: 'a@x.test' },
+      ]
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      let cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(2)
+
+      // setRequesterChoiceMode at index 1 (single → multi).
+      const multiRadio = cards[1].querySelector('[data-testid="approval-node-requester-choice-mode-multi"]') as HTMLInputElement
+      multiRadio.checked = true
+      multiRadio.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' })
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[1]).toEqual({
+        kind: 'requester_choice', mode: 'multi', scope: { type: 'company' },
+      })
+
+      // setRequesterChoiceScopeType at index 1 (company → members). Re-render is required before
+      // the members-only user-picker exists in the DOM (conditional on scope.type === 'members').
+      cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      const scopeSelect = cards[1].querySelector('[data-testid="approval-node-requester-choice-scope"]') as HTMLSelectElement
+      scopeSelect.value = 'members'
+      scopeSelect.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' })
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[1]).toEqual({
+        kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: [] },
+      })
+
+      // setRequesterChoiceScopeIds at index 1.
+      cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      const userPicker = cards[1].querySelector('[data-testid="approval-node-requester-choice-user-picker"]') as HTMLSelectElement
+      expect(userPicker).not.toBeNull()
+      userPicker.value = 'u_alpha'
+      userPicker.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      // Final assertion: card 0 is STILL byte-identical after all THREE writes at index 1, and
+      // card 1 accumulated every write correctly.
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' })
+      expect(api.approvalNodeEditFor('approval_p2b_rc')?.assigneeSources[1]).toEqual({
+        kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: ['u_alpha'] },
+      })
+      unmount()
+    })
   })
 })
