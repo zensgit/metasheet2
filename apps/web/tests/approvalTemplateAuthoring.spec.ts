@@ -1343,6 +1343,35 @@ describe('TemplateAuthoringView', () => {
       .toEqual({ targetType: 'role', targetIds: ['finance'] })
   })
 
+  // P1-B regression: the new-card default kind must be VALID with zero further configuration.
+  // The registry roster's raw first entry for `approval` is `static_user`, whose zero-config shape
+  // (`{ kind: 'static_user', userIds: [] }`) FAILS `isAssigneeSourceValid`/`validateApprovalNodeEdits`
+  // (empty `userIds`) — defaulting to it would mean clicking "＋添加审批人" on a perfectly valid
+  // template, without touching the new card at all, immediately creates an unconfigured/invalid
+  // source. This proves the default is `requester` (valid unconditionally) by driving the FULL save
+  // path with the new card COMPLETELY untouched — not just inspecting the model.
+  it('P1-B: clicking "＋添加审批人" alone (no further configuration) keeps the template save-able — the new card defaults to a VALID zero-config kind, not the roster\'s raw first entry', async () => {
+    routeParams = { id: 'tpl_p1b_add_default_valid' }
+    const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+    await flushUi()
+    // save button itself is not gated on assignee validity (that gate is the publish checklist), but
+    // the SAVE must actually go through cleanly with the new card AS-IS — that's the real proof.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const approval1 = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+    expect(approval1.config.assigneeSources).toEqual([{ kind: 'direct_manager' }, { kind: 'requester' }])
+    // and the PUBLISH checklist's flow item stays green too — a `requester` source is unconditionally
+    // valid, unlike the roster's raw first entry would have been.
+    expect(container!.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+  })
+
   // G-B2-18 + D1: complex-graph static_user/static_role uses typed directory pickers only
   // (manual-ID ordinary path removed). cc forces the preserved-graph (complex) path.
   describe('G-B2-18: complex-node assignee picker', () => {

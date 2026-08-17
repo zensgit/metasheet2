@@ -960,10 +960,20 @@ const routingDriverFieldIds = computed(() => unwrap(api.routingDriverFieldIds ??
 function isKnownAssigneeSourceKind(nodeKey: string, sourceIndex: number): boolean {
   return isRegisteredAssigneeSourceKind(registry.value, props.node.type, approvalSourceKind(nodeKey, sourceIndex))
 }
-/** Registry-driven default kind for a brand-new card — the FIRST roster entry for this node type
- *  (never hand-picked: a `handler` node's seven-member roster differs from `approval`'s). */
+/** Registry-driven default kind for a brand-new card. Prefers `requester` — the SAME default
+ *  `appendApprovalNode` seeds a brand-new node with (`graphTopologyEdit.ts`) — because it is valid
+ *  with ZERO further configuration (`isAssigneeSourceValid` returns true for `{ kind: 'requester' }`
+ *  unconditionally). The roster's raw first entry (`static_user`) is NOT a safe default: its shape
+ *  is `{ kind: 'static_user', userIds: [] }`, which `isAssigneeSourceValid` REJECTS (empty
+ *  `userIds`) — defaulting to it would make "＋添加审批人" immediately disable Save on every click
+ *  until the author manually picks users, on a template that validated fine before the click. Falls
+ *  back to the roster's first entry only if `requester` is somehow absent from this node type's
+ *  roster (never true at the shipped baseline: both `approval` and `handler` include it — defensive
+ *  only, never hand-picked outside the registry per master M4). */
 function defaultNewSourceKind(): ApprovalAssigneeSourceKind {
-  return assigneeSourceRosterForNode.value[0]?.kind ?? 'requester'
+  const roster = assigneeSourceRosterForNode.value
+  if (roster.some((opt) => opt.kind === 'requester')) return 'requester'
+  return roster[0]?.kind ?? 'requester'
 }
 
 // ── Lock-1 §K2 requester_choice sub-form ────────────────────────────────────────────────────

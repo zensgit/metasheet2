@@ -1144,6 +1144,44 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(appB.config.assigneeSources[0]).toEqual({ kind: 'static_role', roleIds: ['legal'] })
   })
 
+  // P1-B / P1-1 interaction: adding a NEW card must NOT clear the P1-1 kind-switch cache for
+  // EXISTING cards. Append never shifts card 0's index, so a naive "clear on any structural change"
+  // implementation would needlessly re-open the exact P1-1 config-loss bug in a new sequence.
+  it('P1-B: adding a 2nd card does NOT clear card 0\'s P1-1 kind-switch cache — switching card 0 away then back still restores its configured roleIds', async () => {
+    routeParams = { id: 'tpl_p1b_add_preserves_cache' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // app_b: static_role, roleIds:['legal'] at card 0 (the same P1-1 fixture as above).
+    clickCanvasNode('app_b')
+    await flushUi()
+    let cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(1)
+
+    // Switch card 0 away from static_role (caches roleIds:['legal'] under card index 0).
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).click()
+    await flushUi()
+
+    // NOW add a 2nd card — this must NOT clear card 0's just-cached payload.
+    ;(container!.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(2)
+
+    // Switch card 0 BACK to static_role — the cached roleIds must be restored, not emptied.
+    ;(cards[0].querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    const rolePickerAfter = cards[0].querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+    expect(rolePickerAfter.value).toBe('legal') // restored — the add did NOT wipe the cache
+    const echo = cards[0].querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo?.textContent).toBe('已配置：指定角色（1 个）')
+    expect(echo?.textContent).not.toBe('已配置：指定角色（未选择）')
+  })
+
   it('Lock-7 G-13: the readonly honesty copy is retired atomically in BOTH authoring surfaces; selecting readonly renders no hint; the routing hint stays', async () => {
     // L0-6 one-change rule: the retired strings/markers must be absent from BOTH surface sources
     // (linear + canvas). Asserting on BOTH blobs is what reds if the copy is re-added to EITHER
@@ -1982,9 +2020,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
 
       expect(api.approvalNodeEditFor('approval_add')?.assigneeSources).toHaveLength(2)
       expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' }) // untouched
-      // the new card is defaulted from the registry roster's FIRST kind (static_user for `approval`
-      // nodes) — never hand-picked, and never a kind outside the node-type roster.
-      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[1]).toMatchObject({ kind: 'static_user' })
+      // the new card defaults to `requester` — NOT the roster's raw first entry (`static_user`,
+      // whose zero-config shape `{ kind: 'static_user', userIds: [] }` fails validation and would
+      // disable Save on every single click of "＋添加审批人"). `requester` is valid with zero
+      // further configuration, same convention as a brand-new node (graphTopologyEdit.ts).
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[1]).toEqual({ kind: 'requester' })
       const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
       expect(cards).toHaveLength(2)
       unmount()

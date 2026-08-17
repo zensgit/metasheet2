@@ -262,6 +262,9 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     expect(sources).toHaveLength(2)
     expect(sources[0]).toEqual({ kind: 'requester' }) // untouched
     const newKind = sources[1].kind
+    // `requester` specifically (valid with zero config) — NOT the roster's raw first entry
+    // (`static_user`, whose zero-config shape fails validation and would disable Save).
+    expect(newKind).toBe('requester')
     expect([...HANDLER_ASSIGNEE_SOURCE_KINDS]).toContain(newKind) // in-roster
     expect(['continuous_managers', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level']).not.toContain(newKind)
   })

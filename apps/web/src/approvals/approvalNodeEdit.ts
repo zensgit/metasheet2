@@ -298,6 +298,17 @@ export function validateApprovalNodeEdits(
 }
 
 /**
+ * True when a single assignee source is the starter-preset placeholder role
+ * (`APPROVAL_ROLE_CONFIGURE_SENTINEL`). SINGLE shared predicate for both the aggregate publish
+ * checklist (`placeholderRoleNodeKeys`, below) and the per-card in-editor hint
+ * (`ApprovalGraphNodeConfigEditor.vue`'s `approvalSourceIsPlaceholder`) — the two surfaces must
+ * agree on exactly which source counts as a placeholder, so this is the one place that decides.
+ */
+export function isPlaceholderRoleSource(source: ApprovalAssigneeSource): boolean {
+  return source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
+}
+
+/**
  * B2-03 publish pre-flight: node keys carrying a static_role placeholder role
  * (`APPROVAL_ROLE_CONFIGURE_SENTINEL`) on ANY assignee source, not only the first. The backend
  * fail-fasts on this at PUBLISH (`assertNoUnconfiguredPlaceholderRoles`, ApprovalProductService.ts)
@@ -309,8 +320,6 @@ export function validateApprovalNodeEdits(
  */
 export function placeholderRoleNodeKeys(edits: ApprovalNodeEdits): string[] {
   return Object.values(edits)
-    .filter((edit) => edit.assigneeSources.some(
-      (source) => source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL),
-    ))
+    .filter((edit) => edit.assigneeSources.some(isPlaceholderRoleSource))
     .map((edit) => edit.nodeKey)
 }

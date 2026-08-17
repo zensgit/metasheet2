@@ -1154,6 +1154,7 @@ import {
   validateTemplateBasicInfo,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
+  isPlaceholderRoleSource,
   addAssigneeSourceCard,
   removeAssigneeSourceCard,
   approvalFormulaInsertOptions,
@@ -1242,9 +1243,6 @@ import type {
   ParallelJoinMode,
   ParallelNodeConfig,
 } from '../../types/approval'
-// P1-B: value import (not type-only) — approvalSourceIsPlaceholder now checks the card AT its own
-// sourceIndex directly instead of delegating to the aggregate publishPlaceholderRoleKeys list.
-import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
@@ -1974,9 +1972,11 @@ function approvalSourceIds(nodeKey: string, sourceIndex: number): string[] {
 // in the editor so the admin replaces it first. Non-blocking — the draft still saves. Computed
 // directly off the card at sourceIndex (not the aggregate `publishPlaceholderRoleKeys` list) so a
 // node with N cards points the hint at the EXACT offending card rather than lighting up all of them.
+// Delegates to the SAME `isPlaceholderRoleSource` predicate `placeholderRoleNodeKeys` uses, so the
+// per-card hint and the aggregate publish checklist item can never disagree on what counts.
 function approvalSourceIsPlaceholder(nodeKey: string, sourceIndex: number): boolean {
   const source = approvalNodeSourceAt(nodeKey, sourceIndex)
-  return source?.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
+  return Boolean(source && isPlaceholderRoleSource(source))
 }
 // P1-B: card count for the v-for + the "keep ≥1" remove-guard's disabled state.
 function approvalSourceCount(nodeKey: string): number {
@@ -1985,18 +1985,25 @@ function approvalSourceCount(nodeKey: string): number {
 // P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
 // editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
 // button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
-// unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts) — this wrapper only supplies the live
-// draft + clears the session kind-switch cache (a view-local UX convenience, never persisted).
+// unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
+// kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
+// the end), so a card the author already configured-then-switched-away-from keeps its cached
+// payload intact across an unrelated add — clearing here would silently re-open the exact P1-1
+// config-loss bug in a new sequence (configure → switch away → add a card → switch back → cache
+// gone → empty payload, no undo).
 function addApprovalSourceCard(nodeKey: string, defaultKind: ApprovalAssigneeSourceKind): void {
   const edits = draft.value.approvalNodeEdits
   if (!edits) return
-  clearApprovalSourceKindCacheForNode(nodeKey)
   addAssigneeSourceCard(edits, nodeKey, defaultApprovalSourceForKind(defaultKind))
 }
 // P1-B fail-closed remove: a node must always keep ≥1 assignee source. Delegates to the pure,
 // independently unit-tested `removeAssigneeSourceCard` (approvalNodeEdit.ts), which refuses at
 // length<=1 REGARDLESS of the remove button's `disabled` attribute — see that function's doc
-// comment for why disabled-button DOM testing alone cannot prove this guard.
+// comment for why disabled-button DOM testing alone cannot prove this guard. Clears the P1-1
+// kind-switch cache for this node HERE (unlike add): removing a card SHIFTS every subsequent card's
+// index, so a stale per-index cache entry would otherwise attribute one card's cached payload to a
+// now-different card at the same index — clearing avoids that misattribution. It is a session-only
+// UX convenience (never persisted), so losing it on remove is a strictly safe/conservative choice.
 function removeApprovalSourceCard(nodeKey: string, sourceIndex: number): void {
   const edits = draft.value.approvalNodeEdits
   if (!edits) return
