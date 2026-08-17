@@ -669,6 +669,16 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'continuous_dept_heads', levels }
       }
+      case 'dept_head_at_level': {
+        // Lock-1 §K5-b: `level` validated byte-identically to `manager_at_level` — an
+        // out-of-range / non-integer / missing `level` is rejected, never silently
+        // defaulted (enum-strictness).
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'dept_head_at_level', level }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)
@@ -1614,6 +1624,8 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `manager_at_level:${source.level}`
     case 'continuous_dept_heads':
       return `continuous_dept_heads:${source.levels}`
+    case 'dept_head_at_level':
+      return `dept_head_at_level:${source.level}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId}`
     case 'static_user':
@@ -3203,14 +3215,24 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
 }
 
 /**
- * Lock-1 §K4: true when any approval node's assignee sources include `continuous_dept_heads`.
- * Used at create time to decide whether to walk the (more expensive) department-head chain into
- * the requester snapshot — a SEPARATE opt-in gate from `runtimeGraphUsesManagerChain` above,
- * because `continuous_dept_heads` bakes a DIFFERENT snapshot field (`deptHeadChainIds`, a
- * different walk over a different pointer — see the union member's doc comment) via a DIFFERENT
- * option (`includeDeptHeadChain`), so an unrelated template never pays for either walk. `kind` is
- * read structurally so this works before the kind is added to the typed union (same posture as
- * `runtimeGraphUsesManagerChain`).
+ * Lock-1 §K4 / §K5-b: true when any approval node's assignee sources include `continuous_dept_heads`
+ * OR `dept_head_at_level`. Used at create time to decide whether to walk the (more expensive)
+ * department-head chain into the requester snapshot — a SEPARATE opt-in gate from
+ * `runtimeGraphUsesManagerChain` above, because both kinds bake the SAME `deptHeadChainIds`
+ * snapshot field (a different walk over a different pointer — see the union members' doc
+ * comments) via a DIFFERENT option (`includeDeptHeadChain`), so an unrelated template never pays
+ * for either walk. K5-b is strictly downstream of K4: it reads the identical snapshot field K4
+ * builds, so it shares this ONE gate rather than minting its own — mirroring how
+ * `runtimeGraphUsesManagerChain` above carries both `continuous_managers` AND `manager_at_level`
+ * for the manager-chain snapshot. Missing this extension would reproduce the exact "silent skip"
+ * class R-13 names: a graph using ONLY `dept_head_at_level` would never bake `deptHeadChainIds`,
+ * so the resolver's positional read would see `undefined` and resolve empty — indistinguishable
+ * from "no head at that level" and liable to silently auto-approve under
+ * `emptyAssigneePolicy:'auto-approve'`. Node-type is `approval`-only (§2.3 registry row: neither
+ * kind is admitted on a `handler` node in this slice — Lock-3 §1.5's forward ADMIT for K5-b on
+ * handler is deliberately NOT landed here; see the `dept_head_at_level` resolver arm comment).
+ * `kind` is read structurally so this works before the kind is added to the typed union (same
+ * posture as `runtimeGraphUsesManagerChain`).
  */
 export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
@@ -3218,7 +3240,9 @@ export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boole
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
-    return sources.some((source) => isRecord(source) && source.kind === 'continuous_dept_heads')
+    return sources.some(
+      (source) => isRecord(source) && (source.kind === 'continuous_dept_heads' || source.kind === 'dept_head_at_level'),
+    )
   })
 }
 
@@ -3232,12 +3256,12 @@ export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boole
  * transient read failure — with NO instance and NO assignment created. Genuine data absence (the
  * read SUCCEEDED, the requester simply has no manager) still follows `emptyAssigneePolicy`.
  *
- * Lock-1 §2.1 EXTENSION (K4): `continuous_dept_heads` is EXTENDED into this detector alongside the
- * four shipped org-derived kinds. Leaving it unextended would reproduce exactly the B5-b fail-open
- * this guard closed: an org read failure plus `emptyAssigneePolicy: 'auto-approve'` would silently
- * auto-approve instead of fail-closing at create. (K5-b `dept_head_at_level` is NOT added here —
- * it is not implemented in this slice; §2.3 admits its registry row only once K4 has landed, and
- * this detector must not claim a kind that does not exist yet.)
+ * Lock-1 §2.1 EXTENSION (K4 + K5-b): `continuous_dept_heads` and `dept_head_at_level` are EXTENDED
+ * into this detector alongside the four shipped org-derived kinds — §2.1 names both explicitly
+ * ("That detector MUST be extended to K4 and K5-b"). Leaving either unextended would reproduce
+ * exactly the B5-b fail-open this guard closed: an org read failure plus
+ * `emptyAssigneePolicy: 'auto-approve'` would silently auto-approve instead of fail-closing at
+ * create.
  */
 export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
@@ -3257,7 +3281,8 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
           source.kind === 'dept_head' ||
           source.kind === 'continuous_managers' ||
           source.kind === 'manager_at_level' ||
-          source.kind === 'continuous_dept_heads'),
+          source.kind === 'continuous_dept_heads' ||
+          source.kind === 'dept_head_at_level'),
     )
   })
 }

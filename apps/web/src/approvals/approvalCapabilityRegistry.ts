@@ -38,6 +38,11 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // deptHeadChainIds snapshot + resolver arm end to end (registry table row:
   // 连续多级部门负责人 / approval).
   continuous_dept_heads: '连续多级部门负责人',
+  // Lock-1 §K5-b (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the resolver arm
+  // end to end (registry table row: 指定层级部门负责人 / approval; "Admitted when: K4 landed").
+  // NOT admitted on `handler` — Lock-3 §1.5's forward ADMIT row is a separate follow-up (see
+  // HANDLER_ASSIGNEE_SOURCE_KINDS below, which deliberately does not include this kind).
+  dept_head_at_level: '指定层级部门负责人',
 }
 
 /** Display order matches parent §10.3's listed order. Kept as an explicit array (rather than
@@ -56,6 +61,8 @@ const SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER: readonly ApprovalAssigneeSourceKind[] 
   'requester_choice',
   // Lock-1 §K4: appended after K2.
   'continuous_dept_heads',
+  // Lock-1 §K5-b: appended after K4 (strictly downstream of it).
+  'dept_head_at_level',
 ]
 
 export interface ApprovalAssigneeSourceCapability {

@@ -977,7 +977,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all ten assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all eleven assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -993,11 +993,15 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // Lock-1 §K4 (RATIFIED 2026-08-17) — the 连续多级部门负责人 registry row, admitted in the
       // SAME slice that lands the deptHeadChainIds snapshot + resolver arm (Lock-1 §2.3 table).
       continuous_dept_heads: '连续多级部门负责人',
+      // Lock-1 §K5-b (RATIFIED 2026-08-17) — the 指定层级部门负责人 registry row, admitted in the
+      // SAME slice that lands the resolver arm end to end (Lock-1 §2.3 table: "Admitted when: K4
+      // landed").
+      dept_head_at_level: '指定层级部门负责人',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 11th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 12th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(10)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(11)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1408,7 +1412,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                   : kind === 'manager_at_level' ? { kind, level: 1 }
                     // Lock-1 §K4: same default shape as continuous_managers.
                     : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
-                      : { kind }
+                      // Lock-1 §K5-b: same default shape as manager_at_level.
+                      : kind === 'dept_head_at_level' ? { kind, level: 1 }
+                        : { kind }
         edit.assigneeSources = [next, ...edit.assigneeSources.slice(1)]
       },
       syncApprovalNodeOptions: () => {},
@@ -1437,6 +1443,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         if (source.kind === 'manager_at_level') source.level = value
         else if (source.kind === 'continuous_managers') source.levels = value
         else if (source.kind === 'continuous_dept_heads') source.levels = value
+        else if (source.kind === 'dept_head_at_level') source.level = value
       },
       approvalSourceIsPlaceholder: () => false,
       approvalNodeMode: () => 'single',
@@ -1629,13 +1636,15 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the ten-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the eleven-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
-    // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`.
-    const CANONICAL_TEN = [
+    // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
+    // `dept_head_at_level`.
+    const CANONICAL_ELEVEN = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
+      'dept_head_at_level',
       'direct_manager',
       'form_field_user',
       'manager_at_level',
@@ -1647,7 +1656,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_TEN)
+    expect(roster).toEqual(CANONICAL_ELEVEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1660,7 +1669,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_TEN)
+    expect(rendered).toEqual(CANONICAL_ELEVEN)
     unmount()
   })
 
@@ -1676,6 +1685,25 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       api: createStubConfigApi({ approval_dh: { assigneeSources: [{ kind: 'continuous_dept_heads', levels: 2 }] } }),
     })
     const roster = c.querySelector('[data-testid="approval-node-source-kind-continuous_dept_heads"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-1 §K5-b — dept_head_at_level authoring sub-form: registry-admitted, renders EDITABLE
+  // with the SAME shared level input as manager_at_level (a single level, not a count — the
+  // el-input-number is shared by kind-family via approvalSourceLevel/setApprovalSourceLevel, so
+  // this reuses testid `approval-node-source-level`, not K4's `-dept-head-levels`).
+  it('K5-b: dept_head_at_level renders EDITABLE with the level input (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_dhal')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_dhal: { assigneeSources: [{ kind: 'dept_head_at_level', level: 2 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-dept_head_at_level"]') as HTMLInputElement
     expect(roster).not.toBeNull()
     expect(roster.checked).toBe(true)
     expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()

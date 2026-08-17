@@ -46,6 +46,10 @@ describe('assigneeSourceSummary (single source)', () => {
     expect(assigneeSourceSummary({ kind: 'continuous_dept_heads', levels: 3 })).toBe('连续多级部门负责人（3 级）')
   })
 
+  it('dept_head_at_level: includes the specific level (Lock-1 §K5-b)', () => {
+    expect(assigneeSourceSummary({ kind: 'dept_head_at_level', level: 2 })).toBe('指定层级部门负责人（第 2 级）')
+  })
+
   it('requester_choice: fixed pre-choice placeholder (提交时选择), no config values leaked (Lock-1 §K2)', () => {
     expect(
       assigneeSourceSummary({ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }),

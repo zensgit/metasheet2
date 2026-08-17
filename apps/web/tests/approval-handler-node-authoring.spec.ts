@@ -65,6 +65,13 @@ describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
     expect(roster.length).toBeLessThan(approvalRoster.length)
     expect(roster).not.toContain('continuous_managers')
     expect(roster).not.toContain('requester_choice')
+    // Lock-1 §K5-b `dept_head_at_level`: Lock-3 §1.5 names it a FORWARD ADMIT row for `handler`,
+    // but per the SAME precedent this file already documents for `requester_choice` (shipped
+    // before P4-A, and P4-A deliberately did NOT retroactively widen the roster for it — "a
+    // separate follow-up decision, not P4-A", approval-product.ts's HANDLER_ASSIGNEE_SOURCE_KINDS
+    // doc comment), K5-b's own slice does not widen the SEVEN-member handler roster either. Not
+    // admitting it here is the deliberate deferral, not an oversight.
+    expect(roster).not.toContain('dept_head_at_level')
   })
 
   it('mutation 1 — dropping an admitted kind fails the exact-set check', () => {
@@ -79,6 +86,19 @@ describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
   it('mutation 2 — adding continuous_managers fails the exact-set check', () => {
     const added: ApprovalCapabilityRegistry = {
       assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'continuous_managers', label: '连续多级上级' }] },
+      operationPoliciesByNodeType: {},
+    }
+    const roster = assigneeSourceRoster(added, 'handler').map((c) => c.kind)
+    expect(new Set(roster)).not.toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
+  })
+
+  // Lock-1 §K5-b deferral invariant: even though Lock-3 §1.5 names dept_head_at_level a FORWARD
+  // ADMIT row for `handler`, this slice does NOT land it (see the `roster).not.toContain(...)`
+  // assertion above) — so "adding" it here must fail the exact-set check exactly like mutation 2's
+  // continuous_managers, not be silently accepted as a legitimate widening.
+  it('mutation 3 — adding dept_head_at_level (Lock-1 §K5-b, deliberately deferred) fails the exact-set check', () => {
+    const added: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'dept_head_at_level', label: '指定层级部门负责人' }] },
       operationPoliciesByNodeType: {},
     }
     const roster = assigneeSourceRoster(added, 'handler').map((c) => c.kind)

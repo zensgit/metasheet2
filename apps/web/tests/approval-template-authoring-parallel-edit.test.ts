@@ -408,6 +408,16 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toEqual([])
   })
 
+  it('Lock-1 §K5-b: flags identical dept_head_at_level levels — the fingerprint mirror is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'dept_head_at_level', level: 2 }], [{ kind: 'dept_head_at_level', level: 2 }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT levels are NOT flagged (parameterized, not kind-blanket).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'dept_head_at_level', level: 1 }], [{ kind: 'dept_head_at_level', level: 3 }]),
+    )).toEqual([])
+  })
+
   it('Lock-1 §K2 / G-17: requester_choice × requester_choice is NOT flagged (null fingerprint DELIBERATE — same-person collision is the runtime 409 guard\'s job)', () => {
     // Two requester_choice sources on parallel branches are NOT provably identical — the
     // requester may pick different people per branch — so the publish preflight must not block
@@ -436,6 +446,16 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     // pointer, per §K4) — same `levels` value must not collide even though the shapes are alike.
     expect(parallelDynamicAssigneeConflicts(
       withBranchSources([{ kind: 'continuous_managers', levels: 2 }], [{ kind: 'continuous_dept_heads', levels: 2 }]),
+    )).toEqual([])
+    // Lock-1 §K5-b: manager_at_level and dept_head_at_level are DIFFERENT kinds (different chain
+    // pointer, positionally alike shape — `level`) — same `level` value must not collide.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'manager_at_level', level: 2 }], [{ kind: 'dept_head_at_level', level: 2 }]),
+    )).toEqual([])
+    // ...and dept_head_at_level vs continuous_dept_heads (both read deptHeadChainIds) must not
+    // collide on the same numeric value either — the fingerprint is kind-prefixed, not bare-number.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'continuous_dept_heads', levels: 2 }], [{ kind: 'dept_head_at_level', level: 2 }]),
     )).toEqual([])
   })
 

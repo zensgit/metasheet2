@@ -177,6 +177,10 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
     // normalizeApprovalAssigneeSources stays the arbiter on the ceiling).
     case 'continuous_dept_heads':
       return Number.isInteger(source.levels) && source.levels >= 1
+    // Lock-1 §K5-b PREVIEW: same shape/cap posture as manager_at_level (backend
+    // normalizeApprovalAssigneeSources stays the arbiter on the ceiling).
+    case 'dept_head_at_level':
+      return Number.isInteger(source.level) && source.level >= 1
     case 'requester_choice':
       // Lock-1 §K2 PREVIEW (backend normalizeApprovalAssigneeSources stays the arbiter):
       // mode + scope discriminator, and a members/role scope needs ≥1 configured id.
