@@ -1518,6 +1518,8 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
     add_sign: '加签',
     reduce_sign: '减签',
     cc: '抄送',
+    // Lock-3 §2.1 — a handler submission renders as 办理 in the timeline (never the raw English verb).
+    handle: '办理',
   }
   return map[action] ?? action
 }

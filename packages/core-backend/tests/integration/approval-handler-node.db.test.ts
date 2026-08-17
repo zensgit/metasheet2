@@ -590,6 +590,25 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect(approveRowsAtHandler).toHaveLength(0)
   })
 
+  // ── Revoke window — a PARTIAL handler submission is "work begun" and closes the revoke window ──
+  it('revoke: after a partial 会签 handler submission the requester can NO LONGER revoke (409); with no submission the window is open (200)', async () => {
+    // Partial-submission instance: H1 handles (money moved / stamp applied), H2 still pending.
+    const tid = await createPublished(`${KEYPFX}-revoke`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1, H2]), handlerMode: 'all' }))
+    const iid = await createInstance(tid)
+    expect((await act(iid, h1Tok, { action: 'handle' })).status).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('handler_h') // still pending at the handler
+    const revokeAfter = await act(iid, reqTok, { action: 'revoke' })
+    expect(revokeAfter.status, await revokeAfter.clone().text()).toBe(409)
+    expect(errorCode((await revokeAfter.json()) as ErrorBody)).toBe('APPROVAL_REVOKE_WINDOW_CLOSED')
+    expect((await instanceRow(iid)).status).toBe('pending') // NOT revoked — work has begun
+    // positive control: a fresh instance with NO handler submission is still revocable.
+    const tid2 = await createPublished(`${KEYPFX}-revoke-ok`, handlerThenApprovalGraph({ assigneeSources: staticUser([H1, H2]), handlerMode: 'all' }))
+    const iid2 = await createInstance(tid2)
+    const revokeBefore = await act(iid2, reqTok, { action: 'revoke' })
+    expect(revokeBefore.status, await revokeBefore.clone().text()).toBe(200)
+    expect((await instanceRow(iid2)).status).toBe('revoked')
+  })
+
   // ── G-15 — dedup / auto-approval exemption (§2.4) — a requester's handler seat is never merged ─
   it('G-15: with template mergeWithRequester ON, a requester handler seat is NOT auto-disposed (pending, no crash); the adjacent approval node IS auto-approved', async () => {
     const graph = {

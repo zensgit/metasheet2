@@ -7136,7 +7136,7 @@ export class ApprovalProductService {
           `SELECT COUNT(*)::text AS count
            FROM approval_records
            WHERE instance_id = $1
-             AND action IN ('approve', 'reject', 'transfer')
+             AND action IN ('approve', 'reject', 'transfer', 'handle')
              AND metadata->>'nodeKey' = $2`,
           [id, currentNodeKey],
         )
