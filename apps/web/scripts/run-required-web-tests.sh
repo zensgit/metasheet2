@@ -144,6 +144,14 @@
 # alongside the other approval-form-* canaries. Bare basename token; verified unique — no existing
 # `approval-form-*` token (approval-form-commands / approval-form-authoring-history /
 # approval-form-palette-focus / approval-form-draft) is a substring of it or vice versa.
+#
+# F1 (2026-08-17, delta §5 F1): `approval-form-identity` (opaque collision-resistant allocator,
+# FB-D5 OPAQUE_COLLISION_RESISTANT) + `approval-form-authoring-adapter` (the single production
+# command adapter over approvalFormCommands + form history: FB-D3 anchor re-resolution, FB-D4
+# one-history-entry semantics, FB-D5 collision retry, FB-D6 current-draft reference provider,
+# legacy-helper freeze pins). Both bare basename tokens; each verified to match exactly one file
+# in isolation, and no existing token (approval-form-authoring-history is the closest neighbor)
+# is a substring of either or vice versa.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -159,6 +167,8 @@ npx vitest run \
   approval-canvas-inspector-a11y \
   approval-form-palette-focus \
   approval-form-inline-editor-extract \
+  approval-form-identity \
+  approval-form-authoring-adapter \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
