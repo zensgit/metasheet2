@@ -1,7 +1,7 @@
 # Lock-2 — Organization Form Controls, Field-Derived Assignees, and Department Routing (2026-08-17)
 
-**Status:** PROPOSED — NOT RATIFIED. This document authorizes nothing; §4 is blank until an explicit owner
-decision names it and its SHA.
+**Status:** RATIFIED — §4 record of 2026-08-17 (goal-set in-session provenance; reversible before
+implementation lands). Design authority only: no runtime, flag, UAT, or deployment authorization.
 **Baseline:** `origin/main@a4ee60d290b10b859b42f7a9e453c80cfe08660e`. Every anchor below was READ AT THIS
 BASELINE, newer than every parent (master pins `d33a6a0fa1`, Lock-0 `5b31cb4349`, Lock-1 `0e8ed11671`,
 Lock-3 `2f4bf6ce3e`) — line numbers are exact here and may differ from those documents'.
@@ -379,10 +379,20 @@ row names the test it turns red and asserts the anchor was actually hit.
 Intentionally blank until an explicit owner decision names this document and its SHA.
 
 ```text
-Decision: <RATIFY | REQUEST CHANGES | REJECT>
-Owner:
-Date:
-Document SHA:
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+Date: 2026-08-17
+Document SHA: drafted a30970af13, review round a1a932ddc3; this record lands on top.
+Decisions recorded: OD-L2-1 (a) local directory_departments.id uuid · OD-L2-2 (a) typed props
+  allowlist on shipped `user`, narrowing gated on the props census · OD-L2-3 (a) UNION +
+  publish-time maxSelections pin · OD-L2-4 (a) retrofit at next save/publish, cost disclosed in
+  authoring copy · OD-L2-5 (a) no-visibilityRule pin + independent create-time 422 · OD-L2-6 (a)
+  cc-node rows DEFERRED · OD-L2-7 (a) confirmed (array support lands in the SAME slice as the
+  prop; until then publish rejects) · OD-L2-8 (a) every department field anchored to the create's
+  canonical integration, WITH the disclosed unlinked-requester cost accepted — all eight per this
+  document's recommendations. Runtime authorization: NONE (design only; each contract still needs
+  its own PR, required checks, adversarial gate, and ledger row; flags stay OFF).
 Independent review: independent adversarial review of head a30970af13 returned REQUEST-CHANGES with one
   P1 (this block's Lock-1 §K4 disposition), one P2 (OD-L2-8(a)'s omitted cost), one P3 and four NITs; it
   refuted no code claim and spot-verified 15 load-bearing claim groups against origin/main. All seven were
