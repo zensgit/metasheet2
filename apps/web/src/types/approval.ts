@@ -198,6 +198,14 @@ export interface ApprovalGraph {
 export interface RuntimePolicy {
   allowRevoke: boolean
   revokeBeforeNodeKeys?: string[]
+  /**
+   * L6-P1 carrier fix — opaque pass-through for a template-level policy field the authoring
+   * editor does not render (e.g. a future auto-approval dedup tier, settable only through the
+   * publish API today). `unknown`, never interpreted here: the editor's job is to round-trip it
+   * unchanged via `buildPublishPolicy`, not to understand its shape. Adding a new typed field
+   * belongs to whichever slice authors that control.
+   */
+  autoApproval?: unknown
 }
 
 export interface RuntimeGraph extends ApprovalGraph {
@@ -381,6 +389,14 @@ export interface ApprovalTemplateListItemDTO {
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+  /**
+   * L6-P1 carrier fix — the active published definition's runtime policy, or `null`/absent
+   * pre-publish. Optional here (unlike the backend DTO, where it's required) so existing test
+   * fixtures that predate this field keep compiling; the backend always sends the key. Hydrated
+   * into the draft verbatim by `draftFromTemplate` / `originalPolicy` and merged back onto the
+   * publish payload by `buildPublishPolicy` — never read directly for rendering.
+   */
+  policy?: RuntimePolicy | null
 }
 
 export interface ApprovalTemplateVisibilityScope {

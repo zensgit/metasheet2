@@ -18,6 +18,7 @@ import type {
   NodeFieldPermission,
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
+  RuntimePolicy,
 } from '../types/approval'
 import {
   buildDetailColumns,
@@ -178,6 +179,13 @@ export interface TemplateAuthoringDraft {
   visibilityIdsText: string
   slaHoursText: string
   allowRevoke: boolean
+  // L6-P1 carrier fix — the full persisted `policy` object as of hydrate (or `null`/undefined for
+  // a never-published template), captured VERBATIM. The editor only authors `allowRevoke` above;
+  // every other key (e.g. `autoApproval`, settable only through the publish API) must survive an
+  // editor republish untouched. `buildPublishPolicy` spreads this and overlays `allowRevoke` —
+  // mirrors the `originalAutoApprovalPolicy` / `amountConsistencyCheck` preserve-verbatim pattern
+  // already used in this file.
+  originalPolicy?: RuntimePolicy | null
   fields: FieldAuthoringDraft[]
   steps: ApprovalStepDraft[]
   // G-1 anti-flatten keystone: a COMPLEX graph (any cc/condition/parallel node, or any
@@ -335,6 +343,10 @@ export function createEmptyTemplateDraft(): TemplateAuthoringDraft {
     visibilityType: 'all',
     visibilityIdsText: '',
     slaHoursText: '',
+    // A brand-new template has never been published, so there is no persisted policy to reflect
+    // (L6-P1 §2.2: `allowRevoke` is the one RuntimePolicy field with no server default). `true`
+    // stays the client-chosen create-time default, unchanged by the carrier fix below —
+    // `originalPolicy` is correctly left absent (nothing to preserve yet).
     allowRevoke: true,
     fields: [createEmptyFieldDraft(1)],
     steps: [createEmptyStepDraft(1)],
@@ -894,7 +906,12 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityType: template.visibilityScope?.type ?? 'all',
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
-    allowRevoke: true,
+    // L6-P1 carrier fix — was hardcoded `true` regardless of the persisted value, so a template
+    // published with `allowRevoke:false` reverted to `true` on every editor load. `??` (not `||`)
+    // is required: a persisted `false` must stay `false`, not fall through to the default. `null`/
+    // absent `policy` (never-published template) keeps the create-time default of `true`.
+    allowRevoke: template.policy?.allowRevoke ?? true,
+    originalPolicy: template.policy ?? null,
     // Hydrate side of the #3161 §1 preserve: carry the amount total-check mapping through verbatim
     // (shallow clone, never alias the source schema). Absent → no key (no phantom on round-trip).
     ...(template.formSchema.amountConsistencyCheck
@@ -1360,4 +1377,22 @@ export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): Creat
 
 export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): UpdateApprovalTemplateRequest {
   return buildCreateTemplatePayload(draft)
+}
+
+/**
+ * L6-P1 carrier fix — the publish-time policy payload. MERGES onto `draft.originalPolicy`
+ * (the persisted object hydrated verbatim by `draftFromTemplate`) and overlays only the field the
+ * editor actually owns (`allowRevoke`). Was previously built inline at the call site as
+ * `{ allowRevoke: draft.allowRevoke }` — a REPLACE, not a merge — which silently destroyed any
+ * sibling policy field (e.g. `autoApproval`, `revokeBeforeNodeKeys`) set only through the publish
+ * API on every editor republish. `draft.originalPolicy` is absent for a template that has never
+ * been published, so a brand-new template still publishes exactly `{ allowRevoke }` (no field is
+ * invented). The backend's `assertRuntimePolicy` re-validates every carried-through key, so
+ * publishing a stale/foreign shape here fails closed there rather than persisting silently.
+ */
+export function buildPublishPolicy(draft: TemplateAuthoringDraft): RuntimePolicy {
+  return {
+    ...(draft.originalPolicy ?? {}),
+    allowRevoke: draft.allowRevoke,
+  }
 }

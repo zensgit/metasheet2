@@ -608,6 +608,16 @@ export interface ApprovalTemplateListItemDTO {
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+  /**
+   * L6-P1 carrier fix — the ACTIVE published definition's runtime policy (the same object a
+   * publish call would need to preserve on republish), or `null` when the template has never
+   * been published. `policy` is a PUBLISH argument, never a template/version column (this DTO
+   * has no other source for it) — required so the authoring draft can hydrate `allowRevoke` from
+   * the persisted value instead of a hardcoded default, and so a republish can merge onto the
+   * full object instead of replacing it and destroying sibling fields (e.g. `autoApproval`) set
+   * only through the publish API.
+   */
+  policy: RuntimePolicy | null
 }
 
 export interface ApprovalTemplateVisibilityScope {

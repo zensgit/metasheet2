@@ -295,6 +295,14 @@ export default defineConfig({
       // .github/workflows/approval-realdb-handler.yml workflow (standalone per the same s6a precedent —
       // plugin-tests.yml is left byte-identical). Two-point wiring, both points in the SAME commit.
       'tests/integration/approval-handler-node.db.test.ts',
+      // L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1) policy
+      // carrier fix — real-DB, whole-HTTP-stack publish/hydrate/PATCH/republish round trip
+      // (gates P-1/P-2/P-3). DATABASE_URL-gated (describeIfDatabase); excluded here so the no-DB
+      // default job cannot collect-and-skip-green it, and carried by the DEDICATED
+      // .github/workflows/approval-template-policy-carrier-realdb.yml workflow (same standalone
+      // rationale as the K2 lane immediately above — plugin-tests.yml is an s6a sha256-pinned
+      // provenance input, deliberately not extended). Two-point wiring, same commit.
+      'tests/integration/approval-template-policy-carrier.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
