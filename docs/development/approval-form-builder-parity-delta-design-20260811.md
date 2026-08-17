@@ -1,12 +1,18 @@
 # Approval Form Builder Parity Delta Design Lock (2026-08-11)
 
-**Status:** PROPOSED - parent G0 plus this delta require owner ratification before runtime implementation
-**Baseline:** `origin/main@0287b250b33fe4c7ea98b880360af74fc08a5ebf`
+**Status:** PROPOSED - this delta requires owner ratification (master P0-A gate) before runtime implementation
+**Baseline:** `origin/main@5b31cb43496c5aaf11b4f821254ed63a345c11e1` (REFRESHED 2026-08-17 per master P0-A;
+the original 2026-08-11 draft was pinned to `0287b250b`, 55 commits behind — every stale statement is corrected below)
 **Parent authorities:**
 
+- `docs/development/approval-parity-master-design-lock-20260817.md` — the program master; its §M3 names this
+  delta's FB-D5/FB-D6 as the two owner-decision interfaces, and its P0-A gates this document's ratification
+- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` — **RATIFIED** (G0 record
+  `approval-canvas-g0-ratify-20260815.md`, 2026-08-15; O3 Vue Flow/ELK: DEFER)
 - `docs/development/approval-canvas-v2-development-plan-20260720.md`
-- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md`
 - `docs/development/approval-canvas-data-closure-owner-handoff-20260808.md`
+- `docs/development/approval-parity-execution-ledger-20260817.md` — execution truth; F4's slice ledger feeds it
+  rather than duplicating it
 
 **Scope:** close the ordinary-user form-authoring gap between the current click-to-append editor and a
 DingTalk/Feishu-class palette -> form canvas -> property inspector workflow.
@@ -20,26 +26,29 @@ or enable a flag.
 
 ## 0. Why this delta exists
 
-The Canvas V2 engineering line is on `main` through #4806 and the residual waves #4815-#4826. That line delivered a
-real field palette, form history, focus return, flow-canvas editing, version comparison, accessibility canaries, and
-owner UAT tooling. It did not deliver the complete form-builder interaction described by the 2026-07-21 interaction
-lock.
+The Canvas V2 engineering line is on `main` through #4806, the residual waves #4815-#4826, the wave-3 closeout
+(#4912), the G0 RATIFY record (#4914), the authoring-shell restyle (#4917 — which landed the live three-region
+palette / phone-preview / inspector shell with draggable palette chips), and the parity program master lock (#4935).
+That line did not deliver the complete form-builder interaction described by the now-RATIFIED 2026-07-21 interaction
+lock: the shell exists, but its drop path, identity, and history integration remain incomplete.
 
-Current `main` behavior at this baseline is narrower:
+Current `main` behavior at this refreshed baseline (each row verified at `5b31cb4349`):
 
 | Area | Current behavior | Missing parity |
 |---|---|---|
-| Palette | `TemplateAuthoringView.vue:255-272` renders a wrapped row of buttons; click calls `addFieldOfType` and appends | no palette drag source; no exact insertion slot |
-| Existing fields | rows are draggable and also expose 上移 / 下移 | drop is index-based; no visible semantic slots or drop preview |
-| Field configuration | every supported field expands its controls inline; an unsupported field locks the whole template read-only | no dedicated selected-field inspector; weak scan/compare ergonomics on long forms; mixed editing of unsupported fields is not claimed |
+| Palette | grouped draggable chip grid (`TemplateAuthoringView.vue:254-275`, `:draggable="true"` :267); click appends via `addFieldOfType` | live drop path **always appends**: `onPreviewDrop` (:2866-2871) and even the per-row `onFieldDrop(index)` (:2921-2937) ignore the hovered slot; no exact start/between/end insertion |
+| Existing fields | rows draggable + 上移 / 下移 | drop is index-based; a live palette drag hijacks the row-drop handler into an append; no semantic slots or drop preview |
+| Drag state | `dataTransfer.setData('text/plain', type)` plus a component ref (:2856-2863) | payload is generic and unvalidated; the ref is cleared **only** inside the two drop handlers — there is no `dragend`/Escape/navigation/read-only clearing anywhere in the view, so a cancelled drag leaves stale state (master M2 blocker) |
+| Field configuration | a right inspector pane exists showing the focused field (`template-authoring__form-inspector-pane` :321) | it renders the legacy inline control set; property edits are direct `v-model` mutation (:351, :355) outside any command/history path |
 | History | `approvalFormAuthoringHistory` records field-list snapshots and focus | direct property mutation is not one committed command; history semantics are incomplete for inspector edits |
-| Command layer | `approvalFormCommands` already defines typed add/move/remove and reference checks | production view still uses local array mutation for add/move/remove |
-| Identity | `addFieldOfType` calls `createEmptyFieldDraft(fields.length + 1)` | delete then add can propose an already-used suffix; backend rejects duplicate IDs, but the UI should prevent the invalid draft |
+| Command layer | `approvalFormCommands` defines typed add/move/remove, opaque supplied identity, and reference-aware delete, and is collected by the required web lane | production view has **zero** imports of it — the substrate is unmounted; there is **no retype/update command** in the module (new F3 work, per master M3) |
+| Identity | `addFieldOfType` calls `createEmptyFieldDraft(fields.length + 1)` (:2874/:2883); detail columns use `createEmptyDetailColumnDraft(length + 1)` (:2955-2957) | delete-middle-then-add mints an already-used suffix; the draft-level uniqueness validator turns it into a save-blocking error wall rather than silent corruption, but the UI must prevent the invalid draft |
 
-This document proposes superseding only the owner-handoff statement that palette drag affordances are optional polish.
-For the new owner direction, semantic palette drag and the selected-field inspector become required before Canvas/Form
-UAT once the owner ratifies this delta. It does not change flow-graph runtime semantics or self-ratify the parent G0
-lock. The request to draft this document is not itself a G0 or delta ratification record.
+Per master §0.2, this delta's P0 role is to **extract and harden the existing shell**, not to rebuild it. The
+supersession this document originally proposed — that exact-slot palette drag stops being "optional polish" — is now
+settled authority: the RATIFIED interaction lock §10.1 requires exact-slot drag, and the master lock records that this
+supersedes only the older owner-handoff §6 residual. This document does not change flow-graph runtime semantics. The
+request to draft or refresh this document is not itself a ratification record.
 
 The old Draft PRs #4642-#4706 may be read as non-authoritative implementation experiments. They must not be merged or
 cherry-picked as a stack onto current `main`; behavior and tests may be ported only after an exact-main review.
@@ -66,6 +75,10 @@ versioning, authorization, FWB, and attachment boundaries.
 ## 2. Hard decisions
 
 ### FB-D1 - Three-region desktop information architecture
+
+A three-region shell already exists live and ungated on this baseline (#4917: grouped palette, phone-frame preview,
+focused-field inspector pane in a bespoke `form-designer` grid). FB-D1 therefore specifies the target track contract
+the extracted-and-hardened builder must satisfy — it is not authorization to rebuild the shell from scratch.
 
 At widths >= 1100 CSS px, Form mode uses one unframed workspace with stable tracks:
 
@@ -123,12 +136,17 @@ columns, and their local selection IDs. The allocator has an injected determinis
 candidate for each retry, and checks the complete current draft before mutation. Existing loaded IDs remain
 byte-identical.
 
-F1 explicitly removes `CompleteFormIdentityHistory` from the production add signature, then amends `addFormField` and
-adds the detail-column command so the allocator is the identity authority. The command validates each generated
-candidate against the complete current draft; the adapter retries a collision before mutation. It must not manufacture
-`complete = true` from a current-draft scan or perform an N+1 fetch of historical versions. Cross-version non-reuse is
-provided by the opaque allocator rather than a server reservation API. A server reservation inventory is deferred and
-is not an owner choice for this delta.
+**This paragraph is master-M3 owner-decision item (a), not a settled design.** The command on main today *requires*
+`CompleteFormIdentityHistory` (mandatory parameter, fail-closed `identity_history_missing`; `identityConflicts`
+checks candidates against history ∪ current draft). This delta proposes removing that parameter from the production
+add signature, amending `addFormField`, and adding the detail-column command so the opaque allocator becomes the sole
+collision authority: the command validates each generated candidate against the complete current draft; the adapter
+retries a collision before mutation; it must not manufacture `complete = true` from a current-draft scan or perform
+an N+1 fetch of historical versions; cross-version non-reuse is provided by the opaque allocator rather than a server
+reservation API. Per master P0-A, this is a guard change that only the owner can ratify — selecting
+`Identity authority (FB-D5): OPAQUE_COLLISION_RESISTANT` in §10 **is** that decision; absent it, production
+integration keeps the mandatory history parameter and stays fail-closed (guards are never weakened merely to simplify
+the adapter).
 
 The existing `createEmptyFieldDraft(index)` and `createEmptyDetailColumnDraft(index)` helpers are legacy fallback
 behavior, not the Designer 2.0 identity authority. F0 preserves them byte-for-byte; F1 does not change their outputs or
@@ -145,10 +163,16 @@ slice from changing the current production editor.
   FWB mappings are deliberately not represented as live references to a mutable draft: they are pinned to
   `sourceTemplateVersionId`, and save/execute already require that pin to match the active template version. Publishing
   any new version therefore makes old mappings stale and requires reconfirmation independently of which fields changed.
-  F1 removes `CompleteFormReferenceInventory` from the production delete signature and amends the misleading comment
-  that currently implies a template-keyed FWB inventory exists. A future same-version external reference owner must add
-  an authoritative provider and backend validation before it can claim delete safety; the UI must never fabricate such
-  a provider.
+  **This bullet is master-M3 owner-decision item (b), not a settled design.** The command on main today is
+  fail-closed on a missing/incomplete `CompleteFormReferenceInventory` (`reference_inventory_missing`). This delta
+  proposes narrowing the authoritative reference set to current-draft references (the six kinds
+  `collectFormFieldDependencies` already covers) plus version-pinned externals — the FWB version-pin premise is
+  verified true on this baseline — and removing the inventory parameter from the production delete signature while
+  amending the misleading comment that implies a template-keyed FWB inventory exists. Per master M3, "production
+  integration stays fail-closed on an incomplete reference inventory" until the owner ratifies this smaller complete
+  set — selecting `Reference boundary (FB-D6): CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS` in §10 **is**
+  that decision. A future same-version external reference owner must add an authoritative provider and backend
+  validation before it can claim delete safety; the UI must never fabricate such a provider.
 - Removing the final remaining field is rejected in `removeFormField` itself with the named
   `last_field_removal_forbidden` reason before reference evaluation. The current UI disable/early-return remains a
   convenience only; it is not the integrity boundary.
@@ -156,9 +180,12 @@ slice from changing the current production editor.
   visibility rule, assignee source, condition, permission, detail mapping, record-link config, amount-consistency
   mapping, or attachment boundary. The administrator removes or edits the dependency first, then retries the type
   change. Designer 2.0 must not call the current silent `invalidateStaleRecordLinkDependencies` cleanup path.
-- F3 extends `FormCommandFailureReason` with a named incompatible-type refusal and extends `FormDependencyKind` for
-  detail configuration, record-link configuration, and attachment boundary references. The design does not route these
-  cases through a generic string error.
+- F3 authors the **new typed update/retype command** (it does not exist in `approvalFormCommands.ts` on this
+  baseline — master M3 prices it as new command work, not a mount), extends `FormCommandFailureReason` with a named
+  incompatible-type refusal, and extends `FormDependencyKind` for detail configuration, record-link configuration, and
+  attachment boundary references — together covering master M3's named retype-refusal set (visibility,
+  condition/formula, permission, graph, mapping, and detail-column references) with ID preservation across retype and
+  exactly one history entry per logical edit. The design does not route these cases through a generic string error.
 - Inspector copy uses business labels (for example, "审批步骤 2 使用此字段"), never internal locations or IDs.
 
 ### FB-D7 - Committed inspector edits participate in history
@@ -176,11 +203,14 @@ field properties as one coherent snapshot.
 
 ### FB-D8 - Existing flag and fallback
 
-The three-region builder is part of Approval Designer 2.0 and is shown only when the existing
-`approvalCanvasV2` product feature is true. F0 extracts the current markup into a dedicated
-`ApprovalFormInlineEditor.vue`; that component remains the flag-OFF implementation and is not evolved into the
-three-region builder. F2/F3 build `ApprovalFormBuilder.vue` separately, and F4 performs the first production mount behind
-the existing flag after both halves are complete. This delta introduces no new environment flag.
+The hardened exact-slot builder is part of Approval Designer 2.0 and is shown only when the existing
+`approvalCanvasV2` product feature is true. **Refresh note:** the current three-region shell (#4917) is live and
+ungated — `canvasV2Enabled` gates only the flow canvas on this baseline. F0 therefore extracts the CURRENT
+three-region shell (grouped draggable palette, phone preview, focused-field inspector, append-only drop) into a
+dedicated `ApprovalFormInlineEditor.vue`; that extracted component remains the flag-OFF implementation, byte/behavior
+equivalent to today's shell, and is not evolved into the new builder. F2/F3 build `ApprovalFormBuilder.vue`
+separately, and F4 performs the first production mount behind the existing flag after both halves are complete. This
+delta introduces no new environment flag.
 
 Canvas enablement does not transitively enable FWB or attachments. `AuthorableFieldType` excludes `attachment` on this
 baseline, and this delta does not add it. A future attachment authoring entry requires its independent line to be
@@ -291,8 +321,10 @@ This delta does not add a field type or change the persisted `formSchema` shape.
 
 ### F0 - Extract the current inline editor
 
-**Goal:** move the current form section from `TemplateAuthoringView.vue` into a focused legacy component without
-behavior change. This preserves the permanent feature-OFF fallback; it is not the new builder shell.
+**Goal:** move the current form section — at this baseline the live #4917 three-region shell (grouped draggable
+palette chips, phone-frame preview, focused-field inspector pane, append-only drop, direct `v-model` property
+edits) — from `TemplateAuthoringView.vue` into a focused legacy component without behavior change. This preserves the
+permanent feature-OFF fallback; it is not the new builder shell.
 
 **Expected files:**
 
@@ -545,25 +577,30 @@ and owner flag decisions remain required by the parent handoff.
 
 ## 10. Owner ratification block
 
-Development authorization requires two linked owner decisions: the parent G0 must be recorded as
-`RATIFY-WITH-DELTAS` with this document named as its form-builder delta, and this delta must be `RATIFY` or
-`RATIFY-WITH-DELTAS`. Completing only one decision does not authorize F0-F4.
+**Refresh note:** the original draft required two linked decisions (parent G0 + this delta). The parent G0 decision
+has since been recorded — the D0 interaction lock was RATIFIED on 2026-08-15 with deltas "(none)" and O3 DEFER
+(`approval-canvas-g0-ratify-20260815.md`), and the parity master lock's P0-A now names this document as the object of
+its own single remaining gate. Exact-slot drag is already required authority (RATIFIED D0 §10.1 via the master's
+§0.2 supersession record); what this ratification decides is the delta's command-contract choices.
 
-Those linked decisions authorize only F0-F4 development and their tests. They do not ratify unrelated optional D7
-runtime, Vue Flow/ELK, FWB number mapping, merge, deployment, UAT, or flag enablement.
+One owner decision remains: `RATIFY` (or `RATIFY-WITH-DELTAS` / `REJECT`) of this refreshed delta under master
+P0-A. The FB-D5 and FB-D6 enum lines below are master M3's two named interface questions — recording them is the
+owner decision that resolves M3; leaving either unrecorded keeps production integration fail-closed on the
+corresponding existing guard.
+
+That decision authorizes only F0-F4 development and their tests. It does not ratify unrelated optional D7 runtime,
+Vue Flow/ELK, FWB number mapping, merge, deployment, UAT, or flag enablement.
 
 ```text
 Approval Form Builder Parity Delta decision
 Date:
 Owner:
-Parent G0 decision: RATIFY-WITH-DELTAS | REJECT | DEFER
-Parent G0 delta reference: approval-form-builder-parity-delta-design-20260811.md
 Delta decision: RATIFY | REJECT | RATIFY-WITH-DELTAS
-Identity authority (FB-D5): OPAQUE_COLLISION_RESISTANT
-Reference boundary (FB-D6): CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS
+Identity authority (FB-D5): OPAQUE_COLLISION_RESISTANT | KEEP_MANDATORY_IDENTITY_HISTORY
+Reference boundary (FB-D6): CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS | KEEP_MANDATORY_REFERENCE_INVENTORY
 Feature boundary (FB-D8): APPROVAL_CANVAS_V2_EXISTING_FLAG
 Notes:
 ```
 
-Until both linked decisions are completed by the owner, this document remains `PROPOSED` and Claude implementation
-sessions must not start.
+Until this decision is completed by the owner, this document remains `PROPOSED` and implementation sessions must not
+start.
