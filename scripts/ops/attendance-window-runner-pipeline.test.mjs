@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -984,6 +984,26 @@ function assertSoakContract({ remote, workflow }) {
     slices.run.includes('soak_batch_guard_check() {'),
     'the per-org same-day guard function must exist',
   )
+  // Codex r2 P1: the marker must be a CLOSED SET — exact (orgId,timezone) equality with the
+  // config, no duplicates — and the stamp must write atomically (temp + rename), so a
+  // half-written marker can neither be observed nor silently admit its missing orgs.
+  assert.ok(
+    slices.run.includes("does not carry EXACTLY the config's (orgId, timezone) set"),
+    'the guard must refuse a marker whose org set differs from the config (a subset admits the missing orgs)',
+  )
+  assert.ok(
+    slices.run.includes('carries duplicate org lines'),
+    'the guard must refuse a marker with duplicate org lines',
+  )
+  assert.match(
+    slices.run,
+    /tmp="\$\{marker\}\.tmp\.\$\$"[\s\S]{0,600}?mv -f "\$tmp" "\$marker"/,
+    'the stamp must write the full set to a temp file and rename it into place (atomic)',
+  )
+  assert.ok(
+    slices.run.includes('if (( clean > attempts )); then'),
+    'the classifier must WARN on a contradictory tally (clean > attempts opens the ok path via negative subtraction)',
+  )
   assert.match(
     slices.run,
     /while IFS=\$'\\t' read -r org tz; do\n\s+today="\$\(TZ="\$tz" date \+%Y-%m-%d\)"/,
@@ -1502,6 +1522,42 @@ function assertGeneratorCadenceContract(generator) {
   )
 }
 
+test('MUTATION (closed set): deleting the set-equality refusal turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = "does not carry EXACTLY the config's (orgId, timezone) set"
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the set-equality refusal')
+  const mutated = original.replace(anchor, 'set note (informational)')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /subset admits the missing orgs/,
+  )
+})
+
+test('MUTATION (atomic stamp): reverting to a truncate-then-append writer turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = '  mv -f "$tmp" "$marker"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the rename')
+  const mutated = original.replace(anchor, '  cat "$tmp" > "$marker"; rm -f "$tmp"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rename it into place/,
+  )
+})
+
+test('MUTATION (tally sanity): deleting the clean>attempts guard turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = 'if (( clean > attempts )); then'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the sanity guard')
+  const mutated = original.replace(anchor, 'if (( clean > attempts + 999999 )); then')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /contradictory tally/,
+  )
+})
+
 test('soak generator: pair-cadence contract (2/day default, daily-batch clean halt, server clock only)', () => {
   assertGeneratorCadenceContract(readFileSync(GENERATOR, 'utf8'))
 })
@@ -1737,6 +1793,65 @@ test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch 
     assert.equal(r.status, 1, 'unrecognized legacy marker content must refuse fail-closed')
     assert.match(r.stdout, /legacy batch marker .* holds unrecognized content/)
     assert.ok(existsSync(legacyMarker), 'an unrecognized legacy marker must be left in place for inspection')
+    rmSync(legacyMarker, { force: true })
+    // CLOSED-SET cells (Codex r2 P1 — replayed probe: an org1-only marker admitted
+    // org2/org3 into a same-day second batch):
+    const yday = (tz) => {
+      const d = new Date(`${orgToday(tz)}T00:00:00Z`)
+      d.setUTCDate(d.getUTCDate() - 1)
+      return d.toISOString().slice(0, 10)
+    }
+    // (a) partial marker — one org missing — must refuse whatever its recorded days say.
+    writeFileSync(marker, `aaaaaaaa-0000-0000-0000-000000000001=Pacific/Kiritimati=${yday('Pacific/Kiritimati')}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'a marker missing config orgs must refuse — its absent orgs would be silently admitted')
+    assert.match(r.stdout, /does not carry EXACTLY/)
+    // (b) ...but the explicit override admits (and the following full-set stamp self-heals).
+    r = run('soak_batch_guard_check', cfg, marker, 'true')
+    assert.equal(r.status, 0, 'the explicit override must admit past a set-mismatched marker')
+    // (c) duplicate org lines refuse.
+    writeFileSync(marker, `${lines.join('\n')}\n${lines[0]}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'duplicate org lines must refuse fail-closed')
+    assert.match(r.stdout, /duplicate org lines/)
+    // (d) a timezone drift on one line is a set mismatch too ((orgId,tz) tuple equality).
+    const tzDrift = lines.map((line, idx) => (idx === 0 ? line.replace('Pacific/Kiritimati', 'Etc/UTC') : line))
+    writeFileSync(marker, `${tzDrift.join('\n')}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'a timezone drift in a marker line must refuse (tuple equality, not orgId alone)')
+    assert.match(r.stdout, /does not carry EXACTLY/)
+    // (e) atomicity: the stamp must leave no temp residue and produce the exact set.
+    r = run('soak_batch_guard_stamp', cfg, marker)
+    assert.equal(r.status, 0)
+    const leftovers = readFileSync(marker, 'utf8').trim().split('\n')
+    assert.equal(leftovers.length, 3, 'the stamp must write the full set')
+    assert.equal(
+      readdirSync(dir).filter((f) => f.includes('.tmp.')).length,
+      0,
+      'the atomic stamp must leave no temp residue in the marker directory',
+    )
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'a freshly stamped marker must refuse a same-day second batch')
+    // (f) ATOMICITY oracle (#4936 gate P2-1 — its own construction, adopted verbatim): in a
+    // read-only marker directory the shipped temp+rename stamp FAILS CLEANLY (rename cannot
+    // land; the existing marker survives untouched), while a truncate-then-append writer
+    // "succeeds" destructively — the `> "$marker"` truncation needs only FILE write
+    // permission, so the marker is emptied and the run exits 0. This discriminates the
+    // exact mutant the source pin alone could not (it cleans up its temp and left the
+    // residue assertion green).
+    assert.equal(readFileSync(marker, 'utf8').trim().split('\n').length, 3, 'precondition: marker holds the full set')
+    chmodSync(dir, 0o555)
+    try {
+      r = run('soak_batch_guard_stamp', cfg, marker)
+      assert.notEqual(r.status, 0, 'the stamp must FAIL when the rename cannot land (read-only dir)')
+      assert.equal(
+        readFileSync(marker, 'utf8').trim().split('\n').length,
+        3,
+        'a failed stamp must leave the existing marker byte-intact — a truncate-then-append writer empties it and exits 0',
+      )
+    } finally {
+      chmodSync(dir, 0o755)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1764,6 +1879,10 @@ test('EXECUTABLE (Codex P2): the halt classifier never calls an incident-bearing
     assert.equal(classify('no_eligible_users_stall_timeout', '180', '180', '180'), 'WARN')
     assert.equal(classify('duration_elapsed', '180', '180', '180'), 'WARN')
     assert.equal(classify('targets_met', 'unknown', 'unknown', '180'), 'WARN')
+    // Codex r2 P2 (replayed probe): a contradictory tally (clean > attempts) made the
+    // subtraction negative and opened the ok path — must WARN.
+    assert.equal(classify('daily_capacity_exhausted', '181', '180', '180'), 'WARN')
+    assert.equal(classify('targets_met', '200', '180', '180'), 'WARN')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

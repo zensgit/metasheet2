@@ -2041,9 +2041,12 @@ soak_batch_guard_check() {
     local legacy_day
     legacy_day="$(head -1 "$legacy_marker" | tr -d '[:space:]')"
     if [[ "$legacy_day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      local mig_tmp="${marker}.tmp.$$"
+      : > "$mig_tmp"
       while IFS=$'\t' read -r org tz; do
-        printf '%s=%s=%s\n' "$org" "$tz" "$legacy_day" >> "$marker"
+        printf '%s=%s=%s\n' "$org" "$tz" "$legacy_day" >> "$mig_tmp"
       done <<< "$entries"
+      mv -f "$mig_tmp" "$marker"
       rm -f "$legacy_marker"
       echo "migrated legacy single-day batch marker (${legacy_day}) to the per-org set — the legacy day counts for EVERY org (conservative fail-closed)" >&2
     else
@@ -2059,6 +2062,24 @@ soak_batch_guard_check() {
       return 1
     fi
   done < "$marker"
+  # CLOSED-SET equality (Codex r2 P1): the marker's (orgId,timezone) set must equal the
+  # config's, with no duplicates — a format-valid SUBSET (a half-written or tampered
+  # marker, or one from a different config shape) would silently admit exactly the orgs
+  # whose lines are missing. Refuse fail-closed; the explicit override admits, and the
+  # fresh full-set stamp that follows self-heals the marker.
+  local marker_set config_set
+  marker_set="$(awk -F= '{print $1 "\t" $2}' "$marker" | sort)"
+  if [[ "$override" != "true" ]]; then
+    if [[ "$(printf '%s\n' "$marker_set" | sort -u | wc -l)" -ne "$(printf '%s\n' "$marker_set" | wc -l)" ]]; then
+      echo "batch marker ${marker} carries duplicate org lines — refusing fail-closed (corrupted or tampered marker); pass soak_opts allow_same_day_rerun=true to override deliberately (the next stamp rewrites the full set)"
+      return 1
+    fi
+    config_set="$(printf '%s\n' "$entries" | sort)"
+    if [[ "$marker_set" != "$config_set" ]]; then
+      echo "batch marker ${marker} does not carry EXACTLY the config's (orgId, timezone) set — a partial/stale/tampered marker would silently admit the missing orgs into a same-day second batch. Refusing fail-closed; pass soak_opts allow_same_day_rerun=true to override deliberately (the next stamp rewrites the full set)"
+      return 1
+    fi
+  fi
   while IFS=$'\t' read -r org tz; do
     today="$(TZ="$tz" date +%Y-%m-%d)"
     rec_day="$(grep -m1 "^${org}=" "$marker" | awk -F= '{print $3}')"
@@ -2074,11 +2095,16 @@ soak_batch_guard_check() {
 # "<orgId>=<tz>=<its-current-local-day>" (whole-file overwrite; only same-day lines matter).
 soak_batch_guard_stamp() {
   local config_path="$1" marker="$2"
-  local org tz
-  : > "$marker"
+  local org tz tmp
+  # ATOMIC (Codex r2 P1): write the full set to a temp file, then rename. A
+  # truncate-then-append writer can leave a format-valid but org-missing marker if the job
+  # dies mid-loop; rename makes partial states unobservable on any POSIX filesystem.
+  tmp="${marker}.tmp.$$"
+  : > "$tmp"
   while IFS=$'\t' read -r org tz; do
-    printf '%s=%s=%s\n' "$org" "$tz" "$(TZ="$tz" date +%Y-%m-%d)" >> "$marker"
+    printf '%s=%s=%s\n' "$org" "$tz" "$(TZ="$tz" date +%Y-%m-%d)" >> "$tmp"
   done < <(soak_batch_guard_entries "$config_path")
+  mv -f "$tmp" "$marker"
 }
 
 # soak_run_classify <haltedReason> <total_clean> <total_attempts> <punch_target> — the ONE
@@ -2090,6 +2116,12 @@ soak_batch_guard_stamp() {
 soak_run_classify() {
   local halted="$1" clean="$2" attempts="$3" target="$4"
   if ! [[ "$clean" =~ ^[0-9]+$ && "$attempts" =~ ^[0-9]+$ && "$target" =~ ^[0-9]+$ ]]; then
+    echo "WARN"
+    return 0
+  fi
+  # Codex r2 P2: a contradictory tally (clean > attempts) makes the subtraction negative
+  # and every branch below fail-open — an honest classifier WARNs on impossible inputs.
+  if (( clean > attempts )); then
     echo "WARN"
     return 0
   fi
