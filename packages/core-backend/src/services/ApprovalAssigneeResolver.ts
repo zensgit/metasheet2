@@ -274,6 +274,33 @@ export function resolveApprovalAssignees(
         })
         break
       }
+      case 'dept_head_at_level': {
+        // Lock-1 §K5-b: resolve to a SINGLE level of the requester's DEPARTMENT-HEAD chain (the
+        // `source.level`-th entry, level 1 = the requester's own department head), frozen in the
+        // same `deptHeadChainIds` snapshot K4's `continuous_dept_heads` reads — positionally
+        // IDENTICAL to `manager_at_level` (:205-225 above), just over a different chain. Strictly
+        // downstream of K4: no new snapshot field, no new directory read of its own.
+        // Self-exclusion drops a hop resolving to the requester; an empty result (chain shorter
+        // than `level`, or `deptHeadChainIds` absent because no node in the published graph
+        // triggered the bake) falls through to `emptyAssigneePolicy` — Lock-1 §K5's explicit
+        // ruling that an in-contract level absent from THIS requester's chain is never a
+        // dispatch-time failure. deptHeadChainIds is DENSE under the RATIFIED
+        // continue-past-empty-level posture (resolveDeptHeadChain continues past an empty/
+        // unresolved level to that department's own parent — see the union member's doc
+        // comment), so chain[level-1] is the level-th *resolved* head walking up, NOT "the head
+        // N parent-hops up": an intermediate department with no resolvable head shifts every
+        // deeper level's position, exactly as `manager_at_level`'s own dense-chain contract does
+        // for managerChainIds. A null rung (defensive, never produced by the builder) resolves
+        // that level to empty via normalizeId — positional, no compaction.
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.deptHeadChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        const headId = normalizeId(chain[source.level - 1])
+        if (headId && headId !== requesterId) {
+          pushResolved('user', headId, source, sourceIndex)
+        }
+        break
+      }
       default:
         throw new ServiceError(
           `Approval node ${options.nodeKey} has an unsupported assignee source`,

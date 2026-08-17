@@ -6,6 +6,10 @@ name: Approval real-DB acceptance (Lock-1 assignee kinds)
 #   - approval-realdb-k4: §K4 `continuous_dept_heads`
 #     (tests/integration/approval-dept-head-chain.db.test.ts — G-1/G-2/G-13,
 #      continue-past-empty-level over real SQL, freeze-purity/temporal)
+#   - approval-realdb-k5b: §K5-b `dept_head_at_level` (strictly downstream of K4 — reads the SAME
+#     deptHeadChainIds snapshot field)
+#     (tests/integration/approval-dept-head-at-level.db.test.ts — G-1/G-2, positional-not-hop-count
+#      over real SQL, out-of-range→emptyAssigneePolicy, freeze-purity/temporal)
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no
 # flag change.
 #
@@ -36,6 +40,7 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-requester-choice.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-chain.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
@@ -50,6 +55,7 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-requester-choice.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-chain.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
@@ -215,6 +221,83 @@ jobs:
             echo "suite=approval-dept-head-chain.db.test.ts"
             echo "lock=approval-lock1-enterprise-assignees-20260817 §K4"
             echo "gates=G-1,G-2,G-13 (continue-past-empty-level over real SQL, freeze-purity/temporal)"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-realdb-k5b:
+    name: approval-realdb-k5b
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see the T8 note there and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md
+          # for the per-item detail) — this lane provisions the identical schema the
+          # approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-1 §K5-b dept_head_at_level real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit
+        # green and hide regressions; verbose prints every collected test so an empty
+        # collection shows in the log instead of reading as green. The sentinel here is
+        # the file's own top-level `sentinel: DATABASE_URL is set` test — it is INSIDE
+        # describeIfDatabase (same posture as K4's job), which is sufficient in THIS lane
+        # because DATABASE_URL is unconditionally set above.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-dept-head-at-level.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-dept-head-at-level.db.test.ts"
+            echo "lock=approval-lock1-enterprise-assignees-20260817 §K5-b"
+            echo "gates=G-1,G-2 (positional-not-hop-count over real SQL, out-of-range->emptyAssigneePolicy, freeze-purity/temporal)"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
             echo "externalWrite=false"

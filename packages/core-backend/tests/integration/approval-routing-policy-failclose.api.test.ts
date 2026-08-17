@@ -24,8 +24,8 @@ import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schem
  * a broken policy became a FAIL-OPEN that silently approves approvals.
  *
  * Proof, for EACH of the org assignee sources (direct_manager / dept_head / continuous_managers /
- * manager_at_level, plus Lock-1 §K4's continuous_dept_heads — all with the dangerous auto-approve
- * policy):
+ * manager_at_level, plus Lock-1 §K4's continuous_dept_heads and Lock-1 §K5-b's dept_head_at_level
+ * — all with the dangerous auto-approve policy):
  *   A. BROKEN POLICY (canonical target disabled) → create rejected **422
  *      APPROVAL_ROUTING_POLICY_MISCONFIGURED**, and — the load-bearing half — **ZERO
  *      approval_instances and ZERO approval_assignments** exist for the template.
@@ -78,7 +78,7 @@ async function req(base: string, path: string, token: string, opts: { method?: s
   })
 }
 
-type OrgSourceKind = 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'continuous_dept_heads'
+type OrgSourceKind = 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'continuous_dept_heads' | 'dept_head_at_level'
 function graph(kind: OrgSourceKind) {
   const source =
     kind === 'continuous_managers' ? { kind, levels: 2 }
@@ -87,7 +87,9 @@ function graph(kind: OrgSourceKind) {
         // (runtimeGraphUsesOrgAssigneeSource, ApprovalProductService.ts) — this fixture proves the
         // extension is load-bearing, not merely declared.
         : kind === 'continuous_dept_heads' ? { kind, levels: 2 }
-          : { kind }
+          // Lock-1 §K5-b: extends the SAME detector (§2.1 names K4 AND K5-b explicitly).
+          : kind === 'dept_head_at_level' ? { kind, level: 1 }
+            : { kind }
   return {
     nodes: [
       { key: 'start', type: 'start', name: 's', config: {} },
@@ -286,9 +288,9 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
     expect(asg.rows[0].n).toBe(0)
   }
 
-  const KINDS: OrgSourceKind[] = ['direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'continuous_dept_heads']
+  const KINDS: OrgSourceKind[] = ['direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'continuous_dept_heads', 'dept_head_at_level']
 
-  it('A. BROKEN policy → 422 APPROVAL_ROUTING_POLICY_MISCONFIGURED for ALL FIVE org sources (Lock-1 §K4 extends the set), zero instances, zero assignments', async () => {
+  it('A. BROKEN policy → 422 APPROVAL_ROUTING_POLICY_MISCONFIGURED for ALL SIX org sources (Lock-1 §K4 + §K5-b extend the set), zero instances, zero assignments', async () => {
     await setPolicy('default', dtIntId)
     await query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [dtIntId])
     try {
@@ -306,7 +308,7 @@ describeIfDatabase('B5-b owner P1 — routing-policy fail-close at approval crea
     }
   })
 
-  it('B. TRANSIENT org-read failure → 503 APPROVAL_REQUESTER_ORG_UNRESOLVED for all five sources (Lock-1 §K4 extends the set), zero instances, zero assignments', async () => {
+  it('B. TRANSIENT org-read failure → 503 APPROVAL_REQUESTER_ORG_UNRESOLVED for all six sources (Lock-1 §K4 + §K5-b extend the set), zero instances, zero assignments', async () => {
     // healthy policy in place; arm the scoped Pool.query spy only for the create calls
     // (non-policy Error shape — not a config error). Publish stays on the healthy path.
     await setPolicy('default', localIntId)

@@ -771,6 +771,26 @@ describe('approval template authoring helpers', () => {
     expect(rehydrated.steps[0].level).toBe(2)
   })
 
+  it('Lock-1 §K5-b: round-trips a dept_head_at_level source incl. level (save emits {kind, level}; level survives the real wire) — the linear editor accepted-kind list mirror site', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'dhal'
+    draft.name = '指定层级部门负责人审批'
+    draft.steps[0].sourceKind = 'dept_head_at_level'
+    draft.steps[0].level = 2
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'dept_head_at_level', level: 2 }])
+
+    // wire-vs-fixture trap: assert `level` survives the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('dept_head_at_level')
+    expect(rehydrated.steps[0].level).toBe(2)
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
   it('Lock-1 §K2: round-trips a requester_choice source incl. mode + role scope (idsText is the scope-id carrier)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'rc'
@@ -1988,6 +2008,20 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('continuous_dept_heads') // hydrated back
     expect((container!.querySelector('[data-testid="approval-step-dept-head-levels"]') as HTMLInputElement)).not.toBeNull() // the levels input renders for this kind
+  })
+
+  it('Lock-1 §K5-b: dept_head_at_level reads back editable: a saved dept_head_at_level template is NOT fail-closed (sourceKind + level input hydrated, registry-admitted)', async () => {
+    routeParams = { id: 'tpl_dhal' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('dept_head_at_level') // hydrated back
+    expect((container!.querySelector('[data-testid="approval-step-dept-head-level"]') as HTMLInputElement)).not.toBeNull() // the level input renders for this kind
   })
 
   it('updates an existing supported template without replacing it through create', async () => {

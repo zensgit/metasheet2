@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -259,6 +259,19 @@ export type ApprovalAssigneeSource =
    * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time, byte-identically to `continuous_managers`.
    */
   | { kind: 'continuous_dept_heads'; levels: number }
+  /**
+   * Lock-1 §K5-b — 指定层级部门负责人 (dept head at a specific level): `deptHeadChainIds[level-1]`,
+   * positionally IDENTICAL to `manager_at_level` but reading the K4 department-head chain instead
+   * of `managerChainIds` (a different pointer — see the `continuous_dept_heads` doc comment above).
+   * Level 1 = the requester's own department head (byte-identical to the single-level `dept_head`).
+   * Strictly downstream of K4: this reads the SAME `deptHeadChainIds` snapshot field K4 builds — it
+   * does not add a snapshot field of its own. `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]`
+   * at normalize time, byte-identically to `manager_at_level`. A `level` valid in contract but past
+   * the end of THIS requester's (possibly shorter) chain resolves EMPTY and falls to
+   * `emptyAssigneePolicy` — the shipped `manager_at_level` behavior, unchanged (Lock-1 §K5: never a
+   * dispatch-time failure).
+   */
+  | { kind: 'dept_head_at_level'; level: number }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -448,13 +461,15 @@ export interface ApprovalRequesterSnapshot {
    * Lock-1 §K4 — ordered local user ids of the requester's DEPARTMENT-HEAD chain, level 1 first
    * (the requester's own department head). A DIFFERENT pointer from `managerChainIds` — see the
    * `continuous_dept_heads` union member doc comment for the leader-pointer vs parent-tree
-   * distinction. Frozen at create time only when the published graph uses `continuous_dept_heads`
-   * (gated by `runtimeGraphUsesDeptHeadChain`, so it is not baked for every approval).
+   * distinction. Frozen at create time when the published graph uses `continuous_dept_heads` OR
+   * Lock-1 §K5-b `dept_head_at_level` (gated by `runtimeGraphUsesDeptHeadChain`, EXTENDED to both
+   * kinds, so it is not baked for every approval).
    * Cycle-guarded (visited set of external DEPARTMENT ids) + capped at MAX_MANAGER_CHAIN_LEVELS;
    * self-excluded on the requester's LOCAL id; absent when unresolvable or unused. A level whose
    * head is unresolved contributes nothing but does NOT truncate the walk (ratified
    * continue-past-empty-level posture). Read by `continuous_dept_heads` (slices it to its own
-   * `levels`). Purely additive; existing snapshots omit it.
+   * `levels`) and by `dept_head_at_level` (positional single-level pick, `[level-1]`). Purely
+   * additive; existing snapshots omit it.
    */
   deptHeadChainIds?: string[]
   /**

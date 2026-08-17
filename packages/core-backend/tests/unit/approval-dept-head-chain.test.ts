@@ -281,6 +281,20 @@ describe('runtimeGraphUsesDeptHeadChain (K4 conditional-bake scanner)', () => {
     expect(runtimeGraphUsesDeptHeadChain(graph([{ kind: 'requester' }, { kind: 'continuous_dept_heads', levels: 1 }]))).toBe(true)
   })
 
+  // Lock-1 §K5-b: dept_head_at_level is STRICTLY DOWNSTREAM of K4 — it reads the SAME
+  // deptHeadChainIds snapshot field, so it shares this ONE gate rather than minting its own
+  // (mirrors runtimeGraphUsesManagerChain carrying both continuous_managers AND
+  // manager_at_level). Missing this is the R-13 "silent skip" class: a graph using ONLY
+  // dept_head_at_level would never bake deptHeadChainIds, and the resolver's positional read
+  // would see `undefined` — indistinguishable from "no head at that level".
+  it('detects a dept_head_at_level source on an approval node (K5-b shares K4\'s gate — strictly downstream)', () => {
+    expect(runtimeGraphUsesDeptHeadChain(graph([{ kind: 'dept_head_at_level', level: 2 }]))).toBe(true)
+  })
+
+  it('detects dept_head_at_level mixed with non-chain sources', () => {
+    expect(runtimeGraphUsesDeptHeadChain(graph([{ kind: 'requester' }, { kind: 'dept_head_at_level', level: 1 }]))).toBe(true)
+  })
+
   it('returns false for continuous_managers / manager_at_level — a SEPARATE gate from runtimeGraphUsesManagerChain, not a relabeling', () => {
     expect(runtimeGraphUsesDeptHeadChain(graph([{ kind: 'continuous_managers', levels: 2 }]))).toBe(false)
     expect(runtimeGraphUsesDeptHeadChain(graph([{ kind: 'manager_at_level', level: 1 }]))).toBe(false)
@@ -302,6 +316,11 @@ describe('runtimeGraphUsesOrgAssigneeSource — K4 extension (Lock-1 §2.1, G-20
 
   it('treats continuous_dept_heads as an org-derived source (extends the B5-b fail-closed guard)', () => {
     expect(runtimeGraphUsesOrgAssigneeSource(graph([{ kind: 'continuous_dept_heads', levels: 2 }]))).toBe(true)
+  })
+
+  // Lock-1 §2.1 names K4 AND K5-b explicitly ("That detector MUST be extended to K4 and K5-b").
+  it('treats dept_head_at_level as an org-derived source (Lock-1 §2.1 K5-b extension, extends the B5-b fail-closed guard)', () => {
+    expect(runtimeGraphUsesOrgAssigneeSource(graph([{ kind: 'dept_head_at_level', level: 2 }]))).toBe(true)
   })
 
   it('still detects the four shipped org-derived kinds (no narrowing regression)', () => {

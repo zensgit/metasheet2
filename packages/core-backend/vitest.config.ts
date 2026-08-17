@@ -310,6 +310,14 @@ export default defineConfig({
       // approval-realdb-k4) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring —
       // both points land in the SAME commit.
       'tests/integration/approval-dept-head-chain.db.test.ts',
+      // Lock-1 §K5-b dept_head_at_level real-DB acceptance (G-1/G-2/core positional-not-hop-count,
+      // out-of-range, freeze purity) — strictly downstream of K4, reads the SAME deptHeadChainIds
+      // snapshot field. DATABASE_URL-gated; excluded here so the no-DB default job cannot
+      // collect-and-skip-green it, and carried by the SAME dedicated
+      // .github/workflows/approval-realdb-acceptance.yml workflow (sibling job
+      // approval-realdb-k5b) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring —
+      // both points land in the SAME commit.
+      'tests/integration/approval-dept-head-at-level.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

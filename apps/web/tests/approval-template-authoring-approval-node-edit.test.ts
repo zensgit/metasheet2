@@ -240,6 +240,26 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 1.5 }] },
     })[0]).toMatch(/continuous_dept_heads/)
   })
+  it('Lock-1 §K5-b: dept_head_at_level — a positive integer level passes; 0/non-integer is flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'dept_head_at_level', level: 2 }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'dept_head_at_level', level: 0 }] },
+    })[0]).toMatch(/dept_head_at_level/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'dept_head_at_level', level: 1.5 }] },
+    })[0]).toMatch(/dept_head_at_level/)
+  })
+  // Lock-3 §1.5 deferral invariant: dept_head_at_level (K5-b) is NOT in the handler roster in
+  // this slice (Lock-3's forward ADMIT is a separate follow-up — see
+  // approval-handler-node-authoring.spec.ts's exact-set test). A handler carrying it must fail
+  // closed here too.
+  it('Lock-3 §1.5 deferral: a HANDLER node carrying dept_head_at_level is rejected (not in the seven-member handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] },
+    })[0]).toMatch(/dept_head_at_level/)
+  })
 })
 
 describe('G-5 fail-closed — complex approval-node config must stay within the BACKEND allowlist', () => {
@@ -338,6 +358,18 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   })
   it('K4: a continuous_dept_heads source with an unknown extra key forces read-only', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'continuous_dept_heads', levels: 3, futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-1 §K5-b — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: dept_head_at_level must be
+  // ALLOWED (present in the allowlist) on the complex path, and an extra key on it must still be
+  // caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K5-b: dept_head_at_level is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2 }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K5-b: a dept_head_at_level source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2, futureFlag: true }] })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })
