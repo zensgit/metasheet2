@@ -124,6 +124,18 @@ export interface FieldAuthoringDraft {
    */
   recordLinkBaseId: string
   recordLinkSheetId: string
+  /**
+   * L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display
+   * props. Meaningful only when `type === 'number'`. Props on the EXISTING `number` type — NOT a
+   * new field type (M10). `numberCurrencySymbol === ''` means "no currency prefix" (props key
+   * omitted at build); the two booleans default `false` (also omitted). Editor is authoritative
+   * for these three keys once touched — buildFormSchema does not resurrect them from `original`
+   * when cleared. min/max/step/precision/derivedFrom stay unauthorable (pass through `original`
+   * verbatim, §0.4), unchanged by this slice.
+   */
+  numberCurrencySymbol: string
+  numberThousandsSeparator: boolean
+  numberUppercaseCny: boolean
   original?: FormField
 }
 
@@ -254,6 +266,9 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
+    numberCurrencySymbol: '',
+    numberThousandsSeparator: false,
+    numberUppercaseCny: false,
   }
 }
 
@@ -445,6 +460,14 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
     recordLinkBaseId: field.type === 'record-link' && typeof props.baseId === 'string' ? props.baseId : '',
     recordLinkSheetId: field.type === 'record-link' && typeof props.sheetId === 'string' ? props.sheetId : '',
+    // L8-C: typeof-guarded per key — a malformed stored value (wrong type) hydrates to the "unset"
+    // default rather than throwing or coercing (mirrors numberFieldProps.ts's per-key discipline).
+    // The backend now type-validates these three keys at publish (ApprovalProductService.ts), so a
+    // freshly-saved template can never reach this hydration path with a malformed value; this stays
+    // defensive for pre-existing/out-of-band data.
+    numberCurrencySymbol: field.type === 'number' && typeof props.currencySymbol === 'string' ? props.currencySymbol : '',
+    numberThousandsSeparator: field.type === 'number' && props.thousandsSeparator === true,
+    numberUppercaseCny: field.type === 'number' && props.uppercaseCny === true,
     original: field,
   }
 }
@@ -989,12 +1012,37 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
           baseId: field.recordLinkBaseId.trim(),
           sheetId: field.recordLinkSheetId.trim(),
         }
+      } else if (field.type === 'number') {
+        // L8-C (§1.3): editor is authoritative for the three NEW display keys only — preserve
+        // min/max/step/precision/derivedFrom verbatim from `original` (unauthorable, §0.4) via the
+        // starting spread, then overlay/delete the three authored keys so unchecking a toggle (or
+        // clearing the currency select) does not resurrect a stale value from `original` (mirrors
+        // the visibilityRule/options omit discipline above). The backend re-canonicalizes on save
+        // regardless (OD-L8-7); this keeps the client-authored payload already clean.
+        const props = next.props && typeof next.props === 'object'
+          ? { ...next.props } as Record<string, unknown>
+          : {}
+        delete props.baseId
+        delete props.sheetId
+        delete props.currencySymbol
+        delete props.thousandsSeparator
+        delete props.uppercaseCny
+        const currencySymbol = field.numberCurrencySymbol.trim()
+        if (currencySymbol) props.currencySymbol = currencySymbol
+        if (field.numberThousandsSeparator) props.thousandsSeparator = true
+        if (field.numberUppercaseCny) props.uppercaseCny = true
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
       } else if (next.props && typeof next.props === 'object') {
-        // Drop record-link pins when type changes away; keep other type-specific props only
-        // if still meaningful (do not leave baseId/sheetId on a text field).
+        // Drop record-link pins + L8-C display keys when type changes away; keep other
+        // type-specific props only if still meaningful (do not leave baseId/sheetId or a
+        // formatted-number display flag on a text field).
         const props = { ...next.props } as Record<string, unknown>
         delete props.baseId
         delete props.sheetId
+        delete props.currencySymbol
+        delete props.thousandsSeparator
+        delete props.uppercaseCny
         if (Object.keys(props).length === 0) delete next.props
         else next.props = props
       }

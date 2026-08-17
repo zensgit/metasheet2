@@ -309,6 +309,14 @@ export function addFormField(
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
+    // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above — this
+    // command layer feeds the Designer 2.0 canvas track (ApprovalFormFieldInspector.vue), which is
+    // unmounted in production (not imported by any live view) and out of Lock-8's citation scope
+    // (§1.3 names ApprovalFormInlineEditor.vue). No authoring affordance for these three keys exists
+    // here; a freshly-added `number` field simply carries no display props, same as today.
+    numberCurrencySymbol: '',
+    numberThousandsSeparator: false,
+    numberUppercaseCny: false,
   }
 
   const fields = [...draft.fields]

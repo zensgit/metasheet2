@@ -434,6 +434,142 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
   })
 
   // -------------------------------------------------------------------------
+  // G-B2-16 — pre-existing auto-sum 大写 caption, gap-closure (adversarial gate on #4959, P3-1):
+  // `amountWordsFor` was refactored from `(fieldId: string)` to `(field: FormField)` by the L8-C
+  // slice above, and the auto-sum branch's call shape was asserted "byte-identical" in that PR's
+  // own comment, but no test anywhere (base OR this PR) rendered the auto-summed-total 大写 caption
+  // in the view — mutation-proof below.
+  // -------------------------------------------------------------------------
+  it('G-B2-16: the auto-summed-total field (isAutoSummedTotal branch of amountWordsFor) renders the 大写 caption', async () => {
+    // `amount.defaultValue: 300` matches the declared detail rows' sum (100+200) so the asserted
+    // caption is correct under EITHER path this harness can exercise: the real `useAutoSumTotal`
+    // recompute (this describe block's `ElTable`/`ElTableColumn` stubs are dumb pass-throughs that
+    // don't render row content, so detail-row reactivity can't be independently observed here) or
+    // the defaultValue seed — both converge on the same total, so the assertion is not sensitive to
+    // which one wins. `useAutoSumTotal`'s OWN auto-sum computation is already covered exhaustively
+    // in `useAutoSumTotal.test.ts`; this test's job is narrower — proving `isAutoSummedTotal(id) ===
+    // true` alone (confirmed independently below via the pre-existing "由明细自动汇总" hint) drives
+    // `amountWordsFor` into its FIRST branch and the view renders the resulting caption.
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_autosum_words',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '总额', required: true, defaultValue: 300 } as FormField,
+          {
+            id: 'items', type: 'detail', label: '明细', required: false,
+            defaultValue: [{ amount: 100 }, { amount: 200 }],
+            columns: [{ id: 'amount', type: 'number', label: '金额', required: true }],
+          } as FormField,
+        ],
+        amountConsistencyCheck: { totalFieldId: 'amount', detailFieldId: 'items', amountColumnId: 'amount' },
+      } as any,
+    })
+    await mountView()
+    await flushUi()
+    // Confirms isAutoSummedTotal('amount') is true (the pre-existing, unrelated read-only hint
+    // shares that same predicate) — so the caption below is proven trigger-selected, not a
+    // coincidence of some other condition.
+    expect(container!.innerHTML).toContain('由明细自动汇总，无需手填')
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('叁佰圆整')
+  })
+
+  // -------------------------------------------------------------------------
+  // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display —
+  // currency/thousands caption + the per-field 大写 trigger, additive to the pre-existing
+  // auto-summed-total trigger (§0.4 — neither replaces the other).
+  // -------------------------------------------------------------------------
+  it('L8-C: uppercaseCny renders the 大写 caption on a PLAIN number field (no auto-sum total declared)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words',
+      formSchema: {
+        fields: [
+          { id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差申请' } as FormField,
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3,
+            props: { uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('壹拾贰圆叁角')
+  })
+
+  it('L8-C: uppercaseCny is gated on scale <= 2 — a precision:4 field never shows the 大写 caption (amountToChineseWords is honest only up to 2 decimals, per its own header)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words_high_precision',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3456,
+            props: { uppercaseCny: true, precision: 4 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+  })
+
+  it('L8-C: a plain number field with NO uppercaseCny and no auto-sum shows NEITHER caption (positive control for the trigger)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_none',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3 } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-amount-display"]')).toBeNull()
+  })
+
+  it('L8-C: currencySymbol + thousandsSeparator render the formatted-number display caption', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_display',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, precision: 2 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-display"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent?.trim()).toBe('¥1,234.5')
+  })
+
+  it('L8-C: currencySymbol/thousandsSeparator/uppercaseCny do not change the submitted formData (display-only, M10)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_submit',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    expect(payload.formData).toEqual({ amount: 1234.5 })
+  })
+
+  // -------------------------------------------------------------------------
   // B2-28
   // -------------------------------------------------------------------------
   it('renders the disabled placeholder for an attachment field — no el-upload', async () => {

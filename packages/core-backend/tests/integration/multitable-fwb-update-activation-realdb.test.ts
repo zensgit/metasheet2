@@ -151,7 +151,14 @@ function approvalTemplateRequest(linkBaseId: string, linkSheetId: string) {
     formSchema: {
       fields: [
         { id: 'summary', type: 'text', label: 'Summary', required: true },
-        { id: 'amount', type: 'number', label: 'Amount', required: true },
+        // M-1(ii) (approval-lock8-field-vocabulary-20260817.md §3): every L8-C formatted-number
+        // display prop, so this file's existing `exact_number_mapping_unavailable` assertion
+        // (~:532) doubles as save-time proof that a formatted-number SOURCE field does not weaken
+        // the stop rule — props are display-only (M10), invisible to `hasUnavailableFwbNumberMapping`.
+        {
+          id: 'amount', type: 'number', label: 'Amount', required: true,
+          props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true, precision: 2 },
+        },
         {
           id: 'linked',
           type: 'record-link',

@@ -501,15 +501,28 @@
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
 
-            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
-                 guessing); derived from the same value the backend total-check sees. Keep this
-                 outside the field-type v-if chain so earlier branches never fall through twice. -->
+            <!-- G-B2-16: 大写回显 — under the template-declared amount total (no label guessing),
+                 OR (L8-C, §0.4: "re-sites [amountInWords] to a per-field display flag") under a
+                 formatted-number field's own `props.uppercaseCny` — additive, neither trigger
+                 replaces the other (an old template with no `uppercaseCny` prop keeps behaving
+                 exactly as it does today). Keep this outside the field-type v-if chain so earlier
+                 branches never fall through twice. -->
             <div
-              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
+              v-if="field.type === 'number' && (isAutoSummedTotal(field.id) || isAmountWordsField(field)) && amountWordsFor(field)"
               class="approval-new__amount-words"
               data-testid="approval-amount-words"
             >
-              大写：{{ amountWordsFor(field.id) }}
+              大写：{{ amountWordsFor(field) }}
+            </div>
+
+            <!-- L8-C: formatted-number display caption (currency prefix / thousands grouping) —
+                 PRESENTATION ONLY, the same value the input holds (M10). -->
+            <div
+              v-if="field.type === 'number' && amountDisplayCaption(field)"
+              class="approval-new__amount-display"
+              data-testid="approval-amount-display"
+            >
+              {{ amountDisplayCaption(field) }}
             </div>
 
             <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
@@ -571,8 +584,15 @@ import { recordRecentTemplate } from '../../approvals/recentTemplates'
 import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
-import { numberFieldProps } from '../../approvals/numberFieldProps'
+import {
+  numberFieldProps,
+  amountDisplayProps,
+  isAmountWordsField,
+  formatAmountDisplay,
+  roundToFieldScale,
+} from '../../approvals/numberFieldProps'
 import { amountToChineseWords } from '../../approvals/amountInWords'
+import { numberFieldScale } from '../../approvals/amountAutoSum'
 import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
@@ -959,9 +979,31 @@ watch(formData, () => routePreviewController.invalidate(), { deep: true })
 // (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
 const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
 
-// G-B2-16: uppercase caption for the declared amount total.
-function amountWordsFor(fieldId: string): string {
-  return amountToChineseWords(formData[fieldId])
+// G-B2-16: uppercase caption for the declared amount total. L8-C (§0.4) adds a SECOND, independent
+// trigger (`props.uppercaseCny`) without touching this branch's byte-identical existing behavior —
+// the auto-summed-total path below is UNCHANGED (same raw `formData` read, same call shape). The
+// new per-field-flag branch is additionally gated on `numberFieldScale(field) <= 2`:
+// amountInWords.ts's own header records that `amountToChineseWords` always rounds to 2 decimals
+// internally and is therefore only an honest caption when the field's declared scale is <= 2 — the
+// pre-existing auto-sum trigger stays within that bound by authoring convention (money-total
+// presets are 2-decimal), but L8-C's `uppercaseCny` is a free-standing per-field opt-in an author
+// could otherwise set on a `precision: 4` field, silently misrepresenting the stored value. Gating
+// here (rather than loosening amountToChineseWords's own 2-decimal rounding) keeps that pure
+// util's contract unchanged.
+function amountWordsFor(field: FormField): string {
+  if (isAutoSummedTotal(field.id)) return amountToChineseWords(formData[field.id])
+  if (isAmountWordsField(field) && numberFieldScale(field) <= 2) {
+    return amountToChineseWords(roundToFieldScale(formData[field.id], numberFieldScale(field)))
+  }
+  return ''
+}
+
+// L8-C: formatted-number display caption (currency prefix / thousands grouping), PRESENTATION ONLY
+// — reads the SAME `formData` value the input holds, rounded to the field's declared scale (the
+// same scale the total-check and the 大写 caption already respect).
+function amountDisplayCaption(field: FormField): string {
+  const spec = amountDisplayProps(field)
+  return formatAmountDisplay(formData[field.id], spec, numberFieldScale(field))
 }
 
 const formRules = computed<FormRules>(() => {
@@ -1433,6 +1475,12 @@ watch([visibleFieldIds, template], () => {
 }
 
 .approval-new__amount-words {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.approval-new__amount-display {
   margin-top: var(--ms-space-1);
   font-size: 12px;
   color: var(--ms-text-3);
