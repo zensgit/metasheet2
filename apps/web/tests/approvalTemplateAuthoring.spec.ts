@@ -1335,7 +1335,7 @@ describe('TemplateAuthoringView', () => {
     expect(defaultCard.querySelector('[data-testid="approval-condition-default-copy"]')).toBeNull() // NOT the default-flow claim
     const emptyCopy = defaultCard.querySelector('[data-testid="approval-condition-default-copy-empty"]')
     expect(emptyCopy?.textContent?.trim()).toBe(
-      '未指定默认分支：所有条件都不满足时，流程将进入第一条出边（优先级最高的分支）。',
+      '未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。',
     )
     // The header hint asserts the SAME "...走默认分支" fact — must not render it either.
     expect(container!.querySelectorAll('[data-testid="approval-condition-order-hint"]')).toHaveLength(0)

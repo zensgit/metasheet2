@@ -251,7 +251,7 @@
           class="template-authoring__condition-default-copy template-authoring__condition-default-copy--empty"
           data-testid="approval-condition-default-copy-empty"
         >
-          未指定默认分支：所有条件都不满足时，流程将进入第一条出边（优先级最高的分支）。
+          未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。
         </p>
         <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
           <el-select

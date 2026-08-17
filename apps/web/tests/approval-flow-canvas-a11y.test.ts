@@ -188,18 +188,33 @@ describe('ApprovalFlowCanvas flat-card grammar — computed-style mechanism guar
     // `var(--el-color-success-light-8)` for `cc` vs `var(--el-fill-color-light)` for every
     // unaffected type, while `.backgroundColor` stayed `rgba(0, 0, 0, 0)` for all of them.
     const computed = getComputedStyle(kindBar)
-    const value = computed.background
+    // Widened beyond `.background` alone: a ribbon can be repainted per type through any
+    // paint-relevant property (`box-shadow: inset 0 0 0 99px …` reproduces the shipped ribbon with
+    // zero `background` involvement), so the guard compares the full paint tuple. Property-scoped
+    // guards are a trap-enumeration anti-pattern; the tuple below is the paint surface of this
+    // element, not a list of known evasions.
+    const paint = JSON.stringify([
+      computed.background,
+      computed.backgroundImage,
+      computed.boxShadow,
+      computed.border,
+      computed.borderLeft,
+      computed.outline,
+      computed.filter,
+      computed.opacity,
+    ])
+    const backgroundOnly = computed.background
     document.body.removeChild(card)
     document.head.removeChild(styleEl)
-    return value
+    return { paint, backgroundOnly }
   }
 
-  it('kind-bar computed background is IDENTICAL across every node type (behavioral, not text-based)', () => {
+  it('kind-bar computed paint tuple is IDENTICAL across every node type (behavioral, not text-based)', () => {
     const types = ['start', 'end', 'approval', 'cc', 'condition', 'parallel']
     const values = types.map((type) => kindBarBackground(type))
     // Sanity: jsdom actually resolved something from the injected stylesheet, not a silent no-op
     // that would make the equality check below vacuously true.
-    expect(values.every((v) => v !== '')).toBe(true)
-    expect(new Set(values).size).toBe(1)
+    expect(values.every((v) => v.backgroundOnly !== '')).toBe(true)
+    expect(new Set(values.map((v) => v.paint)).size).toBe(1)
   })
 })
