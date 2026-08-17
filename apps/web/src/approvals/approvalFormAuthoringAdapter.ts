@@ -173,8 +173,15 @@ function commit(
     result.draft.fields,
     result.focusLocalId,
   )
-  const changed =
-    history.undoStack.length > session.history.undoStack.length
+  // Identity, not undo-stack length growth: once the stack saturates
+  // `FORM_AUTHORING_HISTORY_MAX_STACK`, `trimStack` drops the oldest entry on
+  // every further real push, so length stops growing even though a genuine
+  // value-changing edit landed. `pushFormSnapshot`'s three return paths all
+  // discriminate correctly on `fields` identity instead: a full no-op returns
+  // the SAME history object (same `fields` ref); a focus-only change spreads
+  // the existing history (same `fields` ref carried over); a real change
+  // always returns a freshly cloned `fields` array (new ref).
+  const changed = history.fields !== session.history.fields
   return {
     ok: true,
     session: { draft: result.draft, history },

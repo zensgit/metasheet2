@@ -181,6 +181,81 @@ describe('approvalFormAuthoringAdapter - identity (FB-D5)', () => {
     expect(refused).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
     if (!refused.ok) expect(refused.session).toBe(added.session)
   })
+
+  it('detail column add retries a seam-forced collision with a FRESH candidate and succeeds (P2-3)', () => {
+    // Gate F1 names "field/detail collision retry"; this loop (addDetailColumn)
+    // is structurally identical to the field retry loop above but was
+    // previously unexercised — cutting its budget to 1 must turn this RED.
+    // First candidate (A/B) collides with the owner's live column id; second
+    // (C/D) is free.
+    const source = scriptedSource([BLOCK_A, BLOCK_B, BLOCK_C, BLOCK_D])
+    const adapter = createFormAuthoringAdapter({
+      identityAllocator: createOpaqueFormIdentityAllocator(source),
+    })
+    const detailOwner = field(1, {
+      localId: 'detail_local',
+      id: 'detail_field',
+      type: 'detail',
+      detailColumns: [
+        {
+          localId: 'existing_column_local',
+          id: `dcol_${HEX_A}`,
+          type: 'text',
+          label: '已有子字段',
+          required: false,
+          optionsText: '',
+        },
+      ],
+    })
+    const session = adapter.startSession(draftWith([detailOwner]))
+    const added = adapter.addDetailColumn(session, 'detail_local')
+    assertOk(added)
+    const columns = added.session.draft.fields[0].detailColumns
+    expect(columns.at(-1)!.id).toBe(`dcol_${HEX_C}`)
+    expect(columns.at(-1)!.localId).toBe(`dcolloc_${HEX_D}`)
+    expect(columns.at(-1)!.id).not.toBe(`dcol_${HEX_A}`)
+    // Exactly ONE history entry despite the internal retry.
+    expect(added.session.history.undoStack).toHaveLength(1)
+    expect(added.changed).toBe(true)
+  })
+
+  it('detail column add exhausts the retry budget as a typed values-free failure with zero mutation (P2-3)', () => {
+    // Constant seam: every candidate collides with the owner's live column id
+    // forever — proves the typed exhaustion path on the detail-column loop,
+    // not just the field loop.
+    const source = scriptedSource([BLOCK_A])
+    const adapter = createFormAuthoringAdapter({
+      identityAllocator: createOpaqueFormIdentityAllocator(source),
+    })
+    const detailOwner = field(1, {
+      localId: 'detail_local',
+      id: 'detail_field',
+      type: 'detail',
+      detailColumns: [
+        {
+          localId: 'existing_column_local',
+          id: `dcol_${HEX_A}`,
+          type: 'text',
+          label: '已有子字段',
+          required: false,
+          optionsText: '',
+        },
+      ],
+    })
+    const session = adapter.startSession(draftWith([detailOwner]))
+    const result = adapter.addDetailColumn(session, 'detail_local')
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'identity_allocation_exhausted',
+      dependencies: [],
+    })
+    if (!result.ok) {
+      // Session returned unchanged by identity — zero draft/history mutation.
+      expect(result.session).toBe(session)
+    }
+    expect(session.history.undoStack).toHaveLength(0)
+    expect(session.draft.fields[0].detailColumns).toHaveLength(1)
+  })
 })
 
 describe('approvalFormAuthoringAdapter - anchors (FB-D3)', () => {
@@ -343,6 +418,32 @@ describe('approvalFormAuthoringAdapter - history semantics (FB-D4)', () => {
       ok: false,
       reason: 'history_empty',
     })
+  })
+
+  it('changed stays true across the history-stack cap (P2-2: fields identity, not stack-length growth)', () => {
+    // FORM_AUTHORING_HISTORY_MAX_STACK = 100 (approvalFormAuthoringHistory.ts):
+    // once the undo stack saturates, `trimStack` drops the oldest entry on
+    // every further push, so `undoStack.length` stops growing even though
+    // each add below is a genuine value-changing edit. Reproduced on the
+    // pre-fix adapter: adds #101-105 reported `changed: false`. `changed` must
+    // track `history.fields` identity (fresh clone on real change; same
+    // reference on a full no-op or a focus-only change), not stack-length
+    // growth, so it stays `true` through and past the cap.
+    const adapter = createFormAuthoringAdapter()
+    let session = adapter.startSession(draftWith([field(1)]))
+    for (let i = 0; i < 105; i += 1) {
+      const before = session.draft.fields.length
+      const added = adapter.addField(session, 'text')
+      assertOk(added)
+      expect(added.changed).toBe(true)
+      expect(added.session.draft.fields.length).toBe(before + 1)
+      session = added.session
+    }
+    expect(session.draft.fields).toHaveLength(106)
+    // Confirms this test actually crosses the saturation boundary the flag
+    // got wrong: the stack itself is capped at 100 even though 105 real
+    // edits landed.
+    expect(session.history.undoStack.length).toBe(100)
   })
 
   it('undo preserves non-field draft properties (fields-scoped history)', () => {

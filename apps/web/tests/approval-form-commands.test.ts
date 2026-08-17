@@ -22,6 +22,7 @@ import {
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
+import type { FormField } from '../src/types/approval'
 
 function field(
   index: number,
@@ -532,6 +533,23 @@ describe('approvalFormCommands - remove', () => {
         'external_reference',
       ]),
     )
+    // P2-1a: the kind SET alone cannot tell apart the two independent
+    // `condition_formula` producers (conditionEdits.branches[].formulaExpression
+    // at commands.ts:456, and the preserved-graph walk over `value.expression`
+    // at commands.ts:375-380, reached here via `draft.preservedGraph`) — either
+    // could be deleted and the kind set would still contain `condition_formula`.
+    // Asserting the LOCATION set makes each producer individually load-bearing:
+    // the two locations are distinct strings, so killing either producer alone
+    // drops one of them from this set.
+    const conditionFormulaLocations = dependencies
+      .filter((entry) => entry.kind === 'condition_formula')
+      .map((entry) => entry.location)
+    expect(new Set(conditionFormulaLocations)).toEqual(
+      new Set([
+        'conditionEdits.condition_1.branches.0.formula',
+        'preservedGraph.nodes[0].config.branches[0].formula',
+      ]),
+    )
     const refused = removeFormField(source, 'local_1')
     expect(refused).toMatchObject({
       ok: false,
@@ -545,6 +563,106 @@ describe('approvalFormCommands - remove', () => {
         refused.dependencies.every((entry) => entry.kind !== 'external_reference'),
       ).toBe(true)
     }
+  })
+
+  it('refuses delete when the only reference lives in a hydrated field.original (P2-1b)', () => {
+    // `fieldDraftFromField` (templateAuthoring.ts:425) sets `original: field`
+    // UNCONDITIONALLY on every hydrated authorable field, and `DetailColumnDraft`
+    // carries no visibility member of its own — so a detail SUB-FIELD's
+    // `visibilityRule` naming a top-level field is detectable ONLY through the
+    // `field.original` walk (commands.ts:420-427). This fixture's detail field
+    // has no typed visibility of its own; the sole reference to `field_1` lives
+    // inside `original.columns[0].visibilityRule.fieldId`.
+    const detailFieldOriginal: FormField = {
+      id: 'detail_field',
+      type: 'detail',
+      label: '明细',
+      columns: [
+        {
+          id: 'sub_column',
+          type: 'text',
+          label: '子字段',
+          visibilityRule: { fieldId: 'field_1', operator: 'eq' },
+        },
+      ],
+    }
+    const source = draftWith([
+      field(1),
+      field(2, {
+        id: 'detail_field',
+        type: 'detail',
+        original: detailFieldOriginal,
+      }),
+    ])
+    const dependencies = collectFormFieldDependencies(source, 'field_1')
+    expect(dependencies).toEqual([
+      {
+        kind: 'preserved_graph_reference',
+        location: 'fields.local_2.original.columns[0].visibilityRule',
+      },
+    ])
+    expect(removeFormField(source, 'local_1')).toMatchObject({
+      ok: false,
+      reason: 'field_is_referenced',
+    })
+  })
+
+  it('refuses delete when the field is referenced as the amount-consistency COLUMN id (P3-1)', () => {
+    // `AmountConsistencyMapping.amountColumnId` (types/approval.ts:189-193) is a
+    // persisted detail-column id; the walk previously checked only
+    // `totalFieldId`/`detailFieldId`, orphaning `amountColumnId` on delete.
+    const source = draftWith([field(1), field(2)])
+    source.amountConsistencyCheck = {
+      totalFieldId: 'unrelated_total',
+      detailFieldId: 'unrelated_detail',
+      amountColumnId: 'field_1',
+    }
+    const dependencies = collectFormFieldDependencies(source, 'field_1')
+    expect(dependencies).toEqual([
+      { kind: 'amount_consistency_mapping', location: 'amountConsistencyCheck' },
+    ])
+    expect(removeFormField(source, 'local_1')).toMatchObject({
+      ok: false,
+      reason: 'field_is_referenced',
+    })
+  })
+
+  it('trims whitespace-padded reference ids: permission.fieldId, mapping.totalFieldId, preserved-graph value.fieldId (P3-2)', () => {
+    const source = draftWith([field(1), field(2)])
+    source.steps[0] = {
+      ...source.steps[0],
+      fieldPermissions: [{ fieldId: ' field_1 ', access: 'hidden' }],
+    }
+    source.amountConsistencyCheck = {
+      totalFieldId: ' field_1 ',
+      detailFieldId: 'items',
+      amountColumnId: 'amount',
+    }
+    source.preservedGraph = {
+      nodes: [
+        {
+          key: 'condition_1',
+          type: 'condition',
+          config: {
+            branches: [
+              {
+                edgeKey: 'e1',
+                rules: [{ fieldId: ' field_1 ', operator: 'eq' }],
+              },
+            ],
+          },
+        },
+      ],
+      edges: [],
+    }
+    const dependencies = collectFormFieldDependencies(source, 'field_1')
+    expect(new Set(dependencies.map((entry) => entry.kind))).toEqual(
+      new Set([
+        'step_field_permission',
+        'amount_consistency_mapping',
+        'preserved_graph_reference',
+      ]),
+    )
   })
 })
 

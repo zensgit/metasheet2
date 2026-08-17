@@ -369,7 +369,7 @@ function collectPreservedGraphReferences(
   }
   if (!isRecord(value)) return
 
-  if (value.fieldId === fieldId) {
+  if (typeof value.fieldId === 'string' && value.fieldId.trim() === fieldId) {
     dependencies.push({ kind: 'preserved_graph_reference', location })
   }
   if (
@@ -437,7 +437,9 @@ export function collectFormFieldDependencies(
       })
     }
     if (
-      step.fieldPermissions.some((permission) => permission.fieldId === fieldId)
+      step.fieldPermissions.some(
+        (permission) => permission.fieldId.trim() === fieldId,
+      )
     ) {
       dependencies.push({
         kind: 'step_field_permission',
@@ -486,7 +488,9 @@ export function collectFormFieldDependencies(
   const mapping = draft.amountConsistencyCheck
   if (
     mapping &&
-    (mapping.totalFieldId === fieldId || mapping.detailFieldId === fieldId)
+    (mapping.totalFieldId.trim() === fieldId ||
+      mapping.detailFieldId.trim() === fieldId ||
+      mapping.amountColumnId.trim() === fieldId)
   ) {
     dependencies.push({
       kind: 'amount_consistency_mapping',
