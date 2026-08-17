@@ -1256,21 +1256,111 @@ export type RecordLinkCatalogValidationContext = {
   sheets: ReadonlyArray<{ id: string; baseId?: string | null }>
 }
 
+// P1-A0 (master §4 UI-0 "live validation count"; Lock-0 L0-3 typed-issue-record delta) — typed
+// issue shape for the authoring validators. `target` reuses L0-3's exact `{ kind, key }` contract
+// (`approval-lock0-d0-interaction-delta-20260817.md` L0-3) so a later slice adopting the header
+// count can consume this same record instead of migrating a second shape.
+//
+// `severity` is a SUPERSET field L0-3 does not define. Every basic-info check today is a hard
+// "must fix", so `severity` is currently ALWAYS `'error'` — it is declared for the future header
+// count (which may eventually need to distinguish a soft warning) but has exactly one live value
+// right now; do not read its presence as evidence a warning tier already exists.
+//
+// This is a typed SIBLING of the existing `string[]` validators, not a replacement — but not fully
+// independent of them either: `validateTemplateFormFields` below now COMPOSES
+// `validateTemplateBasicInfo`'s `.message`s for its first five entries (previously inlined). Both
+// `validationErrors` (the save-blocking surface) and `publishChecklist` (the publish pre-flight,
+// `TemplateAuthoringView.vue`) therefore transitively call through this new function, but their
+// composition, values, and rendered strings are byte-identical to before this extraction (pinned
+// by the regression tests below) — "sibling, not replacement" describes the OUTPUT contract, not
+// the call graph. Only the NEW basic-info step-nav issue badge derives its displayed count from
+// the typed shape directly (`AuthoringValidationIssue[].length`, never hand-counted).
+export type AuthoringValidationSeverity = 'error' | 'warning'
+
+export interface AuthoringValidationIssueTarget {
+  kind: 'node' | 'field' | 'section'
+  key: string
+}
+
+export interface AuthoringValidationIssue {
+  /** Stable rule identifier (was informally "field" — renamed to avoid colliding with the
+   * `target.kind === 'field'` case, since a basic-info issue like `visibility` targets the whole
+   * 基础信息 section, not a `FieldAuthoringDraft`). */
+  code: string
+  message: string
+  severity: AuthoringValidationSeverity
+  target?: AuthoringValidationIssueTarget
+}
+
+/**
+ * Typed basic-info issues — the SAME five checks `validateTemplateFormFields` has always run
+ * first (`unsupportedReason` / key / name / visibility scope / SLA hours), extracted verbatim so
+ * the 基础信息 step-nav badge can derive its count from a typed array instead of a hand-maintained
+ * counter. `validateTemplateFormFields` below calls this and flattens `.message` into its existing
+ * `string[]`, in the SAME order, so the combined validation set, order, and exact copy are
+ * unchanged from before this extraction — this function adds a typed VIEW onto existing rules, it
+ * does not add, remove, or reword any of them.
+ *
+ * `unsupportedReason` (an attachment-field/unknown-node structural block, not something an author
+ * fixes by editing 基础信息 text) is included deliberately: `firstInvalidAuthoringSection` already
+ * routes a validate() failure carrying it to the `'basic'` step (this file, `hasBasicSettingsError`
+ * in `TemplateAuthoringView.vue`), so counting it here mirrors an existing attribution rather than
+ * inventing a new one — it does not introduce a second, disagreeing classification.
+ */
+export function validateTemplateBasicInfo(
+  draft: TemplateAuthoringDraft,
+  unsupportedReason?: string | null,
+): AuthoringValidationIssue[] {
+  const issues: AuthoringValidationIssue[] = []
+  if (unsupportedReason) {
+    issues.push({
+      code: 'unsupported',
+      message: unsupportedReason,
+      severity: 'error',
+      target: { kind: 'section', key: 'basic' },
+    })
+  }
+  if (!draft.key.trim()) {
+    issues.push({
+      code: 'key',
+      message: '模板 Key 必填',
+      severity: 'error',
+      target: { kind: 'field', key: 'key' },
+    })
+  }
+  if (!draft.name.trim()) {
+    issues.push({
+      code: 'name',
+      message: '模板名称必填',
+      severity: 'error',
+      target: { kind: 'field', key: 'name' },
+    })
+  }
+  if (draft.visibilityType !== 'all' && parseIdsText(draft.visibilityIdsText).length === 0) {
+    issues.push({
+      code: 'visibility',
+      message: '非全员可见范围至少需要一个 id',
+      severity: 'error',
+      target: { kind: 'field', key: 'visibilityIdsText' },
+    })
+  }
+  if (Number.isNaN(buildSlaHours(draft))) {
+    issues.push({
+      code: 'slaHours',
+      message: 'SLA 必须是正整数小时或留空',
+      severity: 'error',
+      target: { kind: 'field', key: 'slaHoursText' },
+    })
+  }
+  return issues
+}
+
 export function validateTemplateFormFields(
   draft: TemplateAuthoringDraft,
   unsupportedReason?: string | null,
   recordLinkCatalog?: RecordLinkCatalogValidationContext | null,
 ): string[] {
-  const errors: string[] = []
-  if (unsupportedReason) errors.push(unsupportedReason)
-  if (!draft.key.trim()) errors.push('模板 Key 必填')
-  if (!draft.name.trim()) errors.push('模板名称必填')
-  if (draft.visibilityType !== 'all' && parseIdsText(draft.visibilityIdsText).length === 0) {
-    errors.push('非全员可见范围至少需要一个 id')
-  }
-  if (Number.isNaN(buildSlaHours(draft))) {
-    errors.push('SLA 必须是正整数小时或留空')
-  }
+  const errors: string[] = validateTemplateBasicInfo(draft, unsupportedReason).map((issue) => issue.message)
   const fields = draft.fields.map((field) => field.id.trim()).filter(Boolean)
   if (fields.length !== draft.fields.length) errors.push('字段 id 必填')
   if (new Set(fields).size !== fields.length) errors.push('字段 id 不能重复')
