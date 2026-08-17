@@ -490,6 +490,14 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node[data-node-type='condition'] {
   border-left-color: var(--el-color-warning);
 }
+/* Considered trade-off (gate fix round, P2-3): `parallel` shares `--el-color-info` with `start`/`end`
+   above rather than a distinct token, so those three of six types now render an identical left-border
+   accent. `--el-color-info` is `parallel`'s OWN informational token elsewhere in this same component
+   (the edge-insert menu icon, `.is-parallel { background: var(--el-color-info) }`), and D0's only hard
+   requirement is that type stays TEXT-carried (`nodeTypeLabel`) with color merely supplementary — no
+   clause requires six mutually distinct border colors. The alternative (an unused-elsewhere token like
+   `--el-color-primary-dark-2`) would restore distinctness but fails the "existing token used for
+   informational accents elsewhere in the approval UI" instruction. Recorded here, not shipped silently. */
 .template-authoring__canvas-node[data-node-type='parallel'] {
   border-left-color: var(--el-color-info);
 }

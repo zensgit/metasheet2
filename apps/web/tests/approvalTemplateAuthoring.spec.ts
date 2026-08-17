@@ -1297,7 +1297,10 @@ describe('TemplateAuthoringView', () => {
   // `ApprovalGraphExecutor.resolveConditionTarget` falls through to the FIRST outgoing edge when
   // no default is designated — never an undefined "default flow". Positive control: a real
   // `defaultEdgeKey` renders the default-flow copy.
-  it('P1-D/P1-2: default branch card renders the default-flow copy when defaultEdgeKey is set (positive control)', async () => {
+  // Same predicate also gates the condition-inspector header hint (advisor-caught follow-on: the
+  // header's verbatim "...全部不满足时走默认分支。" is the SAME false claim when no default is
+  // configured, so it must be gated identically — visibility, not the verbatim string, is gated).
+  it('P1-D/P1-2: default branch card AND header hint render the default-flow claim when defaultEdgeKey is set (positive control)', async () => {
     routeParams = { id: 'tpl_default_copy' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
@@ -1308,12 +1311,17 @@ describe('TemplateAuthoringView', () => {
     const copy = defaultCard.querySelector('[data-testid="approval-condition-default-copy"]')
     expect(copy?.textContent?.trim()).toBe('未满足其他条件时进入默认流程')
     expect(defaultCard.querySelector('[data-testid="approval-condition-default-copy-empty"]')).toBeNull()
+
+    const hints = container!.querySelectorAll('[data-testid="approval-condition-order-hint"]')
+    expect(hints).toHaveLength(1) // "lives once" — D0 §4.1
+    expect(hints[0].textContent?.trim()).toBe('分支按优先级从上到下依次判断，全部不满足时走默认分支。')
   })
 
-  // Negative test: no `defaultEdgeKey` configured must NOT claim a default flow exists — it must
-  // render the honest empty-state line instead, matching real executor routing (first outgoing
-  // edge, i.e. 优先级 1's branch, not an undefined "default").
-  it('P1-D/P1-2: default branch card renders the honest empty-state line when no defaultEdgeKey is set (negative test)', async () => {
+  // Negative test: no `defaultEdgeKey` configured must NOT claim a default flow exists ANYWHERE in
+  // this panel — neither the default card nor the header hint — it must render the honest
+  // empty-state line instead, matching real executor routing (first outgoing edge, i.e. 优先级 1's
+  // branch, not an undefined "default").
+  it('P1-D/P1-2: default branch card renders the honest empty-state line AND the header hint is absent when no defaultEdgeKey is set (negative test)', async () => {
     routeParams = { id: 'tpl_no_default' }
     const graph = buildThreeBranchConditionGraph()
     const cond = graph.nodes.find((n: any) => n.key === 'cond_1') as any
@@ -1329,6 +1337,8 @@ describe('TemplateAuthoringView', () => {
     expect(emptyCopy?.textContent?.trim()).toBe(
       '未指定默认分支：所有条件都不满足时，流程将进入第一条出边（优先级最高的分支）。',
     )
+    // The header hint asserts the SAME "...走默认分支" fact — must not render it either.
+    expect(container!.querySelectorAll('[data-testid="approval-condition-order-hint"]')).toHaveLength(0)
   })
 
   // P2-6 (D0 §4.1, verbatim): priority chips must convey evaluation direction, and the condition

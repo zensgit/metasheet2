@@ -15,8 +15,14 @@
       :data-condition-node="node.key"
     >
       <!-- D0 §4.1: the evaluation-order hint lives once, in the condition inspector header —
-           verbatim string, do not duplicate elsewhere in this component. -->
+           verbatim string, do not duplicate elsewhere in this component.
+           M8 honesty (P1-2 same class): "全部不满足时走默认分支" is only true when a default IS
+           configured — with no defaultEdgeKey the runtime falls through to the FIRST outgoing
+           edge instead (see the default card's gated copy below, same predicate). Gating
+           VISIBILITY (not the string, which stays verbatim) keeps "lives once" satisfied (count
+           is 0 or 1, never 2+) without asserting a routing fact this node doesn't have. -->
       <p
+        v-if="conditionEditFor(node.key)!.defaultEdgeKey"
         class="template-authoring__condition-order-hint"
         data-testid="approval-condition-order-hint"
       >
