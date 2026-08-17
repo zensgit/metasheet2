@@ -282,6 +282,13 @@ export default defineConfig({
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
       'tests/integration/approval-requester-role.db.test.ts',
+      // Lock-1 §K2 requester_choice real-DB acceptance (G-8/G-9/G-17/G-18). DATABASE_URL-gated;
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by
+      // the DEDICATED .github/workflows/approval-realdb-acceptance.yml workflow (standalone per
+      // the sealed-export-s6a-authority-row-lock.yml precedent — plugin-tests.yml is an s6a
+      // sha256-pinned provenance input, so it is deliberately not extended). Two-point wiring —
+      // both points land in the SAME commit, per the PR #4952 adversarial gate (P2-1).
+      'tests/integration/approval-requester-choice.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

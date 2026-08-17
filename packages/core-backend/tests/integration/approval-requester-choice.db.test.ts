@@ -130,6 +130,17 @@ function errorCode(body: ErrorBody): string | undefined {
   return body.code ?? body.error?.code
 }
 
+// ── Anti-skip-green sentinel (PR #4952 gate P2-2) ────────────────────────────────────────────
+// TOP-LEVEL, deliberately OUTSIDE describeIfDatabase: a sentinel inside the gated describe is
+// structurally inert — it skips exactly when it should fire. The dedicated
+// .github/workflows/approval-realdb-acceptance.yml lane sets EXPECT_DB=1: there, a
+// missing/broken DATABASE_URL REDS the run instead of reporting the whole suite as silently
+// skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test cleanly.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispatch acceptance', () => {
   let server: MetaSheetServer | undefined
   let base = ''
@@ -214,10 +225,6 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
       /* best effort */
     }
     if (server) await server.stop()
-  })
-
-  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   // ── G-1 / G-2 — authoring choke: exact shape only; unimplemented kinds fail closed ─────────
@@ -417,6 +424,19 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
       active = await activeAssignees(iid)
       expect(active.map((a) => a.assignee_id)).toEqual([CHOSEN])
       expect(active[0].node_key).toBe('approval_rc')
+
+      // G-19 temporal positive control (PR #4952 gate P3-5): the SAME role removal DOES reject a
+      // NEW create — the freeze is temporal (the scope read re-executes per create), never a
+      // dead/startup-cached read. Discriminates against a holders set cached across creates,
+      // which would pass both the in-flight assertions above and the static non-holder negative.
+      const beforeTemporal = await instanceCount(tid)
+      const temporalCreate = await req(base, '/api/approvals', reqTok, {
+        method: 'POST',
+        body: { templateId: tid, formData: { reason: 'r' }, requesterChoices: { approval_rc: [CHOSEN] } },
+      })
+      expect(temporalCreate.status, await temporalCreate.clone().text()).toBe(422)
+      expect(errorCode((await temporalCreate.json()) as ErrorBody)).toBe('APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE')
+      expect(await instanceCount(tid)).toBe(beforeTemporal)
 
       // Positive control (the sanctioned mutation): transfer moves the seat to OTHER.
       const transferred = await req(base, `/api/approvals/${iid}/actions`, chosenTok, {
