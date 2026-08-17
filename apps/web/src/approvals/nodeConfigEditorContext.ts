@@ -76,15 +76,17 @@ export interface ApprovalNodeConfigEditorApi {
   nodeConfigSummary: (node: ApprovalNode) => string[]
   /**
    * Lock-0 L0-6/D5 — graph-wide field ids referenced by ANY node's `form_field_user` assignee
-   * source (not just the node currently being edited). OPTIONAL: absent in the shipped
-   * `TemplateAuthoringView.vue` `nodeConfigEditorApi` provide() object at this baseline (P1-A does
-   * not touch that file — see the P1-A PR description). When absent, the canvas field-permission
-   * editor's D5 routing hint never renders (safe default, no false positives) rather than
-   * approximating with node-local data, which would be a narrower predicate than the linear
-   * editor's ("this node's own source" vs. "any node's source") and could silently miss the common
-   * cross-node case. Wiring this is a one-line addition to that provide() object: expose the same
-   * computed the linear editor already has (`routingDriverFieldIds`, ~TemplateAuthoringView.vue:2302)
-   * through this field.
+   * source (not just the node currently being edited). WIRED: `TemplateAuthoringView.vue` provides
+   * its `routingDriverFieldIds` computed here. That computed unions TWO models —
+   * `draft.steps` (linear authoring) and `draft.approvalNodeEdits[key].assigneeSources` (graph
+   * authoring) — because a naive pass-through of the pre-existing linear-only computed does NOT
+   * work: once a draft is promoted to graph authoring, `draft.steps` is always `[]` (see
+   * `draftFromEditedGraph` / `draftFromTemplate`'s `complex` branch), and the canvas inspector this
+   * field feeds mounts ONLY on complex graphs — so a linear-only read is structurally empty on
+   * exactly the surface D5 targets (measured: `draft.steps.length === 0` there, while
+   * `approvalNodeEdits` carries the live `form_field_user` sources). OPTIONAL only so
+   * component-level tests that don't need D5 (most of the suite) can omit it — the property is
+   * always present on the shipped app's api object.
    */
   routingDriverFieldIds?: ComputedRef<Set<string>> | Ref<Set<string>> | Set<string>
   onUserSearch: (query: string) => void | Promise<void>

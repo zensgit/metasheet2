@@ -707,9 +707,10 @@ const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel
 const formatRoleLabel = api.formatRoleLabel
-// L0-6/D5 — see nodeConfigEditorContext.ts's `routingDriverFieldIds` doc comment: absent in the
-// shipped provide() object at this baseline, so this is an empty set and the routing hint never
-// renders (safe default) until that field is wired.
+// L0-6/D5 — wired: `TemplateAuthoringView.vue` provides its graph-wide `routingDriverFieldIds`
+// computed here (see nodeConfigEditorContext.ts's doc comment for why it must union the linear
+// `draft.steps` model with the graph `draft.approvalNodeEdits` model). Falls back to an empty set
+// only for component-level tests that inject an api object without this optional field.
 const routingDriverFieldIds = computed(() => unwrap(api.routingDriverFieldIds ?? new Set<string>()))
 
 // D1: the incidental shipped el-select strings ("指定用户"/"发起人"/"部门主管"/"表单用户字段" — an

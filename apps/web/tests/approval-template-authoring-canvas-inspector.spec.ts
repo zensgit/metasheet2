@@ -19,6 +19,7 @@ import ApprovalCanvasNodeInspectorDirect from '../src/approvals/components/Appro
 import ApprovalGraphNodeConfigEditorDirect from '../src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import { APPROVAL_NODE_CONFIG_EDITOR_KEY, type ApprovalNodeConfigEditorApi } from '../src/approvals/nodeConfigEditorContext'
 import {
+  APPROVAL_ASSIGNEE_SOURCE_LABELS,
   DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
   assigneeSourceRoster,
   type ApprovalCapabilityRegistry,
@@ -968,6 +969,31 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(requesterEcho?.textContent).not.toBe('已配置：发起人')
   })
 
+  // Gate P2-2 fix: the D1/D2 test above pins only 2/8 labels (dept_head/requester) via the rendered
+  // echo. Probe 5 in the gate review reverted `static_user`/`form_field_user` to their pre-D1
+  // wording and the whole required lane stayed 99/99 green — the other six labels had zero
+  // coverage. This is an exact-object-equality pin of ALL EIGHT, written out literally from
+  // docs/development/approval-lock0-d0-interaction-delta-20260817.md §4's ratification record (the
+  // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
+  // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
+  // whether it happens to be one of the two kinds the D1/D2 test exercises.
+  it('D1 (P2-2): all eight assignee-source labels equal the ratified §10.3 map by exact object equality', () => {
+    const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
+      static_user: '指定成员',
+      static_role: '指定角色',
+      requester: '发起人本人',
+      form_field_user: '表单中的成员字段',
+      direct_manager: '直属上级',
+      dept_head: '部门负责人',
+      continuous_managers: '连续多级上级',
+      manager_at_level: '指定层级上级',
+    }
+    expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
+    // Also pin the count so a stray 9th entry (which would still satisfy `toEqual` on the 8 keys
+    // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(8)
+  })
+
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
     routeParams = { id: 'tpl_a7' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
@@ -1050,6 +1076,67 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect((container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
+  // Gate P1-1 fix regression (full mount, real `setApprovalSourceKind` — not the test stub). The
+  // review's "Link A" reproduced this exact fixture: select static_role (roleIds:['legal']) →
+  // traversal onto requester → traversal back → the pre-fix `setApprovalSourceKind` replaced
+  // `assigneeSources[0]` wholesale, so the role picker went blank, the echo read
+  // "已配置：指定角色（未选择）", undo stayed disabled (no recovery), and Save failed validation. A
+  // radiogroup arrow keypress and a `.click()` on the target radio fire the SAME `@change` handler
+  // (native radiogroup commit-on-arrow semantics — see the gate review's "Link B"); jsdom implements
+  // no radiogroup arrow-key semantics at all, so `.click()` is the correct jsdom-safe stand-in for
+  // "arrow onto this radio" here — the real keyboard mechanism is covered separately by the
+  // real-browser check (verification/approval-inspector-keyboard.spec.ts).
+  it('P1-1 regression: roster kind-switch caches and restores the outgoing payload — traversal away and back does not destroy configured roleIds, and Save succeeds with the original JSON intact', async () => {
+    routeParams = { id: 'tpl_p1_1_regression' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // app_b: static_role, roleIds:['legal'] — the exact gate Link A fixture.
+    clickCanvasNode('app_b')
+    await flushUi()
+    expect(
+      (container!.querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).checked,
+    ).toBe(true)
+    const rolePicker = container!.querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+    expect(rolePicker.value).toBe('legal')
+    let echo = container!.querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo?.textContent).toBe('已配置：指定角色（1 个）')
+
+    // Traverse ONE step onto requester.
+    ;(container!.querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).click()
+    await flushUi()
+    echo = container!.querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo?.textContent).toBe('已配置：发起人本人')
+
+    // Traverse back onto static_role.
+    ;(container!.querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).click()
+    await flushUi()
+
+    // FIX-1 assertion: the payload is RESTORED, not stripped to "（未选择）" — this is the line
+    // that must go red if `setApprovalSourceKind` regresses to lossy (unconditionally building a
+    // fresh empty-payload object per kind, ignoring any cache).
+    expect(
+      (container!.querySelector('[data-testid="approval-node-source-kind-static_role"]') as HTMLInputElement).checked,
+    ).toBe(true)
+    const rolePickerAfter = container!.querySelector('[data-testid="approval-node-source-role-picker"]') as HTMLSelectElement
+    expect(rolePickerAfter.value).toBe('legal')
+    echo = container!.querySelector('[data-testid="approval-node-source-configured-summary"]')
+    expect(echo?.textContent).toBe('已配置：指定角色（1 个）')
+    expect(echo?.textContent).not.toBe('已配置：指定角色（未选择）')
+
+    // Save succeeds with the original JSON intact — the gate's decisive "Save failed validation"
+    // symptom must NOT reproduce.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const appB = payload.approvalGraph.nodes.find((n: any) => n.key === 'app_b')
+    expect(appB.config.assigneeSources[0]).toEqual({ kind: 'static_role', roleIds: ['legal'] })
+  })
+
   it('A-9: readonly field-permission honesty copy is byte-identical to the linear editor; editable/hidden do not render it', async () => {
     routeParams = { id: 'tpl_a9' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
@@ -1073,9 +1160,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(hint).not.toBeNull()
     expect(hint.textContent).toBe(FIELD_PERMISSION_READONLY_HINT)
     expect(hint.textContent).toBe('只读将在后续版本（T1-4b）生效，当前保存但暂不强制')
-    // Full-string equality against the shipped linear-editor source (byte source read) — not a
-    // substring match.
-    expect(PARENT_AUTHORING_SOURCE).toContain(hint.textContent)
+    // Gate A-9/probe-6a fix: `.toContain` is a SUBSTRING check — APPENDING drift to the linear
+    // editor's hint (e.g. "…暂不强制。详见发布说明") still contains the original text as a prefix,
+    // so it stayed green (probe 6a: 115/115). Anchor to the linear span's own data-testid and read
+    // its exact text out of source, then assert EQUALITY against the canvas hint — an append on
+    // either side now reds because the two strings genuinely differ.
+    const linearReadonlyHintMatch = PARENT_AUTHORING_SOURCE.match(
+      /data-testid="approval-step-field-readonly-hint"\s*>([^<]*)<\/span>/,
+    )
+    expect(linearReadonlyHintMatch).not.toBeNull()
+    expect(linearReadonlyHintMatch![1]).toBe(hint.textContent)
 
     access.value = 'hidden'
     access.dispatchEvent(new Event('change'))
@@ -1088,14 +1182,65 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
   })
 
-  it('D5: the routing-hint string is pinned against the linear editor source (a one-sided edit fails here even though the hint is currently inert — see nodeConfigEditorContext.ts)', () => {
-    // The hint has no render path yet (routingDriverFieldIds is not wired — see the P1-A PR
-    // description), so this cannot be a DOM assertion; it pins the STRING so a future one-sided
-    // edit (paraphrasing the copy in one surface but not the other) is caught the moment the
-    // render path is wired, per L0-6: "a future slice retiring [the marker] must retire it in both
-    // surfaces in one change".
+  it('D5 (P2-1): the routing-hint string is pinned by anchored exact equality (not substring), and the hint now actually renders on a complex graph via the graph-wide computed', async () => {
+    // Source string pin, same anchored-equality treatment as the A-9 readonly-hint fix above — a
+    // substring `.toContain` stays green if the linear copy is extended on one side only.
     expect(FIELD_PERMISSION_ROUTING_HINT).toBe('该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析')
-    expect(PARENT_AUTHORING_SOURCE).toContain(FIELD_PERMISSION_ROUTING_HINT)
+    const linearRoutingHintMatch = PARENT_AUTHORING_SOURCE.match(
+      /data-testid="approval-step-field-routing-hint"\s*>([^<]*)<\/span>/,
+    )
+    expect(linearRoutingHintMatch).not.toBeNull()
+    expect(linearRoutingHintMatch![1]).toBe(FIELD_PERMISSION_ROUTING_HINT)
+
+    // Gate P2-1 fix (DOM assertion): `routingDriverFieldIds` is now a graph-wide computed (unions
+    // `draft.steps` + `draft.approvalNodeEdits`) wired through the provide() object. The review's
+    // probe 12 showed the PR's originally-claimed "one-line" `routingDriverFieldIds,` pass-through
+    // did NOT work — it pointed at the linear-only computed, which is structurally empty (`draft.
+    // steps.length === 0`) whenever the canvas inspector is mounted at all (a complex graph). This
+    // reproduces that probe end-to-end and asserts it now renders.
+    routeParams = { id: 'tpl_d5_routing_hint' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // app_a: switch its assignee source to form_field_user → reviewer (a real routing driver).
+    clickCanvasNode('app_a')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-node-source-kind-form_field_user"]') as HTMLInputElement).click()
+    await flushUi()
+    const fieldPicker = container!.querySelector('[data-testid="approval-node-source-field"]') as HTMLSelectElement
+    expect(fieldPicker).not.toBeNull()
+    fieldPicker.value = 'reviewer'
+    fieldPicker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // A DIFFERENT node (join_1) hides that same field — proving the graph-wide computed covers
+    // "ANY node's source", not just the node currently being edited (the linear editor's own
+    // semantics — see routingDriverFieldIds's comment in TemplateAuthoringView.vue).
+    clickCanvasNode('join_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
+    await flushUi()
+    const reviewerAccess = container!.querySelector('[data-testid="approval-node-field-access-reviewer"]') as HTMLSelectElement
+    expect(reviewerAccess).not.toBeNull()
+    reviewerAccess.value = 'hidden'
+    reviewerAccess.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    const routingHint = container!.querySelector('[data-testid="approval-node-field-routing-hint"]') as HTMLElement
+    expect(routingHint).not.toBeNull()
+    expect(routingHint.textContent).toBe(FIELD_PERMISSION_ROUTING_HINT)
+
+    // Positive control: hiding a field NO source references renders no routing hint (proves the
+    // condition is value-selected, not a blanket "any hidden field" regression).
+    const amountAccess = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    expect(amountAccess).not.toBeNull()
+    amountAccess.value = 'hidden'
+    amountAccess.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-field-routing-hint"]')).toHaveLength(1)
   })
 
   it('A-11: tab strip uses the tablist roving-tabindex pattern; every tab is keyboard reachable', async () => {
@@ -1352,6 +1497,98 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       },
     }
   }
+
+  // Gate P2-3 fix (a): the 辅助编辑模式 (structured-list) surface mounts `ApprovalGraphNodeConfigEditor`
+  // standalone, WITHOUT `ApprovalCanvasNodeInspector`'s tab-strip wrapper — so no
+  // `APPROVAL_CANVAS_INSPECTOR_TABS_KEY` is ever provided there. This reproduces that exact shape
+  // (only `APPROVAL_NODE_CONFIG_EDITOR_KEY` provided) rather than reusing `mountDirectInspector`,
+  // whose harness always wraps the editor in the tabbed shell.
+  function mountDirectConfigEditorFlat(opts: {
+    node: ApprovalNode
+    registry: ApprovalCapabilityRegistry
+    api: ApprovalNodeConfigEditorApi
+  }) {
+    const localContainer = document.createElement('div')
+    document.body.appendChild(localContainer)
+    const Harness = defineComponent({
+      name: 'DirectFlatConfigEditorHarness',
+      setup() {
+        provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, opts.api)
+        return () => h(ApprovalGraphNodeConfigEditorDirect as any, { node: opts.node, registry: opts.registry })
+      },
+    })
+    const localApp = createApp(Harness)
+    installStubs(localApp)
+    localApp.mount(localContainer)
+    return {
+      container: localContainer,
+      unmount: () => {
+        localApp.unmount()
+        localContainer.remove()
+      },
+    }
+  }
+
+  it('P2-3: 辅助编辑模式 (no tabs context) keeps BOTH sections visible; tabbed mode content stays inside its own L0-1 section wrapper', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+
+    // (a) Flat-mode visibility-aware assertion — direct-mount WITHOUT the tabs context. Gate probe
+    // 10 (narrowing `showFieldPermissionsSection` to tabbed-only, i.e. dropping its
+    // `activeTabId.value === null` branch) hides the field-permission editor in exactly this
+    // surface while every existing suite stayed 121/121 green, because the only prior assertions
+    // were `querySelector` DOM-presence checks (visibility-blind — `v-show` only toggles
+    // `style.display`, never removes the element). `style.display !== 'none'` is the load-bearing
+    // check here, not mere presence.
+    const flat = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const flatAssignee = flat.container.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const flatFieldPerms = flat.container.querySelector(
+      '[data-testid="approval-node-section-field-permissions"]',
+    ) as HTMLElement
+    expect(flatAssignee).not.toBeNull()
+    expect(flatFieldPerms).not.toBeNull()
+    expect(flatAssignee.style.display).not.toBe('none')
+    expect(flatFieldPerms.style.display).not.toBe('none')
+    flat.unmount()
+
+    // Contrasting control, same api: TABBED mode DOES toggle display — proves the flat-mode
+    // assertion above is not vacuously true because `v-show` never sets `display:none` anywhere in
+    // this component (a positive control per feedback_positive_control_not_failclosed.md).
+    const tabbed = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const tabbedAssignee = tabbed.container.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const tabbedFieldPerms = tabbed.container.querySelector(
+      '[data-testid="approval-node-section-field-permissions"]',
+    ) as HTMLElement
+    expect(tabbedAssignee.style.display).not.toBe('none')
+    expect(tabbedFieldPerms.style.display).toBe('none')
+
+    // (b) Per-tab CONTENT-MEMBERSHIP pin (A-1's content clause; gate probe 13). A representative
+    // control from each tab's L0-1 content list must resolve INSIDE that tab's section wrapper —
+    // `section.contains(control)` — not merely exist somewhere in the inspector's DOM (which
+    // `querySelector` at the inspector root cannot distinguish from "moved to the wrong tab").
+    const modeControl = tabbed.container.querySelector('[data-testid="approval-node-mode"]')
+    const emptyPolicyControl = tabbed.container.querySelector('[data-testid="approval-node-empty-policy"]')
+    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-merge-with-requester"]')
+    expect(modeControl).not.toBeNull()
+    expect(emptyPolicyControl).not.toBeNull()
+    expect(mergeControl).not.toBeNull()
+    expect(tabbedAssignee.contains(modeControl)).toBe(true)
+    expect(tabbedAssignee.contains(emptyPolicyControl)).toBe(true)
+    expect(tabbedAssignee.contains(mergeControl)).toBe(true)
+    // Negative half of the same pin: none of the three sit inside the field-permissions wrapper —
+    // this is exactly what gate probe 13 (moving 审批模式/空审批人策略/自审策略 into that section)
+    // would flip.
+    expect(tabbedFieldPerms.contains(modeControl)).toBe(false)
+    expect(tabbedFieldPerms.contains(emptyPolicyControl)).toBe(false)
+    expect(tabbedFieldPerms.contains(mergeControl)).toBe(false)
+
+    const fieldPermRow = tabbed.container.querySelector('[data-testid="approval-node-field-permissions"]')
+    expect(fieldPermRow).not.toBeNull()
+    expect(tabbedFieldPerms.contains(fieldPermRow)).toBe(true)
+    expect(tabbedAssignee.contains(fieldPermRow)).toBe(false)
+
+    tabbed.unmount()
+  })
 
   it('A-1 positive control: a registry WITH a ratified operation policy renders a third 操作权限 tab', () => {
     const node = makeApprovalNode('approval_x')
