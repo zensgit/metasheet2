@@ -1,6 +1,6 @@
 # Lock-6 — Requester and Global Approval/Document Policy (2026-08-17)
 
-**Status:** PROPOSED (§4 ratification block is deliberately blank)
+**Status:** RATIFIED (2026-08-17 — §4 record; design authorization only, slices still gated)
 **Baseline:** `origin/main@3c5f0992ba931f9a7a1115c0e43c4d33e7a306f6`. Every anchor below was read at
 THIS baseline, which is NEWER than every parent (master pins `d33a6a0fa1`, Lock-0 pins `5b31cb4349`,
 Lock-4 pins `075d078eb4`). The six `ApprovalProductService.ts` anchors Lock-4 cites for the
@@ -300,10 +300,21 @@ Backend gates land in the required backend lane; frontend gates extend the requi
 ## 4. Owner ratification block
 
 ```text
-Decision: (pending)
-Owner: (pending)
-Date: (pending)
-Document SHA: (pending)
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+  Independent pre-ratify review: Claude (fable) — spot-verified the L6-P1 shipped-defect anchors
+  (templateAuthoring.ts allowRevoke:true hydrate hardcode; publish sends policy:{allowRevoke} only,
+  destroying API-set policy.autoApproval on republish); drafted by opus with advisor correction.
+Date: 2026-08-17
+Document SHA: drafted 1653922682; this record lands on top.
+Decisions recorded: OD-L6-1 (a) L6-A dedup tier first · OD-L6-2 (a) v1 = L6-A + L6-P1 only ·
+  OD-L6-3 (a) compensating terminal · OD-L6-4 (a) reject-when-fired · OD-L6-5 (a) proxy holds
+  write, dual visibility, revoke with actual submitter · OD-L6-6 (a) keep guard, new narrow path ·
+  OD-L6-7 (a) one mechanical exclusion · OD-L6-8 (a) L6-E ownership moves to Lock-5 · OD-L6-9 (a)
+  revokeBeforeNodeKeys stays unexposed · OD-L6-10 (a) keep shipped label + state restriction —
+  all ten per this document's recommendations. Runtime authorization: NONE (design only; L6-P1 is
+  the named prerequisite slice; fifth-step activation rides the L6-A landing PR per M7/L0-4).
 Decisions required ([R] = this document's recommendation; rejected options are listed so they are
 not re-proposed):
 
