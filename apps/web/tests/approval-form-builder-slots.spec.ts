@@ -963,17 +963,20 @@ describe('ApprovalFormBuilder — P3-2: a drop racing a readOnly flip cannot ins
     expect(dragSession.active()).toBeNull()
   })
 
-  it('PER-GATE A: each programmatic command re-check refuses AFTER the flip — appendField / insertFieldAt (M4) / moveFieldToAnchor (M5) individually load-bearing', async () => {
+  it('PER-GATE A: each programmatic command re-check refuses AFTER the flip — appendField / insertFieldAt (M4) / moveFieldToAnchor (M5) / removeField individually load-bearing', async () => {
     const builder = await mountBuilder([field(1), field(2)])
     builder.state.readOnly = true
     await nextTick()
     const before = builder.vm.getSession()
     // Each call hits ONLY its own mutation-time re-check — no drop handler,
     // no onSlotDrop early return, in front of it. Deleting any single
-    // re-check makes that call mutate and this test red.
+    // re-check makes that call mutate and this test red. removeField is on the
+    // exposed surface too, so its guard is pinned here alongside its siblings
+    // (deleting `if (props.readOnly) return false` in removeField reds this).
     expect(builder.vm.appendField('text')).toBe(false)
     expect(builder.vm.insertFieldAt({ kind: 'start' }, 'select')).toBe(false)
     builder.vm.moveFieldToAnchor('local_2', { kind: 'start' })
+    expect(builder.vm.removeField('local_2')).toBe(false)
     await nextTick()
     expect(builder.vm.getSession()).toBe(before)
     expect(builder.localOrder()).toEqual(['local_1', 'local_2'])

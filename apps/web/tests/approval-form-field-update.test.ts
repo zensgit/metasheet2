@@ -390,6 +390,10 @@ describe('retypeFormField - named incompatible-type refusal for EVERY dependency
       { detailColumns: [pristineColumn()], minRowsText: '1' },
     ],
     [
+      'row bounds (maxRowsText only)',
+      { detailColumns: [pristineColumn()], maxRowsText: '9' },
+    ],
+    [
       'column count != 1 (second otherwise-pristine column)',
       {
         detailColumns: [
