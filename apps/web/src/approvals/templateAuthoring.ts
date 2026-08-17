@@ -1259,13 +1259,22 @@ export type RecordLinkCatalogValidationContext = {
 // P1-A0 (master §4 UI-0 "live validation count"; Lock-0 L0-3 typed-issue-record delta) — typed
 // issue shape for the authoring validators. `target` reuses L0-3's exact `{ kind, key }` contract
 // (`approval-lock0-d0-interaction-delta-20260817.md` L0-3) so a later slice adopting the header
-// count can consume this same record instead of migrating a second shape; `severity` is a
-// SUPERSET addition L0-3 does not define (kept because every basic-info check below is currently
-// a hard "must fix" — see `validateTemplateBasicInfo`). This is the typed sibling of the existing
-// `string[]` validators, not a replacement: `validationErrors` (the save-blocking surface) and
-// `publishChecklist` (the publish pre-flight, `TemplateAuthoringView.vue`) both keep consuming the
-// plain-string validators below UNCHANGED. Only the NEW basic-info step-nav issue badge derives
-// its count from this typed shape (`AuthoringValidationIssue[].length`, never hand-counted).
+// count can consume this same record instead of migrating a second shape.
+//
+// `severity` is a SUPERSET field L0-3 does not define. Every basic-info check today is a hard
+// "must fix", so `severity` is currently ALWAYS `'error'` — it is declared for the future header
+// count (which may eventually need to distinguish a soft warning) but has exactly one live value
+// right now; do not read its presence as evidence a warning tier already exists.
+//
+// This is a typed SIBLING of the existing `string[]` validators, not a replacement — but not fully
+// independent of them either: `validateTemplateFormFields` below now COMPOSES
+// `validateTemplateBasicInfo`'s `.message`s for its first five entries (previously inlined). Both
+// `validationErrors` (the save-blocking surface) and `publishChecklist` (the publish pre-flight,
+// `TemplateAuthoringView.vue`) therefore transitively call through this new function, but their
+// composition, values, and rendered strings are byte-identical to before this extraction (pinned
+// by the regression tests below) — "sibling, not replacement" describes the OUTPUT contract, not
+// the call graph. Only the NEW basic-info step-nav issue badge derives its displayed count from
+// the typed shape directly (`AuthoringValidationIssue[].length`, never hand-counted).
 export type AuthoringValidationSeverity = 'error' | 'warning'
 
 export interface AuthoringValidationIssueTarget {

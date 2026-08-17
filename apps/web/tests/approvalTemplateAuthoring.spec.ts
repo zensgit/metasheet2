@@ -352,7 +352,13 @@ describe('validateTemplateBasicInfo (P1-A0 typed issue model)', () => {
     ])
   })
 
-  it('every basic-info issue is severity "error" (no invented "warning" issue widens the validated set)', () => {
+  // Documentation pin, not a discriminating mutation guard: `severity` is a declared-but-currently-
+  // single-valued field (see the `AuthoringValidationSeverity` doc comment in templateAuthoring.ts)
+  // — every existing basic-info rule is a hard "must fix", so this can only ever observe 'error'
+  // today. It exists so a future PR that adds a real 'warning' rule updates this assertion
+  // deliberately instead of silently drifting past it; it does NOT prove a severity taxonomy is
+  // exercised yet, and a hardcoded `severity: 'error'` in the implementation would still pass it.
+  it('every basic-info issue is severity "error" today (declared-but-single-valued field; see comment)', () => {
     const draft = createEmptyTemplateDraft()
     draft.slaHoursText = 'abc'
 
@@ -411,6 +417,22 @@ describe('validateTemplateBasicInfo (P1-A0 typed issue model)', () => {
       '模板名称必填',
       '非全员可见范围至少需要一个 id',
       'SLA 必须是正整数小时或留空',
+    ])
+  })
+
+  it('does NOT change the combined string-validator output when a REAL field error interleaves with basic-info issues (the extraction boundary the fields=[] fixture above cannot exercise)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.name = '出差审批' // key still blank; name filled — asserts partial basic-info failure too
+    draft.fields[0].label = '' // triggers a genuine per-field error from the untouched downstream loop
+
+    const errors = validateTemplateFormFields(draft, null, null)
+
+    // Basic-info issues (from validateTemplateBasicInfo) must still precede the field-loop error,
+    // in the same relative order as before this extraction — this is the boundary a reordering bug
+    // in the split would live at, which the all-blank/fields=[] fixture above cannot see.
+    expect(errors).toEqual([
+      '模板 Key 必填',
+      '第 1 个字段的名称必填',
     ])
   })
 })
@@ -628,7 +650,10 @@ describe('approval template authoring helpers', () => {
   // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (identical function,
   // `templateAuthoring.ts`) at save time. This slice touches no basic-info persistence code — this
   // pin exists to prove that stays true. A mutation renaming/dropping/reshaping a basic-info payload
-  // key reds either assertion below.
+  // key reds either assertion below. NOTE for future authors: the `Object.keys(...).sort()`
+  // assertion is a full shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated
+  // later slice (e.g. a new top-level payload field) — that is expected; update the expected key
+  // list rather than assume this test caught a regression.
   it('P1-A0: pins the exact basic-info shape of the create/update payload (no key renamed, dropped, or reshaped)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'travel'
@@ -1036,6 +1061,10 @@ describe('TemplateAuthoringView', () => {
     // State 1: brand-new draft — key + name both empty → exactly 2 typed issues.
     let badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge?.textContent?.trim()).toBe('2 项不完善')
+    // The count also folds into the step button's aria-label (it OVERRIDES inner text for
+    // assistive tech, so a visual-only badge would be silently unannounced — see P1-A0 view diff).
+    const basicStepButton = container!.querySelector('[data-testid="approval-template-section-basic"]')
+    expect(basicStepButton?.getAttribute('aria-label')).toContain('2 项不完善')
 
     // State 2: fill both required fields → count derives to 0, badge disappears entirely (not "0
     // 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for a zero state).
@@ -1044,6 +1073,7 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge).toBeNull()
+    expect(basicStepButton?.getAttribute('aria-label')).not.toContain('项不完善')
 
     // State 3: introduce exactly ONE different issue (bad SLA text) → count derives to 1, proving
     // the badge tracks the CURRENT typed array rather than being stuck at its first-seen value.
