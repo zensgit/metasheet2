@@ -74,6 +74,14 @@ surfaces move in the SAME slice, and that is gate G-13 rather than a paragraph. 
 both cite `TemplateAuthoringView.vue:999` for this copy from their own (older) baselines; at THIS baseline
 it is `:655-659`. Both anchors are given so neither parent's citation is silently re-pointed.
 
+This correction rests on VERIFIED BEHAVIOR, not on comments: two shipped comments still call the canvas
+routing hint inert and "out of scope for this slice" (`ApprovalGraphNodeConfigEditor.vue:550-552`,
+`fieldPermissionHonestyCopy.ts:17-23`), but the wiring landed — `TemplateAuthoringView.vue:2495` provides
+`routingDriverFieldIds` through `nodeConfigEditorApi` and `ApprovalGraphNodeConfigEditor.vue:710-714`
+consumes it under a "wired" comment. So both surfaces render the tri-state grid AND the routing hint today;
+the `:550-552`/`:17-23` comments are pre-existing stale-comment debt (not this PR's diff), and the G-13
+retirement slice must update them in the same change so the code stops describing a wired path as inert.
+
 ## 1. Contracts
 
 ### L7-A — one derivation of "this actor's access to this field", three consumers
@@ -83,8 +91,9 @@ INSTANCE's currently-active node(s) — NOT the viewer's assignment set"*
 (`services/approval-form-redaction.ts:17-21`), so an observer, an admin and the requester are all redacted
 alike while the instance sits at a hiding node. An **edit** mask cannot be instance-scoped: the question it
 answers is *which node's row governs THIS actor*. Those are two different node sets over one matrix, and two
-hand-maintained readers of one matrix is the failure mode this program keeps finding (Lock-2 §2.3, Lock-5
-§2.3).
+hand-maintained readers of one matrix is the failure mode this program keeps finding (Lock-2 §2.3's
+"hand-maintained disjunctions in four places do not converge"; Lock-5 §2.1's "a table plus exhaustiveness is
+the convergent form", with §2.3's `returnableNodes` FE/BE divergence as a live instance of it).
 
 **Locked.** One pure exported function in the module that is ALREADY the shared derivation
 (`approval-form-redaction.ts`, whose own header records that the snapshot echo and the attachment byte gate
@@ -106,7 +115,7 @@ node set and nothing else:
 | Consumer | Node set | Effect |
 |---|---|---|
 | snapshot echo — `redactHiddenFormFields:73-93`, called `ApprovalBridgeService.ts:167-171` (list `:557`, detail `:633`) | `collectActiveNodeKeys(current_node_key, metadata)` — instance-scoped, **unchanged** | `hidden` ⇒ key removed from the echoed snapshot |
-| attachment byte gate — `isFieldHiddenAtActiveNode` (`services/approval-attachment-runtime.ts:253-267`, fail-closed on unknown instance `:262`) | same instance-scoped set, **unchanged** | `hidden` ⇒ no bytes |
+| attachment byte gate — `isFieldHiddenAtActiveNode` (`services/approval-attachment-runtime.ts:253-267`, fail-closed on unknown instance `:260`) | same instance-scoped set, **unchanged** | `hidden` ⇒ no bytes |
 | **NEW** write mask — inside Lock-3 §3's seam | exactly `[nodeKey]`, the seam's own argument | `editable` ⇒ writable; `readonly` and `hidden` ⇒ values-free refusal |
 
 The write mask takes a SINGLE node, so no precedence question arises on the write side; precedence exists
@@ -170,10 +179,16 @@ Four NEW publish-time pins, each fail-closed, each raised at every one of those 
    (AGE:616-646): those read the data-keyed `visibilityRule` axis, which the type comment already calls
    orthogonal (`types/approval-product.ts:124-127`). Required-for-visible-only (AGE:625-627) is Lock-2's
    OD-L2-5 finding, **re-verified byte-identical at this baseline and cross-cited, not re-adjudicated**. The
-   two conflicts Lock-7 owns are: (a) a field the node's own write surface must be able to fill but the SAME
-   node marks `hidden` — self-contradictory, rejected; and (b) a `required: true` field marked `hidden` at
-   every node that could write it, which is unfillable by anyone and is rejected with the field id and node
-   key but no value.
+   conflict Lock-7 owns in v1 is exactly one: a `required: true` field marked `hidden` at every node whose
+   write surface could fill it (and not filled at create, i.e. either create-hidden by its `visibilityRule`
+   or intended for the handler to complete) is unfillable by anyone, and is rejected with the field id and
+   node key but no value. There is deliberately **no second "editable-and-hidden-at-the-same-node" conflict
+   in v1**, because `HandlerNodeConfig` (Lock-3 §1.1) carries no per-field "must-fill" declaration — only the
+   `fieldPermissions` tri-state — and a single `(node, field)` pair holds exactly one `access` (duplicate
+   `fieldId` is already rejected by `normalizeNodeFieldPermissions:1140-1143`), so a field cannot be both
+   `editable` and `hidden` at one node. A distinct self-contradiction rule appears only if a later slice adds
+   a per-node "must-complete field X" carrier; until then there is nothing for it to test (OD-L7-12 records
+   the boundary).
 4. **Detail sub-columns are out of scope in v1.** The cross-reference set is top-level only (`:1254`), so a
    sub-column id is already rejected as unknown, and the FE grid rows are top-level fields
    (`fieldPermissionFields`, `TemplateAuthoringView.vue:2330`). Inheriting Lock-2's reasoning verbatim: N row
@@ -238,7 +253,9 @@ requires a mechanical census of persisted `fieldPermissions` shapes first, escal
 a new `approval_published_definitions` row (`:4028-4033`) and only flips the previous rows'
 `is_active = FALSE` (`:3980-3985`); `buildRuntimeGraph` (`:2734-2744`) deep-copies the graph verbatim and
 `deepFreeze`s it, so `fieldPermissions` rides through unchanged; the read path pins per instance via
-`published_definition_id` (`loadRuntimeGraphs:925-944`). Therefore a frozen instance keeps ITS version's
+`published_definition_id` (`ApprovalBridgeService.ts` `loadRuntimeGraphs:925-944` — a private method of that
+service, NOT APS; the other three anchors in this sentence are APS per the header convention). Therefore a
+frozen instance keeps ITS version's
 matrix with no new mechanism, and re-publishing a template cannot retro-edit an in-flight instance's access
 rules. Nothing here is designed; it is verified and depended upon.
 
@@ -279,22 +296,42 @@ designed here; both are named so the surface is not later widened by inference.
 
 **2.5 The honesty copy retires with enforcement, in both surfaces, in one change.** Lock-0 L0-6 pins
 `只读将在后续版本（T1-4b）生效，当前保存但暂不强制` character-for-character including the `（T1-4b）` marker,
-and its acceptance spec pins the exact string so a one-sided edit fails. A second string retires with it:
-`该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析`
-(`fieldPermissionHonestyCopy.ts:25`, linear original `TemplateAuthoringView.vue:660-664`). Its promise is
-true for `hidden` and **false once writes exist** — an edit to a driver field does change assignee resolution
-(§L7-B pin 1) — so the slice that lands writes must correct it rather than leave a stale reassurance beside
-a new capability. The section-level copy at `TemplateAuthoringView.vue:629-631` (`「只读」将在后续版本生效`)
-is a third site in the same change.
+and its acceptance spec pins the exact string so a one-sided edit fails. The section-level copy at
+`TemplateAuthoringView.vue:629-631` (`「只读」将在后续版本生效`) is a second site that retires in the SAME
+change, since it makes the same not-yet-enforced promise about `只读`.
+
+**The routing hint's fate depends on which OD-L7-8 arm ships, and under the recommended arm it stays true.**
+The third string, `该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析`
+(`fieldPermissionHonestyCopy.ts:25`, linear original `TemplateAuthoringView.vue:660-664`), promises that
+hiding a driver affects only the echo, not resolution. Under OD-L7-8(a) — the recommended arm — a routing
+driver may not be `editable` at any node of a newly-published graph, so no write to a driver is ever possible
+and the promise remains TRUE; the hint is NOT retired under arm (a). It becomes false only under OD-L7-8(b)
+(allow driver edits with downstream re-resolution), or for a pre-Lock-7 graph that already carries an
+`editable` driver and stays live under the §2.1 widen-only rule. G-13 therefore conditions this string's
+correction on the arm that ships, and never rewrites an accurate string under arm (a).
 
 **2.6 Lock-4's 内容变更 obligation lands here.** Lock-4 §F4 records it verbatim: 内容变更 is *"vacuous at this
 baseline and therefore deliberately ungated"* because no mid-flight form mutation exists, locked instead as a
 FORWARD obligation that *"the first named field-edit surface (Lock-7 / master P4 handler node) must
 invalidate dedup history in the same slice that creates it"*. Lock-3 §3 states explicitly that it does NOT
 discharge it and transfers it intact, and forbids citing Lock-3 as having satisfied it. Lock-7 is that
-surface. OD-L7-11 is whether the discharge lands in this slice (scoping the dedup readers' history to the
-post-edit round, reusing the `nodeEntryEpoch` machinery the threshold tally already uses) or is re-transferred
-with a named owner — a re-transfer is a decision the owner makes, not a silence.
+surface. OD-L7-11 is whether the discharge lands in this slice or is re-transferred with a named owner — a
+re-transfer is a decision the owner makes, not a silence.
+
+**The discharge needs a NEW marker, not `nodeEntryEpoch` reuse — stated exactly so the OD does not commit
+the owner to a mechanism that cannot fire.** The obvious-looking reuse does not work: `node_activation_seq`
+(the epoch source, `bumpNodeActivationSeq:7733-7744`) is bumped ONLY at node ACTIVATION, and every same-round
+mutation site is commented "NEVER bump" for exactly this reason — admin reassign/handover (`:5838-5840`),
+timeout transfer (`:6078-6080`), manual transfer (`:6463-6465`), add-sign (`:6515`), and the source comment
+"Same-round mutations MUST NOT call this" (`:7730-7732`). A field edit at a handler node is a same-round
+mutation by construction (Lock-3 §3's five-step transaction contains no bump), so it mints no new epoch —
+and it MUST NOT, because the current node's threshold quorum tally is epoch-scoped
+(`(metadata->>'nodeEntryEpoch')::int = $3`, `:6981`) and bumping on an edit would silently void the
+in-flight quorum, which Lock-3 G-12 forbids (a re-entry resets the round; a field edit is not a re-entry).
+The correct scoping key is therefore the **edit event's own ordering**: the append-only revision rows of
+OD-L7-6(a) already carry a per-instance monotonic order, so the dedup readers exclude any prior approval
+whose audit-row ordinal precedes the latest content-edit revision — a new per-edit marker, NOT a reused
+activation epoch. This is OD-L7-11's arm (a), and it is priced as new machinery, not a mount.
 
 **2.7 Shipped defects and open dependencies surfaced by this census.**
 
@@ -319,7 +356,7 @@ turns red and asserts the anchor was actually hit.
 | G-2 | Read behavior is byte-identical | the full shipped redaction suite plus the real-DB P1-C spec pass unchanged: hidden at the active node, retained at a non-hiding node, identical reference when nothing hides, parallel union, null-safe | a DIFFERENT mutation from G-1a's and not a re-count of it: make the derivation hide nothing at all ⇒ those SAME shipped tests red, proving the shipped suite now runs through the new path rather than a bypassed old one |
 | G-3 | Write mask is actor-node-scoped | a field `readonly` at the actor's node is refused even though it is `editable` at another node in the same graph; a field `editable` at the actor's node is written even though another node marks it `hidden` | the mirror fixture (swap the two nodes) inverts both outcomes — the mask is node-selected, not graph-wide |
 | G-4 | Routing drivers cannot be edited | for EACH driver kind (a `form_field_user` source's field, a `ConditionRule.fieldId`, a condition-formula operand): marking it `editable` fails publish at all five entry points | a NON-driver field publishes `editable` in the same graph; and a second fixture proves the hazard is real by construction — with the pin neutered, an edit to the driver field changes the NEXT node's resolved assignee (asserted on `approval_assignments`, not on a log line) |
-| G-5 | Self-contradiction and unfillable-required | a field `hidden` at the same node whose write surface must fill it, and a `required: true` field `hidden` at every write-capable node, each fail publish | a `hidden` field that no node needs to write still publishes — rejection is conflict-selected, not blanket |
+| G-5 | Unfillable-required | a `required: true` field that is not filled at create AND is `hidden` at every write-capable node fails publish, carrying the field id and node key but no value | a `required` field visible at create (so it already has a value), and a non-required field `hidden` everywhere, both still publish — rejection is unfillability-selected, not blanket. There is no separate editable-and-hidden-at-one-node fixture in v1 (§L7-B pin 3: no per-field must-fill carrier exists to make it distinct) |
 | G-6 | Writes re-run the frozen validators | a write violating a type or constraint is refused with zero rows and no node advance, validated against the instance's PINNED version schema, not the live template | mutate the live template's schema after create ⇒ the write still validates against the frozen one; and a named test RECORDS the MS-3 inheritance (a type with no `validateFieldType` arm is accepted unvalidated) so the fail-open is disclosed, not implied fixed |
 | G-7 | Transaction atomicity | forcing a failure at each of Lock-3 §3's five steps leaves zero snapshot change, zero revision row, zero audit row, zero assignment change, and an unchanged `version` | the success path changes all five — the rollback test is not passing against a no-op |
 | G-8 | Audit is values-free but answerable | the `handle` row carries `{ nodeKey, nodeEntryEpoch, changedFieldIds }` and NO value; the revision table carries before/after and is mask-aware | the SAME slice asserts the broadly-scoped history read surface returns no form value for an edited instance, AND that the revision surface DOES return before/after to an authorized reader — both directions, or "no values" is green against an empty payload |
@@ -327,10 +364,10 @@ turns red and asserts the anchor was actually hit.
 | G-10 | Round-trip and restore | save → publish → preview → execute → version-compare → restore preserves every matrix entry byte-for-byte; a changed entry SHOWS in the diff | a pre-Lock-7 template corpus round-trips unchanged through the same path |
 | G-11 | Legacy default | a template with no `fieldPermissions` behaves byte-identically before and after the slice: every field writable at a write-capable node, nothing redacted | a template WITH a matrix diverges in the same fixture — absent-≡-editable is default-selected, not accidental |
 | G-12 | Non-approval node types | `editable` on a `cc` / `start` / `end` / `condition` / `parallel` node is REJECTED at publish, not dropped | the pre-slice behavior is pinned first (the key is silently discarded, asserted on the SAVED graph) so the mutation shows the change; and `hidden` on an approval node still round-trips |
-| G-13 | Honesty copy retires atomically, both surfaces | when enforcement lands, neither `FIELD_PERMISSION_READONLY_HINT` nor the `（T1-4b）` marker appears in either authoring surface or in `fieldPermissionHonestyCopy.ts`, and the routing hint is corrected | before the enforcement commit the SAME test asserts both strings ARE present in both surfaces; deleting the copy from only one surface reds a named test (Lock-0 L0-6's one-change rule) |
+| G-13 | Readonly honesty copy retires atomically, both surfaces | when `readonly` enforcement lands, neither `FIELD_PERMISSION_READONLY_HINT` nor the `（T1-4b）` marker nor the `「只读」将在后续版本生效` section copy appears in either authoring surface or in `fieldPermissionHonestyCopy.ts`. The routing hint is NOT in scope of this gate under OD-L7-8(a) — it stays TRUE because a driver is never editable — and is only asserted-corrected when OD-L7-8(b) ships or a legacy editable-driver graph is in play (§2.5) | before the enforcement commit the SAME test asserts the readonly strings ARE present in both surfaces; deleting the copy from only one surface reds a named test (Lock-0 L0-6's one-change rule); and under arm (a) a test asserts the routing hint is UNCHANGED, so an implementer "correcting" an accurate string reds it |
 | G-14 | Enum mirror sites | the FIVE access-enum copies (R-1) are asserted equal by exact set — not count, not subset — and the site list itself is asserted, so a sixth copy added later fails the census rather than passing unnoticed | dropping a member from any ONE of the five reds a distinct named test; they are hand copies, so the compiler catches none of it. The count is a swept finding, not a remembered figure: an earlier draft of this document said four and missed `templateAuthoring.ts:375-377` |
 | G-15 | Direct-HTTP bypass matrix | for each write-refusal reason (no active seat, wrong node, `readonly`, `hidden`, unknown field, detail sub-column, non-write-capable node type) a direct API call is refused values-free with zero rows | one fully-compliant call succeeds in the same fixture — refusal is reason-selected; and the legacy `/approve` `/reject` routes are asserted to accept NO field payload |
-| G-16 | Dedup invalidation (OD-L7-11(a) only) | with a dedup tier ON, an edited instance does not auto-approve a later node on a pre-edit approval by the same actor | with no edit, the same fixture DOES auto-approve — the invalidation is edit-selected, not flag-blind. Under arm (b) this gate is replaced by a ledger row naming the transferee |
+| G-16 | Dedup invalidation (OD-L7-11(a) only) | with a dedup tier ON, an edited instance does not auto-approve a later node on a pre-edit approval by the same actor. The invalidation keys on the NEW per-edit marker (audit-ordinal-before-latest-content-edit), NOT on `nodeEntryEpoch` — a companion assertion proves the edit did NOT bump the node's epoch, so the current node's in-flight quorum tally (`:6981`) is unchanged by the edit (Lock-3 G-12) | with no edit, the same fixture DOES auto-approve — the invalidation is edit-selected, not flag-blind; and the quorum-unchanged assertion fails if an implementer wrongly reuses the epoch bump. Under arm (b) this gate is replaced by a ledger row naming the transferee |
 | G-17 | The immutability readers were actually re-examined (R-11) | §L7-C's "re-examined in this slice" is a GATE, not prose: after an edit, each named reader's behavior is ASSERTED — what value the FWB create/update path writes to the target record, and what the projection and attendance readers see — rather than reviewed. Whichever value each reader takes, the choice is written down per reader | with NO edit, every one of those readers is byte-identical to today (flag-OFF positive control for the FWB rows), so the assertions are not passing against an inert path; and a fixture edits a field NOT read by any of them and asserts all stay unchanged — the coupling is field-selected |
 
 ## 4. Owner ratification block
@@ -374,7 +411,7 @@ they are not re-proposed):
            admins and the requester (`approval-form-redaction.ts:17-21` documents the current choice) and
            is a separate owner decision on read semantics, not a Lock-7 side effect · (c) two independent
            derivations [rejected §L7-A: two hand-maintained readers of one matrix is the drift class
-           Lock-2 §2.3 and Lock-5 §2.3 both had to close]
+           Lock-2 §2.3 and Lock-5 §2.1/§2.3 both had to close]
   OD-L7-6  What a write mutates — (a)[R] UPDATE `form_snapshot` in place inside Lock-3 §3's single
            transaction, PLUS an append-only per-field revision row; the FWB/projection immutability readers
            (`automation-executor.ts:3192-3194`, `attendance/w4c3b-request-snapshots.ts:1219`) are
@@ -410,11 +447,16 @@ they are not re-proposed):
            `buildDisplayFields` skips any field absent from the snapshot (`detailField.ts:547`) — so the
            FE would have to infer access, i.e. re-derive the matrix client-side · (c) instance-scoped map,
            cheaper but wrong for the write surface, since the actor needs to know what THEY may edit
-  OD-L7-11 Lock-4's 内容变更 obligation — (a)[R] discharged in this slice: scope the dedup readers'
-           history to the post-edit round using the shipped `nodeEntryEpoch` machinery, gated by G-16 ·
-           (b) re-transferred with a named owner slice and a ledger row, leaving the tier honest only
-           while it stays unauthorable. Lock-4's own wording asks for (a); Lock-3 §3 forbids treating the
-           obligation as already discharged under either arm
+  OD-L7-11 Lock-4's 内容变更 obligation — (a)[R] discharged in this slice with a NEW per-edit marker: the
+           dedup readers exclude any prior approval whose audit ordinal precedes the latest content-edit
+           revision (the OD-L7-6(a) revision rows already carry a per-instance monotonic order), gated by
+           G-16. **This is NOT a reuse of `nodeEntryEpoch`** — that epoch bumps only on node ACTIVATION and
+           every same-round mutation is commented "NEVER bump" (`:5838-5840`, `:6078-6080`, `:6463-6465`,
+           `:6515`, `:7730-7732`); a field edit is a same-round mutation and must mint no epoch, or the
+           in-flight quorum tally (`:6981`, Lock-3 G-12) is silently voided. Arm (a) is therefore new
+           machinery, priced as such · (b) re-transferred with a named owner slice and a ledger row, leaving
+           the tier honest only while it stays unauthorable. Lock-4's own wording asks for a same-slice
+           discharge; Lock-3 §3 forbids treating the obligation as already discharged under either arm
   OD-L7-12 Detail sub-columns — (a)[R] excluded in v1: the cross-reference set is top-level only
            (`:1254`) and the grid rows are top-level fields (`TemplateAuthoringView.vue:2330`); N row
            values are ambiguous for one access decision (Lock-2's reasoning, inherited) · (b) per-column
@@ -425,8 +467,11 @@ Unverified at this baseline, recorded so no later document treats it as settled:
   - Whether any HTTP surface echoes the audit-record `metadata` column for a LOCAL instance. The
     broadly-scoped history read surface selects `comment` but NOT `metadata` (private inventory), while a
     local-history mapper does map `metadata` into its DTO and the only route call site reached from HTTP is
-    the PLM branch (private inventory). OD-L7-7(a) is the fail-closed choice under either reading, and
-    gate G-8 asserts the behavior either way.
+    the PLM branch (private inventory). The WRITE side is not empty: a legacy terminal route accepts a
+    client-supplied `metadata` blob and inserts it verbatim into the audit record (write path in the private
+    inventory), so `metadata` is an author-influenced column, which is a further reason OD-L7-7(a) keeps
+    before/after VALUES off it entirely rather than reasoning about who can read it today. OD-L7-7(a) is the
+    fail-closed choice under either read reading, and gate G-8 asserts the behavior either way.
   - Whether any persisted `fieldPermissions` entry carries a shape the current normalizer would reject
     (§2.1's census is a slice deliverable, not a finding here).
   - Lock-2's OD-L2-5 and §L2-C required-pin finding, and Lock-8's MS-1…MS-13 census and MS-3 defaults, are
