@@ -463,17 +463,6 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node[draggable='true'] {
   cursor: grab;
 }
-/* Selection/validation accent (preserved, D0 §3.2 point 3) — a ring plus border-color change on the
-   CARD itself, applied uniformly across every node type (never a per-type fill). */
-.template-authoring__canvas-node.is-selected {
-  border-color: var(--el-color-primary);
-  border-left-color: var(--el-color-primary);
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-7);
-}
-.template-authoring__canvas-node.is-moving {
-  border-style: dashed;
-  border-color: var(--el-color-primary);
-}
 .template-authoring__canvas-node-kind {
   flex: 0 0 28px;
   display: flex;
@@ -485,7 +474,9 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   background: var(--el-fill-color-light);
 }
 /* Per-type accent lives on the CARD's left border only — flat, token-only, never a fill/background
-   on the type-label row above (that stays the single flat color for every node type). */
+   on the type-label row above (that stays the single flat color for every node type). `danger` is
+   the destructive/error token elsewhere in this UI, so it is never used for a node TYPE — reserved
+   for a future validation marker (D0 §3.2 point 3), which this component does not implement today. */
 .template-authoring__canvas-node[data-node-type='start'],
 .template-authoring__canvas-node[data-node-type='end'] {
   border-left-color: var(--el-color-info);
@@ -500,7 +491,21 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   border-left-color: var(--el-color-warning);
 }
 .template-authoring__canvas-node[data-node-type='parallel'] {
-  border-left-color: var(--el-color-danger);
+  border-left-color: var(--el-color-info);
+}
+/* Selection accent — a ring plus border-color change on the CARD itself, applied uniformly across
+   every node type (never a per-type fill). Declared AFTER the per-type accent rules above so its
+   equal-specificity `border-left-color` actually wins the cascade instead of being shadowed by the
+   later per-type rule (both are `.template-authoring__canvas-node` + one class/attribute, so source
+   order decides). */
+.template-authoring__canvas-node.is-selected {
+  border-color: var(--el-color-primary);
+  border-left-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-7);
+}
+.template-authoring__canvas-node.is-moving {
+  border-style: dashed;
+  border-color: var(--el-color-primary);
 }
 .template-authoring__canvas-node-selector {
   display: flex;

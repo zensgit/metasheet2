@@ -1378,8 +1378,6 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       setConditionRuleValue: () => {},
       addConditionRule: () => {},
       removeConditionRule: () => {},
-      canRemoveConditionBranch: () => false,
-      removeConditionBranch: () => {},
       setConditionBranchPredicateMode: () => {},
       insertConditionFormulaToken: () => {},
       insertConditionFormulaFunction: () => {},

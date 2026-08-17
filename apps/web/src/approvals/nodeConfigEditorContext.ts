@@ -40,19 +40,6 @@ export interface ApprovalNodeConfigEditorApi {
   setConditionRuleValue: (rule: ConditionRuleEdit, text: string) => void
   addConditionRule: (branch: ConditionBranchEdit) => void
   removeConditionRule: (branch: ConditionBranchEdit, ruleIndex: number) => void
-  /**
-   * P1-D presentation: whether the TOPOLOGY-level branch (identified by its edgeKey, not a rule)
-   * can be removed right now — mirrors `canRemoveNode`'s try/catch-the-real-command shape against
-   * the existing, already-tested `removeConditionBranch` command (`graphTopologyEdit.ts`). Never
-   * true for the node's `defaultEdgeKey` — the template gates that structurally (no button in the
-   * DOM at all), this predicate only covers the remaining "complex/shared branch" and "ambiguous
-   * convergence" refusals the command itself throws.
-   */
-  canRemoveConditionBranch: (nodeKey: string, edgeKey: string) => boolean
-  /** P1-D: remove a condition branch by edgeKey via the existing typed topology command (one undo
-   *  entry, same `runTopologyOp` path `onAddConditionBranch` already uses). Never called for the
-   *  default edge — the template never renders a delete affordance for it. */
-  removeConditionBranch: (nodeKey: string, edgeKey: string) => void
   setConditionBranchPredicateMode: (branch: ConditionBranchEdit, mode: string) => void
   insertConditionFormulaToken: (branch: ConditionBranchEdit, token: string) => void
   insertConditionFormulaFunction: (branch: ConditionBranchEdit, fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX') => void

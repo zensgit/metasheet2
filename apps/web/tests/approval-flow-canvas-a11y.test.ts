@@ -94,11 +94,21 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
 // colored-title-band fill. Text (`nodeTypeLabel`) remains the sole REQUIRED type carrier (V-6/V-8);
 // these pins guard the PROHIBITED presentation, not the text label (already covered above).
 describe('ApprovalFlowCanvas flat-card grammar (P1-D, structural)', () => {
-  it('the type-label bar carries no per-type background ribbon (no `[data-node-type=...] { background:` fill anywhere)', () => {
-    // Mutation probe: re-adding e.g. `.template-authoring__canvas-node-kind[data-node-type='approval'] {
-    // background: var(--el-color-primary-light-8); }` must turn this red — token-based colors pass
-    // UF-6 (no hex/rgb literal), so this explicit source pin is the actual guard, not UF-6.
-    expect(CANVAS_SRC).not.toMatch(/canvas-node-kind\[data-node-type=[^\]]+\][\s\S]{0,120}background:/)
+  it('no data-node-type-scoped selector of ANY shape sets a background fill (no per-type ribbon, however the selector is spelled)', () => {
+    // Mutation probe: re-adding the literal `.template-authoring__canvas-node-kind[data-node-type=
+    // 'approval'] { background: ... }` must turn this red — token-based colors pass UF-6 (no
+    // hex/rgb literal), so this explicit source pin is the actual guard, not UF-6.
+    //
+    // house-rule fix (adversarial gate P2-1, 20260817): a prior version of this pin keyed off the
+    // literal substring "canvas-node-kind", which a restatement defeats trivially by reaching the
+    // SAME element through a different selector — e.g.
+    // `.template-authoring__canvas-node[data-node-type='cc'] > div:first-child { background: ... }`
+    // (the kind bar IS that element's first child div — verified against the template markup).
+    // The mechanism being guarded is "no rule whose selector is scoped to a `[data-node-type=...]`
+    // attribute sets background/background-color", regardless of what else the selector says
+    // (class name, combinator, pseudo-class) — so the pin now matches on the attribute selector
+    // itself, not on a co-occurring class name.
+    expect(CANVAS_SRC).not.toMatch(/\[data-node-type=[^\]]+\][^{]*\{[^}]{0,240}background(-color)?:/)
   })
 
   it('the type-label bar itself has exactly one flat background across every node type (no per-type override block)', () => {
@@ -133,5 +143,63 @@ describe('ApprovalFlowCanvas flat-card grammar (P1-D, structural)', () => {
     expect(cardRuleMatch).not.toBeNull()
     expect(cardRuleMatch![0]).toMatch(/border-radius:\s*8px/)
     expect(cardRuleMatch![0]).not.toMatch(/box-shadow:/)
+  })
+})
+
+// P2-1 hardening (adversarial gate, 20260817): the source-text pin above guards the SPELLING of the
+// prohibited rule; this block guards the MECHANISM directly by reading real computed style off real
+// DOM nodes — a spelling restatement (e.g. `[data-node-type=X] > div:first-child { background: … }`)
+// cannot evade a check that never looks at selector text at all.
+//
+// The component's OWN raw `<style scoped>` block text is injected as a literal stylesheet. The
+// `scoped` hash attribute (`data-v-xxxxxxxx`) is added by the SFC compiler at BUILD time and is not
+// present in this raw source, so the selectors as written (plain classes / attribute selectors)
+// match ordinary hand-built DOM nodes here without needing that hash.
+describe('ApprovalFlowCanvas flat-card grammar — computed-style mechanism guard (P1-D / P2-1)', () => {
+  function extractStyleBlock(src: string): string {
+    const match = src.match(/<style[^>]*>([\s\S]*?)<\/style>/)
+    if (!match) throw new Error('no <style> block found in ApprovalFlowCanvas.vue')
+    return match[1]
+  }
+
+  function kindBarBackground(nodeType: string): string {
+    const styleEl = document.createElement('style')
+    styleEl.textContent = extractStyleBlock(CANVAS_SRC)
+    document.head.appendChild(styleEl)
+    const card = document.createElement('div')
+    card.className = 'template-authoring__canvas-node'
+    card.setAttribute('data-node-type', nodeType)
+    const kindBar = document.createElement('div')
+    kindBar.className = 'template-authoring__canvas-node-kind'
+    kindBar.setAttribute('data-node-type', nodeType)
+    card.appendChild(kindBar)
+    // A second child mirrors the real markup's `.template-authoring__canvas-node-selector` sibling,
+    // so a MUTATION-A-shaped `> div:first-child` selector resolves against the SAME element a real
+    // mount would hit — not an artifact of a single-child fixture.
+    const selectorEl = document.createElement('div')
+    selectorEl.className = 'template-authoring__canvas-node-selector'
+    card.appendChild(selectorEl)
+    document.body.appendChild(card)
+    // jsdom does not resolve CSS custom properties (`var(--x)`), so `.backgroundColor` collapses
+    // to the same default `rgba(0, 0, 0, 0)` for every rule regardless of which `var(--el-…)` token
+    // it names — that would make every type compare EQUAL even under a real mutation (a toothless
+    // check). `.background` (the shorthand) preserves the raw, unresolved `var(--el-…)` text, which
+    // DOES differ correctly per rule — verified empirically: under MUTATION-A this returns
+    // `var(--el-color-success-light-8)` for `cc` vs `var(--el-fill-color-light)` for every
+    // unaffected type, while `.backgroundColor` stayed `rgba(0, 0, 0, 0)` for all of them.
+    const computed = getComputedStyle(kindBar)
+    const value = computed.background
+    document.body.removeChild(card)
+    document.head.removeChild(styleEl)
+    return value
+  }
+
+  it('kind-bar computed background is IDENTICAL across every node type (behavioral, not text-based)', () => {
+    const types = ['start', 'end', 'approval', 'cc', 'condition', 'parallel']
+    const values = types.map((type) => kindBarBackground(type))
+    // Sanity: jsdom actually resolved something from the injected stylesheet, not a silent no-op
+    // that would make the equality check below vacuously true.
+    expect(values.every((v) => v !== '')).toBe(true)
+    expect(new Set(values).size).toBe(1)
   })
 })

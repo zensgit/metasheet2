@@ -1217,9 +1217,9 @@ describe('TemplateAuthoringView', () => {
 
   // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D; D0 §4.1):
   // condition branch cards get a "优先级 N" priority chip (branch ARRAY ORDER — never the edge key),
-  // the default (fall-through) branch gets an explanatory copy card with NO delete affordance, and
-  // non-default branches DO get one — wired to the existing, already-tested `removeConditionBranch`
-  // topology command (`graphTopologyEdit.ts`, not edited by this slice).
+  // and the default (fall-through) branch gets an explanatory copy card. No branch delete/duplicate
+  // affordance is mounted in this slice (out of scope per master §P1-D; a future slice may add
+  // delete with its own authorization — see docs/development ledger P1-D row).
   function buildThreeBranchConditionGraph() {
     return {
       nodes: [
@@ -1266,7 +1266,7 @@ describe('TemplateAuthoringView', () => {
     const chipTexts = branchCards.map(
       (card) => card.querySelector('[data-testid="approval-condition-branch-priority"]')?.textContent?.trim(),
     )
-    expect(chipTexts).toEqual(['优先级 1', '优先级 2', '优先级 3']) // reversing the fixture's branch order must flip this
+    expect(chipTexts).toEqual(['优先级 1 最高', '优先级 2', '优先级 3']) // reversing the fixture's branch order must flip this
 
     // Ties chip 2 to ITS OWN branch — branch 2 is the only one whose rule field is 'reviewer', so
     // this fails if the chip renders against the wrong card (not just "the string set exists").
@@ -1284,7 +1284,20 @@ describe('TemplateAuthoringView', () => {
     expect(branch3Operator).toBe('lt')
   })
 
-  it('P1-D: default branch gets the exact explanatory copy and no delete button; a non-default branch HAS one (positive control)', async () => {
+  // P1-1 (adversarial gate, 20260817): the branch-delete affordance previously mounted here
+  // (`removeConditionBranch` / `canRemoveConditionBranch`) is OUT OF SCOPE for §P1-D — no lock
+  // row authorizes deleting a topology node from a copy-and-priority slice. It has been dropped
+  // entirely (template button, view-layer handlers, `ApprovalNodeConfigEditorApi` members); the
+  // command layer itself (`graphTopologyEdit.ts`) is untouched and stays covered by its own suite.
+  // There is therefore no delete-affordance test here anymore — asserting its absence would be a
+  // vacuous "this component doesn't render a button it never imports" check.
+
+  // P1-2 (adversarial gate, M8 honesty): the default-card copy must never assert a default flow
+  // that doesn't exist. `conditionEdit.ts` maps an absent `config.defaultEdgeKey` to `''`, and
+  // `ApprovalGraphExecutor.resolveConditionTarget` falls through to the FIRST outgoing edge when
+  // no default is designated — never an undefined "default flow". Positive control: a real
+  // `defaultEdgeKey` renders the default-flow copy.
+  it('P1-D/P1-2: default branch card renders the default-flow copy when defaultEdgeKey is set (positive control)', async () => {
     routeParams = { id: 'tpl_default_copy' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
@@ -1294,44 +1307,47 @@ describe('TemplateAuthoringView', () => {
     expect(defaultCard).not.toBeNull()
     const copy = defaultCard.querySelector('[data-testid="approval-condition-default-copy"]')
     expect(copy?.textContent?.trim()).toBe('未满足其他条件时进入默认流程')
-    expect(defaultCard.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull() // no delete affordance AT ALL
-
-    // Positive control: every non-default branch card DOES render a delete button — proves the
-    // assertion above is not a green test against a component that never renders delete anywhere.
-    const branchCards = container!.querySelectorAll('[data-testid="approval-condition-branch"]')
-    expect(branchCards.length).toBeGreaterThan(0)
-    for (const card of Array.from(branchCards)) {
-      expect(card.querySelector('[data-testid="approval-condition-branch-remove"]')).not.toBeNull()
-    }
+    expect(defaultCard.querySelector('[data-testid="approval-condition-default-copy-empty"]')).toBeNull()
   })
 
-  it('P1-D: deleting a non-default branch mounts the existing removeConditionBranch topology command and drops only that branch', async () => {
-    routeParams = { id: 'tpl_branch_delete' }
+  // Negative test: no `defaultEdgeKey` configured must NOT claim a default flow exists — it must
+  // render the honest empty-state line instead, matching real executor routing (first outgoing
+  // edge, i.e. 优先级 1's branch, not an undefined "default").
+  it('P1-D/P1-2: default branch card renders the honest empty-state line when no defaultEdgeKey is set (negative test)', async () => {
+    routeParams = { id: 'tpl_no_default' }
+    const graph = buildThreeBranchConditionGraph()
+    const cond = graph.nodes.find((n: any) => n.key === 'cond_1') as any
+    delete cond.config.defaultEdgeKey
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    const defaultCard = container!.querySelector('[data-testid="approval-condition-default-branch"]') as HTMLElement
+    expect(defaultCard).not.toBeNull()
+    expect(defaultCard.querySelector('[data-testid="approval-condition-default-copy"]')).toBeNull() // NOT the default-flow claim
+    const emptyCopy = defaultCard.querySelector('[data-testid="approval-condition-default-copy-empty"]')
+    expect(emptyCopy?.textContent?.trim()).toBe(
+      '未指定默认分支：所有条件都不满足时，流程将进入第一条出边（优先级最高的分支）。',
+    )
+  })
+
+  // P2-6 (D0 §4.1, verbatim): priority chips must convey evaluation direction, and the condition
+  // inspector header carries the mandated evaluation-order hint exactly once.
+  it('P1-D/P2-6: priority-1 chip carries the "最高" direction cue and the header hint is the verbatim D0 §4.1 string', async () => {
+    routeParams = { id: 'tpl_priority_direction' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
     await flushUi()
 
-    expect(container!.querySelectorAll('[data-testid="approval-condition-branch"]').length).toBe(3)
-    const removeButtons = container!.querySelectorAll('[data-testid="approval-condition-branch-remove"]')
-    ;(removeButtons[0] as HTMLButtonElement).click() // deletes 优先级 1 (e-a → app_a)
-    await flushUi()
-
-    const after = Array.from(container!.querySelectorAll('[data-testid="approval-condition-branch"]'))
-    expect(after).toHaveLength(2)
-    // The remaining branches keep THEIR OWN identity, renumbered 1/2 — never "the deleted branch's
-    // rule reappears under a new priority" (a reindex bug would still pass a naive length check).
-    const remainingFieldValues = after.map(
-      (card) => (card.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement).value,
+    const branchCards = Array.from(container!.querySelectorAll('[data-testid="approval-condition-branch"]'))
+    const chipTexts = branchCards.map(
+      (card) => card.querySelector('[data-testid="approval-condition-branch-priority"]')?.textContent?.trim(),
     )
-    expect(remainingFieldValues).toEqual(['reviewer', 'amount'])
+    expect(chipTexts).toEqual(['优先级 1 最高', '优先级 2', '优先级 3'])
 
-    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
-    await flushUi()
-    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    const savedNode = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1')
-    expect(savedNode.config.branches).toHaveLength(2)
-    expect(savedNode.config.branches.map((b: any) => b.edgeKey)).toEqual(['e-b', 'e-c']) // e-a's branch is gone
-    expect(payload.approvalGraph.nodes.some((n: any) => n.key === 'app_a')).toBe(false) // its body node is gone too
+    const hints = container!.querySelectorAll('[data-testid="approval-condition-order-hint"]')
+    expect(hints).toHaveLength(1) // "lives once" — D0 §4.1
+    expect(hints[0].textContent?.trim()).toBe('分支按优先级从上到下依次判断，全部不满足时走默认分支。')
   })
 
   // P1-D (master §4 UI-3/UI-9, parent-lock §9/:276 gap): a compact 版本历史 navigation entry in the

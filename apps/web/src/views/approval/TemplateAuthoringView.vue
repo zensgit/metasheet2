@@ -1123,7 +1123,6 @@ import {
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
-  removeConditionBranch as removeConditionBranchTopology,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
 import {
@@ -2024,26 +2023,6 @@ function onAddConditionBranch(nodeKey: string): void {
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
-// P1-D: branch delete affordance — mounts the EXISTING, already-tested `removeConditionBranch`
-// topology command (never edited by this slice) through the same `runTopologyOp` path
-// `onAddConditionBranch` already uses. The default (fall-through) edge is excluded structurally by
-// the template (no button rendered at all — see `ApprovalGraphNodeConfigEditor.vue`'s condition
-// branch card), not by disabling this handler, so this only ever fires for a non-default branch.
-function onRemoveConditionBranch(nodeKey: string, edgeKey: string): void {
-  runTopologyOp((graph) => removeConditionBranchTopology(graph, nodeKey, edgeKey), { kind: 'node', nodeKey })
-}
-/** P1-D: dry-run the same command against the CURRENT graph to decide whether the delete affordance
- *  should be enabled — mirrors `canRemoveNode`'s try/catch shape. Returns false for a "complex or
- *  shared branch" (multi-node branch body) or an ambiguous rejoin target; the command layer remains
- *  the sole authority, this never re-implements its refusal logic. */
-function canRemoveConditionBranch(nodeKey: string, edgeKey: string): boolean {
-  try {
-    removeConditionBranchTopology(buildApprovalGraph(draft.value), nodeKey, edgeKey)
-    return true
-  } catch {
-    return false
-  }
-}
 function selectInsertedNode(beforeKeys: Set<string>): void {
   const inserted = canvasEffectiveGraph.value.nodes.find((node) => !beforeKeys.has(node.key))?.key
   if (inserted) selectedCanvasNode.value = inserted
@@ -2599,8 +2578,6 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   setConditionRuleValue,
   addConditionRule,
   removeConditionRule,
-  canRemoveConditionBranch,
-  removeConditionBranch: onRemoveConditionBranch,
   setConditionBranchPredicateMode,
   insertConditionFormulaToken,
   insertConditionFormulaFunction,

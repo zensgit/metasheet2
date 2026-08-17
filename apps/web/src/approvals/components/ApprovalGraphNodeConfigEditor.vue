@@ -14,6 +14,14 @@
       data-testid="approval-condition-editor"
       :data-condition-node="node.key"
     >
+      <!-- D0 §4.1: the evaluation-order hint lives once, in the condition inspector header —
+           verbatim string, do not duplicate elsewhere in this component. -->
+      <p
+        class="template-authoring__condition-order-hint"
+        data-testid="approval-condition-order-hint"
+      >
+        分支按优先级从上到下依次判断，全部不满足时走默认分支。
+      </p>
       <div
         v-for="(branch, branchIndex) in conditionEditFor(node.key)!.branches"
         :key="branch.edgeKey"
@@ -22,11 +30,13 @@
       >
         <div class="template-authoring__condition-branch-head">
           <!-- D0 §4.1 / P1-D: branch order IS priority — never expose the array-index mechanic as
-               such, only the ordinary-user "优先级 N" copy. -->
+               such, only the ordinary-user "优先级 N" copy. Priority 1 carries the explicit
+               direction cue ("最高") D0 §4.1 mandates so the chips alone communicate evaluation
+               order, not just the header hint above. -->
           <span
             class="template-authoring__condition-branch-priority"
             data-testid="approval-condition-branch-priority"
-          >优先级 {{ branchIndex + 1 }}</span>
+          >优先级 {{ branchIndex + 1 }}{{ branchIndex === 0 ? ' 最高' : '' }}</span>
           <span>分支「{{ liveBranchSummary(branch) }}」</span>
           <el-select
             :model-value="branch.predicateMode"
@@ -50,21 +60,6 @@
             <el-option label="全部满足 (AND)" value="and" />
             <el-option label="任一满足 (OR)" value="or" />
           </el-select>
-          <!-- P1-D: delete affordance for a NON-default branch only — mounts the existing
-               `removeConditionBranch` topology command. The default (fall-through) edge never
-               renders this button at all (structural exclusion, not merely disabled) — see the
-               explanatory copy card below for the default branch's presentation. -->
-          <el-button
-            v-if="branch.edgeKey !== conditionEditFor(node.key)!.defaultEdgeKey"
-            size="small"
-            type="danger"
-            :disabled="readOnly || !canRemoveConditionBranch(node.key, branch.edgeKey)"
-            :aria-label="`删除分支 ${branchIndex + 1}`"
-            data-testid="approval-condition-branch-remove"
-            @click="removeConditionBranch(node.key, branch.edgeKey)"
-          >
-            删除分支
-          </el-button>
         </div>
         <template v-if="branch.predicateMode === 'rules'">
           <div
@@ -222,9 +217,13 @@
         </div>
       </div>
       <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
-           visually de-emphasized from the ordered branch cards above, and NEVER carries a delete
-           affordance — it is excluded from rule editing and cannot be deleted while it is the only
-           default (existing `removeConditionBranch` topology protections carry over unchanged). -->
+           visually de-emphasized from the ordered branch cards above, and excluded from rule
+           editing. It is not a mutable topology affordance in this slice — no delete/duplicate is
+           mounted here (a future slice may add branch delete with its own authorization).
+           M8 honesty: the explanatory copy is gated on a real `defaultEdgeKey` — when none is
+           designated, the runtime falls through to the FIRST outgoing edge
+           (ApprovalGraphExecutor.resolveConditionTarget), never an undefined "default flow", so
+           the empty state must say that plainly instead of asserting a default path exists. -->
       <div
         class="template-authoring__condition-branch template-authoring__condition-default-card"
         data-testid="approval-condition-default-branch"
@@ -235,10 +234,18 @@
           </span>
         </div>
         <p
+          v-if="conditionEditFor(node.key)!.defaultEdgeKey"
           class="template-authoring__condition-default-copy"
           data-testid="approval-condition-default-copy"
         >
           未满足其他条件时进入默认流程
+        </p>
+        <p
+          v-else
+          class="template-authoring__condition-default-copy template-authoring__condition-default-copy--empty"
+          data-testid="approval-condition-default-copy-empty"
+        >
+          未指定默认分支：所有条件都不满足时，流程将进入第一条出边（优先级最高的分支）。
         </p>
         <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
           <el-select
@@ -807,8 +814,6 @@ const conditionRuleValueText = api.conditionRuleValueText
 const setConditionRuleValue = api.setConditionRuleValue
 const addConditionRule = api.addConditionRule
 const removeConditionRule = api.removeConditionRule
-const canRemoveConditionBranch = api.canRemoveConditionBranch
-const removeConditionBranch = api.removeConditionBranch
 const setConditionBranchPredicateMode = api.setConditionBranchPredicateMode
 const insertConditionFormulaToken = api.insertConditionFormulaToken
 const insertConditionFormulaFunction = api.insertConditionFormulaFunction
@@ -1101,10 +1106,11 @@ const { node } = toRefs(props)
   color: var(--el-text-color-secondary);
 }
 
-/* De-emphasized relative to the ordered branch cards above (dashed border, muted fill) — same
-   card shape, never a delete affordance. */
+/* De-emphasized relative to the ordered branch cards above via a muted fill — the dashed border is
+   already inherited from `.template-authoring__condition-branch` above (both classes are always
+   applied together on this card), so it is not repeated here. Same card shape; no delete/duplicate
+   affordance is mounted on this card. */
 .template-authoring__condition-default-card {
-  border-style: dashed;
   background: var(--el-fill-color-lighter);
 }
 
