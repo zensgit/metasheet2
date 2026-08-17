@@ -473,13 +473,8 @@
         </div>
       </div>
 
-      <!-- Action bar (also the 全文评论 tab's scroll target — P3-2 partial fix: this is the
-           closest always-rendered (`v-if="approval"`, both the pending-actions AND the
-           已结束-alert branches share this wrapper) region carrying the 评论 affordance, so the
-           three tabs now scroll to three genuinely distinct elements instead of 审批记录/全文评论
-           silently sharing one target. A real filtered comment-only projection is a separate,
-           larger change — deferred, see PR body.) -->
-      <div v-if="approval" ref="actionsSectionRef" class="approval-detail__actions">
+      <!-- Action bar -->
+      <div v-if="approval" class="approval-detail__actions">
         <template v-if="approval.status === 'pending'">
           <!-- B3-13 按动作 loading: every action button binds to `inFlightAction === '<its own
                action>'` instead of the store-global `loading` flag, so only the button whose
@@ -995,28 +990,23 @@ const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 // ---------------------------------------------------------------------------
 const formSectionRef = ref<HTMLElement | null>(null)
 const timelineSectionRef = ref<HTMLElement | null>(null)
-// P3-2 partial fix: a third, always-rendered (`v-if="approval"`) landing target so 全文评论
-// scrolls somewhere DISTINCT from 审批记录, instead of both silently sharing timelineSectionRef.
-const actionsSectionRef = ref<HTMLElement | null>(null)
 
 type DetailAnchorSection = 'form' | 'record' | 'comments'
 const activeDetailTab = ref<DetailAnchorSection>('record')
 
-// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no separate
-// FILTERED comment stream to build (comments still render inline in the timeline today, as
-// `action === 'comment'` rows) — building that projection is a separate, larger change, deferred
-// (see PR body). This anchor's job is narrower: give 全文评论 a scroll target that is not
-// byte-identical to 审批记录's, so the active-tab highlight isn't claiming two different things
-// land in the same place. It targets the action bar (carries the 评论 affordance, and is the
-// closest always-rendered region below the timeline). Purely presentational either way: it never
-// mutates store state, dispatches an action, or fetches.
+// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no
+// separate stream to build — comments render inline in the timeline today (action
+// === 'comment' rows), so its anchor targets the same timeline region as 审批记录.
+// P3-2 (gate fix round, 2026-08-17): a distinct scroll target for 全文评论 was tried
+// (pointing it at the action bar) and reverted — the action bar renders no comment
+// text at all, so repointing it there would relabel the "dud tab" complaint rather
+// than fix it (comment text is only ever visible in the timeline). A real fix needs
+// an actual `action === 'comment'`-filtered projection, deferred — see PR body; the
+// mis-attribution to the master lock's EXCLUDED clause is corrected there too.
+// Purely presentational: it never mutates store state, dispatches an action, or fetches.
 function scrollToDetailSection(section: DetailAnchorSection): void {
   activeDetailTab.value = section
-  const target = section === 'form'
-    ? formSectionRef.value
-    : section === 'comments'
-      ? actionsSectionRef.value
-      : timelineSectionRef.value
+  const target = section === 'form' ? formSectionRef.value : timelineSectionRef.value
   target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 

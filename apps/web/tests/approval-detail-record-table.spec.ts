@@ -452,33 +452,6 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
       await flushUi()
       expect(executeActionSpy).toHaveBeenCalledTimes(1)
     })
-
-    // P3-2 partial fix: 审批记录 and 全文评论 used to both resolve to `timelineSectionRef`
-    // (the active-tab highlight claimed they differed while landing in the exact same place).
-    // They now target genuinely different elements — the timeline vs. the action bar (which
-    // carries the 评论 affordance and is the closest always-rendered region below it).
-    it('审批记录 and 全文评论 scroll to genuinely different elements, not a shared target (P3-2 partial fix)', async () => {
-      const originalScrollIntoView = (window.HTMLElement.prototype as any).scrollIntoView
-      const scrollTargets: HTMLElement[] = []
-      ;(window.HTMLElement.prototype as any).scrollIntoView = function (this: HTMLElement) {
-        scrollTargets.push(this)
-      }
-      try {
-        await mountView()
-
-        q(container!, 'approval-detail-tab-record')!.click()
-        await flushUi()
-        q(container!, 'approval-detail-tab-comments')!.click()
-        await flushUi()
-
-        expect(scrollTargets).toHaveLength(2)
-        expect(scrollTargets[0]).toBeTruthy()
-        expect(scrollTargets[1]).toBeTruthy()
-        expect(scrollTargets[1]).not.toBe(scrollTargets[0])
-      } finally {
-        ;(window.HTMLElement.prototype as any).scrollIntoView = originalScrollIntoView
-      }
-    })
   })
 
   // -----------------------------------------------------------------------------------------
