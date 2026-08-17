@@ -1,7 +1,7 @@
 # Lock-7 — Per-Node Form Field Edit / Visibility Enforcement (2026-08-17)
 
-**Status:** PROPOSED — §4 is intentionally blank until an explicit owner decision names this document and
-its SHA. Design authority only when ratified: no runtime, flag, UAT, or deployment authorization.
+**Status:** RATIFIED — §4 record of 2026-08-17 (goal-set in-session provenance; reversible before
+implementation lands). Design authority only: no runtime, flag, UAT, or deployment authorization.
 **Baseline:** `origin/main@b296b4d6ebf2e2314a452b13e2c17a296aeb09b2`. Every anchor below was READ AT THIS
 BASELINE, verified newer than every parent by `git merge-base --is-ancestor` (master `d33a6a0fa1`, Lock-0
 `5b31cb4349`, Lock-1 `0e8ed11671`, Lock-3 `2f4bf6ce3e`, Lock-4 `075d078eb4`, Lock-5/6 `3c5f0992ba` are all
@@ -372,13 +372,33 @@ turns red and asserts the anchor was actually hit.
 
 ## 4. Owner ratification block
 
-Intentionally blank until an explicit owner decision names this document and its SHA.
-
 ```text
-Decision:
-Owner:
-Date:
-Document SHA:
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+Date: 2026-08-17
+Document SHA: drafted aab26f740e, disclosure redaction 5c8eae9ec5, review round 70ce8773b3; this
+  record lands on top.
+Decisions recorded: OD-L7-1 (a) shipped fieldPermissions/NodeFieldAccess enum, no second vocabulary ·
+  OD-L7-2 (a) keep three-state enum, 编辑-without-可读 stays unrepresentable (fail-closed) · OD-L7-3 (a)
+  handler-only write surface v1 · OD-L7-4 (a) approval + handler node types only, editable elsewhere =
+  400 · OD-L7-5 (a) one derivation, instance-scoped read + actor-single-node write · OD-L7-6 (a) in-place
+  form_snapshot UPDATE inside Lock-3 §3's transaction + append-only revision rows · OD-L7-7 (a)
+  values-free audit row, before/after behind a mask-aware read · OD-L7-8 (a) publish-pin: routing driver
+  never editable at any node · OD-L7-9 (a) absent matrix ≡ editable, as shipped · OD-L7-10 (a) actor-scoped
+  per-field access map, OpenAPI paid in-slice · OD-L7-11 (a) 内容变更 discharged via a NEW per-edit marker
+  (explicitly NOT nodeEntryEpoch reuse; G-16 asserts the edit does not bump the node epoch) · OD-L7-12 (a)
+  detail sub-columns excluded in v1 — all twelve per this document's recommendations. Runtime
+  authorization: NONE (design only; each contract still needs its own PR, required checks, adversarial
+  gate, and ledger row; the handler-node write surface rides Lock-3; flags stay OFF). D-1 (fieldPermissions
+  silently discarded on cc/start/end/condition/parallel nodes) is a confirmed shipped defect logged for a
+  separate fix slice; D-5 read-scope stays an OPEN owner question.
+Independent review: independent adversarial review returned REQUEST-CHANGES at head 5c8eae9ec5 (2 P2:
+  OD-L7-11 named a mechanism [nodeEntryEpoch reuse] that structurally cannot fire on same-round edits;
+  G-13 routing-hint-correction premise inverted under the recommended OD-L7-8 arm — plus anchor/citation
+  P3/NITs); all closed in the review round (head 70ce8773b3), D-1 and the OD-L7-6/8 adjudications
+  confirmed sound, redaction integrity preserved. This field records the review; the decision above is
+  the owner-provenance ratification.
 Decisions required ([R] = this document's recommendation; rejected options carry their citation so
 they are not re-proposed):
 
