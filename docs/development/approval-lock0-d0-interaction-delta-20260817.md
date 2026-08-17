@@ -1,6 +1,6 @@
 # Lock-0 — D0 Interaction Delta (2026-08-17)
 
-**Status:** PROPOSED — owner ratification required before any implementation PR cites this document
+**Status:** RATIFIED (2026-08-17 — §4 record; authorizes P1-A design + its acceptance specs only)
 **Baseline:** `origin/main@5b31cb43496c5aaf11b4f821254ed63a345c11e1` (the master lock pins the older
 `d33a6a0fa120452b721ea76d449dfa1463727463`; every anchor below is read at this baseline)
 **Parents:** `approval-canvas-v2-interaction-design-lock-20260721.md` (RATIFIED D0 — this document deltas
@@ -214,11 +214,27 @@ Parent §14 rows V-2/V-3/V-4/V-6/V-8 continue to apply to the inspector region; 
 Intentionally blank until an explicit owner decision names this document and its SHA.
 
 ```text
-Decision: NOT RECORDED
-Owner:
-Date:
-Document SHA:
-Deltas accepted (L0-1..L0-6):
-Deltas rejected:
-Runtime authorization: NONE
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17): complete the approval-parity program per
+  its documents, executing recorded recommendations. Recorded by the executing session with this
+  provenance; reversible on owner request. Independent pre-ratify review: Claude (fable), drafted by opus.
+Date: 2026-08-17
+Document SHA: 88ff0ff037a6a597fb08e346de0b413025df7c40 (content SHA at review; this record lands on top)
+Deltas accepted (L0-1..L0-6): ALL SIX, with these dispositions of the drafter's open questions:
+  D1 roster labels — the registry roster ships the PARENT lock §10.3 wording (指定成员/发起人本人/
+     表单中的成员字段/部门负责人), superseding the incidental shipped el-select strings; one-sided
+     label drift is repaired toward the ratified contract at UI-1.
+  D2 configured summary echo — required at UI-1 (parent §10.3 is unambiguous that the picker carries a
+     configured summary echo); not deferred.
+  D3 route preview is NOT a fourth tab — it remains the parent §15 inspector panel host, tracked as the
+     L0-5 UI-0 debt; L0-1's tab strip covers only the node-selection contextual stack.
+  D4 parent §11 "each row links focus to the offending node" — resolved by the same L0-3 typed issue
+     record: node focus exactly where a target key exists, owning-section focus otherwise; no fabricated
+     attribution. Applies to both the header count and the §11 list.
+  D5 the second honesty hint (approval-step-field-routing-hint, TemplateAuthoringView.vue:1001-1005)
+     carries over to the canvas presentation under the same render condition as in the linear editor.
+  D6 master §4 UI-0 row is extended in this same commit to name the L0-5 route-preview debt.
+Deltas rejected: none
+Runtime authorization: NONE — P1-A presentation design + required-lane acceptance specs only; no flag,
+  no UAT, no runtime capability.
 ```
