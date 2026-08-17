@@ -119,7 +119,7 @@
       </AsyncStateBlock>
       <div v-if="approval" class="approval-detail__body">
         <!-- Left: form snapshot -->
-        <div class="approval-detail__form">
+        <div ref="formSectionRef" class="approval-detail__form" data-testid="approval-detail-form-section">
           <h2>表单信息</h2>
           <div class="approval-detail__meta">
             <div class="approval-detail__meta-item">
@@ -221,9 +221,109 @@
         </div>
 
         <!-- Right: history timeline -->
-        <div class="approval-detail__timeline">
+        <div ref="timelineSectionRef" class="approval-detail__timeline">
+          <!-- UI-6 (master §4 UI-6 / P5): anchor-style section nav — chrome only, no new
+               action/verb/dialog. Desktop-only (mobile keeps current behavior unchanged);
+               each tab just scrolls the already-rendered region into view, it never fetches,
+               dispatches a store action, or hides an existing testid. -->
+          <nav
+            v-if="!isMobileLayout"
+            class="approval-detail__detail-tabs"
+            data-testid="approval-detail-tabs"
+            aria-label="审批详情分区导航"
+          >
+            <button
+              type="button"
+              class="approval-detail__detail-tab"
+              :class="{ 'approval-detail__detail-tab--active': activeDetailTab === 'form' }"
+              data-testid="approval-detail-tab-info"
+              @click="scrollToDetailSection('form')"
+            >
+              审批详情
+            </button>
+            <button
+              type="button"
+              class="approval-detail__detail-tab"
+              :class="{ 'approval-detail__detail-tab--active': activeDetailTab === 'record' }"
+              data-testid="approval-detail-tab-record"
+              @click="scrollToDetailSection('record')"
+            >
+              审批记录
+            </button>
+            <button
+              type="button"
+              class="approval-detail__detail-tab"
+              :class="{ 'approval-detail__detail-tab--active': activeDetailTab === 'comments' }"
+              data-testid="approval-detail-tab-comments"
+              @click="scrollToDetailSection('comments')"
+            >
+              全文评论
+            </button>
+          </nav>
           <h2>审批流程</h2>
-          <template v-if="store.history.length">
+          <!-- UI-6: 审批记录 view toggle — timeline (default, byte-for-byte the pre-existing
+               markup below) vs a compact audit-derived table projection. Both read the SAME
+               already-fetched `store.history` array; switching never fetches or dispatches. -->
+          <div
+            v-if="!isMobileLayout"
+            class="approval-detail__record-toggle"
+            data-testid="approval-detail-record-toggle"
+          >
+            <button
+              type="button"
+              class="approval-detail__record-toggle-btn"
+              :class="{ 'approval-detail__record-toggle-btn--active': recordView === 'timeline' }"
+              data-testid="approval-detail-record-view-timeline"
+              @click="recordView = 'timeline'"
+            >
+              时间线
+            </button>
+            <button
+              type="button"
+              class="approval-detail__record-toggle-btn"
+              :class="{ 'approval-detail__record-toggle-btn--active': recordView === 'table' }"
+              data-testid="approval-detail-record-view-table"
+              @click="recordView = 'table'"
+            >
+              表格
+            </button>
+          </div>
+          <div v-if="recordView === 'table' && !isMobileLayout && store.history.length" class="approval-detail__record-table" data-testid="approval-detail-record-table">
+            <el-table :data="recordTableRows" border size="small">
+              <el-table-column label="节点名称">
+                <template #default="{ row }">{{ row.nodeName }}</template>
+              </el-table-column>
+              <el-table-column label="审批人">
+                <template #default="{ row }">{{ row.actorName }}</template>
+              </el-table-column>
+              <el-table-column label="审批结果/时间">
+                <template #default="{ row }">
+                  <div class="approval-detail__record-result">
+                    <span>{{ row.resultLabel }}</span>
+                    <span v-if="row.timestamp" class="approval-detail__record-time">{{ formatDate(row.timestamp) }}</span>
+                  </div>
+                  <div v-if="hasRecordTableBadgeMetadata(row.metadata, row.action)" class="approval-detail__timeline-meta">
+                    <span v-if="row.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                    <span v-if="row.metadata?.approvalMode" class="approval-detail__meta-badge">
+                      审批模式: {{ approvalModeLabel(row.metadata.approvalMode as string) }}
+                    </span>
+                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
+                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                    <span v-if="cancelledAssigneesLabel(row.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                      {{ cancelledAssigneesLabel(row.metadata) }}
+                    </span>
+                    <span v-if="row.action === 'sign' && row.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                      （已被 {{ row.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                    </span>
+                    <span v-if="row.action === 'return' && row.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
+                      退回至: {{ nodeLabel(row.metadata.targetNodeKey as string) }}
+                    </span>
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <template v-else-if="store.history.length">
             <!-- Parallel gateway (并行分支): cluster history entries under
                  each branch's approval-node key so reviewers can trace
                  per-branch decisions without re-reading the full timeline. -->
@@ -879,6 +979,128 @@ const approval = computed(() => store.activeApproval)
 // the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
 const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 
+// ---------------------------------------------------------------------------
+// UI-6 (master §4 UI-6 / P5 "add detail tabs/record projection … only from
+// existing authoritative data"): tab anchors + audit-derived record table.
+// Chrome only — no new action/verb/dialog, no new endpoint, no second fetch;
+// both the tabs and the table read the SAME `approval`/`store.history` this
+// view already loads. The existing parallel-aware timeline is NOT replaced —
+// it remains the default 审批记录 content, byte-for-byte unchanged; the table
+// is an additional toggle-able projection of the same source array.
+// ---------------------------------------------------------------------------
+const formSectionRef = ref<HTMLElement | null>(null)
+const timelineSectionRef = ref<HTMLElement | null>(null)
+
+type DetailAnchorSection = 'form' | 'record' | 'comments'
+const activeDetailTab = ref<DetailAnchorSection>('record')
+
+// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no
+// separate stream to build — comments render inline in the timeline today (action
+// === 'comment' rows), so its anchor targets the same timeline region as 审批记录.
+// P3-2 (gate fix round, 2026-08-17): a distinct scroll target for 全文评论 was tried
+// (pointing it at the action bar) and reverted — the action bar renders no comment
+// text at all, so repointing it there would relabel the "dud tab" complaint rather
+// than fix it (comment text is only ever visible in the timeline). A real fix needs
+// an actual `action === 'comment'`-filtered projection, deferred — see PR body; the
+// mis-attribution to the master lock's EXCLUDED clause is corrected there too.
+// Purely presentational: it never mutates store state, dispatches an action, or fetches.
+function scrollToDetailSection(section: DetailAnchorSection): void {
+  activeDetailTab.value = section
+  const target = section === 'form' ? formSectionRef.value : timelineSectionRef.value
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+}
+
+type RecordView = 'timeline' | 'table'
+const recordView = ref<RecordView>('timeline')
+
+// P2-1 fix (gate PROBE B): the table view is desktop-only chrome — `isMobileLayout` is a LIVE
+// computed (resize-driven, not mount-time-frozen), so a desktop→mobile viewport transition while
+// `recordView === 'table'` must not strand the user on a table with no timeline and no way back.
+// Belt+suspenders: the template gate (`!isMobileLayout` on the table's own `v-if`, below) is the
+// primary defense; this watcher additionally restores the desktop choice to 'timeline' so the
+// toggle itself never has to be touched again once the viewport widens back out.
+watch(isMobileLayout, (mobile) => {
+  if (mobile) recordView.value = 'timeline'
+})
+
+interface RecordTableRow {
+  id: string
+  nodeName: string
+  actorName: string
+  resultLabel: string
+  timestamp: string | null
+  action: string | null
+  metadata: Record<string, unknown> | null
+  synthetic: boolean
+}
+
+// Audit-derived record table: 提交 (from the instance's own `createdAt`/`requester` —
+// never re-derived from a guessed history row) and 结束 (there is no 'end'/'complete'
+// history ACTION in `UnifiedApprovalHistoryDTO['action']` at all — the backend never
+// records process completion as an audit row, only the instance's own `status`/
+// `updatedAt` say it happened) are computed HERE, at presentation time only, and are
+// never written back into `store.history` or any outgoing payload — see
+// `submitAction`/`submitComment`/etc. below, none of which read from this computed.
+//
+// P2-2 fix: 提交 is synthesized ONLY when `store.history` has no `created` row of its own —
+// a STRUCTURAL predicate (`store.history.some((h) => h.action === 'created')`), not a value
+// heuristic keyed on actor/timestamp coincidence (which would silently break the moment
+// `created.occurredAt` drifts a few ms from `instance.createdAt`, the requester is renamed
+// post-submission, or a null `actorName` falls back to '系统'). The audit trail's own `created`
+// row is itself an audit row and wins the tie per §P5's "audit rows are the only history
+// source" — synthesizing a second 提交 on top of it duplicated the submission on every normal
+// instance. `actionLabel`'s map (`created: '发起'`) is exhaustive for created-ish actions, so
+// this predicate never double-counts a differently-spelled equivalent.
+// 结束 is added only once the instance has actually concluded (`status !== 'pending'`,
+// mirroring the existing "该审批已结束" alert below) so a still-in-flight approval is
+// never shown as finished. Every other row maps 1:1 to a `store.history` entry, reusing
+// the exact same label/badge helpers the timeline renders (`actionLabel`, `nodeLabel`,
+// `hasTimelineMetadata`, `cancelledAssigneesLabel`, `approvalModeLabel`) so the two views
+// of the same data never drift.
+const recordTableRows = computed<RecordTableRow[]>(() => {
+  const detail = approval.value
+  if (!detail) return []
+  const hasCreatedRow = store.history.some((item) => item.action === 'created')
+  const rows: RecordTableRow[] = []
+  if (!hasCreatedRow) {
+    rows.push({
+      id: '__submit',
+      nodeName: '提交',
+      actorName: detail.requester?.name ?? '-',
+      resultLabel: '提交',
+      timestamp: detail.createdAt ?? null,
+      action: null,
+      metadata: null,
+      synthetic: true,
+    })
+  }
+  for (const item of store.history) {
+    rows.push({
+      id: item.id,
+      nodeName: item.metadata?.nodeKey ? nodeLabel(item.metadata.nodeKey as string) : '-',
+      actorName: item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统'),
+      resultLabel: actionLabel(item.action, item.metadata),
+      timestamp: item.occurredAt ?? null,
+      action: item.action,
+      metadata: item.metadata ?? null,
+      synthetic: false,
+    })
+  }
+  if (detail.status !== 'pending') {
+    rows.push({
+      id: '__end',
+      nodeName: '结束',
+      actorName: '-',
+      resultLabel: resolveStatusDisplay('approvalInstance', detail.status, true).label,
+      timestamp: detail.updatedAt ?? null,
+      action: null,
+      metadata: null,
+      synthetic: true,
+    })
+  }
+  return rows
+})
+
 // B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
 // only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
 // timeline already tell that story). Severity mirrors the list view's warn/urgent bands.
@@ -1350,6 +1572,24 @@ function hasTimelineMetadata(metadata?: Record<string, unknown>): boolean {
     || metadata.aggregateCancelledBy
     || metadata.nodeKey
     || metadata.targetNodeKey
+  )
+}
+
+// UI-6: table-specific variant of `hasTimelineMetadata` above. The table has its OWN 节点名称
+// column, so a bare `metadata.nodeKey` (with nothing else) must not open an empty
+// `.approval-detail__timeline-meta` container the way the timeline's combined
+// header+badges block tolerates — this mirrors exactly the badge `v-if`s actually rendered in
+// the table cell below (autoApproved / approvalMode / aggregateComplete /
+// cancelledAssigneesLabel / sign+autoCancelled / return+targetNodeKey), nothing more.
+function hasRecordTableBadgeMetadata(metadata?: Record<string, unknown> | null, action?: string | null): boolean {
+  if (!metadata) return false
+  return !!(
+    metadata.autoApproved
+    || metadata.approvalMode
+    || metadata.aggregateComplete
+    || cancelledAssigneesLabel(metadata)
+    || (action === 'sign' && metadata.autoCancelled)
+    || (action === 'return' && metadata.targetNodeKey)
   )
 }
 
@@ -1867,6 +2107,76 @@ watch(
   font-weight: var(--ms-font-weight-title);
 }
 
+/* UI-6: anchor-style tab nav above the right column. */
+.approval-detail__detail-tabs {
+  display: flex;
+  gap: var(--ms-space-2);
+  margin-bottom: var(--ms-space-4);
+  border-bottom: 1px solid var(--ms-border-light);
+}
+
+.approval-detail__detail-tab {
+  padding: 6px 4px 10px;
+  border: none;
+  background: none;
+  color: var(--ms-text-3);
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.approval-detail__detail-tab:hover {
+  color: var(--ms-text-1);
+}
+
+.approval-detail__detail-tab--active {
+  color: var(--el-color-primary);
+  border-bottom-color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+/* UI-6: 审批记录 timeline/table toggle. */
+.approval-detail__record-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: var(--ms-space-3);
+  padding: 2px;
+  border-radius: var(--ms-radius-md);
+  background: var(--el-fill-color-light);
+}
+
+.approval-detail__record-toggle-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: calc(var(--ms-radius-md) - 2px);
+  background: none;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.approval-detail__record-toggle-btn--active {
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.approval-detail__record-table {
+  margin-bottom: var(--ms-space-3);
+}
+
+.approval-detail__record-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.approval-detail__record-time {
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
 .approval-detail__meta {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2147,7 +2457,9 @@ watch(
    being crushed into a 400px rail. */
 @media print {
   .approval-detail__actions,
-  .approval-detail__hide-on-print {
+  .approval-detail__hide-on-print,
+  .approval-detail__detail-tabs,
+  .approval-detail__record-toggle {
     display: none;
   }
 
