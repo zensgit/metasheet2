@@ -1,7 +1,6 @@
 # Lock-1 — Enterprise Assignee Kinds and Resolution Semantics (2026-08-17)
 
-**Status:** PROPOSED — NOT RATIFIED. This document authorizes nothing; §4 is blank until an explicit
-owner decision names it and its SHA.
+**Status:** RATIFIED (2026-08-17 — §4 record; design authorization only, per-kind slices still gated)
 **Baseline:** `origin/main@0e8ed116712429c17abee41bd6bacb62fcc06331`. Every anchor below was read at
 THIS baseline, which is NEWER than both parents (the master lock pins `d33a6a0fa1`; Lock-0 pins
 `5b31cb4349`) — line numbers are exact here and may differ from those documents' own citations.
@@ -326,13 +325,12 @@ config errors — unknown group id, group outside the org binding, illegal `prio
 reference, downward addressing on an incomplete chain — are 400/422 at authoring or create, never a
 dispatch-time surprise on a published template.
 
-**2.3 Capability registry (conditional on Lock-0 landing).** Each ratified kind gets one L0-2 registry
+**2.3 Capability registry (Lock-0 RATIFIED and on main via #4938).** Each ratified kind gets one L0-2 registry
 row; the inspector renders a source only when its capability is ratified, implemented end to end, and
 present in the registry for that node type (master M4). Unratified kinds are not rendered; a persisted
 value outside the registry renders read-only and round-trips unchanged. The registry exact-set test
 (Lock-0 A-3) grows from eight members to eight-plus-ratified-K-kinds in the SAME commit that lands each
-kind — a kind landing without its registry row is an incomplete slice. Because Lock-0 is not on main at
-this baseline, a slice starting before it lands must state which registry it writes into. Roster labels
+kind — a kind landing without its registry row is an incomplete slice. Roster labels
 follow Lock-0's D1 disposition (parent §10.3 wording is authoritative over incidental shipped strings).
 The six rows, each admitted only when its own OD is decided and its slice is implemented end to end:
 
@@ -417,13 +415,16 @@ control; an absence test without one is green against nothing.
 
 ## 4. Owner ratification block
 
-Intentionally blank until an explicit owner decision names this document and its SHA.
-
 ```text
-Decision: <RATIFY | REQUEST CHANGES | REJECT>
-Owner:
-Date:
-Document SHA:
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17): complete the approval-parity program
+  per its documents, executing recorded recommendations. Recorded by the executing session with this
+  provenance; reversible on owner request before implementation lands. Independent pre-ratify review:
+  Claude (fable) — verified the fail-open normalizeApprovalMode claim, the leader-chain/dept-chain
+  distinction anchor, and the G-1..G-20 positive-control discipline; drafted by opus.
+Date: 2026-08-17
+Document SHA: drafted 02e80020c2db965c8f9565c15ef9792f19adf8b9; this record lands on top after
+  rebase onto main@075d078eb4 (Lock-0 landed).
 Decisions required ([R] = this document's recommendation; rejected options are listed so they are
 not re-proposed):
 
@@ -446,7 +447,14 @@ not re-proposed):
   OD-L1-7  K1 cc shape — (a)[R] widen CcNodeConfig.targetType to include 'group' · (b) add a
            ccSources[] array (duplicates assignee-source machinery on a node that resolves nothing else)
 
-Deltas:
-Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design only.
-  No flag, no UAT, no deployment, no runtime capability.
+Decisions recorded: OD-L1-1 (a) EAGER_EXPANSION · OD-L1-2 (a) curated per-org binding table ·
+  OD-L1-3 (a) LATEST round · OD-L1-4 (a) emptyAssigneePolicy · OD-L1-5 (a) level count now, group
+  endpoint deferred pending K1 · OD-L1-6 (a) chain-termination snapshot field + fail-closed 422 ·
+  OD-L1-7 (a) widen CcNodeConfig.targetType — all seven per this document's recommendations.
+  Owner note: OD-L1-1 is the one genuine product-taste fork (group membership changes do NOT reach
+  in-flight tasks under EAGER, unlike the shipped role behavior); reversible at zero cost until the
+  K1 slice lands.
+Deltas: (none)
+Runtime authorization: NONE — ratifying this document authorizes design only. Each K-slice still
+  needs its own PR, required checks, adversarial gate, and ledger row. No flag, no UAT, no deployment.
 ```
