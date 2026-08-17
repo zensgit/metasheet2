@@ -41,6 +41,11 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
     const server = net.createServer()
@@ -298,5 +303,52 @@ describeIfDatabase('Approval dedup round-scoping — a return invalidates pre-re
     const afterP2 = await act.p({ action: 'approve', comment: 'P r2' })
     expect(afterP2.status).toBe('pending')
     expect(afterP2.currentNodeKey).toBe('approval_d')
+  })
+
+  it('mergeAdjacentApprover: a SECOND return re-floors independently — the floor tracks the LATEST return, not the first', async () => {
+    // Directly exercises the crux of the `to_version` mechanism: `MAX(to_version) WHERE
+    // action='return'` must advance to the SECOND return's to_version, not stay pinned to the
+    // first. Between the two returns this drives TWO non-return, to_version-bumping writes — a
+    // MANUAL approve (P at A) and an AUTO-approval-event insert (B's adjacent auto-merge, written
+    // by `insertAutoApprovalEvents`) — proving those ordinary writes never disturb the
+    // `action='return'`-filtered floor query (it is orthogonal to which OTHER action types
+    // occurred in between; it only ever inspects rows tagged `action='return'`).
+    const p = `dedup-rs-p-${TS}-2x`
+    const q = `dedup-rs-q-${TS}-2x`
+    const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-2x`)
+    const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-2x`)
+    await grantWrite(`dedup-rs-req-${TS}-2x`)
+    const pTok = await authToken(baseUrl, p)
+    const qTok = await authToken(baseUrl, q)
+
+    const templateId = await publishGraphTemplate(adminToken, buildAdjacentGraph(p, q), { mergeAdjacentApprover: true })
+    const inst = await createApproval(requesterToken, templateId, 'r')
+    expect(inst.currentNodeKey).toBe('approval_a')
+    const act = { p: actor(pTok, inst.id), q: actor(qTok, inst.id) }
+
+    // Round 1: P approves A; B auto-merges (adjacent) -> C.
+    const afterP1 = await act.p({ action: 'approve', comment: 'P r1' })
+    expect(afterP1.currentNodeKey).toBe('approval_c')
+
+    // RETURN #1 (floor becomes this return's to_version).
+    const afterReturn1 = await act.q({ action: 'return', targetNodeKey: 'approval_a', comment: 'send back 1' })
+    expect(afterReturn1.status).toBe('pending')
+    expect(afterReturn1.currentNodeKey).toBe('approval_a')
+
+    // Round 2, between the two returns: a MANUAL approve (P at A) plus the AUTO-approval-event
+    // insert it triggers (B's adjacent auto-merge) — both non-return, both bump to_version.
+    const afterP2 = await act.p({ action: 'approve', comment: 'P r2' })
+    expect(afterP2.currentNodeKey).toBe('approval_c')
+
+    // RETURN #2. The floor must now be return #2's to_version — HIGHER than return #1's — so
+    // round 2's stale B-approval (and everything from round 1) is excluded all over again.
+    const afterReturn2 = await act.q({ action: 'return', targetNodeKey: 'approval_a', comment: 'send back 2' })
+    expect(afterReturn2.status).toBe('pending')
+    expect(afterReturn2.currentNodeKey).toBe('approval_a')
+
+    // Round 3: dedup fires normally yet again, proving the mechanism is not a one-shot fix that
+    // only tolerates a single return.
+    const afterP3 = await act.p({ action: 'approve', comment: 'P r3' })
+    expect(afterP3.currentNodeKey).toBe('approval_c')
   })
 })
