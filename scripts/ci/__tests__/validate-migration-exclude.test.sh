@@ -3,8 +3,8 @@
 # testable part. Does NOT scan the real repo (that would make the test hostage to future,
 # legitimate edits to the workflows/migration-provider.ts); instead it points the guard at
 # small fixture files via the WORKFLOWS_DIR/PROVIDER_FILE overrides and asserts:
-#   - a "good" fixture set (mirrors the real, currently-documented baseline + the two known
-#     divergences) produces ZERO warnings;
+#   - a "good" fixture set (mirrors the real, currently-documented baseline + the known
+#     divergence) produces ZERO warnings;
 #   - a "drift" fixture set (an undocumented new exclusion, an undocumented divergence, a
 #     missing expected overlap item, an undocumented new overlap item, and a missing doc
 #     pointer) produces warnings for every one of those distinct cases.
@@ -73,7 +73,7 @@ else
 fi
 
 assert_contains "undocumented new exclusion (check A)" "999_bogus_undocumented_migration.sql"
-assert_contains "undocumented divergence (check B)" "Undocumented divergence: '042a_core_model_views.sql'"
+assert_contains "undocumented divergence (check B)" "Undocumented divergence: '048_create_event_bus_tables.sql'"
 assert_contains "undocumented overlap (check C)" "999_bogus_undocumented_migration' appears in BOTH"
 assert_contains "missing expected overlap item (check C reverse)" "'049_create_bpmn_workflow_tables' is no longer in SUPERSEDED_LEGACY_SQL_MIGRATIONS"
 assert_contains "missing doc pointer (check D)" "no longer references docs/development/migration-legacy-sql-skip-design-20260512.md"
