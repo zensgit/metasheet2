@@ -33,6 +33,10 @@ const TARGET_FILES = [
   // F0 (docs/development/approval-form-builder-parity-delta-design-20260811.md §5 F0): extracted
   // from the already-token-only TemplateAuthoringView.vue verbatim, so it starts clean too.
   'src/approvals/components/ApprovalFormInlineEditor.vue',
+  // F2 (same delta §5 F2 / §6 rules): the NEW Designer 2.0 palette + builder join the UF-6
+  // target set in their introducing slice, born token-only (var(--el-*) exclusively).
+  'src/approvals/components/ApprovalFormPalette.vue',
+  'src/approvals/components/ApprovalFormBuilder.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',

@@ -135,6 +135,14 @@ on:
       - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
       - 'apps/web/tests/approval-form-identity.test.ts'
       - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
+      # F2 (2026-08-17, delta §5 F2): typed drag codec + Designer 2.0 palette/builder components
+      # (standalone until the F4 mount) + their mounted specs.
+      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
+      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
+      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
+      - 'apps/web/tests/approval-form-drag-payload.test.ts'
+      - 'apps/web/tests/approval-form-palette-chips.spec.ts'
+      - 'apps/web/tests/approval-form-builder-slots.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -339,6 +347,14 @@ on:
       - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
       - 'apps/web/tests/approval-form-identity.test.ts'
       - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
+      # F2 (2026-08-17, delta §5 F2): typed drag codec + Designer 2.0 palette/builder components
+      # (standalone until the F4 mount) + their mounted specs (same set as the pull_request block).
+      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
+      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
+      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
+      - 'apps/web/tests/approval-form-drag-payload.test.ts'
+      - 'apps/web/tests/approval-form-palette-chips.spec.ts'
+      - 'apps/web/tests/approval-form-builder-slots.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -496,6 +512,9 @@ jobs:
             approval-form-inline-editor-extract \
             approval-form-identity \
             approval-form-authoring-adapter \
+            approval-form-drag-payload \
+            approval-form-palette-chips \
+            approval-form-builder-slots \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

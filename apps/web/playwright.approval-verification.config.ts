@@ -1,0 +1,36 @@
+import { defineConfig, devices } from '@playwright/test'
+
+// F2 approval form-builder browser-verification lane (delta §5 F2 / §7.1
+// item 7: an OWNED real-Chromium harness with its own server — never a reused
+// disappearing server). Boots Vite, renders the real ApprovalFormPalette +
+// ApprovalFormBuilder via verification/approval-form-builder-harness.html, and
+// asserts exact-slot DataTransfer drags, cancelled-drag no-ops, strict codec
+// rejection, and the stale-anchor no-op.
+// Run: `pnpm --filter @metasheet/web exec playwright test
+//       --config playwright.approval-verification.config.ts` (cwd = apps/web).
+// Port 5175 keeps this lane's server disjoint from the multitable lane (5174).
+const PORT = 5175
+
+export default defineConfig({
+  testDir: './verification',
+  testMatch: '**/approval-form-builder-parity.spec.ts',
+  timeout: 60_000,
+  fullyParallel: false,
+  retries: process.env.CI ? 1 : 0,
+  reporter: [['list']],
+  outputDir: './verification-output/_pw-approval',
+  use: {
+    baseURL: `http://127.0.0.1:${PORT}`,
+    screenshot: 'off', // the spec takes explicit, named screenshots
+    trace: process.env.CI ? 'retain-on-failure' : 'off',
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  webServer: {
+    command: `pnpm exec vite --port ${PORT} --strictPort`,
+    url: `http://127.0.0.1:${PORT}/verification/approval-form-builder-harness.html`,
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  },
+})
