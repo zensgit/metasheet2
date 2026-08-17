@@ -1,7 +1,9 @@
-import type { DetailColumnDraft } from './detailField'
+import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from './detailField'
+import type { FormFieldType } from '../types/approval'
 import type {
   AuthorableFieldType,
   FieldAuthoringDraft,
+  FieldVisibilityDraft,
   TemplateAuthoringDraft,
 } from './templateAuthoring'
 
@@ -9,7 +11,9 @@ import type {
  * D6-f1 form command algebra, amended by F1 of the RATIFIED
  * approval-form-builder-parity delta (FB-D3 anchors, FB-D5
  * `OPAQUE_COLLISION_RESISTANT` identity, FB-D6
- * `CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS` delete boundary).
+ * `CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS` delete boundary)
+ * and by F3 (typed property update / retype surface: named incompatible-type
+ * refusal, detail-column commands, identity preservation across retype).
  * These commands use `localId` only as a view-model selection key. It is never
  * rendered as, or accepted from, ordinary-user input; persisted field ids
  * remain owned by the existing template-authoring serializer.
@@ -23,6 +27,16 @@ export type FormCommandFailureReason =
   | 'field_identity_conflict'
   | 'field_is_referenced'
   | 'last_field_removal_forbidden'
+  /** F3: a detail field must keep >=1 column (`validateDetailColumnsDraft`). */
+  | 'last_detail_column_removal_forbidden'
+  /**
+   * F3 named incompatible-type refusal (FB-D6): the retype target conflicts
+   * with at least one named dependency; `dependencies` carries every one. The
+   * administrator removes or edits the dependency first, then retries. Never a
+   * generic string error, and NEVER the legacy silent
+   * `invalidateStaleRecordLinkDependencies` cleanup.
+   */
+  | 'field_type_incompatible_with_references'
 
 export type FormDependencyKind =
   | 'visibility_rule'
@@ -34,6 +48,12 @@ export type FormDependencyKind =
   | 'preserved_graph_reference'
   | 'amount_consistency_mapping'
   | 'external_reference'
+  /** F3: the field's own detail configuration (columns/row bounds) a retype away from `detail` would destroy — or the one-nesting-level detail boundary a column retype would violate. */
+  | 'detail_config'
+  /** F3: the field's own record-link binding a retype away from `record-link` would drop — or the top-level-only record-link boundary a column retype would violate. */
+  | 'record_link_config'
+  /** F3: the attachment authoring boundary (FB-D8) — `attachment` is not an authorable retype target in this delta. */
+  | 'attachment_boundary'
 
 export interface FormFieldDependency {
   kind: FormDependencyKind
@@ -341,13 +361,97 @@ export function addFormDetailColumn(
   return successful({ ...draft, fields }, owner.localId)
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function formulaReferencesField(value: string, fieldId: string): boolean {
-  const escaped = fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`\\{${escaped}(?:\\.[^{}]+)?\\}`).test(value)
+  return new RegExp(`\\{${escapeRegExp(fieldId)}(?:\\.[^{}]+)?\\}`).test(value)
+}
+
+/** Exact `{ownerId.columnId}` detail-column token match (F3 column commands). */
+function formulaReferencesDetailColumn(
+  value: string,
+  ownerFieldId: string,
+  columnId: string,
+): boolean {
+  return new RegExp(
+    `\\{${escapeRegExp(ownerFieldId)}\\.${escapeRegExp(columnId)}\\}`,
+  ).test(value)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Predicate pair for the preserved-graph/original walk: which `fieldId` values
+ * and which formula `expression` strings count as references. The field-level
+ * walk (F1, byte-identical behavior) and the F3 detail-column walk share the
+ * one traversal so neither can silently diverge from the other.
+ */
+interface PreservedReferencePredicates {
+  fieldIdMatches(value: string): boolean
+  expressionMatches(value: string): boolean
+}
+
+function walkPreservedReferences(
+  value: unknown,
+  location: string,
+  dependencies: FormFieldDependency[],
+  predicates: PreservedReferencePredicates,
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      walkPreservedReferences(
+        entry,
+        `${location}[${index}]`,
+        dependencies,
+        predicates,
+      ),
+    )
+    return
+  }
+  if (!isRecord(value)) return
+
+  if (typeof value.fieldId === 'string' && predicates.fieldIdMatches(value.fieldId)) {
+    dependencies.push({ kind: 'preserved_graph_reference', location })
+  }
+  if (
+    typeof value.expression === 'string' &&
+    predicates.expressionMatches(value.expression)
+  ) {
+    dependencies.push({ kind: 'condition_formula', location })
+  }
+  Object.entries(value).forEach(([key, entry]) => {
+    if (key !== 'fieldId' && key !== 'expression') {
+      walkPreservedReferences(
+        entry,
+        `${location}.${key}`,
+        dependencies,
+        predicates,
+      )
+    }
+  })
+}
+
+function fieldReferencePredicates(fieldId: string): PreservedReferencePredicates {
+  return {
+    fieldIdMatches: (value) => value.trim() === fieldId,
+    expressionMatches: (value) => formulaReferencesField(value, fieldId),
+  }
+}
+
+function detailColumnReferencePredicates(
+  ownerFieldId: string,
+  columnId: string,
+): PreservedReferencePredicates {
+  const dotted = `${ownerFieldId}.${columnId}`
+  return {
+    fieldIdMatches: (value) => value.trim() === dotted,
+    expressionMatches: (value) =>
+      formulaReferencesDetailColumn(value, ownerFieldId, columnId),
+  }
 }
 
 function collectPreservedGraphReferences(
@@ -356,38 +460,12 @@ function collectPreservedGraphReferences(
   location: string,
   dependencies: FormFieldDependency[],
 ): void {
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) =>
-      collectPreservedGraphReferences(
-        entry,
-        fieldId,
-        `${location}[${index}]`,
-        dependencies,
-      ),
-    )
-    return
-  }
-  if (!isRecord(value)) return
-
-  if (typeof value.fieldId === 'string' && value.fieldId.trim() === fieldId) {
-    dependencies.push({ kind: 'preserved_graph_reference', location })
-  }
-  if (
-    typeof value.expression === 'string' &&
-    formulaReferencesField(value.expression, fieldId)
-  ) {
-    dependencies.push({ kind: 'condition_formula', location })
-  }
-  Object.entries(value).forEach(([key, entry]) => {
-    if (key !== 'fieldId' && key !== 'expression') {
-      collectPreservedGraphReferences(
-        entry,
-        fieldId,
-        `${location}.${key}`,
-        dependencies,
-      )
-    }
-  })
+  walkPreservedReferences(
+    value,
+    location,
+    dependencies,
+    fieldReferencePredicates(fieldId),
+  )
 }
 
 /**
@@ -541,6 +619,494 @@ export function removeFormField(
     { ...draft, fields },
     fields[index]?.localId ?? fields[index - 1]?.localId ?? null,
   )
+}
+
+// --- F3 typed property update / retype surface ------------------------------
+
+/**
+ * Typed property patch for `updateFormFieldProperties`. Deliberately EXCLUDES
+ * identity (`id`/`localId` — FB-D5: commands never re-mint or accept identity
+ * edits), `type` (that is `retypeFormField`), `detailColumns` (the dedicated
+ * column commands), `original` (round-trip preservation is serializer-owned),
+ * and the record-link base/sheet pins (their typed pickers arrive with the F4
+ * production mount, where the parent-owned catalog lives).
+ */
+export interface FormFieldPropertyPatch {
+  readonly label?: string
+  readonly required?: boolean
+  readonly placeholder?: string
+  readonly optionsText?: string
+  readonly visibility?: FieldVisibilityDraft
+  readonly minRowsText?: string
+  readonly maxRowsText?: string
+}
+
+/** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
+export interface FormDetailColumnPropertyPatch {
+  readonly label?: string
+  readonly required?: boolean
+  readonly optionsText?: string
+}
+
+/**
+ * One committed inspector edit of the field's own properties (FB-D7: the
+ * adapter turns one successful call into at most ONE history entry; a
+ * value-identical patch is a zero-entry no-op by history construction).
+ * Identity and type are untouched by construction of the patch type.
+ *
+ * Fail-closed boundaries (F3 gate P3-1/P3-4): a field whose CURRENT type is
+ * not authorable (`attachment` or unknown persisted types) rejects every
+ * property edit at the command level — §3.4's whole-template lock must not
+ * depend on the UI `readOnly` prop alone. Row-bound keys are `detail`-only:
+ * patching them onto any other type is rejected rather than parked as latent
+ * state a later retype could resurrect.
+ */
+export function updateFormFieldProperties(
+  draft: TemplateAuthoringDraft,
+  localId: string,
+  patch: FormFieldPropertyPatch,
+): FormCommandResult {
+  const index = draft.fields.findIndex((field) => field.localId === localId)
+  if (index === -1) return rejected('field_not_found')
+  const current = draft.fields[index]
+  if (!AUTHORABLE_FIELD_TYPES.has(current.type))
+    return rejected('unsupported_field_type')
+  if (
+    (patch.minRowsText !== undefined || patch.maxRowsText !== undefined) &&
+    current.type !== 'detail'
+  )
+    return rejected('unsupported_field_type')
+  const next: FieldAuthoringDraft = {
+    ...current,
+    ...(patch.label !== undefined ? { label: patch.label } : {}),
+    ...(patch.required !== undefined ? { required: patch.required } : {}),
+    ...(patch.placeholder !== undefined
+      ? { placeholder: patch.placeholder }
+      : {}),
+    ...(patch.optionsText !== undefined
+      ? { optionsText: patch.optionsText }
+      : {}),
+    ...(patch.visibility !== undefined
+      ? { visibility: { ...patch.visibility } }
+      : {}),
+    ...(patch.minRowsText !== undefined
+      ? { minRowsText: patch.minRowsText }
+      : {}),
+    ...(patch.maxRowsText !== undefined
+      ? { maxRowsText: patch.maxRowsText }
+      : {}),
+  }
+  const fields = [...draft.fields]
+  fields[index] = next
+  return successful({ ...draft, fields }, current.localId)
+}
+
+/** True when leaving `detail` would destroy real (non-pristine) configuration. */
+function detailFieldCarriesConfiguration(field: FieldAuthoringDraft): boolean {
+  if (field.original) return true // hydrated persisted detail: columns are persisted ids
+  if (field.minRowsText.trim() !== '' || field.maxRowsText.trim() !== '')
+    return true
+  if (field.detailColumns.length !== 1) return true
+  const column = field.detailColumns[0]
+  return Boolean(
+    column.original ||
+      column.type !== 'text' ||
+      column.required ||
+      column.optionsText.trim() !== '' ||
+      column.label !== '子字段 1',
+  )
+}
+
+/** True when leaving `record-link` would drop a configured/persisted binding. */
+function recordLinkCarriesConfiguration(field: FieldAuthoringDraft): boolean {
+  return Boolean(
+    field.original ||
+      field.recordLinkBaseId.trim() !== '' ||
+      field.recordLinkSheetId.trim() !== '',
+  )
+}
+
+/**
+ * Every dependency that makes retyping `localId` to `nextType` incompatible
+ * (RATIFIED FB-D6, master M3 as amended).
+ *
+ * v1 compatibility floor — deliberately CONSERVATIVE, mirroring the
+ * complete-by-construction current-draft walk: EVERY inbound current-draft
+ * reference (all `collectFormFieldDependencies` kinds — visibility, assignee
+ * sources, field permissions, condition rules/formulas, preserved graph,
+ * amount-consistency mapping, plus the optional external seam) is treated as
+ * incompatible with a type change, because each consumer's semantics are bound
+ * to the current value type. The administrator removes or edits the dependency
+ * first, then retries. Loosening any kind to a finer per-type compatibility
+ * matrix would widen what retype silently accepts and needs a new lock
+ * decision — it must not be done to simplify a caller.
+ *
+ * On top of the inbound floor, two OWN-configuration kinds fail closed:
+ * - `detail_config`: leaving `detail` while the field carries non-pristine
+ *   column/row-bound configuration (persisted or edited columns would be
+ *   destroyed);
+ * - `record_link_config`: leaving `record-link` while a base/sheet binding is
+ *   configured or persisted.
+ * A value-identical retype (same type) is never incompatible.
+ */
+export function collectFormFieldRetypeDependencies(
+  draft: TemplateAuthoringDraft,
+  localId: string,
+  nextType: FormFieldType,
+  inventory?: CompleteFormReferenceInventory,
+): FormFieldDependency[] {
+  const field = draft.fields.find((candidate) => candidate.localId === localId)
+  if (!field || field.type === nextType) return []
+  const dependencies = collectFormFieldDependencies(draft, field.id, inventory)
+  if (field.type === 'detail') {
+    // Leaving `detail` destroys every column, so each column's OWN reference
+    // set (dotted `{field.column}` formulas/rules, amount `amountColumnId`,
+    // preserved payload tokens) blocks the retype too (F3 gate P3-2 —
+    // `formulaReferencesField` already catches dotted FORMULA tokens above;
+    // this fold adds the exact-equality dotted rule/graph shapes).
+    field.detailColumns.forEach((column) => {
+      dependencies.push(
+        ...collectFormDetailColumnDependencies(draft, field.id, column.id),
+      )
+    })
+    if (detailFieldCarriesConfiguration(field)) {
+      dependencies.push({
+        kind: 'detail_config',
+        location: `fields.${field.localId}.detailColumns`,
+      })
+    }
+  }
+  if (field.type === 'record-link' && recordLinkCarriesConfiguration(field)) {
+    dependencies.push({
+      kind: 'record_link_config',
+      location: `fields.${field.localId}.recordLink`,
+    })
+  }
+  return dependencies
+}
+
+/**
+ * F3 typed retype command (NEW on this baseline — master M3 prices it as new
+ * command work, not a mount).
+ *
+ * - Reference-aware NAMED refusal (`field_type_incompatible_with_references`
+ *   with the full dependency list) via
+ *   `collectFormFieldRetypeDependencies`; never a generic string error and
+ *   NEVER the legacy silent `invalidateStaleRecordLinkDependencies` cleanup.
+ * - IDENTITY IS PRESERVED (FB-D5): the field keeps its `id` and `localId`
+ *   byte-identical by construction — retype never re-mints identity.
+ * - `attachment` target = the named `attachment_boundary` refusal (FB-D8).
+ * - Retyping TO `detail` mints only the FIRST COLUMN identity, which the
+ *   caller supplies from the opaque allocator (`detailColumnIdentity`); the
+ *   adapter retries a collision with a fresh candidate.
+ * - Value-identical retype (same type) is a zero-entry no-op by adapter
+ *   history construction.
+ * - The optional `inventory` is the same FUTURE external-owner seam as
+ *   `collectFormFieldDependencies`; production callers pass none (FB-D6).
+ */
+export function retypeFormField(
+  draft: TemplateAuthoringDraft,
+  localId: string,
+  // Accepts the FULL persisted union so a hostile/stale `attachment` (or any
+  // unknown) input hits the runtime boundary checks instead of being
+  // type-laundered by the caller.
+  nextType: FormFieldType,
+  detailColumnIdentity?: FormDetailColumnIdentity,
+  inventory?: CompleteFormReferenceInventory,
+): FormCommandResult {
+  const index = draft.fields.findIndex((field) => field.localId === localId)
+  if (index === -1) return rejected('field_not_found')
+  const current = draft.fields[index]
+  // Boundary checks run BEFORE the same-type no-op (F3 gate P3-1): an
+  // `attachment`→`attachment` "retype" must be the named boundary refusal and
+  // an unknown persisted type must stay fail-closed, never a silent success.
+  if (nextType === 'attachment') {
+    return rejected('field_type_incompatible_with_references', [
+      { kind: 'attachment_boundary', location: 'fieldType.attachment' },
+    ])
+  }
+  if (!AUTHORABLE_FIELD_TYPES.has(nextType as AuthorableFieldType))
+    return rejected('unsupported_field_type')
+  if (!AUTHORABLE_FIELD_TYPES.has(current.type))
+    return rejected('unsupported_field_type')
+  if (nextType === current.type) {
+    return successful({ ...draft, fields: draft.fields.slice() }, localId)
+  }
+  const target = nextType as AuthorableFieldType
+
+  const dependencies = collectFormFieldRetypeDependencies(
+    draft,
+    localId,
+    target,
+    inventory,
+  )
+  if (dependencies.length > 0)
+    return rejected('field_type_incompatible_with_references', dependencies)
+
+  let detailColumns: DetailColumnDraft[] = []
+  if (target === 'detail') {
+    if (
+      !detailColumnIdentity ||
+      !nonBlank(detailColumnIdentity.persistentId) ||
+      !nonBlank(detailColumnIdentity.localId)
+    )
+      return rejected('invalid_field_identity')
+    if (
+      candidateTokensConflict(draft, [
+        detailColumnIdentity.persistentId,
+        detailColumnIdentity.localId,
+      ])
+    )
+      return rejected('field_identity_conflict')
+    detailColumns = [newDetailColumn(detailColumnIdentity)]
+  }
+
+  const next: FieldAuthoringDraft = {
+    ...current,
+    // Identity preservation by construction: `id`/`localId` are carried from
+    // `current` and never reassigned here.
+    //
+    // DELIBERATE (not an accident — F3 gate NIT-2): `optionsText` is kept
+    // across retype so select→other→select round-trips restore the options;
+    // `buildFormSchema` already omits `options` for non-select types, so the
+    // emitted schema stays clean while the draft preserves the admin's work.
+    type: target,
+    detailColumns,
+    ...(target !== 'detail' ? { minRowsText: '', maxRowsText: '' } : {}),
+  }
+  const fields = [...draft.fields]
+  fields[index] = next
+  return successful({ ...draft, fields }, current.localId)
+}
+
+/**
+ * Every current-draft reference to one detail COLUMN (F3 column commands):
+ * the amount-consistency `amountColumnId`, dotted `ownerId.columnId` condition
+ * rules, `{ownerId.columnId}` condition formulas, and the same dotted tokens
+ * anywhere in the preserved graph or hydrated `field.original` payloads (one
+ * shared conservative walk with the field-level collector).
+ */
+export function collectFormDetailColumnDependencies(
+  draft: TemplateAuthoringDraft,
+  ownerFieldId: string,
+  columnId: string,
+): FormFieldDependency[] {
+  const dependencies: FormFieldDependency[] = []
+  const owner = ownerFieldId.trim()
+  const column = columnId.trim()
+  if (!owner || !column) return dependencies
+  const dotted = `${owner}.${column}`
+  const predicates = detailColumnReferencePredicates(owner, column)
+
+  const mapping = draft.amountConsistencyCheck
+  if (
+    mapping &&
+    (mapping.amountColumnId.trim() === column ||
+      mapping.amountColumnId.trim() === dotted)
+  ) {
+    dependencies.push({
+      kind: 'amount_consistency_mapping',
+      location: 'amountConsistencyCheck.amountColumnId',
+    })
+  }
+  Object.values(draft.conditionEdits ?? {}).forEach((edit) => {
+    edit.branches.forEach((branch, branchIndex) => {
+      if (branch.rules.some((rule) => rule.fieldId.trim() === dotted)) {
+        dependencies.push({
+          kind: 'condition_rule',
+          location: `conditionEdits.${edit.nodeKey}.branches.${branchIndex}.rules`,
+        })
+      }
+      if (predicates.expressionMatches(branch.formulaExpression)) {
+        dependencies.push({
+          kind: 'condition_formula',
+          location: `conditionEdits.${edit.nodeKey}.branches.${branchIndex}.formula`,
+        })
+      }
+    })
+  })
+  draft.fields.forEach((field) => {
+    if (field.original) {
+      walkPreservedReferences(
+        field.original,
+        `fields.${field.localId}.original`,
+        dependencies,
+        predicates,
+      )
+    }
+  })
+  if (draft.preservedGraph) {
+    walkPreservedReferences(
+      draft.preservedGraph,
+      'preservedGraph',
+      dependencies,
+      predicates,
+    )
+  }
+  return dependencies
+}
+
+interface LocatedDetailColumn {
+  fieldIndex: number
+  owner: FieldAuthoringDraft
+  columnIndex: number
+  column: DetailColumnDraft
+}
+
+function locateDetailColumn(
+  draft: TemplateAuthoringDraft,
+  fieldLocalId: string,
+  columnLocalId: string,
+): LocatedDetailColumn | FormCommandResult {
+  const fieldIndex = draft.fields.findIndex(
+    (field) => field.localId === fieldLocalId,
+  )
+  if (fieldIndex === -1) return rejected('field_not_found')
+  const owner = draft.fields[fieldIndex]
+  if (owner.type !== 'detail') return rejected('unsupported_field_type')
+  const columnIndex = owner.detailColumns.findIndex(
+    (column) => column.localId === columnLocalId,
+  )
+  if (columnIndex === -1) return rejected('target_not_found')
+  return {
+    fieldIndex,
+    owner,
+    columnIndex,
+    column: owner.detailColumns[columnIndex],
+  }
+}
+
+function isRejection(value: LocatedDetailColumn | FormCommandResult): value is FormCommandResult {
+  return 'ok' in value
+}
+
+function withReplacedColumn(
+  draft: TemplateAuthoringDraft,
+  located: LocatedDetailColumn,
+  nextColumn: DetailColumnDraft,
+): FormCommandResult {
+  const detailColumns = [...located.owner.detailColumns]
+  detailColumns[located.columnIndex] = nextColumn
+  const fields = [...draft.fields]
+  fields[located.fieldIndex] = { ...located.owner, detailColumns }
+  return successful({ ...draft, fields }, located.owner.localId)
+}
+
+/**
+ * One committed inspector edit of one detail column's properties (FB-D7).
+ * A column whose CURRENT type is outside the leaf allowlist (hostile/broken
+ * persisted data) rejects edits fail-closed (P3-1 posture, same as the
+ * field-level command).
+ */
+export function updateFormDetailColumn(
+  draft: TemplateAuthoringDraft,
+  fieldLocalId: string,
+  columnLocalId: string,
+  patch: FormDetailColumnPropertyPatch,
+): FormCommandResult {
+  const located = locateDetailColumn(draft, fieldLocalId, columnLocalId)
+  if (isRejection(located)) return located
+  if (!DETAIL_LEAF_FIELD_TYPES.includes(located.column.type))
+    return rejected('unsupported_field_type')
+  const next: DetailColumnDraft = {
+    ...located.column,
+    ...(patch.label !== undefined ? { label: patch.label } : {}),
+    ...(patch.required !== undefined ? { required: patch.required } : {}),
+    ...(patch.optionsText !== undefined
+      ? { optionsText: patch.optionsText }
+      : {}),
+  }
+  return withReplacedColumn(draft, located, next)
+}
+
+/**
+ * F3 detail-column retype (master M3 detail-column retype semantics). Column
+ * identity (`id`/`localId`) is PRESERVED by construction. Boundary targets are
+ * NAMED refusals, never generic errors: `detail` (one nesting level) →
+ * `detail_config`; `record-link` (top-level only) → `record_link_config`;
+ * `attachment` → `attachment_boundary`. Any current-draft reference to the
+ * column (amount mapping / dotted rules / `{owner.column}` formulas /
+ * preserved payloads) blocks the type change under the same conservative v1
+ * floor as `retypeFormField`.
+ */
+export function retypeFormDetailColumn(
+  draft: TemplateAuthoringDraft,
+  fieldLocalId: string,
+  columnLocalId: string,
+  nextType: FormFieldType,
+): FormCommandResult {
+  const located = locateDetailColumn(draft, fieldLocalId, columnLocalId)
+  if (isRejection(located)) return located
+  const { owner, column } = located
+  // Fail-closed on a non-leaf CURRENT column type (P3-1 posture) before the
+  // same-type no-op, mirroring the field-level ordering.
+  if (!DETAIL_LEAF_FIELD_TYPES.includes(column.type))
+    return rejected('unsupported_field_type')
+  if (nextType === column.type) {
+    return successful({ ...draft, fields: draft.fields.slice() }, owner.localId)
+  }
+  const boundaryLocation = `fields.${owner.localId}.detailColumns.${column.localId}`
+  if (nextType === 'attachment') {
+    return rejected('field_type_incompatible_with_references', [
+      { kind: 'attachment_boundary', location: boundaryLocation },
+    ])
+  }
+  if (nextType === 'detail') {
+    return rejected('field_type_incompatible_with_references', [
+      { kind: 'detail_config', location: boundaryLocation },
+    ])
+  }
+  if (nextType === 'record-link') {
+    return rejected('field_type_incompatible_with_references', [
+      { kind: 'record_link_config', location: boundaryLocation },
+    ])
+  }
+  if (!DETAIL_LEAF_FIELD_TYPES.includes(nextType))
+    return rejected('unsupported_field_type')
+
+  const dependencies = collectFormDetailColumnDependencies(
+    draft,
+    owner.id,
+    column.id,
+  )
+  if (dependencies.length > 0)
+    return rejected('field_type_incompatible_with_references', dependencies)
+
+  return withReplacedColumn(draft, located, { ...column, type: nextType })
+}
+
+/**
+ * Remove one detail column. The LAST column is refused with the named
+ * `last_detail_column_removal_forbidden` (a detail field needs >=1 column —
+ * same command-level integrity posture as `last_field_removal_forbidden`);
+ * a referenced column is the named `field_is_referenced` refusal with the
+ * full dependency list. Zero mutation on refusal.
+ */
+export function removeFormDetailColumn(
+  draft: TemplateAuthoringDraft,
+  fieldLocalId: string,
+  columnLocalId: string,
+): FormCommandResult {
+  const located = locateDetailColumn(draft, fieldLocalId, columnLocalId)
+  if (isRejection(located)) return located
+  const { owner, column } = located
+  if (owner.detailColumns.length <= 1) {
+    return rejected('last_detail_column_removal_forbidden')
+  }
+  const dependencies = collectFormDetailColumnDependencies(
+    draft,
+    owner.id,
+    column.id,
+  )
+  if (dependencies.length > 0)
+    return rejected('field_is_referenced', dependencies)
+
+  const detailColumns = owner.detailColumns.filter(
+    (candidate) => candidate.localId !== columnLocalId,
+  )
+  const fields = [...draft.fields]
+  fields[located.fieldIndex] = { ...owner, detailColumns }
+  return successful({ ...draft, fields }, owner.localId)
 }
 
 /**

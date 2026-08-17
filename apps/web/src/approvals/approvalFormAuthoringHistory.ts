@@ -55,6 +55,15 @@ function cloneFields(fields: readonly FieldAuthoringDraft[]): FieldAuthoringDraf
   return cloneJson([...fields] as FieldAuthoringDraft[])
 }
 
+/**
+ * KEY-ORDER SENSITIVE (F3 gate NIT-1): `JSON.stringify` equality treats two
+ * value-identical objects with different key insertion orders as DIFFERENT, so
+ * a caller that rebuilds a nested object (e.g. `visibility`) with reordered
+ * keys creates a phantom "value-changing" history entry. Every shipped caller
+ * preserves key order by spreading the existing object (`{ ...current, k }`);
+ * if you add a caller that constructs literals, keep the canonical key order
+ * or replace this with a canonicalising compare first.
+ */
 function fieldsEqual(
   left: readonly FieldAuthoringDraft[],
   right: readonly FieldAuthoringDraft[],

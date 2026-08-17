@@ -180,6 +180,15 @@
 # `inlineApprovingId` cross-row gate, Esc/keyboard, URL restore). Both explicitly listed per this
 # file's own discipline even though the pre-existing bare `approval-center` token already
 # incidentally substring-matches both filenames — never rely on that incidental match alone.
+#
+# F3 (2026-08-17, delta §5 F3): `approval-form-field-update` (typed retype/property-update
+# commands: 12 named dependency-kind refusals, identity preservation, detail-column
+# update/retype/remove, adapter one-entry-per-edit) + `approval-form-field-inspector` (mounted
+# Designer 2.0 selected-field inspector: committed-edit-only history, per-keystroke forbidden,
+# dirty-buffer settle/block arms, values-free named refusal copy). Both bare basename tokens;
+# each verified to match exactly one file in isolation; no existing token (`approval-form-draft`
+# / `approval-form-drag-payload` are the closest neighbors) is a substring of either or vice
+# versa, and the two new tokens do not substring-match each other.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -200,6 +209,8 @@ npx vitest run \
   approval-form-drag-payload \
   approval-form-palette-chips \
   approval-form-builder-slots \
+  approval-form-field-update \
+  approval-form-field-inspector \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

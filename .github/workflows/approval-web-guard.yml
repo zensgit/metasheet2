@@ -146,6 +146,11 @@ on:
       - 'apps/web/tests/approval-form-drag-payload.test.ts'
       - 'apps/web/tests/approval-form-palette-chips.spec.ts'
       - 'apps/web/tests/approval-form-builder-slots.spec.ts'
+      # F3 (2026-08-17, delta §5 F3): typed retype/update commands + Designer 2.0 selected-field
+      # inspector + their specs. approvalFormCommands.ts, the adapter, and the builder are listed above.
+      - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
+      - 'apps/web/tests/approval-form-field-update.test.ts'
+      - 'apps/web/tests/approval-form-field-inspector.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -367,6 +372,11 @@ on:
       - 'apps/web/tests/approval-form-drag-payload.test.ts'
       - 'apps/web/tests/approval-form-palette-chips.spec.ts'
       - 'apps/web/tests/approval-form-builder-slots.spec.ts'
+      # F3 (2026-08-17, delta §5 F3): typed retype/update commands + Designer 2.0 selected-field
+      # inspector + their specs (same set as the pull_request block).
+      - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
+      - 'apps/web/tests/approval-form-field-update.test.ts'
+      - 'apps/web/tests/approval-form-field-inspector.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -533,6 +543,8 @@ jobs:
             approval-form-drag-payload \
             approval-form-palette-chips \
             approval-form-builder-slots \
+            approval-form-field-update \
+            approval-form-field-inspector \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

@@ -48,6 +48,9 @@ const TARGET_FILES = [
   // enrollment is a real migration for that file, not a clean pass (corrected from the PR body).
   'src/approvals/components/ApprovalFlowCanvas.vue',
   'src/approvals/components/ApprovalGraphNodeConfigEditor.vue',
+  // F3 (same delta §5 F3 / §6 rules): the NEW selected-field inspector joins in its
+  // introducing slice, born token-only too.
+  'src/approvals/components/ApprovalFormFieldInspector.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',

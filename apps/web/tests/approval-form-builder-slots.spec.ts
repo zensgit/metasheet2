@@ -16,6 +16,11 @@ import ApprovalFormBuilder, {
   STALE_SLOT_RETRY_MESSAGE,
 } from '../src/approvals/components/ApprovalFormBuilder.vue'
 import {
+  DEPENDENCY_KIND_BUSINESS_LABELS,
+  INSPECTOR_INVALID_BUFFER_MESSAGE,
+  INSPECTOR_RETYPE_REFUSAL_PREFIX,
+} from '../src/approvals/components/ApprovalFormFieldInspector.vue'
+import {
   createFormAuthoringAdapter,
   type FormAuthoringAdapter,
   type FormAuthoringSession,
@@ -129,6 +134,7 @@ function dispatchDrag(
 interface BuilderExposed {
   appendField(type: AuthorableFieldType): boolean
   insertFieldAt(anchor: unknown, type: AuthorableFieldType): boolean
+  moveFieldToAnchor(movingLocalId: string, anchor: unknown): void
   removeField(localId: string): boolean
   getSession(): FormAuthoringSession
   getDragSession(): ApprovalFormDragSession
@@ -702,6 +708,392 @@ describe('ApprovalFormBuilder — draft-change emission (FB-D4)', () => {
     // Rejected drop (foreign payload): no additional emission.
     await builder.dropOnSlot('start', makeDataTransfer({ 'text/plain': 'x' }))
     expect(builder.draftChanges).toHaveLength(1)
+  })
+})
+
+// --- F3B: builder <-> inspector wiring (FB-D7) ------------------------------
+
+describe('ApprovalFormBuilder — F3B selected-field inspector wiring (FB-D7)', () => {
+  function inspectorLabelInput(builder: BuilderHarness): HTMLInputElement {
+    return builder.q(
+      '[data-testid="approval-form-field-inspector-label"]',
+    ) as HTMLInputElement
+  }
+
+  async function typeInspectorLabel(
+    builder: BuilderHarness,
+    value: string,
+  ): Promise<void> {
+    const input = inspectorLabelInput(builder)
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+  }
+
+  it('the inspector tracks the selected field: card selection switches its content', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    expect(inspectorLabelInput(builder).value).toBe('字段 1')
+    ;(
+      builder.root.querySelector(
+        '[data-field-local-id="local_2"]',
+      ) as HTMLElement
+    ).click()
+    await nextTick()
+    expect(inspectorLabelInput(builder).value).toBe('字段 2')
+    expect(
+      builder.root
+        .querySelector('[data-field-local-id="local_2"]')
+        ?.getAttribute('data-selected'),
+    ).toBe('true')
+  })
+
+  it('an inspector commit flows through the ONE adapter path: card copy updates, ONE history entry, ONE draft-change', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    await typeInspectorLabel(builder, '采购主题')
+    // Typing alone: zero commands, zero entries, zero emissions (FB-D7).
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+    inspectorLabelInput(builder).dispatchEvent(new Event('blur'))
+    await nextTick()
+    expect(builder.vm.getSession().draft.fields[0].label).toBe('采购主题')
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(1)
+    expect(builder.draftChanges).toHaveLength(1)
+    expect(
+      builder.root.querySelector('.approval-form-builder__card-label')
+        ?.textContent,
+    ).toContain('采购主题')
+  })
+
+  it('COMMIT ARM: switching selection with a VALID dirty buffer commits it as ONE entry, then switches', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    await typeInspectorLabel(builder, '改名甲')
+    ;(
+      builder.root.querySelector(
+        '[data-field-local-id="local_2"]',
+      ) as HTMLElement
+    ).click()
+    await nextTick()
+    expect(builder.vm.getSession().draft.fields[0].label).toBe('改名甲')
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(1)
+    // The switch went through after the commit.
+    expect(inspectorLabelInput(builder).value).toBe('字段 2')
+    expect(
+      builder.root
+        .querySelector('[data-field-local-id="local_2"]')
+        ?.getAttribute('data-selected'),
+    ).toBe('true')
+  })
+
+  it('BLOCK ARM: an INVALID dirty buffer blocks the selection switch with values-free copy — never a silent discard', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    await typeInspectorLabel(builder, '   ')
+    ;(
+      builder.root.querySelector(
+        '[data-field-local-id="local_2"]',
+      ) as HTMLElement
+    ).click()
+    await nextTick()
+    // Selection unchanged, zero mutation, buffer preserved.
+    expect(
+      builder.root
+        .querySelector('[data-field-local-id="local_1"]')
+        ?.getAttribute('data-selected'),
+    ).toBe('true')
+    expect(builder.vm.getSession().draft.fields[0].label).toBe('字段 1')
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+    expect(inspectorLabelInput(builder).value).toBe('   ')
+    expect(
+      builder.q('[data-testid="approval-form-field-inspector-status"]')
+        .textContent,
+    ).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+    expect(INSPECTOR_INVALID_BUFFER_MESSAGE).not.toMatch(/local_|field_|字段 \d/)
+  })
+
+  it('P2-3 SETTLE PATH: a dirty option-label buffer settles on selection switch with the option VALUE preserved (never regenerated)', async () => {
+    const builder = await mountBuilder([
+      field(1, { type: 'select', optionsText: '甲:a\n乙:b' }),
+      field(2),
+    ])
+    const optionInput = builder.q(
+      '[data-testid="approval-form-field-inspector-option-label-0"]',
+    ) as HTMLInputElement
+    optionInput.value = '甲改'
+    optionInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    // Switch selection WITHOUT blurring: the settle path commits the buffer.
+    ;(
+      builder.root.querySelector(
+        '[data-field-local-id="local_2"]',
+      ) as HTMLElement
+    ).click()
+    await nextTick()
+    // ONE entry; label changed; the hand-authored VALUE 'a' survived byte-identical.
+    expect(builder.vm.getSession().draft.fields[0].optionsText).toBe(
+      '甲改:a\n乙:b',
+    )
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(1)
+    expect(
+      builder.root
+        .querySelector('[data-field-local-id="local_2"]')
+        ?.getAttribute('data-selected'),
+    ).toBe('true')
+  })
+
+  it('an invalid buffer also blocks slot drops and keyboard moves (no mutation past a pending invalid edit)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    await typeInspectorLabel(builder, ' ')
+    await builder.dropOnSlot(
+      'start',
+      payloadTransfer({ version: 1, kind: 'palette', fieldType: 'select' }),
+    )
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    builder.q('[data-testid="approval-form-builder-move-up-local_2"]').click()
+    await nextTick()
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+  })
+
+  it('retype through the inspector: a referenced field is the NAMED values-free refusal with zero mutation; the unreferenced control succeeds with preserved identity', async () => {
+    // Negative arm: field_2's visibility depends on field_1.
+    const refused = await mountBuilder([
+      field(1),
+      field(2, {
+        visibility: {
+          dependsOnFieldId: 'field_1',
+          operator: 'eq',
+          valueText: 'y',
+        },
+      }),
+    ])
+    const refusedSelect = refused.q(
+      '[data-testid="approval-form-field-inspector-type"]',
+    ) as HTMLSelectElement
+    refusedSelect.value = 'date'
+    refusedSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    expect(refused.vm.getSession().draft.fields[0].type).toBe('text')
+    expect(refused.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(refused.draftChanges).toHaveLength(0)
+    const copy = refused.q(
+      '[data-testid="approval-form-field-inspector-status"]',
+    ).textContent!
+    expect(copy).toBe(
+      `${INSPECTOR_RETYPE_REFUSAL_PREFIX}${DEPENDENCY_KIND_BUSINESS_LABELS.visibility_rule}`,
+    )
+    expect(copy).not.toMatch(/local_|field_\d|fields\./)
+
+    // Positive control: no reference → retype succeeds, ONE entry, identity kept.
+    const allowed = await mountBuilder([field(1), field(2)])
+    const allowedSelect = allowed.q(
+      '[data-testid="approval-form-field-inspector-type"]',
+    ) as HTMLSelectElement
+    allowedSelect.value = 'date'
+    allowedSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    const retypedCard = allowed.root.querySelector(
+      '[data-field-local-id="local_1"]',
+    )!
+    expect(retypedCard.getAttribute('data-field-type')).toBe('date')
+    expect(allowed.vm.getSession().draft.fields[0].id).toBe('field_1')
+    expect(allowed.vm.getSession().history.undoStack).toHaveLength(1)
+    expect(allowed.draftChanges).toHaveLength(1)
+  })
+
+  it('read-only mode renders the inspector note without any editable controls', async () => {
+    const builder = await mountBuilder([field(1), field(2)], { readOnly: true })
+    expect(
+      builder.root.querySelector(
+        '[data-testid="approval-form-field-inspector-readonly"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      builder.root.querySelector(
+        '[data-testid="approval-form-field-inspector-label"]',
+      ),
+    ).toBeNull()
+  })
+})
+
+// --- P3-2 regression: read-only guards at MUTATION time ---------------------
+//
+// Coverage shape (stated honestly, per the F3 gate's P2-1): the drop path has
+// THREE redundant read-only gates (`onSlotDrop`'s early return, then the
+// mutation-time re-checks in `insertFieldAt` / `moveFieldToAnchor`). On the
+// jsdom DROP path the early return fires first, so the A5 drop test alone
+// cannot discriminate the deeper gates. The per-gate tests below therefore
+// arrive via the NON-drop callers — the exposed programmatic command surface,
+// a retained move button, and a retained inspector input — so deleting any
+// single deeper re-check (F2's M4/M5) or the `runInspectorCommand` gate turns
+// exactly its own test red. `onSlotDrop`'s early return ALONE remains pure
+// redundant shielding: deleting only it stays green BY CONSTRUCTION because
+// the individually-pinned deeper gates catch the drop.
+
+describe('ApprovalFormBuilder — P3-2: a drop racing a readOnly flip cannot insert (PROBE A5)', () => {
+  it('a drop on a RETAINED slot node after the readOnly flip has propagated is a zero-mutation no-op (palette AND move payloads)', async () => {
+    const dragSession = createApprovalFormDragSession()
+    const builder = await mountBuilder([field(1), field(2)], { dragSession })
+    // Retain the live slot DOM node BEFORE the flip (the A5 fixture).
+    const retainedSlot = builder.slot('start')
+    builder.state.readOnly = true
+    await nextTick()
+    // props.readOnly is now genuinely true and the slot is detached — the
+    // retained node is the only remaining path to the drop handler.
+    expect(builder.slotKeys()).toHaveLength(0)
+    const before = builder.vm.getSession()
+    dispatchDrag(
+      retainedSlot,
+      'drop',
+      payloadTransfer({ version: 1, kind: 'palette', fieldType: 'select' }),
+    )
+    dispatchDrag(
+      retainedSlot,
+      'drop',
+      payloadTransfer({ version: 1, kind: 'field', localId: 'local_2' }),
+    )
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.vm.getSession().draft.fields.map((entry) => entry.localId)).toEqual([
+      'local_1',
+      'local_2',
+    ])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+    // The read-only drop still cleared transient drag state (§3.1 trigger 5/1).
+    expect(dragSession.active()).toBeNull()
+  })
+
+  it('PER-GATE A: each programmatic command re-check refuses AFTER the flip — appendField / insertFieldAt (M4) / moveFieldToAnchor (M5) / removeField individually load-bearing', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    // Each call hits ONLY its own mutation-time re-check — no drop handler,
+    // no onSlotDrop early return, in front of it. Deleting any single
+    // re-check makes that call mutate and this test red. removeField is on the
+    // exposed surface too, so its guard is pinned here alongside its siblings
+    // (deleting `if (props.readOnly) return false` in removeField reds this).
+    expect(builder.vm.appendField('text')).toBe(false)
+    expect(builder.vm.insertFieldAt({ kind: 'start' }, 'select')).toBe(false)
+    builder.vm.moveFieldToAnchor('local_2', { kind: 'start' })
+    expect(builder.vm.removeField('local_2')).toBe(false)
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+  })
+
+  it('PER-GATE B: a RETAINED move button clicked after the flip cannot reorder (onMoveByOffset re-check)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    // Retain the live button node BEFORE the flip removes it from the DOM.
+    const retainedButton = builder.q(
+      '[data-testid="approval-form-builder-move-up-local_2"]',
+    )
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    retainedButton.click()
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.localOrder()).toEqual(['local_1', 'local_2'])
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+  })
+
+  it('PER-GATE C: a dirty inspector buffer blurred after the flip cannot commit (runInspectorCommand read-only gate)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    const retainedInput = builder.q(
+      '[data-testid="approval-form-field-inspector-label"]',
+    ) as HTMLInputElement
+    retainedInput.value = '越权改名'
+    retainedInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    builder.state.readOnly = true
+    await nextTick()
+    const before = builder.vm.getSession()
+    // The retained (now-detached) input's blur handler still runs commit →
+    // execute → runInspectorCommand, whose read-only gate must refuse.
+    retainedInput.dispatchEvent(new Event('blur'))
+    await nextTick()
+    expect(builder.vm.getSession()).toBe(before)
+    expect(builder.vm.getSession().draft.fields[0].label).toBe('字段 1')
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
+    expect(builder.draftChanges).toHaveLength(0)
+  })
+})
+
+// --- NIT-2: slot type menu keyboard semantics -------------------------------
+
+describe('ApprovalFormBuilder — slot menu keyboard semantics (aria-haspopup menu)', () => {
+  function menuItems(builder: BuilderHarness): HTMLButtonElement[] {
+    return Array.from(
+      builder.root.querySelectorAll<HTMLButtonElement>(
+        '.approval-form-builder__slot-menu-item',
+      ),
+    )
+  }
+
+  function pressOnActive(key: string): void {
+    document.activeElement!.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    )
+  }
+
+  it('the trigger declares aria-haspopup="menu" and opening moves focus INTO the menu', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    const trigger = builder.slot('start')
+    expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    trigger.click()
+    await nextTick()
+    await nextTick()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    const items = menuItems(builder)
+    expect(items.length).toBeGreaterThan(1)
+    expect(document.activeElement).toBe(items[0])
+  })
+
+  it('ArrowDown/ArrowUp cycle the items; Home/End jump to the edges', async () => {
+    const builder = await mountBuilder([field(1)])
+    builder.slot('start').click()
+    await nextTick()
+    await nextTick()
+    const items = menuItems(builder)
+    pressOnActive('ArrowDown')
+    await nextTick()
+    expect(document.activeElement).toBe(items[1])
+    pressOnActive('ArrowUp')
+    await nextTick()
+    expect(document.activeElement).toBe(items[0])
+    // ArrowUp from the first item wraps to the last; ArrowDown wraps forward.
+    pressOnActive('ArrowUp')
+    await nextTick()
+    expect(document.activeElement).toBe(items[items.length - 1])
+    pressOnActive('ArrowDown')
+    await nextTick()
+    expect(document.activeElement).toBe(items[0])
+    pressOnActive('End')
+    await nextTick()
+    expect(document.activeElement).toBe(items[items.length - 1])
+    pressOnActive('Home')
+    await nextTick()
+    expect(document.activeElement).toBe(items[0])
+  })
+
+  it('Escape inside the menu closes it and RETURNS focus to the trigger (no mutation)', async () => {
+    const builder = await mountBuilder([field(1), field(2)])
+    const trigger = builder.slot('after-local_1')
+    trigger.click()
+    await nextTick()
+    await nextTick()
+    expect(menuItems(builder).length).toBeGreaterThan(0)
+    pressOnActive('Escape')
+    await nextTick()
+    expect(menuItems(builder)).toHaveLength(0)
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(trigger)
+    expect(builder.vm.getSession().history.undoStack).toHaveLength(0)
   })
 })
 

@@ -4,10 +4,17 @@ import {
   collectFormFieldDependencies,
   moveFormField,
   moveFormFieldByOffset,
+  removeFormDetailColumn,
   removeFormField,
+  retypeFormDetailColumn,
+  retypeFormField,
+  updateFormDetailColumn,
+  updateFormFieldProperties,
   type FormCommandFailureReason,
   type FormCommandResult,
+  type FormDetailColumnPropertyPatch,
   type FormFieldDependency,
+  type FormFieldPropertyPatch,
   type FormInsertionAnchor,
 } from './approvalFormCommands'
 import {
@@ -23,6 +30,7 @@ import {
   createOpaqueFormIdentityAllocator,
   type OpaqueFormIdentityAllocator,
 } from './approvalFormIdentity'
+import type { FormFieldType } from '../types/approval'
 import type {
   AuthorableFieldType,
   TemplateAuthoringDraft,
@@ -55,6 +63,12 @@ import type {
  * - References (FB-D6): the authoritative reference set is the current-draft
  *   set from `collectFormFieldDependencies`, complete by construction;
  *   `listFieldReferences` exposes it as the delete/retype reference provider.
+ * - F3 property/retype surface: committed inspector edits
+ *   (`updateFieldProperties` / detail-column commands) and the typed
+ *   `retypeField` ride the SAME one-entry-per-logical-edit history; retype
+ *   preserves identity (FB-D5) and surfaces the named
+ *   `field_type_incompatible_with_references` refusal (FB-D6) — never the
+ *   legacy silent `invalidateStaleRecordLinkDependencies` cleanup.
  * - Failure surface is values-free: results carry only typed reasons and
  *   internal dependency kinds/locations — never form values, labels, or other
  *   user content.
@@ -120,6 +134,48 @@ export interface FormAuthoringAdapter {
   ): FormAdapterResult
   /** Reference-aware delete; refuses last-field and referenced deletes. */
   removeField(session: FormAuthoringSession, localId: string): FormAdapterResult
+  /**
+   * F3: one committed inspector property edit (FB-D7). A value-changing patch
+   * is EXACTLY ONE history entry; a value-identical patch is zero entries; a
+   * rejection is zero mutation.
+   */
+  updateFieldProperties(
+    session: FormAuthoringSession,
+    localId: string,
+    patch: FormFieldPropertyPatch,
+  ): FormAdapterResult
+  /**
+   * F3 typed retype (FB-D5/FB-D6): identity preserved — the allocator is
+   * consulted ONLY for the first detail-column identity when retyping TO
+   * `detail` (collision retried with a fresh candidate); every incompatible
+   * reference is the NAMED `field_type_incompatible_with_references` refusal
+   * with zero mutation.
+   */
+  retypeField(
+    session: FormAuthoringSession,
+    localId: string,
+    nextType: FormFieldType,
+  ): FormAdapterResult
+  /** F3: one committed detail-column property edit (FB-D7). */
+  updateDetailColumn(
+    session: FormAuthoringSession,
+    fieldLocalId: string,
+    columnLocalId: string,
+    patch: FormDetailColumnPropertyPatch,
+  ): FormAdapterResult
+  /** F3 detail-column retype: identity preserved; boundary/reference refusals are named. */
+  retypeDetailColumn(
+    session: FormAuthoringSession,
+    fieldLocalId: string,
+    columnLocalId: string,
+    nextType: FormFieldType,
+  ): FormAdapterResult
+  /** F3: remove one detail column; refuses the last column and referenced columns. */
+  removeDetailColumn(
+    session: FormAuthoringSession,
+    fieldLocalId: string,
+    columnLocalId: string,
+  ): FormAdapterResult
   /** Semantic drag placement. */
   moveField(
     session: FormAuthoringSession,
@@ -239,6 +295,70 @@ export function createFormAuthoringAdapter(
 
     removeField(session, localId) {
       return commit(session, removeFormField(session.draft, localId))
+    },
+
+    updateFieldProperties(session, localId, patch) {
+      return commit(
+        session,
+        updateFormFieldProperties(session.draft, localId, patch),
+      )
+    },
+
+    retypeField(session, localId, nextType) {
+      // Identity preservation (FB-D5): the FIELD identity is never re-minted —
+      // the allocator supplies only the first detail-column identity when the
+      // target type is `detail`, retried on collision with a FRESH candidate.
+      if (nextType !== 'detail') {
+        return commit(
+          session,
+          retypeFormField(session.draft, localId, nextType),
+        )
+      }
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const identity = allocator.nextDetailColumnIdentity()
+        const result = retypeFormField(
+          session.draft,
+          localId,
+          nextType,
+          identity,
+        )
+        if (result.ok) return commit(session, result)
+        if (result.reason !== 'field_identity_conflict') {
+          return failure(session, result.reason, result.dependencies)
+        }
+      }
+      return failure(session, 'identity_allocation_exhausted')
+    },
+
+    updateDetailColumn(session, fieldLocalId, columnLocalId, patch) {
+      return commit(
+        session,
+        updateFormDetailColumn(
+          session.draft,
+          fieldLocalId,
+          columnLocalId,
+          patch,
+        ),
+      )
+    },
+
+    retypeDetailColumn(session, fieldLocalId, columnLocalId, nextType) {
+      return commit(
+        session,
+        retypeFormDetailColumn(
+          session.draft,
+          fieldLocalId,
+          columnLocalId,
+          nextType,
+        ),
+      )
+    },
+
+    removeDetailColumn(session, fieldLocalId, columnLocalId) {
+      return commit(
+        session,
+        removeFormDetailColumn(session.draft, fieldLocalId, columnLocalId),
+      )
     },
 
     moveField(session, movingLocalId, targetLocalId, placement) {
