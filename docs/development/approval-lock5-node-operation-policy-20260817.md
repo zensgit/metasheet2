@@ -1,6 +1,6 @@
 # Lock-5 — Per-Node Operation and Member-Action Policy (2026-08-17)
 
-**Status:** PROPOSED (§4 ratification block is blank; no owner decision is recorded here)
+**Status:** RATIFIED (2026-08-17 — §4 record; design authorization only, slices still gated)
 **Baseline:** `origin/main@3c5f0992ba931f9a7a1115c0e43c4d33e7a306f6`. Every anchor below was READ AT THIS
 BASELINE, verified newer than every parent by `git merge-base --is-ancestor` (master `d33a6a0fa1`, Lock-4
 `075d078eb4`, Lock-3 `2f4bf6ce3e` are all ancestors) — line numbers are exact here and may differ from those
@@ -289,10 +289,14 @@ backend lane; frontend gates extend `apps/web/scripts/run-required-web-tests.sh`
 ## 4. Owner ratification block
 
 ```text
-Decision: (blank — not ratified)
-Owner: (blank)
-Date: (blank)
-Document SHA: (blank) — independent pre-ratify review: (blank)
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+Date: 2026-08-17
+Document SHA: drafted 799a3a6efa; this record lands on top. — independent pre-ratify review:
+  Claude (fable) — spot-verified the add-sign placebo finding (addSignMode stored only in metadata
+  :6538; buildAddSignAssignments takes no mode) and the rejectCommentRequired double-hardcode;
+  drafted by opus.
 Decisions required ([R] = this document's recommendation; rejected options listed so they are not re-proposed):
 
   OD-L5-1  L5-A carrier — (a)[R] one `nodeOperationPolicy` object on ApprovalNodeConfig, modelled on
@@ -341,7 +345,11 @@ Decisions required ([R] = this document's recommendation; rejected options liste
            commentRequired only, the other three rejected at the authoring choke · (b) handler admits all
            six [rejected §1.6: Lock-3 §2.2 already 409s those verbs, so the switches are theater]
 
-Decisions recorded: (blank) — Deltas: (blank)
+Decisions recorded: OD-L5-1 (a) · OD-L5-2 (a) · OD-L5-3 (a) · OD-L5-4 (b) deferred same-node
+  round with the honesty-copy constraint · OD-L5-5 (a) · OD-L5-6 (a) · OD-L5-7 (a) unified
+  commentRequired vocabulary incl. Lock-3 adoption · OD-L5-8 (a) · OD-L5-9 (a) policy_denied row +
+  CHECK migration + timeline exclusions same-slice · OD-L5-10 (a) · OD-L5-11 (a) — all per this
+  document's recommendations. — Deltas: (none)
 Runtime authorization: NONE — ratifying this document would authorize design only. Each L5 slice still needs
   its own PR, required checks, adversarial gate, and ledger row. No flag, no UAT, no deployment, and no
   fifth wizard step (master §P3-B: Lock-5 per-node controls do not unblock that shell). Gates B-3 and B-5
