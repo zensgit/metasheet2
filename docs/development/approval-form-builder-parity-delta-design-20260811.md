@@ -1,6 +1,6 @@
 # Approval Form Builder Parity Delta Design Lock (2026-08-11)
 
-**Status:** PROPOSED - this delta requires owner ratification (master P0-A gate) before runtime implementation
+**Status:** RATIFIED (2026-08-17 — §10 record; authorizes F0-F4 development and tests only; no merge/UAT/flag authority)
 **Baseline:** `origin/main@5b31cb43496c5aaf11b4f821254ed63a345c11e1` (REFRESHED 2026-08-17 per master P0-A;
 the original 2026-08-11 draft was pinned to `0287b250b`, 55 commits behind — every stale statement is corrected below)
 **Parent authorities:**
@@ -593,14 +593,14 @@ Vue Flow/ELK, FWB number mapping, merge, deployment, UAT, or flag enablement.
 
 ```text
 Approval Form Builder Parity Delta decision
-Date:
-Owner:
-Delta decision: RATIFY | REJECT | RATIFY-WITH-DELTAS
-Identity authority (FB-D5): OPAQUE_COLLISION_RESISTANT | KEEP_MANDATORY_IDENTITY_HISTORY
-Reference boundary (FB-D6): CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS | KEEP_MANDATORY_REFERENCE_INVENTORY
+Date: 2026-08-17
+Owner: zensgit — goal-set in-session instruction (2026-08-17): complete this approval-line development,
+  verification, and closeout per the program documents, executing their recorded recommendations.
+  Recorded by the executing session with this provenance; reversible on owner request.
+Delta decision: RATIFY
+Identity authority (FB-D5): OPAQUE_COLLISION_RESISTANT
+Reference boundary (FB-D6): CURRENT_DRAFT_REFERENCES_PLUS_VERSION_PINNED_EXTERNALS
 Feature boundary (FB-D8): APPROVAL_CANVAS_V2_EXISTING_FLAG
-Notes:
+Notes: resolves master M3 items (a) and (b) per this document's recorded recommendations. Authorizes
+  F0-F4 development and tests only. Flags remain OFF; merge/UAT/enablement stay owner-gated.
 ```
-
-Until this decision is completed by the owner, this document remains `PROPOSED` and implementation sessions must not
-start.
