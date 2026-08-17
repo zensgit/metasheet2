@@ -129,6 +129,12 @@ on:
       # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
       - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
       - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
+      # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
+      - 'apps/web/src/approvals/approvalFormIdentity.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
+      - 'apps/web/tests/approval-form-identity.test.ts'
+      - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -327,6 +333,12 @@ on:
       # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
       - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
       - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
+      # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
+      - 'apps/web/src/approvals/approvalFormIdentity.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
+      - 'apps/web/tests/approval-form-identity.test.ts'
+      - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -482,6 +494,8 @@ jobs:
             approval-canvas-inspector-a11y \
             approval-form-palette-focus \
             approval-form-inline-editor-extract \
+            approval-form-identity \
+            approval-form-authoring-adapter \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

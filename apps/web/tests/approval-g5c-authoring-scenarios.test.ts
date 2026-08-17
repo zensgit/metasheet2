@@ -10,7 +10,6 @@ import {
   addFormField,
   applyFormCommands,
   moveFormFieldByOffset,
-  type CompleteFormIdentityHistory,
   type FormFieldIdentity,
 } from '../src/approvals/approvalFormCommands'
 import {
@@ -41,10 +40,6 @@ import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/appr
 
 const VIEW_PATH = join(__dirname, '../src/views/approval/TemplateAuthoringView.vue')
 
-function completeHistory(ids: string[]): CompleteFormIdentityHistory {
-  return { complete: true, persistentIds: ids, localIds: ids.map((id) => `local-${id}`) }
-}
-
 function identityFor(type: AuthorableFieldType, n: number): FormFieldIdentity {
   const base = {
     persistentId: `f_${type}_${n}`,
@@ -67,12 +62,12 @@ describe('G5-C S1 form authoring (real form commands)', () => {
     let draft = createEmptyTemplateDraft()
     // Start from empty field list for a clean matrix.
     draft = { ...draft, fields: [] }
-    // Identity history is complete but empty: allocator-owned ids must not pre-exist.
-    const emptyHistory = completeHistory([])
 
     for (const [index, type] of AUTHORABLE_FIELD_TYPES.entries()) {
       const identity = identityFor(type, index)
-      const added = addFormField(draft, type, identity, emptyHistory)
+      // FB-D5 RATIFIED: identity is opaque-allocator-owned; the command checks
+      // candidates against the complete current draft (no history parameter).
+      const added = addFormField(draft, type, identity)
       expect(added.ok, `add ${type}`).toBe(true)
       if (!added.ok) return
       draft = added.draft
