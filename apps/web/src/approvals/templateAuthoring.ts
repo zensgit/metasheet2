@@ -213,6 +213,17 @@ export interface TemplateAuthoringDraft {
   // mirrors the `originalAutoApprovalPolicy` / `amountConsistencyCheck` preserve-verbatim pattern
   // already used in this file.
   originalPolicy?: RuntimePolicy | null
+  /**
+   * P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1) —
+   * the editable projection of the TEMPLATE-level dedup tier. Mirrors the node-level
+   * `mergeWithRequester` / `originalAutoApprovalPolicy` pattern immediately below: this is the ONE
+   * sub-field of `originalPolicy.autoApproval` the editor authors; every other key (and the
+   * both-flags-true combination this tier cannot express) survives verbatim via
+   * `buildTemplateAutoApprovalPolicy`, which reads `originalPolicy.autoApproval` directly rather
+   * than reconstructing it from this field alone. See `templateDedupTierFromPolicy` /
+   * `isTemplateDedupTierLocked` for the hydrate-time projection and lock detection.
+   */
+  autoApprovalDedupTier: TemplateDedupTier
   fields: FieldAuthoringDraft[]
   steps: ApprovalStepDraft[]
   // G-1 anti-flatten keystone: a COMPLEX graph (any cc/condition/parallel node, or any
@@ -382,6 +393,9 @@ export function createEmptyTemplateDraft(): TemplateAuthoringDraft {
     // stays the client-chosen create-time default, unchanged by the carrier fix below —
     // `originalPolicy` is correctly left absent (nothing to preserve yet).
     allowRevoke: true,
+    // §2.2 "no shipped default may change": absent `autoApproval` === 不去重 for a brand-new
+    // template, exactly like every pre-P3-B published template.
+    autoApprovalDedupTier: 'none',
     fields: [createEmptyFieldDraft(1)],
     steps: [createEmptyStepDraft(1)],
   }
@@ -978,6 +992,11 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     // absent `policy` (never-published template) keeps the create-time default of `true`.
     allowRevoke: template.policy?.allowRevoke ?? true,
     originalPolicy: template.policy ?? null,
+    // P3-B / Lock-6 L6-A — projects the hydrated `policy.autoApproval` onto the 3-way tier. Reads
+    // `template.policy?.autoApproval` (not `originalPolicy` above, though they are the same value)
+    // for clarity that this is a pure function of the persisted definition, matching
+    // `templateDedupTierFromPolicy`'s own signature.
+    autoApprovalDedupTier: templateDedupTierFromPolicy(template.policy?.autoApproval),
     // Hydrate side of the #3161 §1 preserve: carry the amount total-check mapping through verbatim
     // (shallow clone, never alias the source schema). Absent → no key (no phantom on round-trip).
     ...(template.formSchema.amountConsistencyCheck
@@ -1612,19 +1631,92 @@ export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): Updat
 }
 
 /**
+ * P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1) —
+ * the template-level 审批人去重 tier. A 3-way projection over the SAME two booleans the backend
+ * already server-enforces on `runtimeGraph.policy.autoApproval` (Lock-4 §2.6 /
+ * `evaluateAutoApprovalAssignment`): `dedupeHistoricalApprover` (仅一次全自动同意) and
+ * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` is deliberately NOT part of this
+ * tier — it stays a NODE-level-only field authored via the existing per-step
+ * `mergeWithRequester` / `originalAutoApprovalPolicy` pair, never through this template control.
+ */
+export type TemplateDedupTier = 'none' | 'dedupe_historical' | 'merge_adjacent'
+
+/**
+ * Lock-6 §2.6 / gate X-1 (M4 unknown-persisted-values-stay-round-trip-safe) — a persisted policy
+ * with BOTH booleans true is a combination this 3-way tier cannot express (the tier is a strict
+ * partition: 不去重 / 仅一次全自动同意 / 仅连续节点自动同意, never "both"). `buildTemplateAutoApprovalPolicy`
+ * must preserve that combination byte-unchanged rather than collapsing it onto any single tier.
+ */
+export function isTemplateDedupTierLocked(autoApproval?: AutoApprovalPolicy | null): boolean {
+  return Boolean(autoApproval?.dedupeHistoricalApprover === true && autoApproval?.mergeAdjacentApprover === true)
+}
+
+/**
+ * Hydrate-time projection: absent `autoApproval`, or absent/false on both flags, is 不去重 (§2.2 "no
+ * shipped default may change" — byte-stable for every existing template). The locked (both-true)
+ * combination also projects to `'none'` here PURELY for a deterministic radio value; the component
+ * gates on `isTemplateDedupTierLocked` to render that state read-only, and
+ * `buildTemplateAutoApprovalPolicy` independently re-checks the SAME predicate against
+ * `originalPolicy` (not this projected tier) before ever touching the publish payload — so a
+ * locked template can never be saved as if the author had picked 不去重.
+ */
+export function templateDedupTierFromPolicy(autoApproval?: AutoApprovalPolicy | null): TemplateDedupTier {
+  if (!autoApproval || isTemplateDedupTierLocked(autoApproval)) return 'none'
+  if (autoApproval.dedupeHistoricalApprover === true) return 'dedupe_historical'
+  if (autoApproval.mergeAdjacentApprover === true) return 'merge_adjacent'
+  return 'none'
+}
+
+/**
+ * Builds the template-level `autoApproval` object `buildPublishPolicy` carries onto the publish
+ * payload. Two disjoint paths, chosen by re-reading `draft.originalPolicy.autoApproval` (NOT the
+ * projected `draft.autoApprovalDedupTier`) for the lock check every time, so a stale in-memory tier
+ * value can never accidentally unlock a save:
+ *
+ *   - LOCKED (§2.6/X-1, both flags true in the hydrated original): return the original object
+ *     VERBATIM. The tier control never touched it — this is preservation, not a no-op default.
+ *   - editable: project `draft.autoApprovalDedupTier` onto the two tier-owned keys, but PRESERVE
+ *     every OTHER key already present on the hydrated `autoApproval` (e.g. a `mergeWithRequester`
+ *     or `actorMode` some other API caller set directly on the template-level object — extremely
+ *     unlikely in practice, but this control must never be the mechanism that destroys it).
+ *
+ * Omits the whole `autoApproval` key when the result is empty, matching the node-level
+ * `autoApprovalPolicy`-omit-when-empty convention elsewhere in this file (and §2.2: absent ===
+ * 不去重 === today's behavior).
+ */
+export function buildTemplateAutoApprovalPolicy(draft: TemplateAuthoringDraft): AutoApprovalPolicy | undefined {
+  const original = draft.originalPolicy?.autoApproval
+  if (isTemplateDedupTierLocked(original)) return original
+
+  const preserved: AutoApprovalPolicy = { ...(original ?? {}) }
+  delete preserved.dedupeHistoricalApprover
+  delete preserved.mergeAdjacentApprover
+  if (draft.autoApprovalDedupTier === 'dedupe_historical') preserved.dedupeHistoricalApprover = true
+  else if (draft.autoApprovalDedupTier === 'merge_adjacent') preserved.mergeAdjacentApprover = true
+
+  return Object.keys(preserved).length > 0 ? preserved : undefined
+}
+
+/**
  * L6-P1 carrier fix — the publish-time policy payload. MERGES onto `draft.originalPolicy`
- * (the persisted object hydrated verbatim by `draftFromTemplate`) and overlays only the field the
- * editor actually owns (`allowRevoke`). Was previously built inline at the call site as
- * `{ allowRevoke: draft.allowRevoke }` — a REPLACE, not a merge — which silently destroyed any
- * sibling policy field (e.g. `autoApproval`, `revokeBeforeNodeKeys`) set only through the publish
- * API on every editor republish. `draft.originalPolicy` is absent for a template that has never
- * been published, so a brand-new template still publishes exactly `{ allowRevoke }` (no field is
- * invented). The backend's `assertRuntimePolicy` re-validates every carried-through key, so
- * publishing a stale/foreign shape here fails closed there rather than persisting silently.
+ * (the persisted object hydrated verbatim by `draftFromTemplate`) and overlays only the fields the
+ * editor actually owns (`allowRevoke`, and now the P3-B dedup tier's projection of `autoApproval`).
+ * Was previously built inline at the call site as `{ allowRevoke: draft.allowRevoke }` — a REPLACE,
+ * not a merge — which silently destroyed any sibling policy field (e.g. `autoApproval`,
+ * `revokeBeforeNodeKeys`) set only through the publish API on every editor republish.
+ * `draft.originalPolicy` is absent for a template that has never been published, so a brand-new
+ * template still publishes exactly `{ allowRevoke }` (no field is invented — a fresh draft's
+ * `autoApprovalDedupTier` defaults to `'none'`, which `buildTemplateAutoApprovalPolicy` projects to
+ * `undefined`/omitted, not an empty object). The backend's `assertRuntimePolicy` re-validates every
+ * carried-through key, so publishing a stale/foreign shape here fails closed there rather than
+ * persisting silently.
  */
 export function buildPublishPolicy(draft: TemplateAuthoringDraft): RuntimePolicy {
+  const { autoApproval: _originalAutoApproval, ...restOriginalPolicy } = draft.originalPolicy ?? {}
+  const autoApproval = buildTemplateAutoApprovalPolicy(draft)
   return {
-    ...(draft.originalPolicy ?? {}),
+    ...restOriginalPolicy,
     allowRevoke: draft.allowRevoke,
+    ...(autoApproval ? { autoApproval } : {}),
   }
 }

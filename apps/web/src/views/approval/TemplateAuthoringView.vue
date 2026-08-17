@@ -807,6 +807,52 @@
         </div>
       </el-card>
 
+      <!-- P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1,
+           §2.7) — the fifth wizard step. M7 (master §4 P3-B exit): this step is authorized ONLY because
+           it now carries one REAL, server-enforced control (the template-level dedup tier); it does not
+           exist as an empty/disabled shell. The tier is an immediate-apply typed control — no separate
+           Save/Cancel transaction, matching the D0 grammar the rest of this view already uses (e.g.
+           `draft.allowRevoke` above). -->
+      <el-card v-show="activeAuthoringSection === 'more-settings'" class="template-authoring__panel" shadow="never">
+        <template #header>
+          <strong>更多设置</strong>
+        </template>
+        <el-form label-position="top" class="template-authoring__grid">
+          <el-form-item label="审批人去重" class="template-authoring__wide">
+            <!-- L6-A shape (Lock-4 OD-L4-6(a)): a 3-way tier projected over the two ALREADY
+                 server-enforced booleans `dedupeHistoricalApprover` / `mergeAdjacentApprover` on
+                 `runtimeGraph.policy.autoApproval` — no new engine behavior, no new contract field.
+                 M8 honesty: labels name the EXACT shipped predicate (§1 L6-A / Lock-4 F4-D), not the
+                 corpus's broader "撤回撤销" framing this product does not implement. -->
+            <el-radio-group
+              v-model="draft.autoApprovalDedupTier"
+              :disabled="readOnly || isAutoApprovalDedupTierLocked"
+              data-testid="approval-template-dedup-tier"
+            >
+              <el-radio value="none" data-testid="approval-template-dedup-tier-none">
+                不去重
+              </el-radio>
+              <el-radio value="dedupe_historical" data-testid="approval-template-dedup-tier-dedupe-historical">
+                仅一次全自动同意
+              </el-radio>
+              <el-radio value="merge_adjacent" data-testid="approval-template-dedup-tier-merge-adjacent">
+                仅连续节点自动同意
+              </el-radio>
+            </el-radio-group>
+            <p class="template-authoring__hint">
+              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；仅对未单独设置去重规则的审批节点生效，返回上一节点后该节点重新计入本轮去重历史。
+            </p>
+            <p
+              v-if="isAutoApprovalDedupTierLocked"
+              class="template-authoring__hint template-authoring__hint--warn"
+              data-testid="approval-template-dedup-tier-locked-hint"
+            >
+              当前已通过接口设置了本控件无法表达的去重组合，已保持只读并原样保留，不会被此处的选择覆盖。
+            </p>
+          </el-form-item>
+        </el-form>
+      </el-card>
+
       <!-- D1 ordinary-user hygiene: JSON formSchema/approvalGraph preview removed from the review
            step. Payload builders are unchanged; try-run remains the user-facing dry-run surface. -->
 
@@ -1173,6 +1219,7 @@ import {
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
   moveItemToIndex,
+  isTemplateDedupTierLocked,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
@@ -1362,7 +1409,13 @@ watch(
   { immediate: true },
 )
 
-type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'review'
+// P3-B / Lock-6 §2.7 (docs/development/approval-lock6-requester-global-policy-20260817.md):
+// "Activation is a typed change to the AuthoringSectionId union and the authoringSections array
+// ... performed by the SAME PR that lands the functional L6-A control". This PR lands the L6-A
+// dedup-tier control (below) in the SAME commit as this activation — the fifth step, `更多设置`,
+// is never an empty/disabled shell (master M7); it exists BECAUSE the tier control it hosts is now
+// real and server-enforced. `测试发布` stays last, unconditionally.
+type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'more-settings' | 'review'
 const authoringSections: Array<{
   id: AuthoringSectionId
   label: string
@@ -1371,6 +1424,7 @@ const authoringSections: Array<{
   { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
   { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
   { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等模板级策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1431,6 +1485,14 @@ const basicInfoIssues = computed<AuthoringValidationIssue[]>(() => (
   validateTemplateBasicInfo(draft.value, unsupportedReason.value)
 ))
 const basicInfoIssueCount = computed<number>(() => basicInfoIssues.value.length)
+
+// P3-B / Lock-6 §2.6, gate X-1 — a persisted template with BOTH dedup booleans true is a
+// combination the 3-way tier cannot express. Reads the HYDRATED `originalPolicy`, not the
+// projected `draft.autoApprovalDedupTier`, so the lock state is derived from the actual persisted
+// definition every time, not from whatever the radio group last rendered.
+const isAutoApprovalDedupTierLocked = computed<boolean>(() => (
+  isTemplateDedupTierLocked(draft.value.originalPolicy?.autoApproval)
+))
 
 function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
   if (!target) return

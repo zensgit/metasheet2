@@ -1,6 +1,6 @@
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { computed, createApp, defineComponent, h, inject, nextTick, provide, ref, type App as VueApp, type InjectionKey } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
@@ -169,6 +169,53 @@ const ElCheckbox = defineComponent({
   },
 })
 
+// P3-B (docs/development/approval-lock6-requester-global-policy-20260817.md §1 L6-A) — the
+// dedup-tier control uses <el-radio-group>/<el-radio>, previously unused (and unstubbed) anywhere
+// in this authoring view. Mirrors real Element Plus's provide/inject wiring closely enough for
+// tests: the group provides its modelValue + updater, each radio reads/writes through it.
+const RADIO_GROUP_KEY: InjectionKey<{
+  modelValue: () => unknown
+  update: (value: unknown) => void
+  disabled: () => boolean
+}> = Symbol('RadioGroup')
+
+const ElRadioGroup = defineComponent({
+  name: 'ElRadioGroup',
+  inheritAttrs: false,
+  props: { modelValue: [String, Number, Boolean], disabled: Boolean },
+  emits: ['update:modelValue'],
+  setup(props, { emit, attrs, slots }) {
+    provide(RADIO_GROUP_KEY, {
+      modelValue: () => props.modelValue,
+      update: (value: unknown) => emit('update:modelValue', value),
+      disabled: () => Boolean(props.disabled),
+    })
+    return () => h('div', {
+      'data-testid': (attrs as any)?.['data-testid'],
+      role: 'radiogroup',
+    }, slots.default?.())
+  },
+})
+
+const ElRadio = defineComponent({
+  name: 'ElRadio',
+  inheritAttrs: false,
+  props: { value: [String, Number, Boolean], disabled: Boolean },
+  setup(props, { attrs, slots }) {
+    const group = inject(RADIO_GROUP_KEY, null)
+    return () => h('label', [
+      h('input', {
+        type: 'radio',
+        checked: group ? group.modelValue() === props.value : false,
+        disabled: Boolean(props.disabled) || Boolean(group?.disabled()),
+        'data-testid': (attrs as any)?.['data-testid'],
+        onChange: () => group?.update(props.value),
+      }),
+      slots.default?.(),
+    ])
+  },
+})
+
 const ElTable = defineComponent({
   name: 'ElTable',
   props: { data: Array },
@@ -232,6 +279,8 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElSelect', ElSelect)
   app.component('ElOption', ElOption)
   app.component('ElCheckbox', ElCheckbox)
+  app.component('ElRadioGroup', ElRadioGroup)
+  app.component('ElRadio', ElRadio)
   app.component('ElAlert', ElAlert)
   app.component('ElDialog', ElDialog)
   app.component('ElTable', ElTable)
@@ -2398,6 +2447,199 @@ describe('TemplateAuthoringView', () => {
     confirmButton.click()
     await flushUi()
     expect(publishTemplateSpy).not.toHaveBeenCalled()
+  })
+
+  // P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1,
+  // §2.7). Master M7 (§4 P3-B exit): the fifth wizard step is authorized ONLY because it carries a
+  // REAL, server-enforced control (Lock-4 §2.6's dedup arms — already enforced by the backend; this
+  // PR adds only the authoring surface). These tests assert the census (M-2: no inert control), the
+  // structural activation (Lock-0 L0-4 / Lock-6 §2.7: 5 steps, 测试发布 last), and the round-trip
+  // through hydrate -> edit -> publish (including the locked both-true state, gate X-1).
+  describe('P3-B More-settings step — L6-A dedup tier (master M7, Lock-6 §1/§2.7/X-1)', () => {
+    it('activates exactly 5 steps: 更多设置 as step 4, 测试发布 last', async () => {
+      await mountView()
+      const stepIds = Array.from(container!.querySelectorAll('[data-testid^="approval-template-section-"]'))
+        .map((el) => el.getAttribute('data-testid'))
+        .filter((id): id is string => /^approval-template-section-(basic|fields|flow|more-settings|review)$/.test(id ?? ''))
+      expect(stepIds).toEqual([
+        'approval-template-section-basic',
+        'approval-template-section-fields',
+        'approval-template-section-flow',
+        'approval-template-section-more-settings',
+        'approval-template-section-review',
+      ])
+    })
+
+    it('M7/M-2 census: 更多设置 is NOT an empty shell — it renders the dedup-tier radio group with 3 real, distinct options', async () => {
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const group = container!.querySelector('[data-testid="approval-template-dedup-tier"]')
+      expect(group).not.toBeNull()
+      expect(group!.querySelectorAll('input[type="radio"]').length).toBe(3)
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-none"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-dedupe-historical"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent"]')).not.toBeNull()
+    })
+
+    it('defaults to 不去重 (none) for a brand-new template — §2.2 no shipped default may change', async () => {
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+      const noneInput = container!.querySelector('[data-testid="approval-template-dedup-tier-none"]') as HTMLInputElement
+      expect(noneInput.checked).toBe(true)
+    })
+
+    it('selecting a tier (immediate-apply, no separate save transaction) and publishing carries autoApproval alongside allowRevoke', async () => {
+      await mountView()
+      setInput('approval-template-key', 'purchase')
+      setInput('approval-template-name', '采购审批')
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const dedupeInput = container!.querySelector('[data-testid="approval-template-dedup-tier-dedupe-historical"]') as HTMLInputElement
+      dedupeInput.checked = true
+      dedupeInput.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+      confirmButton.click()
+      await flushUi()
+
+      expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', {
+        policy: { allowRevoke: true, autoApproval: { dedupeHistoricalApprover: true } },
+      })
+    })
+
+    it('hydrating a template with a persisted tier pre-selects the matching radio, and republishing WITHOUT touching it round-trips unchanged', async () => {
+      routeParams = { id: 'tpl_dedup_hydrate' }
+      const persistedPolicy = { allowRevoke: true, autoApproval: { mergeAdjacentApprover: true } }
+      getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_dedup_hydrate', status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }))
+      // L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1): the REAL
+      // backend's PATCH response carries the active published definition's policy forward
+      // unchanged (persistDraft() rebuilds `draft.value` from this response before publish reads
+      // it). The shared default mock in this file's beforeEach omits `policy` entirely — faithful
+      // for a template that has never been published, but NOT for this hydrate-from-published
+      // scenario, so this test overrides it to match the real, already-fixed contract.
+      updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
+        ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }),
+        ...payload,
+      }))
+      await mountView()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const mergeInput = container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent"]') as HTMLInputElement
+      expect(mergeInput.checked).toBe(true)
+
+      ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+      confirmButton.click()
+      await flushUi()
+
+      expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_dedup_hydrate', {
+        policy: { allowRevoke: true, autoApproval: { mergeAdjacentApprover: true } },
+      })
+    })
+
+    it('gate X-1: a locked (both-true) persisted combination disables the radio group and republishing preserves it byte-unchanged', async () => {
+      routeParams = { id: 'tpl_dedup_locked' }
+      const persistedPolicy = { allowRevoke: true, autoApproval: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true } }
+      getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_dedup_locked', status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }))
+      // See the sibling hydrate test above for why this override is needed (L6-P1 §1 PATCH-response
+      // contract; the shared beforeEach default omits policy).
+      updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
+        ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }),
+        ...payload,
+      }))
+      await mountView()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const group = container!.querySelector('[data-testid="approval-template-dedup-tier"]')!
+      const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+      expect(radios.length).toBe(3)
+      radios.forEach((radio) => expect(radio.disabled).toBe(true))
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-locked-hint"]')).not.toBeNull()
+
+      ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+      confirmButton.click()
+      await flushUi()
+
+      expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_dedup_locked', {
+        policy: { allowRevoke: true, autoApproval: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true } },
+      })
+    })
+
+    it('M8 honesty: the control never touches a node-level policy field — switching tiers never clears mergeWithRequester on any step (gate A-4 spirit at the FE boundary)', async () => {
+      routeParams = { id: 'tpl_dedup_a4' }
+      const a4Graph = {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: { mergeWithRequester: true },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      }
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        id: 'tpl_dedup_a4',
+        status: 'published',
+        activeVersionId: 'ver_1',
+        policy: { allowRevoke: true },
+        approvalGraph: a4Graph,
+      }))
+      // See the hydrate test above for why this override is needed.
+      updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
+        ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: true }, approvalGraph: a4Graph }),
+        ...payload,
+      }))
+      await mountView()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const mergeAdjacentInput = container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent"]') as HTMLInputElement
+      mergeAdjacentInput.checked = true
+      mergeAdjacentInput.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+      await flushUi()
+      const nodeSelfApproverCheckbox = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
+      expect(nodeSelfApproverCheckbox).not.toBeNull()
+      expect(nodeSelfApproverCheckbox.checked).toBe(true)
+
+      ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+      confirmButton.click()
+      await flushUi()
+
+      const payload = publishTemplateSpy.mock.calls.at(-1)?.[1] as { policy: { autoApproval?: Record<string, unknown> } }
+      expect(payload.policy.autoApproval).toEqual({ mergeAdjacentApprover: true })
+      // The template-level tier switch must never have written into the node's own config.
+    })
   })
 
   it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
