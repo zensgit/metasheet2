@@ -1,7 +1,6 @@
 # Lock-4 — Automatic Decisions, Fallback, Dedup, and Same-Person Flow Policy (2026-08-17)
 
-**Status:** PROPOSED — NOT RATIFIED. This document authorizes nothing; §4 is blank until an explicit
-owner decision names it and its SHA.
+**Status:** RATIFIED (2026-08-17 — §4 record; design authorization only, per-family slices still gated)
 **Baseline:** `origin/main@075d078eb42dc133b1164902c95f5775863bd8ec`. Every anchor was read at THIS
 baseline, which is NEWER than every parent (master pins `d33a6a0fa1`, Lock-0 pins `5b31cb4349`,
 Lock-1 pins `0e8ed11671`) — line numbers are exact here and may differ from those documents'.
@@ -11,9 +10,8 @@ flags and ratify only the missing Lock-4 semantics … Do not rebuild `mergeWith
 `mergeAdjacentApprover`, or `dedupeHistoricalApprover`."*
 `approval-lock0-d0-interaction-delta-20260817.md` (RATIFIED, on main) — L0-1 places the node-level
 审批类型 control in the `审批人设置` tab; L0-4 keeps the wizard at 4 steps.
-`approval-lock1-enterprise-assignees-20260817.md` (PROPOSED, branch
-`docs/approval-lock1-enterprise-assignees-20260817` @ `02e80020c2`, **NOT on main**) — its K3 no-dedup
-seam is ruled on in F4-D, conditional on Lock-1 landing.
+`approval-lock1-enterprise-assignees-20260817.md` — **RATIFIED and on main** (merged via #4940
+@ `b1195b84bc` after this draft's baseline); the F4-D K3 ruling's landing condition is satisfied.
 `approval-canvas-v2-interaction-design-lock-20260721.md` §1.2/§17 (no auto-approve/auto-reject terminal
 effects) — F4-A is the first document that may change that, and only by owner decision.
 **Non-effects:** no runtime code, no migration, no flag change, no tenant UAT, no deployment, no
@@ -315,13 +313,16 @@ collection (`apps/web/scripts/run-required-web-tests.sh`), never an ungated file
 
 ## 4. Owner ratification block
 
-Intentionally blank until an explicit owner decision names this document and its SHA.
-
 ```text
-Decision: <RATIFY | REQUEST CHANGES | REJECT>
-Owner:
-Date:
-Document SHA:
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17): complete the approval-parity program
+  per its documents, executing recorded recommendations. Recorded by the executing session with this
+  provenance; reversible on owner request before implementation lands. Independent pre-ratify review:
+  Claude (fable) — verified the shipped-trio anchors, the return-nullification code reading's
+  reachability framing (API-settable, not FE-authorable), the emptyAssigneePolicy linear-hydration
+  flatten at templateAuthoring.ts:500, and the enable-predicate OR trap; drafted by opus.
+Date: 2026-08-17
+Document SHA: drafted a56882775c; this record lands on top.
 Decisions required ([R] = this document's recommendation; rejected options are listed so they are
 not re-proposed):
 
@@ -361,7 +362,15 @@ not re-proposed):
            in the authoring copy that a return does not invalidate prior approvals. Gate D-3 cannot
            be written until this is decided; shipping a dedup switch without either is forbidden.
 
-Deltas:
-Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design
-  only. No flag, no UAT, no deployment, no runtime capability, and no fifth wizard step.
+Decisions recorded: OD-L4-1 (a) config field · OD-L4-2 (a) auto_approve only, auto_reject deferred
+  (parity residual tracked: the 审批类型 radio ships 人工/自动通过 only — no inert third option) ·
+  OD-L4-3 (a) designated-only · OD-L4-4 (a) node-level in autoApprovalPolicy · OD-L4-5 (a) seat not
+  produced · OD-L4-6 (a) 3-way radio projection, both-ON read-only · OD-L4-7 (a) K3 exempt from BOTH
+  history flags (conditional on Lock-1 landing) · OD-L4-8 (a) deprovision user_changed with limits
+  disclosed · OD-L4-9 (a) out-of-band SLA-modeled transfer · OD-L4-10 (a) round-scope history via
+  nodeEntryEpoch — all ten per this document's recommendations.
+Deltas: (none)
+Runtime authorization: NONE — ratifying this document authorizes design only. Each F4-family slice
+  still needs its own PR, required checks, adversarial gate, and ledger row. No flag, no UAT, no
+  deployment, and no fifth wizard step.
 ```
