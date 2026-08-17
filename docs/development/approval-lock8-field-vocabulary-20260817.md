@@ -1,6 +1,6 @@
 # Lock-8 — Bounded Additional Form-Field Vocabulary (2026-08-17)
 
-**Status:** PROPOSED (§4's ratification block is blank; nothing below is authorized)
+**Status:** RATIFIED (2026-08-17 — §4 record; design authorization only, slices still gated)
 **Baseline:** `origin/main@6c0b9162a9a878d894d8f747d7f2ae5ab16656dc` — the Lock-5 landing commit (#4947).
 Every anchor was READ AT THIS BASELINE on an **unshallowed** clone (`git rev-parse --is-shallow-repository`
 → `false` *before* any ancestry claim; a shallow clone's `merge-base` answers are not evidence). Line numbers
@@ -316,10 +316,19 @@ file.
 ## 4. Owner ratification block
 
 ```text
-Decision: (blank — PROPOSED; no ratification recorded)
-Owner: (blank)
-Date: (blank)
-Document SHA: (blank — to be recorded by the owner against the reviewed commit)
+Decision: RATIFY
+Owner: zensgit — goal-set in-session instruction (2026-08-17), executing recorded recommendations;
+  recorded by the executing session with this provenance; reversible before implementation lands.
+  Independent pre-ratify review: Claude (fable) — spot-verified the executor fail-open `default:
+  return null` (submit values accepted for unknown types, :412-413) and accepted the two task-premise
+  corrections (FWB compat reads multitable meta_fields.type; no normalizeApprovalGraph field-type
+  arm); drafted by opus with two pre-push review fixes.
+Date: 2026-08-17
+Document SHA: drafted cbf1014a65; this record lands on top.
+Decisions recorded: OD-L8-1 (a) · OD-L8-2 (a) display-only 说明 · OD-L8-3 (a) props.text carrier ·
+  OD-L8-4 (a) · OD-L8-5 (a) per-type predicate both sides · OD-L8-6 (a) props on existing number ·
+  OD-L8-7 (a) sized-by-sweep allowlist · OD-L8-8 (a) derived display-only duration · OD-L8-9 (a)
+  formula DEFERRED-BY-DESIGN — all nine per this document's recommendations.
 Independent review: (none recorded)
 
 Decisions required ([R] = this document's recommendation; rejected options carry their citation so
