@@ -288,7 +288,7 @@
               表格
             </button>
           </div>
-          <div v-if="recordView === 'table'" class="approval-detail__record-table" data-testid="approval-detail-record-table">
+          <div v-if="recordView === 'table' && !isMobileLayout && store.history.length" class="approval-detail__record-table" data-testid="approval-detail-record-table">
             <el-table :data="recordTableRows" border size="small">
               <el-table-column label="节点名称">
                 <template #default="{ row }">{{ row.nodeName }}</template>
@@ -473,8 +473,13 @@
         </div>
       </div>
 
-      <!-- Action bar -->
-      <div v-if="approval" class="approval-detail__actions">
+      <!-- Action bar (also the 全文评论 tab's scroll target — P3-2 partial fix: this is the
+           closest always-rendered (`v-if="approval"`, both the pending-actions AND the
+           已结束-alert branches share this wrapper) region carrying the 评论 affordance, so the
+           three tabs now scroll to three genuinely distinct elements instead of 审批记录/全文评论
+           silently sharing one target. A real filtered comment-only projection is a separate,
+           larger change — deferred, see PR body.) -->
+      <div v-if="approval" ref="actionsSectionRef" class="approval-detail__actions">
         <template v-if="approval.status === 'pending'">
           <!-- B3-13 按动作 loading: every action button binds to `inFlightAction === '<its own
                action>'` instead of the store-global `loading` flag, so only the button whose
@@ -990,23 +995,43 @@ const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 // ---------------------------------------------------------------------------
 const formSectionRef = ref<HTMLElement | null>(null)
 const timelineSectionRef = ref<HTMLElement | null>(null)
+// P3-2 partial fix: a third, always-rendered (`v-if="approval"`) landing target so 全文评论
+// scrolls somewhere DISTINCT from 审批记录, instead of both silently sharing timelineSectionRef.
+const actionsSectionRef = ref<HTMLElement | null>(null)
 
 type DetailAnchorSection = 'form' | 'record' | 'comments'
 const activeDetailTab = ref<DetailAnchorSection>('record')
 
-// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no
-// separate stream to build — comments render inline in the timeline today (action
-// === 'comment' rows), so its anchor targets the same timeline region as 审批记录
-// per the master lock's "do NOT build a new comment stream" instruction. Purely
-// presentational: it never mutates store state, dispatches an action, or fetches.
+// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no separate
+// FILTERED comment stream to build (comments still render inline in the timeline today, as
+// `action === 'comment'` rows) — building that projection is a separate, larger change, deferred
+// (see PR body). This anchor's job is narrower: give 全文评论 a scroll target that is not
+// byte-identical to 审批记录's, so the active-tab highlight isn't claiming two different things
+// land in the same place. It targets the action bar (carries the 评论 affordance, and is the
+// closest always-rendered region below the timeline). Purely presentational either way: it never
+// mutates store state, dispatches an action, or fetches.
 function scrollToDetailSection(section: DetailAnchorSection): void {
   activeDetailTab.value = section
-  const target = section === 'form' ? formSectionRef.value : timelineSectionRef.value
+  const target = section === 'form'
+    ? formSectionRef.value
+    : section === 'comments'
+      ? actionsSectionRef.value
+      : timelineSectionRef.value
   target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 
 type RecordView = 'timeline' | 'table'
 const recordView = ref<RecordView>('timeline')
+
+// P2-1 fix (gate PROBE B): the table view is desktop-only chrome — `isMobileLayout` is a LIVE
+// computed (resize-driven, not mount-time-frozen), so a desktop→mobile viewport transition while
+// `recordView === 'table'` must not strand the user on a table with no timeline and no way back.
+// Belt+suspenders: the template gate (`!isMobileLayout` on the table's own `v-if`, below) is the
+// primary defense; this watcher additionally restores the desktop choice to 'timeline' so the
+// toggle itself never has to be touched again once the viewport widens back out.
+watch(isMobileLayout, (mobile) => {
+  if (mobile) recordView.value = 'timeline'
+})
 
 interface RecordTableRow {
   id: string
@@ -1026,6 +1051,16 @@ interface RecordTableRow {
 // `updatedAt` say it happened) are computed HERE, at presentation time only, and are
 // never written back into `store.history` or any outgoing payload — see
 // `submitAction`/`submitComment`/etc. below, none of which read from this computed.
+//
+// P2-2 fix: 提交 is synthesized ONLY when `store.history` has no `created` row of its own —
+// a STRUCTURAL predicate (`store.history.some((h) => h.action === 'created')`), not a value
+// heuristic keyed on actor/timestamp coincidence (which would silently break the moment
+// `created.occurredAt` drifts a few ms from `instance.createdAt`, the requester is renamed
+// post-submission, or a null `actorName` falls back to '系统'). The audit trail's own `created`
+// row is itself an audit row and wins the tie per §P5's "audit rows are the only history
+// source" — synthesizing a second 提交 on top of it duplicated the submission on every normal
+// instance. `actionLabel`'s map (`created: '发起'`) is exhaustive for created-ish actions, so
+// this predicate never double-counts a differently-spelled equivalent.
 // 结束 is added only once the instance has actually concluded (`status !== 'pending'`,
 // mirroring the existing "该审批已结束" alert below) so a still-in-flight approval is
 // never shown as finished. Every other row maps 1:1 to a `store.history` entry, reusing
@@ -1035,8 +1070,10 @@ interface RecordTableRow {
 const recordTableRows = computed<RecordTableRow[]>(() => {
   const detail = approval.value
   if (!detail) return []
-  const rows: RecordTableRow[] = [
-    {
+  const hasCreatedRow = store.history.some((item) => item.action === 'created')
+  const rows: RecordTableRow[] = []
+  if (!hasCreatedRow) {
+    rows.push({
       id: '__submit',
       nodeName: '提交',
       actorName: detail.requester?.name ?? '-',
@@ -1045,8 +1082,8 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
       action: null,
       metadata: null,
       synthetic: true,
-    },
-  ]
+    })
+  }
   for (const item of store.history) {
     rows.push({
       id: item.id,
