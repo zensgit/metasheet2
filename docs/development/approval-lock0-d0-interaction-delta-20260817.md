@@ -18,12 +18,13 @@ Six deltas. Nothing outside this list is changed by this document.
 
 ### L0-1 — Inspector gains three named presentations (tabs)
 
-**Parent clause modified.** §15 `ApprovalFlowInspector.vue` (line 446): "Parts: heading (node type +
+**Parent clause modified.** §15 `ApprovalFlowInspector.vue` (lines 444-446): "Parts: heading (node type +
 name), **contextual section stack per §4/§10**…". Shipped anchor for what is replaced:
 `apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue:162-163` — one flat `节点设置` label
 plus a single `<slot />`, no sectioning.
 
-**New contract.** The contextual section stack renders as a tab strip, in this order:
+**New contract.** The contextual section stack — the node-selection context only; the empty-selection
+flow summary and validation list are untouched and get no tabs — renders as a tab strip, in this order:
 
 | Tab | Content | Gate |
 |---|---|---|
@@ -33,13 +34,14 @@ plus a single `<slot />`, no sectioning.
 
 Preserved invariants, stated so no reviewer has to infer them:
 
-- **One implementation, three viewport presentations** (§5 line 190: "Same fields, same order, same
+- **One implementation, three viewport presentations** (§5 lines 191-192: "Same fields, same order, same
   validation, same commands — only geometry changes") holds because tab set, tab order, and per-tab
   content are **viewport-invariant**: docked 360px / overlay 320px / bottom sheet render the same tabs.
-- **Commit model unchanged** (§5: "Dirty fields apply through the same typed commands as canvas edits
-  (one undo history, §7.1). There is no separate inspector 'apply' button"). Tabs add NO Save/Cancel
-  transaction, NO per-tab dirty buffer, NO confirm-on-tab-switch; switching tabs is presentation state
-  producing zero history entries. NO scrim at any viewport (§5 compact row: "scrim-free flat boundary").
+- **Commit model unchanged** (§5 lines 204-206: "Dirty fields apply through the same typed commands as
+  canvas edits (one undo history, §7.1). There is no separate inspector 'apply' button"). Tabs add NO
+  Save/Cancel transaction, NO per-tab dirty buffer, NO confirm-on-tab-switch; switching tabs is
+  presentation state producing zero history entries. NO scrim at any viewport (§5 compact row, line 197:
+  "scrim-free flat boundary").
 - Tab-strip membership is **derived from the L0-2 registry**, not hand-written, so the `操作权限` gate is
   mechanical: a registry with no ratified operation policy for the node type yields exactly two tabs in
   the DOM. Master §P1-A names the three presentations and calls an empty tab theater; deriving the strip
@@ -127,16 +129,19 @@ reading can treat a step-count change as unrecorded drift from D0.
 
 ### L0-5 — Parent §9 inline header route-preview toggle: acknowledged contract debt
 
-**Parent clause affected (not modified).** §9 lines 303-304: "A header toggle opens the route-preview
-panel in the inspector region (same three presentations as §5)"; §2 line 55 likewise lists
-"route-preview toggle" in the header bar.
+**Parent clause affected (not modified).** §9 line 305: "A header toggle opens the route-preview panel in
+the inspector region (same three presentations as §5)"; §2 line 55 likewise lists "route-preview toggle"
+in the header bar.
 
 **Status and contract.** Not delivered at this baseline: the shipped 试运行 surface is a section inside
 the `测试发布` step (`apps/web/src/views/approval/TemplateAuthoringView.vue:1013-1203`), not a header
 toggle opening an inspector-region panel. The clause is **not dropped and not weakened** — it is recorded
-as open contract debt scheduled with **UI-0** (master §4). Ratifying Lock-0 does not discharge it, and no
-document may cite Lock-0 as evidence that §9 was satisfied. (Master M11 evidence discipline: an
-unrecorded parent clause the delta walks past is how a RATIFIED contract erodes without a decision.)
+here as open contract debt and **this document assigns it to the UI-0 authoring-shell slice**. Master §4's
+UI-0 row enumerates only typed basic-information controls, the live validation count, and the conditional
+More-settings step; it does not currently list route preview, so that row must be extended when this
+document is ratified. Ratifying Lock-0 does not discharge the debt, and no document may cite Lock-0 as
+evidence that §9 was satisfied. (Master M11 evidence discipline: an unrecorded parent clause the delta
+walks past is how a RATIFIED contract erodes without a decision.)
 
 ### L0-6 — Field-permission honesty copy carries over verbatim
 
