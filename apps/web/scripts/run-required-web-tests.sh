@@ -152,6 +152,17 @@
 # legacy-helper freeze pins). Both bare basename tokens; each verified to match exactly one file
 # in isolation, and no existing token (approval-form-authoring-history is the closest neighbor)
 # is a substring of either or vice versa.
+#
+# F2 (2026-08-17, delta §5 F2): `approval-form-drag-payload` (typed drag codec: single app MIME,
+# strict decode, transient-session store), `approval-form-palette-chips` (mounted Designer 2.0
+# palette: shipped-shell grouping pin, click/drag/keyboard, read-only), and
+# `approval-form-builder-slots` (mounted builder: N+1 semantic slots, exact FB-D3 anchors,
+# codec negatives with positive controls, stale-anchor no-op, five-trigger transient clearing,
+# FB-D4 click/drag/keyboard equivalence, FB-D8 no-production-mount pin). All bare basename
+# tokens; each verified to match exactly one file. Deliberate non-collisions: `approval-form-draft`
+# is NOT a substring of `approval-form-drag-payload` (draft vs drag-), `approval-form-palette-focus`
+# does not match `approval-form-palette-chips`, and the playwright-only
+# `verification/approval-form-builder-parity.spec.ts` matches none of these tokens.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -169,6 +180,9 @@ npx vitest run \
   approval-form-inline-editor-extract \
   approval-form-identity \
   approval-form-authoring-adapter \
+  approval-form-drag-payload \
+  approval-form-palette-chips \
+  approval-form-builder-slots \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

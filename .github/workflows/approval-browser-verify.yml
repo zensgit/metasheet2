@@ -1,0 +1,89 @@
+name: Approval Browser Verify
+
+# F2 real-browser verification lane for the approval Designer 2.0 form builder
+# (docs/development/approval-form-builder-parity-delta-design-20260811.md §5 F2,
+# §7.1 items 7-8). Boots Vite via the OWNED playwright.approval-verification
+# config (its own webServer on port 5175 — never a reused disappearing server),
+# renders the real ApprovalFormPalette + ApprovalFormBuilder through
+# apps/web/verification/approval-form-builder-harness.html, and asserts from
+# DOM/session evidence: exact start/middle/end insertion-slot placement via
+# real DataTransfer drags, cancelled-drag (Escape / drop-outside) no-ops,
+# strict typed-codec rejection of text/plain + malformed payloads (with a
+# positive control), the stale-anchor values-free no-op, and the read-only
+# transition. Screenshots upload as supporting artifacts.
+#
+# NOT a required check yet: per delta §7.1 item 8 the branch-protection
+# addition is an explicit OWNER step before the F4 merge; until that owner
+# action is visible, this lane's evidence is exact-head but not "required".
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
+      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
+      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
+      - 'apps/web/src/approvals/approvalFormIdentity.ts'
+      - 'apps/web/src/approvals/approvalFormCommands.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
+      - 'apps/web/verification/approval-form-builder-harness.html'
+      - 'apps/web/verification/approval-form-builder-harness.ts'
+      - 'apps/web/verification/approval-form-builder-parity.spec.ts'
+      - 'apps/web/playwright.approval-verification.config.ts'
+      - '.github/workflows/approval-browser-verify.yml'
+
+jobs:
+  browser-verify:
+    name: Approval browser verify (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright chromium (+ system deps)
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run approval browser verification (boots Vite, renders real components)
+        run: pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts
+
+      - name: Upload verification screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-browser-verify-screenshots
+          path: apps/web/verification-output/afb-*.png
+          if-no-files-found: warn
