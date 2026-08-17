@@ -15,12 +15,18 @@
       :data-condition-node="node.key"
     >
       <div
-        v-for="branch in conditionEditFor(node.key)!.branches"
+        v-for="(branch, branchIndex) in conditionEditFor(node.key)!.branches"
         :key="branch.edgeKey"
         class="template-authoring__condition-branch"
         data-testid="approval-condition-branch"
       >
         <div class="template-authoring__condition-branch-head">
+          <!-- D0 §4.1 / P1-D: branch order IS priority — never expose the array-index mechanic as
+               such, only the ordinary-user "优先级 N" copy. -->
+          <span
+            class="template-authoring__condition-branch-priority"
+            data-testid="approval-condition-branch-priority"
+          >优先级 {{ branchIndex + 1 }}</span>
           <span>分支「{{ liveBranchSummary(branch) }}」</span>
           <el-select
             :model-value="branch.predicateMode"
@@ -44,6 +50,21 @@
             <el-option label="全部满足 (AND)" value="and" />
             <el-option label="任一满足 (OR)" value="or" />
           </el-select>
+          <!-- P1-D: delete affordance for a NON-default branch only — mounts the existing
+               `removeConditionBranch` topology command. The default (fall-through) edge never
+               renders this button at all (structural exclusion, not merely disabled) — see the
+               explanatory copy card below for the default branch's presentation. -->
+          <el-button
+            v-if="branch.edgeKey !== conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            type="danger"
+            :disabled="readOnly || !canRemoveConditionBranch(node.key, branch.edgeKey)"
+            :aria-label="`删除分支 ${branchIndex + 1}`"
+            data-testid="approval-condition-branch-remove"
+            @click="removeConditionBranch(node.key, branch.edgeKey)"
+          >
+            删除分支
+          </el-button>
         </div>
         <template v-if="branch.predicateMode === 'rules'">
           <div
@@ -200,24 +221,44 @@
           </div>
         </div>
       </div>
-      <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
-        <el-select
-          v-model="conditionEditFor(node.key)!.defaultEdgeKey"
-          size="small"
-          clearable
-          :disabled="readOnly"
-          class="ms-w-220"
-          placeholder="（无默认分支）"
-          data-testid="approval-condition-default-edge"
+      <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
+           visually de-emphasized from the ordered branch cards above, and NEVER carries a delete
+           affordance — it is excluded from rule editing and cannot be deleted while it is the only
+           default (existing `removeConditionBranch` topology protections carry over unchanged). -->
+      <div
+        class="template-authoring__condition-branch template-authoring__condition-default-card"
+        data-testid="approval-condition-default-branch"
+      >
+        <div class="template-authoring__condition-branch-head">
+          <span class="template-authoring__condition-branch-priority template-authoring__condition-branch-priority--default">
+            默认分支（其他情况）
+          </span>
+        </div>
+        <p
+          class="template-authoring__condition-default-copy"
+          data-testid="approval-condition-default-copy"
         >
-          <el-option
-            v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
-            :key="edgeKey"
-            :label="conditionEdgeLabel(node.key, edgeKey)"
-            :value="edgeKey"
-          />
-        </el-select>
-      </el-form-item>
+          未满足其他条件时进入默认流程
+        </p>
+        <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+          <el-select
+            v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            clearable
+            :disabled="readOnly"
+            class="ms-w-220"
+            placeholder="（无默认分支）"
+            data-testid="approval-condition-default-edge"
+          >
+            <el-option
+              v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
+              :key="edgeKey"
+              :label="conditionEdgeLabel(node.key, edgeKey)"
+              :value="edgeKey"
+            />
+          </el-select>
+        </el-form-item>
+      </div>
     </div>
 
     <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
@@ -766,6 +807,8 @@ const conditionRuleValueText = api.conditionRuleValueText
 const setConditionRuleValue = api.setConditionRuleValue
 const addConditionRule = api.addConditionRule
 const removeConditionRule = api.removeConditionRule
+const canRemoveConditionBranch = api.canRemoveConditionBranch
+const removeConditionBranch = api.removeConditionBranch
 const setConditionBranchPredicateMode = api.setConditionBranchPredicateMode
 const insertConditionFormulaToken = api.insertConditionFormulaToken
 const insertConditionFormulaFunction = api.insertConditionFormulaFunction
@@ -1036,6 +1079,40 @@ const { node } = toRefs(props)
 
 .template-authoring__condition-default {
   margin: 4px 0 0;
+}
+
+/* P1-D — priority chip (condition branches) / de-emphasized default-branch label. Text-only
+   information carrier (branch order + "default" are both spelled out in words); the token colors
+   below are a supplementary accent, never the sole carrier (V-6/V-8). */
+.template-authoring__condition-branch-priority {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.template-authoring__condition-branch-priority--default {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+}
+
+/* De-emphasized relative to the ordered branch cards above (dashed border, muted fill) — same
+   card shape, never a delete affordance. */
+.template-authoring__condition-default-card {
+  border-style: dashed;
+  background: var(--el-fill-color-lighter);
+}
+
+.template-authoring__condition-default-copy {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 
 /* G-3 / G-4 shells (compact; no nested cards) */

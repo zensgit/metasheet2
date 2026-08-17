@@ -1215,6 +1215,155 @@ describe('TemplateAuthoringView', () => {
     expect(branches[1].rules[0].fieldId).toBe('amount') // …with its configured rule, never rules: []
   })
 
+  // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D; D0 §4.1):
+  // condition branch cards get a "优先级 N" priority chip (branch ARRAY ORDER — never the edge key),
+  // the default (fall-through) branch gets an explanatory copy card with NO delete affordance, and
+  // non-default branches DO get one — wired to the existing, already-tested `removeConditionBranch`
+  // topology command (`graphTopologyEdit.ts`, not edited by this slice).
+  function buildThreeBranchConditionGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '判断',
+          config: {
+            branches: [
+              { edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 3000 }] },
+              { edgeKey: 'e-b', rules: [{ fieldId: 'reviewer', operator: 'isEmpty' }] },
+              { edgeKey: 'e-c', rules: [{ fieldId: 'amount', operator: 'lt', value: 100 }] },
+            ],
+            defaultEdgeKey: 'e-low',
+          },
+        },
+        { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'app_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'app_c', type: 'approval', name: 'C', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        { key: 'e-a', source: 'cond_1', target: 'app_a' },
+        { key: 'e-b', source: 'cond_1', target: 'app_b' },
+        { key: 'e-c', source: 'cond_1', target: 'app_c' },
+        { key: 'e-low', source: 'cond_1', target: 'end' },
+        { key: 'e-a-end', source: 'app_a', target: 'end' },
+        { key: 'e-b-end', source: 'app_b', target: 'end' },
+        { key: 'e-c-end', source: 'app_c', target: 'end' },
+      ],
+    }
+  }
+
+  it('P1-D: condition branch cards show 优先级 N chips matching configured branch order (3-branch fixture)', async () => {
+    routeParams = { id: 'tpl_priority' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
+    await mountView()
+    await flushUi()
+
+    const branchCards = Array.from(container!.querySelectorAll('[data-testid="approval-condition-branch"]'))
+    expect(branchCards).toHaveLength(3)
+    const chipTexts = branchCards.map(
+      (card) => card.querySelector('[data-testid="approval-condition-branch-priority"]')?.textContent?.trim(),
+    )
+    expect(chipTexts).toEqual(['优先级 1', '优先级 2', '优先级 3']) // reversing the fixture's branch order must flip this
+
+    // Ties chip 2 to ITS OWN branch — branch 2 is the only one whose rule field is 'reviewer', so
+    // this fails if the chip renders against the wrong card (not just "the string set exists").
+    const branch2FieldSelect = branchCards[1].querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    expect(branch2FieldSelect.value).toBe('reviewer')
+    expect(branchCards[1].textContent).toContain('优先级 2')
+
+    // Branches 1 and 3 BOTH use fieldId 'amount' (only their operator/value differ) — a naive
+    // "chip text is index+1" implementation would still look right after swapping cards 1↔3 (a
+    // 3-element reversal leaves the middle element in place), so the operator is the assertion that
+    // actually catches a reversed branch order.
+    const branch1Operator = (branchCards[0].querySelector('[data-testid="approval-condition-rule-operator"]') as HTMLSelectElement).value
+    const branch3Operator = (branchCards[2].querySelector('[data-testid="approval-condition-rule-operator"]') as HTMLSelectElement).value
+    expect(branch1Operator).toBe('gte')
+    expect(branch3Operator).toBe('lt')
+  })
+
+  it('P1-D: default branch gets the exact explanatory copy and no delete button; a non-default branch HAS one (positive control)', async () => {
+    routeParams = { id: 'tpl_default_copy' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
+    await mountView()
+    await flushUi()
+
+    const defaultCard = container!.querySelector('[data-testid="approval-condition-default-branch"]') as HTMLElement
+    expect(defaultCard).not.toBeNull()
+    const copy = defaultCard.querySelector('[data-testid="approval-condition-default-copy"]')
+    expect(copy?.textContent?.trim()).toBe('未满足其他条件时进入默认流程')
+    expect(defaultCard.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull() // no delete affordance AT ALL
+
+    // Positive control: every non-default branch card DOES render a delete button — proves the
+    // assertion above is not a green test against a component that never renders delete anywhere.
+    const branchCards = container!.querySelectorAll('[data-testid="approval-condition-branch"]')
+    expect(branchCards.length).toBeGreaterThan(0)
+    for (const card of Array.from(branchCards)) {
+      expect(card.querySelector('[data-testid="approval-condition-branch-remove"]')).not.toBeNull()
+    }
+  })
+
+  it('P1-D: deleting a non-default branch mounts the existing removeConditionBranch topology command and drops only that branch', async () => {
+    routeParams = { id: 'tpl_branch_delete' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelectorAll('[data-testid="approval-condition-branch"]').length).toBe(3)
+    const removeButtons = container!.querySelectorAll('[data-testid="approval-condition-branch-remove"]')
+    ;(removeButtons[0] as HTMLButtonElement).click() // deletes 优先级 1 (e-a → app_a)
+    await flushUi()
+
+    const after = Array.from(container!.querySelectorAll('[data-testid="approval-condition-branch"]'))
+    expect(after).toHaveLength(2)
+    // The remaining branches keep THEIR OWN identity, renumbered 1/2 — never "the deleted branch's
+    // rule reappears under a new priority" (a reindex bug would still pass a naive length check).
+    const remainingFieldValues = after.map(
+      (card) => (card.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement).value,
+    )
+    expect(remainingFieldValues).toEqual(['reviewer', 'amount'])
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const savedNode = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1')
+    expect(savedNode.config.branches).toHaveLength(2)
+    expect(savedNode.config.branches.map((b: any) => b.edgeKey)).toEqual(['e-b', 'e-c']) // e-a's branch is gone
+    expect(payload.approvalGraph.nodes.some((n: any) => n.key === 'app_a')).toBe(false) // its body node is gone too
+  })
+
+  // P1-D (master §4 UI-3/UI-9, parent-lock §9/:276 gap): a compact 版本历史 navigation entry in the
+  // authoring header, linking to the existing TemplateDetailView.vue version-history section. No new
+  // version storage — pure navigation, gated on "saved template WITH at least one recorded version".
+  it('P1-D: header 版本历史 link renders for a saved template with recorded history and navigates to the detail view', async () => {
+    routeParams = { id: 'tpl_version_link' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_version_link', latestVersionId: 'ver_9' }))
+    await mountView()
+    await flushUi()
+
+    const link = container!.querySelector('[data-testid="approval-template-version-history-link"]') as HTMLButtonElement
+    expect(link).not.toBeNull()
+    link.click()
+    expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_version_link' })
+  })
+
+  it('P1-D: header 版本历史 link is absent for a brand-new (unsaved) template', async () => {
+    routeParams = {}
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-version-history-link"]')).toBeNull()
+  })
+
+  it('P1-D: header 版本历史 link is absent for a saved template with no recorded version yet', async () => {
+    routeParams = { id: 'tpl_no_history' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_no_history', latestVersionId: null }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-version-history-link"]')).toBeNull()
+  })
+
   it('promotes a blank linear template into graph authoring when a condition gateway is inserted', async () => {
     approvalCanvasV2.value = true
     await mountView()

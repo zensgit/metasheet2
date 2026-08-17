@@ -441,13 +441,17 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   left: 0;
   top: 0;
 }
+/* D0 §3.2 flat-card grammar (P1-D): flat background, 1px border, 8px radius, no shadow stack, no
+   gradient, no nested cards. Type is a TEXT label (`.template-authoring__canvas-node-kind`, below)
+   — color is never the sole carrier (V-6/V-8). The per-type left-border accent below is a
+   supplementary token-only accent, NOT the superseded colored-title-band/ribbon presentation. */
 .template-authoring__canvas-node {
   box-sizing: border-box;
   padding: 0;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
+  border-left: 3px solid var(--el-border-color-lighter);
+  border-radius: 8px;
   background: var(--ms-bg-card);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -459,13 +463,12 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node[draggable='true'] {
   cursor: grab;
 }
+/* Selection/validation accent (preserved, D0 §3.2 point 3) — a ring plus border-color change on the
+   CARD itself, applied uniformly across every node type (never a per-type fill). */
 .template-authoring__canvas-node.is-selected {
   border-color: var(--el-color-primary);
+  border-left-color: var(--el-color-primary);
   box-shadow: 0 0 0 2px var(--el-color-primary-light-7);
-}
-.template-authoring__canvas-node.is-selected .template-authoring__canvas-node-kind[data-node-type='approval'] {
-  background: var(--el-color-primary);
-  color: var(--el-color-white);
 }
 .template-authoring__canvas-node.is-moving {
   border-style: dashed;
@@ -481,26 +484,23 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   color: var(--el-text-color-primary);
   background: var(--el-fill-color-light);
 }
-.template-authoring__canvas-node-kind[data-node-type='start'],
-.template-authoring__canvas-node-kind[data-node-type='end'] {
-  background: var(--el-color-info-light-8);
-  color: var(--el-color-info-dark-2);
+/* Per-type accent lives on the CARD's left border only — flat, token-only, never a fill/background
+   on the type-label row above (that stays the single flat color for every node type). */
+.template-authoring__canvas-node[data-node-type='start'],
+.template-authoring__canvas-node[data-node-type='end'] {
+  border-left-color: var(--el-color-info);
 }
-.template-authoring__canvas-node-kind[data-node-type='approval'] {
-  background: var(--el-color-primary-light-8);
-  color: var(--el-color-primary);
+.template-authoring__canvas-node[data-node-type='approval'] {
+  border-left-color: var(--el-color-primary);
 }
-.template-authoring__canvas-node-kind[data-node-type='cc'] {
-  background: var(--el-color-success-light-8);
-  color: var(--el-color-success-dark-2);
+.template-authoring__canvas-node[data-node-type='cc'] {
+  border-left-color: var(--el-color-success);
 }
-.template-authoring__canvas-node-kind[data-node-type='condition'] {
-  background: var(--el-color-warning-light-8);
-  color: var(--el-color-warning-dark-2);
+.template-authoring__canvas-node[data-node-type='condition'] {
+  border-left-color: var(--el-color-warning);
 }
-.template-authoring__canvas-node-kind[data-node-type='parallel'] {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary-dark-2);
+.template-authoring__canvas-node[data-node-type='parallel'] {
+  border-left-color: var(--el-color-danger);
 }
 .template-authoring__canvas-node-selector {
   display: flex;

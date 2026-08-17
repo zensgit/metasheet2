@@ -85,3 +85,53 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     )
   })
 })
+
+// P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D; D0 §3.2 flat-card
+// grammar): the shipped renderer used per-type colored ribbons — a full-width `background:` fill on
+// the `.template-authoring__canvas-node-kind` type-label bar, varying by `data-node-type`. This
+// migrates to the RATIFIED flat-card grammar: flat background, 1px border, 8px radius, and a
+// supplementary per-type accent expressed ONLY as a left-border token on the card — never a
+// colored-title-band fill. Text (`nodeTypeLabel`) remains the sole REQUIRED type carrier (V-6/V-8);
+// these pins guard the PROHIBITED presentation, not the text label (already covered above).
+describe('ApprovalFlowCanvas flat-card grammar (P1-D, structural)', () => {
+  it('the type-label bar carries no per-type background ribbon (no `[data-node-type=...] { background:` fill anywhere)', () => {
+    // Mutation probe: re-adding e.g. `.template-authoring__canvas-node-kind[data-node-type='approval'] {
+    // background: var(--el-color-primary-light-8); }` must turn this red — token-based colors pass
+    // UF-6 (no hex/rgb literal), so this explicit source pin is the actual guard, not UF-6.
+    expect(CANVAS_SRC).not.toMatch(/canvas-node-kind\[data-node-type=[^\]]+\][\s\S]{0,120}background:/)
+  })
+
+  it('the type-label bar itself has exactly one flat background across every node type (no per-type override block)', () => {
+    const kindRuleMatches = CANVAS_SRC.match(/\.template-authoring__canvas-node-kind\s*\{[\s\S]*?\}/g) ?? []
+    expect(kindRuleMatches.length).toBe(1) // the single base rule only — no `[data-node-type=...]` variants
+    expect(kindRuleMatches[0]).toMatch(/background:\s*var\(--el-fill-color-light\)/)
+  })
+
+  it('per-type accent is a left-border token on the CARD, one rule per node type, token-only', () => {
+    for (const type of ['approval', 'cc', 'condition', 'parallel']) {
+      const re = new RegExp(
+        `\\.template-authoring__canvas-node\\[data-node-type='${type}'\\]\\s*\\{[\\s\\S]{0,120}border-left-color:\\s*var\\(--el-color-`,
+      )
+      expect(CANVAS_SRC).toMatch(re)
+    }
+    // start/end intentionally share one selector block (mirrors the pre-migration shared ribbon).
+    expect(CANVAS_SRC).toMatch(
+      /\.template-authoring__canvas-node\[data-node-type='start'\],\s*\n\s*\.template-authoring__canvas-node\[data-node-type='end'\]\s*\{[\s\S]{0,120}border-left-color:\s*var\(--el-color-/,
+    )
+  })
+
+  it('selection accent stays on the card border/ring, applied uniformly (no per-type selected-state fill)', () => {
+    // The old ribbon-era rule ONLY recolored the `approval` type's kind bar on selection — that
+    // per-type special case must be gone; `.is-selected` styling must not reference `[data-node-type=`.
+    const selectedBlockMatch = CANVAS_SRC.match(/\.template-authoring__canvas-node\.is-selected[\s\S]*?\n\}/)
+    expect(selectedBlockMatch).not.toBeNull()
+    expect(CANVAS_SRC).not.toMatch(/is-selected[\s\S]{0,40}canvas-node-kind\[data-node-type=/)
+  })
+
+  it('card corner radius matches D0 §3.2 (8px) and the base card carries no shadow-stack literal', () => {
+    const cardRuleMatch = CANVAS_SRC.match(/\.template-authoring__canvas-node\s*\{[\s\S]*?\n\}/)
+    expect(cardRuleMatch).not.toBeNull()
+    expect(cardRuleMatch![0]).toMatch(/border-radius:\s*8px/)
+    expect(cardRuleMatch![0]).not.toMatch(/box-shadow:/)
+  })
+})
