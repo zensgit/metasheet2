@@ -19,6 +19,10 @@ const TARGET_FILES = [
   'src/views/approval/ApprovalCardDecisionView.vue',
   'src/views/approval/ApprovalCenterTable.vue',
   'src/views/approval/ApprovalCenterView.vue',
+  // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): brand-new desktop
+  // master-detail pane, clean from the start (no legacy hex to migrate) — same precedent as the
+  // IU-3/IU-4 wizard components above.
+  'src/views/approval/ApprovalCenterDetailPane.vue',
   'src/views/approval/ApprovalDetailView.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
