@@ -3255,16 +3255,29 @@ async function confirmPublish() {
   publishChecklistVisible.value = false
   publishing.value = true
   try {
+    // Publish-sequencing fix (Lock-6 L6-P1 gate F3 finding, corroborated by an independent
+    // component-level probe during P3-B): `policy` is a PUBLISH-ONLY argument — it never travels
+    // through the create/update payload OR response (Lock-6 §0: "policy is a PUBLISH argument,
+    // never a template/version column"). `persistDraft()` below REPLACES `draft.value` wholesale
+    // via `draftFromTemplate(saved)`, re-deriving `allowRevoke` / the L6-A dedup tier from
+    // `saved.policy` — which can only ever echo the LAST-PUBLISHED policy (or nothing, for a
+    // template that has never published), never an in-progress, not-yet-published edit the admin
+    // just made in this same sitting. Reading `draft.value` for the publish payload AFTER
+    // `persistDraft()` therefore silently discarded any such edit — the allowRevoke checkbox (and,
+    // once added, the L6-A dedup-tier control) worked in the DOM but never reached the server.
+    // Fix: snapshot the in-progress policy BEFORE persistDraft() replaces the draft, and publish
+    // THAT snapshot. This does not change persistDraft/draftFromTemplate/hydrate behavior at all —
+    // an untouched draft's snapshot is byte-identical to what the old post-persistDraft read would
+    // have produced, so P-1/P-2 round-trip behavior is unaffected; only an in-session edit now
+    // survives to publish.
+    const policyToPublish = buildPublishPolicy(draft.value)
     const saved = await persistDraft()
     if (!saved) return
     // B3-09 — whitespace-only normalizes to null server-side; send undefined to keep the wire
     // payload identical to pre-B3-09 publishes when the admin typed nothing.
     const note = publishNote.value.trim()
     await publishTemplate(saved.id, {
-      // L6-P1 carrier fix — was `{ allowRevoke: draft.value.allowRevoke }`, a REPLACE that
-      // destroyed any sibling policy field (e.g. `autoApproval`) set only through the publish
-      // API. `buildPublishPolicy` merges onto the persisted `originalPolicy` instead.
-      policy: buildPublishPolicy(draft.value),
+      policy: policyToPublish,
       ...(note ? { note } : {}),
     })
     ElMessage.success('模板已发布')

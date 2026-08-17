@@ -2208,6 +2208,87 @@ describe('TemplateAuthoringView', () => {
     expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
   })
 
+  // Publish-sequencing fix (Lock-6 L6-P1 gate F3 finding). `confirmPublish()` used to read
+  // `draft.value` for the publish payload AFTER `persistDraft()` had already REPLACED it via
+  // `draftFromTemplate(saved)` — and since `policy` is publish-only (never part of the create/
+  // update payload or response), that rebuild always re-derives `allowRevoke` from whatever was
+  // LAST published (or the default, for a template that never has), discarding any in-progress
+  // edit the admin just made. The checkbox was fully interactive and its DOM state was correct;
+  // the edit simply never reached the server. These two tests reproduce the discriminating case
+  // BOTH prior tests in this file miss: they interact with the checkbox and immediately publish in
+  // the SAME sitting (every prior test either never touches the control, or asserts against a pure
+  // `draftFromTemplate`/`buildPublishPolicy` call outside the component, never through the full
+  // click -> persistDraft -> publish sequence).
+  it('CREATE mode: unchecking allowRevoke and publishing in the SAME sitting reaches the server (was silently discarded)', async () => {
+    await mountView()
+    setInput('approval-template-key', 'purchase')
+    setInput('approval-template-name', '采购审批')
+
+    const checkbox = container!.querySelector('[data-testid="approval-template-allow-revoke"]') as HTMLInputElement
+    expect(checkbox.checked).toBe(true) // create-time default
+    checkbox.checked = false
+    checkbox.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    confirmButton.click()
+    await flushUi()
+
+    expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: false } })
+  })
+
+  it('UPDATE mode: unchecking allowRevoke on an EXISTING published template and publishing in the SAME sitting reaches the server (was silently discarded)', async () => {
+    routeParams = { id: 'tpl_seq' }
+    // The REAL backend's PATCH response carries the active published policy forward unchanged
+    // (Lock-6 L6-P1) — this override matches that contract; the shared beforeEach default omits
+    // `policy` entirely, which would mask this exact bug behind an unrealistic mock.
+    updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
+      ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: true } }),
+      ...payload,
+    }))
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_seq', status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: true } }))
+    await mountView()
+    await flushUi()
+
+    const checkbox = container!.querySelector('[data-testid="approval-template-allow-revoke"]') as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+    checkbox.checked = false
+    checkbox.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    confirmButton.click()
+    await flushUi()
+
+    expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_seq', { policy: { allowRevoke: false } })
+  })
+
+  it('positive control: republishing WITHOUT touching allowRevoke still carries the persisted value unchanged (the fix does not disturb the untouched round trip, gate P-1)', async () => {
+    routeParams = { id: 'tpl_seq_untouched' }
+    updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
+      ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: false } }),
+      ...payload,
+    }))
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_seq_untouched', status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: false } }))
+    await mountView()
+    await flushUi()
+
+    const checkbox = container!.querySelector('[data-testid="approval-template-allow-revoke"]') as HTMLInputElement
+    expect(checkbox.checked).toBe(false) // hydrated, untouched
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    confirmButton.click()
+    await flushUi()
+
+    expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_seq_untouched', { policy: { allowRevoke: false } })
+  })
+
   // B3-09 (模板治理 — 发布说明): the checklist dialog carries an OPTIONAL note; typed → trimmed and
   // sent, untyped/whitespace-only → the payload has NO note key (byte-identical to pre-B3-09 wire).
   it('B3-09: publishes with a trimmed note when one is typed in the checklist dialog', async () => {
