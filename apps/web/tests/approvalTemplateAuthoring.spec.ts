@@ -1288,6 +1288,61 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
+  // P1-B — master §P1-B / approval-parity-master-design-lock-20260817.md: multi-source assignee
+  // cards, full SFC mount (not the direct-component stub harness). Proves the REAL production
+  // TemplateAuthoringView wiring — the ＋添加审批人 button through to draft.approvalNodeEdits
+  // through to the save payload — for the exact scenario the task names: add a 2nd source card →
+  // model has 2 sources → publish payload has 2; remove one → back to 1. The FE-only claim (engine
+  // unchanged) is proven by ApprovalAssigneeResolver.ts's unmodified `sources.forEach` + dedup
+  // (verified by source read, not re-tested here — this file only covers the FE authoring surface).
+  it('P1-B: add a 2nd source card via the REAL "＋添加审批人" control → save payload carries 2 sources; remove one → save payload carries 1 (both survive the SAME node, edges/cc byte-identical)', async () => {
+    routeParams = { id: 'tpl_p1b_multicard' }
+    const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    // starts with exactly 1 card; add appends a 2nd.
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(1)
+    ;(container!.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+    await flushUi()
+    let cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(2)
+    // card 0 stays direct_manager (untouched by the add); configure card 1 to a distinguishable
+    // kind (dept_head) so a later removal can prove WHICH card survived, not just the count.
+    expect((cards[0].querySelector('[data-testid="approval-node-source-kind-direct_manager"]') as HTMLInputElement).checked).toBe(true)
+    ;(cards[1].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    let approval1 = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+    expect(approval1.config.assigneeSources).toEqual([{ kind: 'direct_manager' }, { kind: 'dept_head' }]) // BOTH sources serialize
+    expect(approval1.config.approvalMode).toBe('single') // node-level fields untouched by the card add/edit
+    expect(approval1.config.emptyAssigneePolicy).toBe('error')
+
+    // remove card 0 (direct_manager) — the SURVIVOR is dept_head, not a stale re-render.
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    ;(cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+    cards = container!.querySelectorAll('[data-testid="approval-node-source-card"]')
+    expect(cards).toHaveLength(1)
+    expect((cards[0].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).checked).toBe(true)
+    // remove is disabled again at exactly 1 card — the "keep ≥1" invariant's UX signal.
+    expect((cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(true)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(2)
+    approval1 = (updateTemplateSpy.mock.calls[1]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+    expect(approval1.config.assigneeSources).toEqual([{ kind: 'dept_head' }]) // exactly the survivor
+    // topology + the untouched cc node stay byte-identical across both saves.
+    expect((updateTemplateSpy.mock.calls[1]?.[1] as any).approvalGraph.edges).toEqual(graph.edges)
+    expect((updateTemplateSpy.mock.calls[1]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'cc_1').config)
+      .toEqual({ targetType: 'role', targetIds: ['finance'] })
+  })
+
   // G-B2-18 + D1: complex-graph static_user/static_role uses typed directory pickers only
   // (manual-ID ordinary path removed). cc forces the preserved-graph (complex) path.
   describe('G-B2-18: complex-node assignee picker', () => {

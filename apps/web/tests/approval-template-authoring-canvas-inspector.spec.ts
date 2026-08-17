@@ -1394,10 +1394,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       ccTargetTypeLabel: () => '用户',
       setCcTargetIds: () => {},
       syncCcOptions: () => {},
-      approvalSourceKind: (nodeKey: string) => (edits[nodeKey]?.assigneeSources[0]?.kind as any) ?? 'requester',
-      setApprovalSourceKind: (nodeKey: string, kind: any) => {
+      // P1-B: every per-source accessor now takes an explicit sourceIndex (one card in the array).
+      approvalSourceKind: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.kind as any) ?? 'requester',
+      setApprovalSourceKind: (nodeKey: string, sourceIndex: number, kind: any) => {
         const edit = edits[nodeKey]
-        if (!edit) return
+        if (!edit || sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
         const next: Record<string, unknown> =
           kind === 'static_user' ? { kind, userIds: [] }
             : kind === 'static_role' ? { kind, roleIds: [] }
@@ -1409,30 +1410,32 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                       // Lock-1 §K5-b: same default shape as manager_at_level.
                       : kind === 'dept_head_at_level' ? { kind, level: 1 }
                         : { kind }
-        edit.assigneeSources = [next, ...edit.assigneeSources.slice(1)]
+        const nextSources = edit.assigneeSources.slice()
+        nextSources[sourceIndex] = next
+        edit.assigneeSources = nextSources
       },
       syncApprovalNodeOptions: () => {},
-      approvalSourceIds: (nodeKey: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceIds: (nodeKey: string, sourceIndex: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         return (source?.userIds as string[]) ?? (source?.roleIds as string[]) ?? []
       },
-      setApprovalSourceIdsFromPicker: (nodeKey: string, ids: string[]) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      setApprovalSourceIdsFromPicker: (nodeKey: string, sourceIndex: number, ids: string[]) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (!source) return
         if (source.kind === 'static_user') source.userIds = ids
         else if (source.kind === 'static_role') source.roleIds = ids
       },
-      approvalSourceFieldId: (nodeKey: string) => (edits[nodeKey]?.assigneeSources[0]?.fieldId as string) ?? '',
-      setApprovalSourceFieldId: (nodeKey: string, fieldId: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.fieldId as string) ?? '',
+      setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (source && source.kind === 'form_field_user') source.fieldId = fieldId
       },
-      approvalSourceLevel: (nodeKey: string) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      approvalSourceLevel: (nodeKey: string, sourceIndex: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         return (source?.level as number) ?? (source?.levels as number) ?? 1
       },
-      setApprovalSourceLevel: (nodeKey: string, value: number) => {
-        const source = edits[nodeKey]?.assigneeSources[0]
+      setApprovalSourceLevel: (nodeKey: string, sourceIndex: number, value: number) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
         if (!source) return
         if (source.kind === 'manager_at_level') source.level = value
         else if (source.kind === 'continuous_managers') source.levels = value
@@ -1440,6 +1443,26 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         else if (source.kind === 'dept_head_at_level') source.level = value
       },
       approvalSourceIsPlaceholder: () => false,
+      approvalSourceCount: (nodeKey: string) => edits[nodeKey]?.assigneeSources.length ?? 0,
+      addApprovalSourceCard: (nodeKey: string, defaultKind: any) => {
+        const edit = edits[nodeKey]
+        if (!edit) return
+        const next: Record<string, unknown> =
+          defaultKind === 'static_user' ? { kind: defaultKind, userIds: [] }
+            : defaultKind === 'static_role' ? { kind: defaultKind, roleIds: [] }
+              : defaultKind === 'form_field_user' ? { kind: defaultKind, fieldId: '' }
+                : defaultKind === 'continuous_managers' ? { kind: defaultKind, levels: 1 }
+                  : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 }
+                    : defaultKind === 'continuous_dept_heads' ? { kind: defaultKind, levels: 1 }
+                      : defaultKind === 'dept_head_at_level' ? { kind: defaultKind, level: 1 }
+                        : { kind: defaultKind }
+        edit.assigneeSources = [...edit.assigneeSources, next]
+      },
+      removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => {
+        const edit = edits[nodeKey]
+        if (!edit || edit.assigneeSources.length <= 1) return
+        edit.assigneeSources = edit.assigneeSources.filter((_, index) => index !== sourceIndex)
+      },
       approvalNodeMode: () => 'single',
       setApprovalNodeMode: () => {},
       approvalNodeEmptyPolicy: () => 'error',
@@ -1900,5 +1923,97 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       scope: { type: 'role', roleIds: ['role_fin'] },
     })
     unmount()
+  })
+
+  // P1-B — master §P1-B: multi-source assignee cards. The engine already unions + dedups
+  // `assigneeSources[]` (ApprovalAssigneeResolver.ts, verified unchanged by this slice); these
+  // tests cover the FE-ONLY surface — rendering N cards, add/remove wiring, and the M8 honesty
+  // copy. The fail-closed "keep ≥1 source" GUARD itself is unit-tested directly against the pure
+  // `removeAssigneeSourceCard` in approval-template-authoring-approval-node-edit.test.ts (a native
+  // `disabled` button cannot dispatch a click event at all, so DOM-level mutation testing of the
+  // guard is not meaningful here — this file proves the WIRING: the button reaches that function
+  // and the `disabled` attribute reflects the count correctly).
+  describe('P1-B: multi-source assignee cards', () => {
+    it('positive control: a SINGLE-source node renders exactly 1 card, remove disabled, no union hint (byte-identical to pre-P1-B shape)', () => {
+      const node = makeApprovalNode('approval_single')
+      const api = createStubConfigApi({ approval_single: { assigneeSources: [{ kind: 'direct_manager' }] } })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((c.querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(true)
+      expect(c.querySelector('[data-testid="approval-node-source-union-hint"]')).toBeNull() // M8: no dedup-honesty copy for a trivial single-source node
+      expect(c.querySelector('[data-testid="approval-node-source-add"]')).not.toBeNull()
+      // every existing single-source testid still resolves exactly once — the old shape survives.
+      expect(c.querySelectorAll('[data-testid="approval-node-source-roster"]')).toHaveLength(1)
+      expect((c.querySelector('[data-testid="approval-node-source-kind-direct_manager"]') as HTMLInputElement).checked).toBe(true)
+      unmount()
+    })
+
+    it('hydrate: a node seeded with 2 sources renders exactly 2 cards, each showing its OWN kind (mutation: hydrate only [0] → this reds)', () => {
+      const node = makeApprovalNode('approval_two')
+      const api = createStubConfigApi({
+        approval_two: { assigneeSources: [{ kind: 'direct_manager' }, { kind: 'dept_head' }] },
+      })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(2)
+      expect((cards[0].querySelector('[data-testid="approval-node-source-kind-direct_manager"]') as HTMLInputElement).checked).toBe(true)
+      expect((cards[1].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).checked).toBe(true)
+      // remove is ENABLED once there is more than one card.
+      expect((cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(false)
+      expect((cards[1].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(false)
+      // M8 honesty: the union/dedup hint renders (count > 1) and does not claim the FE itself dedups.
+      const hint = c.querySelector('[data-testid="approval-node-source-union-hint"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent).toContain('并集')
+      expect(hint!.textContent).toMatch(/系统运行时自动去重|运行时/) // attributes dedup to the RUNTIME, not this editor
+      unmount()
+    })
+
+    it('"＋添加审批人" appends a registry-defaulted card; the existing card is untouched; the model has 2 sources', async () => {
+      const node = makeApprovalNode('approval_add')
+      const api = createStubConfigApi({ approval_add: { assigneeSources: [{ kind: 'direct_manager' }] } })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      ;(c.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources).toHaveLength(2)
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[0]).toEqual({ kind: 'direct_manager' }) // untouched
+      // the new card is defaulted from the registry roster's FIRST kind (static_user for `approval`
+      // nodes) — never hand-picked, and never a kind outside the node-type roster.
+      expect(api.approvalNodeEditFor('approval_add')?.assigneeSources[1]).toMatchObject({ kind: 'static_user' })
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(2)
+      unmount()
+    })
+
+    it('remove drops the RIGHT card — the SURVIVOR is the other one, not a stale re-render of the removed card (not a count-only assertion)', async () => {
+      const node = makeApprovalNode('approval_rm')
+      const api = createStubConfigApi({
+        approval_rm: { assigneeSources: [{ kind: 'direct_manager' }, { kind: 'dept_head' }] },
+      })
+      const { container: c, unmount } = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+
+      const removeCard0 = c.querySelectorAll('[data-testid="approval-node-source-card"]')[0]
+        .querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement
+      removeCard0.click()
+      await flushUi()
+
+      expect(api.approvalNodeEditFor('approval_rm')?.assigneeSources).toEqual([{ kind: 'dept_head' }])
+      const cards = c.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((cards[0].querySelector('[data-testid="approval-node-source-kind-dept_head"]') as HTMLInputElement).checked).toBe(true)
+      // remove is disabled again now that exactly 1 remains — the UX signal tracks the guard.
+      expect((cards[0].querySelector('[data-testid="approval-node-source-remove"]') as HTMLButtonElement).disabled).toBe(true)
+      unmount()
+    })
+
+    // A `handler` node's own "add defaults from the seven-member handler roster" case is covered in
+    // approval-handler-node-config.spec.ts's stub, which (unlike this file's createStubConfigApi)
+    // already implements handlerNodeMode/handlerNodeOpinionRequired — required for a handler node
+    // to render at all through THIS harness's `installStubs`.
   })
 })

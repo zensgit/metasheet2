@@ -110,6 +110,42 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
 }
 
 /**
+ * P1-B: append one new assignee-source card to a node's edit, in place. `defaultSource` is
+ * caller-supplied (the config editor derives it from the L0-2 capability registry roster for the
+ * node's TYPE, never a hand-picked kind — a `handler` node's roster differs from `approval`'s). No
+ * dedup, no reorder: the runtime resolver owns the union + identity dedup (master §P1-B item 4 /
+ * M5) — this only appends to the array. No-op when the node is not in `edits`.
+ */
+export function addAssigneeSourceCard(
+  edits: ApprovalNodeEdits,
+  nodeKey: string,
+  defaultSource: ApprovalAssigneeSource,
+): void {
+  const edit = edits[nodeKey]
+  if (!edit) return
+  edit.assigneeSources = [...edit.assigneeSources, cloneJson(defaultSource)]
+}
+
+/**
+ * P1-B fail-closed: a node must always keep ≥1 assignee source. Refuses (no-op) when the node has
+ * exactly one source, REGARDLESS of any caller-side disabled-button UX — a native `disabled`
+ * button element cannot even dispatch a click event, so the browser-level guard alone is
+ * untestable/unenforceable independent of this function; THIS is the actual invariant enforcement
+ * point (master §P1-B). Also a no-op for a missing node or an out-of-range index.
+ */
+export function removeAssigneeSourceCard(
+  edits: ApprovalNodeEdits,
+  nodeKey: string,
+  sourceIndex: number,
+): void {
+  const edit = edits[nodeKey]
+  if (!edit) return
+  if (edit.assigneeSources.length <= 1) return
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  edit.assigneeSources = edit.assigneeSources.filter((_, index) => index !== sourceIndex)
+}
+
+/**
  * Apply the graph editor's owned fields while leaving every other node, edge, and config field
  * byte-identical. Optional fields only overwrite when present, preserving untouched absence.
  *
@@ -262,17 +298,19 @@ export function validateApprovalNodeEdits(
 }
 
 /**
- * B2-03 publish pre-flight: node keys whose FIRST assignee source is still the starter-preset
- * placeholder role (`APPROVAL_ROLE_CONFIGURE_SENTINEL`). The backend fail-fasts on this at PUBLISH
- * (`assertNoUnconfiguredPlaceholderRoles`, ApprovalProductService.ts) — this mirrors that check so
- * the publish-checklist can warn BEFORE the confirm instead of after a rejected request. Non-fatal
- * for save (mirrors the in-editor sentinel hint, which is also non-blocking).
+ * B2-03 publish pre-flight: node keys carrying a static_role placeholder role
+ * (`APPROVAL_ROLE_CONFIGURE_SENTINEL`) on ANY assignee source, not only the first. The backend
+ * fail-fasts on this at PUBLISH (`assertNoUnconfiguredPlaceholderRoles`, ApprovalProductService.ts)
+ * by looping every source on the node — this mirrors that check exactly so the publish-checklist
+ * can warn BEFORE the confirm instead of after a rejected request. P1-B widened this from
+ * `assigneeSources[0]`-only once the editor exposes N source cards (before that slice, index 0 was
+ * the only authorable source, so the two checks were equivalent). Non-fatal for save (mirrors the
+ * in-editor sentinel hint, which is also non-blocking).
  */
 export function placeholderRoleNodeKeys(edits: ApprovalNodeEdits): string[] {
   return Object.values(edits)
-    .filter((edit) => {
-      const source = edit.assigneeSources[0]
-      return source?.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
-    })
+    .filter((edit) => edit.assigneeSources.some(
+      (source) => source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL),
+    ))
     .map((edit) => edit.nodeKey)
 }

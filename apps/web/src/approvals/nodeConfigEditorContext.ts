@@ -56,16 +56,29 @@ export interface ApprovalNodeConfigEditorApi {
   ccTargetTypeLabel: (targetType: ApprovalAssigneeType) => string
   setCcTargetIds: (nodeKey: string, ids: string[]) => void
   syncCcOptions: (nodeKey: string) => void
-  approvalSourceKind: (nodeKey: string) => ApprovalAssigneeSourceKind
-  setApprovalSourceKind: (nodeKey: string, kind: ApprovalAssigneeSourceKind) => void
+  // P1-B: every per-source accessor takes an explicit `sourceIndex` — one card in the multi-source
+  // roster (`edit.assigneeSources[sourceIndex]`). Required (not defaulted to 0) so a missed callsite
+  // is a compile error under `src/**` typecheck, not a silent write to card 0. Master §P1-B / M5:
+  // array order is display order; the runtime resolver owns dedup — the FE never reorders or merges.
+  approvalSourceKind: (nodeKey: string, sourceIndex: number) => ApprovalAssigneeSourceKind
+  setApprovalSourceKind: (nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind) => void
   syncApprovalNodeOptions: (nodeKey: string) => void
-  approvalSourceIds: (nodeKey: string) => string[]
-  setApprovalSourceIdsFromPicker: (nodeKey: string, ids: string[]) => void
-  approvalSourceFieldId: (nodeKey: string) => string
-  setApprovalSourceFieldId: (nodeKey: string, fieldId: string) => void
-  approvalSourceLevel: (nodeKey: string) => number
-  setApprovalSourceLevel: (nodeKey: string, value: number) => void
-  approvalSourceIsPlaceholder: (nodeKey: string) => boolean
+  approvalSourceIds: (nodeKey: string, sourceIndex: number) => string[]
+  setApprovalSourceIdsFromPicker: (nodeKey: string, sourceIndex: number, ids: string[]) => void
+  approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => string
+  setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => void
+  approvalSourceLevel: (nodeKey: string, sourceIndex: number) => number
+  setApprovalSourceLevel: (nodeKey: string, sourceIndex: number, value: number) => void
+  approvalSourceIsPlaceholder: (nodeKey: string, sourceIndex: number) => boolean
+  /** Card count for a node — drives the v-for and the "keep ≥1" remove-guard's disabled state. */
+  approvalSourceCount: (nodeKey: string) => number
+  /** Appends one new card, defaulted from the registry roster's first kind for this node type
+   *  (never a hand-picked kind — a `handler` node's roster differs from an `approval` node's). */
+  addApprovalSourceCard: (nodeKey: string, defaultKind: ApprovalAssigneeSourceKind) => void
+  /** Fail-closed: refuses (no-op) when the node has exactly one source — a node must always keep
+   *  ≥1 assignee source (master §P1-B). This guard lives in the mutator itself, not only in a
+   *  disabled button, so it holds even if a caller bypasses the disabled affordance. */
+  removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => void
   approvalNodeMode: (nodeKey: string) => ApprovalMode
   setApprovalNodeMode: (nodeKey: string, mode: ApprovalMode) => void
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy

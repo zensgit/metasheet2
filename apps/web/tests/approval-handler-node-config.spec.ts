@@ -101,20 +101,31 @@ function createStubConfigApi(seed: Record<string, Partial<Edit>>): ApprovalNodeC
     ccTargetTypeLabel: () => '用户',
     setCcTargetIds: () => {},
     syncCcOptions: () => {},
-    approvalSourceKind: (k: string) => (edits[k]?.assigneeSources[0]?.kind as any) ?? 'requester',
-    setApprovalSourceKind: (k: string, kind: any) => {
-      const e = edits[k]; if (!e) return
+    // P1-B: every per-source accessor now takes an explicit sourceIndex (one card in the array).
+    approvalSourceKind: (k: string, i: number) => (edits[k]?.assigneeSources[i]?.kind as any) ?? 'requester',
+    setApprovalSourceKind: (k: string, i: number, kind: any) => {
+      const e = edits[k]; if (!e || i < 0 || i >= e.assigneeSources.length) return
       const next: Record<string, unknown> = kind === 'static_user' ? { kind, userIds: [] } : kind === 'static_role' ? { kind, roleIds: [] } : kind === 'form_field_user' ? { kind, fieldId: '' } : kind === 'manager_at_level' ? { kind, level: 1 } : { kind }
-      e.assigneeSources = [next, ...e.assigneeSources.slice(1)]
+      const nextSources = e.assigneeSources.slice(); nextSources[i] = next; e.assigneeSources = nextSources
     },
     syncApprovalNodeOptions: () => {},
-    approvalSourceIds: (k: string) => { const s = edits[k]?.assigneeSources[0]; return (s?.userIds as string[]) ?? (s?.roleIds as string[]) ?? [] },
+    approvalSourceIds: (k: string, i: number) => { const s = edits[k]?.assigneeSources[i]; return (s?.userIds as string[]) ?? (s?.roleIds as string[]) ?? [] },
     setApprovalSourceIdsFromPicker: () => {},
-    approvalSourceFieldId: (k: string) => (edits[k]?.assigneeSources[0]?.fieldId as string) ?? '',
+    approvalSourceFieldId: (k: string, i: number) => (edits[k]?.assigneeSources[i]?.fieldId as string) ?? '',
     setApprovalSourceFieldId: () => {},
-    approvalSourceLevel: (k: string) => (edits[k]?.assigneeSources[0]?.level as number) ?? 1,
+    approvalSourceLevel: (k: string, i: number) => (edits[k]?.assigneeSources[i]?.level as number) ?? 1,
     setApprovalSourceLevel: () => {},
     approvalSourceIsPlaceholder: () => false,
+    approvalSourceCount: (k: string) => edits[k]?.assigneeSources.length ?? 0,
+    addApprovalSourceCard: (k: string, defaultKind: any) => {
+      const e = edits[k]; if (!e) return
+      const next: Record<string, unknown> = defaultKind === 'static_user' ? { kind: defaultKind, userIds: [] } : defaultKind === 'static_role' ? { kind: defaultKind, roleIds: [] } : defaultKind === 'form_field_user' ? { kind: defaultKind, fieldId: '' } : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 } : { kind: defaultKind }
+      e.assigneeSources = [...e.assigneeSources, next]
+    },
+    removeApprovalSourceCard: (k: string, i: number) => {
+      const e = edits[k]; if (!e || e.assigneeSources.length <= 1) return
+      e.assigneeSources = e.assigneeSources.filter((_: unknown, idx: number) => idx !== i)
+    },
     approvalNodeMode: () => 'single',
     setApprovalNodeMode: () => {},
     approvalNodeEmptyPolicy: () => 'error',
@@ -232,5 +243,26 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     select.value = 'any'
     select.dispatchEvent(new Event('change'))
     expect(api.handlerNodeMode('handler_h')).toBe('any')
+  })
+
+  // P1-B — master §P1-B: multi-source assignee cards. A handler node's roster is the RATIFIED
+  // seven-member subset (Lock-3 §1.5, G-13) — "＋添加办理人" must default the new card from THAT
+  // roster, never a hand-picked kind or an approval-only kind (continuous_managers /
+  // requester_choice / continuous_dept_heads / dept_head_at_level are all absent from it).
+  it('P1-B: "＋添加办理人" defaults the new card from the SEVEN-member handler roster (never an approval-only kind)', () => {
+    const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
+    const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
+
+    const addBtn = c.querySelector('[data-testid="approval-node-source-add"]') as HTMLButtonElement
+    expect(addBtn).not.toBeNull()
+    expect(addBtn.textContent).toContain('办理人') // handler-specific copy, not "审批人"
+    addBtn.click()
+
+    const sources = api.approvalNodeEditFor('handler_h')?.assigneeSources as Array<{ kind: string }>
+    expect(sources).toHaveLength(2)
+    expect(sources[0]).toEqual({ kind: 'requester' }) // untouched
+    const newKind = sources[1].kind
+    expect([...HANDLER_ASSIGNEE_SOURCE_KINDS]).toContain(newKind) // in-roster
+    expect(['continuous_managers', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level']).not.toContain(newKind)
   })
 })
