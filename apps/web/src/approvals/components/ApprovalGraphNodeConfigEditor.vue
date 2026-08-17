@@ -333,22 +333,53 @@
       data-testid="approval-node-editor"
       :data-approval-node="node.key"
     >
+    <!-- Lock-0 L0-1: this section renders alone when inside the canvas inspector's tabbed
+         presentation (activeTabId === 'assignee'); it renders alongside the field-permissions
+         section, unchanged, in the flat/list presentation (no tabs context injected). -->
+    <section
+      v-show="showAssigneeSection"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-assignee"
+    >
+      <!-- Lock-0 L0-2: registry-driven radio-grid roster (replaces the single el-select). §10.3
+           constrains the picker to be ONE component with plain labels + a configured summary
+           echo, not a specific control shape — a radio grid needs no further delta. -->
       <el-form-item label="审批人来源">
-        <el-select
-          :model-value="approvalSourceKind(node.key)"
-          size="small"
-          :disabled="readOnly"
-          class="ms-w-240"
-          data-testid="approval-node-source-kind"
-          @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
+        <div
+          class="approval-node-source-roster"
+          role="radiogroup"
+          aria-label="审批人来源"
+          data-testid="approval-node-source-roster"
         >
-          <el-option
-            v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
+          <label
+            v-for="opt in assigneeSourceRosterForNode"
+            :key="opt.kind"
+            class="approval-node-source-roster-option"
+          >
+            <input
+              type="radio"
+              :name="`approval-node-source-kind-${node.key}`"
+              :checked="approvalSourceKind(node.key) === opt.kind"
+              :disabled="readOnly"
+              :data-testid="`approval-node-source-kind-${opt.kind}`"
+              @change="() => { setApprovalSourceKind(node.key, opt.kind); syncApprovalNodeOptions(node.key) }"
+            />
+            <span>{{ opt.label }}</span>
+          </label>
+        </div>
+        <!-- L0-2 / A-4: a persisted source kind outside the registry stays read-only and
+             round-trips unchanged — never flattened to a registry default. -->
+        <p
+          v-if="!isKnownAssigneeSourceKind"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-source-kind-unknown"
+        >当前来源「{{ approvalSourceKind(node.key) }}」不在能力清单中，保留为只读，保存时不会被覆盖或清空</p>
+        <!-- D2: configured summary echo (parent §10.3), reusing the existing shared wording. -->
+        <p
+          v-if="configuredSourceSummaryLine"
+          class="template-authoring__hint"
+          data-testid="approval-node-source-configured-summary"
+        >{{ configuredSourceSummaryLine }}</p>
       </el-form-item>
       <!-- G-B2-18 + D1: typed directory pickers only; no ordinary raw-ID authoring path. -->
       <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
@@ -480,6 +511,15 @@
           >发起人自动通过（自审合并）</el-checkbox>
         </el-form-item>
       </div>
+    </section>
+
+    <!-- Lock-0 L0-1/L0-6: 表单权限 tab content. Renders alone when tabbed (activeTabId ===
+         'fieldPermissions'); alongside the assignee section, unchanged, in flat/list mode. -->
+    <section
+      v-show="showFieldPermissionsSection"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-field-permissions"
+    >
       <div class="template-authoring__field-perms" data-testid="approval-node-field-permissions">
         <div class="template-authoring__field-perms-head"><strong>字段权限</strong></div>
         <div
@@ -501,8 +541,40 @@
             <el-option label="只读" value="readonly" />
             <el-option label="隐藏" value="hidden" />
           </el-select>
+          <!-- L0-6: linear editor's honesty copy, verbatim (fieldPermissionHonestyCopy.ts). -->
+          <span
+            v-if="approvalNodeFieldAccess(node.key, field.id) === 'readonly'"
+            class="template-authoring__hint"
+            data-testid="approval-node-field-readonly-hint"
+          >{{ FIELD_PERMISSION_READONLY_HINT }}</span>
+          <!-- D5: same render condition as the linear editor — inert (never renders) until the
+               graph-wide routingDriverFieldIds field is wired through nodeConfigEditorContext
+               (see that file's comment; out of scope for this slice). -->
+          <span
+            v-else-if="approvalNodeFieldAccess(node.key, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-field-routing-hint"
+          >{{ FIELD_PERMISSION_ROUTING_HINT }}</span>
         </div>
       </div>
+    </section>
+
+    <!-- Lock-0 L0-1: 操作权限 tab content. Only reachable when the tabs context is active AND the
+         registry declared ≥1 ratified operation policy for this node type — never true at the
+         shipped baseline (operationPoliciesByNodeType is empty everywhere), so this renders
+         nothing in production. Content, when it exists, echoes the registry's OWN data rather than
+         fabricating UI ("empty tab theater" — Lock-0 delta §1 L0-1). -->
+    <section
+      v-if="isTabbed && activeTabId === 'operations'"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-operations"
+    >
+      <p
+        v-for="policy in operationPoliciesForNode"
+        :key="policy.id"
+        class="template-authoring__hint"
+      >{{ policy.label }}</p>
+    </section>
     </div>
 
     <!-- approval (legacy / no edit) / other — read-only summary. -->
@@ -519,7 +591,6 @@
 import { computed, inject, toRefs, unref, type ComputedRef, type Ref } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import type {
-  ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
   EmptyAssigneePolicy,
@@ -534,15 +605,46 @@ import {
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
 } from '../templateAuthoring'
+import {
+  APPROVAL_ASSIGNEE_SOURCE_LABELS,
+  DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+  assigneeSourceRoster,
+  isRegisteredAssigneeSourceKind,
+  type ApprovalCapabilityRegistry,
+} from '../approvalCapabilityRegistry'
+import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
+import {
+  FIELD_PERMISSION_READONLY_HINT,
+  FIELD_PERMISSION_ROUTING_HINT,
+} from '../fieldPermissionHonestyCopy'
 
 const props = defineProps<{
   node: ApprovalNode
+  /** Lock-0 L0-2 capability registry. Optional — defaults to the shipped registry; tests override
+   *  it for the A-3 exact-set / A-4 unknown-kind fixtures. */
+  registry?: ApprovalCapabilityRegistry
 }>()
 
 const api = inject(APPROVAL_NODE_CONFIG_EDITOR_KEY)
 if (!api) {
   throw new Error('ApprovalGraphNodeConfigEditor requires APPROVAL_NODE_CONFIG_EDITOR_KEY')
 }
+
+// ── Lock-0 L0-1 tab presentation (optional — absent in the flat/list "辅助编辑模式" surface) ──
+const tabsCtx = inject(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, undefined)
+const isTabbed = computed(() => Boolean(tabsCtx?.active.value))
+const activeTabId = computed(() => (isTabbed.value ? tabsCtx!.activeTab.value : null))
+const showAssigneeSection = computed(() => activeTabId.value === null || activeTabId.value === 'assignee')
+const showFieldPermissionsSection = computed(
+  () => activeTabId.value === null || activeTabId.value === 'fieldPermissions',
+)
+
+// ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
+const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
+const assigneeSourceRosterForNode = computed(() => assigneeSourceRoster(registry.value, props.node.type))
+const operationPoliciesForNode = computed(
+  () => registry.value.operationPoliciesByNodeType[props.node.type] ?? [],
+)
 
 function unwrap<T>(value: ComputedRef<T> | Ref<T> | T): T {
   return unref(value as ComputedRef<T> | Ref<T> | T)
@@ -605,17 +707,59 @@ const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel
 const formatRoleLabel = api.formatRoleLabel
+// L0-6/D5 — see nodeConfigEditorContext.ts's `routingDriverFieldIds` doc comment: absent in the
+// shipped provide() object at this baseline, so this is an empty set and the routing hint never
+// renders (safe default) until that field is wired.
+const routingDriverFieldIds = computed(() => unwrap(api.routingDriverFieldIds ?? new Set<string>()))
 
-const APPROVAL_NODE_SOURCE_KINDS: { value: import('../../types/approval').ApprovalAssigneeSourceKind; label: string }[] = [
-  { value: 'static_user', label: '指定用户' },
-  { value: 'static_role', label: '指定角色' },
-  { value: 'requester', label: '发起人' },
-  { value: 'direct_manager', label: '直属上级' },
-  { value: 'dept_head', label: '部门主管' },
-  { value: 'continuous_managers', label: '连续多级上级' },
-  { value: 'manager_at_level', label: '指定层级上级' },
-  { value: 'form_field_user', label: '表单用户字段' },
-]
+// D1: the incidental shipped el-select strings ("指定用户"/"发起人"/"部门主管"/"表单用户字段" — an
+// independent hand-written array) are SUPERSEDED by the L0-2 capability registry
+// (assigneeSourceRosterForNode above), which carries the ratified parent §10.3 wording. No
+// hand-written roster is kept here anymore — the registry is the only source.
+
+/** L0-2 / A-4: the currently configured source kind may be a persisted value the registry does
+ *  not know about (legacy/unratified). Read-only in that case — never mutated, never flattened. */
+const isKnownAssigneeSourceKind = computed(() =>
+  isRegisteredAssigneeSourceKind(registry.value, props.node.type, approvalSourceKind(props.node.key)),
+)
+
+/** D2: configured summary echo. Reads the LIVE edit model (not `node.config`, which is the stale
+ *  pre-edit snapshot in list mode — `TemplateAuthoringView.vue`'s `graphPreviewNodes` is sourced
+ *  from `draft.preservedGraph`, not the live effective graph) so it stays correct in both
+ *  presentations.
+ *
+ *  Labels come from `APPROVAL_ASSIGNEE_SOURCE_LABELS` (the SAME D1-ratified §10.3 wording the
+ *  roster uses) — NOT from `assigneeSourceSummary` (`../assigneeSource.ts`), which is shipped copy
+ *  for a different, requester-facing audience (`nodeAssigneeSourceSummary`'s docstring) and still
+ *  carries the incidental pre-D1 strings ("发起人", "部门主管") that this echo would otherwise
+ *  contradict one line below the D1-labelled roster it belongs to. `static_user`/`static_role`/
+ *  `form_field_user` also avoid raw ids/field-ids — the same no-raw-id rule the existing read-only
+ *  `nodeConfigSummary` already applies to those three kinds (count/label only). */
+const configuredSourceSummaryLine = computed(() => {
+  if (!isKnownAssigneeSourceKind.value) return ''
+  const source = approvalNodeEditFor(props.node.key)?.assigneeSources[0]
+  if (!source) return ''
+  const label = APPROVAL_ASSIGNEE_SOURCE_LABELS[source.kind]
+  if (source.kind === 'static_user') {
+    const count = source.userIds?.length ?? 0
+    return `已配置：${label}${count ? `（${count} 人）` : '（未选择）'}`
+  }
+  if (source.kind === 'static_role') {
+    const count = source.roleIds?.length ?? 0
+    return `已配置：${label}${count ? `（${count} 个）` : '（未选择）'}`
+  }
+  if (source.kind === 'form_field_user') {
+    const field = userFields.value.find((entry) => entry.id === source.fieldId)
+    return `已配置：${label}：${field ? (field.label || '未命名字段') : '（未选择）'}`
+  }
+  if (source.kind === 'continuous_managers') {
+    return `已配置：${label}（${source.levels} 级）`
+  }
+  if (source.kind === 'manager_at_level') {
+    return `已配置：${label}（第 ${source.level} 级）`
+  }
+  return `已配置：${label}`
+})
 
 const { node } = toRefs(props)
 </script>
@@ -744,6 +888,28 @@ const { node } = toRefs(props)
 
 .template-authoring__approval-node-policy {
   margin-top: 8px;
+}
+
+/* Lock-0 L0-1: transparent section wrappers — no border/shadow of their own (parent §3.2). */
+.template-authoring__approval-node-section {
+  min-width: 0;
+}
+
+/* Lock-0 L0-2: radio-grid roster replacing the single el-select. Flat, no card-in-card. */
+.approval-node-source-roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  min-width: 0;
+}
+
+.approval-node-source-roster-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  cursor: pointer;
 }
 
 .template-authoring__placeholder-hint {

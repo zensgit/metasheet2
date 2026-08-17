@@ -74,6 +74,19 @@ export interface ApprovalNodeConfigEditorApi {
   approvalNodeFieldAccess: (nodeKey: string, fieldId: string) => NodeFieldAccess
   setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: NodeFieldAccess) => void
   nodeConfigSummary: (node: ApprovalNode) => string[]
+  /**
+   * Lock-0 L0-6/D5 — graph-wide field ids referenced by ANY node's `form_field_user` assignee
+   * source (not just the node currently being edited). OPTIONAL: absent in the shipped
+   * `TemplateAuthoringView.vue` `nodeConfigEditorApi` provide() object at this baseline (P1-A does
+   * not touch that file — see the P1-A PR description). When absent, the canvas field-permission
+   * editor's D5 routing hint never renders (safe default, no false positives) rather than
+   * approximating with node-local data, which would be a narrower predicate than the linear
+   * editor's ("this node's own source" vs. "any node's source") and could silently miss the common
+   * cross-node case. Wiring this is a one-line addition to that provide() object: expose the same
+   * computed the linear editor already has (`routingDriverFieldIds`, ~TemplateAuthoringView.vue:2302)
+   * through this field.
+   */
+  routingDriverFieldIds?: ComputedRef<Set<string>> | Ref<Set<string>> | Set<string>
   onUserSearch: (query: string) => void | Promise<void>
   directoryUsers: ComputedRef<Array<{ id: string }>> | Ref<Array<{ id: string }>> | Array<{ id: string }>
   directoryUsersLoading: ComputedRef<boolean> | Ref<boolean> | boolean
