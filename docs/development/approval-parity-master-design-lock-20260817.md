@@ -150,7 +150,7 @@ work until its named lock is drafted, reviewed, and explicitly ratified by the o
 |---|---|---|---|
 | Lock-0 | D0 interaction delta: named inspector tabs, validation count, and delayed fifth-step activation | **RATIFIED 2026-08-17** (`approval-lock0-d0-interaction-delta-20260817.md` §4) | owner |
 | Lock-1 | enterprise assignee kinds and resolution semantics | NOT DRAFTED | owner |
-| Lock-2 | organization controls, field-derived assignees, and department routing | NOT DRAFTED | owner |
+| Lock-2 | organization controls, field-derived assignees, and department routing | RATIFIED — `approval-lock2-org-controls-field-routing-20260817.md` §4 (2026-08-17, goal-set provenance; eight ODs per document recommendations) | owner |
 | Lock-3 | handler/business-operation node and its mutation boundary | NOT DRAFTED | owner |
 | Lock-4 | automatic decisions, fallback, dedup, and same-person flow policy | NOT DRAFTED | owner |
 | Lock-5 | per-node operation and member-action policy | NOT DRAFTED | owner |
