@@ -67,14 +67,21 @@ instance state, and the shipped machinery cannot carry it: `insertAutoApprovalEv
 `action:'approve'|'sign'`, `ApprovalAutoApprovalReason` is a closed approve-side union, no shipped path
 sets `status='rejected'` without a human actor, and the §0 terminal-effects row shows the owner already
 declining terminal automation once. If admitted it needs a NEW sentinel `system:auto-reject` (never
-reusing `system:auto-approval`), a reject-side audit path, and Lock-1's sentinel drop list (K3 / G-11)
-extended in the SAME slice — a cross-lock obligation named here, not discovered during implementation.
+reusing `system:auto-approval`) and a reject-side audit path. Cross-lock obligation, stated at the
+strength the evidence supports: Lock-1 K3's sentinel drop is DESIGN TEXT for an unimplemented kind —
+no shipped drop list exists, only the two literals at `:474` and `:3139` — so whichever form K3's drop
+takes must cover `system:auto-reject`. A `system:` prefix test covers it automatically; an enumerated
+set must be extended in the same slice.
 
 ### F4-B — Expanded empty-assignee fallback (审批人为空时)
 
 `EmptyAssigneePolicy` (`types/approval-product.ts:18`) grows from `'error' | 'auto-approve'` to add
-`'designated'`, with `emptyAssigneeUserIds: string[]` / `emptyAssigneeRoleIds: string[]` on the node
-config through typed pickers only (D0 §10.2). `'error'` stays the absent default.
+`'designated'`, whose targets ride ONE new top-level key
+`emptyAssigneeFallback?: { userIds?: string[]; roleIds?: string[] }`, filled through typed pickers only
+(D0 §10.2). `'error'` stays the absent default. One key, not two, because every added key must move
+four allowlists at once (§2.3): the backend rebuild is the binding one — `normalizeApprovalGraph`
+reconstructs an approval node's config from a FIXED field list (`ApprovalProductService.ts:1840-1855`)
+and silently drops anything else, so an unlisted key does not survive a save at all.
 
 **转审批管理员 is deferred, with a named blocker (OD-L4-3).** There is **no shipped reverse lookup from
 a permission code to a user set** at this baseline: `approval-templates:manage` /
@@ -164,7 +171,8 @@ tiers as invalidated by 内容变更 or 回退.
   or refute it. **Locked requirement:** any slice making a dedup tier authorable must FIRST scope the
   history the flags read to the current post-return round (the `nodeEntryEpoch` machinery at `:5273`,
   `:6764`, `:7195` already does this for the threshold tally at `:6975-6985`), or state in the authoring
-  copy that returns do not invalidate prior approvals. Shipping the switch without one is forbidden.
+  copy that returns do not invalidate prior approvals. Shipping the switch without one is forbidden —
+  which of the two is OD-L4-10, and gate D-3 cannot be written before it is decided.
 - *内容变更*: **vacuous at this baseline and therefore deliberately ungated.** `form_snapshot` is written
   once at create (`:5209`) and never updated; no mid-flight form-mutation surface exists, so a gate here
   would be green against nothing. It is locked instead as a FORWARD obligation: the first named
@@ -242,14 +250,22 @@ enforcement neutered, a named test must go red. A switch whose removal breaks no
 `getEffectiveAutoApprovalPolicy` return `null` for that node, the second skips the cascade for the whole
 instance. Extending both is a locked requirement with a mandatory gate (X-1).
 
-**2.3 Enum widening moves four frontend sites in ONE slice.** Widening `EmptyAssigneePolicy` (F4-B) or
-`ApprovalMode` hits: the linear hydration FLATTEN at `templateAuthoring.ts:500`
-(`config.emptyAssigneePolicy === 'auto-approve' ? … : 'error'` — a new value silently becomes
-`'error'`); the linear unsupported-config guard at `:755-787`, which checks KEY presence and never
-values, so it does not catch that flatten; and the two canvas validators at `approvalNodeEdit.ts:166-171`,
-which REJECT an out-of-enum value and block the save. The hazards differ and both must be named: the
-linear path flattens; the canvas path preserves the value (`:72`, `:96`) but refuses to save. Per master
-M4, unknown persisted values round-trip read-only and are never flattened to a default.
+**2.3 A widened enum and a new config key are DIFFERENT hazards; both move four sites in ONE slice.**
+
+*New KEY* (F4-B's `emptyAssigneeFallback`) must be added to all four allowlists together, or it is
+inert or worse: the backend rebuild's fixed field list (`ApprovalProductService.ts:1840-1855`) drops it
+on save; `BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS` (`templateAuthoring.ts:588-596`) and the
+linear `allowedConfigKeys` (`:757-770`) each force any template carrying it to READ-ONLY; and its
+nested shape needs its own key list beside `BACKEND_AUTO_APPROVAL_POLICY_KEYS` (`:613`). "Round-trips
+safely" is not the bar here — the bar is that the template stays EDITABLE (gate X-2).
+
+*New VALUE* (a widened `EmptyAssigneePolicy` / `ApprovalMode`) hits: the linear hydration FLATTEN at
+`templateAuthoring.ts:500` (`config.emptyAssigneePolicy === 'auto-approve' ? … : 'error'` — a new value
+silently becomes `'error'`); the linear guard at `:755-787`, which checks KEY presence and never values,
+so it cannot catch that flatten; and the two canvas validators at `approvalNodeEdit.ts:166-171`, which
+REJECT an out-of-enum value and block the save. The linear path flattens; the canvas path preserves the
+value (`:72`, `:96`) but refuses to save. Per master M4, unknown persisted values round-trip read-only
+and are never flattened to a default.
 
 **2.4 Values-free.** Every new error carries node key, source index, and policy name only — no person id,
 group membership, form value, or resolved manager identity. `APPROVAL_ASSIGNEE_EMPTY` keeps its shipped
@@ -275,7 +291,7 @@ collection (`apps/web/scripts/run-required-web-tests.sh`), never an ungated file
 | # | Gate | Assertion | Positive control (mandatory) |
 |---|---|---|---|
 | A-1 | F4-A placement | `approvalType` on start/end/cc/condition/parallel, and any non-`manual` node inside a parallel region, fail publish 400 | a non-`manual` linear approval node publishes — the rejection is placement-selected |
-| A-2 | F4-A auto-pass | an `auto_approve` node advances with reason `auto-node-approve`, resolves NO assignees, and still counts in `totalSteps` | the same graph with `approvalType` absent holds pending for a human |
+| A-2 | F4-A auto-pass | an `auto_approve` node advances with reason `auto-node-approve` and resolves NO assignees; the member-visible `currentStep` (`stepIndexForNode`, `ApprovalGraphExecutor.ts:908`, `:945`) lands on the NEXT node's index, not the skipped one — `totalSteps` is `approvalNodeOrder.length` (`:665-673`) and never reads config, so asserting it is unchanged proves nothing | the same graph with `approvalType` absent holds pending at that node with `currentStep` on it |
 | A-3 | F4-A no historical residue | after an `auto_approve` node, a later node assigned to any real user is NOT auto-approved by `dedupeHistoricalApprover` | a genuine human approval at that same position DOES trigger the dedup — the exemption is event-selected |
 | A-4 | F4-A auto-reject sentinel (only if OD-L4-2 admits it) | an auto-rejected instance records `system:auto-reject`, never `system:auto-approval`, and Lock-1's sentinel drop list rejects it too | a human reject in the same fixture records the human |
 | B-1 | F4-B designated fallback | an empty primary source with `'designated'` dispatches to the designated set at BOTH executor sites (initial resolution and `resolveAfterApprove`) | `'error'` on the identical fixture still throws `APPROVAL_ASSIGNEE_EMPTY` |
@@ -286,15 +302,16 @@ collection (`apps/web/scripts/run-required-web-tests.sh`), never an ungated file
 | C-3 | F4-C absent target | with no manager in the snapshot the seat is not produced and `emptyAssigneePolicy` governs; it never falls back to self-approve | a snapshot WITH a manager produces the transferred seat |
 | D-1 | F4-D tier equivalence | each of the three tiers produces its documented outcome on a shared fixture; 不去重 auto-approves nothing | each tier's own positive control approves where it should |
 | D-2 | F4-D projection safety | switching tiers never clears `mergeWithRequester` or `actorMode`; the both-ON state renders read-only and round-trips unchanged | a single-tier value renders editable — read-only is state-selected |
-| D-3 | F4-D return invalidation | the F4-D 回退 trace executed end to end: A→B, same approver, `mergeAdjacentApprover` on, return to A — assert the ratified behavior (round-scoped ⇒ A stays pending) | the identical flow WITHOUT a return still auto-merges at B — the change is return-selected |
+| D-3 | F4-D return invalidation | the F4-D 回退 trace executed end to end: A→B, same approver, `mergeAdjacentApprover` on, return to A. Under OD-L4-10(a) assert A stays PENDING (history round-scoped); under (b) assert A auto-approves AND the authoring copy states that returns do not invalidate. The gate cannot be written before OD-L4-10 is decided | the identical flow WITHOUT a return still auto-merges at B — the change is return-selected |
 | D-4 | F4-D K3 exemption (only if Lock-1 lands) | a `prior_node_approver`-derived assignment is consumed by neither history flag | a `static_user` assignment for the SAME person in the same fixture IS consumed — the exemption is kind-selected |
 | E-1 | F4-E transfer | a departure signal moves the departed user's active seats to the resolved manager, same epoch, with the `system:approval-departure` sentinel and an audit row | a non-departed assignee's seats are untouched in the same run |
 | E-2 | F4-E fail-closed | with no manager resolvable the assignment is UNCHANGED; no approval, rejection, or drop occurs | the resolvable case in the same fixture DOES transfer |
 | E-3 | F4-E delegation | a seat already substituted by delegation is not transferred again on the delegator's departure | the delegatee's OWN departure does transfer that seat |
 | X-1 | Enable-predicate | a node carrying ONLY a new `AutoApprovalPolicy` field executes that policy | a node with no policy at all still skips the cascade — proving the predicate widened rather than disappeared |
-| X-2 | Unknown value round-trip | a persisted `emptyAssigneePolicy` / `samePersonPolicy` outside the frontend enum renders read-only and saves unchanged on BOTH the linear and canvas paths | a known value renders editable — the branch is value-selected |
-| X-3 | Values-free | every new error path's message and details carry no person id, membership, or form value | assert the SAME path carries the node key — the check is not passing on an empty payload |
-| X-4 | Enforcement is real (M7) | for every rendered switch, neutering its server enforcement turns a named test red | the unneutered build passes that same test |
+| X-2 | New key stays editable | a template carrying `emptyAssigneeFallback` survives a backend save (not dropped by `ApprovalProductService.ts:1840-1855`) and stays EDITABLE — not merely round-trip-safe — in BOTH editors | a template with a genuinely unknown config key still goes read-only, proving the allowlist widened rather than the guard being removed |
+| X-3 | Unknown value round-trip | a persisted `emptyAssigneePolicy` / `samePersonPolicy` outside the frontend enum renders read-only and saves unchanged on BOTH the linear and canvas paths | a known value renders editable — the branch is value-selected |
+| X-4 | Values-free | every new error path's message and details carry no person id, membership, or form value | assert the SAME path carries the node key — the check is not passing on an empty payload |
+| X-5 | Enforcement is real (M7) | for every rendered switch, neutering its server enforcement turns a named test red | the unneutered build passes that same test |
 
 ## 4. Owner ratification block
 
@@ -339,6 +356,10 @@ not re-proposed):
            effect, resolver stays pure · (b) at dispatch via a live read [breaks Lock-1 §2.1 purity
            for every approval] · (c) at action-attempt [the departed user can never act, so the task
            deadlocks until an admin intervenes — today's behavior]
+  OD-L4-10 F4-D 回退 invalidation — (a)[R] scope the history the flags read to the current post-return
+           round using the existing nodeEntryEpoch machinery · (b) leave the behavior as-is and state
+           in the authoring copy that a return does not invalidate prior approvals. Gate D-3 cannot
+           be written until this is decided; shipping a dedup switch without either is forbidden.
 
 Deltas:
 Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design
