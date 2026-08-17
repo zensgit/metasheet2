@@ -87,6 +87,26 @@ function gateThenHandlerGraph(handlerConfig: Record<string, unknown>) {
   }
 }
 
+// approval_A(GATE) → handler_H(会签 [H1,H2]) → approval_B(FINAL). Exercises R-3 (the return-trail
+// walker passing THROUGH a handler) and G-12's re-entry control (a re-entered handler round).
+function threeStageGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: 's', config: {} },
+      { key: 'approval_A', type: 'approval', name: 'A', config: { assigneeSources: staticUser([GATE]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'handler_H', type: 'handler', name: '办理', config: { assigneeSources: staticUser([H1, H2]), handlerMode: 'all' } },
+      { key: 'approval_B', type: 'approval', name: 'B', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: 'e', config: {} },
+    ],
+    edges: [
+      { key: 's2a', source: 'start', target: 'approval_A' },
+      { key: 'a2h', source: 'approval_A', target: 'handler_H' },
+      { key: 'h2b', source: 'handler_H', target: 'approval_B' },
+      { key: 'b2e', source: 'approval_B', target: 'end' },
+    ],
+  }
+}
+
 type ErrorBody = { code?: string; error?: { code?: string; message?: string; details?: Record<string, unknown> } }
 function errorCode(body: ErrorBody): string | undefined {
   return body.code ?? body.error?.code
@@ -518,6 +538,56 @@ describeIfDatabase('Lock-3 handler node — real-DB authoring/dispatch acceptanc
     expect(handlerRow?.nodeType).toBe('handler')
     const gateRow = route.find((r) => r.nodeKey === 'approval_gate')
     expect(gateRow?.nodeType).toBe('approval')
+  })
+
+  // ── R-3 + G-12 re-entry control — return walks THROUGH a handler; a re-entered round is fresh ─
+  it('R-3/G-12: a return-target trail walks through a handler (200 to approval_A); the re-entered handler round ignores prior-round submissions', async () => {
+    const tid = await createPublished(`${KEYPFX}-reentry`, threeStageGraph())
+    const iid = await createInstance(tid)
+    // Approve A → the handler activates. Capture its round-1 activation epoch.
+    expect((await act(iid, gateTok, { action: 'approve' })).status).toBe(200)
+    const round1Seats = (await activeAssignees(iid)).filter((s) => s.node_key === 'handler_H')
+    expect(round1Seats.map((s) => s.assignee_id).sort()).toEqual([H1, H2].sort())
+    const epoch1 = Number(round1Seats[0].entry_epoch)
+    // Both 会签 seats submit → advance to approval_B.
+    expect((await act(iid, h1Tok, { action: 'handle' })).status).toBe(200)
+    expect((await act(iid, h2Tok, { action: 'handle' })).status).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('approval_B')
+    // R-3: FINAL (holding the approval_B seat) returns to approval_A — the trail walker
+    // (listVisitedApprovalNodeKeysUntil) passes THROUGH handler_H without a phantom cycle.
+    const ret = await act(iid, finalTok, { action: 'return', targetNodeKey: 'approval_A' })
+    expect(ret.status, await ret.clone().text()).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('approval_A')
+    // Approve A AGAIN → the handler RE-activates: fresh seats, a HIGHER epoch than round 1.
+    expect((await act(iid, gateTok, { action: 'approve' })).status).toBe(200)
+    const round2Seats = (await activeAssignees(iid)).filter((s) => s.node_key === 'handler_H')
+    expect(round2Seats.map((s) => s.assignee_id).sort()).toEqual([H1, H2].sort())
+    expect(Number(round2Seats[0].entry_epoch)).toBeGreaterThan(epoch1)
+    // G-12 CONTROL: H1 submits ONCE in the new round → the node STAYS pending; the two prior-round
+    // 'handle' records must NOT satisfy the new 会签 round. Then H2 submits → advance.
+    expect((await act(iid, h1Tok, { action: 'handle' })).status).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('handler_H')
+    expect((await act(iid, h2Tok, { action: 'handle' })).status).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('approval_B')
+  })
+
+  // ── Handler as the LAST node — terminal to approved, submit-only (never an 'approve' verb) ────
+  it('a handler as the last node completes the instance to approved via handle only (never an approve verb attributed to it)', async () => {
+    const tid = await createPublished(`${KEYPFX}-terminal`, gateThenHandlerGraph({ assigneeSources: staticUser([H1]) }))
+    const iid = await createInstance(tid)
+    expect((await act(iid, gateTok, { action: 'approve' })).status).toBe(200)
+    expect((await instanceRow(iid)).current_node_key).toBe('handler_h')
+    expect((await act(iid, h1Tok, { action: 'handle', comment: '打款完成' })).status).toBe(200)
+    const row = await instanceRow(iid)
+    expect(row.status).toBe('approved')
+    expect(row.current_node_key).toBeNull()
+    // Exactly one action='handle' row, and NO 'approve' row attributed to the handler node (§2.1 —
+    // a handler submission is never recorded as an approval).
+    const handleRows = (await records(iid, 'handle'))
+    expect(handleRows).toHaveLength(1)
+    expect(handleRows[0].metadata?.nodeKey).toBe('handler_h')
+    const approveRowsAtHandler = (await records(iid, 'approve')).filter((r) => r.metadata?.nodeKey === 'handler_h')
+    expect(approveRowsAtHandler).toHaveLength(0)
   })
 
   // ── G-18 — values-free errors ──────────────────────────────────────────────────────────────────
