@@ -174,7 +174,14 @@ describe('dept-head chain walk (resolveApprovalRequesterOrgRelations + includeDe
     expect(rel.deptHeadChainIds).toEqual(['u-h1', 'u-h2'])
   })
 
-  it('excludes the requester themselves on LOCAL id — the level is consumed (walk continues) but nothing is pushed', async () => {
+  it('excludes the requester themselves via the EXTERNAL-id filter (pre-resolution) — the level is consumed (walk continues) but nothing is pushed', async () => {
+    // Correction (P2 fix round, 20260817): this test's earlier title claimed to cover the
+    // LOCAL-id guard (the `localId !== requesterLocalId` conjunct in `resolveDeptHeadChain`),
+    // but its fixture uses `e-r` — the requester's own EXTERNAL id — which is removed by the
+    // pre-resolution `.filter((external) => external !== requesterExternalId)` BEFORE the
+    // local-id check ever runs. It genuinely proves the external-id filter and the
+    // continue-past-empty posture; it does NOT exercise the local-id guard. See the next test
+    // for that.
     const hopped: string[] = []
     const query = makeDeptOrgQuery({
       ...BASE,
@@ -185,6 +192,35 @@ describe('dept-head chain walk (resolveApprovalRequesterOrgRelations + includeDe
       // NOTE: e-r is the requester's OWN external id, filtered out by the per-level exclusion
       // before resolution is even attempted (byte-identical to the single-level dept_head rule).
       localByExternalId: { 'e-h2': 'u-h2' },
+      onDeptHop: (deptId) => hopped.push(deptId),
+    })
+    const rel = await resolveApprovalRequesterOrgRelations('u-r', query, { includeDeptHeadChain: true })
+    expect(rel.deptHeadChainIds).toEqual(['u-h2'])
+    expect(hopped).toEqual(['d1', 'd2'])
+  })
+
+  it('excludes the requester\'s OWN local id when reached via a DIFFERENT (alt-account) external id — the `localId !== requesterLocalId` guard, not the external-id filter above', async () => {
+    // Reachability (multi-account org, e.g. DingTalk): the requester has TWO directory accounts
+    // linked to the SAME local user — their normal external id (`e-r`, excluded above by the
+    // filter) and an alt-account external id (`e-r-alt`) that is unrelated to `e-r` but resolves
+    // to the SAME local user. `e-r-alt` is listed FIRST in an ancestor dept's manager list, ahead
+    // of the department's real (different-person) head `e-h1`. The inner loop resolves `e-r-alt`
+    // to a local id on its first iteration and `break`s immediately — `e-h1` is never even
+    // queried — so the `localId !== requesterLocalId` self-exclusion is the ONLY thing standing
+    // between the requester's own alt-account local id and the chain. Mutating away that conjunct
+    // makes this level push `u-r` (the requester) instead of contributing nothing, and the walk
+    // still continues to d2 either way — proving the guard, not merely the continue-past-empty
+    // posture.
+    const hopped: string[] = []
+    const query = makeDeptOrgQuery({
+      ...BASE,
+      departments: {
+        d1: { managerExternalIds: ['e-r-alt', 'e-h1'], parentExternalId: 'd2' },
+        d2: { managerExternalIds: ['e-h2'], parentExternalId: null },
+      },
+      // e-r-alt is a DIFFERENT external id from the requester's own (e-r) — it survives the
+      // pre-resolution external-id filter — but resolves to the SAME local user as the requester.
+      localByExternalId: { 'e-r-alt': BASE.requesterLocalId, 'e-h1': 'u-h1', 'e-h2': 'u-h2' },
       onDeptHop: (deptId) => hopped.push(deptId),
     })
     const rel = await resolveApprovalRequesterOrgRelations('u-r', query, { includeDeptHeadChain: true })
