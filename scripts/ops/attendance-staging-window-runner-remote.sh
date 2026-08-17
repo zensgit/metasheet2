@@ -2002,6 +2002,86 @@ action_soak_flags() {
   log "soak-flags OK: W4=${SOAK_ORG1_SHORT},${SOAK_ORG2_SHORT},${SOAK_ORG3_SHORT} W7=${SOAK_ORG3_SHORT} live on the backend"
 }
 
+# --- soak daily-batch guard + halt classification (testable units; #4932 follow-up) ------
+# soak_batch_guard_entries <config_path> — prints "orgId<TAB>dailyCapTimezone" per entry;
+# fails (non-zero) if any entry lacks either field (stale-config fail-closed, round-3
+# P2-R3-1 contract).
+soak_batch_guard_entries() {
+  python3 -c '
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+for e in cfg["entries"]:
+    org = e.get("orgId"); tz = e.get("dailyCapTimezone")
+    if not org or not tz:
+        sys.stderr.write("entry missing orgId/dailyCapTimezone\n"); sys.exit(1)
+    print(f"{org}\t{tz}")
+' "$1"
+}
+
+# soak_batch_guard_check <config_path> <marker_path> <override(true|false)> — prints a
+# refusal message and returns 1 if ANY config org already ran a batch on its OWN current
+# local day (whole-batch refusal — Codex P1: per-org day boundaries diverge across the three
+# supported org timezones). Malformed or legacy marker content refuses fail-closed. Returns
+# 0 (silent) when the batch may proceed.
+soak_batch_guard_check() {
+  local config_path="$1" marker="$2" override="$3"
+  local line org tz today rec_day entries
+  entries="$(soak_batch_guard_entries "$config_path")" \
+    || { echo "config at ${config_path} is missing orgId/dailyCapTimezone — it predates the org-day cap contract; re-run action=soak-seed first"; return 1; }
+  [[ -f "$marker" ]] || return 0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if ! [[ "$line" =~ ^[0-9a-fA-F-]+=[A-Za-z0-9_/+-]+=[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      echo "unrecognized batch-marker line '${line}' in ${marker} (legacy or corrupted format) — refusing fail-closed; inspect and remove the marker manually if a batch is genuinely due"
+      return 1
+    fi
+  done < "$marker"
+  while IFS=$'\t' read -r org tz; do
+    today="$(TZ="$tz" date +%Y-%m-%d)"
+    rec_day="$(grep -m1 "^${org}=" "$marker" | awk -F= '{print $3}')"
+    if [[ -n "$rec_day" && "$rec_day" == "$today" && "$override" != "true" ]]; then
+      echo "org ${org:0:8} already ran (or started) a batch on its local day ${today} (${tz}) — a second same-day batch lands duplicate sessions on the same work date (§4.2-critical review_required); the WHOLE batch is refused. Wait for every org's next local day, or pass soak_opts allow_same_day_rerun=true for a deliberate retry (accepting that risk for already-punched users)"
+      return 1
+    fi
+  done <<< "$entries"
+  return 0
+}
+
+# soak_batch_guard_stamp <config_path> <marker_path> — records ONE line per org:
+# "<orgId>=<tz>=<its-current-local-day>" (whole-file overwrite; only same-day lines matter).
+soak_batch_guard_stamp() {
+  local config_path="$1" marker="$2"
+  local org tz
+  : > "$marker"
+  while IFS=$'\t' read -r org tz; do
+    printf '%s=%s=%s\n' "$org" "$tz" "$(TZ="$tz" date +%Y-%m-%d)" >> "$marker"
+  done < <(soak_batch_guard_entries "$config_path")
+}
+
+# soak_run_classify <haltedReason> <total_clean> <total_attempts> <punch_target> — the ONE
+# halt classifier (Codex P2: daily_capacity_exhausted with scattered incidents must never
+# print ok — dailyCounts increments on EVERY attempt, so capacity exhaustion alone proves
+# nothing about cleanliness). ok ONLY for a clean halt with zero incidents and the target
+# reached; FAIL for the consecutive-incident halt; WARN for everything else, including
+# non-numeric tallies (fail-closed).
+soak_run_classify() {
+  local halted="$1" clean="$2" attempts="$3" target="$4"
+  if ! [[ "$clean" =~ ^[0-9]+$ && "$attempts" =~ ^[0-9]+$ && "$target" =~ ^[0-9]+$ ]]; then
+    echo "WARN"
+    return 0
+  fi
+  local incidents=$(( attempts - clean ))
+  case "$halted" in
+    max_consecutive_incidents) echo "FAIL" ;;
+    targets_met|daily_capacity_exhausted)
+      if (( incidents > 0 )); then echo "WARN"
+      elif (( clean < target )); then echo "WARN"
+      else echo "ok"; fi
+      ;;
+    *) echo "WARN" ;;
+  esac
+}
+
 action_soak_run() {
   soak_validate_opts
   local punch_target config_path
@@ -2061,31 +2141,28 @@ action_soak_run() {
   done
   IFS="$IFS_SAVE"
 
-  # SAME-DAY RE-DISPATCH GUARD (gate round-2 P2-1): the generator's daily cap is
-  # per-process, so a second soak-run inside the same org-calendar day would land a second
-  # pair on the SAME work date — exactly the duplicate-session shape that floods
-  # §4.2-critical review_required diffs. The org day is derived from the FIRST config
-  # entry's dailyCapTimezone (all soak orgs share one); override only for a deliberate
-  # halt-retry with soak_opts allow_same_day_rerun=true (documented critical-shape risk).
-  local batch_tz batch_day last_batch_day
-  batch_tz="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entries"][0]["dailyCapTimezone"])' "$config_path" 2>/dev/null)" \
-    || fail "config at ${config_path} carries no dailyCapTimezone — it predates the org-day cap contract and would silently revert the 2/day cap and the same-day guard to UTC days; re-run action=soak-seed first"
-  batch_day="$(TZ="$batch_tz" date +%Y-%m-%d)"
-  local batch_marker="${SOAK_PERSIST_DIR}/soak-run-last-batch-day"
-  if [[ -f "$batch_marker" ]]; then
-    last_batch_day="$(cat "$batch_marker")"
-    if [[ "$last_batch_day" == "$batch_day" && "$(soak_opt allow_same_day_rerun false)" != "true" ]]; then
-      fail "a soak-run batch already ran (or started) on ${batch_day} (${batch_tz}) — a second same-day batch lands duplicate sessions on the same work date (§4.2-critical review_required). Wait for the next org-calendar day, or pass soak_opts allow_same_day_rerun=true for a deliberate retry (accepting that risk for already-punched users)"
-    fi
+  # SAME-DAY RE-DISPATCH GUARD (gate round-2 P2-1; Codex post-merge review P1): the
+  # generator's daily cap is per-process, so a second soak-run inside the same org-calendar
+  # day would land a second pair on the SAME work date — the duplicate-session shape that
+  # floods §4.2-critical review_required diffs. The seeder explicitly supports THREE
+  # independent org timezones, so the marker is a PER-ORG closed set ({orgId}={tz}={localDay}
+  # lines) and the batch is refused WHOLE if ANY org already ran on its own current local
+  # day — a first-entry-only derivation would admit a second batch the moment org1 crossed
+  # midnight while org2/org3 had not. Override only for a deliberate halt-retry with
+  # soak_opts allow_same_day_rerun=true (documented critical-shape risk).
+  mkdir -p "$SOAK_PERSIST_DIR"
+  local batch_marker="${SOAK_PERSIST_DIR}/soak-run-last-batch-days"
+  local guard_msg
+  if ! guard_msg="$(soak_batch_guard_check "$config_path" "$batch_marker" "$(soak_opt allow_same_day_rerun false)")"; then
+    fail "${guard_msg}"
   fi
-  # Written BEFORE the generator runs: even a PARTIAL batch punched some users, so a bare
-  # same-day retry would duplicate exactly those — burning the day on any attempt is the
-  # fail-closed choice; the override above is the deliberate escape hatch.
-  printf '%s\n' "$batch_day" > "$batch_marker"
+  # Stamped BEFORE the generator runs: even a PARTIAL batch punched some users, so a bare
+  # same-day retry would duplicate exactly those — burning each org's day on any attempt is
+  # the fail-closed choice; the override above is the deliberate escape hatch.
+  soak_batch_guard_stamp "$config_path" "$batch_marker"
 
   # Log every synthetic user in through the REAL login route; tokens go ONLY into a 0600
   # host temp config (deleted below) and are never echoed (per-user output is id + ok/fail).
-  mkdir -p "$SOAK_PERSIST_DIR"
   local run_config_host
   run_config_host="$(mktemp "${SOAK_PERSIST_DIR}/.soak-run-config.XXXXXX")"
   cleanup_soak_run() {
@@ -2186,25 +2263,24 @@ PY
     echo "halted_reason=${halted}"
     echo "http_level_clean=${total_clean}"
     echo "attempts=${total_attempts}"
-    echo "note=haltedReason is LOAD-BEARING: targets_met (this batch met its targets) and daily_capacity_exhausted (every user completed its one daily pair; cumulative criteria accrue across days) are the clean outcomes; the HTTP tally upper-bounds (never equals) the DB-level clean-punch count — soak-status Q1-Q4 are the authoritative counts"
-    # gate round-2 P2-3: exactly the two clean halts print ok; incidents FAIL the job; every
-    # other halt (stall, duration, safety cap) prints WARN — recorded, non-alert, but never
-    # dressed up as a clean batch.
-    case "$halted" in
-      targets_met|daily_capacity_exhausted) echo "result=ok" ;;
-      max_consecutive_incidents) echo "result=FAIL" ;;
-      *) echo "result=WARN" ;;
-    esac
+    echo "note=haltedReason is LOAD-BEARING: targets_met and daily_capacity_exhausted are clean outcomes ONLY with zero incidents and the target reached (Codex P2: capacity counts every ATTEMPT, so exhaustion alone proves nothing about cleanliness); the HTTP tally upper-bounds (never equals) the DB-level clean-punch count — soak-status Q1-Q4 are the authoritative counts"
+    if [[ "$total_clean" =~ ^[0-9]+$ && "$total_attempts" =~ ^[0-9]+$ ]]; then
+      echo "incidents=$(( total_attempts - total_clean ))"
+    else
+      echo "incidents=unknown"
+    fi
+    # gate round-2 P2-3 + Codex P2: ONE classifier decides — ok only for a clean halt with
+    # zero incidents and target reached; incidents-halt FAILs; everything else WARNs.
+    echo "result=$(soak_run_classify "$halted" "$total_clean" "$total_attempts" "$punch_target")"
   } > "${OUTPUT_DIR}/summary.txt"
   if [[ "$halted" == "max_consecutive_incidents" ]]; then
     fail "generator halted on consecutive non-clean responses (haltedReason=max_consecutive_incidents) — alert-class outcome, see soak-run.log + soak-run-summary.json"
   fi
-  case "$halted" in
-    targets_met|daily_capacity_exhausted) ;;
-    *)
-      log "soak-run WARN: haltedReason=${halted} is neither clean outcome — see summary.txt (a same-day retry needs soak_opts allow_same_day_rerun=true and accepts the duplicate-session risk for already-punched users)"
-      ;;
-  esac
+  local batch_result
+  batch_result="$(soak_run_classify "$halted" "$total_clean" "$total_attempts" "$punch_target")"
+  if [[ "$batch_result" != "ok" ]]; then
+    log "soak-run ${batch_result}: haltedReason=${halted} clean=${total_clean}/${punch_target} — see summary.txt (a same-day retry needs soak_opts allow_same_day_rerun=true and accepts the duplicate-session risk for already-punched users)"
+  fi
   log "soak-run done: haltedReason=${halted} http_clean=${total_clean}/${punch_target} (DB-level counts come from action=soak-status, never from this tally)"
 }
 

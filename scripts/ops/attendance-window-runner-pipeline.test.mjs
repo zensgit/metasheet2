@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -530,8 +530,10 @@ function extractSoakSlices(remote) {
     // The seed slice deliberately spans its helpers (SQL writer, per-org report, W4/W7
     // posture walks) through the end of action_soak_seed — they are one action's body.
     seed: sliceBetween(remote, 'soak_seed_write_org_sql() {', '\naction_soak_flags() {', 'soak-seed'),
-    flags: sliceBetween(remote, 'action_soak_flags() {', '\naction_soak_run() {', 'soak-flags'),
-    run: sliceBetween(remote, 'action_soak_run() {', '\nsoak_status_scalar() {', 'soak-run'),
+    flags: sliceBetween(remote, 'action_soak_flags() {', '\n# --- soak daily-batch guard', 'soak-flags'),
+    // The run slice deliberately spans the guard/classifier helper functions ahead of
+    // action_soak_run — they are that action's testable units.
+    run: sliceBetween(remote, '# --- soak daily-batch guard', '\nsoak_status_scalar() {', 'soak-run'),
     status: sliceBetween(remote, 'soak_status_scalar() {', '\n# --- main', 'soak-status'),
   }
 }
@@ -963,38 +965,66 @@ function assertSoakContract({ remote, workflow }) {
     'soak-run must track the last batch day host-side',
   )
   assert.ok(
-    slices.run.includes('carries no dailyCapTimezone'),
-    'soak-run must refuse a config without dailyCapTimezone (stale-config silent revert)',
+    slices.run.includes('is missing orgId/dailyCapTimezone'),
+    'the guard must refuse a config without orgId/dailyCapTimezone (stale-config silent revert)',
   )
   assert.doesNotMatch(
     slices.run,
-    /\.get\("dailyCapTimezone"/,
-    'the runner batch-day derivation must have no UTC default',
+    /\.get\("dailyCapTimezone", ?"/,
+    'the batch-day derivation must have no fallback default (a defaulted .get is the silent-revert channel)',
   )
   assert.ok(
     slices.run.includes('allow_same_day_rerun'),
     'the same-day guard must have exactly the explicit override, never a silent bypass',
   )
-  const guardIdx = slices.run.indexOf('a soak-run batch already ran')
-  const markerWriteIdx = slices.run.indexOf('> "$batch_marker"')
+  // Codex post-merge P1: the marker is a PER-ORG closed set and the batch refuses WHOLE if
+  // ANY org already ran on its own local day — a first-entry-only derivation would admit a
+  // second batch the moment org1 crossed midnight while org2/org3 had not.
+  assert.ok(
+    slices.run.includes('soak_batch_guard_check() {'),
+    'the per-org same-day guard function must exist',
+  )
+  assert.match(
+    slices.run,
+    /while IFS=\$'\\t' read -r org tz; do\n\s+today="\$\(TZ="\$tz" date \+%Y-%m-%d\)"/,
+    'the guard must derive TODAY per org from that orgʼs own timezone (never entries[0] alone)',
+  )
+  assert.doesNotMatch(
+    slices.run,
+    /entries"\]\[0\]\["dailyCapTimezone"\]/,
+    'no first-entry-only timezone derivation may remain in the batch guard path',
+  )
+  const guardIdx = slices.run.indexOf('soak_batch_guard_check "$config_path" "$batch_marker"')
+  const markerWriteIdx = slices.run.indexOf('soak_batch_guard_stamp "$config_path" "$batch_marker"')
   const generatorRunIdx = slices.run.indexOf('--punches-per-user-per-day 2')
-  assert.ok(guardIdx !== -1 && markerWriteIdx !== -1, 'the same-day guard and marker write must exist')
+  assert.ok(guardIdx !== -1 && markerWriteIdx !== -1, 'the same-day guard check and per-org stamp must exist')
   assert.ok(
     guardIdx < markerWriteIdx && markerWriteIdx < generatorRunIdx,
-    'the guard must run before the marker write, and the marker must be written BEFORE the generator runs',
+    'the guard must run before the stamp, and the stamp must land BEFORE the generator runs',
   )
-  // Gate round-2 P2-3: exactly the two clean halts print ok; incidents FAIL; all others WARN.
+  // Gate round-2 P2-3 + Codex post-merge P2: ONE classifier decides the batch result — ok
+  // requires a clean halt AND zero incidents AND target reached; capacity exhaustion alone
+  // proves nothing (dailyCounts increments on every ATTEMPT).
   assert.ok(
-    slices.run.includes('targets_met|daily_capacity_exhausted) echo "result=ok"'),
-    'only the two clean halt reasons may print result=ok',
+    slices.run.includes('soak_run_classify() {'),
+    'the halt classifier function must exist',
+  )
+  assert.match(
+    slices.run,
+    /targets_met\|daily_capacity_exhausted\)\n\s+if \(\( incidents > 0 \)\); then echo "WARN"/,
+    'a clean-halt batch with ANY incidents must classify WARN, never ok',
   )
   assert.ok(
-    slices.run.includes('max_consecutive_incidents) echo "result=FAIL"'),
-    'the incident halt must print result=FAIL',
+    slices.run.includes('max_consecutive_incidents) echo "FAIL"'),
+    'the incident halt must classify FAIL',
   )
   assert.ok(
-    slices.run.includes('*) echo "result=WARN"'),
-    'every other halt reason (stall, duration, safety cap) must print result=WARN, never ok',
+    slices.run.includes('*) echo "WARN"'),
+    'every other halt reason (stall, duration, safety cap) must classify WARN, never ok',
+  )
+  assert.ok(
+    slices.run.includes('echo "result=$(soak_run_classify "$halted" "$total_clean" "$total_attempts" "$punch_target")"'),
+    'the summary result line must come from the classifier, never an inline case',
   )
   assert.ok(
     slices.run.includes('--confirm I_UNDERSTAND_THIS_DRIVES_SYNTHETIC_STAGING_TRAFFIC_ONLY'),
@@ -1352,7 +1382,9 @@ test('MUTATION (P2-4): deleting the soak-run live-allowlist coverage loops turns
   const mutatedRun = slices.run
     .replace(w4Loop, 'DELETED_W4_COVERAGE_MESSAGE')
     .replace(w7Loop, 'DELETED_W7_COVERAGE_MESSAGE')
-  const mutated = original.replace(slices.run, mutatedRun)
+  // Replacement-FUNCTION form: the run slice now contains bash `$'` sequences, which
+  // String.replace treats as special replacement patterns and silently corrupts the file.
+  const mutated = original.replace(slices.run, () => mutatedRun)
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
@@ -1524,28 +1556,169 @@ test('MUTATION (cadence): reverting the runner to the 8/day invocation turns the
   )
 })
 
-test('MUTATION (same-day guard): removing the batch-day refusal turns the soak contract red', () => {
+test('MUTATION (same-day guard): removing the guard-check call turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
-  const anchor = 'a soak-run batch already ran'
-  assert.ok(original.includes(anchor), 'mutation anchor must hit the same-day refusal')
-  const mutated = original.replace(anchor, 'a prior batch note:')
+  const anchor = 'soak_batch_guard_check "$config_path" "$batch_marker"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the guard-check call')
+  const mutated = original.replace(anchor, 'true # guard skipped')
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
-    /guard must run before the marker write|same-day guard/,
+    /guard check and per-org stamp must exist|guard must run before the stamp/,
   )
 })
 
-test('MUTATION (halt classes): letting a stall halt print result=ok turns the soak contract red', () => {
+test('MUTATION (same-day guard): reverting to a first-entry-only timezone derivation turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
-  const anchor = '*) echo "result=WARN"'
-  assert.ok(original.includes(anchor), 'mutation anchor must hit the WARN default case')
-  const mutated = original.replace(anchor, '*) echo "result=ok"')
+  // The Codex P1 shape: derive one global day from entries[0] instead of per-org days.
+  const anchor = '  while IFS=$\'\\t\' read -r org tz; do\n    today="$(TZ="$tz" date +%Y-%m-%d)"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the per-org day loop')
+  const mutated = original.replace(
+    anchor,
+    () => '  tz="$(soak_batch_guard_entries "$config_path" | head -1 | cut -f2)"\n  today="$(TZ="$tz" date +%Y-%m-%d)"\n  while IFS=$\'\\t\' read -r org _ignored_tz; do',
+  )
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
-    /result=WARN, never ok/,
+    /orgʼs own timezone/,
   )
+})
+
+test('MUTATION (halt classes): letting an incident-bearing clean halt classify ok turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = 'if (( incidents > 0 )); then echo "WARN"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the incidents branch')
+  const mutated = original.replace(anchor, 'if (( incidents > 999999 )); then echo "WARN"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /ANY incidents must classify WARN/,
+  )
+})
+
+test('MUTATION (halt classes): letting a stall halt classify ok turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = '*) echo "WARN"'
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the WARN default case')
+  const mutated = original.replace(anchor, '*) echo "ok"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /classify WARN, never ok/,
+  )
+})
+
+/**
+ * EXECUTABLE legs — extract the REAL guard/classifier functions from the shipped runner and
+ * drive them with fixture configs/markers (the Codex P1 three-timezone cross-day
+ * counterexample, and the P2 interleaved clean/fail classification matrix). Extraction runs
+ * the shipped bytes, so a behavioural regression cannot hide behind an intact source pin.
+ */
+function extractRunnerFunctions(names) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  return names
+    .map((name) => {
+      const m = remote.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?\\n\\}`, 'm'))
+      assert.ok(m, `${name} must exist in the runner`)
+      return m[0]
+    })
+    .join('\n')
+}
+
+test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch that a first-entry derivation would admit', () => {
+  const fns = extractRunnerFunctions(['soak_batch_guard_entries', 'soak_batch_guard_check', 'soak_batch_guard_stamp'])
+  // Kiritimati (UTC+14) and Pago Pago (UTC-11) are 25h apart: their local calendar days are
+  // NEVER both equal to their values one real day apart, so "org1 crossed midnight, org2
+  // has not" is constructible at ANY wall-clock moment: stamp all orgs, then rewind ONLY
+  // org1's line one day. A first-entry-only guard (keyed on org1) would see yesterday!=today
+  // and ADMIT the batch; the per-org guard must refuse on org2/org3.
+  const dir = mkdtempSync(join(tmpdir(), 'soak-guard-'))
+  try {
+    const cfg = join(dir, 'config.json')
+    const marker = join(dir, 'marker')
+    const script = join(dir, 'probe.sh')
+    writeFileSync(cfg, JSON.stringify({
+      entries: [
+        { orgId: 'aaaaaaaa-0000-0000-0000-000000000001', dailyCapTimezone: 'Pacific/Kiritimati' },
+        { orgId: 'bbbbbbbb-0000-0000-0000-000000000002', dailyCapTimezone: 'Pacific/Pago_Pago' },
+        { orgId: 'cccccccc-0000-0000-0000-000000000003', dailyCapTimezone: 'Asia/Shanghai' },
+      ],
+    }))
+    writeFileSync(script, `#!/bin/bash\nset -u\n${fns}\n"$@"\n`)
+    const run = (...args) => spawnSync('bash', [script, ...args], { encoding: 'utf8' })
+    // Fresh marker: stamp writes one line per org, each under its OWN timezone.
+    let r = run('soak_batch_guard_stamp', cfg, marker)
+    assert.equal(r.status, 0, `stamp must succeed: ${r.stderr}`)
+    const lines = readFileSync(marker, 'utf8').trim().split('\n')
+    assert.equal(lines.length, 3, 'stamp must write one line per org')
+    for (const line of lines) assert.match(line, /^[0-9a-f-]+=[A-Za-z0-9_/+-]+=\d{4}-\d{2}-\d{2}$/)
+    // Same-day re-dispatch: refused (any org matches its own local day).
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'a same-day second batch must be refused')
+    assert.match(r.stdout, /already ran \(or started\) a batch on its local day/)
+    // Cross-day counterexample: rewind ONLY org1's (first entry!) recorded day. A guard
+    // keyed on entries[0] alone sees a stale day and admits; the per-org guard still
+    // refuses because org2/org3 remain on their same local days.
+    const rewound = lines.map((line) => {
+      if (!line.startsWith('aaaaaaaa-')) return line
+      const [org, tz, day] = line.split('=')
+      const d = new Date(`${day}T00:00:00Z`)
+      d.setUTCDate(d.getUTCDate() - 1)
+      return `${org}=${tz}=${d.toISOString().slice(0, 10)}`
+    })
+    writeFileSync(marker, `${rewound.join('\n')}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'org1 crossing midnight must NOT admit a batch while org2/org3 are still on their punched local day')
+    assert.match(r.stdout, /bbbbbbbb|cccccccc/, 'the refusal must come from a non-first org')
+    // All orgs rewound one day: the batch may proceed.
+    const allRewound = lines.map((line) => {
+      const [org, tz, day] = line.split('=')
+      const d = new Date(`${day}T00:00:00Z`)
+      d.setUTCDate(d.getUTCDate() - 1)
+      return `${org}=${tz}=${d.toISOString().slice(0, 10)}`
+    })
+    writeFileSync(marker, `${allRewound.join('\n')}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 0, `all orgs on a fresh local day must be admitted: ${r.stdout}`)
+    // Override admits a same-day batch (deliberate escape hatch).
+    writeFileSync(marker, `${lines.join('\n')}\n`)
+    r = run('soak_batch_guard_check', cfg, marker, 'true')
+    assert.equal(r.status, 0, 'the explicit override must admit a same-day retry')
+    // Legacy/corrupted marker content refuses fail-closed.
+    writeFileSync(marker, '2026-08-17\n')
+    r = run('soak_batch_guard_check', cfg, marker, 'false')
+    assert.equal(r.status, 1, 'a legacy single-date marker must refuse fail-closed')
+    assert.match(r.stdout, /unrecognized batch-marker line/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('EXECUTABLE (Codex P2): the halt classifier never calls an incident-bearing or short batch ok', () => {
+  const fns = extractRunnerFunctions(['soak_run_classify'])
+  const dir = mkdtempSync(join(tmpdir(), 'soak-classify-'))
+  try {
+    const script = join(dir, 'probe.sh')
+    writeFileSync(script, `#!/bin/bash\nset -u\n${fns}\n"$@"\n`)
+    const classify = (...args) => {
+      const r = spawnSync('bash', [script, 'soak_run_classify', ...args], { encoding: 'utf8' })
+      assert.equal(r.status, 0, `classifier must not error: ${r.stderr}`)
+      return r.stdout.trim()
+    }
+    assert.equal(classify('targets_met', '180', '180', '180'), 'ok')
+    assert.equal(classify('daily_capacity_exhausted', '180', '180', '180'), 'ok')
+    // Interleaved clean/fail (scattered 429/500s, never 5 consecutive): capacity exhausts
+    // with a shortfall — MUST NOT be ok (the Codex P2 shape).
+    assert.equal(classify('daily_capacity_exhausted', '160', '180', '180'), 'WARN')
+    assert.equal(classify('targets_met', '180', '183', '180'), 'WARN')
+    assert.equal(classify('daily_capacity_exhausted', '160', '160', '180'), 'WARN')
+    assert.equal(classify('max_consecutive_incidents', '10', '15', '180'), 'FAIL')
+    assert.equal(classify('no_eligible_users_stall_timeout', '180', '180', '180'), 'WARN')
+    assert.equal(classify('duration_elapsed', '180', '180', '180'), 'WARN')
+    assert.equal(classify('targets_met', 'unknown', 'unknown', '180'), 'WARN')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('soak generator: committed tool keeps its reviewed guard rails (rate ceiling, dry-run default, ruled daily quota, upper-bound count semantics)', () => {
