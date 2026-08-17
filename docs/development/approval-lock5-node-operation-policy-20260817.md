@@ -84,21 +84,20 @@ nodeOperationPolicy?: {
   allowReduceSign?: boolean                                  // absent ≡ true (C-2)
   allowReturn?: boolean                                      // absent ≡ true (C-7)
   returnReviewMode?: 'resume_forward' | 'jump_back_to_current' // absent ≡ 'resume_forward' (§1.2)
-  commentRequired?: 'never' | 'reject_only' | 'always'         // absent ≡ 'reject_only' (§1.3)
+  commentRequired?: 'never' | 'reject_only' | 'always'         // absent ≡ the instance snapshot (§1.3)
 }
 ```
 
 Every field is absent-≡-today, so existing graphs are byte-stable and no migration touches stored JSON; an
-all-absent object is OMITTED rather than persisted as `{}`, the emptiness discipline Lock-4 §0 records for
-`buildStepConfig`.
+all-absent object is OMITTED rather than persisted as `{}` (Lock-4 §0's `buildStepConfig` discipline).
 
 **Why one object and not six flat keys (OD-L5-1).** Four-allowlist arithmetic (Lock-4 §2.3), not taste: each
 top-level key must be added to the backend rebuild (`:1840-1855`), both FE guards
 (`templateAuthoring.ts:588-596`, `:759-770`), and — if nested — its own key list beside
-`BACKEND_AUTO_APPROVAL_POLICY_KEYS` (`:613`). Six flat keys is 18 allowlist edits with six chances to miss
-one; one object is 3 edits plus one nested list, and it is 1:1 with the `操作权限` tab the corpus groups these
-settings into. `signaturePolicy` is the shipped worked example of this shape — and of the failure mode,
-never having been added to either FE guard.
+`BACKEND_AUTO_APPROVAL_POLICY_KEYS` (`:613`). Six flat keys is 18 allowlist edits with six chances to miss one;
+one object is 3 edits plus one nested list, and it is 1:1 with the `操作权限` tab the corpus groups these settings
+into. `signaturePolicy` is the shipped worked example of this shape — and of the failure mode, never having
+been added to either FE guard.
 
 **Normalizer strictness, two hazards disclosed.** Copy `normalizeNodeSignaturePolicy` (`:1158-1187`):
 unknown sub-keys `failValidation` at publish; out-of-enum `returnReviewMode`/`commentRequired` rejected,
@@ -148,11 +147,12 @@ pre-return approval). **This document did not execute that trace either.** Locke
 
 ### 1.3 L5-C / L5-D — The comment requirement, one key for both sides
 
-`commentRequired: 'never' | 'reject_only' | 'always'`, absent ≡ `'reject_only'` ≡ today. Three values, not
-two booleans: the corpus's single switch (C-10) has two states and neither is our default (OFF ⇒ `'never'`,
-ON ⇒ `'always'`; today's reject-only asymmetry is expressible in neither). Four boolean states over a
-three-state semantic is the shape Lock-4 OD-L4-6 rejected for dedup tiers, for the same reason: the audit
-row cannot report which state was configured.
+`commentRequired: 'never' | 'reject_only' | 'always'`. Absent ≡ the instance's snapshot value, which is `true`
+for every instance created before this slice, i.e. `'reject_only'` ≡ today — ONE rule, not a literal default
+racing the fallback below. Three values, not two booleans: the corpus's single switch (C-10) has two states
+and neither is our default (OFF ⇒ `'never'`, ON ⇒ `'always'`; today's reject-only asymmetry is expressible in
+neither), and four boolean states over a three-state semantic is the shape Lock-4 OD-L4-6 rejected for dedup
+tiers, for the same reason: the audit row cannot report which state was configured.
 
 **Both hardcodings move in the same slice, and the shipped error code does not change.** `:6698-6700` must
 read the effective policy instead of always requiring a comment, and `:5224` must stop writing a literal
@@ -164,16 +164,14 @@ changes meaning.
 
 **Level: NODE, with the instance snapshot as fallback (OD-L5-8).** Enforcement reads the node's
 `commentRequired` from the instance's frozen runtime graph and, when absent, falls back to
-`policy_snapshot.rejectCommentRequired` — `true` for every instance created before this slice, making the
-fallback byte-stable and a backfill unnecessary. Node level is where the corpus puts it, and the only level
-that can differ per node.
+`policy_snapshot.rejectCommentRequired` (byte-stable, no backfill). Node level is where the corpus puts it,
+and the only level that can differ per node.
 
 ### 1.4 Denied-attempt audit
 
 **Recommended: one `approval_records` row per policy denial** (`action:'policy_denied'`, `actor_id` = the denied
 actor, `from_status`/`to_status` unchanged, `metadata: { nodeKey, nodeEntryEpoch, operation, policyKey }`, no
-comment), plus the CHECK migration in the `zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts:26-52`
-pattern. Two load-bearing facts:
+comment), plus the CHECK migration in the `zzzz20260702110000_…_admin_scopes.ts:26-52` pattern. Two facts:
 
 1. **A denial today survives nothing.** Every refusal in `dispatchAction` throws inside the transaction
    opened at `:6238` and is rolled back. The single choke (§2.1) sits after the authorization gate
@@ -202,6 +200,7 @@ pattern. Two load-bearing facts:
 | 批量处理 (C-12) | template-level; the shipped batch verbs are `'approve' \| 'reject'` only (`ApprovalCenterView.vue:747-773`) | Lock-6 |
 | 不计入审批效率诊断 (C-11) | node-level, but the metrics split is Lock-3 OD-L3-4's and must be decided once, there | Lock-3 |
 | multi-target 退回 (C-8), action attachments (M9) | named, not designed; neither has a carrier at this baseline | own slices |
+| requester controls, named in the §P5 charter clause quoted above | master §3 assigns "requester and global approval/document policy" to Lock-6; this lock mints nothing narrower rather than pre-empting that registry row, and the routing is recorded here so the dropped clause is not read as an omission | Lock-6 |
 
 ### 1.6 L5-F — Lock-3 handler alignment
 
@@ -214,8 +213,8 @@ transfer-allowed with no behavior change.
 **Vocabulary alignment, not a fork (OD-L5-7).** Lock-3 §1.1 declares `opinionRequired?: boolean` (absent ≡
 false); the recommendation is that its slice instead adopts `commentRequired` restricted to `'never' |
 'always'`, absent ≡ `'never'` — OD-L3-3's default preserved exactly, one key for both node types. Per-type
-admitted sets and absent-defaults are the registry's job (§2.5), already how Lock-3 §1.5 scopes assignee
-kinds; Lock-3 is not on main, so this costs an edit to an unmerged document, not a migration.
+admitted sets and absent-defaults are the registry's job (§2.5); Lock-3 is not on main, so this costs an edit
+to an unmerged document, not a migration.
 
 ## 2. Cross-cutting invariants
 
@@ -267,6 +266,7 @@ backend lane; frontend gates extend `apps/web/scripts/run-required-web-tests.sh`
 | A-4 | In-flight freeze | an instance created before a switch flip keeps the old policy; one created after the next publish gets the new one | the same flip with no republish changes nothing at all |
 | A-5 | Placement | `nodeOperationPolicy` on `start`/`end`/`cc`/`condition`/`parallel` fails publish 400 | the identical key on an `approval` node publishes — rejection is type-selected |
 | A-6 | Shape strictness and emptiness | an unknown sub-key and an out-of-enum `returnReviewMode`/`commentRequired` fail publish, neither coerced; authoring all-default switches leaves the persisted config byte-identical (no `nodeOperationPolicy` key at all) | a valid object with the same surrounding graph publishes, and setting one switch to `false` DOES change the bytes |
+| A-7 | Add/reduce projection (OD-L5-2) | the combined 允许加/减签 checkbox writes BOTH keys; a persisted mixed state (`allowAddSign:true, allowReduceSign:false`) renders read-only and round-trips unchanged; flipping the checkbox never clears a sibling `nodeOperationPolicy` field | a matched pair renders editable — read-only is state-selected |
 | B-1 | Add-sign mode is explicit at BOTH doors | `'after'` reaches the service as `'after'` (route `:1986-1991` widened) and an unknown mode is 400 `APPROVAL_ADD_SIGN_MODE_INVALID`; reverting EITHER door alone turns a named test red | `'parallel'` and `'before'` behave exactly as today — the change is value-selected |
 | B-2 | `'before'` honesty | a test pins that pre-slice `'before'` and `'parallel'` produce identical assignments/epoch outside a parallel region, and that the FE label no longer claims an unimplemented semantic | the parallel-region case still diverges (409 for `'before'`), proving the pin is not vacuous |
 | B-3 | After-sign runtime shape | the ratified OD-L5-4 arm executes: the appended round activates, the actor's seat is consumed, and the instance does NOT terminate early. Cannot be written before OD-L5-4 is decided | the same fixture with `'parallel'` keeps one node and one epoch |
@@ -284,7 +284,7 @@ backend lane; frontend gates extend `apps/web/scripts/run-required-web-tests.sh`
 | F-1 | Handler alignment (conditional) | `allowAddSign`/`allowReduceSign`/`allowReturn` on a handler node fail publish; `allowTransfer:false` refuses a handler transfer 409 | `allowTransfer` absent still permits it (Lock-3 §2.2 behavior preserved) — the switch is value-selected |
 | X-1 | Values-free | every new error carries `{ nodeKey, operation }` at most, on both the HTTP body and the log line | assert the SAME path DOES carry `nodeKey` — the check is not passing on an empty payload |
 | X-2 | Old-graph compatibility | a corpus of pre-Lock-5 published graphs round-trips save → publish → preview → execute → version-compare → restore byte-for-byte | mutate one `nodeOperationPolicy` field in a new-format fixture and assert the version diff SHOWS it |
-| X-3 | Browser check | real-browser (not jsdom) at 1440×900, 1024×768 and 390×844: the tab is reachable and operable, the switch state is announced, and the member action bar reflects a disabled operation on all three | a node with all switches at default shows every affordance in all three viewports |
+| X-3 | Browser check, per surface | real-browser (not jsdom): the AUTHORING `操作权限` tab is reachable, operable and state-announced at 1440×900, 1024×768 and 390×844; the MEMBER bar mirrors a disabled operation at the two desktop widths ONLY — the deferred verbs are `!isMobileLayout`-gated (`ApprovalDetailView.vue:404-449`), so the four switches have no mobile affordance to hide and 390×844 instead asserts approve/reject/comment unchanged | a node with all switches at default shows every deferred affordance at both desktop widths, and the mobile bar is byte-identical under both configurations |
 
 ## 4. Owner ratification block
 
