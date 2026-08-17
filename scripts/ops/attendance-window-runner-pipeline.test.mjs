@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1832,6 +1832,26 @@ test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch 
     )
     r = run('soak_batch_guard_check', cfg, marker, 'false')
     assert.equal(r.status, 1, 'a freshly stamped marker must refuse a same-day second batch')
+    // (f) ATOMICITY oracle (#4936 gate P2-1 — its own construction, adopted verbatim): in a
+    // read-only marker directory the shipped temp+rename stamp FAILS CLEANLY (rename cannot
+    // land; the existing marker survives untouched), while a truncate-then-append writer
+    // "succeeds" destructively — the `> "$marker"` truncation needs only FILE write
+    // permission, so the marker is emptied and the run exits 0. This discriminates the
+    // exact mutant the source pin alone could not (it cleans up its temp and left the
+    // residue assertion green).
+    assert.equal(readFileSync(marker, 'utf8').trim().split('\n').length, 3, 'precondition: marker holds the full set')
+    chmodSync(dir, 0o555)
+    try {
+      r = run('soak_batch_guard_stamp', cfg, marker)
+      assert.notEqual(r.status, 0, 'the stamp must FAIL when the rename cannot land (read-only dir)')
+      assert.equal(
+        readFileSync(marker, 'utf8').trim().split('\n').length,
+        3,
+        'a failed stamp must leave the existing marker byte-intact — a truncate-then-append writer empties it and exits 0',
+      )
+    } finally {
+      chmodSync(dir, 0o755)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
