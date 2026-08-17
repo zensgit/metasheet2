@@ -197,6 +197,17 @@
 # `autoApproval` survives an editor republish). Bare basename token; verified to match exactly one
 # file — no existing token is a substring of it (`approval-template-authoring-parallel-edit` is
 # the closest neighbor, diverging at `-p`) and it is not a substring of any existing token.
+#
+# L8-B (2026-08-17, docs/development/approval-lock8-field-vocabulary-20260817.md §1.2): date_range
+# (日期区间) — three new tokens. `approval-date-range-field` (draft carrier/buildFormSchema/
+# hydration/registration-completeness/OD-L8-4 exclusion/OD-L8-8 derived-duration pure-fn specs),
+# `approval-date-range-visibility` (OD-L8-5(a) per-type predicate: FE resolver, MS-9 selectable-
+# dependency predicate + endpoint options, dependency-tracking dotted safety on delete/retype),
+# `approval-date-range-inline-editor` (ApprovalFormInlineEditor.vue mounted spec: retype option,
+# property-block render, M7 wired-not-inert controls, type-selected non-rendering negative). All
+# three bare basename tokens; verified no existing token (checked the full `approval-date*` /
+# `*date-range*` namespace) is a substring of any of them or vice versa — the namespace was
+# entirely empty before this slice.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -219,6 +230,9 @@ npx vitest run \
   approval-form-builder-slots \
   approval-form-field-update \
   approval-form-field-inspector \
+  approval-date-range-field \
+  approval-date-range-visibility \
+  approval-date-range-inline-editor \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

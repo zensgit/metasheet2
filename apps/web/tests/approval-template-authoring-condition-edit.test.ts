@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalGraph, ApprovalTemplateDetailDTO, FormSchema } from '../src/types/approval'
 import {
   buildApprovalGraph,
   draftFromTemplate,
@@ -494,6 +494,46 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
       },
     }
     expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
+  })
+
+  // Lock-8 L8-B OD-L8-5(c) (PR #4964 gate F1): `validateConditionEdits`'s date_range rejection —
+  // BOTH the rule-mode and the formula-mode branch — had no dedicated test; removing either check
+  // left every test in this file green, silently deferring the rejection to server save. Redundant
+  // with the mounted `conditionFieldOptions` exclusion + the BE authoritative
+  // `validateNonScalarFieldsNotUsedInConditions` guard (defence-in-depth, not a live hole), but
+  // pinned here so this FE preview guard itself can't silently regress.
+  const dateRangeSchema: FormSchema = {
+    fields: [
+      ...formSchema.fields,
+      {
+        id: 'trip', type: 'date_range', label: '行程日期',
+        props: { dateType: 'date', startLabel: '开始', endLabel: '结束' },
+      },
+    ],
+  }
+
+  it('flags a rules-mode branch rule that references a date_range field (OD-L8-5(c))', () => {
+    const edits: ConditionEdits = {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules: [{ fieldId: 'trip', operator: 'notEmpty', value: undefined }], formulaExpression: '' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+    const errors = validateConditionEdits(edits, dateRangeSchema, CONDITION_GRAPH)
+    expect(errors).toContain('条件节点 cond_1 分支 1 规则 1 不能引用日期区间字段（v1）')
+  })
+
+  it('flags a formula-mode branch that references a date_range field (OD-L8-5(c))', () => {
+    const edits: ConditionEdits = {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'formula', conjunction: 'and', rules: [], formulaExpression: '{trip} != ""' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+    const errors = validateConditionEdits(edits, dateRangeSchema, CONDITION_GRAPH)
+    expect(errors).toContain('条件节点 cond_1 分支 1 公式 不能引用日期区间字段 trip（v1）')
   })
 
   it('surfaces the rule-fieldId error through validateTemplateDraft when the draft carries condition edits', () => {

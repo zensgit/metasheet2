@@ -127,6 +127,7 @@
               <el-option label="用户" value="user" />
               <el-option label="明细（子表单）" value="detail" />
               <el-option label="关联记录" value="record-link" />
+              <el-option label="日期区间" value="date_range" />
             </el-select>
           </el-form-item>
           <el-form-item label="占位文本">
@@ -267,6 +268,62 @@
             </div>
             <div class="template-authoring__hint">
               格式化数字仅用于展示（货币符号、千位分隔符、中文大写回显），不改变提交的数值。
+            </div>
+          </el-form-item>
+          <!-- Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/
+               OD-L8-8): date_range (日期区间) — a start+end pair. `dateType` is REQUIRED with NO
+               absent-default (a range whose granularity is implicit cannot be compared or diffed
+               unambiguously, §1.2) — the placeholder option is intentionally non-selectable-back-to
+               so an author must actively choose. `startLabel`/`endLabel` are required (C-7's
+               控件名称 1/2); `durationLabel` is an OPTIONAL custom label for the ALWAYS-rendered
+               derived duration (OD-L8-8) — every control here writes to a real FieldAuthoringDraft
+               key `buildFormSchema` emits (M7: no inert/disabled-theater controls). -->
+          <el-form-item
+            v-if="field.type === 'date_range'"
+            label="日期区间"
+            class="template-authoring__wide"
+            data-testid="approval-date-range-config"
+          >
+            <div class="template-authoring__grid">
+              <el-form-item label="日期类型" required>
+                <el-select
+                  v-model="field.dateRangeDateType"
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  data-testid="approval-date-range-type-select"
+                >
+                  <el-option label="年-月-日" value="date" />
+                  <el-option label="年-月-日 上午/下午" value="date_half_day" />
+                  <el-option label="年-月-日 时:分" value="date_minute" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="起始控件名称" required>
+                <el-input
+                  v-model="field.dateRangeStartLabel"
+                  :disabled="readOnly"
+                  placeholder="例如：开始时间"
+                  data-testid="approval-date-range-start-label"
+                />
+              </el-form-item>
+              <el-form-item label="结束控件名称" required>
+                <el-input
+                  v-model="field.dateRangeEndLabel"
+                  :disabled="readOnly"
+                  placeholder="例如：结束时间"
+                  data-testid="approval-date-range-end-label"
+                />
+              </el-form-item>
+              <el-form-item label="时长控件名称">
+                <el-input
+                  v-model="field.dateRangeDurationLabel"
+                  :disabled="readOnly"
+                  placeholder="默认：时长"
+                  data-testid="approval-date-range-duration-label"
+                />
+              </el-form-item>
+            </div>
+            <div class="template-authoring__hint">
+              时长由起始、结束自动计算并展示，不可编辑；提交时以系统计算结果为准。
             </div>
           </el-form-item>
           <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each

@@ -5802,7 +5802,8 @@
               "multi-select",
               "user",
               "attachment",
-              "detail"
+              "detail",
+              "date_range"
             ]
           },
           "label": {
@@ -5912,7 +5913,8 @@
             "multi-select": "#/components/schemas/FormFieldGeneric",
             "user": "#/components/schemas/FormFieldGeneric",
             "attachment": "#/components/schemas/FormFieldGeneric",
-            "detail": "#/components/schemas/FormFieldGeneric"
+            "detail": "#/components/schemas/FormFieldGeneric",
+            "date_range": "#/components/schemas/FormFieldGeneric"
           }
         }
       },

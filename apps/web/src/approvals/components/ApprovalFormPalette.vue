@@ -79,9 +79,11 @@ export const APPROVAL_FORM_FIELD_TYPE_LABELS: Record<
   user: '人员',
   detail: '明细',
   'record-link': '关联记录',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
+  date_range: '日期区间',
 }
 
-const FIELD_TYPE_MARKS: Record<AuthorableFieldType, string> = {
+export const APPROVAL_FORM_FIELD_TYPE_MARKS: Record<AuthorableFieldType, string> = {
   text: 'A',
   textarea: 'Aa',
   number: '123',
@@ -92,13 +94,14 @@ const FIELD_TYPE_MARKS: Record<AuthorableFieldType, string> = {
   user: '人',
   detail: '表',
   'record-link': '链',
+  date_range: '区',
 }
 
 export const APPROVAL_FORM_PALETTE_GROUPS: ApprovalFormPaletteGroup[] = [
   { id: 'text', label: '文本', types: ['text', 'textarea'] },
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
-  { id: 'date', label: '日期', types: ['date', 'datetime'] },
+  { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
   { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
 ].map(({ id, label, types }) => ({
   id,
@@ -106,7 +109,7 @@ export const APPROVAL_FORM_PALETTE_GROUPS: ApprovalFormPaletteGroup[] = [
   entries: (types as AuthorableFieldType[]).map((type) => ({
     type,
     label: APPROVAL_FORM_FIELD_TYPE_LABELS[type],
-    mark: FIELD_TYPE_MARKS[type],
+    mark: APPROVAL_FORM_FIELD_TYPE_MARKS[type],
   })),
 }))
 </script>

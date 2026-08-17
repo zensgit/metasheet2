@@ -1,4 +1,5 @@
 import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from './detailField'
+import { visibilityReferenceBaseFieldId } from './recordLinkField'
 import type { FormFieldType } from '../types/approval'
 import type {
   AuthorableFieldType,
@@ -149,6 +150,7 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   user: '人员',
   detail: '明细',
   'record-link': '关联记录',
+  date_range: '日期区间',
 }
 
 const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
@@ -317,6 +319,15 @@ export function addFormField(
     numberCurrencySymbol: '',
     numberThousandsSeparator: false,
     numberUppercaseCny: false,
+    // L8-B: same neutral-defaults discipline as the L8-C keys above — no authoring affordance for
+    // date_range's four keys exists on this command layer's (unmounted) canvas track; a freshly-
+    // added date_range field simply carries an unset dateType (matching §1.2's no-absent-default:
+    // it stays publish-rejected until the OTHER, live authoring surface — ApprovalFormInlineEditor
+    // — sets a granularity), same posture as recordLinkBaseId/numberCurrencySymbol above.
+    dateRangeDateType: '',
+    dateRangeStartLabel: '',
+    dateRangeEndLabel: '',
+    dateRangeDurationLabel: '',
   }
 
   const fields = [...draft.fields]
@@ -494,9 +505,14 @@ export function collectFormFieldDependencies(
 ): FormFieldDependency[] {
   const dependencies: FormFieldDependency[] = []
   draft.fields.forEach((field) => {
+    // Lock-8 L8-B OD-L8-5(a): a dotted `${fieldId}.start`/`${fieldId}.end` endpoint address still
+    // counts as a reference to `fieldId` for delete/retype dependency-tracking purposes —
+    // otherwise removing a date_range field whose endpoint an OTHER field's visibility rule
+    // depends on would silently orphan that rule (it would fail at the next publish instead of
+    // being caught here, same class of bug `clearStaleRecordLinkDependencies` guards for retype).
     if (
       field.id !== fieldId &&
-      field.visibility.dependsOnFieldId.trim() === fieldId
+      visibilityReferenceBaseFieldId(field.visibility.dependsOnFieldId.trim()) === fieldId
     ) {
       dependencies.push({
         kind: 'visibility_rule',

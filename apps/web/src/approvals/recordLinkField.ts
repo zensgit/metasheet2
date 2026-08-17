@@ -78,16 +78,59 @@ export function isRecordLinkType(type: FormFieldType): boolean {
 }
 
 /**
- * Whether a field type may appear in visibility/condition/formula selectors (v1).
- * record-link and detail are server-rejected as simple condition/visibility dependencies.
+ * Whether a field type may appear in visibility/condition/formula selectors as a WHOLE-VALUE
+ * dependency (v1). record-link and detail are server-rejected as simple condition/visibility
+ * dependencies (non-scalar values). Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2,
+ * OD-L8-5(a)) extends the same exclusion to `date_range` — its `{ start, end }` value is also
+ * non-scalar and "never as one comparable value"; its two endpoints are separately selectable via
+ * `dateRangeVisibilityEndpointOptions` below, a per-type ADDITIVE affordance, not a widening of
+ * this boolean.
  */
 export function isSelectableConditionOrVisibilityDependencyType(type: FormFieldType | string): boolean {
-  return type !== 'record-link' && type !== 'detail'
+  return type !== 'record-link' && type !== 'detail' && type !== 'date_range'
+}
+
+/**
+ * Lock-8 L8-B OD-L8-5(a): the sub-value choices a `date_range` field offers a visibility-rule
+ * author (as `${fieldId}.start` / `${fieldId}.end` dotted addresses) — empty for every other type.
+ * The UI affordance that turns a selected date_range field + endpoint choice into the dotted
+ * `dependsOnFieldId` this array's caller must write (M7: no inert picker — selecting an endpoint
+ * must produce a real, server-resolvable address).
+ */
+export function dateRangeVisibilityEndpointOptions(
+  type: FormFieldType | string,
+): ReadonlyArray<{ endpoint: 'start' | 'end'; label: string }> {
+  if (type !== 'date_range') return []
+  return [
+    { endpoint: 'start', label: '起始' },
+    { endpoint: 'end', label: '结束' },
+  ]
+}
+
+/** Build the dotted `dependsOnFieldId` address for a date_range field's endpoint (OD-L8-5(a)). */
+export function dateRangeVisibilityFieldId(fieldId: string, endpoint: 'start' | 'end'): string {
+  return `${fieldId}.${endpoint}`
+}
+
+/**
+ * Base field id a `dependsOnFieldId` string points at, stripping a Lock-8 OD-L8-5(a) dotted
+ * endpoint suffix (`${id}.start` / `${id}.end`) when present. Used ONLY for dependency-tracking
+ * (does this reference point at field X?) — not for evaluation, which needs the endpoint-aware
+ * resolver in `fieldVisibility.ts`. A bare id with no dot returns unchanged.
+ */
+export function visibilityReferenceBaseFieldId(rawFieldId: string): string {
+  const dot = rawFieldId.lastIndexOf('.')
+  if (dot <= 0 || dot === rawFieldId.length - 1) return rawFieldId
+  const suffix = rawFieldId.slice(dot + 1)
+  return suffix === 'start' || suffix === 'end' ? rawFieldId.slice(0, dot) : rawFieldId
 }
 
 /**
  * Drop visibility dependsOn / condition rule fieldIds that point at banned types after a retype.
- * Pure helper for authoring + unit tests.
+ * Pure helper for authoring + unit tests. Lock-8 L8-B: `date_range` joins record-link/detail as a
+ * type whose retype-away must clear stale dependents — including a dotted endpoint address
+ * (`${id}.start`/`${id}.end`), which `visibilityReferenceBaseFieldId` resolves to the same base id
+ * a bare reference would use, so neither form survives orphaned.
  */
 export function clearStaleRecordLinkDependencies<T extends {
   id: string
@@ -99,13 +142,18 @@ export function clearStaleRecordLinkDependencies<T extends {
   changedFieldId: string,
   changedType: string,
 ): { fields: T[]; conditionRules: Array<{ fieldId: string }> } {
-  if (changedType !== 'record-link' && changedType !== 'detail') {
+  if (changedType !== 'record-link' && changedType !== 'detail' && changedType !== 'date_range') {
     return { fields, conditionRules }
   }
   const id = changedFieldId.trim()
   if (!id) return { fields, conditionRules }
   const nextFields = fields.map((field) => {
-    if (!field.visibility || field.visibility.dependsOnFieldId.trim() !== id) return field
+    if (
+      !field.visibility ||
+      visibilityReferenceBaseFieldId(field.visibility.dependsOnFieldId.trim()) !== id
+    ) {
+      return field
+    }
     return {
       ...field,
       visibility: { dependsOnFieldId: '', operator: 'eq', valueText: '' },

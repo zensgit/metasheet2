@@ -969,6 +969,7 @@ function fieldTypeLabel(type: FormFieldType) {
     attachment: '附件',
     detail: '明细',
     'record-link': '关联记录',
+    date_range: '日期区间',
   }
   return map[type] ?? type
 }

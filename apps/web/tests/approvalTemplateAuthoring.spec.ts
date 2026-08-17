@@ -2629,6 +2629,145 @@ describe('TemplateAuthoringView', () => {
     const cc = payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1')
     expect(cc.config).toEqual({ targetType: 'role', targetIds: ['finance-role-id'] })
   })
+
+  // Lock-8 L8-B (docs/development/approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-5(a)):
+  // date_range is never offered as a single bare visibility dependency (its `{start,end}` value is
+  // non-scalar — server rejects it, matching record-link/detail) but its two ENDPOINTS are
+  // separately selectable via `visibilityFieldOptions` in TemplateAuthoringView.vue, each producing
+  // the dotted `${fieldId}.start`/`.end` address the resolver (fieldVisibility.ts /
+  // ApprovalGraphExecutor.ts) and `validateFormFieldVisibilityRules` (publish) both understand. This
+  // is the M7 affordance that makes the endpoint predicate REACHABLE from the mounted authoring UI —
+  // without it, selecting a date_range field here would either be impossible (silently narrowing to
+  // OD-L8-5(c)) or offer a bare option that always fails publish (an inert control).
+  it('OD-L8-5(a): the visibility depends-on picker offers a date_range field ONLY as two endpoint options, and the chosen endpoint reaches the saved payload', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'trip', type: 'date_range', label: '行程日期', props: { dateType: 'date', startLabel: '开始', endLabel: '结束' } },
+          { id: 'reason', type: 'text', label: '事由' },
+        ],
+      } as any,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const reasonRow = () => container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+    const dependsSelect = reasonRow().querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    const optionEntries = Array.from(dependsSelect.options).map((o) => ({ value: o.value, label: o.textContent }))
+    expect(optionEntries.some((o) => o.value === 'trip')).toBe(false)
+    expect(optionEntries).toContainEqual({ value: 'trip.start', label: '行程日期(起始)' })
+    expect(optionEntries).toContainEqual({ value: 'trip.end', label: '行程日期(结束)' })
+
+    dependsSelect.value = 'trip.start'
+    dependsSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    // Ground-truth: a <select> silently coerces `.value` to '' if no matching <option> exists (the
+    // same false-positive trap the "(j) invalidate-record-link-deps" test above documents) —
+    // reading it back confirms the option genuinely exists, not merely that assignment threw no error.
+    expect(dependsSelect.value).toBe('trip.start')
+
+    const operatorSelect = reasonRow().querySelector('[data-testid="approval-field-visibility-operator"]') as HTMLSelectElement
+    operatorSelect.value = 'notEmpty'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    // Load-bearing: the dotted address the option construction produced survived selection AND
+    // buildFormSchema's serialization into the real update payload — proof across the whole chain,
+    // not just that two <option> elements rendered (source-text/markup assertions are not behavior).
+    expect(payload.formSchema.fields[1].visibilityRule).toEqual({ fieldId: 'trip.start', operator: 'notEmpty' })
+  })
+
+  // OD-L8-5(c) [accepted residual]: unlike visibility rules (MS-8, endpoints admitted above), graph
+  // condition rules (MS-9) exclude date_range ENTIRELY in this slice — `validateConditionEdits`
+  // (conditionEdit.ts) rejects any condition rule referencing one, so offering it in the picker
+  // would be an M7 inert control (always selectable, never publishable). The number-field leg is a
+  // mandatory positive control: without it, an accidentally-emptied options list would also pass.
+  it('OD-L8-5(c): the condition rule field picker excludes date_range entirely while a sibling number field remains selectable', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'trip', type: 'date_range', label: '行程日期', props: { dateType: 'date', startLabel: '开始', endLabel: '结束' } },
+        ],
+      } as any,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] }], defaultEdgeKey: 'e-b' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-c', source: 'start', target: 'cond_1' },
+          { key: 'e-a', source: 'cond_1', target: 'app_a' },
+          { key: 'e-b', source: 'cond_1', target: 'end' },
+          { key: 'e-a-end', source: 'app_a', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const fieldSelect = container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    expect(fieldSelect).not.toBeNull()
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value)
+    // Positive control FIRST — proves the options list is non-trivial, not accidentally emptied.
+    expect(optionValues).toContain('amount')
+    expect(optionValues).not.toContain('trip')
+  })
+
+  // Lock-8 L8-B: date_range needs a REVERSE-direction stale-dependency sweep record-link/detail
+  // never needed — nothing could validly have depended on a record-link/detail field (the picker
+  // always excluded them), but a date_range field's endpoints ARE validly selectable while it IS
+  // date_range, so retyping AWAY can orphan a dotted `${id}.start`/`.end` dependency mid-session.
+  it('retyping a date_range field AWAY clears a dependent visibility rule pointing at its dotted endpoint (reverse-direction stale sweep)', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'trip', type: 'date_range', label: '行程日期', props: { dateType: 'date', startLabel: '开始', endLabel: '结束' } },
+          { id: 'reason', type: 'text', label: '事由', visibilityRule: { fieldId: 'trip.start', operator: 'notEmpty' } },
+        ],
+      } as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    const rows = () => container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+    const tripRow = rows()[0] as HTMLElement
+    const reasonRow = () => rows()[1] as HTMLElement
+    // Sanity: the dotted dependency hydrated correctly before the retype (the operator select only
+    // renders when `field.visibility.dependsOnFieldId` is truthy).
+    const operatorSelect = () => reasonRow().querySelector('[data-testid="approval-field-visibility-operator"]')
+    expect(operatorSelect()).not.toBeNull()
+
+    const typeSelect = tripRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'text'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Ground-truth signal (same trap as the "(j)" test documents): the operator select's v-if is
+    // the proof, not the depends <select>'s own `.value` getter, which silently coerces to '' once
+    // the matching <option> disappears regardless of whether the reactive string was actually cleared.
+    expect(operatorSelect()).toBeNull()
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {

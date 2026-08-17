@@ -408,6 +408,27 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(unparsable[0].value).toBe('not-a-date')
   })
 
+  // Lock-8 L8-B (PR #4964 gate F2): `formatDisplayValue`'s date_range arm was reachable but
+  // untested — removing it silently falls through to the `default: String(value)` case, which
+  // prints the JS-internal "[object Object]" placeholder to the APPROVER reading a submitted
+  // date_range via ApprovalDetailView.vue (M8 honesty regression, no value leak but a real one).
+  it('date_range renders "start ~ end" via formatDisplayDate on both endpoints, never falls through to "[object Object]"', () => {
+    const schema: FormSchema = {
+      fields: [{ id: 'fld_trip', type: 'date_range', label: '行程日期' }],
+    }
+    const fields = buildDisplayFields(schema, {
+      fld_trip: { start: '2026-01-02T03:04:05Z', end: '2026-01-05T03:04:05Z' },
+    })
+    expect(fields[0].value).toBe(
+      `${new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN')} ~ ${new Date('2026-01-05T03:04:05Z').toLocaleString('zh-CN')}`,
+    )
+    expect(fields[0].value).not.toBe('[object Object]')
+
+    // A malformed value (missing start or end) renders the fallback dash, not "[object Object]".
+    const malformed = buildDisplayFields(schema, { fld_trip: { start: '2026-01-02' } })
+    expect(malformed[0].value).toBe('-')
+  })
+
   it('appends snapshot keys absent from the schema after schema-ordered entries, using the raw key as label', () => {
     const fields = buildDisplayFields(displaySchema, {
       fld_reason: '原因内容',

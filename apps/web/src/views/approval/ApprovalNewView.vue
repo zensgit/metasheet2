@@ -285,6 +285,43 @@
               class="ms-w-100pct"
             />
 
+            <!-- Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-8) date_range:
+                 two pickers of the field's declared granularity, bound to `{ start, end }`, plus an
+                 ALWAYS-rendered read-only derived duration (never a control — a plain span, no
+                 v-model, no input element: OD-L8-8 forbids any authoring control that offers
+                 editing it). value-format is explicit on BOTH pickers so the submitted wire shape
+                 is a deterministic string matching the server's `date_range` value contract exactly
+                 (never the picker's own default Date-object binding). -->
+            <div
+              v-else-if="field.type === 'date_range'"
+              class="approval-new__date-range"
+              data-testid="approval-date-range-field"
+            >
+              <div class="approval-new__date-range-row">
+                <el-date-picker
+                  :model-value="dateRangeStart(field.id)"
+                  :type="dateRangePickerElementType(field.props?.dateType)"
+                  :value-format="dateRangePickerValueFormat(field.props?.dateType)"
+                  :placeholder="(field.props?.startLabel as string) || '起始'"
+                  data-testid="approval-date-range-start"
+                  @update:model-value="(value: string | null) => setDateRangeStart(field.id, value)"
+                />
+                <span class="approval-new__date-range-sep">至</span>
+                <el-date-picker
+                  :model-value="dateRangeEnd(field.id)"
+                  :type="dateRangePickerElementType(field.props?.dateType)"
+                  :value-format="dateRangePickerValueFormat(field.props?.dateType)"
+                  :placeholder="(field.props?.endLabel as string) || '结束'"
+                  data-testid="approval-date-range-end"
+                  @update:model-value="(value: string | null) => setDateRangeEnd(field.id, value)"
+                />
+              </div>
+              <div class="approval-new__date-range-duration" data-testid="approval-date-range-duration">
+                <span class="approval-new__date-range-duration-label">{{ dateRangeDurationLabel(field) }}</span>
+                <span data-testid="approval-date-range-duration-value">{{ dateRangeDurationDisplay(field) }}</span>
+              </div>
+            </div>
+
             <!-- select -->
             <el-select
               v-else-if="field.type === 'select'"
@@ -619,6 +656,11 @@ import {
   recordLinkSheetId,
 } from '../../approvals/recordLinkField'
 import ApprovalRecordLinkPicker from '../../approvals/components/ApprovalRecordLinkPicker.vue'
+import {
+  computeDateRangeDurationText,
+  dateRangePickerElementType,
+  dateRangePickerValueFormat,
+} from '../../approvals/dateRangeField'
 import {
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
@@ -1013,13 +1055,34 @@ const formRules = computed<FormRules>(() => {
     // template comment above), so a `required` attachment must never make the form unsubmittable;
     // there is no way for the user to satisfy it. Excluded from validation entirely.
     if (field.required && field.type !== 'attachment') {
-      rules[field.id] = [
+      if (field.type === 'date_range') {
+        // Lock-8 L8-B: `formData[field.id]` is `{ start, end }` — a non-null OBJECT even when both
+        // endpoints are blank, so el-form's built-in `required: true` empty-check (string/array/
+        // null/undefined only) would silently pass a wholly-unfilled required date_range. A custom
+        // validator closes that (the server's `isDateRangeEndpointValid` still catches it either
+        // way at submit — this is client-side UX clarity, not the authority).
+        rules[field.id] = [
+          {
+            required: true,
+            trigger: ['blur', 'change'],
+            validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
+              if (!dateRangeStart(field.id) || !dateRangeEnd(field.id)) {
+                callback(new Error(`请填写${field.label}`))
+                return
+              }
+              callback()
+            },
+          },
+        ]
+      } else {
         // B2-15: `blur` alone never reliably fires for a select / date-picker (the user picks via
         // a click in a popper, not a native blur on a text input), so a required select/date left
         // unset could silently pass validation until submit-time. `change` catches those; `blur`
         // stays too so leaving a text/textarea/number field empty validates without a submit click.
-        { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
-      ]
+        rules[field.id] = [
+          { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
+        ]
+      }
     }
   }
   return rules
@@ -1112,6 +1175,44 @@ function onRecordLinkPicked(payload: { recordId: string; display: string }): voi
   }
   recordLinkPickerVisible.value = false
   recordLinkPickerField.value = null
+}
+
+// ---------------------------------------------------------------------------
+// Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-8) date_range fill helpers
+// — `formData[field.id]` is `{ start, end }`. Duration is DERIVED and DISPLAY-ONLY: computed fresh
+// on every read, never stored in `formData`, never submitted, no control offers editing it.
+// ---------------------------------------------------------------------------
+function dateRangeStart(fieldId: string): string {
+  const value = formData[fieldId]
+  return value && typeof value === 'object' && typeof (value as { start?: unknown }).start === 'string'
+    ? ((value as { start: string }).start)
+    : ''
+}
+
+function dateRangeEnd(fieldId: string): string {
+  const value = formData[fieldId]
+  return value && typeof value === 'object' && typeof (value as { end?: unknown }).end === 'string'
+    ? ((value as { end: string }).end)
+    : ''
+}
+
+function setDateRangeStart(fieldId: string, value: string | null): void {
+  formData[fieldId] = { start: value ?? '', end: dateRangeEnd(fieldId) }
+}
+
+function setDateRangeEnd(fieldId: string, value: string | null): void {
+  formData[fieldId] = { start: dateRangeStart(fieldId), end: value ?? '' }
+}
+
+function dateRangeDurationDisplay(field: FormField): string {
+  const dateType = field.props?.dateType
+  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id))
+  return text ?? '-'
+}
+
+function dateRangeDurationLabel(field: FormField): string {
+  const label = field.props?.durationLabel
+  return typeof label === 'string' && label.trim() ? label.trim() : '时长'
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1405,11 @@ onMounted(async () => {
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         // detail value is an array of row objects; seed empty so the fill table binds an array.
         formData[field.id] = []
+      } else if (field.type === 'date_range') {
+        // Lock-8 L8-B: value is `{ start, end }` — seed BOTH keys present (empty strings) so the
+        // two pickers and the derived-duration display always have a well-defined shape to bind
+        // against, rather than reading off `undefined`.
+        formData[field.id] = { start: '', end: '' }
       } else {
         formData[field.id] = undefined
       }
@@ -1335,6 +1441,8 @@ function syncVisibleFormState() {
         formData[field.id] = field.defaultValue
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         formData[field.id] = []
+      } else if (field.type === 'date_range') {
+        formData[field.id] = { start: '', end: '' }
       }
     }
   }
@@ -1484,6 +1592,34 @@ watch([visibleFieldIds, template], () => {
   margin-top: var(--ms-space-1);
   font-size: 12px;
   color: var(--ms-text-3);
+}
+
+.approval-new__date-range-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2, 8px);
+  width: 100%;
+}
+
+.approval-new__date-range-row .el-date-editor {
+  flex: 1;
+}
+
+.approval-new__date-range-sep {
+  flex: none;
+  color: var(--el-text-color-secondary);
+}
+
+.approval-new__date-range-duration {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
+  display: flex;
+  gap: var(--ms-space-1, 4px);
+}
+
+.approval-new__date-range-duration-label::after {
+  content: '：';
 }
 
 .approval-new__form {
