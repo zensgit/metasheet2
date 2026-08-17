@@ -447,6 +447,27 @@ const FORM_FIELD_TYPES = new Set([
   'record-link',
 ])
 
+// L8-C (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7): the
+// allowlist of props keys permitted on the EXISTING `number` type (top-level fields AND detail
+// columns — this function runs for both). NOT a new FormFieldType member: M10 forecloses that
+// ("may enhance an existing number field only when labeled 'formatted number'") and §0.3 gives the
+// mechanical reason (thirteen site families, only presentation maps compile-forced). Sized by a
+// repo-source sweep (OD-L8-7(a)), not memory: `min`/`max`/`step`/`precision` are the shipped
+// `el-input-number` keys (numberFieldProps.ts), `derivedFrom` is the shipped line-derivation
+// declaration (lineDerivation.ts, commonTemplatePresets.ts:201) — both already ride through props
+// verbatim today — plus the three NEW L8-C display keys. EXPORTED so a census test can assert exact-
+// set equality and mutation-prove membership (gate C-2 / N-1 pattern).
+export const NUMBER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'min',
+  'max',
+  'step',
+  'precision',
+  'derivedFrom',
+  'currencySymbol',
+  'thousandsSeparator',
+  'uppercaseCny',
+])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
@@ -906,6 +927,47 @@ function normalizeFormField(
     pinnedProps = { baseId, sheetId }
   }
 
+  // L8-C (§1.3, OD-L8-6/OD-L8-7): allowlist + canonicalize `number` props. Runs for BOTH top-level
+  // fields and detail columns (this function handles both; `nested` only gates record-link above).
+  // Unlike record-link this is NOT a fixed 2-key reconstruction — pre-existing shipped keys
+  // (min/max/step/precision/derivedFrom) must keep riding through untouched (gate C-2 / X-1's
+  // byte-for-byte round-trip), so canonicalization here is a KEY FILTER over the ORIGINAL key
+  // order (`Object.keys(props).filter(...)`), never a rebuild in the allowlist's own order —
+  // reordering would make `templateVersionDiff.ts` (§2.5) see a spurious change on every existing
+  // number field the first time it is re-saved after this lands.
+  let numberProps: Record<string, unknown> | undefined
+  if (value.type === 'number') {
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => !NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] number props may only contain ${[...NUMBER_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+      // The three NEW L8-C display keys are type-checked at publish (fail closed on the wrong
+      // shape) so FE hydration (typeof-guarded, see templateAuthoring.ts fieldDraftFromField) is
+      // lossless by construction — a stored `uppercaseCny: "true"` can never silently round-trip
+      // to `false`. Pre-existing keys (min/max/step/precision/derivedFrom) are NOT newly
+      // type-validated here — out of this slice's scope, unchanged behavior.
+      if (props.currencySymbol !== undefined && typeof props.currencySymbol !== 'string') {
+        failValidation(context, `formSchema.fields[${index}] number props.currencySymbol must be a string`)
+      }
+      if (props.thousandsSeparator !== undefined && typeof props.thousandsSeparator !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.thousandsSeparator must be a boolean`)
+      }
+      if (props.uppercaseCny !== undefined && typeof props.uppercaseCny !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.uppercaseCny must be a boolean`)
+      }
+      const canonical: Record<string, unknown> = {}
+      for (const key of Object.keys(props)) {
+        if (NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key)) canonical[key] = props[key]
+      }
+      numberProps = canonical
+    }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -926,9 +988,11 @@ function normalizeFormField(
       : {}),
     ...(pinnedProps
       ? { props: pinnedProps }
-      : isRecord(value.props)
-        ? { props: { ...value.props } }
-        : {}),
+      : numberProps !== undefined
+        ? { props: numberProps }
+        : isRecord(value.props)
+          ? { props: { ...value.props } }
+          : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]

@@ -57,4 +57,49 @@ describe('validateAmountTotalConsistency (Gate A — pure server-side total-chec
     expect(validateAmountTotalConsistency(schema(), { amount: 0, items: [] }, MAP)).toBeNull()
     expect(validateAmountTotalConsistency(schema(), { amount: 50, items: [] }, MAP)).toMatch(/不一致/)
   })
+
+  // Gate C-4 (approval-lock8-field-vocabulary-20260817.md §3): "uppercaseCny changes no stored
+  // value, no comparison, and no total-check outcome" — paired with a VISIBLE effect (the
+  // `precision` sweep just above already proves the scale DOES change the verdict), so this is not
+  // a no-op assertion green against nothing.
+  it('L8-C: currencySymbol/thousandsSeparator/uppercaseCny on the amount field are display-only — byte-identical verdicts with vs without them, across a scale sweep', () => {
+    const l8cProps = { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true }
+    const schemaWithDisplayProps = (amountPrecision?: number): FormSchema => ({
+      fields: [
+        {
+          id: 'amount', type: 'number', label: '总额',
+          props: { ...(amountPrecision !== undefined ? { precision: amountPrecision } : {}), ...l8cProps },
+        },
+        {
+          id: 'items', type: 'detail', label: '明细',
+          columns: [
+            { id: 'name', type: 'text', label: '名称' },
+            {
+              id: 'amount', type: 'number', label: '金额',
+              props: { ...(amountPrecision !== undefined ? { precision: amountPrecision } : {}), ...l8cProps },
+            },
+          ],
+        },
+      ],
+    })
+    for (const precision of [undefined, 0, 2, 4]) {
+      for (const [formData, expected] of [
+        [{ amount: 300, items: [{ amount: 100 }, { amount: 200 }] }, null],
+        [{ amount: 100, items: [{ amount: 100 }, { amount: 200 }] }, /不一致/],
+      ] as const) {
+        const plain = validateAmountTotalConsistency(schema(precision), formData, MAP)
+        const withDisplayProps = validateAmountTotalConsistency(schemaWithDisplayProps(precision), formData, MAP)
+        if (expected === null) {
+          expect(plain).toBeNull()
+          expect(withDisplayProps).toBeNull()
+        } else {
+          expect(plain).toMatch(expected)
+          expect(withDisplayProps).toMatch(expected)
+        }
+        // Byte-identical, not just "both pass/fail": the same message (up to the props-invariant
+        // parts — there is no props text in the message at all, so this is a straight equality).
+        expect(withDisplayProps).toBe(plain)
+      }
+    }
+  })
 })

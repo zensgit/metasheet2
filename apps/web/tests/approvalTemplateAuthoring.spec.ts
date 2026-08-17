@@ -2365,3 +2365,140 @@ describe('TemplateAuthoringView', () => {
     expect(cc.config).toEqual({ targetType: 'role', targetIds: ['finance-role-id'] })
   })
   })
+
+describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {
+  it('fieldDraftFromField hydrates the three display keys from props, typed and default-safe', () => {
+    const withProps = buildTemplate({
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额',
+            props: { min: 0, currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+          },
+        ],
+      } as any,
+    })
+    const draft = draftFromTemplate(withProps).fields[0]
+    expect(draft.numberCurrencySymbol).toBe('¥')
+    expect(draft.numberThousandsSeparator).toBe(true)
+    expect(draft.numberUppercaseCny).toBe(true)
+
+    // Absent props -> unset defaults, not thrown.
+    const plain = buildTemplate({
+      formSchema: { fields: [{ id: 'amount', type: 'number', label: '金额' }] } as any,
+    })
+    const plainDraft = draftFromTemplate(plain).fields[0]
+    expect(plainDraft.numberCurrencySymbol).toBe('')
+    expect(plainDraft.numberThousandsSeparator).toBe(false)
+    expect(plainDraft.numberUppercaseCny).toBe(false)
+
+    // Malformed stored value (wrong type — pre-publish-gate legacy data) hydrates to the unset
+    // default rather than being coerced to truthy.
+    const malformed = buildTemplate({
+      formSchema: {
+        fields: [{ id: 'amount', type: 'number', label: '金额', props: { uppercaseCny: 'true' } }],
+      } as any,
+    })
+    expect(draftFromTemplate(malformed).fields[0].numberUppercaseCny).toBe(false)
+  })
+
+  it('buildFormSchema emits the three display keys alongside preserved min/precision (unauthorable keys pass through unchanged, §0.4)', () => {
+    const template = buildTemplate({
+      formSchema: {
+        fields: [{ id: 'amount', type: 'number', label: '金额', props: { min: 0, precision: 2 } }],
+      } as any,
+    })
+    const draft = draftFromTemplate(template)
+    draft.fields[0].numberCurrencySymbol = '¥'
+    draft.fields[0].numberThousandsSeparator = true
+    draft.fields[0].numberUppercaseCny = true
+    const schema = buildFormSchema(draft)
+    expect(schema.fields[0].props).toEqual({
+      min: 0, precision: 2, currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true,
+    })
+  })
+
+  it('buildFormSchema is editor-authoritative for the three display keys: clearing them drops the keys, never resurrected from `original`', () => {
+    const template = buildTemplate({
+      formSchema: {
+        fields: [{
+          id: 'amount', type: 'number', label: '金额',
+          props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+        }],
+      } as any,
+    })
+    const draft = draftFromTemplate(template)
+    draft.fields[0].numberCurrencySymbol = ''
+    draft.fields[0].numberThousandsSeparator = false
+    draft.fields[0].numberUppercaseCny = false
+    const schema = buildFormSchema(draft)
+    expect(schema.fields[0].props).toBeUndefined()
+  })
+
+  it('retyping a number field AWAY drops the three L8-C display keys (no stale currencySymbol resurrected on a text field)', () => {
+    const template = buildTemplate({
+      formSchema: {
+        fields: [{ id: 'amount', type: 'number', label: '金额', props: { currencySymbol: '¥', uppercaseCny: true } }],
+      } as any,
+    })
+    const draft = draftFromTemplate(template)
+    draft.fields[0].type = 'text'
+    const schema = buildFormSchema(draft)
+    expect(schema.fields[0].props).toBeUndefined()
+  })
+
+  it('a detail column carrying the shipped derivedFrom shape (commonTemplatePresets subtotal) survives buildFormSchema untouched — L8-C authoring is top-level only', () => {
+    const template = buildTemplate({
+      formSchema: {
+        fields: [{
+          id: 'items', type: 'detail', label: '明细',
+          columns: [
+            { id: 'qty', type: 'number', label: '数量', props: { min: 1 } },
+            { id: 'price', type: 'number', label: '单价', props: { min: 0 } },
+            {
+              id: 'subtotal', type: 'number', label: '小计',
+              props: { min: 0, derivedFrom: { operandColumnIds: ['qty', 'price'], operation: 'product' } },
+            },
+          ],
+        }],
+      } as any,
+    })
+    const schema = buildFormSchema(draftFromTemplate(template))
+    const detail = schema.fields.find((f: any) => f.id === 'items') as any
+    expect(detail.columns.find((c: any) => c.id === 'subtotal').props).toEqual({
+      min: 0, derivedFrom: { operandColumnIds: ['qty', 'price'], operation: 'product' },
+    })
+  })
+
+  it('gate C-1: a template carrying all L8-C display props stays EDITABLE — paired with the positive control (an unauthorable field type still locks the template read-only, §2.2)', () => {
+    // `unsupportedTemplateAuthoringReason` is the single production gate that decides whole-
+    // template read-only (§2.2, :718-722) — TemplateAuthoringView.vue's `readOnly`/`!canSave`
+    // both derive from it, and it is the only live authoring surface (ApprovalFormFieldInspector.vue
+    // / Designer 2.0 is unmounted in production — see this PR's description).
+    const propped = unsupportedTemplateAuthoringReason(buildTemplate({
+      formSchema: {
+        fields: [{
+          id: 'amount', type: 'number', label: '金额',
+          props: { min: 0, precision: 2, currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+        }],
+      } as any,
+    }))
+    expect(propped).toBeNull()
+
+    // Positive control (Lock-5 A-3's shape, reused per this file's own precedent at :398-408):
+    // an UNAUTHORABLE field type on the SAME kind of template DOES lock it read-only — proving
+    // "stays editable" above is guard-selected, not vacuous because no guard exists on this path.
+    const unauthorable = unsupportedTemplateAuthoringReason(buildTemplate({
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额',
+            props: { min: 0, precision: 2, currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+          },
+          { id: 'file', type: 'attachment', label: '附件' },
+        ],
+      } as any,
+    }))
+    expect(unauthorable).not.toBeNull()
+  })
+})

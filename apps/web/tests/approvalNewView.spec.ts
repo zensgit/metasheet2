@@ -434,6 +434,99 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
   })
 
   // -------------------------------------------------------------------------
+  // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display —
+  // currency/thousands caption + the per-field 大写 trigger, additive to the pre-existing
+  // auto-summed-total trigger (§0.4 — neither replaces the other).
+  // -------------------------------------------------------------------------
+  it('L8-C: uppercaseCny renders the 大写 caption on a PLAIN number field (no auto-sum total declared)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words',
+      formSchema: {
+        fields: [
+          { id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差申请' } as FormField,
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3,
+            props: { uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('壹拾贰圆叁角')
+  })
+
+  it('L8-C: uppercaseCny is gated on scale <= 2 — a precision:4 field never shows the 大写 caption (amountToChineseWords is honest only up to 2 decimals, per its own header)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words_high_precision',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3456,
+            props: { uppercaseCny: true, precision: 4 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+  })
+
+  it('L8-C: a plain number field with NO uppercaseCny and no auto-sum shows NEITHER caption (positive control for the trigger)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_none',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3 } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-amount-display"]')).toBeNull()
+  })
+
+  it('L8-C: currencySymbol + thousandsSeparator render the formatted-number display caption', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_display',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, precision: 2 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-display"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent?.trim()).toBe('¥1,234.5')
+  })
+
+  it('L8-C: currencySymbol/thousandsSeparator/uppercaseCny do not change the submitted formData (display-only, M10)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_submit',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    expect(payload.formData).toEqual({ amount: 1234.5 })
+  })
+
+  // -------------------------------------------------------------------------
   // B2-28
   // -------------------------------------------------------------------------
   it('renders the disabled placeholder for an attachment field — no el-upload', async () => {

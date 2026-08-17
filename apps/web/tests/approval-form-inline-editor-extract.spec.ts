@@ -690,4 +690,112 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
     // the operator select's v-if condition (`field.visibility.dependsOnFieldId`) is now falsy.
     expect(operatorSelect()).toBeNull()
   })
+
+  // -------------------------------------------------------------------------
+  // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): the formatted-number
+  // props config block. Every control here is TYPED and WRITE-THROUGH (M7: no inert/disabled-
+  // theater controls) — this test proves that mechanically, by driving the real DOM controls and
+  // reading the value back off the real createTemplate payload, not by asserting the markup shape
+  // alone.
+  // -------------------------------------------------------------------------
+  it('(k) L8-C: the number-props config block is type-selected, its three controls are typed (not inert), and their values reach the create payload', async () => {
+    await mountView()
+    setInput('approval-template-key', 'num_l8c')
+    setInput('approval-template-name', 'L8C数字')
+
+    // The default create-mode field starts as `text` — the block is absent until retyped.
+    expect(container!.querySelector('[data-testid="approval-number-format-config"]')).toBeNull()
+
+    const typeSelect = container!.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    expect(typeSelect).not.toBeNull()
+    typeSelect.value = 'number'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Presence is type-selected: appears now, for a `number` field (matching the OTHER type-gated
+    // blocks in this component — select/detail/record-link — never rendered as always-on chrome).
+    expect(container!.querySelector('[data-testid="approval-number-format-config"]')).not.toBeNull()
+
+    const currencySelect = container!.querySelector('[data-testid="approval-number-currency-select"]') as HTMLSelectElement
+    const thousandsToggle = container!.querySelector('[data-testid="approval-number-thousands-toggle"]') as HTMLInputElement
+    const uppercaseToggle = container!.querySelector('[data-testid="approval-number-uppercase-toggle"]') as HTMLInputElement
+    expect(currencySelect).not.toBeNull()
+    expect(thousandsToggle).not.toBeNull()
+    expect(uppercaseToggle).not.toBeNull()
+    expect(thousandsToggle.type).toBe('checkbox')
+    expect(uppercaseToggle.type).toBe('checkbox')
+
+    currencySelect.value = '¥'
+    currencySelect.dispatchEvent(new Event('change'))
+    thousandsToggle.checked = true
+    thousandsToggle.dispatchEvent(new Event('change'))
+    uppercaseToggle.checked = true
+    uppercaseToggle.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = createTemplateSpy.mock.calls[0][0]
+    const field = payload.formSchema.fields[0]
+    expect(field.type).toBe('number')
+    // Every control's value made it through — proof the controls WRITE, not merely render
+    // (M7's "no inert/disabled-theater controls" applied mechanically).
+    expect(field.props).toEqual({ currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true })
+  })
+
+  it('(l) L8-C: unchecking the toggles / clearing the currency select removes the keys (editor-authoritative, not resurrected)', async () => {
+    await mountView()
+    setInput('approval-template-key', 'num_l8c_clear')
+    setInput('approval-template-name', 'L8C清空')
+
+    const typeSelect = container!.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'number'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    const currencySelect = container!.querySelector('[data-testid="approval-number-currency-select"]') as HTMLSelectElement
+    const thousandsToggle = container!.querySelector('[data-testid="approval-number-thousands-toggle"]') as HTMLInputElement
+    const uppercaseToggle = container!.querySelector('[data-testid="approval-number-uppercase-toggle"]') as HTMLInputElement
+    currencySelect.value = '¥'
+    currencySelect.dispatchEvent(new Event('change'))
+    thousandsToggle.checked = true
+    thousandsToggle.dispatchEvent(new Event('change'))
+    uppercaseToggle.checked = true
+    uppercaseToggle.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Clear all three back to their unset state.
+    currencySelect.value = ''
+    currencySelect.dispatchEvent(new Event('change'))
+    thousandsToggle.checked = false
+    thousandsToggle.dispatchEvent(new Event('change'))
+    uppercaseToggle.checked = false
+    uppercaseToggle.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const field = createTemplateSpy.mock.calls[0][0].formSchema.fields[0]
+    expect(field.props).toBeUndefined()
+  })
+
+  it('(m) L8-C gate M-2: the rendered number-props block never renders 金额/money/exact — mechanical sweep, positive control 格式化数字 IS found', async () => {
+    await mountView()
+    const typeSelect = container!.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'number'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    const block = container!.querySelector('[data-testid="approval-number-format-config"]') as HTMLElement
+    expect(block).not.toBeNull()
+    const text = block.textContent ?? ''
+    for (const forbidden of ['金额', 'money', 'Money', 'MONEY', 'exact', 'Exact']) {
+      expect(text, `must not render "${forbidden}"`).not.toContain(forbidden)
+    }
+    // Positive control: the sweep DOES find the mandated replacement copy — not passing over an
+    // empty string set (Lock-8 gate M-2).
+    expect(text).toContain('格式化数字')
+  })
 })

@@ -218,6 +218,57 @@
               placeholder="每行一个选项，格式：显示名:值"
             />
           </el-form-item>
+          <!-- L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/M10): formatted-number
+               DISPLAY props on the EXISTING `number` type — currency prefix, thousands separator,
+               中文大写 (amountInWords.ts re-sited). Every control here writes to a real
+               FieldAuthoringDraft key that buildFormSchema emits (M7: no inert/disabled-theater
+               controls). Copy stays scoped to formatted-DISPLAY vocabulary only — never a
+               money/exact-storage claim (gate M-2). -->
+          <el-form-item
+            v-if="field.type === 'number'"
+            label="格式化数字"
+            class="template-authoring__wide"
+            data-testid="approval-number-format-config"
+          >
+            <div class="template-authoring__grid">
+              <el-form-item label="货币符号">
+                <el-select
+                  v-model="field.numberCurrencySymbol"
+                  :disabled="readOnly"
+                  clearable
+                  class="ms-w-100pct"
+                  data-testid="approval-number-currency-select"
+                >
+                  <el-option label="不显示" value="" />
+                  <el-option label="¥ 人民币" value="¥" />
+                  <el-option label="$ 美元" value="$" />
+                  <el-option label="€ 欧元" value="€" />
+                  <el-option label="£ 英镑" value="£" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="千位分隔符">
+                <el-checkbox
+                  v-model="field.numberThousandsSeparator"
+                  :disabled="readOnly"
+                  data-testid="approval-number-thousands-toggle"
+                >
+                  显示千位分隔符
+                </el-checkbox>
+              </el-form-item>
+              <el-form-item label="中文大写">
+                <el-checkbox
+                  v-model="field.numberUppercaseCny"
+                  :disabled="readOnly"
+                  data-testid="approval-number-uppercase-toggle"
+                >
+                  显示中文大写
+                </el-checkbox>
+              </el-form-item>
+            </div>
+            <div class="template-authoring__hint">
+              格式化数字仅用于展示（货币符号、千位分隔符、中文大写回显），不改变提交的数值。
+            </div>
+          </el-form-item>
           <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each
                sub-field is a LEAF type (no nested detail). Mirrors the backend column schema. -->
           <el-form-item

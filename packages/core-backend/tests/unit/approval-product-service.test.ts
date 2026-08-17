@@ -1596,6 +1596,245 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('number field props contract (L8-C formatted-number, approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7)', () => {
+    // M10 verbatim: props on the EXISTING `number` type — NOT a new union member (OD-L8-6). The
+    // allowlist mirrors record-link's fail-closed shape (§1.3/OD-L8-7): unknown keys REJECT at
+    // publish, known keys are canonicalized (no residual spread, original key order preserved —
+    // §2.5/X-1). Reject cases run before pool.connect() (assertFormSchema is synchronous), same as
+    // record-link above.
+    const wrap = (field: Record<string, unknown>, extra: Record<string, unknown>[] = []) => ({
+      key: `num-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name: 'Number Props Tpl',
+      formSchema: { fields: [field, ...extra] },
+      approvalGraph: buildRuntimeGraph(),
+    })
+    const create = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    it('N-1 style census: the allowlist is EXACTLY the shipped keys + the three L8-C display keys', async () => {
+      const { NUMBER_FIELD_ALLOWED_PROP_KEYS } = await import('../../src/services/ApprovalProductService')
+      // Mutation-provable: dropping any member here (or adding one without updating this list)
+      // reds this exact-equality assertion directly — the census IS the test, not a claim about it.
+      expect([...NUMBER_FIELD_ALLOWED_PROP_KEYS].sort()).toEqual(
+        ['currencySymbol', 'derivedFrom', 'max', 'min', 'precision', 'step', 'thousandsSeparator', 'uppercaseCny'].sort(),
+      )
+    })
+
+    it('rejects a number field props key outside the allowlist (fail-closed, not silently dropped)', async () => {
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { precision: 2, exact: true },
+      }))).rejects.toThrow(/number props may only contain/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { currencySymbol: '¥', moneyType: 'exact' },
+      }))).rejects.toThrow(/unknown: moneyType/)
+    })
+
+    it('rejects the three new display keys when wrong-typed (publish-time type gate, not FE-only)', async () => {
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { currencySymbol: true },
+      }))).rejects.toThrow(/currencySymbol must be a string/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { thousandsSeparator: 'true' },
+      }))).rejects.toThrow(/thousandsSeparator must be a boolean/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { uppercaseCny: 1 },
+      }))).rejects.toThrow(/uppercaseCny must be a boolean/)
+    })
+
+    it('a detail column carrying the extra key is ALSO rejected (same function handles nested columns)', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{ id: 'unit_price', type: 'number', label: '单价', props: { min: 0, extraneous: 1 } }],
+      }))).rejects.toThrow(/number props may only contain/)
+    })
+
+    it('accepts and canonicalizes all three L8-C display props alongside pre-existing shipped keys, ORIGINAL key order preserved', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-num', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-num', template_id: 'tpl-num', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-num', key: 'num-tpl', name: 'Num', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-num', latest_version_id: 'ver-num',
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: {
+          min: 0, precision: 2,
+          currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true,
+        },
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.type).toBe('number')
+      // Original insertion order preserved (min, precision, currencySymbol, thousandsSeparator,
+      // uppercaseCny) — a rebuild in the allowlist's own order would still equal-compare here, so
+      // this is a genuine order assertion (not merely value equality).
+      expect(Object.keys(field.props as object)).toEqual(
+        ['min', 'precision', 'currencySymbol', 'thousandsSeparator', 'uppercaseCny'],
+      )
+      expect(field.props).toEqual({
+        min: 0, precision: 2,
+        currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true,
+      })
+    })
+
+    it('OD-L8-7 sized-by-sweep gate C-2: a detail column carrying the shipped derivedFrom shape (commonTemplatePresets subtotal) still publishes', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-deriv', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-deriv', template_id: 'tpl-deriv', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-deriv', key: 'deriv-tpl', name: 'Deriv', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-deriv', latest_version_id: 'ver-deriv',
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [
+          { id: 'quantity', type: 'number', label: '数量', required: true, props: { min: 1 } },
+          { id: 'unit_price', type: 'number', label: '单价', required: true, props: { min: 0 } },
+          {
+            id: 'subtotal', type: 'number', label: '小计',
+            props: { min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } },
+          },
+        ],
+      }))
+      const columns = result.formSchema.fields[0].columns as Array<{ id: string; props?: Record<string, unknown> }>
+      expect(columns.find((c) => c.id === 'subtotal')?.props).toEqual({
+        min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' },
+      })
+    })
+
+    it('OD-L8-7 gate C-2, RESTORE half: restoreTemplateVersion re-validates a historical number-props shape through the new allowlist and still restores (:3796-3804 revalidation path)', async () => {
+      // This is the precise path §1.3 warns the allowlist can break ("reject existing published
+      // templates at their next save AND their history at restore") — publish-time acceptance
+      // (above) does not, by itself, prove the SAME shape survives restoreTemplateVersion's
+      // independent re-validation of a STORED (pre-Lock-8) snapshot.
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      const historicalSchema = {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', props: { min: 0, precision: 2 } },
+          {
+            id: 'items', type: 'detail', label: '明细',
+            columns: [
+              { id: 'quantity', type: 'number', label: '数量', props: { min: 1 } },
+              { id: 'unit_price', type: 'number', label: '单价', props: { min: 0 } },
+              {
+                id: 'subtotal', type: 'number', label: '小计',
+                props: { min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } },
+              },
+            ],
+          },
+        ],
+      }
+      const templateRow = {
+        id: 'tpl-restore', key: 'restore-tpl', name: 'Restore', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+        active_version_id: 'ver-current', latest_version_id: 'ver-current',
+        created_at: new Date('2026-07-01T00:00:00.000Z'), updated_at: new Date('2026-07-01T00:00:00.000Z'),
+      }
+      const historicalVersionRow = {
+        id: 'ver-historical', template_id: 'tpl-restore', version: 1, status: 'draft',
+        form_schema: historicalSchema,
+        approval_graph: graph,
+        created_at: new Date('2026-07-01T00:00:00.000Z'), updated_at: new Date('2026-07-01T00:00:00.000Z'),
+      }
+      const restoredVersionRow = {
+        id: 'ver-restored', template_id: 'tpl-restore', version: 2, status: 'draft',
+        form_schema: historicalSchema,
+        approval_graph: graph,
+        restored_from_version_id: 'ver-historical',
+        created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions') && s.includes('WHERE id = $1 AND template_id = $2')) {
+          return { rows: [historicalVersionRow], rowCount: 1 }
+        }
+        if (s.startsWith('SELECT COALESCE(MAX(version), 0)')) {
+          return { rows: [{ max_version: '1' }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [restoredVersionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{ ...templateRow, latest_version_id: 'ver-restored' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await service.restoreTemplateVersion('tpl-restore', 'ver-historical', {
+        expectedLatestVersionId: 'ver-current',
+      } as never)
+      const restoredFields = (result.formSchema as { fields: Array<Record<string, unknown>> }).fields
+      expect(restoredFields.find((f) => f.id === 'amount')?.props).toEqual({ min: 0, precision: 2 })
+      const detail = restoredFields.find((f) => f.id === 'items') as { columns: Array<{ id: string; props?: unknown }> }
+      expect(detail.columns.find((c) => c.id === 'subtotal')?.props).toEqual({
+        min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' },
+      })
+    })
+    // NOTE: `cloneTemplate` (:4408-4430) re-validates through the SAME `assertFormSchema` →
+    // `normalizeFormField` call as both `createTemplate` (tested above) and `restoreTemplateVersion`
+    // (tested here) — not a third, independently-implemented gate — so it is not separately
+    // black-box tested in this file; deferred, not silently assumed equivalent.
+  })
+
   describe('approval condition formula contract (FC-1)', () => {
     const formulaFormSchema = {
       fields: [
