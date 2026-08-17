@@ -119,13 +119,24 @@
             :class="{ 'is-active': activeAuthoringSection === section.id }"
             text
             :aria-current="activeAuthoringSection === section.id ? 'step' : undefined"
-            :aria-label="`${index + 1} ${section.label} ${section.description}`"
+            :aria-label="`${index + 1} ${section.label} ${section.description}${section.id === 'basic' && basicInfoIssueCount > 0 ? `，${basicInfoIssueCount} 项不完善` : ''}`"
             :data-testid="`approval-template-section-${section.id}`"
             @click="selectAuthoringSection(section.id)"
           >
             <span class="template-authoring__step-index">{{ index + 1 }}</span>
             <span class="template-authoring__step-copy">
               <strong>{{ section.label }}</strong>
+            </span>
+            <!-- P1-A0: typed-issue-derived count, basic-info step only (see `basicInfoIssueCount`
+                 above — NOT the parent-lock header count, which stays undelivered debt).
+                 Reuses the pre-existing `.template-authoring__step-count` pill style, which had
+                 no template usage before this slice. -->
+            <span
+              v-if="section.id === 'basic' && basicInfoIssueCount > 0"
+              class="template-authoring__step-count"
+              data-testid="approval-template-section-basic-issue-count"
+            >
+              {{ basicInfoIssueCount }} 项不完善
             </span>
           </el-button>
         </nav>
@@ -184,10 +195,20 @@
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
           </el-form-item>
           <el-form-item label="分类">
-            <el-input v-model="draft.category" :disabled="readOnly" placeholder="如 请假 / 采购 / 报销" />
+            <el-input
+              v-model="draft.category"
+              :disabled="readOnly"
+              placeholder="如 请假 / 采购 / 报销"
+              data-testid="approval-template-category"
+            />
           </el-form-item>
           <el-form-item label="SLA 小时">
-            <el-input v-model="draft.slaHoursText" :disabled="readOnly" placeholder="留空表示不启用" />
+            <el-input
+              v-model="draft.slaHoursText"
+              :disabled="readOnly"
+              placeholder="留空表示不启用"
+              data-testid="approval-template-sla-hours"
+            />
           </el-form-item>
           <el-form-item label="描述" class="template-authoring__wide">
             <el-input
@@ -195,11 +216,17 @@
               :disabled="readOnly"
               type="textarea"
               :rows="3"
+              data-testid="approval-template-description"
             />
           </el-form-item>
           <el-form-item label="可见范围">
             <div class="template-authoring__inline">
-              <el-select v-model="draft.visibilityType" :disabled="readOnly" class="ms-w-140">
+              <el-select
+                v-model="draft.visibilityType"
+                :disabled="readOnly"
+                class="ms-w-140"
+                data-testid="approval-template-visibility-type"
+              >
                 <el-option label="全员" value="all" />
                 <el-option label="部门" value="dept" />
                 <el-option label="角色" value="role" />
@@ -209,11 +236,16 @@
                 v-model="draft.visibilityIdsText"
                 :disabled="readOnly || draft.visibilityType === 'all'"
                 placeholder="逗号分隔，按所选范围填写"
+                data-testid="approval-template-visibility-ids"
               />
             </div>
           </el-form-item>
           <el-form-item label="发布策略">
-            <el-checkbox v-model="draft.allowRevoke" :disabled="readOnly">
+            <el-checkbox
+              v-model="draft.allowRevoke"
+              :disabled="readOnly"
+              data-testid="approval-template-allow-revoke"
+            >
               允许发起人撤回
             </el-checkbox>
           </el-form-item>
@@ -1111,6 +1143,8 @@ import {
   unsupportedTemplateAuthoringReason,
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
+  validateTemplateBasicInfo,
+  type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
@@ -1373,6 +1407,16 @@ const authoringFlowNodeCount = computed(() => (
 const authoringSectionIndex = computed(() => (
   authoringSections.findIndex(section => section.id === activeAuthoringSection.value)
 ))
+
+// P1-A0 (master §4 UI-0 "live validation count"; Lock-0 L0-3 typed-issue-record delta, scoped to
+// the 基础信息 step only — the parent-lock header count over the FULL publishChecklist stays
+// undelivered L0-5-adjacent debt, tracked separately, and is NOT what this badge claims to be).
+// Typed source of truth; the step-nav badge below reads `.length` off this array — it never
+// hand-counts or hardcodes a number.
+const basicInfoIssues = computed<AuthoringValidationIssue[]>(() => (
+  validateTemplateBasicInfo(draft.value, unsupportedReason.value)
+))
+const basicInfoIssueCount = computed<number>(() => basicInfoIssues.value.length)
 
 function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
   if (!target) return

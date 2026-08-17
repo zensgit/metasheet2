@@ -13,6 +13,8 @@ import {
   graphReadOnlyReason,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  validateTemplateFormFields,
+  validateTemplateBasicInfo,
 } from '../src/approvals/templateAuthoring'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
@@ -321,6 +323,98 @@ function setInput(testId: string, value: string) {
   input.dispatchEvent(new Event('input'))
 }
 
+// P1-A0 — typed basic-info issue model (master §4 UI-0; Lock-0 L0-3 typed-issue-record delta,
+// basic-info-step scope only). `validateTemplateBasicInfo` is a NEW typed extraction of the SAME
+// five checks `validateTemplateFormFields` has always run first; these pin (a) the typed shape and
+// derivable count, and (b) that the extraction did not change the combined string-validator output
+// — order, text, and set all byte-identical to before this slice.
+describe('validateTemplateBasicInfo (P1-A0 typed issue model)', () => {
+  it('positive control: a fully valid basic-info draft yields zero typed issues', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+
+    const issues = validateTemplateBasicInfo(draft, null)
+
+    expect(issues).toEqual([])
+  })
+
+  it('returns one typed {code, message, severity, target} issue per missing required field, in the SAME order as the string validator', () => {
+    const draft = createEmptyTemplateDraft()
+    // key/name left blank on purpose; visibilityType defaults to 'all' (no id requirement);
+    // slaHoursText defaults to '' (unset, not invalid) — only key/name should fire here.
+
+    const issues = validateTemplateBasicInfo(draft, null)
+
+    expect(issues).toEqual([
+      { code: 'key', message: '模板 Key 必填', severity: 'error', target: { kind: 'field', key: 'key' } },
+      { code: 'name', message: '模板名称必填', severity: 'error', target: { kind: 'field', key: 'name' } },
+    ])
+  })
+
+  it('every basic-info issue is severity "error" (no invented "warning" issue widens the validated set)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.slaHoursText = 'abc'
+
+    const issues = validateTemplateBasicInfo(draft, 'unsupported-x')
+
+    expect(issues.length).toBeGreaterThan(0)
+    expect(issues.every((issue) => issue.severity === 'error')).toBe(true)
+  })
+
+  it('attributes unsupportedReason to the basic-info section (mirrors the existing firstInvalidAuthoringSection routing, not a new classification)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+
+    const issues = validateTemplateBasicInfo(draft, '该模板包含当前 MVP 不支持编辑的结构')
+
+    expect(issues).toEqual([{
+      code: 'unsupported',
+      message: '该模板包含当前 MVP 不支持编辑的结构',
+      severity: 'error',
+      target: { kind: 'section', key: 'basic' },
+    }])
+  })
+
+  it('typed issue count derivation: N basic-info problems → N-length array, for 0/1/several — never a hand-maintained number', () => {
+    const zero = createEmptyTemplateDraft()
+    zero.key = 'travel'
+    zero.name = '出差审批'
+    expect(validateTemplateBasicInfo(zero, null)).toHaveLength(0)
+
+    const one = createEmptyTemplateDraft()
+    one.key = 'travel'
+    one.name = '出差审批'
+    one.slaHoursText = 'abc'
+    expect(validateTemplateBasicInfo(one, null)).toHaveLength(1)
+
+    const several = createEmptyTemplateDraft()
+    several.slaHoursText = 'abc'
+    several.visibilityType = 'dept'
+    // key/name left blank + bad SLA + unresolved visibility scope = 4 issues.
+    expect(validateTemplateBasicInfo(several, null)).toHaveLength(4)
+  })
+
+  it('does NOT change the combined string-validator output: same messages, same order, for a multi-failure draft (regression pin for the extraction)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.visibilityType = 'dept'
+    draft.slaHoursText = 'abc'
+    // key/name left blank.
+    draft.fields = [] // avoid unrelated form-field errors interleaving with the basic-info block
+
+    const errors = validateTemplateFormFields(draft, '结构不受支持', null)
+
+    expect(errors).toEqual([
+      '结构不受支持',
+      '模板 Key 必填',
+      '模板名称必填',
+      '非全员可见范围至少需要一个 id',
+      'SLA 必须是正整数小时或留空',
+    ])
+  })
+})
+
 describe('approval template authoring helpers', () => {
   it('preserves visibilityRule metadata while rebuilding supported fields', () => {
     const template = buildTemplate()
@@ -527,6 +621,51 @@ describe('approval template authoring helpers', () => {
     expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([
       { kind: 'form_field_user', fieldId: 'reviewer' },
     ])
+  })
+
+  // P1-A0 publish-payload-shape pin — basic-info fields never travel through `publishTemplate`
+  // (which sends only `{ policy }`, see `approval-template-authoring-policy-carrier.test.ts`); they
+  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (identical function,
+  // `templateAuthoring.ts`) at save time. This slice touches no basic-info persistence code — this
+  // pin exists to prove that stays true. A mutation renaming/dropping/reshaping a basic-info payload
+  // key reds either assertion below.
+  it('P1-A0: pins the exact basic-info shape of the create/update payload (no key renamed, dropped, or reshaped)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+    draft.category = '差旅'
+    draft.description = '跨部门出差需要审批'
+    draft.slaHoursText = '24'
+    draft.visibilityType = 'dept'
+    draft.visibilityIdsText = 'dept_a, dept_b'
+
+    const payload = buildCreateTemplatePayload(draft)
+
+    expect(Object.keys(payload).sort()).toEqual([
+      'approvalGraph',
+      'category',
+      'description',
+      'formSchema',
+      'key',
+      'name',
+      'slaHours',
+      'visibilityScope',
+    ])
+    expect({
+      key: payload.key,
+      name: payload.name,
+      category: payload.category,
+      description: payload.description,
+      slaHours: payload.slaHours,
+      visibilityScope: payload.visibilityScope,
+    }).toEqual({
+      key: 'travel',
+      name: '出差审批',
+      category: '差旅',
+      description: '跨部门出差需要审批',
+      slaHours: 24,
+      visibilityScope: { type: 'dept', ids: ['dept_a', 'dept_b'] },
+    })
   })
 
   it('round-trips a direct_manager assignee source (save emits {kind} + hydrate restores sourceKind)', () => {
@@ -852,6 +991,66 @@ describe('TemplateAuthoringView', () => {
     expect(payload.name).toBe('出差审批')
     expect(payload.approvalGraph.nodes.map((node: any) => node.key)).toEqual(['start', 'approval_1', 'end'])
     expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
+  })
+
+  // P1-A0 typed-control test — each basic-info control commits its typed value onto the draft and
+  // survives to the save payload. `key`/`name` are already covered by the test above; this covers
+  // the remaining controls (category/SLA/description/visibility type+ids), which previously had no
+  // stable `data-testid` to target. Positive control: every field's value round-trips unaltered.
+  it('P1-A0: every basic-info control commits its typed value through to the save payload (positive control)', async () => {
+    await mountView()
+
+    setInput('approval-template-key', 'travel')
+    setInput('approval-template-name', '出差审批')
+    setInput('approval-template-category', '差旅')
+    setInput('approval-template-sla-hours', '24')
+    setInput('approval-template-description', '跨部门出差需要审批')
+    const visibilityType = container!.querySelector('[data-testid="approval-template-visibility-type"]') as HTMLSelectElement
+    visibilityType.value = 'dept'
+    visibilityType.dispatchEvent(new Event('change'))
+    await flushUi()
+    setInput('approval-template-visibility-ids', 'dept_a, dept_b')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = createTemplateSpy.mock.calls[0]?.[0] as any
+    expect(payload.key).toBe('travel')
+    expect(payload.name).toBe('出差审批')
+    expect(payload.category).toBe('差旅')
+    expect(payload.slaHours).toBe(24)
+    expect(payload.description).toBe('跨部门出差需要审批')
+    expect(payload.visibilityScope).toEqual({ type: 'dept', ids: ['dept_a', 'dept_b'] })
+  })
+
+  // P1-A0 validation-count derivation — the 基础信息 step-nav badge reads `.length` off
+  // `validateTemplateBasicInfo(draft, unsupportedReason)` (`TemplateAuthoringView.vue`
+  // `basicInfoIssueCount`). This exercises the LIVE component derivation (not the pure helper in
+  // isolation — a helper-only test would pass even if the view's binding were broken/hardcoded), at
+  // three states: 2 known issues, 0 issues, 1 different known issue. A mutation that hardcodes the
+  // badge number or drops `.length` fails at least one of these three assertions.
+  it('P1-A0: the 基础信息 step-nav issue count is DERIVED from typed issues, not hand-counted', async () => {
+    await mountView()
+
+    // State 1: brand-new draft — key + name both empty → exactly 2 typed issues.
+    let badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
+    expect(badge?.textContent?.trim()).toBe('2 项不完善')
+
+    // State 2: fill both required fields → count derives to 0, badge disappears entirely (not "0
+    // 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for a zero state).
+    setInput('approval-template-key', 'travel')
+    setInput('approval-template-name', '出差审批')
+    await flushUi()
+    badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
+    expect(badge).toBeNull()
+
+    // State 3: introduce exactly ONE different issue (bad SLA text) → count derives to 1, proving
+    // the badge tracks the CURRENT typed array rather than being stuck at its first-seen value.
+    setInput('approval-template-sla-hours', 'abc')
+    await flushUi()
+    badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
+    expect(badge?.textContent?.trim()).toBe('1 项不完善')
   })
 
   it('creates a common purchase template as a draft without publishing', async () => {
