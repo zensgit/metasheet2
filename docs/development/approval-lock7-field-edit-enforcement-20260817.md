@@ -214,19 +214,15 @@ composition step; a delta table read-composed by each reader would be fail-OPEN 
 reader that forgets to compose silently serves the create-time value (five independent read sites named
 above).
 
-**The audit row carries field IDs, never values (OD-L7-7).** `GET /api/approvals/:id/history`
-(`routes/approval-history.ts:43`) is guarded by `authenticate` ALONE — no `approvals:read`, no participant
-check — and its query selects raw `approval_records` columns including `comment` with no mask applied
-(`:86-104`, `comment` at `:93`); the FE detail timeline consumes exactly that endpoint
-(`apps/web/src/approvals/api.ts:960`). That history is intentionally outside redaction is corroborated by the
-real-DB spec's own comment — *"redaction is a read-time echo transform, never a write"* — beside its
-records-table assertion (`tests/integration/approval-p1c-field-permissions.api.test.ts:273-280`); the route
-is the primary evidence, the comment only the recorded intent. So a before/after VALUE placed in
-`approval_records.comment` or `.metadata` would be readable by any authenticated user and would bypass the
-`hidden` mask entirely — including for the very field the author hid. The `action:'handle'` row therefore
-carries `{ nodeKey, nodeEntryEpoch, changedFieldIds }` and no values; values live in the revision table
-behind a mask-aware read. (This is the same audit-versus-error split Lock-2 §2.6 drew, one surface further
-out: here even the *audit* surface is too wide for values.)
+**The audit row carries field IDs, never values (OD-L7-7).** The instance history read surface is
+broadly scoped — wider than the participant/permission audience a masked field is meant for (exact guard and
+column posture held in the private line inventory per the disclosure doctrine, and corroborated by the
+real-DB spec's recorded intent *"redaction is a read-time echo transform, never a write"*). A before/after
+VALUE placed on that surface would therefore be readable beyond the intended audience and would defeat the
+`hidden` mask — including for the very field the author hid. The `action:'handle'` row therefore carries
+`{ nodeKey, nodeEntryEpoch, changedFieldIds }` and no values; values live in the revision table behind a
+mask-aware read. (This is the same audit-versus-error split Lock-2 §2.6 drew, one surface further out: here
+even the *audit* surface is too wide for values.)
 
 ## 2. Cross-cutting
 
@@ -266,12 +262,12 @@ current code neither throws nor logs.
 | R-12 | Value validators | AGE:637, `:642`, `:634`; fail-open defaults AGE:412-413, `:552-553` | EXTEND — re-run on writes; MS-3 inherited, asserted not fixed (G-6) |
 | R-13 | Dispatch re-normalize | `:2708-2726` | CONFIRM — the §2.1 constraint; gate G-9 |
 | R-14 | Condition + assignee re-read at dispatch | `:6059-6065`, `:6270-6276` | EXTEND — the §L7-B pin 1 hazard; gate G-4 |
-| R-15 | Audit insert + history read | `approval_records`; `routes/approval-history.ts:43`, `:86-104` | EXTEND — values-free row (OD-L7-7); gate G-8 |
+| R-15 | Audit insert + history read | `approval_records`; history read surface (private inventory) | EXTEND — values-free row (OD-L7-7); gate G-8 |
 | R-16 | Read DTO | `ApprovalBridgeService.ts` `toUnifiedDTO:158-…`; FE `detailField.ts:529-561`, skip-if-absent `:547` | EXTEND per OD-L7-10 — no per-field access channel exists today |
 | R-17 | Authoring grids + honesty copy | `TemplateAuthoringView.vue:626-666`, `:655-659`; `ApprovalGraphNodeConfigEditor.vue:518-560`; `fieldPermissionHonestyCopy.ts:14`, `:25` | EXTEND — both surfaces in one change (G-13) |
 | R-18 | FE draft model + backend-drop allowlists | `templateAuthoring.ts:161`, `:383-387`, `:394`, `:981-990`, `:1011-1012`, `:595`, `:653`, `:768`, `:781`; `approvalNodeEdit.ts:35`, `:74`, `:99-101`, `:172-179` | CONFIRM — `editable`-means-absent and the delete-when-editable projection are preserved (OD-L7-9) |
 | R-19 | OpenAPI | `packages/openapi/src/base.yml:3453-3477` | decision — OD-L7-10; `ApprovalNodeConfig` omits `fieldPermissions` (and `assigneeSources`, threshold, timeout, `signaturePolicy`; its `approvalMode` enum lacks `threshold`), and no runtime validator is wired, so this is codegen / `tools/guard-codegen.mjs` only |
-| R-20 | Legacy terminal routes | `routes/approvals.ts:2097`, `:2247`; raw UPDATEs `:2180`, `:2337` | CONFIRM-EXCLUDE — they write NO form data (§2.7 D-3); locked: no field write is ever added there |
+| R-20 | Legacy terminal routes | private inventory (§2.7 D-3) | CONFIRM-EXCLUDE — they write NO form data (§2.7 D-3); locked: no field write is ever added there |
 | R-21 | Bridged instance inserts | `ApprovalBridgeService.ts:1024`; `AfterSalesApprovalBridgeService.ts:515` | CONFIRM — neither writes `form_snapshot` and neither pins a published definition, so the mask is a no-op there **by construction, not by decision** |
 | R-22 | Version diff / restore | `restoreTemplateVersion:3651-3660` (re-validates history against today's contract) | CONFIRM — the §2.1 widen-only rule is what keeps restore working; G-10 |
 
@@ -306,9 +302,9 @@ with a named owner — a re-transfer is a decision the owner makes, not a silenc
 |---|---|---|---|
 | D-1 | `fieldPermissions` on a `cc` / `start` / `end` / `condition` / `parallel` node is silently discarded at normalize — no error, no effect; the author believes the field is hidden | `:1858-1867`; `default:` `:1943-1945` | Real shipped defect. Not a live *bypass* (no such node reads the mask today), but a configuration-loss class: the same shape that would be honored on an approval node is dropped elsewhere. Independent of Lock-7; §L7-B pin 2 keeps Lock-7 from inheriting it |
 | D-2 | `approvals:admin-data` ("Approval Data Recovery Admin") is declared and seeded but has **zero** enforcement sites — a repo-wide sweep at this baseline (excluding `node_modules` and build output) returns exactly the two declaration sites and no guard, route, or check | `types/approval-product.ts:7`; `db/migrations/zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts:16-19` | Declared-inert, **not** a vulnerability — granting it confers nothing, so the failure direction is closed. Recorded because it is the obvious carrier for a later admin data-repair surface and must not be adopted by inference |
-| D-3 | Legacy `POST /api/approvals/:id/approve` and `/reject` terminate an instance with a raw status UPDATE, bypassing the graph executor and any assignment check, on `approvals:act` alone | `routes/approvals.ts:2097`, `:2247`; UPDATEs `:2180`, `:2337` | Pre-existing, out of Lock-7's scope, and **cannot bypass a field mask today because they write no form data**. Stated so the row is not read as a live field-write bypass; locked forward: no field write may ever be added on these paths |
+| D-3 | Two legacy terminal routes act outside the graph executor (pre-existing posture; details held in the private line inventory per the disclosure doctrine) | private inventory | Pre-existing, out of Lock-7's scope, and **cannot bypass a field mask today because they write no form data**. Locked forward: no field write may ever be added on these paths; a separate hardening slice owns the posture itself |
 | D-4 | Two divergent participant predicates with no shared helper | `approval-attachment-runtime.ts:201-243`; `routes/approval-metrics.ts:193-215` | Pre-existing divergence. Lock-7 adds no third; its authorization is the active-seat check |
-| D-5 | `GET /api/approvals/:id` is guarded by `approvals:read` alone — `getApproval` (`ApprovalBridgeService.ts:615-660`) applies no participant scoping — and `GET /api/approvals/:id/history` is guarded by `authenticate` alone | `routes/approvals.ts:2404`; `routes/approval-history.ts:43` | **EXTERNAL DEPENDENCY, OPEN owner question, deliberately not settled here.** Lock-7 does not narrow or widen the read scope; it only refuses to add a values channel to the wider of the two surfaces (OD-L7-7). Any later document must resolve read scope on its own authority |
+| D-5 | Instance-detail read surfaces are permission-scoped, not participant-scoped; one adjacent read surface's guard is being aligned to its siblings in a separate hardening slice (details held in the private line inventory per the disclosure doctrine) | private inventory | **EXTERNAL DEPENDENCY, OPEN owner question, deliberately not settled here.** Lock-7 does not narrow or widen the read scope; it only refuses to add a values channel to the wider of the read surfaces (OD-L7-7). Any later document must resolve read scope on its own authority |
 
 ## 3. Acceptance gates
 
@@ -326,7 +322,7 @@ turns red and asserts the anchor was actually hit.
 | G-5 | Self-contradiction and unfillable-required | a field `hidden` at the same node whose write surface must fill it, and a `required: true` field `hidden` at every write-capable node, each fail publish | a `hidden` field that no node needs to write still publishes — rejection is conflict-selected, not blanket |
 | G-6 | Writes re-run the frozen validators | a write violating a type or constraint is refused with zero rows and no node advance, validated against the instance's PINNED version schema, not the live template | mutate the live template's schema after create ⇒ the write still validates against the frozen one; and a named test RECORDS the MS-3 inheritance (a type with no `validateFieldType` arm is accepted unvalidated) so the fail-open is disclosed, not implied fixed |
 | G-7 | Transaction atomicity | forcing a failure at each of Lock-3 §3's five steps leaves zero snapshot change, zero revision row, zero audit row, zero assignment change, and an unchanged `version` | the success path changes all five — the rollback test is not passing against a no-op |
-| G-8 | Audit is values-free but answerable | the `handle` row carries `{ nodeKey, nodeEntryEpoch, changedFieldIds }` and NO value; the revision table carries before/after and is mask-aware | the SAME slice asserts the history endpoint (`authenticate`-only) returns no form value for an edited instance, AND that the revision surface DOES return before/after to an authorized reader — both directions, or "no values" is green against an empty payload |
+| G-8 | Audit is values-free but answerable | the `handle` row carries `{ nodeKey, nodeEntryEpoch, changedFieldIds }` and NO value; the revision table carries before/after and is mask-aware | the SAME slice asserts the broadly-scoped history read surface returns no form value for an edited instance, AND that the revision surface DOES return before/after to an authorized reader — both directions, or "no values" is green against an empty payload |
 | G-9 | In-flight re-normalize survives | an instance created before the slice dispatches unchanged after it; every persisted `access` value still normalizes | mutate the normalizer to reject one previously-legal shape ⇒ a named test reds on DISPATCH of a pre-existing instance, not only on save — proving `:2708-2726` is the exercised path |
 | G-10 | Round-trip and restore | save → publish → preview → execute → version-compare → restore preserves every matrix entry byte-for-byte; a changed entry SHOWS in the diff | a pre-Lock-7 template corpus round-trips unchanged through the same path |
 | G-11 | Legacy default | a template with no `fieldPermissions` behaves byte-identically before and after the slice: every field writable at a write-capable node, nothing redacted | a template WITH a matrix diverges in the same fixture — absent-≡-editable is default-selected, not accidental |
@@ -388,10 +384,9 @@ they are not re-proposed):
            shape for a benefit (a) already gives through the revision table
   OD-L7-7  Audit value carriage — (a)[R] `approval_records` carries `changedFieldIds` and no values;
            before/after lives in the revision table behind a mask-aware read · (b) before/after in
-           `approval_records.metadata` or `.comment` [rejected §L7-C: `GET /api/approvals/:id/history`
-           is `authenticate`-only (`routes/approval-history.ts:43`) and selects raw record columns with no
-           mask (`:86-104`), so a hidden field's value would become readable by any authenticated
-           user] · (c) no before/after anywhere, leaving
+           the audit-record columns [rejected §L7-C: the history read surface is broadly scoped (private
+           inventory), so a hidden field's value would become readable beyond its intended
+           audience] · (c) no before/after anywhere, leaving
            "what changed" unanswerable and the 内容变更 tier ungroundable
   OD-L7-8  Routing drivers × editable — (a)[R] publish-pin: a field referenced by any assignee source,
            `ConditionRule` or condition formula may not be `editable` at ANY node · (b) allow, and
@@ -427,11 +422,10 @@ they are not re-proposed):
            validators and in both grids
 
 Unverified at this baseline, recorded so no later document treats it as settled:
-  - Whether any HTTP surface echoes `approval_records.metadata` for a LOCAL instance. The
-    `authenticate`-only history route selects `comment` but NOT `metadata`
-    (`routes/approval-history.ts:87-93`), while `ApprovalBridgeService.loadLocalHistory:975-991` maps
-    `metadata` into its DTO and the only route call site reached from HTTP is the PLM branch
-    (`routes/approval-history.ts:60`). OD-L7-7(a) is the fail-closed choice under either reading, and
+  - Whether any HTTP surface echoes the audit-record `metadata` column for a LOCAL instance. The
+    broadly-scoped history read surface selects `comment` but NOT `metadata` (private inventory), while a
+    local-history mapper does map `metadata` into its DTO and the only route call site reached from HTTP is
+    the PLM branch (private inventory). OD-L7-7(a) is the fail-closed choice under either reading, and
     gate G-8 asserts the behavior either way.
   - Whether any persisted `fieldPermissions` entry carries a shape the current normalizer would reject
     (§2.1's census is a slice deliverable, not a finding here).
