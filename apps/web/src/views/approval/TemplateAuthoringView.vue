@@ -520,6 +520,7 @@
                 <el-option label="连续多级上级" value="continuous_managers" />
                 <el-option label="指定层级上级" value="manager_at_level" />
                 <el-option label="表单用户字段" value="form_field_user" />
+                <el-option label="提交人自选" value="requester_choice" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -594,6 +595,75 @@
                   :key="field.id"
                   :label="fieldDisplayLabel(field)"
                   :value="field.id"
+                />
+              </el-select>
+            </el-form-item>
+            <!-- Lock-1 §K2 (提交人自选) linear authoring: mode + scope with typed pickers only
+                 (the scope id list rides the shared idsText chip carrier via stepIds/setStepIds). -->
+            <el-form-item v-if="step.sourceKind === 'requester_choice'" label="选择方式">
+              <el-select v-model="step.requesterChoiceMode" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-requester-choice-mode">
+                <el-option label="单选（提交时选一人）" value="single" />
+                <el-option label="多选（提交时可选多人）" value="multi" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="step.sourceKind === 'requester_choice'" label="可选范围">
+              <el-select
+                :model-value="step.requesterChoiceScopeType"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                data-testid="approval-step-requester-choice-scope"
+                @update:model-value="(type: 'company' | 'members' | 'role') => setStepRequesterChoiceScopeType(step, type)"
+              >
+                <el-option label="全公司（任意成员）" value="company" />
+                <el-option label="指定成员" value="members" />
+                <el-option label="指定角色的成员" value="role" />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              v-if="step.sourceKind === 'requester_choice' && step.requesterChoiceScopeType === 'members'"
+              label="可选成员"
+            >
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                remote
+                :remote-method="onUserSearch"
+                :loading="directory.usersLoading.value"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="搜索用户名 / 邮箱"
+                data-testid="approval-step-requester-choice-user-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+                @visible-change="(visible: boolean) => visible && onUserSearch('')"
+              >
+                <el-option
+                  v-for="user in directory.users.value"
+                  :key="user.id"
+                  :label="directoryUserDisplayLabel(user)"
+                  :value="user.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              v-if="step.sourceKind === 'requester_choice' && step.requesterChoiceScopeType === 'role'"
+              label="可选角色"
+            >
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="选择角色"
+                data-testid="approval-step-requester-choice-role-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+              >
+                <el-option
+                  v-for="role in directory.roles.value"
+                  :key="role.id"
+                  :label="directoryRoleDisplayLabel(role)"
+                  :value="role.id"
                 />
               </el-select>
             </el-form-item>
@@ -1724,7 +1794,9 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
       : kind === 'form_field_user' ? { kind, fieldId: '' }
         : kind === 'continuous_managers' ? { kind, levels: 1 }
           : kind === 'manager_at_level' ? { kind, level: 1 }
-            : { kind }
+            // Lock-1 §K2: single choice over the whole company is the widest, always-valid start.
+            : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
+              : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
   const current = approvalNodeFirstSource(nodeKey)
@@ -2369,6 +2441,14 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+// Lock-1 §K2: a scope-type switch clears the shared idsText carrier deliberately — userIds and
+// roleIds are different id domains, so carrying one list into the other would author wrong config.
+function setStepRequesterChoiceScopeType(step: ApprovalStepDraft, type: 'company' | 'members' | 'role'): void {
+  if (step.requesterChoiceScopeType === type) return
+  step.requesterChoiceScopeType = type
+  step.idsText = ''
+}
+
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
   // Keep already-selected ids visible as chips even if the new search page omits them —
@@ -2395,6 +2475,13 @@ function syncStepOptions(step: ApprovalStepDraft): void {
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   } else if (step.sourceKind === 'static_role') {
     for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
+  } else if (step.sourceKind === 'requester_choice') {
+    // §K2: the scope id list rides idsText — keep its chips visible per scope type.
+    if (step.requesterChoiceScopeType === 'members') {
+      for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+    } else if (step.requesterChoiceScopeType === 'role') {
+      for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
+    }
   }
 }
 
@@ -2410,6 +2497,16 @@ function syncApprovalNodeOptions(nodeKey: string): void {
     for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
   } else if (kind === 'static_role') {
     for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
+  } else if (kind === 'requester_choice') {
+    // §K2: keep the configured scope list's chips visible in the sub-form pickers.
+    const source = approvalNodeEditFor(nodeKey)?.assigneeSources[0]
+    if (source?.kind === 'requester_choice') {
+      if (source.scope.type === 'members') {
+        for (const id of source.scope.userIds) directory.ensureUserOptionVisible(id)
+      } else if (source.scope.type === 'role') {
+        for (const id of source.scope.roleIds) directory.ensureRoleOptionVisible(id)
+      }
+    }
   }
 }
 

@@ -229,6 +229,28 @@ export function resolveApprovalAssignees(
         if (assigneeId) pushResolved('user', assigneeId, source, sourceIndex)
         break
       }
+      case 'requester_choice': {
+        // Lock-1 §K2: resolve to the requester's SUBMIT-TIME choice, read ONLY from the frozen
+        // snapshot map (node key → chosen local user ids). The choices were scope-validated at
+        // create (fail-closed 422 before any insert), so no live directory/role read happens
+        // here — the resolver stays pure, and a re-entered node (return / admin-jump /
+        // timeout-jump) re-resolves the SAME list regardless of any directory or role change
+        // after create. Changing an in-flight seat is `transfer` (a shipped action), never a
+        // re-choice. A missing/empty entry resolves EMPTY and falls to the node's
+        // emptyAssigneePolicy — unreachable via createApproval (which 422s on a missing
+        // choice); it covers only a made-then-unusable choice or a choices-free preview walk.
+        // NO self-exclusion (deliberate, unlike direct_manager/dept_head): the requester may
+        // legitimately be inside the configured scope; self-approval semantics stay owned by
+        // autoApprovalPolicy.mergeWithRequester.
+        const rawMap = options.requesterSnapshot?.requesterChoices
+        const rawList = isRecord(rawMap) ? rawMap[options.nodeKey] : undefined
+        const chosen = Array.isArray(rawList) ? rawList : []
+        chosen.forEach((entry) => {
+          const chosenId = normalizeId(entry)
+          if (chosenId) pushResolved('user', chosenId, source, sourceIndex)
+        })
+        break
+      }
       default:
         throw new ServiceError(
           `Approval node ${options.nodeKey} has an unsupported assignee source`,

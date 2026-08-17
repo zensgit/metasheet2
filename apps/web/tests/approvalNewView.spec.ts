@@ -1374,3 +1374,188 @@ describe('ApprovalNewView — record-link labels are per-field (same recordId, d
     expect(displaysAfter[0]!.value).not.toContain(RECORD_LINK_LABEL_A)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Lock-1 §K2 — submit-time requester-choice chooser (提交人自选)
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const RC_GRAPH: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'approval_1',
+        type: 'approval',
+        name: '自选审批人',
+        config: {
+          assigneeSources: [
+            { kind: 'requester_choice', mode: 'single', scope: { type: 'role', roleIds: ['role_fin'] } },
+          ],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  // Interactive el-select stub (this suite only): forwards modelValue, emits update:modelValue
+  // on change, and emits visible-change on focus so the view's scope-filtered remote search
+  // actually runs — the shared render-only ElSelect stub above cannot drive either path.
+  const InteractiveElSelect = defineComponent({
+    name: 'ElSelect',
+    props: {
+      modelValue: [String, Array],
+      multiple: Boolean,
+      loading: Boolean,
+      disabled: Boolean,
+      placeholder: String,
+      filterable: Boolean,
+      remote: Boolean,
+      clearable: Boolean,
+    },
+    emits: ['update:modelValue', 'change', 'visible-change'],
+    render() {
+      return h('select', {
+        'data-el-select': 'true',
+        value: Array.isArray(this.modelValue) ? undefined : this.modelValue ?? '',
+        onFocus: () => this.$emit('visible-change', true),
+        onChange: (event: Event) => {
+          const value = (event.target as HTMLSelectElement).value
+          this.$emit('update:modelValue', this.multiple ? [value] : value)
+          this.$emit('change', value)
+        },
+      }, this.$slots.default?.())
+    },
+  })
+
+  beforeEach(() => {
+    routeQuery = {}
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [{ id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差' } as FormField],
+      },
+      approvalGraph: RC_GRAPH,
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rc_1' }))
+    searchApprovalDirectoryUsersSpy.mockReset()
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'u_alpha', name: 'Alpha', email: 'a@x.test' }])
+    messageWarningSpy.mockClear()
+    pushSpy.mockClear()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', InteractiveElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  function submitButton(): HTMLButtonElement {
+    const btn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('提交审批'))
+    expect(btn).toBeTruthy()
+    return btn as HTMLButtonElement
+  }
+
+  function chooserPicker(): HTMLSelectElement {
+    const picker = container!.querySelector('[data-testid="approval-requester-choice-picker-approval_1"]')
+    expect(picker).not.toBeNull()
+    return picker as HTMLSelectElement
+  }
+
+  it('renders the chooser card for a requester_choice route; the static flow preview shows the pre-choice placeholder', async () => {
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-requester-choice"]')).not.toBeNull()
+    const item = container!.querySelector('[data-testid="approval-requester-choice-item"]')
+    expect(item?.textContent).toContain('自选审批人')
+    expect(item?.textContent).toContain('选一人')
+    expect(item?.textContent).toContain('限指定角色的成员')
+    // B2-07 static preview: honest placeholder — no fabricated approver, no raw config ids.
+    const flowPreview = container!.querySelector('[data-testid="approval-flow-preview"]')
+    expect(flowPreview?.textContent).toContain('提交人自选（提交时选择）')
+    expect(flowPreview?.textContent).not.toContain('role_fin')
+  })
+
+  it('does NOT render the chooser when the route has no requester_choice node (chooser is graph-selected, not blanket)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [{ id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差' } as FormField],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-requester-choice"]')).toBeNull()
+  })
+
+  it('opening the picker runs a scope-filtered directory search (role scope → roleIds param)', async () => {
+    await mountView()
+    chooserPicker().dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(searchApprovalDirectoryUsersSpy).toHaveBeenCalledWith('', 20, { roleIds: ['role_fin'] })
+  })
+
+  it('blocks submit until a mode-satisfying choice is made, then sends requesterChoices keyed by node key', async () => {
+    await mountView()
+
+    // No choice yet → submit is blocked with an actionable message and NOTHING is sent.
+    submitButton().click()
+    await flushUi()
+    expect(messageWarningSpy).toHaveBeenCalledWith('请为「自选审批人」选择审批人')
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
+
+    // Choose via the scope-filtered picker (single mode → exactly one).
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    expect(submitApprovalSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: 'tpl_numfields',
+        requesterChoices: { approval_1: ['u_alpha'] },
+      }),
+    )
+  })
+})

@@ -587,6 +587,50 @@ describe('approval template authoring helpers', () => {
     expect(rehydrated.steps[0].level).toBe(2)
   })
 
+  it('Lock-1 §K2: round-trips a requester_choice source incl. mode + role scope (idsText is the scope-id carrier)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'rc'
+    draft.name = '提交人自选审批'
+    draft.steps[0].sourceKind = 'requester_choice'
+    draft.steps[0].requesterChoiceMode = 'multi'
+    draft.steps[0].requesterChoiceScopeType = 'role'
+    draft.steps[0].idsText = 'role_fin, role_legal'
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([
+      { kind: 'requester_choice', mode: 'multi', scope: { type: 'role', roleIds: ['role_fin', 'role_legal'] } },
+    ])
+
+    // wire-vs-fixture trap: mode/scope survive the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('requester_choice')
+    expect(rehydrated.steps[0].requesterChoiceMode).toBe('multi')
+    expect(rehydrated.steps[0].requesterChoiceScopeType).toBe('role')
+    expect(rehydrated.steps[0].idsText).toBe('role_fin, role_legal')
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
+  it('Lock-1 §K2: round-trips a members-scope requester_choice (single mode, userIds carrier)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'rc2'
+    draft.name = '提交人自选成员'
+    draft.steps[0].sourceKind = 'requester_choice'
+    draft.steps[0].requesterChoiceMode = 'single'
+    draft.steps[0].requesterChoiceScopeType = 'members'
+    draft.steps[0].idsText = 'u_alpha'
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([
+      { kind: 'requester_choice', mode: 'single', scope: { type: 'members', userIds: ['u_alpha'] } },
+    ])
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].requesterChoiceScopeType).toBe('members')
+    expect(rehydrated.steps[0].idsText).toBe('u_alpha')
+  })
+
   // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
   function buildAutoApprovalTemplate(
     policy: AutoApprovalPolicy,

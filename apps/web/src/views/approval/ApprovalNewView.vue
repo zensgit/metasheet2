@@ -139,6 +139,54 @@
           </div>
         </el-card>
 
+        <!-- Lock-1 §K2 (提交人自选): submit-time approver chooser. Rendered only when the
+             loaded template's graph carries a requester_choice node; REQUIRED — handleSubmit
+             blocks until every such node has a mode-satisfying choice. The picker is
+             scope-filtered server-side (members/role scope → userIds/roleIds params on the
+             participant directory search); createApproval re-validates the submitted choice
+             fail-closed either way. -->
+        <el-card
+          v-if="requesterChoiceNodes.length > 0"
+          class="approval-new__requester-choice"
+          shadow="never"
+          data-testid="approval-requester-choice"
+        >
+          <template #header>
+            <span class="approval-new__flow-preview-header">选择审批人</span>
+          </template>
+          <el-form label-position="top">
+            <el-form-item
+              v-for="chooser in requesterChoiceNodes"
+              :key="chooser.nodeKey"
+              :label="`${chooser.nodeName}（${chooser.mode === 'multi' ? '可选多人' : '选一人'} · ${chooserScopeLabel(chooser)}）`"
+              required
+              data-testid="approval-requester-choice-item"
+            >
+              <el-select
+                :model-value="chooser.mode === 'multi' ? (requesterChoices[chooser.nodeKey] ?? []) : (requesterChoices[chooser.nodeKey]?.[0] ?? undefined)"
+                :multiple="chooser.mode === 'multi'"
+                filterable
+                remote
+                clearable
+                :remote-method="(q: string) => searchChoiceCandidates(chooser, q)"
+                :loading="choiceSearchLoading[chooser.nodeKey] === true"
+                class="ms-w-100pct"
+                placeholder="搜索并选择审批人"
+                :data-testid="`approval-requester-choice-picker-${chooser.nodeKey}`"
+                @update:model-value="(value: string[] | string | null) => setRequesterChoice(chooser, value)"
+                @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
+              >
+                <el-option
+                  v-for="option in choiceOptions[chooser.nodeKey] ?? []"
+                  :key="option.id"
+                  :label="choiceOptionLabel(option)"
+                  :value="option.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-form>
+        </el-card>
+
         <el-divider content-position="left">填写表单</el-divider>
 
         <el-form
@@ -509,7 +557,12 @@ import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
-import type { FormField, FormSchema } from '../../types/approval'
+import type {
+  ApprovalAssigneeSource,
+  FormField,
+  FormSchema,
+  RequesterChoiceAssigneeSource,
+} from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
@@ -529,7 +582,12 @@ import {
   validateDetailRows,
 } from '../../approvals/detailField'
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
-import { previewApprovalRoute, type ApprovalRoutePreview } from '../../approvals/api'
+import {
+  previewApprovalRoute,
+  searchApprovalDirectoryUsers,
+  type ApprovalDirectoryUser,
+  type ApprovalRoutePreview,
+} from '../../approvals/api'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
@@ -771,6 +829,104 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
 
+// ---------------------------------------------------------------------------
+// Lock-1 §K2 (提交人自选) — submit-time approver chooser state.
+// ---------------------------------------------------------------------------
+interface RequesterChoiceChooser {
+  nodeKey: string
+  nodeName: string
+  mode: 'single' | 'multi'
+  scope: RequesterChoiceAssigneeSource['scope']
+}
+
+// One chooser row per approval node whose sources include a requester_choice entry (the FIRST
+// such source drives the UI; the server validates the submitted choice against EVERY
+// requester_choice source on the node, so the UI can never under-constrain the create).
+const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
+  const graph = template.value?.approvalGraph
+  if (!graph) return []
+  const choosers: RequesterChoiceChooser[] = []
+  for (const node of graph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources
+    if (!Array.isArray(sources)) continue
+    const source = sources.find(
+      (entry): entry is RequesterChoiceAssigneeSource => !!entry && entry.kind === 'requester_choice',
+    )
+    if (source) {
+      choosers.push({
+        nodeKey: node.key,
+        nodeName: (node.name && node.name.trim()) || node.key,
+        mode: source.mode,
+        scope: source.scope,
+      })
+    }
+  }
+  return choosers
+})
+
+const requesterChoices = reactive<Record<string, string[]>>({})
+const choiceOptions = reactive<Record<string, ApprovalDirectoryUser[]>>({})
+const choiceSearchLoading = reactive<Record<string, boolean>>({})
+
+function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
+  if (chooser.scope.type === 'members') return '限指定成员'
+  if (chooser.scope.type === 'role') return '限指定角色的成员'
+  return '全公司可选'
+}
+
+function choiceOptionLabel(option: ApprovalDirectoryUser): string {
+  const primary = option.name?.trim() || option.id
+  const email = option.email?.trim()
+  return email ? `${primary} · ${email}` : primary
+}
+
+async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string): Promise<void> {
+  choiceSearchLoading[chooser.nodeKey] = true
+  try {
+    // Scope-filtered SERVER-SIDE so a members/role-scoped candidate outside the current search
+    // page still surfaces, and out-of-scope users never appear as pickable at all.
+    const scope = chooser.scope.type === 'members'
+      ? { userIds: chooser.scope.userIds }
+      : chooser.scope.type === 'role'
+        ? { roleIds: chooser.scope.roleIds }
+        : {}
+    choiceOptions[chooser.nodeKey] = await searchApprovalDirectoryUsers(q, 20, scope)
+  } finally {
+    choiceSearchLoading[chooser.nodeKey] = false
+  }
+}
+
+function setRequesterChoice(chooser: RequesterChoiceChooser, value: string[] | string | null): void {
+  const ids = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    : typeof value === 'string' && value.length > 0
+      ? [value]
+      : []
+  if (ids.length === 0) delete requesterChoices[chooser.nodeKey]
+  else requesterChoices[chooser.nodeKey] = ids
+  // A changed choice invalidates a previously resolved route preview (stale names must not stick).
+  routePreviewController.invalidate()
+}
+
+/** First chooser whose selection does not satisfy its mode cardinality; null when all chosen. */
+function missingRequesterChoiceNode(): RequesterChoiceChooser | null {
+  for (const chooser of requesterChoiceNodes.value) {
+    const ids = requesterChoices[chooser.nodeKey] ?? []
+    if (chooser.mode === 'single' ? ids.length !== 1 : ids.length === 0) return chooser
+  }
+  return null
+}
+
+function buildRequesterChoicesPayload(): Record<string, string[]> {
+  const payload: Record<string, string[]> = {}
+  for (const chooser of requesterChoiceNodes.value) {
+    const ids = requesterChoices[chooser.nodeKey]
+    if (ids && ids.length > 0) payload[chooser.nodeKey] = [...ids]
+  }
+  return payload
+}
+
 // RP-2 (B3-05): live route preview state. Compute-at-click; any form edit invalidates the resolved
 // path (stale resolution must never keep rendering as if it matched the current values). The
 // generation race-guard lives in createRoutePreviewController so it is unit-testable.
@@ -786,7 +942,14 @@ const routePreviewController = createRoutePreviewController(previewApprovalRoute
 
 async function loadRoutePreview() {
   if (!template.value) return
-  await routePreviewController.run({ templateId: template.value.id, formData: { ...formData } })
+  // §K2: choices made so far ride along so the preview resolves the chosen names; pre-choice
+  // the server previews the requester_choice node honestly (placeholder / unresolved).
+  const choices = buildRequesterChoicesPayload()
+  await routePreviewController.run({
+    templateId: template.value.id,
+    formData: { ...formData },
+    ...(Object.keys(choices).length > 0 ? { requesterChoices: choices } : {}),
+  })
 }
 
 watch(formData, () => routePreviewController.invalidate(), { deep: true })
@@ -1020,11 +1183,20 @@ async function handleSubmit() {
     }
   }
 
+  // Lock-1 §K2: block submit until every requester_choice node carries a mode-satisfying
+  // choice — the server would 422 values-free anyway; this surfaces the actionable message.
+  const missingChoice = missingRequesterChoiceNode()
+  if (missingChoice) {
+    ElMessage.warning(`请为「${missingChoice.nodeName}」选择审批人`)
+    return
+  }
+
   const templateId = route.params.templateId as string
   try {
     const result = await approvalStore.submitApproval({
       templateId,
       formData: buildSubmitFormData(),
+      ...(requesterChoiceNodes.value.length > 0 ? { requesterChoices: buildRequesterChoicesPayload() } : {}),
     })
     ElMessage.success('审批已提交')
     // G-B2-14: a successful submit consumes the draft.
@@ -1176,6 +1348,11 @@ watch([visibleFieldIds, template], () => {
    deliberately NOT the authoring canvas's node-graph styling — this is a compact glance, not an
    editing surface. */
 .approval-new__flow-preview {
+  margin-bottom: 8px;
+}
+
+/* Lock-1 §K2: submit-time approver chooser card. */
+.approval-new__requester-choice {
   margin-bottom: 8px;
 }
 

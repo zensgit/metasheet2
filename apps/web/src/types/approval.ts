@@ -15,7 +15,7 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -102,6 +102,21 @@ export type ApprovalAssigneeSource =
   | { kind: 'dept_head' }
   | { kind: 'continuous_managers'; levels: number }
   | { kind: 'manager_at_level'; level: number }
+  /**
+   * Lock-1 §K2 — 提交人自选. Byte-mirrors the backend union member: the requester picks the
+   * approver(s) at SUBMIT time (chooser in ApprovalNewView); choices travel in the create
+   * payload keyed by node key, are scope-validated server-side, and freeze at create.
+   */
+  | {
+      kind: 'requester_choice'
+      mode: 'single' | 'multi'
+      scope:
+        | { type: 'company' }
+        | { type: 'members'; userIds: string[] }
+        | { type: 'role'; roleIds: string[] }
+    }
+
+export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
 export interface ConditionNodeConfig {
   branches: ConditionBranch[]
@@ -281,6 +296,12 @@ export interface UnifiedApprovalHistoryDTO {
 export interface CreateApprovalRequest {
   templateId: string
   formData: Record<string, unknown>
+  /**
+   * Lock-1 §K2 — submit-time approver choices, keyed by the published requester_choice
+   * node's key. Required per node when the route carries a requester_choice source (the
+   * server 422s values-free on a missing entry); validated + frozen server-side at create.
+   */
+  requesterChoices?: Record<string, string[]>
 }
 
 export interface ApprovalActionRequest {

@@ -12,7 +12,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -168,6 +168,30 @@ export type ApprovalAssigneeSource =
    * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time.
    */
   | { kind: 'manager_at_level'; level: number }
+  /**
+   * Lock-1 §K2 — 提交人自选 (requester choice). The REQUESTER picks the approver(s) at SUBMIT
+   * time: the chosen local user ids travel in the create payload
+   * (`CreateApprovalRequest.requesterChoices`, keyed by node key), are validated server-side
+   * against THIS configured `scope` at create (fail-closed 422 BEFORE any insert), and are
+   * frozen into `ApprovalRequesterSnapshot.requesterChoices`. The resolver reads ONLY that
+   * frozen map — never a live directory/role read — so return/admin-jump/timeout re-entry
+   * re-resolves the SAME list; changing an in-flight seat is `transfer`, not a re-choice.
+   * `mode: 'single'` requires exactly one chosen id; `'multi'` requires at least one.
+   * Scope semantics at create: `company` = any active local user; `members` = only ids in the
+   * configured list; `role` = only ids holding a configured role in a FRESH `user_roles` read
+   * (plain role membership — deliberately NOT the `approval_usable`-curated
+   * `resolveApprovalRequesterRoleIds`, which serves the `requester.role` ROUTING predicate).
+   */
+  | {
+      kind: 'requester_choice'
+      mode: 'single' | 'multi'
+      scope:
+        | { type: 'company' }
+        | { type: 'members'; userIds: string[] }
+        | { type: 'role'; roleIds: string[] }
+    }
+
+export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
 export interface ApprovalAssigneeResolutionMetadata {
   /**
@@ -359,6 +383,16 @@ export interface ApprovalRequesterSnapshot {
    * delegation applies; purely additive.
    */
   delegations?: Record<string, string>
+  /**
+   * Lock-1 §K2 (requester_choice) — the requester's submit-time approver choices, FROZEN at
+   * create: node key → chosen local user ids, validated against each `requester_choice`
+   * source's configured scope BEFORE any insert. OPT-IN: present only when the published
+   * runtime graph carries a `requester_choice` source (unrelated approvals pay nothing).
+   * The resolver reads ONLY this map (no live read at dispatch/return/admin-jump/timeout),
+   * so a re-entered node re-resolves the SAME list; a directory/role change after create
+   * never alters it — the sanctioned in-flight mutation is `transfer`.
+   */
+  requesterChoices?: Record<string, string[]>
   [key: string]: unknown
 }
 
@@ -431,6 +465,15 @@ export interface UnifiedApprovalHistoryDTO {
 export interface CreateApprovalRequest {
   templateId: string
   formData: Record<string, unknown>
+  /**
+   * Lock-1 §K2 (requester_choice) — submit-time approver choices, keyed by the published
+   * `requester_choice` node's key. REQUIRED (per node) when the published route carries a
+   * `requester_choice` source: a missing/empty entry is a values-free 422 at create, never an
+   * empty resolution. Validated server-side against the node's configured scope + mode
+   * cardinality BEFORE any instance/assignment insert, then frozen into the requester
+   * snapshot (`requesterChoices`) that the resolver reads.
+   */
+  requesterChoices?: Record<string, string[]>
 }
 
 export interface ApprovalActionRequest {

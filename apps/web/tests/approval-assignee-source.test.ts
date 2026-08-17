@@ -42,9 +42,34 @@ describe('assigneeSourceSummary (single source)', () => {
     expect(assigneeSourceSummary({ kind: 'manager_at_level', level: 2 })).toBe('指定层级上级（第 2 级）')
   })
 
-  it('falls back to a JSON dump for an unrecognized kind (defensive default)', () => {
-    const unknown = { kind: 'unknown_kind' } as unknown as ApprovalAssigneeSource
-    expect(assigneeSourceSummary(unknown)).toBe(JSON.stringify(unknown))
+  it('requester_choice: fixed pre-choice placeholder (提交时选择), no config values leaked (Lock-1 §K2)', () => {
+    expect(
+      assigneeSourceSummary({ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }),
+    ).toBe('提交人自选（提交时选择）')
+    // Same label regardless of mode/scope config — the approver is unknowable pre-choice, and
+    // the scope's configured ids must never leak into this ordinary-user surface.
+    const membersScoped = assigneeSourceSummary({
+      kind: 'requester_choice',
+      mode: 'multi',
+      scope: { type: 'members', userIds: ['secret_user_1'] },
+    })
+    expect(membersScoped).toBe('提交人自选（提交时选择）')
+    expect(membersScoped).not.toContain('secret_user_1')
+  })
+
+  // Lock-1 §2.5 item 5: the old `JSON.stringify(source)` default leaked raw config (raw IDs
+  // included) into an ordinary-user surface — a defect, not a precedent. The default is now a
+  // VALUES-FREE fixed label. G-16's "no JSON.stringify fallback reaches any surface" half.
+  it('unknown kind falls back to a values-free label — never a JSON dump of the source (Lock-1 §2.5)', () => {
+    const unknown = { kind: 'unknown_kind', secretIds: ['u_secret'] } as unknown as ApprovalAssigneeSource
+    const summary = assigneeSourceSummary(unknown)
+    expect(summary).toBe('（未知审批人来源）')
+    expect(summary).not.toContain('unknown_kind')
+    expect(summary).not.toContain('u_secret')
+    expect(summary).not.toBe(JSON.stringify(unknown))
+    // Positive control: a KNOWN kind still renders its typed summary (the fallback is
+    // unknown-selected, not a blanket label).
+    expect(assigneeSourceSummary({ kind: 'direct_manager' })).toBe('直属上级')
   })
 })
 

@@ -212,6 +212,23 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
     draft.approvalNodeEdits!.approval_1.assigneeSources = []
     expect(validateTemplateDraft(draft).some((e) => /审批人来源/.test(e))).toBe(true)
   })
+  it('Lock-1 §K2: requester_choice — company/role-with-ids pass; empty members/role list and bad mode are flagged', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'role', roleIds: ['r1'] } }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: [] } }] },
+    })[0]).toMatch(/requester_choice/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'role', roleIds: ['  '] } }] },
+    })[0]).toMatch(/requester_choice/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'requester_choice', mode: 'both', scope: { type: 'company' } } as never] },
+    })[0]).toMatch(/requester_choice/)
+  })
 })
 
 describe('G-5 fail-closed — complex approval-node config must stay within the BACKEND allowlist', () => {
@@ -244,6 +261,33 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   it('allows a complex approval node with only backend-preserved keys', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+
+  // Lock-1 §K2: requester_choice is the FIRST source with a nested object (`scope`), so its
+  // allowlist check needs a third level — the flat 2-level allowlist alone cannot see inside it.
+  it('K2: a well-formed requester_choice source is allowed on the complex path (every scope type)', () => {
+    for (const scope of [
+      { type: 'company' },
+      { type: 'members', userIds: ['u1'] },
+      { type: 'role', roleIds: ['r1'] },
+    ]) {
+      const graph = complexWith({ assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope }] })
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+    }
+  })
+  it('K2: a malformed requester_choice (extra scope key / unknown scope type / bad mode) forces read-only', () => {
+    const extraScopeKey = complexWith({
+      assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'members', userIds: ['u1'], futureFlag: true } }],
+    })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(extraScopeKey))).not.toBeNull()
+    const unknownScopeType = complexWith({
+      assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'dept' } }],
+    })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(unknownScopeType))).not.toBeNull()
+    const badMode = complexWith({
+      assigneeSources: [{ kind: 'requester_choice', mode: 'both', scope: { type: 'company' } }],
+    })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(badMode))).not.toBeNull()
   })
 
   // NESTED unknown keys: the backend rebuilds assigneeSources[] / autoApprovalPolicy / fieldPermissions[]

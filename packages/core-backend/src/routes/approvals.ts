@@ -116,6 +116,16 @@ function normalizeApprovalText(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null
 }
 
+// Lock-1 §K2: explicit-whitelist extraction of the submit-time requester choices (node key →
+// chosen local user ids). Only the outer type is gated here; the authoritative shape / scope /
+// cardinality validation is `validateAndFreezeRequesterChoices` in the service (values-free 422
+// before any insert). A non-object value is treated as absent so the service's own
+// "required choice missing" rejection fires instead of a generic parse error.
+function extractRequesterChoices(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, string[]>
+}
+
 function resolveApprovalActorId(req: Request): string | null {
   const candidate = req.user?.id ?? req.user?.userId ?? req.user?.sub
   if (typeof candidate !== 'string') return null
@@ -532,8 +542,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
+      const sampleRequesterChoices = extractRequesterChoices(req.body?.sampleRequesterChoices)
       const preview = await productService.previewTemplateRoute(
-        { templateId, formData: sampleFormData },
+        { templateId, formData: sampleFormData, ...(sampleRequesterChoices !== undefined ? { requesterChoices: sampleRequesterChoices } : {}) },
         {
           userId: actorId,
           userName: resolveApprovalActorName(req, actorId),
@@ -789,7 +800,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const q = String(req.query.q || '').trim()
       const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
-      const users = await searchDirectoryUsers(q, Number.isFinite(limit) ? limit : 20)
+      // Lock-1 §K2 — optional scope narrowing for the submit-time requester-choice picker:
+      // comma-separated id lists, capped so a hostile query cannot smuggle an unbounded array.
+      // Candidate convenience only — createApproval re-validates the actual choice server-side.
+      const parseScopeIds = (value: unknown): string[] | undefined => {
+        if (typeof value !== 'string' || value.trim().length === 0) return undefined
+        const ids = value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+        return ids.length > 0 ? ids.slice(0, 200) : undefined
+      }
+      const scopeUserIds = parseScopeIds(req.query.userIds)
+      const scopeRoleIds = parseScopeIds(req.query.roleIds)
+      const users = await searchDirectoryUsers(q, Number.isFinite(limit) ? limit : 20, {
+        ...(scopeUserIds ? { userIds: scopeUserIds } : {}),
+        ...(scopeRoleIds ? { roleIds: scopeRoleIds } : {}),
+      })
       res.json({ users })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_PARTICIPANT_DIRECTORY_FAILED', 'Failed to search directory users')
@@ -1034,8 +1058,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
+      const requesterChoices = extractRequesterChoices(req.body?.requesterChoices)
       const preview = await productService.previewApprovalRoute(
-        { templateId, formData },
+        { templateId, formData, ...(requesterChoices !== undefined ? { requesterChoices } : {}) },
         {
           userId,
           userName: resolveApprovalActorName(req, userId),
@@ -1086,8 +1111,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
+      const requesterChoices = extractRequesterChoices(req.body?.requesterChoices)
       const approval = await productService.createApproval(
-        { templateId, formData },
+        { templateId, formData, ...(requesterChoices !== undefined ? { requesterChoices } : {}) },
         {
           userId,
           userName: resolveApprovalActorName(req, userId),

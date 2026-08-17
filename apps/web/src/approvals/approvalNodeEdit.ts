@@ -126,6 +126,14 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
       return Number.isInteger(source.levels) && source.levels >= 1
     case 'manager_at_level':
       return Number.isInteger(source.level) && source.level >= 1
+    case 'requester_choice':
+      // Lock-1 §K2 PREVIEW (backend normalizeApprovalAssigneeSources stays the arbiter):
+      // mode + scope discriminator, and a members/role scope needs ≥1 configured id.
+      if (source.mode !== 'single' && source.mode !== 'multi') return false
+      if (source.scope.type === 'company') return true
+      if (source.scope.type === 'members') return source.scope.userIds.some((id) => id.trim().length > 0)
+      if (source.scope.type === 'role') return source.scope.roleIds.some((id) => id.trim().length > 0)
+      return false
     case 'requester':
     case 'direct_manager':
     case 'dept_head':
