@@ -17,6 +17,20 @@
         </span>
         <span class="template-authoring__meta-count">{{ draft.fields.length }} 个表单字段</span>
         <span class="template-authoring__meta-count">{{ authoringFlowNodeCount }} 个流程节点</span>
+        <!-- P1-D (master §4 UI-3/UI-9): compact navigation-only link to the existing version
+             history section on TemplateDetailView.vue — no new version storage here. Lives in the
+             #meta info line (not #actions) so it never contends with the Lock-0 L0-5 header
+             route-preview toggle debt, which parent §9/§2 places in the ACTIONS/toolbar area. -->
+        <el-button
+          v-if="hasSavedVersionHistory"
+          text
+          size="small"
+          class="template-authoring__version-history-link"
+          data-testid="approval-template-version-history-link"
+          @click="goToVersionHistory"
+        >
+          版本历史
+        </el-button>
       </template>
       <template #actions>
         <div class="template-authoring__actions">
@@ -1309,6 +1323,18 @@ const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+// P1-D (master §4 UI-3/UI-9 — editor version entry, parent-lock §9/:276 gap): a compact link to the
+// existing TemplateDetailView.vue "版本历史" section (`data-testid="template-detail-version-history"`).
+// PRESENTATION ONLY — no new version storage, no route-preview toggle (that stays Lock-0 L0-5 debt,
+// not this slice). `latestVersionId` is read straight off the loaded/updated template DTO (never
+// folded into `draft`, so it can never leak into a save payload) purely to gate "saved template WITH
+// at least one recorded version" — a brand-new unsaved draft has neither an id nor a version yet.
+const templateLatestVersionId = ref<string | null>(null)
+const hasSavedVersionHistory = computed(() => isEditMode.value && Boolean(templateLatestVersionId.value))
+function goToVersionHistory(): void {
+  if (!templateId.value) return
+  router.push({ path: `/approval-templates/${templateId.value}` })
+}
 const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
@@ -2847,6 +2873,7 @@ async function loadTemplateForEdit() {
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = null
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
@@ -2860,6 +2887,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = template.latestVersionId
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
@@ -2916,6 +2944,7 @@ async function persistDraft() {
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
       formFieldFocusLocalId.value = null
+      templateLatestVersionId.value = updated.latestVersionId
       reseedCanvasHistoryFromDraft()
       reseedFormHistoryFromDraft()
       snapshotDraft()
@@ -2926,6 +2955,7 @@ async function persistDraft() {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = created.latestVersionId
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
@@ -2949,6 +2979,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = created.latestVersionId
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
@@ -3186,6 +3217,10 @@ onUnmounted(() => {
 
 .template-authoring__save-state--dirty::before {
   background: var(--ms-color-warning);
+}
+
+.template-authoring__version-history-link {
+  margin-left: var(--ms-space-1);
 }
 
 .template-authoring__alert {

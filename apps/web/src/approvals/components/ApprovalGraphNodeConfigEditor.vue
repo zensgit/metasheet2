@@ -14,13 +14,35 @@
       data-testid="approval-condition-editor"
       :data-condition-node="node.key"
     >
+      <!-- D0 §4.1: the evaluation-order hint lives once, in the condition inspector header —
+           verbatim string, do not duplicate elsewhere in this component.
+           M8 honesty (P1-2 same class): "全部不满足时走默认分支" is only true when a default IS
+           configured — with no defaultEdgeKey the runtime falls through to the FIRST outgoing
+           edge instead (see the default card's gated copy below, same predicate). Gating
+           VISIBILITY (not the string, which stays verbatim) keeps "lives once" satisfied (count
+           is 0 or 1, never 2+) without asserting a routing fact this node doesn't have. -->
+      <p
+        v-if="conditionEditFor(node.key)!.defaultEdgeKey"
+        class="template-authoring__condition-order-hint"
+        data-testid="approval-condition-order-hint"
+      >
+        分支按优先级从上到下依次判断，全部不满足时走默认分支。
+      </p>
       <div
-        v-for="branch in conditionEditFor(node.key)!.branches"
+        v-for="(branch, branchIndex) in conditionEditFor(node.key)!.branches"
         :key="branch.edgeKey"
         class="template-authoring__condition-branch"
         data-testid="approval-condition-branch"
       >
         <div class="template-authoring__condition-branch-head">
+          <!-- D0 §4.1 / P1-D: branch order IS priority — never expose the array-index mechanic as
+               such, only the ordinary-user "优先级 N" copy. Priority 1 carries the explicit
+               direction cue ("最高") D0 §4.1 mandates so the chips alone communicate evaluation
+               order, not just the header hint above. -->
+          <span
+            class="template-authoring__condition-branch-priority"
+            data-testid="approval-condition-branch-priority"
+          >优先级 {{ branchIndex + 1 }}{{ branchIndex === 0 ? ' 最高' : '' }}</span>
           <span>分支「{{ liveBranchSummary(branch) }}」</span>
           <el-select
             :model-value="branch.predicateMode"
@@ -200,24 +222,56 @@
           </div>
         </div>
       </div>
-      <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
-        <el-select
-          v-model="conditionEditFor(node.key)!.defaultEdgeKey"
-          size="small"
-          clearable
-          :disabled="readOnly"
-          class="ms-w-220"
-          placeholder="（无默认分支）"
-          data-testid="approval-condition-default-edge"
+      <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
+           visually de-emphasized from the ordered branch cards above, and excluded from rule
+           editing. It is not a mutable topology affordance in this slice — no delete/duplicate is
+           mounted here (a future slice may add branch delete with its own authorization).
+           M8 honesty: the explanatory copy is gated on a real `defaultEdgeKey` — when none is
+           designated, the runtime falls through to the FIRST outgoing edge
+           (ApprovalGraphExecutor.resolveConditionTarget), never an undefined "default flow", so
+           the empty state must say that plainly instead of asserting a default path exists. -->
+      <div
+        class="template-authoring__condition-branch template-authoring__condition-default-card"
+        data-testid="approval-condition-default-branch"
+      >
+        <div class="template-authoring__condition-branch-head">
+          <span class="template-authoring__condition-branch-priority template-authoring__condition-branch-priority--default">
+            默认分支（其他情况）
+          </span>
+        </div>
+        <p
+          v-if="conditionEditFor(node.key)!.defaultEdgeKey"
+          class="template-authoring__condition-default-copy"
+          data-testid="approval-condition-default-copy"
         >
-          <el-option
-            v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
-            :key="edgeKey"
-            :label="conditionEdgeLabel(node.key, edgeKey)"
-            :value="edgeKey"
-          />
-        </el-select>
-      </el-form-item>
+          未满足其他条件时进入默认流程
+        </p>
+        <p
+          v-else
+          class="template-authoring__condition-default-copy template-authoring__condition-default-copy--empty"
+          data-testid="approval-condition-default-copy-empty"
+        >
+          未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。
+        </p>
+        <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+          <el-select
+            v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            clearable
+            :disabled="readOnly"
+            class="ms-w-220"
+            placeholder="（无默认分支）"
+            data-testid="approval-condition-default-edge"
+          >
+            <el-option
+              v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
+              :key="edgeKey"
+              :label="conditionEdgeLabel(node.key, edgeKey)"
+              :value="edgeKey"
+            />
+          </el-select>
+        </el-form-item>
+      </div>
     </div>
 
     <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
@@ -1036,6 +1090,41 @@ const { node } = toRefs(props)
 
 .template-authoring__condition-default {
   margin: 4px 0 0;
+}
+
+/* P1-D — priority chip (condition branches) / de-emphasized default-branch label. Text-only
+   information carrier (branch order + "default" are both spelled out in words); the token colors
+   below are a supplementary accent, never the sole carrier (V-6/V-8). */
+.template-authoring__condition-branch-priority {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.template-authoring__condition-branch-priority--default {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+}
+
+/* De-emphasized relative to the ordered branch cards above via a muted fill — the dashed border is
+   already inherited from `.template-authoring__condition-branch` above (both classes are always
+   applied together on this card), so it is not repeated here. Same card shape; no delete/duplicate
+   affordance is mounted on this card. */
+.template-authoring__condition-default-card {
+  background: var(--el-fill-color-lighter);
+}
+
+.template-authoring__condition-default-copy {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 
 /* G-3 / G-4 shells (compact; no nested cards) */

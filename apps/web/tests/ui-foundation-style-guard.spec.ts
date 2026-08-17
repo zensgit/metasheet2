@@ -41,6 +41,13 @@ const TARGET_FILES = [
   // target set in their introducing slice, born token-only (var(--el-*) exclusively).
   'src/approvals/components/ApprovalFormPalette.vue',
   'src/approvals/components/ApprovalFormBuilder.vue',
+  // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D): the canvas
+  // node-card flat-card-grammar migration and the condition-branch priority/default presentation.
+  // Note: ApprovalFlowCanvas.vue was NOT already token-only pre-migration — main carried a
+  // literal `box-shadow: 0 1px 2px rgb(0 0 0 / 4%)` that P1-D's flat-card change deleted, so this
+  // enrollment is a real migration for that file, not a clean pass (corrected from the PR body).
+  'src/approvals/components/ApprovalFlowCanvas.vue',
+  'src/approvals/components/ApprovalGraphNodeConfigEditor.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',
