@@ -143,9 +143,12 @@
     </el-alert>
 
     <!-- UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail
-         layout. `approval-center__split` is a plain flex row; the pane only ever renders at
-         `masterDetailEnabled` widths (>= ~1440px) with a live selection, so this wrapper is a
-         no-op div at every narrower width and on mobile. -->
+         layout. `approval-center__split` is rendered UNCONDITIONALLY at every width — the pane
+         itself only ever renders at `masterDetailEnabled` widths (>= ~1440px) with a live
+         selection, but the wrapper's `display: flex` still applies at every narrower width and on
+         mobile (P1-01 fix: it is NOT a no-op div there — see the CSS comment below for why that
+         assumption caused a real-browser layout regression, and .approval-center__tabs's own rule
+         for the fix). -->
     <div class="approval-center__split" :class="{ 'approval-center__split--active': showDetailPane }">
     <el-tabs v-model="activeTab" class="approval-center__tabs" @tab-change="handleTabChange">
       <el-tab-pane name="pending">
@@ -766,20 +769,42 @@ function navigateToApprovalDetail(row: UnifiedApprovalDTO): void {
   router.push({ name: 'approval-detail', params: { id: row.id } })
 }
 
+// P2-03 fix: an Element Plus overlay (select dropdown / date-picker panel / any teleported
+// `.el-popper`) is "open" when its popper node exists in the DOM and is not hidden — Element Plus
+// toggles both `display: none` (v-show) and `aria-hidden="true"` on close, so checking either is
+// sufficient and neither is a false-negative-prone signal on its own. Heuristic chosen because
+// there is no existing codebase precedent for this check (verified: no other `.el-popper` query
+// exists in apps/web/src) — it mirrors Element Plus's own internal close-state contract instead of
+// inventing a new one.
+function hasOpenElPopper(): boolean {
+  const poppers = document.querySelectorAll<HTMLElement>('.el-popper')
+  for (const popper of poppers) {
+    if (popper.getAttribute('aria-hidden') === 'true') continue
+    if (popper.style.display === 'none') continue
+    return true
+  }
+  return false
+}
+
 // Keyboard: Esc closes the pane, Up/Down move the selection — only while the pane is actually
 // open, and never while a reject/batch-result dialog is open (its own textarea needs Up/Down for
-// cursor movement, and Esc must close IT, not the pane underneath).
+// cursor movement, and Esc must close IT, not the pane underneath). The editable-target check is
+// hoisted above the Escape branch (P2-03 fix) — previously it only guarded Arrow keys, so Escape
+// from a focused filter input (or any other INPUT/TEXTAREA/SELECT) silently closed the pane
+// underneath it too. The `.el-popper` check catches the remaining case where the open overlay's
+// own reference element is not one of those three tags (e.g. a non-filterable el-select trigger).
 function handleDetailPaneKeydown(event: KeyboardEvent): void {
   if (!masterDetailEnabled.value || !selectedApprovalId.value) return
   if (batchRejectDialogVisible.value || rowRejectDialogVisible.value || batchResultDialogVisible.value) return
+  const target = event.target as HTMLElement | null
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
   if (event.key === 'Escape') {
+    if (hasOpenElPopper()) return
     event.preventDefault()
     closeDetailPane()
     return
   }
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-  const target = event.target as HTMLElement | null
-  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
   const rows = activeTabRows.value
   const idx = rows.findIndex((row) => row.id === selectedApprovalId.value)
   if (idx === -1) return
@@ -1201,6 +1226,14 @@ const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+// P2-04 fix: the URL-restore select watcher below (`watch([selectedApprovalId, masterDetailEnabled],
+// ..., { immediate: true })`) already fires the pane's single fetch synchronously during setup() —
+// BEFORE onMounted runs — whenever a fresh mount carries `?detail=<id>` at wide width. Without this
+// flag, `loadCurrentTab()`'s own pane-refresh block (needed for every SUBSEQUENT reload, including a
+// pane-triggered 通过/驳回) would redundantly re-fetch on that very first onMounted() call too,
+// producing 2 fetches instead of 1.
+let isInitialTabLoad = true
+
 function loadCurrentTab() {
   const query = {
     search: searchText.value || undefined,
@@ -1229,9 +1262,10 @@ function loadCurrentTab() {
   // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
   // keeps showing a stale current-node/pending-approver snapshot (or a stale 通过/驳回 affordance)
   // after the very reload that changed it. A no-op whenever the pane is not open.
-  if (selectedApprovalId.value && masterDetailEnabled.value) {
+  if (!isInitialTabLoad && selectedApprovalId.value && masterDetailEnabled.value) {
     void paneController.select(selectedApprovalId.value)
   }
+  isInitialTabLoad = false
 }
 
 function handleTabChange() {
@@ -1541,20 +1575,32 @@ onBeforeUnmount(() => {
 }
 
 /* UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail split.
-   A plain flex row — inert (single implicit block-level child) whenever the pane is not rendered,
-   which is every narrower-than-wide-desktop width and every mobile render. */
+   RENDERED UNCONDITIONALLY (no `v-if`) at every width — `display: flex` therefore applies even
+   when the pane itself does not render (every narrower-than-wide-desktop width, every mobile
+   render). This is NOT inert: a flex container changes its single implicit child's sizing from
+   block (`width: 100%` of the container by default) to flex-item (`flex: 0 1 auto`, i.e.
+   fit-content, unless told otherwise) — see .approval-center__tabs's own rule immediately below
+   for the fix (P1-01: this exact false "it's a no-op div elsewhere" assumption caused a real,
+   measured layout regression at every viewport width, invisible to jsdom). */
 .approval-center__split {
   display: flex;
   align-items: flex-start;
   gap: var(--ms-space-4);
 }
 
-.approval-center__split--active .approval-center__tabs {
+/* Unconditional: `.approval-center__split` is `display: flex` at every width (open or closed
+   pane), so the tabs must be told to stretch the row at every width too. Gating this behind
+   `--active` (pre-fix) left the closed-pane state — the default at every width, and the *only*
+   state below 1440px and on mobile — as a fit-content flex item instead of a container-stretched
+   one, collapsing the whole approval center. Verified via real-Chromium cold-layout measurement
+   at 1600/1440/1366/1024/768/390: this restores merge-base widths exactly and eliminates 390px
+   overflow. See apps/web/tests/approval-center-master-detail.spec.ts's "P1-01 CSS source pin"
+   describe block for the source-pin regression guard (jsdom cannot measure real layout — the
+   guard only pins that this rule stays unconditional in source; the actual proof is the
+   real-Chromium measurement above, see the PR body's browser-harness backlog note). */
+.approval-center__tabs {
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.approval-center__tabs {
   min-height: 480px;
   padding: 0 var(--ms-space-4) var(--ms-space-4);
   border: 1px solid var(--ms-border-light);

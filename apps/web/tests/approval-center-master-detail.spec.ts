@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createApp,
@@ -161,7 +163,28 @@ const ElTabs = defineComponent({
   props: { modelValue: String },
   emits: ['update:modelValue', 'tab-change'],
   render() {
-    return h('div', { 'data-el-tabs': this.modelValue }, this.$slots.default?.())
+    return h('div', { 'data-el-tabs': this.modelValue }, [
+      // Test-only affordances (P2-02 M5/M10 coverage): the real el-tabs fires BOTH
+      // `update:modelValue` and `tab-change` from the same tab-header click, but this stub has no
+      // interactive tab-header UI to drive that. Two separate buttons isolate the two mechanisms:
+      // `test-set-active-tab-mine` fires ONLY `update:modelValue` (proves `paneShowQuickActions`'s
+      // own `activeTab === 'pending'` conjunct, independent of `handleTabChange`'s side effects —
+      // M5); `test-switch-tab-mine` fires both, mirroring a real tab switch end-to-end (M10).
+      h('button', {
+        type: 'button',
+        'data-testid': 'test-set-active-tab-mine',
+        onClick: () => this.$emit('update:modelValue', 'mine'),
+      }, 'set-tab-mine'),
+      h('button', {
+        type: 'button',
+        'data-testid': 'test-switch-tab-mine',
+        onClick: () => {
+          this.$emit('update:modelValue', 'mine')
+          this.$emit('tab-change', 'mine')
+        },
+      }, 'switch-tab-mine'),
+      this.$slots.default?.(),
+    ])
   },
 })
 
@@ -384,6 +407,8 @@ function pendingRow(id: string, title: string, extra: Record<string, unknown> = 
     createdAt: '2026-08-10T08:00:00Z',
     updatedAt: '2026-08-10T08:00:00Z',
     currentNodeKey: 'node_manager',
+    currentStep: 2,
+    totalSteps: 4,
     assignments: [
       { id: `asg_${id}`, type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
     ],
@@ -557,6 +582,22 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-el-row="apv_2"]')?.className ?? '').not.toContain('approval-center-row--selected')
   })
 
+  // P2-01 fix: the pane shows the DTO's `currentStep`/`totalSteps` step count, never the raw
+  // `currentNodeKey` graph-node key (a no-raw-IDs lock hit — master lock §1 / §4 P1 exit).
+  it('shows the step count, never the raw node key', async () => {
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(text).toContain('第 2 / 4 步')
+    expect(text).not.toContain('node_manager')
+    expect(text).not.toContain('当前节点')
+  })
+
   // -------------------------------------------------------------------------
   // Quick actions dispatch through the SAME handlers as row actions.
   // -------------------------------------------------------------------------
@@ -654,6 +695,107 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     }))
   })
 
+  // P2-03 fix: the editable-target check used to sit AFTER the Escape branch (it only guarded
+  // Arrow keys), so Escape from a focused filter input silently closed the pane underneath it too
+  // (adversarial gate PROBE B). Hoisted above the Escape branch — this proves the fix.
+  it('Esc from the filter input does NOT close the pane (P2-03)', async () => {
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+
+    const searchInput = container!.querySelector('[data-testid="approval-search-input"]') as HTMLInputElement
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+  })
+
+  // P2-03 fix, second half: an open Element Plus overlay whose OWN reference element is not an
+  // INPUT/TEXTAREA/SELECT (e.g. a non-filterable el-select trigger, which Element Plus renders as
+  // a plain div) still must not let Escape fall through to the pane. `hasOpenElPopper()` mirrors
+  // Element Plus's real close-state contract: a `.el-popper` node is "closed" when it carries
+  // `aria-hidden="true"` OR `style.display: none`; either alone is sufficient. All three tests
+  // below construct a synthetic `.el-popper` directly (no real Element Plus overlay component is
+  // stubbed in this harness) and clean it up in `finally` so it cannot leak into later Esc tests.
+  //
+  // Failure-direction note (documented per fix-round review): this heuristic can fail in EITHER
+  // direction. If a real closed popper is ever represented some other way than these two signals,
+  // `hasOpenElPopper()` false-negatives (returns false) and Escape closes the pane through a
+  // stale/closed popper — the original P2-03 bug, undetected by this guard. If some UNRELATED
+  // `.el-popper` node is left in the DOM without either signal (e.g. a leaked node from another
+  // component that failed to clean up), `hasOpenElPopper()` false-positives (returns true) and
+  // Escape stops closing the pane AT ALL — worse than the bug being fixed, and invisible to jsdom
+  // since it requires a real stray DOM node, not a logic-only mutation.
+  describe('P2-03 el-popper overlay guard (hasOpenElPopper)', () => {
+    let popper: HTMLDivElement | null = null
+
+    afterEach(() => {
+      popper?.remove()
+      popper = null
+    })
+
+    it('Esc does NOT close the pane while an open .el-popper exists (no aria-hidden, not display:none)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+
+      popper = document.createElement('div')
+      popper.className = 'el-popper'
+      document.body.appendChild(popper)
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    })
+
+    it('Esc closes the pane once the .el-popper is marked closed via aria-hidden="true" (positive control)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+
+      popper = document.createElement('div')
+      popper.className = 'el-popper'
+      popper.setAttribute('aria-hidden', 'true')
+      document.body.appendChild(popper)
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeNull()
+    })
+
+    it('Esc closes the pane once the .el-popper is marked closed via style.display = "none" (positive control)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+
+      popper = document.createElement('div')
+      popper.className = 'el-popper'
+      popper.style.display = 'none'
+      document.body.appendChild(popper)
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeNull()
+    })
+  })
+
   it('Esc does NOT close the pane while the row-reject dialog is open', async () => {
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
     mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
@@ -691,7 +833,7 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
   // -------------------------------------------------------------------------
   // URL restore.
   // -------------------------------------------------------------------------
-  it('a fresh mount with `?detail=<id>` in the URL restores the pane once the row loads', async () => {
+  it('a fresh mount with `?detail=<id>` in the URL restores the pane once the row loads, with exactly ONE fetch (P2-04)', async () => {
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
     mockRoute.query = { detail: 'apv_1' }
     mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
@@ -699,6 +841,10 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
 
     expect(container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent).toContain('出差报销')
     expect(getApprovalSpy).toHaveBeenCalledWith('apv_1')
+    // P2-04: the immediate select watcher and loadCurrentTab()'s pane-refresh block were both
+    // producers of a `getApproval` fetch on a URL-restored mount — strengthened from a bare
+    // `toHaveBeenCalledWith` (which a double-fetch regression would still pass) to `toHaveBeenCalledTimes(1)`.
+    expect(getApprovalSpy).toHaveBeenCalledTimes(1)
   })
 
   // -------------------------------------------------------------------------
@@ -734,5 +880,217 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-testid="approval-batch-approve"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-batch-reject"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-mark-all-read"]')).toBeTruthy()
+  })
+
+  // -------------------------------------------------------------------------
+  // P1-01 (adversarial gate): `.approval-center__tabs { flex: 1 1 auto; min-width: 0 }` must be
+  // UNCONDITIONAL, not gated behind `.approval-center__split--active`. jsdom has no layout engine,
+  // so this is a source-pin regression guard only, NOT a substitute for the real proof — the
+  // gate's real-Chromium cold-layout measurement at 1600/1440/1366/1024/768/390px (documented in
+  // the PR body's browser-harness backlog note), which showed the gated form collapsed the whole
+  // approval center to a ~612px fit-content width at every viewport including 390px overflow, and
+  // the unconditional form restores merge-base widths exactly at all six.
+  // -------------------------------------------------------------------------
+  describe('P1-01 CSS source pin: tabs flex sizing must be unconditional', () => {
+    const componentSource = readFileSync(
+      join(__dirname, '../src/views/approval/ApprovalCenterView.vue'),
+      'utf8',
+    )
+
+    function styleBlock(src: string): string {
+      const m = src.match(/<style[^>]*>([\s\S]*?)<\/style>/)
+      return m ? m[1] : ''
+    }
+
+    // Matches the rule whose selector is EXACTLY `.approval-center__tabs` (not
+    // `...--active .approval-center__tabs`, not `.approval-center__tabs :deep(...)`).
+    function bareTabsRuleBody(css: string): string | null {
+      const m = css.match(/(?:^|\n)\.approval-center__tabs\s*\{([^}]*)\}/)
+      return m ? m[1] : null
+    }
+
+    it('the bare `.approval-center__tabs` rule carries flex: 1 1 auto and min-width: 0', () => {
+      const body = bareTabsRuleBody(styleBlock(componentSource))
+      expect(body).not.toBeNull()
+      expect(body).toMatch(/flex:\s*1\s+1\s+auto/)
+      expect(body).toMatch(/min-width:\s*0/)
+    })
+
+    it('no rule still scopes that sizing to `.approval-center__split--active .approval-center__tabs` (positive control proves the regex can catch the pre-fix pattern)', () => {
+      // Positive control: the exact pre-fix pattern the adversarial gate found (P1-01), reproduced
+      // as a fixture — proves this check's regex actually discriminates gated from unconditional,
+      // not just "some flex somewhere".
+      const preFixFixture = '.approval-center__split--active .approval-center__tabs {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n'
+      expect(preFixFixture).toMatch(/\.approval-center__split--active\s+\.approval-center__tabs\s*\{[^}]*flex:\s*1\s+1\s+auto/)
+
+      const css = styleBlock(componentSource)
+      expect(css).not.toMatch(/\.approval-center__split--active\s+\.approval-center__tabs\s*\{[^}]*flex:\s*1\s+1\s+auto/)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // P2-02 (adversarial gate, mutation record M4/M5/M6/M7/M9/M10/M12/M14): 8 guards on the pane
+  // that were previously mutation-green (neutering each one still left all specs passing). Each
+  // test below is a discriminating negative/positive control for exactly one guard — verified
+  // (per fix-round instructions) by neutering the guarded condition in the source, confirming the
+  // corresponding new test goes RED, then restoring the source and confirming it goes GREEN again.
+  // -------------------------------------------------------------------------
+  describe('P2-02 mutation-discriminating guard coverage', () => {
+    it('M4: pane hides quick actions for an attendance-bridged pending row (isRowBatchSelectable guard)', async () => {
+      const attendanceRow = pendingRow('apv_1', '补卡申请', { workflowKey: 'attendance.request' })
+      getApprovalSpy.mockResolvedValue(attendanceRow)
+      mockRoute.query = { detail: 'apv_1' }
+      mockPendingApprovals.value = [attendanceRow]
+      await mountView()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+      expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeNull()
+    })
+
+    it('M5: pane hides quick actions once activeTab is no longer "pending" (activeTab guard, isolated from handleTabChange)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeTruthy()
+
+      // Drives `activeTab` off 'pending' WITHOUT `tab-change` firing, so `handleTabChange`'s own
+      // closeDetailPane() (M10's guard) cannot be what hides the buttons — isolates
+      // `paneShowQuickActions`'s own `activeTab === 'pending'` conjunct.
+      ;(container!.querySelector('[data-testid="test-set-active-tab-mine"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane-approve"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeNull()
+    })
+
+    it('M6: Esc does NOT close the pane while the batch-reject dialog is open', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+
+      ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="approval-batch-reject"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-batch-reject-dialog"]')).toBeTruthy()
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    })
+
+    it('M7: Esc does NOT close the pane while the batch-result (failure manifest) dialog is open', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      dispatchActionSpy.mockRejectedValue(new Error('服务器错误'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+
+      ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')).toBeTruthy()
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    })
+
+    it('M9: ArrowDown does not move the selection while focus is in the search input (editable-target guard)', async () => {
+      getApprovalSpy.mockImplementation((id: string) =>
+        Promise.resolve(pendingRow(id, id === 'apv_1' ? '出差报销' : '采购申请')),
+      )
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent).toContain('出差报销')
+      getApprovalSpy.mockClear()
+
+      const searchInput = container!.querySelector('[data-testid="approval-search-input"]') as HTMLInputElement
+      searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      await flushUi()
+
+      expect(getApprovalSpy).not.toHaveBeenCalled()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent).toContain('出差报销')
+    })
+
+    it('M10: switching tabs closes the pane', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+
+      ;(container!.querySelector('[data-testid="test-switch-tab-mine"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeNull()
+    })
+
+    it('M12: pane approve/reject are disabled while ANY row approve is in flight (shared paneActionsDisabled gate)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      const d = deferred<unknown>()
+      dispatchActionSpy.mockReturnValueOnce(d.promise)
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+
+      const paneApprove = container!.querySelector('[data-testid="approval-detail-pane-approve"]') as HTMLButtonElement
+      const paneReject = container!.querySelector('[data-testid="approval-detail-pane-reject"]') as HTMLButtonElement
+      expect(paneApprove.disabled).toBe(false)
+      expect(paneReject.disabled).toBe(false)
+
+      // apv_2's OWN row-level approve — a DIFFERENT row than the one displayed in the pane.
+      const rowConfirm = document.querySelector('[data-el-popconfirm-confirm="确认通过「采购申请」？"]') as HTMLButtonElement
+      rowConfirm.click()
+      await flushUi()
+
+      expect(paneApprove.disabled).toBe(true)
+      expect(paneReject.disabled).toBe(true)
+
+      d.resolve({})
+      await flushUi()
+      expect(paneApprove.disabled).toBe(false)
+    })
+
+    it('M14: an unrelated row action success re-fetches the open pane\'s detail (pane staleness refresh)', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(getApprovalSpy).toHaveBeenCalledTimes(1)
+
+      // Approving apv_2 (NOT the row in the pane) still calls loadCurrentTab() on success, which
+      // must re-run the pane's own single fetch for apv_1 so its current-node/pending-approver/
+      // quick-action state never goes stale after any list reload.
+      const rowConfirm = document.querySelector('[data-el-popconfirm-confirm="确认通过「采购申请」？"]') as HTMLButtonElement
+      rowConfirm.click()
+      await flushUi()
+
+      expect(getApprovalSpy).toHaveBeenCalledTimes(2)
+      expect(getApprovalSpy).toHaveBeenLastCalledWith('apv_1')
+    })
   })
 })

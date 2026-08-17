@@ -32,8 +32,11 @@
         {{ detailError }}
       </div>
       <template v-else-if="detail">
-        <div v-if="detail.currentNodeKey" class="approval-detail-pane__node-current">
-          当前节点：{{ detail.currentNodeKey }}
+        <div
+          v-if="detail.currentStep !== null || detail.totalSteps !== null"
+          class="approval-detail-pane__node-current"
+        >
+          第 {{ detail.currentStep ?? '-' }} / {{ detail.totalSteps ?? '-' }} 步
         </div>
         <div v-if="pendingApproverLabels.length" class="approval-detail-pane__node-approvers">
           待处理人：{{ pendingApproverLabels.join('、') }}
