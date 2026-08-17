@@ -303,6 +303,13 @@ export default defineConfig({
       // rationale as the K2 lane immediately above — plugin-tests.yml is an s6a sha256-pinned
       // provenance input, deliberately not extended). Two-point wiring, same commit.
       'tests/integration/approval-template-policy-carrier.db.test.ts',
+      // Lock-1 §K4 continuous_dept_heads real-DB acceptance (G-1/G-2/G-13, continue-past-empty,
+      // freeze purity). DATABASE_URL-gated; excluded here so the no-DB default job cannot
+      // collect-and-skip-green it, and carried by the SAME dedicated
+      // .github/workflows/approval-realdb-acceptance.yml workflow (sibling job
+      // approval-realdb-k4) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring —
+      // both points land in the SAME commit.
+      'tests/integration/approval-dept-head-chain.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

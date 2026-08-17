@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -243,6 +243,22 @@ export type ApprovalAssigneeSource =
         | { type: 'members'; userIds: string[] }
         | { type: 'role'; roleIds: string[] }
     }
+  /**
+   * Lock-1 §K4 — 连续多级部门负责人 (continuous department heads), levels 1..`levels` (level 1 =
+   * the requester's own department head), resolved from the baked `deptHeadChainIds` snapshot.
+   * A DIFFERENT pointer from `continuous_managers`/`managerChainIds`: that chain walks the
+   * `leader_in_dept` LEADER pointer (`ApprovalDirectoryOrg.resolveManagerChain`); this one walks
+   * the DEPARTMENT PARENT tree (`directory_departments.external_parent_department_id`), reading
+   * `dept_manager_userid_list` at each level (`ApprovalDirectoryOrg.resolveDeptHeadChain`). The
+   * two chains coincide only where every department's leader is also its listed manager.
+   * RATIFIED continue-past-empty-level posture: a level whose manager list is empty or resolves
+   * to no linked local user contributes NOTHING to the chain, but the walk CONTINUES to that
+   * department's parent (the next hop is the department's OWN parent pointer, independent of
+   * whether a head resolves at this level) — unlike `managerChainIds`, whose next hop IS the
+   * resolved leader and so DOES stop when none is found. `levels` is validated
+   * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time, byte-identically to `continuous_managers`.
+   */
+  | { kind: 'continuous_dept_heads'; levels: number }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -428,6 +444,19 @@ export interface ApprovalRequesterSnapshot {
    * snapshots omit it.
    */
   managerChainIds?: string[]
+  /**
+   * Lock-1 §K4 — ordered local user ids of the requester's DEPARTMENT-HEAD chain, level 1 first
+   * (the requester's own department head). A DIFFERENT pointer from `managerChainIds` — see the
+   * `continuous_dept_heads` union member doc comment for the leader-pointer vs parent-tree
+   * distinction. Frozen at create time only when the published graph uses `continuous_dept_heads`
+   * (gated by `runtimeGraphUsesDeptHeadChain`, so it is not baked for every approval).
+   * Cycle-guarded (visited set of external DEPARTMENT ids) + capped at MAX_MANAGER_CHAIN_LEVELS;
+   * self-excluded on the requester's LOCAL id; absent when unresolvable or unused. A level whose
+   * head is unresolved contributes nothing but does NOT truncate the walk (ratified
+   * continue-past-empty-level posture). Read by `continuous_dept_heads` (slices it to its own
+   * `levels`). Purely additive; existing snapshots omit it.
+   */
+  deptHeadChainIds?: string[]
   /**
    * Delegation (委托) substitution map (delegator localUserId -> delegatee localUserId),
    * frozen at create time from the active `approval_delegations` scoped to this template

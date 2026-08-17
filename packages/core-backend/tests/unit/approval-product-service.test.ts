@@ -4519,10 +4519,12 @@ describe('ApprovalProductService', () => {
     )
 
     // Scanner saw manager_at_level -> createApproval asked the resolver for the chain.
+    // Lock-1 §K4 added a SEPARATE opt-in (includeDeptHeadChain) to this SAME options object —
+    // false here since the graph carries no continuous_dept_heads source.
     expect(orgRelationsState.resolveApprovalRequesterOrgRelations).toHaveBeenCalledWith(
       'requester-1',
       expect.anything(),
-      { includeManagerChain: true },
+      { includeManagerChain: true, includeDeptHeadChain: false },
     )
 
     // And the chain is baked into the PERSISTED requester snapshot (INSERT param $5 / index 4),

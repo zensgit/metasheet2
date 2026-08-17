@@ -70,6 +70,24 @@ export interface ApprovalRequesterOrgRelations {
    * `manager_at_level` (picks the single id at `level - 1`). Omitted when empty.
    */
   managerChainIds?: string[]
+  /**
+   * Lock-1 §K4 — ordered local user ids of the requester's DEPARTMENT-HEAD chain, level 1 first
+   * (the requester's own department head). A DIFFERENT pointer from `managerChainIds`: that chain
+   * walks the `leader_in_dept` LEADER pointer (`resolveManagerChain` below); this one walks the
+   * DEPARTMENT PARENT tree (`directory_departments.external_parent_department_id`), reading
+   * `dept_manager_userid_list` at each level (`resolveDeptHeadChain` below). The two coincide only
+   * where every department's leader is also its listed manager. Only populated when the caller
+   * opts in via `includeDeptHeadChain` (i.e. a published graph uses `continuous_dept_heads`).
+   * Cycle-guarded (visited set of external DEPARTMENT ids) + capped at `MAX_MANAGER_CHAIN_LEVELS`.
+   * RATIFIED continue-past-empty-level posture (Lock-1 §K4): a level whose manager list is empty
+   * or resolves to no linked local user contributes nothing to the chain, but the walk CONTINUES
+   * to that department's parent — the next hop is the department's OWN parent pointer, independent
+   * of whether a head resolves at this level. This is the one place this chain's termination
+   * differs from `managerChainIds`, whose next hop IS the resolved leader (so it DOES stop when
+   * none is found). Read by `continuous_dept_heads` (slices it to its own `levels`). Omitted when
+   * empty.
+   */
+  deptHeadChainIds?: string[]
 }
 
 /** Default cap on how far up the org tree the bake-time walk climbs when unconfigured. */
@@ -203,6 +221,11 @@ export async function resolveApprovalRequesterOrgRelations(
   query: QueryFn,
   options: {
     includeManagerChain?: boolean
+    /** Lock-1 §K4 — walk the department-head chain (`deptHeadChainIds`) into the result. Opt-in
+     *  like `includeManagerChain`: gated on the published graph using `continuous_dept_heads`
+     *  (`runtimeGraphUsesDeptHeadChain`), so the extra per-hop queries stay off every other
+     *  approval. */
+    includeDeptHeadChain?: boolean
     maxLevels?: number
     orgId?: string
     /**
@@ -502,6 +525,23 @@ export async function resolveApprovalRequesterOrgRelations(
     if (chain.length > 0) relations.managerChainIds = chain
   }
 
+  // 5) Department-head chain (Lock-1 §K4, opt-in): walk the department PARENT tree up from the
+  //    requester's primary department, reading dept_manager_userid_list at each level. Only runs
+  //    when the caller opts in — i.e. a published graph uses continuous_dept_heads — so the extra
+  //    per-hop queries are NOT added to every approval. requesterDeptId may be null (requester has
+  //    no primary department); resolveDeptHeadChain handles that as an immediate empty chain.
+  if (options.includeDeptHeadChain) {
+    const deptHeadChain = await resolveDeptHeadChain(
+      integrationId,
+      requesterDeptId,
+      requester.external_user_id,
+      userId,
+      clampChainLevels(options.maxLevels),
+      query,
+    )
+    if (deptHeadChain.length > 0) relations.deptHeadChainIds = deptHeadChain
+  }
+
   return relations
 }
 
@@ -609,6 +649,103 @@ async function resolveManagerChain(
 
     currentExternalId = hop.externalUserId
     currentDeptExternalId = hop.primaryDeptExternalId
+  }
+
+  return chain
+}
+
+interface DeptHop {
+  raw: unknown
+  parentExternalId: string | null
+}
+
+/**
+ * One hop: the department identified by `(integrationId, deptExternalId)`, returning its `raw`
+ * payload (source of `dept_manager_userid_list` for THIS level) and its parent's external id (to
+ * continue the walk). Returns `undefined` when the department itself cannot be found — top of the
+ * REACHABLE tree, covering both a genuine root department (no `external_parent_department_id`)
+ * and a dangling/missing parent reference from a partially-synced org.
+ */
+async function fetchDeptHop(
+  integrationId: string,
+  deptExternalId: string,
+  query: QueryFn,
+): Promise<DeptHop | undefined> {
+  const rows = await query<{ raw: unknown; external_parent_department_id: string | null }>(
+    `SELECT raw                          AS raw,
+            external_parent_department_id AS external_parent_department_id
+       FROM directory_departments
+      WHERE integration_id = $1::uuid
+        AND external_department_id = $2
+      LIMIT 1`,
+    [integrationId, deptExternalId],
+  )
+  const row = rows.rows[0]
+  if (!row) return undefined
+  return { raw: row.raw, parentExternalId: normalizeExternalId(row.external_parent_department_id) }
+}
+
+/**
+ * Lock-1 §K4 — walk the department PARENT tree up from the requester's primary department,
+ * collecting each level's head. A DIFFERENT pointer from `resolveManagerChain` above: that walk
+ * follows the `leader_in_dept` LEADER pointer (the next hop IS the resolved leader's own primary
+ * department); this walk follows `directory_departments.external_parent_department_id` — a
+ * property of the DEPARTMENT itself, independent of whether any head resolves at this level.
+ *
+ * "Primary" head selection is byte-identical to the shipped single-level `dept_head` (step 3
+ * above): the FIRST external id in `dept_manager_userid_list` order — excluding the requester's
+ * own EXTERNAL id — that resolves to a LINKED local user. The inner loop breaks on that first
+ * resolution exactly like the single-level computation; a SEPARATE local-id self-exclusion then
+ * decides whether the resolved head enters the CHAIN (mirroring how `managerChainIds` differs
+ * from `managerId` — see that field's doc comment).
+ *
+ * RATIFIED continue-past-empty-level posture (confirmed BINDING by Lock-2): a level whose manager
+ * list is empty, OR whose ids all resolve to no linked local user, contributes NOTHING to the
+ * chain — but the walk CONTINUES to that department's parent regardless, because the next hop
+ * (`hop.parentExternalId`) is read from THIS department's own row, never from a resolved manager.
+ * This is the exact way K4 differs from `resolveManagerChain`, whose next hop DOES depend on a
+ * resolved leader and therefore DOES stop when none is found.
+ *
+ * Termination is bounded three ways, mirroring `resolveManagerChain`:
+ *   - a visited-set of external DEPARTMENT ids stops cycles (dept A's parent is dept B, B's is A);
+ *   - a hop whose department cannot be found at all stops the walk (top of the reachable tree);
+ *   - at most `maxLevels` hops are taken.
+ * Self-exclusion is on the requester's LOCAL id (an alt-account of the requester listed as a
+ * manager of some ancestor department must not enter the chain — same rationale as
+ * `resolveManagerChain`'s local-id exclusion); duplicates are collapsed.
+ */
+async function resolveDeptHeadChain(
+  integrationId: string,
+  requesterDeptExternalId: string | null,
+  requesterExternalId: string,
+  requesterLocalId: string,
+  maxLevels: number,
+  query: QueryFn,
+): Promise<string[]> {
+  const chain: string[] = []
+  const visited = new Set<string>()
+  let currentDeptExternalId = requesterDeptExternalId
+
+  for (let level = 0; level < maxLevels; level += 1) {
+    if (!currentDeptExternalId || visited.has(currentDeptExternalId)) break
+    visited.add(currentDeptExternalId)
+
+    const hop = await fetchDeptHop(integrationId, currentDeptExternalId, query)
+    if (!hop) break
+
+    // Continue-past-empty-level: resolve THIS level's head without letting the outcome gate the
+    // next hop (set below, from `hop.parentExternalId`).
+    const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
+      .filter((external) => external !== requesterExternalId)
+    for (const external of managerExternalIds) {
+      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+      if (localId) {
+        if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
+        break
+      }
+    }
+
+    currentDeptExternalId = hop.parentExternalId
   }
 
   return chain

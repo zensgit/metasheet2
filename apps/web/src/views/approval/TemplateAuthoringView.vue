@@ -537,6 +537,7 @@
                 <el-option label="指定层级上级" value="manager_at_level" />
                 <el-option label="表单用户字段" value="form_field_user" />
                 <el-option label="提交人自选" value="requester_choice" />
+                <el-option label="连续多级部门负责人" value="continuous_dept_heads" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -550,6 +551,18 @@
                 :step="1"
                 :disabled="readOnly"
                 data-testid="approval-step-levels"
+              />
+            </el-form-item>
+            <!-- Lock-1 §K4 (连续多级部门负责人) linear authoring: reuses the shared `levels`
+                 field, same cap posture as continuous_managers. -->
+            <el-form-item v-if="step.sourceKind === 'continuous_dept_heads'" label="部门负责人层级数">
+              <el-input-number
+                v-model="step.levels"
+                :min="1"
+                :max="10"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-dept-head-levels"
               />
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'manager_at_level'" label="指定上级层级">
@@ -1846,7 +1859,9 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
           : kind === 'manager_at_level' ? { kind, level: 1 }
             // Lock-1 §K2: single choice over the whole company is the widest, always-valid start.
             : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
-              : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+              // Lock-1 §K4: same default shape as continuous_managers.
+              : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
   const current = approvalNodeFirstSource(nodeKey)
@@ -2457,12 +2472,15 @@ function approvalSourceLevel(nodeKey: string): number {
   const source = approvalNodeFirstSource(nodeKey)
   if (source?.kind === 'manager_at_level') return source.level
   if (source?.kind === 'continuous_managers') return source.levels
+  // Lock-1 §K4: same shared-field shape as continuous_managers.
+  if (source?.kind === 'continuous_dept_heads') return source.levels
   return 1
 }
 function setApprovalSourceLevel(nodeKey: string, value: number): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
   else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
+  else if (kind === 'continuous_dept_heads') setApprovalNodeSource(nodeKey, { kind, levels: value })
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))

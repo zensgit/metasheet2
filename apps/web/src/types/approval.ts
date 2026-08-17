@@ -18,7 +18,7 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -148,6 +148,14 @@ export type ApprovalAssigneeSource =
         | { type: 'members'; userIds: string[] }
         | { type: 'role'; roleIds: string[] }
     }
+  /**
+   * Lock-1 §K4 — 连续多级部门负责人. Byte-mirrors the backend union member: levels 1..`levels`
+   * (level 1 = the requester's own department head), resolved from the baked `deptHeadChainIds`
+   * snapshot — a DIFFERENT pointer from `continuous_managers` (leader_in_dept vs the department
+   * parent tree). No authoring shape beyond `levels`; the picker is a plain level-count input,
+   * same as `continuous_managers`.
+   */
+  | { kind: 'continuous_dept_heads'; levels: number }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 

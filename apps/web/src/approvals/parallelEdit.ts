@@ -159,6 +159,8 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_managers:${source.levels}`
     case 'manager_at_level':
       return `manager_at_level:${source.level}`
+    case 'continuous_dept_heads':
+      return `continuous_dept_heads:${source.levels}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
     case 'static_user':
