@@ -148,7 +148,7 @@ work until its named lock is drafted, reviewed, and explicitly ratified by the o
 
 | Lock | One-line scope | Current status | Owner |
 |---|---|---|---|
-| Lock-0 | D0 interaction delta: named inspector tabs, validation count, and delayed fifth-step activation | NOT DRAFTED | owner |
+| Lock-0 | D0 interaction delta: named inspector tabs, validation count, and delayed fifth-step activation | **RATIFIED 2026-08-17** (`approval-lock0-d0-interaction-delta-20260817.md` §4) | owner |
 | Lock-1 | enterprise assignee kinds and resolution semantics | NOT DRAFTED | owner |
 | Lock-2 | organization controls, field-derived assignees, and department routing | NOT DRAFTED | owner |
 | Lock-3 | handler/business-operation node and its mutation boundary | NOT DRAFTED | owner |
@@ -392,7 +392,7 @@ The original UI-1 through UI-9 list is retained only after subtracting what alre
 
 | UI slice | Actual remaining work | Not part of the slice |
 |---|---|---|
-| UI-0 authoring shell | typed basic-information controls, live validation count, and conditional More-settings step | rebuilding the four-step wizard, common presets, or Template Center |
+| UI-0 authoring shell | typed basic-information controls, live validation count, conditional More-settings step, and the parent-D0 §9 header route-preview toggle (Lock-0 L0-5 debt) | rebuilding the four-step wizard, common presets, or Template Center |
 | UI-1 node inspector | three named presentations, capability registry, all existing source cards, field-permission honesty, shipped compatibility | sticky Save/Cancel, scrim, runtime readonly enforcement, or unratified operations |
 | UI-2 organization fields | department/contact controls and field-derived routing after Lock-2 | inventing directory semantics in Vue |
 | UI-3 canvas residual | priority/default/copy affordances, edge polish, editor version entry | renderer rewrite, free wiring, colored title bands, new minimap/undo |
