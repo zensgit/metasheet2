@@ -72,6 +72,9 @@ describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
     // doc comment), K5-b's own slice does not widen the SEVEN-member handler roster either. Not
     // admitting it here is the deliberate deferral, not an oversight.
     expect(roster).not.toContain('dept_head_at_level')
+    // Lock-1 §K3 `prior_node_approver`: unlike K5-b, Lock-3 §1.5 lists NO forward ADMIT row for
+    // this kind at all — its absence from the handler roster is the contract, not a deferral.
+    expect(roster).not.toContain('prior_node_approver')
   })
 
   it('mutation 1 — dropping an admitted kind fails the exact-set check', () => {
@@ -99,6 +102,17 @@ describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
   it('mutation 3 — adding dept_head_at_level (Lock-1 §K5-b, deliberately deferred) fails the exact-set check', () => {
     const added: ApprovalCapabilityRegistry = {
       assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'dept_head_at_level', label: '指定层级部门负责人' }] },
+      operationPoliciesByNodeType: {},
+    }
+    const roster = assigneeSourceRoster(added, 'handler').map((c) => c.kind)
+    expect(new Set(roster)).not.toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
+  })
+
+  // Lock-1 §K3: prior_node_approver has NO handler row in Lock-3 §1.5 (not even forward) —
+  // "adding" it must fail the exact-set check exactly like the probes above.
+  it('mutation 4 — adding prior_node_approver (Lock-1 §K3, no handler row exists) fails the exact-set check', () => {
+    const added: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'prior_node_approver', label: '节点审批人' }] },
       operationPoliciesByNodeType: {},
     }
     const roster = assigneeSourceRoster(added, 'handler').map((c) => c.kind)

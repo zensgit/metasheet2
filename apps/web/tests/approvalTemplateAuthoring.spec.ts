@@ -8,10 +8,12 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  createEmptyStepDraft,
   createEmptyTemplateDraft,
   draftFromTemplate,
   graphReadOnlyReason,
   unsupportedTemplateAuthoringReason,
+  validateTemplateApprovalFlow,
   validateTemplateDraft,
   validateTemplateFormFields,
   validateTemplateBasicInfo,
@@ -838,6 +840,104 @@ describe('approval template authoring helpers', () => {
     expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
       payload.approvalGraph.nodes[1]?.config,
     )
+  })
+
+  it('Lock-1 §K3: round-trips a prior_node_approver source (localId reference → the referenced step CURRENT positional key on save; the stored key re-resolves to the SAME step) — the linear editor accepted-kind list mirror site', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'k3'
+    draft.name = '节点审批人审批'
+    draft.steps[0].name = '一审'
+    const second = createEmptyStepDraft(2)
+    second.sourceKind = 'prior_node_approver'
+    second.priorStepLocalId = draft.steps[0].localId
+    draft.steps.push(second)
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[2]?.config as any).assigneeSources).toEqual([{ kind: 'prior_node_approver', nodeKey: 'approval_1' }])
+
+    // wire-vs-fixture trap: the stored nodeKey survives the real serialize→parse and re-resolves
+    // to the FIRST step's fresh localId (a localId is session-scoped, so hydrate must re-derive
+    // the reference from the stored key + ordered chain, not carry the old localId).
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[1].sourceKind).toBe('prior_node_approver')
+    expect(rehydrated.steps[1].priorStepLocalId).toBe(rehydrated.steps[0].localId)
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[2]?.config).toEqual(
+      payload.approvalGraph.nodes[2]?.config,
+    )
+  })
+
+  it('Lock-1 §K3 retarget-safety: inserting a step ABOVE the referenced step re-emits the reference at the step NEW positional key — the reference follows the STEP, never the stale key', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'k3-retarget'
+    draft.name = '节点审批人审批'
+    draft.steps[0].name = '一审'
+    const second = createEmptyStepDraft(2)
+    second.sourceKind = 'prior_node_approver'
+    second.priorStepLocalId = draft.steps[0].localId
+    draft.steps.push(second)
+    expect((buildCreateTemplatePayload(draft).approvalGraph.nodes[2]?.config as any).assigneeSources)
+      .toEqual([{ kind: 'prior_node_approver', nodeKey: 'approval_1' }])
+
+    // Insert a NEW first step: the referenced 一审 step shifts to position 2 (key approval_2).
+    // Under a raw-key carrier the reference would still say approval_1 — now the NEW step, a
+    // silent wrong-approver retarget. The localId carrier re-emits the moved step's current key.
+    draft.steps.unshift(createEmptyStepDraft(1))
+    const shifted = buildCreateTemplatePayload(draft)
+    expect((shifted.approvalGraph.nodes[3]?.config as any).assigneeSources)
+      .toEqual([{ kind: 'prior_node_approver', nodeKey: 'approval_2' }])
+  })
+
+  it('Lock-1 §K3 validation: a prior_node_approver step with no chosen reference — or referencing a NON-earlier step — is flagged; a valid earlier reference passes (positive control)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'k3-validate'
+    draft.name = '节点审批人审批'
+    const second = createEmptyStepDraft(2)
+    second.sourceKind = 'prior_node_approver'
+    draft.steps.push(second)
+    // No reference chosen.
+    expect(validateTemplateApprovalFlow(draft).some((e) => e.includes('节点审批人'))).toBe(true)
+    // Self/later reference (its own localId — index not strictly earlier).
+    second.priorStepLocalId = second.localId
+    expect(validateTemplateApprovalFlow(draft).some((e) => e.includes('节点审批人'))).toBe(true)
+    // Positive control: a strictly-earlier reference passes.
+    second.priorStepLocalId = draft.steps[0].localId
+    expect(validateTemplateApprovalFlow(draft).filter((e) => e.includes('节点审批人'))).toEqual([])
+  })
+
+  it('Lock-1 §K3 fail-closed hydrate: a LINEAR graph whose prior_node_approver references a NON-earlier node (self/dangling) opens read-only — never silently re-referenced on save', () => {
+    // Self-reference (illegal — publish would reject; a hand-crafted/stale row could carry it).
+    const selfRef = buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '一审', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_1' }] } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approval_1' },
+          { key: 'e2', source: 'approval_1', target: 'end' },
+        ],
+      } as any,
+    })
+    expect(unsupportedTemplateAuthoringReason(selfRef)).not.toBeNull()
+    // Positive control: the same shape referencing a genuinely EARLIER node is editable.
+    const legal = buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '一审', config: { assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'approval_2', type: 'approval', name: '二审', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_1' }] } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approval_1' },
+          { key: 'e2', source: 'approval_1', target: 'approval_2' },
+          { key: 'e3', source: 'approval_2', target: 'end' },
+        ],
+      } as any,
+    })
+    expect(unsupportedTemplateAuthoringReason(legal)).toBeNull()
   })
 
   it('Lock-1 §K2: round-trips a requester_choice source incl. mode + role scope (idsText is the scope-id carrier)', () => {
@@ -2157,6 +2257,33 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('dept_head_at_level') // hydrated back
     expect((container!.querySelector('[data-testid="approval-step-dept-head-level"]') as HTMLInputElement)).not.toBeNull() // the level input renders for this kind
+  })
+
+  it('Lock-1 §K3: prior_node_approver reads back editable on a 2-step linear graph: sourceKind + the TYPED prior-step picker hydrated (registry-admitted, reference resolved to the earlier step)', async () => {
+    routeParams = { id: 'tpl_k3' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '一审', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_2', type: 'approval', name: '二审', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_1' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approval_1' },
+          { key: 'e2', source: 'approval_1', target: 'approval_2' },
+          { key: 'e3', source: 'approval_2', target: 'end' },
+        ],
+      } as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // legal upstream reference → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    const kindSelects = container!.querySelectorAll('[data-testid="approval-step-source-kind"]')
+    expect((kindSelects[1] as HTMLSelectElement).value).toBe('prior_node_approver') // hydrated back on step 2
+    expect(container!.querySelector('[data-testid="approval-step-prior-node"]')).not.toBeNull() // the TYPED prior-step picker renders
   })
 
   it('updates an existing supported template without replacing it through create', async () => {

@@ -633,6 +633,37 @@
             </el-select>
           </el-form-item>
         </template>
+        <!-- Lock-1 §K3 (节点审批人) authoring sub-form: a TYPED node picker restricted to the
+             publish-time-legal upstream approval nodes (D0 §10.2 — never a free-text node-key
+             input). Candidates come from the api's `priorApproverNodeOptions` (the shipped app
+             derives them via `legalPriorApproverNodeKeys` — the FE mirror of the backend publish
+             dominance gate, which stays the sole arbiter). -->
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'prior_node_approver'"
+          label="引用审批节点"
+        >
+          <el-select
+            :model-value="priorNodeApproverKey(node.key, sourceIndex)"
+            size="small"
+            :disabled="readOnly"
+            class="ms-w-240"
+            placeholder="选择上游审批节点"
+            data-testid="approval-node-source-prior-node"
+            @update:model-value="(key: string) => setPriorNodeApproverKey(node.key, sourceIndex, key)"
+          >
+            <el-option
+              v-for="option in priorApproverNodeOptionsFor(node.key)"
+              :key="option.key"
+              :label="option.label"
+              :value="option.key"
+            />
+          </el-select>
+          <p
+            v-if="priorApproverNodeOptionsFor(node.key).length === 0"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-source-prior-node-empty"
+          >当前节点上游没有可引用的审批节点（引用目标必须位于每条可达路径的上游）</p>
+        </el-form-item>
         <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
              so the admin replaces it before publish (rather than hitting the publish-time 400).
              P1-B: scoped to THIS card's own source, not the node-wide aggregate — a node with N
@@ -815,6 +846,7 @@
 import { computed, inject, toRefs, unref, type ComputedRef, type Ref } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import type {
+  ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
@@ -1032,6 +1064,33 @@ function setRequesterChoiceScopeIds(nodeKey: string, sourceIndex: number, ids: s
   }
 }
 
+// ── Lock-1 §K3 prior_node_approver sub-form ─────────────────────────────────────────────────
+// Same pattern as the §K2 sub-form above: reads/writes the card AT sourceIndex of the SHARED
+// approvalNodeEditFor edit model directly. Candidates come from the api's OPTIONAL
+// `priorApproverNodeOptions` (always present on the shipped app's api object; component tests
+// that don't exercise K3 omit it — the picker then offers nothing, mutating nothing).
+function priorNodeApproverSourceFor(nodeKey: string, sourceIndex: number): Extract<ApprovalAssigneeSource, { kind: 'prior_node_approver' }> | null {
+  const source = approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
+  return source?.kind === 'prior_node_approver' ? source : null
+}
+function priorNodeApproverKey(nodeKey: string, sourceIndex: number): string {
+  return priorNodeApproverSourceFor(nodeKey, sourceIndex)?.nodeKey ?? ''
+}
+function setPriorNodeApproverKey(nodeKey: string, sourceIndex: number, referencedNodeKey: string): void {
+  const source = priorNodeApproverSourceFor(nodeKey, sourceIndex)
+  if (!source || source.nodeKey === referencedNodeKey) return
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  const nextSources = edit.assigneeSources.slice()
+  nextSources[sourceIndex] = { ...source, nodeKey: referencedNodeKey }
+  edit.assigneeSources = nextSources
+}
+const priorApproverNodeOptionsApi = api.priorApproverNodeOptions
+function priorApproverNodeOptionsFor(nodeKey: string): Array<{ key: string; label: string }> {
+  return priorApproverNodeOptionsApi?.(nodeKey) ?? []
+}
+
 /** D2: configured summary echo. Reads the LIVE edit model (not `node.config`, which is the stale
  *  pre-edit snapshot in list mode — `TemplateAuthoringView.vue`'s `graphPreviewNodes` is sourced
  *  from `draft.preservedGraph`, not the live effective graph) so it stays correct in both
@@ -1077,6 +1136,10 @@ function configuredSourceSummaryLine(nodeKey: string, sourceIndex: number): stri
         ? `指定角色${source.scope.roleIds.length ? `（${source.scope.roleIds.length} 个）` : '（未选择）'}`
         : '全公司'
     return `已配置：${label}（${mode} · ${scope}）`
+  }
+  if (source.kind === 'prior_node_approver') {
+    // §K3 echo — the referenced node's display label (a template-authored name/key, no person id).
+    return `已配置：${label}${source.nodeKey ? `（${graphNodeLabel(source.nodeKey)}）` : '（未选择）'}`
   }
   return `已配置：${label}`
 }

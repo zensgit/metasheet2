@@ -393,8 +393,33 @@ export function pruneHiddenFormData(
   )
 }
 
-function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'all' || value === 'any' || value === 'single' || value === 'threshold' ? value : 'single'
+/**
+ * Lock-1 §K6 precondition (named by the K3 slice sequencing): the executor's approval-mode
+ * normalizer must fail CLOSED. The previous arm silently mapped ANY unrecognized mode to
+ * `'single'` — for contract-valid data the gap was unreachable (the authoring choke rejects
+ * unknown modes, and `asRuntimeGraph` re-normalizes every STORED graph through that same choke on
+ * each dispatch), but the moment a new mode (e.g. `sequential`) becomes authorable, deploy skew or
+ * rollback would degrade it silently to first-approver-wins with no error and no audit signal —
+ * the precise inverse of the S7 governing precedent.
+ *
+ * Enumerated legitimate inputs (widen-only: every value a re-normalized stored graph can carry):
+ *   - `undefined` — the absent default, ≡ `'single'` (the shipped contract; the service-side
+ *     normalizer emits the key only when set, and `single` is the documented absent default);
+ *   - the four shipped members `'single' | 'all' | 'any' | 'threshold'` — pass through unchanged.
+ * ANYTHING else (an unknown string, `null`, a non-string) throws a typed error instead of running
+ * as `'single'`. `null` is deliberately in the reject set: the authoring choke has always rejected
+ * it (`typeof null !== 'string'`), so no legitimately stored graph carries it. The raw value is
+ * deliberately NOT echoed into the message (values-free; the node key — template-authored — is).
+ */
+function normalizeApprovalMode(value: unknown, nodeKey: string): ApprovalMode {
+  if (value === undefined) return 'single'
+  if (value === 'all' || value === 'any' || value === 'single' || value === 'threshold') return value
+  throw new ServiceError(
+    `Approval node ${nodeKey} has an unsupported approval mode`,
+    400,
+    'APPROVAL_MODE_UNSUPPORTED',
+    { nodeKey },
+  )
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -991,7 +1016,7 @@ export class ApprovalGraphExecutor {
   }
 
   getApprovalMode(nodeKey: string): ApprovalMode {
-    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
+    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode, nodeKey)
   }
 
   // Lock-3 §2.2 — handler aggregation mode, fail-closed to `'all'` (see `normalizeHandlerMode`).
@@ -1208,7 +1233,7 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
@@ -1535,7 +1560,7 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
@@ -1718,7 +1743,7 @@ export class ApprovalGraphExecutor {
     approvalConfig: ApprovalNodeConfig,
     assignments: ApprovalGraphAssignment[],
   ): void {
-    if (normalizeApprovalMode(approvalConfig.approvalMode) !== 'threshold') return
+    if (normalizeApprovalMode(approvalConfig.approvalMode, nodeKey) !== 'threshold') return
     if (assignments.length === 0) return
     const threshold = this.getApprovalThreshold(nodeKey)
     const distinctSlots = new Set(

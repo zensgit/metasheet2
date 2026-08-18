@@ -334,6 +334,14 @@ export default defineConfig({
       // approval-realdb-k5b) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring —
       // both points land in the SAME commit.
       'tests/integration/approval-dept-head-at-level.db.test.ts',
+      // Lock-1 §K3 prior_node_approver real-DB acceptance (G-1/G-2/G-10/G-11/G-12/G-18 +
+      // OD-L1-3(a) latest-round + OD-L1-4(a) skipped/auto-approved fail-closed + freeze-of-rule).
+      // DATABASE_URL-gated; excluded here so the no-DB default job cannot collect-and-skip-green
+      // it, and carried by the SAME dedicated .github/workflows/approval-realdb-acceptance.yml
+      // workflow (sibling job approval-realdb-k3, EXPECT_DB=1 arming the top-level anti-skip
+      // sentinel) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both
+      // points land in the SAME commit.
+      'tests/integration/approval-prior-node-approver.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

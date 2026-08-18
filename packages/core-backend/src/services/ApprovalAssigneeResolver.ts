@@ -21,6 +21,17 @@ export interface ResolveApprovalAssigneesOptions {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
   requesterSnapshot: Record<string, unknown> | null
+  /**
+   * Lock-1 §K3 (`prior_node_approver`) — referenced prior node key → that node's ACTUAL decider
+   * local user ids, read by the CALLER at node activation from instance-internal
+   * `approval_records` rows (LATEST `nodeEntryEpoch` round only, OD-L1-3(a); system sentinel
+   * actors already dropped) and passed in alongside the snapshots, exactly as `formSnapshot` and
+   * `requesterSnapshot` are. The resolver performs NO database access of its own (§2.1 purity —
+   * K3 is the one kind whose input is caller-supplied at activation rather than create-frozen).
+   * Absent/undefined (create-time cascade, read-only previews) ⇒ every `prior_node_approver`
+   * source resolves EMPTY and falls to the node's `emptyAssigneePolicy` (OD-L1-4(a)).
+   */
+  priorNodeApprovers?: Record<string, string[]>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,8 +48,23 @@ function metadataFor(source: ApprovalAssigneeSource, sourceIndex: number): Appro
       kind: source.kind,
       sourceIndex,
       ...(source.kind === 'form_field_user' ? { fieldId: source.fieldId } : {}),
+      // Lock-1 §K3 audit: the referenced prior node's key on the row (§2.6 — a template-authored
+      // node key, values-free), so "why is this person an approver" is answerable from the row.
+      ...(source.kind === 'prior_node_approver' ? { priorNodeKey: source.nodeKey } : {}),
     },
   }
+}
+
+/**
+ * Lock-1 §K3 — `system:`-namespaced sentinel actors (`system:auto-approval`,
+ * `system:approval-timeout`) are not assignable users and are DROPPED, never assigned. The
+ * caller's audit-row read already drops them; this pure re-check keeps the guarantee even for a
+ * hand-assembled `priorNodeApprovers` map. The `system:` prefix is the repo-wide non-user actor
+ * namespace (directory-sync.ts applies the same predicate to reject `system:`-prefixed ids as
+ * user ids).
+ */
+function isSystemSentinelActor(actorId: string): boolean {
+  return actorId.startsWith('system:')
 }
 
 function resolveFormUserValue(value: unknown): string | null {
@@ -270,6 +296,33 @@ export function resolveApprovalAssignees(
           const headId = normalizeId(entry)
           if (headId && headId !== requesterId) {
             pushResolved('user', headId, source, sourceIndex)
+          }
+        })
+        break
+      }
+      case 'prior_node_approver': {
+        // Lock-1 §K3: resolve to the referenced prior node's ACTUAL decider(s), read from the
+        // caller-supplied `priorNodeApprovers` map (instance-internal approval_records actors,
+        // LATEST round only — OD-L1-3(a)); never from config, never from a directory read, and no
+        // resolver-internal database access (§2.1: K3's input is caller-supplied at activation).
+        // System sentinel actors are dropped here as a pure re-check (primary drop is in the
+        // caller's audit-row read); when nothing remains — the node was skipped, unreached,
+        // auto-approved under the system actor, or the map is absent (create-time cascade /
+        // choices-free preview) — resolution is EMPTY and falls to the node's emptyAssigneePolicy
+        // (OD-L1-4(a): fail-closed APPROVAL_ASSIGNEE_EMPTY under the default 'error'; an AUDITED
+        // auto-approval event under an explicit 'auto-approve' — never a silent nobody).
+        // NO self-exclusion (deliberate — the §K2 posture): a prior decider who is the requester
+        // still gets the seat; self-approval stays owned by autoApprovalPolicy.mergeWithRequester.
+        // Cross-node NO-DEDUP is structural: this node's `seen` set is per-resolution, so the same
+        // person approving at the prior node simply gets a fresh seat here; intra-node dedup
+        // (one seat per identity at THIS node) still applies via pushResolved.
+        const rawMap = options.priorNodeApprovers
+        const rawList = isRecord(rawMap) ? rawMap[source.nodeKey] : undefined
+        const deciders = Array.isArray(rawList) ? rawList : []
+        deciders.forEach((entry) => {
+          const deciderId = normalizeId(entry)
+          if (deciderId && !isSystemSentinelActor(deciderId)) {
+            pushResolved('user', deciderId, source, sourceIndex)
           }
         })
         break
