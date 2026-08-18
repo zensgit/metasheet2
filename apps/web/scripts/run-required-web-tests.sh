@@ -208,6 +208,21 @@
 # three bare basename tokens; verified no existing token (checked the full `approval-date*` /
 # `*date-range*` namespace) is a substring of any of them or vice versa — the namespace was
 # entirely empty before this slice.
+#
+# L8-A (2026-08-17, docs/development/approval-lock8-field-vocabulary-20260817.md §1.1): explanation
+# (说明) — three new tokens. `approval-explanation-field` (draft carrier/buildFormSchema A-1
+# valuelessness stripping/hydration/registration-completeness/MS-9 predicate+retype-clearing/FE
+# resolveVisibilityFieldReference/prefill exclusion/buildDisplayFields visibility-gated render/
+# summaryFields exclusion/condition-branch exclusion pure-fn specs), `approval-explanation-inline-
+# editor` (ApprovalFormInlineEditor.vue mounted spec: retype option, props.text property block, M7
+# wired-not-inert control, 必填/占位文本 HIDDEN-for-explanation, type-selected non-rendering
+# negative), `approval-lock8-field-type-census` (§2.1 N-1: the MS-5/MS-9 mechanical census —
+# exhaustive per-type loops over `AUTHORABLE_FIELD_TYPES` with a completeness meta-check; the
+# backend half lives in packages/core-backend/tests/unit/approval-lock8-field-type-census.test.ts).
+# All three bare basename tokens; verified no existing token (checked the full `approval-explan*` /
+# `*explanation*` / `*lock8*` / `*census*` namespace) is a substring of any of them or vice versa —
+# the namespace was entirely empty before this slice (one pre-existing `lock8` hit is a doc-comment
+# citation, not a test token).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -233,6 +248,9 @@ npx vitest run \
   approval-date-range-field \
   approval-date-range-visibility \
   approval-date-range-inline-editor \
+  approval-explanation-field \
+  approval-explanation-inline-editor \
+  approval-lock8-field-type-census \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

@@ -128,12 +128,16 @@
               <el-option label="明细（子表单）" value="detail" />
               <el-option label="关联记录" value="record-link" />
               <el-option label="日期区间" value="date_range" />
+              <el-option label="说明" value="explanation" />
             </el-select>
           </el-form-item>
-          <el-form-item label="占位文本">
+          <!-- Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, A-1): explanation is
+               DISPLAY-ONLY — no submitted value, so 占位文本/是否必填 are hidden rather than left as
+               inert controls that would always fail publish (M7). -->
+          <el-form-item v-if="field.type !== 'explanation'" label="占位文本">
             <el-input v-model="field.placeholder" :disabled="readOnly" />
           </el-form-item>
-          <el-form-item label="是否必填">
+          <el-form-item v-if="field.type !== 'explanation'" label="是否必填">
             <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
           </el-form-item>
           <el-form-item
@@ -324,6 +328,29 @@
             </div>
             <div class="template-authoring__hint">
               时长由起始、结束自动计算并展示，不可编辑；提交时以系统计算结果为准。
+            </div>
+          </el-form-item>
+          <!-- Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3):
+               explanation (说明) — display-only, renders `props.text` to the requester/approver.
+               No 必填/占位文本/选项 (A-1: a valueless field has nothing to require, prompt, or
+               choose among). This control writes to a real FieldAuthoringDraft key
+               `buildFormSchema` emits (M7: no inert/disabled-theater controls). -->
+          <el-form-item
+            v-if="field.type === 'explanation'"
+            label="说明内容"
+            class="template-authoring__wide"
+            data-testid="approval-explanation-config"
+          >
+            <el-input
+              v-model="field.explanationText"
+              :disabled="readOnly"
+              type="textarea"
+              :rows="3"
+              placeholder="向提交人 / 审批人展示的说明文本"
+              data-testid="approval-explanation-text"
+            />
+            <div class="template-authoring__hint">
+              说明为纯展示控件，不收集任何提交值，不可设置必填、占位文本或选项。
             </div>
           </el-form-item>
           <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each

@@ -970,6 +970,7 @@ function fieldTypeLabel(type: FormFieldType) {
     detail: '明细',
     'record-link': '关联记录',
     date_range: '日期区间',
+    explanation: '说明',
   }
   return map[type] ?? type
 }

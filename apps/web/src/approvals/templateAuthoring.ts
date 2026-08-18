@@ -92,6 +92,10 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'record-link',
   // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): start+end date pair.
   'date_range',
+  // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1): display-only 说明. Top-level
+  // only — excluded from `DETAIL_LEAF_FIELD_TYPES` (detailField.ts), never a whole-value
+  // visibility/condition dependency (MS-8/MS-9/MS-10).
+  'explanation',
 ]
 
 /**
@@ -151,6 +155,13 @@ export interface FieldAuthoringDraft {
   dateRangeStartLabel: string
   dateRangeEndLabel: string
   dateRangeDurationLabel: string
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-3(a)): the authored body
+   * (`props.text`) shown to the requester/approver. Meaningful only when `type === 'explanation'`.
+   * `''` is the "not yet written" draft state — publish rejects a blank/missing `props.text`, never
+   * silently defaults it.
+   */
+  explanationText: string
   original?: FormField
 }
 
@@ -306,6 +317,7 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     dateRangeStartLabel: '',
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
+    explanationText: '',
   }
 }
 
@@ -521,6 +533,11 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     dateRangeStartLabel: field.type === 'date_range' && typeof props.startLabel === 'string' ? props.startLabel : '',
     dateRangeEndLabel: field.type === 'date_range' && typeof props.endLabel === 'string' ? props.endLabel : '',
     dateRangeDurationLabel: field.type === 'date_range' && typeof props.durationLabel === 'string' ? props.durationLabel : '',
+    // L8-A: typeof-guarded, same discipline as the L8-B/L8-C keys above — a malformed stored value
+    // hydrates to the "unset" draft state rather than throwing or coercing. The backend requires a
+    // non-blank `props.text` at publish, so a freshly-saved template can never reach this hydration
+    // path with a malformed value; this stays defensive for out-of-band data.
+    explanationText: field.type === 'explanation' && typeof props.text === 'string' ? props.text : '',
     original: field,
   }
 }
@@ -1092,6 +1109,18 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       if (!field.placeholder.trim()) {
         delete next.placeholder
       }
+      // Lock-8 L8-A (§1.1, OD-L8-2, A-1): explanation is DISPLAY-ONLY — force `required: false` and
+      // strip `placeholder`/`defaultValue` regardless of what the draft or `original` spread carries.
+      // `required`/`placeholder` are set UNCONDITIONALLY above from the draft (an author who toggled
+      // 必填 before retyping AWAY... into explanation would otherwise still emit `required: true`);
+      // `defaultValue` is never deleted anywhere else in this function — it only ever survives via
+      // the `original` spread (a field retyped FROM a type that had one). None of the three may leak
+      // through a retype. `options` is already handled by the non-select/multi-select delete below.
+      if (field.type === 'explanation') {
+        next.required = false
+        delete next.placeholder
+        delete next.defaultValue
+      }
       if (field.type === 'select' || field.type === 'multi-select') {
         next.options = parseOptionsText(field.optionsText)
       } else {
@@ -1160,10 +1189,17 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         const durationLabel = field.dateRangeDurationLabel.trim()
         if (durationLabel) props.durationLabel = durationLabel
         next.props = props
+      } else if (field.type === 'explanation') {
+        // L8-A (§1.1, OD-L8-3(a)): a BRAND NEW type — same discipline as date_range, props built
+        // fresh (never spreading `next.props`/`original`). `text` has no absent-default: an
+        // unwritten draft emits an empty string, and publish's non-blank check rejects it rather
+        // than the client silently picking a placeholder body.
+        next.props = { text: field.explanationText.trim() }
       } else if (next.props && typeof next.props === 'object') {
-        // Drop record-link pins + L8-C display keys + L8-B date_range keys when type changes away;
-        // keep other type-specific props only if still meaningful (do not leave baseId/sheetId, a
-        // formatted-number display flag, or a date_range prop on a text field).
+        // Drop record-link pins + L8-C display keys + L8-B date_range keys + L8-A explanation
+        // text when type changes away; keep other type-specific props only if still meaningful (do
+        // not leave baseId/sheetId, a formatted-number display flag, a date_range prop, or a stale
+        // explanation body on a field retyped to something else).
         const props = { ...next.props } as Record<string, unknown>
         delete props.baseId
         delete props.sheetId
@@ -1174,6 +1210,7 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         delete props.startLabel
         delete props.endLabel
         delete props.durationLabel
+        delete props.text
         if (Object.keys(props).length === 0) delete next.props
         else next.props = props
       }

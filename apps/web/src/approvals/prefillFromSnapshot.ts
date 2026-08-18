@@ -68,6 +68,11 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       // picker of the wrong kind). Safe by construction: the field just keeps its normal blank/
       // default-seeded value, same as any other never-prefilled type.
       return false
+    case 'explanation':
+      // Lock-8 L8-A: explanation carries no submitted value (A-1) — it is never a snapshot key on
+      // a legitimately-published field, so this arm is defensive (an out-of-band/legacy snapshot
+      // carrying a stray key here must not resurrect it as if it were a real answer).
+      return false
     default:
       return false
   }

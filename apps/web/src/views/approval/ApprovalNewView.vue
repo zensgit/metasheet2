@@ -531,6 +531,21 @@
               附件上传功能即将支持，请先在其他字段中注明附件信息。
             </div>
 
+            <!-- Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3)
+                 explanation: display-only. Renders the authored `props.text` body to the
+                 requester. No v-model: an explanation collects nothing (A-1), so there is no
+                 formData key to bind — WITHOUT this arm, an explanation field would fall through
+                 to the plain-text-input fallback below and silently collect a value it must never
+                 carry. white-space:pre-wrap preserves authored line breaks without interpreting
+                 markup (plain text, never raw HTML). -->
+            <div
+              v-else-if="field.type === 'explanation'"
+              class="approval-new__explanation"
+              data-testid="approval-explanation-field"
+            >
+              {{ (field.props?.text as string) || '' }}
+            </div>
+
             <!-- fallback -->
             <el-input
               v-else
@@ -1620,6 +1635,19 @@ watch([visibleFieldIds, template], () => {
 
 .approval-new__date-range-duration-label::after {
   content: '：';
+}
+
+.approval-new__explanation {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--ms-bg-subtle, var(--el-fill-color-light));
+  color: var(--ms-text-2, var(--el-text-color-regular));
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .approval-new__form {

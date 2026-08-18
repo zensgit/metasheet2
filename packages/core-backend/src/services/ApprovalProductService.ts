@@ -440,7 +440,9 @@ const STORED_RUNTIME_CONTEXT: ValidationContext = {
   code: 'APPROVAL_RUNTIME_GRAPH_INVALID',
 }
 
-const FORM_FIELD_TYPES = new Set([
+// EXPORTED (Lock-8 L8-A §2.1 N-1: the census import-anchor, not a re-declared list) so a census
+// test can assert exact-set equality against the canonical type set and mutation-prove membership.
+export const FORM_FIELD_TYPES = new Set([
   'text',
   'textarea',
   'number',
@@ -457,6 +459,9 @@ const FORM_FIELD_TYPES = new Set([
   // Top-level only — explicitly excluded from DETAIL_LEAF below (OD-L8-4: two-to-three sub-values
   // in a single-leaf column structure ripples into lineDerivation/FWB-per-column/diff-granularity).
   'date_range',
+  // Lock-8 L8-A (§1.1, OD-L8-2): display-only 说明. Top-level only — excluded from DETAIL_LEAF
+  // below (a valueless control inside a repeating row has no per-row meaning).
+  'explanation',
 ])
 
 // L8-C (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7): the
@@ -492,6 +497,11 @@ export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
   'durationLabel',
 ])
 
+// Lock-8 L8-A (§1.1, OD-L8-3(a)): the allowlist of props keys permitted on `explanation`. `text`
+// is the ONLY key — the rendered body shown to the requester/approver. Mirrors record-link's
+// fail-closed shape (§0.4): unknown keys fail publish, canonicalized props never spread residually.
+export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
@@ -509,9 +519,18 @@ export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
 // .test.ts's OD-L8-4 describe block for the full mutation log. Earlier PR-body language claiming
 // this filter alone is "what B-4's mutation removes to prove load-bearing" was imprecise and has
 // been corrected.
-const DETAIL_LEAF_FIELD_TYPES = new Set(
+//
+// Lock-8 L8-A (§1.1, MS-4): `explanation` is excluded too — UNLIKE record-link/date_range it has
+// NO separate explicit `nested` guard in `normalizeFormField` (its props block below runs
+// regardless of nesting; the shared column-shape checks harmlessly canonicalize `props.text`
+// either way), so THIS filter is the sole, independently mutation-provable rejection site for a
+// nested explanation column — no pre-emption ambiguity to correct later.
+//
+// EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation} rather than re-declaring it.
+export const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
-    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range',
+    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation',
   ),
 )
 
@@ -1092,6 +1111,46 @@ function normalizeFormField(
     dateRangeProps = canonical
   }
 
+  // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
+  // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
+  // to require, default, choose among, or prompt for). The generic shape checks above only reject a
+  // WRONGLY-TYPED value (e.g. `required: 'yes'`); a well-typed-but-meaningless one (`required: true`,
+  // a real placeholder string) must be rejected HERE, per-type. `props.text` is the ONLY allowed
+  // key — the rendered body (OD-L8-3(a)); the strict allowlist mirrors record-link's fail-closed
+  // shape (§0.4): unknown keys fail publish, canonicalized props never spread residually. No
+  // separate `nested` guard (unlike record-link/date_range): `DETAIL_LEAF_FIELD_TYPES` above is the
+  // sole, independently mutation-provable rejection for a nested explanation column (MS-4).
+  let explanationProps: Record<string, unknown> | undefined
+  if (value.type === 'explanation') {
+    if (value.required === true) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot be required (no submitted value)`)
+    }
+    if (value.defaultValue !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a defaultValue (no submitted value)`)
+    }
+    if (value.placeholder !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a placeholder (no submitted value)`)
+    }
+    if (value.options !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry options (no submitted value)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !EXPLANATION_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] explanation props may only contain ${[...EXPLANATION_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const text = props?.text
+    if (typeof text !== 'string' || !text.trim()) {
+      failValidation(context, `formSchema.fields[${index}] explanation props.text is required`)
+    }
+    explanationProps = { text: (text as string).trim() }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -1116,9 +1175,11 @@ function normalizeFormField(
         ? { props: numberProps }
         : dateRangeProps
           ? { props: dateRangeProps }
-          : isRecord(value.props)
-            ? { props: { ...value.props } }
-            : {}),
+          : explanationProps
+            ? { props: explanationProps }
+            : isRecord(value.props)
+              ? { props: { ...value.props } }
+              : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -1327,6 +1388,15 @@ function validateFormFieldVisibilityRules(
         failValidation(
           context,
           `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a date_range field as a single value — reference its .start or .end endpoint (Lock-8 OD-L8-5)`,
+        )
+      }
+      // Lock-8 L8-A (§1.1, MS-8): explanation carries NO value at all (not merely non-scalar) —
+      // there is nothing to compare, so a dependent field can never legitimately key visibility off
+      // one. Unlike date_range there is no endpoint address to fall back to; the exclusion is total.
+      if (target.type === 'explanation') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference an explanation field (it carries no value)`,
         )
       }
       return
@@ -2252,6 +2322,11 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: 
  * address); this lock does not extend endpoint addressing to condition branches — `date_range` is
  * simply excluded from them, exactly like record-link, rather than left auto-admitted and
  * fail-open (§0.3's governing fact: a new member auto-admits into every hand-maintained gate).
+ *
+ * Lock-8 L8-A (§1.1, MS-10) reuses the SAME mechanism for `explanation`: it carries no value at
+ * all (a stricter case than "non-scalar" — there is nothing to compare, ever), so a condition rule
+ * or formula referencing one can never legitimately match. Name kept generic (this function
+ * already covers non-scalar AND valueless types under one gate) rather than adding a parallel one.
  */
 function validateNonScalarFieldsNotUsedInConditions(
   approvalGraph: ApprovalGraph,
@@ -2261,6 +2336,7 @@ function validateNonScalarFieldsNotUsedInConditions(
   const nonScalarFieldTypes: ReadonlyArray<{ type: FormField['type']; label: string }> = [
     { type: 'record-link', label: 'record-link' },
     { type: 'date_range', label: 'date_range' },
+    { type: 'explanation', label: 'explanation' },
   ]
   const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
   const nonScalarFieldIds = new Set(
@@ -9583,7 +9659,20 @@ export class ApprovalProductService {
       // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
       // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
       // approval-node write surface (OD-L7-3's named next slice) carries the binding surfaces.
-      if (field.type === 'record-link' || field.type === 'attachment') {
+      //
+      // Lock-8 L8-A (§1.1) gate P2-2 hardening: `explanation` joins this refusal for a DIFFERENT
+      // reason — it carries no value at ANY time (display-only, A-1). A handler node with NO matrix
+      // entry for it defaults to OD-L7-9 absent≡editable (`fieldAccessAtNodes` above), so the ONLY
+      // remaining backstop was `validateFieldType`'s explicit `case 'explanation'` arm
+      // (ApprovalGraphExecutor.ts) — which DOES refuse a non-null submitted value, but that function's
+      // own universal `value === undefined || value === null` early return (shared by every field
+      // type, not explanation-specific) lets a `null` write skip validation entirely. Without this
+      // arm, `fieldWrites: {<explanationId>: null}` would reach the `merge[fieldId] = value` in-place
+      // UPDATE below and add an `explanation` key to `form_snapshot` (plus a field-revision row) for a
+      // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
+      // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
+      // arm above, unaffected by this change.
+      if (field.type === 'record-link' || field.type === 'attachment' || field.type === 'explanation') {
         throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
       }
       // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a
