@@ -124,6 +124,7 @@
 name: Attendance Web Guard
 
 on:
+  merge_group:
   pull_request:
   push:
     branches: [main]

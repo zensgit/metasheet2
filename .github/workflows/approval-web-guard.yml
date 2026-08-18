@@ -15,6 +15,7 @@
 name: Approval Web Guard
 
 on:
+  merge_group:
   pull_request:
     paths:
       - 'apps/web/src/approvals/conditionEdit.ts'
