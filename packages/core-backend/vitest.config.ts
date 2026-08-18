@@ -374,6 +374,39 @@ export default defineConfig({
       // no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
       'tests/integration/approval-nofm-threshold.test.ts',
+      // P7-R1 (FAIL-0/FAIL-3): T2-4 nodeEntryEpoch durable threshold round-scoping oracle — the
+      // direct evidence for approval-parity-final-verification-20260817.md matrix rows I7/R8.
+      // DATABASE_URL-gated (describeIfDatabase). Was NOT excluded here before this fix, so the
+      // required no-DB `test (20.x)` job collected and describeIfDatabase-skip-greened it, and it
+      // was named in NO real-DB lane — the exact FAIL-0 skip-green pattern. Excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the dedicated
+      // .github/workflows/approval-realdb-entry-epoch-anymode.yml workflow (standalone per the
+      // sealed-export-s6a-authority-row-lock.yml precedent — plugin-tests.yml is an s6a
+      // sha256-pinned provenance input, deliberately not extended). Two-point wiring — both points
+      // land in the SAME commit.
+      'tests/integration/approval-node-entry-epoch.test.ts',
+      // P7-R1 (FAIL-0/FAIL-4): WP1 或签 (any-mode) first-wins + sibling-cancellation oracle. Same
+      // shape and same fix as the entry immediately above — was NOT excluded here, skip-greened in
+      // the no-DB job, named in no real-DB lane. Excluded here and wired as a WHOLE FILE into the
+      // SAME dedicated approval-realdb-entry-epoch-anymode.yml workflow (sibling job
+      // approval-realdb-wp1-any-mode). Two-point wiring, same commit.
+      'tests/integration/approval-wp1-any-mode.api.test.ts',
+      // P7-R1 (FAIL-0 §5 mechanical sweep, 2026-08-18): seven MORE approval real-DB suites found
+      // by a systematic "every approval* test file vs every known lane" sweep — same skip-green
+      // pattern as the two entries immediately above (describeIfDatabase-gated, referenced in NO
+      // workflow, collected+skip-greened by the required no-DB job). Excluded here and wired as
+      // WHOLE FILES into the SAME dedicated approval-realdb-p7r1-coverage-repair.yml workflow
+      // (sibling job approval-realdb-p7r1-sweep). Two-point wiring, same commit.
+      // approval-calendar-sla.test.ts was ALSO red on a fresh DB (fixture rot, same
+      // grantApprovalWriteForIntegrationActor gap, fixed in the same commit); the other six were
+      // already green.
+      'tests/integration/approval-calendar-sla.test.ts',
+      'tests/integration/approval-delegation-selfservice.db.test.ts',
+      'tests/integration/approval-wp2-source-filter.api.test.ts',
+      'tests/integration/approval-wp3-pending-count.api.test.ts',
+      'tests/integration/approval-wp3-reads.api.test.ts',
+      'tests/integration/approval-wp3-remind.api.test.ts',
+      'tests/integration/approval-wp4-template-categories.api.test.ts',
       // T2-1+2 scoped approval admins + bulk handover: real-DB route/service boundary with RBAC and
       // approval_records CHECK coverage. Excluded from the no-DB default and wired into approval real-DB CI.
       'tests/integration/approval-bulk-reassign.api.test.ts',

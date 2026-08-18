@@ -1,0 +1,313 @@
+name: Approval real-DB acceptance (P7-R1 coverage repair)
+
+# P7-R1 (FAIL-0/FAIL-3/FAIL-4 closure, plus the FAIL-0 §5 mechanical sweep). EVIDENCE LANE for
+# real-DB integration suites that were, until this workflow, collected by the required no-DB
+# `test (20.x)` job and describeIfDatabase-skip-greened there, named in NO real-DB lane at all:
+#   - approval-realdb-node-entry-epoch: the T2-4 durable threshold round-scoping oracle
+#     (tests/integration/approval-node-entry-epoch.test.ts) — the direct evidence for the
+#     approval-parity-final-verification matrix rows I7 and R8 (stale prior-round votes must
+#     never satisfy a re-entered threshold node's new epoch).
+#   - approval-realdb-wp1-any-mode: the 或签 (any-mode) first-wins + sibling-cancellation oracle
+#     (tests/integration/approval-wp1-any-mode.api.test.ts).
+#   - approval-realdb-p7r1-sweep: seven MORE suites found by a mechanical "every approval* test
+#     file vs every known lane" sweep (approval-calendar-sla, approval-delegation-selfservice,
+#     approval-wp2-source-filter, approval-wp3-pending-count, approval-wp3-reads,
+#     approval-wp3-remind, approval-wp4-template-categories) — same skip-green pattern.
+# node-entry-epoch, wp1-any-mode and approval-calendar-sla were ALSO red on a fresh DB
+# independent of the CI-wiring gap (fixture rot: none of the three ever called
+# grantApprovalWriteForIntegrationActor, so every createApproval/startApproval call 403'd) — that
+# fixture fix landed in the SAME commit as this workflow. The other six sweep suites were already
+# green. Ephemeral first-party PostgreSQL container per job; no customer source, no deployment,
+# no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry (same rationale as
+# approval-realdb-acceptance.yml / approval-realdb-handler.yml / approval-realdb-field-edit.yml):
+# plugin-tests.yml is an s6a sha256-pinned provenance input
+# (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so every edit forces an s6a
+# re-pin and a merge-serialisation race. plugin-tests.yml is left byte-identical.
+#
+# TWO-POINT WIRING (the other half): every suite here is excluded from the no-DB default vitest
+# config (packages/core-backend/vitest.config.ts) in the SAME commit that adds this workflow, so
+# the required `test (20.x)` job no longer collect-and-skip-greens them. This workflow is where
+# each suite actually EXECUTES, with EXPECT_DB=1 arming its top-level anti-skip-green sentinel: a
+# run in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the
+# whole suite as skipped.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # No `branches:` filter, mirroring the approval-realdb-acceptance.yml precedent: a
+    # brand-new workflow cannot be workflow_dispatch-ed until it has run once via a trigger it
+    # responds to, and a stacked-base PR would silently skip a branch-filtered trigger. The
+    # `paths` filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-node-entry-epoch.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp1-any-mode.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-calendar-sla.test.ts'
+      - 'packages/core-backend/tests/integration/approval-delegation-selfservice.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-pending-count.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-reads.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-remind.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp4-template-categories.api.test.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalMetricsService.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      - '.github/workflows/approval-realdb-p7r1-coverage-repair.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-node-entry-epoch.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp1-any-mode.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-calendar-sla.test.ts'
+      - 'packages/core-backend/tests/integration/approval-delegation-selfservice.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-pending-count.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-reads.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp3-remind.api.test.ts'
+      - 'packages/core-backend/tests/integration/approval-wp4-template-categories.api.test.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalMetricsService.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      - '.github/workflows/approval-realdb-p7r1-coverage-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-node-entry-epoch:
+    name: approval-realdb-node-entry-epoch
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a
+      # red run, never a silent skipped-tests green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see the T8 note there and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md
+          # for the per-item detail) — this lane provisions the identical schema the
+          # approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run node-entry-epoch real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit
+        # green and hide regressions; verbose prints every collected test so an empty
+        # collection shows in the log instead of reading as green.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-node-entry-epoch.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-node-entry-epoch.test.ts"
+            echo "matrixRows=I7,R8 (approval-parity-final-verification-20260817.md)"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-realdb-wp1-any-mode:
+    name: approval-realdb-wp1-any-mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run WP1 any-mode (或签) real-DB acceptance (whole file)
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-wp1-any-mode.api.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-wp1-any-mode.api.test.ts"
+            echo "claim=或签 (any-mode) first-wins + sibling-cancellation"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-realdb-p7r1-sweep:
+    name: approval-realdb-p7r1-sweep
+    # Seven suites found by the FAIL-0 §5 mechanical sweep (2026-08-18): each is
+    # describeIfDatabase-gated, referenced in NO workflow, and collected/skip-greened by the
+    # required no-DB `test (20.x)` job. Run together in one job (vitest.integration.config.ts
+    # already sets fileParallelism:false / maxConcurrency:1, so multi-file-per-job is the same
+    # serial execution plugin-tests.yml's batched steps already use) rather than one
+    # postgres-service job each, to bound CI cost.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run P7-R1 sweep real-DB acceptance (whole files)
+        # WHOLE FILES, --reporter=verbose: a name filter matching zero tests would exit green
+        # and hide regressions; verbose prints every collected test so an empty collection
+        # shows in the log instead of reading as green.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-calendar-sla.test.ts
+          tests/integration/approval-delegation-selfservice.db.test.ts
+          tests/integration/approval-wp2-source-filter.api.test.ts
+          tests/integration/approval-wp3-pending-count.api.test.ts
+          tests/integration/approval-wp3-reads.api.test.ts
+          tests/integration/approval-wp3-remind.api.test.ts
+          tests/integration/approval-wp4-template-categories.api.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-calendar-sla,approval-delegation-selfservice,approval-wp2-source-filter,approval-wp3-pending-count,approval-wp3-reads,approval-wp3-remind,approval-wp4-template-categories"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

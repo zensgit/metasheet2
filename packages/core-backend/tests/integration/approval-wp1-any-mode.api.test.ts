@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -30,6 +30,11 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  // P7-R1 (FAIL-4): production authorises createApproval from the DB-side approvals:write
+  // permission, not the dev-token's embedded perms=*:* wildcard — see
+  // grantApprovalWriteForIntegrationActor's own doc comment. 26 sibling integration suites seed
+  // it here; this file never did, so createApproval 403'd on a fresh DB.
+  await grantApprovalWriteForIntegrationActor(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
@@ -92,6 +97,16 @@ function buildAnyModeGraph() {
     ],
   }
 }
+
+// P7-R1 (FAIL-4 closure) — Anti-skip-green sentinel (mirrors approval-realdb-handler /
+// approval-field-edit-enforcement.db.test.ts): the approval-realdb-parallel lane sets
+// EXPECT_DB=1, so a broken/missing DATABASE_URL there REDS the run instead of the whole file
+// silently reporting skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test
+// cleanly — it never runs in the required no-DB `test (20.x)` job.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 describeIfDatabase('Approval Wave 2 WP1 any-mode (或签) API', () => {
   let server: MetaSheetServer | undefined
