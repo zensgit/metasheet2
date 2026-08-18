@@ -16,10 +16,16 @@ import type {
   FormSchema,
   NodeFieldAccess,
   NodeFieldPermission,
+  NodeTimeoutConfig,
+  NodeTimeoutEffect,
+  SupportedNodeTimeoutEffect,
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
 } from '../types/approval'
+import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
   buildDetailColumns,
   detailColumnDraftsFromField,
@@ -45,6 +51,12 @@ import {
   validateCcEdits,
   type CcEdits,
 } from './ccEdit'
+// P1-C: reuse the EXISTING FE mirror of backend `collectParallelRegionNodeKeys`
+// (ApprovalProductService.ts) — ported once already for the canvas's nested-parallel authoring
+// guard. Do not duplicate; both the canvas guard and this slice's linear-only threshold/timeout gate
+// must agree on exactly what "inside a parallel region" means.
+import { collectParallelRegionNodeKeys } from './graphTopologyEdit'
+export { collectParallelRegionNodeKeys } from './graphTopologyEdit'
 import {
   applyApprovalNodeEditsToGraph,
   approvalNodeEditsFromGraph,
@@ -197,6 +209,15 @@ export interface ApprovalStepDraft {
   // emits that step's CURRENT key at build time. `''` = not yet chosen (invalid to save).
   priorStepLocalId: string
   approvalMode: ApprovalMode
+  // P1-C (T2-4 N-of-M / 门槛会签): meaningful ONLY when `approvalMode === 'threshold'`. Carried for
+  // every step (mirrors `levels`/`level`'s always-present-but-conditionally-meaningful posture) so
+  // switching mode back to 'threshold' restores the last-entered N rather than resetting to 1. The
+  // backend's static N<=M publish bound applies ONLY to the legacy `assigneeType`/`assigneeIds`
+  // shape (ApprovalProductService.ts :2292-2304) — this editor always emits `assigneeSources`
+  // (`buildStepConfig`), so M is ALWAYS resolved at runtime and an unreachable N fails closed at
+  // dispatch (`APPROVAL_THRESHOLD_UNREACHABLE`), never at save/publish. See
+  // `validateTemplateApprovalFlow` for the (integer-only) client-side preview.
+  approvalThreshold: number
   emptyAssigneePolicy: EmptyAssigneePolicy
   // Self-approver authoring: the editable toggle (merge the requester in as an
   // auto-approval). `originalAutoApprovalPolicy` preserves the three non-merge
@@ -212,6 +233,30 @@ export interface ApprovalStepDraft {
   // are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a write;
   // `readonly` refuses a write at that node.
   fieldPermissions: NodeFieldPermission[]
+  // P1-C (T1-1) node-level SLA timeout — a linear graph is BY CONSTRUCTION never inside a parallel
+  // region (`orderedLinearNodes` admits no `parallel` node at all), so the backend's
+  // `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED` gate can never fire here; the linear editor offers
+  // this control unconditionally. `timeoutEnabled` false ⇒ `buildStepConfig` omits `timeout` entirely
+  // (byte-stable absence, mirrors the `autoApprovalPolicy`/`fieldPermissions` omit-empty discipline).
+  timeoutEnabled: boolean
+  // Raw text input, mirroring `slaHoursText`'s parse-on-build discipline — '' is the unset state.
+  timeoutAfterMinutesText: string
+  // '' is the "not yet chosen" draft state (mirrors `dateRangeDateType`) — publish-time validation
+  // (`validateTemplateApprovalFlow`) rejects it while `timeoutEnabled` is true, never silently
+  // coerced to a default effect. Restricted to `NODE_TIMEOUT_SUPPORTED_EFFECTS` — `auto_approve` /
+  // `auto_reject` are reserved and this control never offers them (M6/M8: no invented capability).
+  timeoutEffect: SupportedNodeTimeoutEffect | ''
+  // Meaningful only when `timeoutEffect === 'transfer'`.
+  timeoutTransferToUserId: string
+  // Meaningful only when `timeoutEffect === 'jump'` — the TARGET approval step's `localId` (resolved
+  // to the built node key by `buildStepConfig`, since node keys are assigned positionally at build
+  // time and are not stable identity in the draft). Never the raw persisted node key on read either —
+  // `stepDraftFromApprovalNode` re-resolves the persisted `jumpToNodeKey` to the matching step's
+  // `localId` at hydrate time for the SAME reason.
+  timeoutJumpToStepLocalId: string
+  // '' (wall-clock, the backend absent-default) or 'business'. Mirrors `normalizeNodeTimeout`'s
+  // emitted shape: 'wall_clock' is never persisted as an explicit value, only as key-absence.
+  timeoutUnit: '' | 'business'
 }
 
 export interface TemplateAuthoringDraft {
@@ -365,9 +410,16 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     requesterChoiceScopeType: 'company',
     priorStepLocalId: '',
     approvalMode: 'single',
+    approvalThreshold: 1,
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
     fieldPermissions: [],
+    timeoutEnabled: false,
+    timeoutAfterMinutesText: '',
+    timeoutEffect: '',
+    timeoutTransferToUserId: '',
+    timeoutJumpToStepLocalId: '',
+    timeoutUnit: '',
   }
 }
 
@@ -629,6 +681,36 @@ function stepDraftFromApprovalNode(
         .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
     : []
 
+  // P1-C: `unsupportedTemplateAuthoringReason` already forces the WHOLE template read-only for any
+  // mode outside the known union or a threshold missing its threshold — this total mapping is
+  // therefore never asked to coerce a genuinely-unknown value; it stays total only for the compiler.
+  const approvalMode: ApprovalMode =
+    config.approvalMode === 'all' || config.approvalMode === 'any' || config.approvalMode === 'threshold'
+      ? config.approvalMode
+      : 'single'
+  const approvalThreshold =
+    Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1
+      ? (config.approvalThreshold as number)
+      : 1
+
+  // P1-C: hydrate node-level timeout. Shape is already gated by `unsupportedTemplateAuthoringReason`
+  // (`timeoutConfigHasBackendDrop`), so every field read here is well-typed.
+  const timeout = config.timeout as
+    | { afterMinutes: number; effect: string; transferToUserId?: string; jumpToNodeKey?: string; unit?: 'business' }
+    | undefined
+  const timeoutEnabled = timeout !== undefined
+  const timeoutAfterMinutesText = timeout ? String(timeout.afterMinutes) : ''
+  const timeoutEffect: ApprovalStepDraft['timeoutEffect'] =
+    timeout && (NODE_TIMEOUT_SUPPORTED_EFFECTS as readonly string[]).includes(timeout.effect)
+      ? (timeout.effect as SupportedNodeTimeoutEffect)
+      : ''
+  const timeoutTransferToUserId = timeout?.transferToUserId ?? ''
+  // Resolved to the target step's `localId` in a second pass by `draftFromTemplate` (this function
+  // has no visibility into sibling steps' generated localIds) — left '' here regardless of a raw
+  // `jumpToNodeKey` being present, and fixed up by the caller.
+  const timeoutJumpToStepLocalId = ''
+  const timeoutUnit: ApprovalStepDraft['timeoutUnit'] = timeout?.unit === 'business' ? 'business' : ''
+
   return {
     localId: nextLocalId('step'),
     name: node.name ?? `审批人 ${index}`,
@@ -640,11 +722,18 @@ function stepDraftFromApprovalNode(
     requesterChoiceMode,
     requesterChoiceScopeType,
     priorStepLocalId: '',
-    approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
+    approvalMode,
+    approvalThreshold,
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
+    timeoutEnabled,
+    timeoutAfterMinutesText,
+    timeoutEffect,
+    timeoutTransferToUserId,
+    timeoutJumpToStepLocalId,
+    timeoutUnit,
   }
 }
 
@@ -727,19 +816,32 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
  * Returns `null` when the template is editable OR complex-but-preservable.
  */
 // The approval-node config keys the BACKEND `normalizeApprovalGraph` re-emits for a COMPLEX graph
-// (ApprovalProductService.ts:899-911). Any other key — TOP-LEVEL or NESTED — is silently dropped on
-// save. NB: this is the COMPLEX path's allowlist ONLY — the linear path reconstructs via
-// `buildStepConfig`, which authors + re-emits `fieldPermissions` (T1-4) but NOT `timeout` /
-// `approvalThreshold`, so the two allowlists must stay SEPARATE (sharing would let a linear node's
-// unrepresented key through, then flatten it).
+// (ApprovalProductService.ts:2331-2346). Any other key — TOP-LEVEL or NESTED — is silently dropped on
+// save. NB: this is the COMPLEX path's allowlist ONLY — the linear path (`buildStepConfig`) has its
+// OWN separate allowlist (`allowedConfigKeys`, below), because the two paths author + re-emit
+// `fieldPermissions` / `approvalThreshold` / `timeout` through DIFFERENT code (one projects
+// `ApprovalStepDraft` -> config, the other composes `ApprovalNodeSourceEdit` onto a preserved config)
+// — sharing one allowlist between them would let a key one path can't actually represent through as
+// if it round-trips, then silently flatten it on THAT path's save.
+//
+// P1-C CORRECTION (approval-parity-master-design-lock-20260817.md §P1-C): earlier revisions of this
+// comment claimed the backend "silently drops" `approvalThreshold`/`timeout` on a complex graph — that
+// was never true. `normalizeApprovalGraph`'s per-node-type switch has ONE `case 'approval':` branch
+// (ApprovalProductService.ts :2260-2347) that runs identically regardless of the graph's overall
+// topology; it re-emits both keys (:2339-2340, :2344) for EVERY approval node, complex or linear. The
+// two keys were simply ABSENT from this allowlist, which forced every carrying template fully
+// read-only (I12/I13) rather than actually losing data on save — this slice adds them (with the
+// matching nested-shape checks below) now that the FE can represent + preserve them honestly.
 const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'assigneeType',
   'assigneeIds',
   'assigneeSources',
   'approvalMode',
+  'approvalThreshold',
   'emptyAssigneePolicy',
   'autoApprovalPolicy',
   'fieldPermissions',
+  'timeout',
 ]
 // The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
 // allowlist must be shape-level, not just top-level:
@@ -812,14 +914,53 @@ function isBackendDroppedFieldPermission(perm: unknown): boolean {
     || !isNodeFieldAccess(perm.access)
 }
 
+// P1-C: the exact set of keys backend `normalizeNodeTimeout` re-emits on a `timeout` object
+// (ApprovalProductService.ts :1468-1493) — SHAPE, not the (separate) VALIDITY rules
+// `validateNodeTimeoutConfigs` layers on top. Deliberately mirrors normalize, not validate: the two
+// disagree on `unit` (validate ACCEPTS `unit: 'wall_clock'` as input; normalize only ever EMITS
+// `unit: 'business'`, silently dropping an explicit `'wall_clock'` back to the omitted default) — a
+// byte-faithful "would this round-trip identically" check must follow the emitter, not the acceptor.
+const BACKEND_NODE_TIMEOUT_CONFIG_KEYS = ['afterMinutes', 'effect', 'transferToUserId', 'jumpToNodeKey', 'unit']
+
+/**
+ * True when a persisted `timeout` value is NOT exactly the shape backend `normalizeNodeTimeout` would
+ * re-emit — an extra/missing-typed key, OR `unit` carrying anything other than the literal
+ * `'business'` (a stored `'wall_clock'` never happens; normalize omits the key for that default). Used
+ * by BOTH the complex-path and linear-path backend-drop gates (§P1-C — one shared shape check; the two
+ * TOP-LEVEL key allowlists stay separate, see the comment on `BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS`).
+ */
+function timeoutConfigHasBackendDrop(value: unknown): boolean {
+  if (!isPlainRecord(value)) return true
+  if (hasKeyOutside(value, BACKEND_NODE_TIMEOUT_CONFIG_KEYS)) return true
+  if (typeof value.afterMinutes !== 'number') return true
+  if (typeof value.effect !== 'string') return true
+  if (value.transferToUserId !== undefined && typeof value.transferToUserId !== 'string') return true
+  if (value.jumpToNodeKey !== undefined && typeof value.jumpToNodeKey !== 'string') return true
+  if (value.unit !== undefined && value.unit !== 'business') return true
+  return false
+}
+
+/**
+ * P1-C: a `config.approvalThreshold` that survives on a node whose `approvalMode` is NOT `'threshold'`
+ * is a backend-drop shape — `normalizeApprovalGraph` assigns `approvalThreshold` exclusively inside
+ * the `approvalMode === 'threshold'` branch (ApprovalProductService.ts :2281-2305) and omits it
+ * otherwise (:2340), so this combination can never come from a real save and must fail closed rather
+ * than be silently carried or dropped.
+ */
+function thresholdConfigHasBackendDrop(config: Record<string, unknown>): boolean {
+  return config.approvalThreshold !== undefined && config.approvalMode !== 'threshold'
+}
+
 /**
  * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
- * / autoApprovalPolicy / fieldPermissions[] — that the backend `normalizeApprovalGraph` does NOT
- * re-emit (and silently DROPS on save). The FE preserves config verbatim, so without this the
+ * / autoApprovalPolicy / fieldPermissions[] / timeout — that the backend `normalizeApprovalGraph` does
+ * NOT re-emit (and silently DROPS on save). The FE preserves config verbatim, so without this the
  * deep-equal round-trip looks clean while the real save flattens the unknown key.
  */
 function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): boolean {
   if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
+  if (thresholdConfigHasBackendDrop(config)) return true
+  if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
   const sources = config.assigneeSources
   if (Array.isArray(sources)) {
     for (const source of sources) {
@@ -948,13 +1089,29 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       'assigneeIds',
       'assigneeSources',
       'approvalMode',
+      // P1-C: `approvalThreshold`/`timeout` are now authored + preserved by the linear path
+      // (buildStepConfig / stepDraftFromApprovalNode), so they are no longer unknown config keys
+      // that would force the whole template read-only (master §P1-C I12/I13 no-flatten).
+      'approvalThreshold',
       'emptyAssigneePolicy',
       'autoApprovalPolicy',
       // T1-4: `fieldPermissions` is now authored + preserved by the linear path (buildStepConfig),
       // so it is no longer an unknown config key that would force the whole template read-only.
       'fieldPermissions',
+      'timeout',
     ]
     if (Object.keys(config).some((key) => !allowedConfigKeys.includes(key))) return true
+    // P1-C: `approvalMode` itself must be a KNOWN value — the key-only check above can't see this.
+    // An out-of-union value can never come from a real save (backend authoring `normalizeApprovalMode`
+    // `failValidation`s any value outside single/all/any/threshold, ApprovalProductService.ts :570),
+    // so this must fail closed rather than let `stepDraftFromApprovalNode` coerce it to 'single'.
+    if (
+      config.approvalMode !== undefined
+      && !['single', 'all', 'any', 'threshold'].includes(config.approvalMode as string)
+    ) return true
+    if (thresholdConfigHasBackendDrop(config)) return true
+    if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
+    if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
     const sources = config.assigneeSources
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
@@ -1024,6 +1181,22 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     : ordered
         .map(stepDraftFromApprovalNode)
         .filter((step): step is ApprovalStepDraft => step !== null)
+  if (!complex) {
+    // P1-C: second pass — resolve each step's `timeout.jumpToNodeKey` (a persisted node key) to the
+    // TARGET step's freshly-generated `localId`. Needs every step's localId assigned first (done
+    // above), so this can't happen inside `stepDraftFromApprovalNode` itself, which sees one node at
+    // a time. `orderedApprovalNodes[i]` and `steps[i]` are 1:1 — `ordered` is filtered to exactly the
+    // approval nodes that produced a non-null step, in the same relative order.
+    const orderedApprovalNodes = ordered.filter((node) => node.type === 'approval')
+    const nodeKeyToLocalId = new Map(orderedApprovalNodes.map((node, index) => [node.key, steps[index]?.localId]))
+    orderedApprovalNodes.forEach((node, index) => {
+      const jumpToNodeKey = (node.config as { timeout?: { jumpToNodeKey?: string } }).timeout?.jumpToNodeKey
+      if (!jumpToNodeKey) return
+      const step = steps[index]
+      const targetLocalId = nodeKeyToLocalId.get(jumpToNodeKey)
+      if (step && targetLocalId) step.timeoutJumpToStepLocalId = targetLocalId
+    })
+  }
 
   // Lock-1 §K3 post-pass: resolve each stored `prior_node_approver` nodeKey into the referenced
   // EARLIER step's localId (steps[i] ↔ the i-th approval node of the ordered linear chain). The
@@ -1303,7 +1476,67 @@ export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepD
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
  * bare `{}` is never persisted.
  */
-function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>, allSteps: ApprovalStepDraft[]): ApprovalNodeConfig {
+/**
+ * P1-C: build the `timeout` config for a step, or `undefined` when disabled/incomplete. Mirrors
+ * backend `normalizeNodeTimeout`'s emit shape exactly (`timeoutConfigHasBackendDrop`'s allowlist) —
+ * only the target field matching the chosen effect is included, `unit` is omitted for the wall-clock
+ * default. `stepLocalIdToNodeKey` resolves the draft's stable `localId` jump reference to the
+ * position-based node key `buildApprovalGraph` assigns this build (steps can reorder between saves).
+ * Returns `undefined` (never a half-filled object) when a required field for the chosen effect is
+ * still blank — `validateTemplateApprovalFlow` blocks save on that same incompleteness, so this is a
+ * defensive "never emit a shape the backend would 400 on" floor, not the primary UX validation.
+ */
+function buildStepTimeoutConfig(
+  step: ApprovalStepDraft,
+  stepLocalIdToNodeKey: Map<string, string>,
+): NodeTimeoutConfig | undefined {
+  if (!step.timeoutEnabled) return undefined
+  const afterMinutes = Number(step.timeoutAfterMinutesText.trim())
+  if (!Number.isInteger(afterMinutes) || afterMinutes <= 0) return undefined
+  if (!step.timeoutEffect) return undefined
+  const effect: NodeTimeoutEffect = step.timeoutEffect
+  if (effect === 'transfer') {
+    const transferToUserId = step.timeoutTransferToUserId.trim()
+    if (!transferToUserId) return undefined
+    return {
+      afterMinutes,
+      effect,
+      transferToUserId,
+      ...(step.timeoutUnit === 'business' ? { unit: 'business' as const } : {}),
+    }
+  }
+  if (effect === 'jump') {
+    const jumpToNodeKey = stepLocalIdToNodeKey.get(step.timeoutJumpToStepLocalId)
+    if (!jumpToNodeKey) return undefined
+    return {
+      afterMinutes,
+      effect,
+      jumpToNodeKey,
+      ...(step.timeoutUnit === 'business' ? { unit: 'business' as const } : {}),
+    }
+  }
+  // 'remind' — no target field.
+  return {
+    afterMinutes,
+    effect,
+    ...(step.timeoutUnit === 'business' ? { unit: 'business' as const } : {}),
+  }
+}
+
+// P1-C rebase (K3 + P1-C unification): `buildStepConfig` needs TWO distinct localId resolutions —
+// K3's `prior_node_approver` source (via `allSteps`, `sourceFromStep` below — requires the referenced
+// step be STRICTLY EARLIER, an ordering check `allSteps` supplies) and P1-C's timeout jump target (via
+// `stepLocalIdToNodeKey`, no ordering constraint — a jump may target any node). Both are threaded
+// through rather than collapsed into one map: `stepLocalIdToNodeKey` alone cannot express "earlier
+// than the current step" without re-deriving positions from its `approval_${index+1}` values, and
+// `sourceFromStep` is an exported function also called directly by `linearStepSpine.ts`, so its
+// existing `allSteps?: ApprovalStepDraft[]` contract is left untouched here.
+function buildStepConfig(
+  step: ApprovalStepDraft,
+  fieldIds: Set<string>,
+  allSteps: ApprovalStepDraft[],
+  stepLocalIdToNodeKey: Map<string, string>,
+): ApprovalNodeConfig {
   const autoApprovalPolicy: AutoApprovalPolicy = {
     ...step.originalAutoApprovalPolicy,
     ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
@@ -1321,12 +1554,18 @@ function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>, allStep
   const fieldPermissions = step.fieldPermissions
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
+  const timeout = buildStepTimeoutConfig(step, stepLocalIdToNodeKey)
   return {
     assigneeSources: [sourceFromStep(step, allSteps)],
     approvalMode: step.approvalMode,
+    // P1-C: `approvalThreshold` is emitted ONLY under `approvalMode === 'threshold'` — mirrors the
+    // backend's own conditional emission (`thresholdConfigHasBackendDrop`'s invariant) so switching
+    // mode away never leaves an orphaned threshold key behind.
+    ...(step.approvalMode === 'threshold' ? { approvalThreshold: step.approvalThreshold } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
+    ...(timeout ? { timeout } : {}),
   }
 }
 
@@ -1350,13 +1589,20 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
   // T1-4: the set of live top-level form-field ids — `buildStepConfig` prunes any fieldPermission
   // whose field was deleted so a dangling fieldId can never reach the backend cross-reference.
   const fieldIds = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
+  // P1-C: node keys are positional (`approval_${index+1}`) and are reassigned on every build — a
+  // step's stable draft identity is its `localId`. Resolve jump targets through this map so a
+  // `timeout.jumpToNodeKey` referencing a step that has since MOVED still lands on the right node.
+  const stepLocalIdToNodeKey = new Map(draft.steps.map((step, index) => [step.localId, `approval_${index + 1}`]))
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
     // Lock-1 §K3: the full step list rides along so a prior_node_approver step can emit its
-    // referenced step's CURRENT positional key (localId reference → key at build time).
-    config: buildStepConfig(step, fieldIds, draft.steps),
+    // referenced step's CURRENT positional key (localId reference → key at build time), enforcing
+    // strict-earlier ordering. P1-C: `stepLocalIdToNodeKey` rides along too, for the (unordered)
+    // timeout jump-target resolution — see `buildStepConfig`'s doc comment for why both are threaded
+    // through rather than collapsed into one map.
+    config: buildStepConfig(step, fieldIds, draft.steps, stepLocalIdToNodeKey),
   }))
   const nodes: ApprovalGraph['nodes'] = [
     { key: 'start', type: 'start', name: '发起', config: {} },
@@ -1691,7 +1937,14 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
     errors.push(...validateCcEdits(draft.ccEdits))
   }
   if (draft.approvalNodeEdits && Object.keys(draft.approvalNodeEdits).length > 0) {
-    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields))
+    // P1-C: linear-only fail-closed — a preserved complex graph CAN mix parallel regions with plain
+    // sequential ones, so gate threshold/timeout per-node against the FE mirror of the backend's
+    // exact region definition. `draft.preservedGraph` is always present alongside `approvalNodeEdits`
+    // (both seeded together, `draftFromEditedGraph`/`draftFromTemplate`'s `complex` branch).
+    const parallelRegionNodeKeys = draft.preservedGraph
+      ? collectParallelRegionNodeKeys(draft.preservedGraph)
+      : new Set<string>()
+    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields, parallelRegionNodeKeys))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
@@ -1719,6 +1972,40 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
       const referencedIndex = draft.steps.findIndex((candidate) => candidate.localId === step.priorStepLocalId)
       if (referencedIndex < 0 || referencedIndex >= index) {
         errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
+      }
+    }
+    // P1-C (T2-4) threshold PREVIEW: integer-only shape check, matching the ONE bound the backend
+    // enforces UNCONDITIONALLY at publish for the `assigneeSources` shape this editor emits
+    // (`APPROVAL_THRESHOLD_INVALID`, ApprovalProductService.ts :2282-2289). The backend's static
+    // N<=M bound (:2292-2304) applies ONLY to the legacy `assigneeType`/`assigneeIds` shape — this
+    // editor never emits that shape (`buildStepConfig` always writes `assigneeSources`) — so M is
+    // ALWAYS resolved at runtime here, static_user source included. Do NOT invent a stricter
+    // client-side bound the backend would not itself enforce (M8): an unreachable resolved M fails
+    // closed at the backend's dispatch-time `assertThresholdReachable`
+    // (`APPROVAL_THRESHOLD_UNREACHABLE`) when the running instance actually reaches the node — the
+    // authoring UI surfaces that as non-blocking copy, not a save-blocking error.
+    if (step.approvalMode === 'threshold' && (!Number.isInteger(step.approvalThreshold) || step.approvalThreshold < 1)) {
+      errors.push(`${label} 的门槛会签人数必须是不小于 1 的整数`)
+    }
+    // P1-C (T1-1) timeout PREVIEW — mirrors `validateNodeTimeoutConfigs`'s shape/target rules (the
+    // parallel-region rule is moot here: a linear graph is BY CONSTRUCTION never inside one).
+    if (step.timeoutEnabled) {
+      const afterMinutes = Number(step.timeoutAfterMinutesText.trim())
+      if (!Number.isInteger(afterMinutes) || afterMinutes <= 0 || afterMinutes > NODE_TIMEOUT_MAX_AFTER_MINUTES) {
+        errors.push(`${label} 的超时时长需为 1–${NODE_TIMEOUT_MAX_AFTER_MINUTES} 分钟之间的整数`)
+      }
+      if (!step.timeoutEffect) {
+        errors.push(`${label} 需要选择超时后的处理方式`)
+      } else if (step.timeoutEffect === 'transfer' && !step.timeoutTransferToUserId.trim()) {
+        errors.push(`${label} 的超时转交需要选择接收人`)
+      } else if (step.timeoutEffect === 'jump') {
+        if (!step.timeoutJumpToStepLocalId) {
+          errors.push(`${label} 的超时跳转需要选择目标审批节点`)
+        } else if (step.timeoutJumpToStepLocalId === step.localId) {
+          errors.push(`${label} 的超时跳转不能指向自身`)
+        } else if (!draft.steps.some((candidate) => candidate.localId === step.timeoutJumpToStepLocalId)) {
+          errors.push(`${label} 的超时跳转目标节点不存在`)
+        }
       }
     }
   })

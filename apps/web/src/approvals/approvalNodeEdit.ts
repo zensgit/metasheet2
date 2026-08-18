@@ -9,9 +9,17 @@ import type {
   HandlerMode,
   HandlerNodeConfig,
   NodeFieldPermission,
+  NodeTimeoutConfig,
 } from '../types/approval'
-import { APPROVAL_ROLE_CONFIGURE_SENTINEL, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval'
+import {
+  APPROVAL_ROLE_CONFIGURE_SENTINEL,
+  HANDLER_ASSIGNEE_SOURCE_KINDS,
+  NODE_TIMEOUT_MAX_AFTER_MINUTES,
+  NODE_TIMEOUT_SUPPORTED_EFFECTS,
+} from '../types/approval'
 import { runtimeSuccessorTargets } from './parallelEdit'
+
+const NODE_TIMEOUT_SUPPORTED_EFFECT_SET = new Set<string>(NODE_TIMEOUT_SUPPORTED_EFFECTS)
 
 const HANDLER_ASSIGNEE_SOURCE_KIND_SET = new Set<string>(HANDLER_ASSIGNEE_SOURCE_KINDS)
 
@@ -44,12 +52,22 @@ export interface ApprovalNodeSourceEdit {
   nodeType?: 'approval' | 'handler'
   assigneeSources: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
+  // P1-C (T2-4 N-of-M). Meaningful only when `approvalMode === 'threshold'` — `applyApprovalNodeEditsToGraph`
+  // emits it ONLY in that case (mirrors the backend's own conditional emission), so an author switching
+  // mode away can never leave an orphaned threshold on the saved graph. approval-node-only (never on a
+  // handler edit — §1.2 forbids the key there).
+  approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy | null
   fieldPermissions?: NodeFieldPermission[]
   // Lock-3 §1.1 — handler-only. `handlerMode` absent ≡ 'all'; `opinionRequired` absent ≡ false.
   handlerMode?: HandlerMode
   opinionRequired?: boolean
+  // P1-C (T1-1) node-level SLA timeout — approval-node-only (§1.2 forbids `timeout` on a handler).
+  // `undefined` = untouched (the seeded/preserved value, if any); `null` = explicitly cleared by the
+  // author (mirrors the `autoApprovalPolicy` null-clears-it convention); a `NodeTimeoutConfig` value =
+  // author-set/edited.
+  timeout?: NodeTimeoutConfig | null
 }
 
 /** Map of approval-node source edits keyed by node key, seeded from a preserved graph. */
@@ -90,9 +108,11 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
         nodeKey: node.key,
         assigneeSources: cloneJson(node.config.assigneeSources),
         ...(node.config.approvalMode !== undefined ? { approvalMode: node.config.approvalMode } : {}),
+        ...(node.config.approvalThreshold !== undefined ? { approvalThreshold: node.config.approvalThreshold } : {}),
         ...(node.config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: node.config.emptyAssigneePolicy } : {}),
         ...(node.config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(node.config.autoApprovalPolicy) } : {}),
         ...(node.config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(node.config.fieldPermissions) } : {}),
+        ...(node.config.timeout !== undefined ? { timeout: cloneJson(node.config.timeout) } : {}),
       }
     } else if (node.type === 'handler') {
       // Lock-3 §1.1 — seed the handler edit with its own fields only (never approval-node keys).
@@ -177,6 +197,16 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
     const originalConfig = cloneJson(node.config)
     const config: ApprovalNodeConfig = { ...originalConfig, assigneeSources: cloneJson(edit.assigneeSources) }
     if (edit.approvalMode !== undefined) config.approvalMode = edit.approvalMode
+    // P1-C: `approvalThreshold` rides ONLY with an effective mode of 'threshold' — mirrors the
+    // backend's own conditional emission. An author switching mode away (or a stale edit carrying a
+    // threshold under a different mode) must not leave an orphaned key on the saved graph; switching
+    // TO 'threshold' without yet entering N stays incomplete here (caught by
+    // `validateApprovalNodeEdits`/publish), never silently defaulted.
+    if (config.approvalMode === 'threshold') {
+      if (edit.approvalThreshold !== undefined) config.approvalThreshold = edit.approvalThreshold
+    } else {
+      delete config.approvalThreshold
+    }
     if (edit.emptyAssigneePolicy !== undefined) config.emptyAssigneePolicy = edit.emptyAssigneePolicy
     if (edit.autoApprovalPolicy === null) delete config.autoApprovalPolicy
     else if (edit.autoApprovalPolicy !== undefined) config.autoApprovalPolicy = cloneJson(edit.autoApprovalPolicy)
@@ -184,6 +214,10 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
       if (edit.fieldPermissions.length > 0) config.fieldPermissions = cloneJson(edit.fieldPermissions)
       else delete config.fieldPermissions
     }
+    // P1-C: `null` explicitly clears a preserved timeout (mirrors the `autoApprovalPolicy` convention);
+    // `undefined` leaves whatever `originalConfig` carried (already spread in) untouched.
+    if (edit.timeout === null) delete config.timeout
+    else if (edit.timeout !== undefined) config.timeout = cloneJson(edit.timeout)
     return { ...cloneJson(node), config }
   })
   return {
@@ -247,10 +281,18 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
  * `normalizeApprovalGraph` + `validateApprovalAssigneeSourcesAgainstFormSchema` stay the sole
  * arbiter). Each edited node needs at least one assignee source, every source must be well-formed,
  * and a `form_field_user` source must reference a top-level `user` field (when `fields` is given).
+ *
+ * P1-C: `parallelRegionNodeKeys` (from `collectParallelRegionNodeKeys` in templateAuthoring.ts) is the
+ * linear-only fail-closed gate for `approvalMode: 'threshold'` and `timeout` — both are backend-
+ * rejected inside a parallel region (`APPROVAL_THRESHOLD_IN_PARALLEL` /
+ * `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED`). Optional so existing callers/tests that don't touch
+ * threshold/timeout are unaffected; omitting it treats every node as outside a parallel region (the
+ * caller — `validateTemplateApprovalFlow` — always supplies the real set for the live app).
  */
 export function validateApprovalNodeEdits(
   edits: ApprovalNodeEdits,
   fields?: Array<{ id: string; type: string }>,
+  parallelRegionNodeKeys?: Set<string>,
 ): string[] {
   const errors: string[] = []
   const topLevelUserFieldIds = fields
@@ -285,11 +327,53 @@ export function validateApprovalNodeEdits(
         errors.push(`办理节点 ${edit.nodeKey} 的办理模式无效`)
       }
     } else {
-      if (edit.approvalMode !== undefined && !(['single', 'all', 'any'] as const).includes(edit.approvalMode)) {
+      if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold'] as const).includes(edit.approvalMode)) {
         errors.push(`审批节点 ${edit.nodeKey} 的审批模式无效`)
       }
       if (edit.emptyAssigneePolicy !== undefined && !(['error', 'auto-approve'] as const).includes(edit.emptyAssigneePolicy)) {
         errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略无效`)
+      }
+      const inParallelRegion = parallelRegionNodeKeys?.has(edit.nodeKey) ?? false
+      // P1-C (T2-4): linear-only fail-closed — mirrors `APPROVAL_THRESHOLD_IN_PARALLEL`. The mode
+      // picker must not OFFER 'threshold' inside a parallel region (rendering layer); this is the
+      // defense-in-depth floor for a caller that bypassed that (e.g. a programmatic edit).
+      if (edit.approvalMode === 'threshold' && inParallelRegion) {
+        errors.push(`审批节点 ${edit.nodeKey} 位于并行分支内，不支持门槛会签（v1 仅支持线性路径）`)
+      } else if (edit.approvalMode === 'threshold') {
+        if (!Number.isInteger(edit.approvalThreshold) || (edit.approvalThreshold as number) < 1) {
+          errors.push(`审批节点 ${edit.nodeKey} 的门槛会签人数必须是不小于 1 的整数`)
+        }
+        // No static N<=M bound here for the SAME reason as the linear preview: this editor always
+        // emits `assigneeSources` (never the legacy shape the backend's static bound is scoped to),
+        // so M is always resolved at runtime — do not invent a stricter client check (M8).
+      }
+      if (edit.timeout !== undefined && edit.timeout !== null) {
+        const timeout = edit.timeout
+        if (inParallelRegion) {
+          errors.push(`审批节点 ${edit.nodeKey} 位于并行分支内，不支持节点超时（v1 仅支持线性路径）`)
+        } else {
+          if (
+            !Number.isInteger(timeout.afterMinutes)
+            || timeout.afterMinutes <= 0
+            || timeout.afterMinutes > NODE_TIMEOUT_MAX_AFTER_MINUTES
+          ) {
+            errors.push(`审批节点 ${edit.nodeKey} 的超时时长需为 1–${NODE_TIMEOUT_MAX_AFTER_MINUTES} 分钟之间的整数`)
+          }
+          if (!NODE_TIMEOUT_SUPPORTED_EFFECT_SET.has(timeout.effect)) {
+            errors.push(`审批节点 ${edit.nodeKey} 的超时处理方式暂不支持`)
+          } else if (timeout.effect === 'transfer' && !timeout.transferToUserId?.trim()) {
+            errors.push(`审批节点 ${edit.nodeKey} 的超时转交需要选择接收人`)
+          } else if (timeout.effect === 'jump') {
+            const jumpTarget = timeout.jumpToNodeKey?.trim()
+            if (!jumpTarget) {
+              errors.push(`审批节点 ${edit.nodeKey} 的超时跳转需要选择目标审批节点`)
+            } else if (jumpTarget === edit.nodeKey) {
+              errors.push(`审批节点 ${edit.nodeKey} 的超时跳转不能指向自身`)
+            } else if (parallelRegionNodeKeys?.has(jumpTarget)) {
+              errors.push(`审批节点 ${edit.nodeKey} 的超时跳转目标节点位于并行分支内，不受支持`)
+            }
+          }
+        }
       }
     }
     for (const permission of edit.fieldPermissions ?? []) {

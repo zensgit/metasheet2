@@ -767,7 +767,30 @@
                 <el-option label="单人通过" value="single" />
                 <el-option label="全部通过" value="all" />
                 <el-option label="任一通过" value="any" />
+                <!-- P1-C (T2-4 N-of-M / 门槛会签). Linear graphs are BY CONSTRUCTION never inside a
+                     parallel region (the linear editor admits no `parallel` node), so this option is
+                     always offered here — the backend's linear-only constraint is satisfied by
+                     construction, not by a runtime gate (contrast the complex-graph editor, which
+                     disables this option per-node). -->
+                <el-option label="门槛会签（N 人同意）" value="threshold" data-testid="approval-step-mode-threshold-option" />
               </el-select>
+            </el-form-item>
+            <!-- P1-C: typed N-of-M control. M is resolved from this step's approver source at
+                 runtime — this editor always emits `assigneeSources` (never the legacy shape the
+                 backend's static publish bound is scoped to), so an unreachable N fails closed at
+                 dispatch (APPROVAL_THRESHOLD_UNREACHABLE), never at save/publish; the hint says so
+                 honestly rather than pretending to validate M here (M8). -->
+            <el-form-item v-if="step.approvalMode === 'threshold'" label="通过所需人数（N）">
+              <el-input-number
+                v-model="step.approvalThreshold"
+                :min="1"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-threshold"
+              />
+              <p class="template-authoring__hint">
+                需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
+              </p>
             </el-form-item>
             <el-form-item label="空审批人策略">
               <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct">
@@ -784,6 +807,104 @@
                 发起人自动通过（自审合并）
               </el-checkbox>
             </el-form-item>
+          </div>
+          <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
+               (see the mode-picker comment above), so this section renders unconditionally per step,
+               no gating needed. -->
+          <div class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+            <el-form-item label="节点超时">
+              <el-checkbox
+                v-model="step.timeoutEnabled"
+                :disabled="readOnly"
+                data-testid="approval-step-timeout-enabled"
+              >启用超时处理</el-checkbox>
+            </el-form-item>
+            <template v-if="step.timeoutEnabled">
+              <el-form-item label="超时时长（分钟）">
+                <el-input
+                  v-model="step.timeoutAfterMinutesText"
+                  :disabled="readOnly"
+                  placeholder="例如 60"
+                  data-testid="approval-step-timeout-after-minutes"
+                />
+              </el-form-item>
+              <el-form-item label="超时后动作">
+                <el-select v-model="step.timeoutEffect" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-timeout-effect">
+                  <!-- P1-C: ONLY the effects the scheduler actually acts on / publish accepts — never
+                       'auto_approve'/'auto_reject' (reserved, M6/M8). -->
+                  <el-option
+                    v-for="effect in NODE_TIMEOUT_SUPPORTED_EFFECTS"
+                    :key="effect"
+                    :label="stepTimeoutEffectOptionLabel(effect)"
+                    :value="effect"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="step.timeoutEffect === 'transfer'" label="转交给">
+                <el-select
+                  v-model="step.timeoutTransferToUserId"
+                  filterable
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
+                  :disabled="readOnly"
+                  class="ms-w-360"
+                  placeholder="搜索用户名 / 邮箱"
+                  data-testid="approval-step-timeout-transfer-target"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-else-if="step.timeoutEffect === 'jump'" label="跳转到节点">
+                <!-- Business labels only — never a raw step key/id in the option text (M8). -->
+                <el-select
+                  v-model="step.timeoutJumpToStepLocalId"
+                  :disabled="readOnly"
+                  class="ms-w-240"
+                  placeholder="选择目标审批节点"
+                  data-testid="approval-step-timeout-jump-target"
+                >
+                  <el-option
+                    v-for="option in timeoutJumpStepOptions(step.localId)"
+                    :key="option.localId"
+                    :label="option.label"
+                    :value="option.localId"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="计时方式">
+                <div class="approval-node-source-roster" role="radiogroup" aria-label="计时方式" data-testid="approval-step-timeout-unit">
+                  <label class="approval-node-source-roster-option">
+                    <input
+                      type="radio"
+                      :name="`approval-step-timeout-unit-${step.localId}`"
+                      :checked="step.timeoutUnit !== 'business'"
+                      :disabled="readOnly"
+                      data-testid="approval-step-timeout-unit-wall-clock"
+                      @change="() => { step.timeoutUnit = '' }"
+                    />
+                    <span>自然时间</span>
+                  </label>
+                  <label class="approval-node-source-roster-option">
+                    <input
+                      type="radio"
+                      :name="`approval-step-timeout-unit-${step.localId}`"
+                      :checked="step.timeoutUnit === 'business'"
+                      :disabled="readOnly"
+                      data-testid="approval-step-timeout-unit-business"
+                      @change="() => { step.timeoutUnit = 'business' }"
+                    />
+                    <span>工作时间</span>
+                  </label>
+                </div>
+              </el-form-item>
+            </template>
           </div>
           <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` and
                `只读` are BOTH enforced server-side (Lock-7 P4-B: 隐藏 redacts the read echo + blocks a
@@ -1325,9 +1446,12 @@ import type {
   HandlerMode,
   FormField,
   NodeFieldAccess,
+  NodeTimeoutConfig,
   ParallelJoinMode,
   ParallelNodeConfig,
+  SupportedNodeTimeoutEffect,
 } from '../../types/approval'
+import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
@@ -1700,7 +1824,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
     // Prefer human labels; for static_user/static_role avoid dumping raw id lists in read-only rows
     // (typed pickers own those values when the node is editable).
-    return sources.map((source) => {
+    const lines = sources.map((source) => {
       if (source.kind === 'static_user') {
         const count = source.userIds?.length ?? 0
         return `审批人：指定用户${count ? `（${count} 人）` : '（无）'}`
@@ -1715,6 +1839,17 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
       }
       return `审批人：${assigneeSourceSummary(source)}`
     })
+    // P1-C: business labels only — never a raw effect enum, user id, or node key (master §P1-C
+    // G1-p exit bullet 4).
+    const approvalConfig = config as { approvalMode?: ApprovalMode; approvalThreshold?: number; timeout?: NodeTimeoutConfig }
+    if (approvalConfig.approvalMode === 'threshold' && Number.isInteger(approvalConfig.approvalThreshold)) {
+      lines.push(`审批模式：门槛会签（需 ${approvalConfig.approvalThreshold} 人同意）`)
+    }
+    if (approvalConfig.timeout) {
+      const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
+      if (effectLabel) lines.push(`节点超时：${approvalConfig.timeout.afterMinutes} 分钟后${effectLabel}`)
+    }
+    return lines
   }
   return []
 }
@@ -1964,7 +2099,31 @@ function approvalNodeMode(nodeKey: string): ApprovalMode {
 }
 function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
   const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.approvalMode = mode
+  if (!edit) return
+  // P1-C linear-only fail-closed floor: the mode picker must not OFFER 'threshold' inside a parallel
+  // region (see the `:disabled` option below), but a native `<select>`'s disabled option cannot even
+  // dispatch a change event — same untestable-without-a-mutator posture as P1-B's remove-card guard
+  // — so THIS is the actual invariant enforcement point, independent of the render-layer gating.
+  if (mode === 'threshold' && approvalNodeInParallelRegion(nodeKey)) return
+  edit.approvalMode = mode
+}
+// P1-C (T2-4 N-of-M / 门槛会签). Meaningful only when `approvalNodeMode(nodeKey) === 'threshold'`.
+function approvalNodeThreshold(nodeKey: string): number {
+  const value = approvalNodeEditFor(nodeKey)?.approvalThreshold
+  return Number.isInteger(value) && (value as number) >= 1 ? (value as number) : 1
+}
+function setApprovalNodeThreshold(nodeKey: string, value: number): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.approvalThreshold = Number.isInteger(value) && value >= 1 ? value : 1
+}
+// P1-C: FE mirror of the backend's parallel-region definition (reused from the canvas's own
+// nested-parallel authoring guard, `graphTopologyEdit.ts`), read over the CURRENT effective graph —
+// a config edit never moves topology, but this stays consistent with the file's existing convention
+// of reading topology through `canvasEffectiveGraph` rather than the (load-time) `preservedGraph`.
+const parallelRegionNodeKeysInDraft = computed(() => collectParallelRegionNodeKeys(canvasEffectiveGraph.value))
+function approvalNodeInParallelRegion(nodeKey: string): boolean {
+  return parallelRegionNodeKeysInDraft.value.has(nodeKey)
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
@@ -1985,6 +2144,67 @@ function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): v
   if (enabled) policy.mergeWithRequester = true
   else delete policy.mergeWithRequester
   edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+}
+// ── P1-C (T1-1) node-level timeout — approval-node-only; `null` explicitly clears (mirrors the
+// `autoApprovalPolicy` null-clears-it convention above). `undefined` fields are ONLY ever produced
+// by these setters together, never a half-filled shape — `buildStepTimeoutConfig`'s linear-path
+// counterpart applies the SAME per-effect target discipline. ──────────────────────────────────────
+function approvalNodeTimeout(nodeKey: string): NodeTimeoutConfig | undefined {
+  return approvalNodeEditFor(nodeKey)?.timeout ?? undefined
+}
+function setApprovalNodeTimeoutEnabled(nodeKey: string, enabled: boolean): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (!enabled) {
+    edit.timeout = null
+    return
+  }
+  // Fail-closed floor mirroring `setApprovalNodeMode`'s threshold guard above — a disabled checkbox
+  // cannot dispatch a change event either, so this is the real enforcement point.
+  if (approvalNodeInParallelRegion(nodeKey)) return
+  if (edit.timeout) return // already enabled — do not clobber an in-progress configuration
+  edit.timeout = { afterMinutes: 60, effect: 'remind' }
+}
+function setApprovalNodeTimeoutAfterMinutes(nodeKey: string, minutes: number): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  if (!Number.isInteger(minutes) || minutes < 1) return
+  edit.timeout = { ...edit.timeout, afterMinutes: minutes }
+}
+function setApprovalNodeTimeoutEffect(nodeKey: string, effect: SupportedNodeTimeoutEffect): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  const { afterMinutes, unit } = edit.timeout
+  // Switching effect drops the PREVIOUS effect's target field — transfer/jump are mutually
+  // exclusive and 'remind' carries neither (mirrors `validateNodeTimeoutConfigs`'s strict
+  // per-effect target rule: a stray target on the wrong effect is rejected, never ignored).
+  edit.timeout = { afterMinutes, effect, ...(unit ? { unit } : {}) }
+}
+function setApprovalNodeTimeoutTransferToUserId(nodeKey: string, userId: string): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout || edit.timeout.effect !== 'transfer') return
+  edit.timeout = { ...edit.timeout, transferToUserId: userId }
+}
+function setApprovalNodeTimeoutJumpToNodeKey(nodeKey: string, targetNodeKey: string): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout || edit.timeout.effect !== 'jump') return
+  edit.timeout = { ...edit.timeout, jumpToNodeKey: targetNodeKey }
+}
+function setApprovalNodeTimeoutUnit(nodeKey: string, unit: 'wall_clock' | 'business'): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit?.timeout) return
+  const next = { ...edit.timeout }
+  if (unit === 'business') next.unit = 'business'
+  else delete next.unit
+  edit.timeout = next
+}
+/** Candidate jump targets: every OTHER `approval` node not inside a parallel region, business-labeled
+ *  via the SAME `graphNodeLabel` the condition/cc editors already use — never a raw node key in the
+ *  rendered option text (M8). */
+function timeoutJumpTargetOptions(nodeKey: string): Array<{ key: string; label: string }> {
+  return canvasEffectiveGraph.value.nodes
+    .filter((node) => node.type === 'approval' && node.key !== nodeKey && !approvalNodeInParallelRegion(node.key))
+    .map((node) => ({ key: node.key, label: graphNodeLabel(node.key) }))
 }
 // Lock-3 §1.1 — handler-only mode + opinion accessors (same edit model, keyed by nodeKey).
 function handlerNodeMode(nodeKey: string): HandlerMode {
@@ -2780,6 +3000,31 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+// P1-C (T1-1): business labels for the timeout effect picker — never the raw enum string.
+const STEP_TIMEOUT_EFFECT_OPTION_LABELS: Record<SupportedNodeTimeoutEffect, string> = {
+  remind: '催办提醒',
+  transfer: '转交他人',
+  jump: '跳转节点',
+}
+function stepTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): string {
+  return STEP_TIMEOUT_EFFECT_OPTION_LABELS[effect]
+}
+/** Read-only-summary counterpart of `stepTimeoutEffectOptionLabel` — tolerates an effect outside the
+ *  wired set (returns '', never the raw enum string) since a SUMMARY echoes persisted data rather
+ *  than authoring it. */
+function nodeTimeoutEffectLabel(effect: string | undefined): string {
+  return (effect && (STEP_TIMEOUT_EFFECT_OPTION_LABELS as Partial<Record<string, string>>)[effect]) || ''
+}
+
+/** Candidate jump targets for the linear editor's timeout: every OTHER step, keyed + business-labeled
+ *  by its stable draft `localId` (never the position-based node key, which is unstable across a
+ *  reorder — see `buildStepTimeoutConfig`'s resolution comment). */
+function timeoutJumpStepOptions(currentStepLocalId: string): Array<{ localId: string; label: string }> {
+  return draft.value.steps
+    .filter((candidate) => candidate.localId !== currentStepLocalId)
+    .map((candidate, index) => ({ localId: candidate.localId, label: candidate.name.trim() || `审批人 ${index + 1}` }))
+}
+
 // Lock-1 §K2: a scope-type switch clears the shared idsText carrier deliberately — userIds and
 // roleIds are different id domains, so carrying one list into the other would author wrong config.
 function setStepRequesterChoiceScopeType(step: ApprovalStepDraft, type: 'company' | 'members' | 'role'): void {
@@ -2923,10 +3168,21 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   removeApprovalSourceCard,
   approvalNodeMode,
   setApprovalNodeMode,
+  approvalNodeThreshold,
+  setApprovalNodeThreshold,
+  approvalNodeInParallelRegion,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,
   setApprovalNodeMergeWithRequester,
+  approvalNodeTimeout,
+  setApprovalNodeTimeoutEnabled,
+  setApprovalNodeTimeoutAfterMinutes,
+  setApprovalNodeTimeoutEffect,
+  setApprovalNodeTimeoutTransferToUserId,
+  setApprovalNodeTimeoutJumpToNodeKey,
+  setApprovalNodeTimeoutUnit,
+  timeoutJumpTargetOptions,
   handlerNodeMode,
   setHandlerNodeMode,
   handlerNodeOpinionRequired,
