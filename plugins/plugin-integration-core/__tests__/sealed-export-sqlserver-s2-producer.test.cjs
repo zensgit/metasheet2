@@ -8,6 +8,13 @@ const Module = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 
+// POSIX modes are a POSIX-only control: chmod()/mkdir({ mode }) SUCCEED and then
+// no-op on win32 (the mode reads back 0o666). Asserting them there would assert a
+// guarantee the platform does not give. The win32 substitute is the operator NTFS
+// ACL attestation gated in lib/sealed-export/stock-preparation-runtime-config.cjs;
+// see docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md.
+const POSIX_MODES_ENFORCED = process.platform !== 'win32'
+
 const originalModuleLoad = Module._load
 let activeDriver = null
 
@@ -456,7 +463,7 @@ async function positiveStreamingCaptureAndSigning() {
       true,
     )
 
-    if (process.platform !== 'win32') {
+    if (POSIX_MODES_ENFORCED) {
       assert.equal(
         fs.statSync(output.artifact.directory).mode & 0o777,
         0o700,
