@@ -246,10 +246,22 @@ describe('ApprovalFlowCanvas flat-card grammar — computed-style mechanism guar
 // A future contributor who re-adds a light-5 (or color-only, or outline:none) focus-visible rule
 // ANYWHERE in this component — new selector text included — trips this without editing the test.
 describe('ApprovalFlowCanvas focus-ring contrast (FAIL-2 / V-6, P7-R2 fix, mechanism guard)', () => {
+  // P7-R2 gate hardening (P2-3): the original non-global `.match()` here only ever captured the
+  // FIRST `<style>` block — a second block anywhere in the file would carry zero test signal
+  // through any of the four assertions below (reproduced: an appended hostile second block with a
+  // light-5, colour-only, bare-outline:none rule left every assertion green). Mirrors the
+  // sibling-file fix already shipped in `ui-foundation-style-guard.spec.ts`'s `extractStyleBlocks`
+  // (global regex + `exec` loop, concatenating every block) rather than inventing a new pattern.
+  const STYLE_BLOCK_RE = /<style[^>]*>([\s\S]*?)<\/style>/g
   function extractStyleBlock(src: string): string {
-    const match = src.match(/<style[^>]*>([\s\S]*?)<\/style>/)
-    if (!match) throw new Error('no <style> block found in ApprovalFlowCanvas.vue')
-    return match[1]
+    const blocks: string[] = []
+    let match: RegExpExecArray | null
+    STYLE_BLOCK_RE.lastIndex = 0
+    while ((match = STYLE_BLOCK_RE.exec(src))) {
+      blocks.push(match[1])
+    }
+    if (blocks.length === 0) throw new Error('no <style> block found in ApprovalFlowCanvas.vue')
+    return blocks.join('\n')
   }
 
   function focusVisibleRuleBlocks(styleBlock: string): string[] {

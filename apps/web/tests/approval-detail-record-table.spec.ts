@@ -784,6 +784,65 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
       // shape always contains a brace) — a mutation-proof net wider than the specific id string.
       expect(cell?.textContent).not.toMatch(/[{}]/)
     })
+
+    // P7-R2 gate hardening (P2-2/P3-2): the Array.isArray branch was untouched by the original
+    // fix and rendered raw ids verbatim (['rec_secret_aaa', …] joined as-is). Constructs the
+    // gate's exact leak shape through the REAL production call path (`formatFieldValue(value,
+    // column)` — the column carries the field's OWN authored `options` whitelist).
+    function multiSelectFieldInstance(cellValue: unknown, options: Array<{ label: string; value: string }>): any {
+      return baseInstance({
+        formSchema: {
+          fields: [
+            {
+              id: 'items', type: 'detail', label: '明细',
+              columns: [{ id: 'tags', type: 'multi-select', label: '标签', options }],
+            },
+          ],
+        },
+        formSnapshot: { items: [{ tags: cellValue }] },
+      })
+    }
+
+    it('array values: a value found in the column\'s own options whitelist renders its label', async () => {
+      mockActiveApproval.value = multiSelectFieldInstance(['opt_a', 'opt_b'], [
+        { label: '紧急', value: 'opt_a' },
+        { label: '常规', value: 'opt_b' },
+      ])
+      await mountView()
+
+      const cell = container!.querySelector('table.approval-detail__detail-table td[data-el-cell="标签"]')
+      expect(cell?.textContent?.trim()).toBe('紧急, 常规')
+    })
+
+    it('array values: a raw id NOT in the options whitelist never renders verbatim (P2-2/P3-2 fix)', async () => {
+      // The gate's exact repro shape — a leaf-contract-violating array of raw record ids.
+      mockActiveApproval.value = multiSelectFieldInstance(['rec_secret_aaa', 'rec_secret_bbb'], [
+        { label: '紧急', value: 'opt_a' },
+      ])
+      await mountView()
+
+      const cell = container!.querySelector('table.approval-detail__detail-table td[data-el-cell="标签"]')
+      expect(cell?.textContent).not.toContain('rec_secret_aaa')
+      expect(cell?.textContent).not.toContain('rec_secret_bbb')
+      expect(cell?.textContent?.trim()).toBe('未知选项, 未知选项')
+    })
+
+    it('array values: object elements resolve through the same known-key-or-placeholder logic, never [object Object]', async () => {
+      mockActiveApproval.value = baseInstance({
+        formSchema: {
+          fields: [
+            { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] },
+          ],
+        },
+        formSnapshot: { items: [{ note: [{ internalRecordId: 'rec_x' }, { displayValue: '张三' }] }] },
+      })
+      await mountView()
+
+      const cell = container!.querySelector('table.approval-detail__detail-table td[data-el-cell="备注"]')
+      expect(cell?.textContent).not.toContain('rec_x')
+      expect(cell?.textContent).not.toContain('[object Object]')
+      expect(cell?.textContent?.trim()).toBe('复杂内容, 张三')
+    })
   })
 
   // -----------------------------------------------------------------------------------------
@@ -837,7 +896,7 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
       }]
     }
 
-    it('a node key absent from BOTH the live and pinned template renders a values-free fallback, never the raw key', async () => {
+    it('a node key absent from the live template renders a values-free fallback, never the raw key', async () => {
       mockHistory.value = historyWithNodeKey('ghost_node_removed_9f2')
       mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
       mockDetailActiveVersion.value = null
@@ -847,16 +906,26 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
       expect(container!.textContent).not.toContain('ghost_node_removed_9f2')
     })
 
-    it('falls back to the PINNED (frozen) template name when the LIVE template has drifted past the node — never the raw key, never silently using the wrong name', async () => {
+    // P7-R2 gate hardening (P2-1): an earlier revision of this test asserted a PINNED
+    // (`activeVersion`) fallback that only ever fires for template admins — `loadVersion`'s
+    // endpoint is `approvalTemplateAdminGuard`-gated, so an ordinary member's `activeVersion`
+    // never populates and that branch always re-searched the same live graph it had already
+    // missed. Removed (see the `nodeLabel` comment). This test now proves the removal directly:
+    // even when `activeVersion` WOULD carry the drifted node under a name (an admin-only shape a
+    // member's app state would never actually reach), `nodeLabel` must not consult it — the
+    // values-free fallback fires regardless, so a member is never shown a name from a graph they
+    // have no way to have loaded.
+    it('does NOT consult a pinned/admin-only activeVersion on drift — values-free fallback fires regardless (P2-1 fix)', async () => {
       mockHistory.value = historyWithNodeKey('approval_1')
       // Live template: node renamed/removed since this history row's node ran.
       mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
-      // Pinned (frozen) version: still carries the node under its name at instance-creation time.
+      // Even if some future/admin code path populated activeVersion with the historical name,
+      // nodeLabel must not reach for it — this shape must never leak through.
       mockDetailActiveVersion.value = { approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批（历史）', config: {} }], edges: [] } }
       await mountView()
 
-      expect(container!.textContent).toContain('部门主管审批（历史）')
-      expect(container!.textContent).not.toContain('节点已变更')
+      expect(container!.textContent).toContain('节点已变更')
+      expect(container!.textContent).not.toContain('部门主管审批（历史）')
       expect(container!.textContent).not.toContain('approval_1')
     })
 

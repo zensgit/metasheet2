@@ -1526,7 +1526,7 @@ describe('Approval E2E Lifecycle', () => {
   // UX B2-08: current handler + upcoming nodes
   // =========================================================================
   describe('UX B2-08: current handler + upcoming nodes', () => {
-    it('a pending instance renders 当前处理人 with the active assignee + 已等待', async () => {
+    it('a pending instance renders 当前处理人 with a values-free label + 已等待', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1537,8 +1537,50 @@ describe('Approval E2E Lifecycle', () => {
       const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
       expect(item).toBeTruthy()
       expect(item!.textContent).toContain('当前处理人')
-      expect(item!.textContent).toContain('user_current') // the fixture's active assigneeId
+      // P7-R2 gate hardening (P2-2): this used to pin the raw `assigneeId` leak — the fixture's
+      // assignment carries no `metadata.assigneeName` (matches production: that field has zero
+      // producers repo-wide), so `assignmentDisplayLabel` now renders the values-free "审批人"
+      // placeholder instead of ever falling back to the raw id.
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_current') // the fixture's raw assigneeId
       expect(item!.textContent).toContain('已等待')
+    })
+
+    // P7-R2 gate hardening (P2-2) — the gate's own probe named this the most reachable
+    // member-facing raw-id leak in ApprovalDetailView.vue: not a drift/exotic shape, the ORDINARY
+    // pending-instance case. Constructs the exact leak shape and confirms both branches.
+    it('P2-2: never renders the raw assigneeId, even with a distinctive id shape', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item).toBeTruthy()
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_secret_777')
+      expect(container!.innerHTML).not.toContain('user_secret_777')
+    })
+
+    it('P2-2: resolves to a real display name when the assignment already carries one', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: { assigneeName: '王五' },
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item!.textContent).toContain('王五')
+      expect(item!.textContent).not.toContain('user_secret_777')
     })
 
     it('a non-pending instance renders NO current/upcoming section', async () => {
