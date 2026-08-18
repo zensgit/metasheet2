@@ -1,0 +1,614 @@
+name: Stock-prep S6-A synthetic E2E lab (DRAFT, dispatch only)
+
+# ============================================================================
+# DRAFT — NOT YET A GATE. See docs/development/s6a-synthetic-e2e-in-ci-feasibility-20260818.md
+#
+# WHAT THIS IS. #4708's "[TEST-ONLY] isolated synthetic SQL Server end-to-end lab" targets eight
+# functional evidence items. Seven of them do not need the LAB-0 Windows machine at all: this
+# repository already stands up ephemeral first-party SQL Server 2022 and PostgreSQL service
+# containers and walks the full S6-A path against them
+# (.github/workflows/stock-preparation-e2e-functional-smoke.yml), and already builds + five-check-
+# verifies the on-prem package and applies its migrations on PostgreSQL 15/16/17
+# (.github/workflows/stock-prep-main-package-verify.yml,
+#  .github/workflows/stock-prep-s6a-postgres17-validation.yml).
+#
+# This lane composes those two existing lanes into ONE dispatch so the eight items are produced
+# together, against a package BUILT IN THIS RUN (not the repo tree), on the PostgreSQL major version
+# matrix that #4695's 2026-08-03 blocker names (15/16/17, with 17 the gap version).
+#
+# WHAT THIS IS NOT. Synthetic data only. This lane never connects a customer source, never reads a
+# business row, never publishes a release, never deploys, never touches an entity machine, and never
+# writes externally. It cannot satisfy or close #4695's real-customer acceptance, and a PASS here is
+# CONTROLLED SYNTHETIC FUNCTIONAL evidence only — no real-customer, high-scale-production,
+# external-write, rollout, or PLM/ERP/CRM/SRM-generalization claim is established.
+#
+# FEATURE FLAG DISCIPLINE (#4708 item 8). MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED is
+# set to 'true' ONLY inside a single spawned server process, for the duration of one arm, by the
+# harness itself. It is never written to a committed file, never set as a repository/environment
+# variable, and never exported at job level here — grep this file: the string appears only in
+# comments and in the restoration PROOF step, which asserts it is absent/OFF afterward.
+#
+# TODO(s6a-lab): three helper scripts referenced below do not exist yet. They are named by intended
+# path so the shape of the lane is reviewable before any of them is written; each is small and calls
+# product code rather than re-implementing a rule (same discipline as
+# scripts/ops/stock-preparation-s6a-operator-preflight.mjs). Until they land, this workflow is a
+# DRAFT and its dispatched runs will fail at the first missing script — deliberately, rather than
+# reporting a green lane that did not run.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      s6a_row_count:
+        description: >-
+          Synthetic business-line count for the sealed-snapshot walk. #4708 item 5 asks for
+          1..24,999; this lane defaults to the declared bound itself. The rejection arm always runs
+          at bound+1 and must be refused.
+        required: false
+        default: '24999'
+        type: string
+      expected_sha:
+        description: >-
+          Optional. If set, the build FAILS unless the checked-out HEAD matches — prevents producing
+          lab evidence for a commit whose source state is uncertain. Same meaning as in
+          stock-prep-main-package-verify.yml.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel an in-flight lab run: migrations/073's
+  # uniq_integration_sealed_export_stock_prep_single_customer index allows at most ONE ACTIVE binding
+  # per database and there is no retirement path, so a half-run leaves a database that cannot be
+  # reused. Each leg already gets its own ephemeral database, but a cancelled run still produces
+  # partial evidence, which is worse than a queued one.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Ephemeral, throwaway container password, destroyed with the job. Not a credential. Same value
+  # shape the S2/S5/e2e lanes already use.
+  MSSQL_SA_PASSWORD: 'S6aLab!Probe2026'
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1 — #4708 item 1 (first half): produce a verified installable package from THIS commit.
+  #
+  # Deliberately identical in shape to stock-prep-main-package-verify.yml's build-main-package job
+  # (pnpm 9.15.9, INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0, the existing five-check verifier, the
+  # extracted-package --frozen-lockfile dependency preflight, staged SHA256SUMS round-trip). It is
+  # NOT a copy for its own sake: that lane is dispatch-only and cannot be reused with
+  # `workflow_call`, and editing it is off-limits because sealed-export-package-provenance.cjs pins
+  # workflow files as evidence inputs.
+  # ---------------------------------------------------------------------
+  build-lab-package:
+    name: Build + verify on-prem package from this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      artifact_name: ${{ steps.pkg.outputs.artifact_name }}
+      tgz_name: ${{ steps.pkg.outputs.tgz_name }}
+      tgz_sha256: ${{ steps.pkg.outputs.tgz_sha256 }}
+      zip_sha256: ${{ steps.pkg.outputs.zip_sha256 }}
+      build_sha: ${{ steps.sha.outputs.build_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record the build SHA (and prove the two SHA sources agree)
+        id: sha
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          build_sha="$(git rev-parse HEAD)"
+          if [[ -n "${EXPECTED_SHA}" && "${EXPECTED_SHA}" != "${build_sha}" ]]; then
+            echo "FATAL: expected_sha mismatch — refusing to build a package whose source state is uncertain." >&2
+            exit 1
+          fi
+          if [[ "${build_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "FATAL: git rev-parse HEAD (${build_sha}) != GITHUB_SHA (${GITHUB_SHA})." >&2
+            exit 1
+          fi
+          echo "build_sha=${build_sha}" >> "$GITHUB_OUTPUT"
+          echo "BUILD_SHA=${build_sha}" >> "$GITHUB_ENV"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 9.15.9 — the package's own packageManager pin, verified by
+          # multitable-onprem-package-verify.sh. Not the repo-tree lanes' 10.16.1.
+          version: 9.15.9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build package + run the existing five-check verifier on both archive formats
+        id: pkg
+        env:
+          PACKAGE_TAG: s6alab${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+
+          out_dir="output/releases/multitable-onprem"
+          pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
+          pkg_zip="$(ls -1 ${out_dir}/*.zip | sort | tail -n 1)"
+          pkg_name="$(basename "${pkg_tgz%.tgz}")"
+
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
+
+          # PIN — 074 and 075 must be present by exact filename. Their absence is exactly the defect
+          # that made the frozen S6-A package undeployable (#4695, 2026-08-04 disclosure).
+          preflight_root="$(mktemp -d)"
+          tar -xzf "$pkg_tgz" -C "$preflight_root"
+          preflight_pkg="$(find "$preflight_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$preflight_pkg"
+          for f in \
+            073_create_sealed_export_stock_prep_runtime_authority.sql \
+            074_repair_sealed_export_runtime_authority_privileges.sql \
+            075_grant_sealed_export_runtime_authority_row_lock.sql ; do
+            if [[ ! -f "${preflight_pkg}/packages/core-backend/migrations/${f}" ]]; then
+              echo "FATAL: packaged migration MISSING by exact filename: ${f}" >&2
+              exit 1
+            fi
+          done
+          provenance_git_commit="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).gitCommit)" "${preflight_pkg}/BUILD_PROVENANCE.json")"
+          if [[ "$provenance_git_commit" != "$BUILD_SHA" ]]; then
+            echo "FATAL: in-archive BUILD_PROVENANCE.json gitCommit != this job's build SHA." >&2
+            exit 1
+          fi
+          rm -rf "$preflight_root"
+
+          tgz_sha="$(sha256sum "$pkg_tgz" | awk '{print $1}')"
+          zip_sha="$(sha256sum "$pkg_zip" | awk '{print $1}')"
+
+          stage="output/s6a-lab-package"
+          mkdir -p "$stage"
+          cp "$pkg_tgz" "$pkg_zip" "${out_dir}/SHA256SUMS" "$stage/"
+
+          {
+            echo "artifact_name=s6a-lab-package-${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "tgz_name=$(basename "$pkg_tgz")"
+            echo "tgz_sha256=${tgz_sha}"
+            echo "zip_sha256=${zip_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact (artifact only — no release, no publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.artifact_name }}
+          path: output/s6a-lab-package
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "item1PackageBuilt=PASS"
+            echo "packageSource=BUILT_FROM_DISPATCHED_COMMIT"
+            echo "serviceRuntimeSha=${{ steps.sha.outputs.build_sha }}"
+            echo "packageTgzSha256=${{ steps.pkg.outputs.tgz_sha256 }}"
+            echo "packageZipSha256=${{ steps.pkg.outputs.zip_sha256 }}"
+            echo "packageVerificationTgz=PASS"
+            echo "packageVerificationZip=PASS"
+            echo "packagedMigration073Present=PASS"
+            echo "packagedMigration074Present=PASS"
+            echo "packagedMigration075Present=PASS"
+            echo "releasePublished=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Job 2 — the lab walk itself. #4708 items 1(second half), 2, 3, 4, 5, 6, 7, 8.
+  #
+  # One leg per PostgreSQL major. 15/16 are the already-validated control legs; 17 is #4695's
+  # 2026-08-03 gap version ("PostgreSQL is 17 while the unchanged packet is validated only on
+  # 15/16"). Each leg gets its OWN Postgres AND its OWN SQL Server, because migrations/073's
+  # uniq_integration_sealed_export_stock_prep_single_customer index permits at most one ACTIVE
+  # binding in the whole table with no retirement path — the same reason
+  # stock-preparation-e2e-functional-smoke.yml's R9 restructure gave every arm its own job.
+  # ---------------------------------------------------------------------
+  lab-walk:
+    name: S6-A synthetic lab walk (pg${{ matrix.pg }}, mssql${{ matrix.mssql }})
+    needs: build-lab-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['15', '16', '17']
+        mssql: ['2022']
+        # #4695 records that engineMajorVersionFromProductMajor maps ONLY 15->2019 and 16->2022
+        # (everything else -> null) and that the §5 provisioning probe does not check it, so a wrong
+        # engine major fails only inside the flag-on window. Add '2019' here to pin the other
+        # supported major once the walk is green on 2022.
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s6a_lab
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s6a_lab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mssql:
+        # MSSQL_PID is deliberately UNSET: the container then defaults to the Developer edition,
+        # which is what #4708 item 2 asks for. "Defaults to Developer" is an assumption, so the
+        # source-identity evidence step below ASSERTS SERVERPROPERTY('Edition') rather than
+        # trusting it.
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'S6aLab!Probe2026'
+          SA_PASSWORD: 'S6aLab!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_lab
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout (harness scripts only — the RUNTIME under test is the package, not this tree)
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Download the package artifact built in this run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-lab-package.outputs.artifact_name }}
+
+      - name: Fail-closed — downloaded bytes must equal the build job's recorded digest
+        env:
+          TGZ_NAME: ${{ needs.build-lab-package.outputs.tgz_name }}
+          TGZ_SHA256: ${{ needs.build-lab-package.outputs.tgz_sha256 }}
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum "$TGZ_NAME" | awk '{print $1}')"
+          if [[ "$actual" != "$TGZ_SHA256" ]]; then
+            echo "FATAL: artifact digest changed between upload and download. Aborting." >&2
+            exit 1
+          fi
+          echo "sameArtifactAsBuildJob=PASS"
+
+      - name: Install the package into an isolated runtime root (#4708 item 1)
+        env:
+          TGZ_NAME: ${{ needs.build-lab-package.outputs.tgz_name }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/multitable-onprem-package-verify.sh
+          mkdir -p "${RUNNER_TEMP}/labroot"
+          EXTRACT_ROOT="${RUNNER_TEMP}/labroot" \
+            scripts/ops/multitable-onprem-package-verify.sh "$TGZ_NAME"
+          pkg_root="$(find "${RUNNER_TEMP}/labroot" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$pkg_root"
+          echo "PKG_ROOT=${pkg_root}" >> "$GITHUB_ENV"
+          # The package's OWN pinned lockfile — never relaxed. This is the install claim.
+          ( cd "$pkg_root" && pnpm install --frozen-lockfile --reporter=append-only )
+          echo "packageInstallInIsolatedRuntime=PASS"
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if node -e "
+              const sql = require('${PKG_ROOT}/node_modules/mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:process.env.MSSQL_SA_PASSWORD,database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Generate lab-local ephemeral secrets (masked, never logged, scoped to this job)
+        run: |
+          set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 16)"
+          provisioning_password="$(openssl rand -hex 16)"
+          for s in "$jwt_secret" "$enc_key" "$runtime_password" "$provisioning_password"; do
+            echo "::add-mask::$s"
+          done
+          {
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
+            echo "E2E_S6A_RUNTIME_DB_ROLE=s6a_lab_runtime"
+            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$runtime_password"
+            echo "E2E_S6A_PROVISIONING_DB_ROLE=s6a_lab_provision"
+            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$provisioning_password"
+          } >> "$GITHUB_ENV"
+
+      # #4708 item 4. Reuses the EXISTING provisioner verbatim: it creates both roles
+      # NOSUPERUSER/NOCREATEDB/NOCREATEROLE/NOREPLICATION/NOBYPASSRLS/NOINHERIT, neither a member of
+      # the other and neither equal to the migration owner, then runs migrations with both
+      # `metasheet.sealed_export_*_role` GUCs visible from the very first connection (073 grants its
+      # privilege matrix only if they are).
+      #
+      # TODO(s6a-lab): the script currently spawns `pnpm --filter @metasheet/core-backend run
+      # migrate` from the REPO root. For this lane it must run the PACKAGE's own
+      # packages/core-backend/dist/src/db/migrate.js from $PKG_ROOT — add a
+      # `MIGRATE_FROM_PACKAGE_ROOT` env override there rather than forking the script.
+      - name: Provision separated PostgreSQL roles, then migrate from the PACKAGE (#4708 item 4)
+        env:
+          PG_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_lab
+          RUNTIME_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          RUNTIME_PASSWORD: ${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}
+          PROVISIONING_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          PROVISIONING_PASSWORD: ${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}
+          MIGRATE_FROM_PACKAGE_ROOT: ${{ env.PKG_ROOT }}
+        run: node scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+
+      - name: Confirm the live server is PostgreSQL ${{ matrix.pg }} and 073/074/075 applied
+        run: |
+          set -euo pipefail
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          server_major=$(( $(PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d metasheet_s6a_lab -tAc 'SHOW server_version_num') / 10000 ))
+          if [[ "${server_major}" != "${{ matrix.pg }}" ]]; then
+            echo "FATAL: live server major (${server_major}) != matrix leg (${{ matrix.pg }})." >&2
+            exit 1
+          fi
+          cd "$PKG_ROOT"
+          node packages/core-backend/dist/src/db/migrate.js --confirm 073_create_sealed_export_stock_prep_runtime_authority
+          node packages/core-backend/dist/src/db/migrate.js --confirm 074_repair_sealed_export_runtime_authority_privileges
+          node packages/core-backend/dist/src/db/migrate.js --confirm 075_grant_sealed_export_runtime_authority_row_lock
+
+      # #4708 items 2 and 3, emitted as values-free evidence rather than left implicit inside the
+      # product's own internal check. The walk step below ALSO re-proves them from the product side
+      # (sqlserver-sealed-snapshot-source-session.cjs:19-28 asserts sysadmin/db_owner/db_datawriter
+      # are 0 and that INSERT/UPDATE/DELETE/ALTER/CONTROL are absent); this step exists so a reader
+      # of the evidence block can see the facts without reading product source.
+      #
+      # TODO(s6a-lab): script does not exist. Intended shape — connect as sa, assert
+      # SERVERPROPERTY('Edition') contains 'Developer' and ProductMajorVersion matches the matrix
+      # leg, create the synthetic database, ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON, poll
+      # sys.databases.snapshot_isolation_state until it reads 1, create the dedicated login+user,
+      # GRANT SELECT ON OBJECT:: only, then RECONNECT AS THAT PRINCIPAL and emit its
+      # HAS_PERMS_BY_NAME matrix. Reuse prepareSqlServerRelation()/waitForSnapshotIsolationOn() from
+      # scripts/ops/stock-preparation-e2e-functional-smoke.mjs — do not re-derive them.
+      - name: Synthetic SQL Server source + snapshot isolation + read-only identity (#4708 items 2,3)
+        env:
+          MSSQL_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+          S6A_LAB_ROW_COUNT: ${{ inputs.s6a_row_count }}
+          S6A_LAB_EVIDENCE_DIR: ${{ github.workspace }}/output/s6a-lab/pg${{ matrix.pg }}
+          # The marketing YEAR (2019/2022), not the product major (15/16). The script must map it —
+          # engineMajorVersionFromProductMajor maps 15->2019 and 16->2022 and NOTHING else.
+          S6A_LAB_EXPECT_ENGINE_YEAR: ${{ matrix.mssql }}
+        run: node scripts/ops/stock-preparation-s6a-lab-source-identity-evidence.mjs
+
+      # #4708 items 5, 6, 7. The flag is set to 'true' ONLY inside the server process this harness
+      # spawns, for the duration of this one arm, and the harness always restarts flag-OFF at the
+      # end of the arm (its own `finally { await stopServer() }`).
+      #
+      # TODO(s6a-lab): stock-preparation-e2e-functional-smoke.mjs's startServer() hardcodes
+      # `spawn('pnpm', ['--filter','@metasheet/core-backend','run','dev:core'], { cwd: REPO_ROOT })`.
+      # Add an E2E_SERVER_ROOT (and E2E_SERVER_CMD) override so the SAME harness can drive the
+      # extracted package root instead of the repo tree — that override is the whole delta between
+      # the existing lane and this one for items 5/6/7.
+      - name: S6-A sealed-snapshot walk + same-operation replay against the PACKAGE (#4708 items 5,6,7)
+        env:
+          E2E_SERVER_ROOT: ${{ env.PKG_ROOT }}
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_lab
+          E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
+          E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
+          E2E_S6A_RUNTIME_DB_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          E2E_S6A_RUNTIME_DB_URL: postgresql://${{ env.E2E_S6A_RUNTIME_DB_ROLE }}:${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}@127.0.0.1:5432/metasheet_s6a_lab
+          E2E_S6A_PROVISIONING_DB_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          E2E_S6A_PROVISIONING_DB_URL: postgresql://${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}:${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}@127.0.0.1:5432/metasheet_s6a_lab
+          MSSQL_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+          # 'midtier' is the arm that runs a FULL walk (capture -> private ingestion -> generation
+          # kernel -> apply -> activation -> idempotent replay) at an arbitrary row count. 'primary'
+          # is pinned to 3 rows by construction and cannot carry #4708 item 5.
+          E2E_S6A_ARM: midtier
+          E2E_S6A_ROW_COUNT: ${{ inputs.s6a_row_count }}
+          E2E_OUT_DIR: ${{ github.workspace }}/output/s6a-lab/pg${{ matrix.pg }}
+        run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
+
+      # #4708 item 8, first half — UNCONDITIONAL, hence `if: always()`. The existing lane's flag-OFF
+      # arms run BEFORE the flag-on window and therefore prove nothing about restoration; this one
+      # runs after it, and runs even when the walk failed. That is the point: a failed walk is
+      # exactly when an un-restored flag would matter most.
+      #
+      # TODO(s6a-lab): script does not exist. Intended shape — assert the flag is absent from the
+      # ambient process environment; restart the server from $PKG_ROOT with NO flag set; assert
+      # /api/integration/health capabilities.stockPreparationSqlServerSealedSnapshot === false, that
+      # an always-registered sibling route (stock-preparation/mvp/readiness) still answers 200, and
+      # that the S6-A internal route answers 404. Reuse runFlagArm() from
+      # stock-preparation-e2e-functional-smoke.mjs rather than re-implementing the three-part
+      # assertion (a bare 404 cannot distinguish "gated" from "nothing mounted").
+      - name: PROVE feature flag restored OFF after the window (#4708 item 8) — unconditional
+        if: always()
+        env:
+          E2E_SERVER_ROOT: ${{ env.PKG_ROOT }}
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_lab
+          E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
+          E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
+          S6A_LAB_EVIDENCE_DIR: ${{ github.workspace }}/output/s6a-lab/pg${{ matrix.pg }}
+        run: node scripts/ops/stock-preparation-s6a-lab-flag-off-restoration.mjs
+
+      # #4708 item 8, second half. The containers are destroyed with the job, but "destroyed by the
+      # platform" is not the same claim as "the product cleaned up after itself".
+      #
+      # TODO(s6a-lab): script does not exist. Intended shape — report whether the artifact root's
+      # capture directory was created by the product and is now removed, the run/generation/
+      # ingestion-session row counts left behind, and that no synthetic fixture escaped the
+      # ephemeral database. Values-free counts and booleans only.
+      - name: Cleanup and retention evidence (#4708 item 8) — unconditional
+        if: always()
+        env:
+          S6A_LAB_EVIDENCE_DIR: ${{ github.workspace }}/output/s6a-lab/pg${{ matrix.pg }}
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s6a_lab
+        run: node scripts/ops/stock-preparation-s6a-lab-cleanup-retention.mjs
+
+      - name: Guard — the flag must not appear in any committed file or job-level env
+        if: always()
+        run: |
+          set -euo pipefail
+          # The flag may appear only in comments and in this guard. A committed assignment would mean
+          # the lane changed a default rather than opening a scoped window.
+          if grep -rn --include='*.env' --include='*.yml' --include='*.yaml' --include='*.json' \
+               'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED[[:space:]]*[:=][[:space:]]*.*true' \
+               . 2>/dev/null | grep -v '^\./\.git/' ; then
+            echo "FATAL: the S6-A feature flag is set to true in a committed file." >&2
+            exit 1
+          fi
+          echo "flagCommittedAnywhere=NO"
+          echo "flagDefaultAndFinal=OFF"
+
+      - name: Upload values-free lab evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s6a-lab-evidence-pg${{ matrix.pg }}-mssql${{ matrix.mssql }}
+          path: output/s6a-lab/pg${{ matrix.pg }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Job 3 — the rejection arm. Not one of #4708's eight items, but the bound in item 5 is only
+  # meaningful if exceeding it is refused. Own database for the same single-ACTIVE-binding reason.
+  # ---------------------------------------------------------------------
+  lab-rejection:
+    name: S6-A lab rejection arm (declared bound + 1 must be refused)
+    needs: build-lab-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s6a_lab_reject
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s6a_lab_reject"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'S6aLab!Probe2026'
+          SA_PASSWORD: 'S6aLab!Probe2026'
+        ports:
+          - 1433:1433
+    steps:
+      # TODO(s6a-lab): this job's body is the SAME step sequence as lab-walk with
+      # E2E_S6A_ARM=rejection (the harness derives bound+1 itself from MAX_BUSINESS_LINES — never
+      # hardcode 25000 here). Once the E2E_SERVER_ROOT override above exists, factor the shared
+      # sequence into a composite action under .github/actions/s6a-lab-leg/ rather than duplicating
+      # it a third time; a reusable workflow is not usable here because the matrix legs need
+      # per-job `services:`.
+      - name: Placeholder — see TODO(s6a-lab)
+        run: |
+          echo "TODO(s6a-lab): rejection arm not yet wired; failing rather than reporting a green arm that did not run." >&2
+          exit 1
+
+  # ---------------------------------------------------------------------
+  # Job 4 — one combined, values-free evidence block mapped 1:1 onto #4708's eight items.
+  # ---------------------------------------------------------------------
+  evidence-summary:
+    name: S6-A synthetic lab evidence summary
+    needs: [build-lab-package, lab-walk, lab-rejection]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every upstream job to have fully succeeded
+        env:
+          BUILD_RESULT: ${{ needs.build-lab-package.result }}
+          WALK_RESULT: ${{ needs.lab-walk.result }}
+          REJECT_RESULT: ${{ needs.lab-rejection.result }}
+        run: |
+          set -euo pipefail
+          echo "build-lab-package: ${BUILD_RESULT}"
+          echo "lab-walk (all of pg15/16/17): ${WALK_RESULT}"
+          echo "lab-rejection: ${REJECT_RESULT}"
+          if [[ "${BUILD_RESULT}" != "success" || "${WALK_RESULT}" != "success" || "${REJECT_RESULT}" != "success" ]]; then
+            echo "One or more lab gates did not pass; overall FAIL." >&2
+            exit 1
+          fi
+
+      - name: Values-free combined evidence block
+        env:
+          SERVICE_RUNTIME_SHA: ${{ needs.build-lab-package.outputs.build_sha }}
+          PACKAGE_TGZ_SHA256: ${{ needs.build-lab-package.outputs.tgz_sha256 }}
+          PACKAGE_ZIP_SHA256: ${{ needs.build-lab-package.outputs.zip_sha256 }}
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "labVenue=GITHUB_ACTIONS_EPHEMERAL_CONTAINERS"
+            echo "customerScope=SYNTHETIC_SINGLE_CUSTOMER"
+            echo "serviceRuntimeSha=${SERVICE_RUNTIME_SHA}"
+            echo "packageTgzSha256=${PACKAGE_TGZ_SHA256}"
+            echo "packageZipSha256=${PACKAGE_ZIP_SHA256}"
+            echo "item1PackageInstallIsolatedRuntime=PASS"
+            echo "item2SqlServer2022DeveloperSnapshotIsolation=PASS"
+            echo "item3NonprivilegedReadOnlySourceIdentity=PASS"
+            echo "item4Migration073SeparatedRoles=PASS"
+            echo "item5SealedSnapshotRunWithinDeclaredBound=PASS"
+            echo "item6ReplayInternalNoopSourceReadCountOne=PASS"
+            echo "item7ExternalWriteFalseThroughout=PASS"
+            echo "item8FlagOffRestorationAndCleanup=PASS"
+            echo "postgresMajorVersionsExercised=15,16,17"
+            echo "postgresGapVersion=17"
+            echo "sqlServerMajorVersionsExercised=2022"
+            echo "declaredBoundPlusOneRefused=PASS"
+            echo "sourceMode=READ_ONLY"
+            echo "externalWrite=false"
+            echo "flagDefaultAndFinal=OFF"
+            echo "flagCommittedAnywhere=NO"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "customerDataUsed=NO"
+            echo "entityMachineInvolved=false"
+            echo "releasePublished=false"
+            echo "productionOrStagingDeployment=NONE"
+            echo "syntheticResultMaySatisfyCustomerReadiness=NO"
+            echo "realCustomerAcceptanceUnaffected=YES"
+            echo "overallSyntheticLabResult=PASS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
