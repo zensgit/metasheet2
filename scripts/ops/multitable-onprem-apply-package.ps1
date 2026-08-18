@@ -18,7 +18,15 @@ param(
   [string]$DependencyRefreshTimeoutSec = '1800',
   [string]$DependencyRefreshHeartbeatSec = '60',
   [string]$HealthcheckAttempts = '12',
-  [string]$HealthcheckDelaySec = '5'
+  [string]$HealthcheckDelaySec = '5',
+  # 'auto' (default): when this host's app.env enables the S6-A sealed-snapshot
+  # flag, apply + verify the NTFS ACL on the artifact root and only then write the
+  # win32 artifact-ACL attestation into that same app.env. Hosts that never enable
+  # the flag are not touched. 'off' is the operator escape hatch: the step is
+  # skipped entirely, so the runtime keeps refusing to boot (fail-closed) rather
+  # than booting with an unenforced artifact root.
+  [ValidateSet('auto', 'off')]
+  [string]$S6aArtifactRootAcl = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1002,6 +1010,55 @@ function Invoke-Healthcheck {
   return $false
 }
 
+function Test-S6aSealedSnapshotFlagEnabled {
+  # Same normalization as featureEnabled() in
+  # plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs
+  # (trim + lower-case). Read from the process env, which Import-AppEnvFile has
+  # already populated from the very app.env PM2 sources.
+  $raw = [string][Environment]::GetEnvironmentVariable(
+    'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED', 'Process'
+  )
+  return ($raw.Trim().ToLowerInvariant() -eq 'true')
+}
+
+function Invoke-S6aArtifactRootAclStep {
+  param(
+    [string]$LiveRoot,
+    [string]$EnvFile,
+    [string]$Mode
+  )
+
+  # Follow-up 1 of docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md.
+  # chmod(0o700/0o600) no-ops on win32, so the S6-A runtime refuses to boot there
+  # unless MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_WIN32_ARTIFACT_ACL_ATTESTED
+  # is exactly 'true'. This step makes that attestation an ENFORCED fact rather than
+  # an operator assertion: it applies the NTFS ACL, re-reads it, and writes the
+  # attestation only when the re-read proves the control is in place.
+  #
+  # Flag-driven on purpose: hosts whose app.env does not enable the sealed-snapshot
+  # flag are never touched, and no operator has to remember a switch on the host
+  # that does enable it.
+  if ($Mode -eq 'off') {
+    Write-Info 'S6-A artifact-root ACL step skipped: -S6aArtifactRootAcl off'
+    return
+  }
+  if (-not (Test-S6aSealedSnapshotFlagEnabled)) {
+    return
+  }
+
+  $aclScript = Join-Path $LiveRoot 'scripts\ops\multitable-onprem-s6a-artifact-root-acl.ps1'
+  if (-not (Test-Path -LiteralPath $aclScript -PathType Leaf)) {
+    throw 'S6A_ARTIFACT_ROOT_ACL_HELPER_MISSING'
+  }
+
+  Write-Info 'Apply and verify the S6-A artifact-root NTFS ACL before the service restart'
+  & $aclScript -EnvFilePath $EnvFile -RootDir $LiveRoot -Mode $Mode
+  if ($LASTEXITCODE -ne 0) {
+    # The helper already emitted a values-free reason token; do not restate inputs.
+    throw 'S6A_ARTIFACT_ROOT_ACL_ATTESTATION_FAILED'
+  }
+}
+
 $resolvedRoot = Resolve-NormalizedPath -Candidate $RootDir -Label 'RootDir'
 $resolvedArchive = Resolve-NormalizedPath -Candidate $PackageArchive -Label 'PackageArchive'
 $resolvedEnvFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
@@ -1225,6 +1282,14 @@ try {
         node $migratePath
       }
     }
+
+    # Must precede the restart: the attestation is written into the same app.env
+    # the PM2 startup helper re-imports, so the service can only ever start with an
+    # attestation that this run just proved.
+    Invoke-S6aArtifactRootAclStep `
+      -LiveRoot $resolvedRoot `
+      -EnvFile $resolvedEnvFile `
+      -Mode $S6aArtifactRootAcl
 
     if ($RestartService -ne '0') {
       $startScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'

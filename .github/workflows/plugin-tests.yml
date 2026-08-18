@@ -154,6 +154,23 @@ jobs:
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # S6-A win32 artifact-root ACL + attestation (follow-up 1 of
+      # docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md). This is the
+      # only job with a real NTFS volume and a real icacls.exe, so the layer-3 checks (apply, verify,
+      # idempotent re-run, tampered-ACL retraction against a throwaway TEMP directory) can only run
+      # here. Both shells are exercised: the deploy path runs under whichever PowerShell the operator
+      # host provides, and 5.1's native-stderr semantics differ from pwsh 7's.
+      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   test:
     runs-on: ubuntu-latest
 
@@ -529,6 +546,9 @@ jobs:
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
+          # ACL layers self-report SKIP. The real-icacls coverage lives in stock-prep-powershell51.
+          ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

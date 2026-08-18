@@ -6,7 +6,13 @@ param(
   [ValidateSet('0', '1')]
   [string]$InstallDeps = '1',
   [ValidateSet('0', '1')]
-  [string]$RunMigrations = '1'
+  [string]$RunMigrations = '1',
+  # Passed straight through to the staged apply helper, which owns the service env.
+  # 'auto' (default) applies + verifies the S6-A artifact-root NTFS ACL and writes
+  # the win32 attestation ONLY on hosts whose app.env enables the sealed-snapshot
+  # flag; 'off' skips the step entirely (the runtime then stays refused).
+  [ValidateSet('auto', 'off')]
+  [string]$S6aArtifactRootAcl = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,13 +192,24 @@ try {
   # try/catch contract instead so a successful apply ("Package deploy
   # complete" + health 200) reliably yields launcher exit 0 and a Last
   # Result of 0 in the outer scheduled task (#1526 follow-up).
+  # Splatted so the S6-A switch is forwarded ONLY when the operator moved it off the
+  # default. A launcher can be newer than the archive it is pointed at; the default
+  # 'auto' is also the staged helper's own default, so omitting it keeps an older
+  # staged apply working, while an explicit 'off' against a helper too old to honour
+  # it fails loudly instead of silently ignoring the operator.
+  $applyParameters = @{
+    InstallDeps = $InstallDeps
+    PackageArchive = $resolvedArchive
+    RootDir = $resolvedRoot
+    RunMigrations = $RunMigrations
+    StagingRoot = $stagingBase
+  }
+  if ($S6aArtifactRootAcl -ne 'auto') {
+    $applyParameters['S6aArtifactRootAcl'] = $S6aArtifactRootAcl
+  }
+
   try {
-    & $stagedApply `
-      -RootDir $resolvedRoot `
-      -PackageArchive $resolvedArchive `
-      -StagingRoot $stagingBase `
-      -InstallDeps $InstallDeps `
-      -RunMigrations $RunMigrations
+    & $stagedApply @applyParameters
     $launcherExit = 0
   }
   catch {

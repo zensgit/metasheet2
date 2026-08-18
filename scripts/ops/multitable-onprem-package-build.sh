@@ -65,6 +65,10 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-apply-package.ps1"
   "scripts/ops/multitable-onprem-deploy-launcher.ps1"
+  # S6-A win32 artifact-root ACL + attestation step invoked by the apply helper
+  # before the PM2 restart. Absent from the package, an S6-A host cannot be
+  # attested and the runtime stays refused.
+  "scripts/ops/multitable-onprem-s6a-artifact-root-acl.ps1"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
