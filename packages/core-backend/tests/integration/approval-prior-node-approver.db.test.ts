@@ -37,16 +37,21 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *             with an EXPLICIT audited auto-approval record and no `system:*` assignee row —
  *             never a silent nobody). NOTE: this create-time arm resolves against an ABSENT
  *             `priorNodeApprovers` map (§K3: the map is never built on the create path), so it
- *             does not exercise the sentinel-drop filter itself — see G-11 below for the arm that
- *             does.
- *  G-11       sentinel-drop reachability: the referenced node auto-approves under
- *             `system:auto-approval` at CREATE (a COMMITTED, separate transaction — `gate`'s
- *             cascade halts at a REAL human node before ever reaching the referencing node, unlike
- *             the OD-L1-4(a) arm above). The referencing node activates LATER, on the acting
- *             decider's OWN approve transaction, which forces `loadPriorNodeApproverDeciders` to
- *             actually READ gate's persisted `system:auto-approval` row and DROP it — never a
- *             vacuous "map absent" pass. EMPTY resolution, no `system:*` assignee row, audited
- *             auto-approval instead.
+ *             does not exercise the sentinel-drop filter itself — see G-11 below for the arms that
+ *             do.
+ *  G-11       two arms, over a genuine dispatch-path transaction (not create-time):
+ *             (a) sentinel-drop: the referenced node auto-approves under `system:auto-approval` at
+ *             CREATE (a COMMITTED, separate transaction — the cascade halts at a REAL human node
+ *             before ever reaching the referencing node, unlike the OD-L1-4(a) arm above); the
+ *             referencing node activates LATER, on the acting decider's OWN approve — EMPTY
+ *             resolution, no `system:*` assignee row, audited auto-approval instead. Mutation
+ *             note: this arm alone cannot distinguish "the map was built and filtered" from "the
+ *             map was never built" — both look EMPTY (verified: gutting the dispatch call site
+ *             leaves it green). (b) human-survivor reachability: the SAME graph, but the
+ *             referencing node names BOTH the sentinel-only node AND a REAL decider in its
+ *             `assigneeSources` — the real decider MUST survive resolution, which requires
+ *             `loadPriorNodeApproverDeciders` to have genuinely run (a gutted call site drops the
+ *             survivor too, mutation-verified) — the arm that actually carries reachability.
  *  G-12       no cross-node dedup: the SAME person approves at the prior node and AGAIN at the
  *             referencing node (intra-node dedup is unit-covered).
  *  freeze     the RULE is frozen with the instance's pinned published definition: re-publishing
@@ -454,8 +459,17 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
     expect(auditedAuto.rows.length).toBeGreaterThan(0)
   })
 
-  // ── G-11 — service-door reachability: the sentinel filter reads a REAL committed row ──────────
-  it('service-door reachability (G-11): `gate` auto-approves under `system:auto-approval` at CREATE (a COMMITTED transaction, cascade halted at a REAL human `mid` node before ever touching `again`); MID\'s LATER approve activates `again`, forcing loadPriorNodeApproverDeciders to actually read + drop gate\'s persisted sentinel row — EMPTY resolution, no system:* assignee, audited auto-approval', async () => {
+  // ── G-11 — sentinel-drop over a genuine dispatch-path transaction ───────────────────────────
+  // NOTE on what this leg does and does NOT prove: it shows the sentinel never leaks into an
+  // assignee row even when `again` resolves on a REAL dispatch-path transaction (not the
+  // create-time cascade). It does NOT, by itself, prove `loadPriorNodeApproverDeciders` was
+  // actually CALLED — an empty resolution here looks IDENTICAL whether the map was built and
+  // correctly filtered, or never built at all (mutation-verified: gutting the dispatch call site
+  // so `priorNodeApprovers` stays undefined leaves this leg green, same failure mode the P2
+  // finding named for the OD-L1-4(a) arm above). That reachability claim is carried by the
+  // separate "human-survivor reachability (G-11)" leg below, which requires the map to be built
+  // and filtered correctly by MIXING a sentinel-only reference with a REAL decider reference.
+  it('sentinel-drop over a real dispatch-path transaction (G-11): `gate` auto-approves under `system:auto-approval` at CREATE (a COMMITTED transaction, cascade halted at a REAL human `mid` node before ever touching `again`); MID\'s LATER approve activates `again` on the dispatch path — EMPTY resolution, no system:* assignee, audited auto-approval', async () => {
     // start -> gate (requester + mergeWithRequester ⇒ auto-approves AT CREATE, COMMITTED) ->
     // mid (REAL human decider ⇒ the create-time cascade halts HERE, never reaching `again`) ->
     // again (prior_node_approver -> 'gate', emptyAssigneePolicy 'auto-approve') -> end.
@@ -464,9 +478,7 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
     // auto-approving node and resolves within the SAME create-time cascade — where
     // `getPriorNodeApprovers` is omitted entirely, §K3), this graph puts a REAL decider (`mid`)
     // between `gate` and `again`. `again` can only activate on MID's own approve — a SEPARATE,
-    // LATER transaction on the dispatch/act path, which DOES build the `priorNodeApprovers` map
-    // from `gate`'s already-committed row. That is the only path that exercises the service-side
-    // sentinel filter (`loadPriorNodeApproverDeciders`'s `pushDecider`) for real.
+    // LATER transaction on the dispatch/act path.
     const svcDoorGraph = {
       nodes: [
         { key: 'start', type: 'start', name: 's', config: {} },
@@ -534,6 +546,84 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
     expect(auditedAuto.rows.length).toBeGreaterThan(0)
     const finalStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [iid])
     expect(finalStatus.rows[0].status).toBe('approved')
+  })
+
+  // ── G-11 — human-survivor reachability: the map-build itself is load-bearing ────────────────
+  // The leg above cannot distinguish "the map was built and correctly filtered" from "the map was
+  // never built at all" — both look like an EMPTY resolution. This leg closes that gap the way the
+  // resolver's OWN unit test does (approval-assignee-resolver.test.ts:260's mandatory
+  // human-survivor positive control): `again` references TWO prior nodes in the SAME
+  // `assigneeSources` array — the sentinel-only `gate` (must contribute nothing) AND the REAL
+  // human decider `mid` (must survive). `mid` is `again`'s own immediate predecessor, so MID's
+  // approve is simultaneously the ACT that activates `again` and the round `mid` itself is being
+  // decided in — `mid`'s entry is carried through the in-flight-merge branch of
+  // `loadPriorNodeApproverDeciders`, `gate`'s through the persisted-audit-row branch: one
+  // resolution, both branches of the SAME function. If the dispatch call site were gutted (the
+  // map stays undefined, mutation-verified to leave the leg above green), `again` would resolve
+  // to EMPTY here too — MID would silently NOT be an assignee — and the assertion below reds.
+  it('human-survivor reachability (G-11): `again` references BOTH the sentinel-only `gate` and the REAL decider `mid` — `mid` MUST survive resolution, which is only possible if loadPriorNodeApproverDeciders genuinely ran (a gutted call site, mutation-verified, silently drops MID too — NOT a vacuous "map absent" pass)', async () => {
+    const survivorGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        {
+          key: 'gate', type: 'approval', name: 'gate',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+            autoApprovalPolicy: { mergeWithRequester: true },
+          },
+        },
+        { key: 'mid', type: 'approval', name: 'mid', config: { assigneeSources: [{ kind: 'static_user', userIds: [MID] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        {
+          key: 'again', type: 'approval', name: 'again',
+          config: {
+            // Sentinel-only reference FIRST, real-decider reference SECOND — order-independence
+            // is incidental here; what matters is BOTH sources feed the SAME resolution.
+            assigneeSources: [
+              { kind: 'prior_node_approver', nodeKey: 'gate' },
+              { kind: 'prior_node_approver', nodeKey: 'mid' },
+            ],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+          },
+        },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 's2g', source: 'start', target: 'gate' },
+        { key: 'g2m', source: 'gate', target: 'mid' },
+        { key: 'm2a', source: 'mid', target: 'again' },
+        { key: 'a2e', source: 'again', target: 'end' },
+      ],
+    }
+    const tid = await createPublished(`pna-${TS}-g11-survivor`, survivorGraph)
+    const started = await createAsReq(tid)
+    expect(started.status, started.text).toBe(201)
+    const iid = started.iid!
+
+    // gate's sentinel row already committed at create; `again` untouched (cascade halted at mid).
+    const gateAuto = await query(
+      `SELECT id FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND actor_id = 'system:auto-approval' AND metadata->>'nodeKey' = 'gate'`,
+      [iid],
+    )
+    expect(gateAuto.rows.length).toBeGreaterThan(0)
+    expect(await activeAssignees(iid, 'again')).toHaveLength(0)
+
+    // MID's approve is BOTH the decider of `mid` (in-flight branch) and the trigger that
+    // activates `again` (persisted-row branch, reading gate's committed sentinel).
+    const midApprove = await act(iid, midTok, { action: 'approve' })
+    expect(midApprove.status, await midApprove.clone().text()).toBeLessThan(300)
+
+    // The REAL survivor: `again` resolves to EXACTLY [MID] — gate's sentinel contributed
+    // nothing, but a genuinely-built, correctly-filtered map still carried mid's real decider
+    // through. A map that was never built (call-site gutted) would have dropped MID here too.
+    expect((await activeAssignees(iid, 'again')).map((a) => a.assignee_id)).toEqual([MID])
+    const sentinelAssignees = await query(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND assignee_id LIKE 'system:%'`,
+      [iid],
+    )
+    expect(sentinelAssignees.rows).toHaveLength(0)
   })
 
   // ── Freeze: the RULE rides the instance's pinned published definition ────────────────────────
