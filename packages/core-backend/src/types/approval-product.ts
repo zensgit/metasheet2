@@ -908,14 +908,20 @@ export interface PublishApprovalTemplateRequest {
    */
   actorUserId?: string | null
   /**
-   * Lock-1 §K1 / OD-L1-2(a) — the org this template is being published FOR, scoping the
-   * `approval_usable_member_groups` curated-binding hard gate (§K1 "the requesting org's
-   * binding"). Optional, mirroring the S7 §3.3 `orgId` idiom ("existing kernel callers that omit
-   * it keep today's [default] behavior"): blank/absent normalizes to the repo-wide
-   * `DEFAULT_ORG_ID = 'default'` single-tenant bucket, matching `directory_integrations.org_id`
-   * / `attendance_groups.org_id`'s own default. No new identity→org resolution is added — the
-   * caller states the org explicitly, exactly like every other `org_id`-scoped table in this
-   * codebase. Ignored when the graph carries no `user_group` source (no read, no gate).
+   * Lock-1 §K1 / OD-L1-2(a) — the curated NAMESPACE the publish request is validated against for
+   * `approval_usable_member_groups`. NOT a tenant boundary and not identity-resolved: this
+   * codebase has no `orgs` table and the kernel create path never resolves an actor's org, so the
+   * caller states the namespace explicitly, exactly like every other `org_id`-scoped table here —
+   * a caller MAY name any namespace (fix-round P2-b/ii correction: an earlier comment overclaimed
+   * this as a per-caller boundary; it is not). The gate it scopes still guarantees every
+   * referenced group has been explicitly curated — via `ensurePlatformAdmin`-gated bind — into AT
+   * LEAST the named namespace; a group with zero curation anywhere can never be referenced.
+   * Optional, mirroring the S7 §3.3 `orgId` idiom ("existing kernel callers that omit it keep
+   * today's [default] behavior" — bracketed because S7's own callers default to UNSCOPED, not a
+   * bucket; this slice is stricter: blank/absent normalizes to the repo-wide
+   * `DEFAULT_ORG_ID = 'default'` bucket, matching `directory_integrations.org_id` /
+   * `attendance_groups.org_id`'s own default, rather than an org-agnostic match). Ignored when the
+   * graph carries no `user_group` source (no read, no gate).
    */
   orgId?: string | null
 }

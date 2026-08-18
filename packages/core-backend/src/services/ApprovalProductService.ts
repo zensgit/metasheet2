@@ -4053,11 +4053,22 @@ export function assertUserGroupSourcesBoundToOrg(
 ): void {
   for (const node of approvalGraph.nodes) {
     if (node.type !== 'approval') continue
-    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
-    sources.forEach((source, sourceIndex) => {
-      if (source.kind !== 'user_group') return
-      for (const groupId of source.groupIds) {
-        if (!curatedGroupIds.has(groupId)) {
+    // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
+    // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
+    // before any graph reaches publish), but the two functions read the SAME field and should not
+    // differ in how defensively they do it.
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    sources.forEach((source: unknown, sourceIndex: number) => {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) return
+      for (const rawGroupId of source.groupIds) {
+        // Trimmed the same way collectApprovalGraphMemberGroupIds trims before adding to the
+        // curated set — untrimmed comparison was harmless today (normalizeStringArray already
+        // trims at authoring time) but the two functions read this field with different
+        // normalization, which is a latent inconsistency (fix-round NIT-2).
+        const groupId = typeof rawGroupId === 'string' ? rawGroupId.trim() : ''
+        if (!groupId || !curatedGroupIds.has(groupId)) {
           throw new ServiceError(
             `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] user_group references a group not bound to this organization`,
             400,
@@ -5268,14 +5279,26 @@ export class ApprovalProductService {
       // undominated reference resolvable.
       assertPriorNodeApproverReferencesUpstream(approvalGraph)
       // Lock-1 §K1 / OD-L1-2(a) — THE HARD GATE (RA-1b shape): every group id any `user_group`
-      // source references must be bound to the PUBLISHING org (`approval_usable_member_groups`,
+      // source references must have a binding row for the NAMED org (`approval_usable_member_groups`,
       // empty by default). Only when the graph actually uses `user_group` do we fetch the curated
-      // set (one read, on THIS transaction client) and reject any dangling/foreign-org reference —
-      // independent of the picker, so an author can never publish a reference to a group nobody
-      // curated for this org. `orgId` mirrors the S7 §3.3 idiom: blank/absent normalizes to
-      // `DEFAULT_ORG_ID` — NEVER an org-agnostic match, so the default path fails closed exactly
-      // like an explicit one. UNCONDITIONAL like the K3 dominance gate above: no policy exemption
-      // makes a foreign/dangling group reference resolvable.
+      // set (one read, on THIS transaction client) and reject any reference with ZERO binding rows
+      // for that org — dangling (bound nowhere) or simply never curated there.
+      //
+      // FIX-ROUND CORRECTION (gate finding P2-b/ii): the PRIOR comment here overclaimed "an author
+      // can never publish a reference to a group nobody curated for this org" as if `orgId` were a
+      // tenant boundary the CALLER is confined to. It is not, and per the owner's G-6 adjudication
+      // it is not supposed to be (OD-L1-2(a) delivers a curation NAMESPACE, not identity-resolved
+      // tenant anchoring — this codebase has no `orgs` table and the kernel create path never
+      // resolves an actor's org). `orgId` is a caller-supplied partition key on BOTH this gate and
+      // the picker: an author MAY name a different org's namespace (e.g. `org-b`) and publish a
+      // reference to whatever is bound THERE, even with no relationship to that namespace. What
+      // this gate actually guarantees: every referenced group has been explicitly curated — via
+      // `ensurePlatformAdmin`-gated bind, fix-round P1 — into AT LEAST the named namespace; a group
+      // with zero curation anywhere can never be referenced, regardless of which orgId is named.
+      // `orgId` mirrors the S7 §3.3 idiom: blank/absent normalizes to `DEFAULT_ORG_ID` — NEVER an
+      // org-agnostic match (a group bound only elsewhere still 400s under the default), so the
+      // default path fails closed exactly like an explicit one. UNCONDITIONAL like the K3 dominance
+      // gate above: no policy exemption makes a wholly-uncurated group reference resolvable.
       const memberGroupIds = collectApprovalGraphMemberGroupIds(approvalGraph)
       if (memberGroupIds.size > 0) {
         const publishOrgId = typeof request.orgId === 'string' && request.orgId.trim().length > 0

@@ -293,6 +293,31 @@ describeIfDatabase('Lock-1 §K1 user_group — real-DB create/freeze/dispatch/pu
     if (server) await server.stop()
   })
 
+  // ── Migration-shape assertion (fix-round P2-3) ──────────────────────────────────────────────
+  // The `beforeAll` guard above is DEFENSIVE (matches the K2/K4/K5-b/K3 precedent's own defensive
+  // roles/user_roles CREATE TABLE guards) and intentionally OMITS the `created_by` FK + the
+  // `group_id` index — so if the REAL migration (zzzz20260818120000) never ran, this suite would
+  // otherwise stay fully green against a materially weaker table. This test makes that
+  // observable: it asserts the shape ONLY the migration produces, so a dropped/reverted migration
+  // reds here even though every other test in this file still passes against the defensive
+  // fallback table.
+  it('the real migration ran: approval_usable_member_groups carries the created_by→users FK and the group_id index (not just the defensive fallback shape)', async () => {
+    const pool = poolManager.get()
+    const fk = await pool.query<{ conname: string }>(
+      `SELECT conname FROM pg_constraint
+       WHERE conname = 'approval_usable_member_groups_created_by_fkey'
+         AND conrelid = 'approval_usable_member_groups'::regclass
+         AND confrelid = 'users'::regclass`,
+    )
+    expect(fk.rows.length, 'created_by -> users(id) FK missing — only the defensive fallback DDL ran, the migration did not').toBe(1)
+    const idx = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE tablename = 'approval_usable_member_groups'
+         AND indexname = 'idx_approval_usable_member_groups_group_id'`,
+    )
+    expect(idx.rows.length, 'idx_approval_usable_member_groups_group_id missing — only the defensive fallback DDL ran, the migration did not').toBe(1)
+  })
+
   // ── G-1 — authoring choke: exact shape only ─────────────────────────────────────────────────
   it('G-1: user_group saves in its exact shape; empty groupIds / non-array / unknown extra key each 400', async () => {
     // Positive control FIRST: the exact shape saves (the rejection below is shape-selected).
@@ -350,8 +375,19 @@ describeIfDatabase('Lock-1 §K1 user_group — real-DB create/freeze/dispatch/pu
     await pool.query(`DELETE FROM platform_member_groups WHERE id = $1`, [scratchGroup])
   })
 
-  // ── Picker org-scoping: values-free negative ────────────────────────────────────────────────
-  it('picker: org A cannot list org B\'s bindings — values-free negative (no cross-org group id/name leaks either direction)', async () => {
+  // ── Picker query-partitioning: values-free re: MEMBER identities only ───────────────────────
+  // FIX-ROUND RETITLE (gate finding P2-b/i): the PRIOR title here asserted an AUTHORIZATION
+  // property ("org A cannot list org B's bindings") that the test body never tested — both calls
+  // below use the SAME `reqTok` (a single non-platform-admin template author), so this is a
+  // query-PARTITION test, not a cross-caller isolation test. Per §K1 the picker is authorized "the
+  // same [way as] the shipped user/role lookups" — i.e. NOT re-engineered into a per-namespace
+  // authorization boundary (Lock-1 names no such boundary, and this codebase has no org-identity
+  // resolution to build one on). A caller holding the picker's shipped permission MAY list any
+  // named namespace's bindings — id + name + memberCount — by choosing its `orgId`; that is the
+  // ratified shape, not a leak. What stays genuinely values-free is MEMBER identity: the picker
+  // never returns who is in a group, only how many.
+  it('picker: results partition by the requested orgId — a single caller sees ONLY the named namespace\'s bindings per call; member identities never appear (values-free)', async () => {
+    // Same caller (reqTok) issues BOTH calls — this discriminates the query param, not the caller.
     const defaultList = await listBoundGroups('default')
     expect(defaultList.groups.map((g) => g.id)).toContain(groupIdMain)
     expect(defaultList.groups.map((g) => g.id)).not.toContain(groupIdOrgB)
@@ -360,7 +396,9 @@ describeIfDatabase('Lock-1 §K1 user_group — real-DB create/freeze/dispatch/pu
     expect(orgBList.groups.map((g) => g.id)).toContain(groupIdOrgB)
     expect(orgBList.groups.map((g) => g.id)).not.toContain(groupIdMain)
 
-    // Values-free: memberCount is a count, never the member id list.
+    // Values-free re: MEMBER identity only: memberCount is a count, never the member id list —
+    // this is the property the picker's shape actually guarantees (approval-directory.ts's
+    // `DirectoryMemberGroupOption` carries id + name + memberCount, nothing else).
     const mainEntry = defaultList.groups.find((g) => g.id === groupIdMain)
     expect(mainEntry?.memberCount).toBe(2)
     expect(JSON.stringify(defaultList.groups)).not.toContain(M1)

@@ -13,6 +13,10 @@ import { IPLMAdapter } from '../di/identifiers'
 import { pool, query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+// Lock-1 §K1 fix-round P1 — the curated bind/unbind path is gated STRICTER than the rest of this
+// picker seam (see the route's own doc comment). Reuses the SAME `ensurePlatformAdmin` the
+// mirrored `scope-templates/:templateId/member-groups/:action` route uses.
+import { ensurePlatformAdmin } from './admin-users'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
@@ -429,11 +433,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  // Lock-1 §K1 / OD-L1-2(a) — the `user_group` authoring PICKER: org-scoped listing of groups
-  // CURATED (bound) for approval use — id + name + member COUNT only, never the member list
-  // itself (values-free). Convenience only, same split as /directory/formula-roles vs. the publish
-  // hard gate: the actual boundary is `assertUserGroupSourcesBoundToOrg`, independent of this
-  // route. `orgId` is REQUIRED here so a caller can never accidentally list an unscoped view.
+  // Lock-1 §K1 / OD-L1-2(a) — the `user_group` authoring PICKER: `orgId`-partitioned listing of
+  // groups CURATED (bound) for approval use — id + name + member COUNT only, never the member
+  // list itself (values-free re: member identity). Convenience only, same split as
+  // /directory/formula-roles vs. the publish hard gate: the actual curation boundary is
+  // `assertUserGroupSourcesBoundToOrg` + `ensurePlatformAdmin`-gated bind, independent of this
+  // route. `orgId` is REQUIRED (never an accidental unscoped view) but is a CALLER-SUPPLIED
+  // partition key, not an identity check — same guard as the shipped user/role lookups (§2.5), NOT
+  // a per-namespace authorization boundary (this codebase has no org-identity resolution to build
+  // one on; see the fix-round G-6 erratum).
   r.get('/api/approval-templates/directory/member-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const orgId = String(req.query.orgId || '').trim()
@@ -448,14 +456,24 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Lock-1 §K1 / OD-L1-2(a) — THE CURATED PATH: the only sanctioned way to add/remove an
-  // `(org_id, group_id)` binding row. Mirrors the shipped
-  // `scope-templates/:templateId/member-groups/:action(assign|unassign)` admin pattern
-  // (routes/admin-users.ts) under the SAME template-admin guard the rest of this picker seam uses
-  // (curating which groups a template AUTHOR may reference is itself a template-authoring action,
-  // not a platform-admin one). `groupId` existence is verified BEFORE bind so a dangling reference
-  // surfaces as a clean 404, never a raw FK-violation 500.
-  r.post('/api/approval-templates/directory/member-groups/:action(bind|unbind)', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+  // `(org_id, group_id)` binding row. Gated by `ensurePlatformAdmin` — DELIBERATELY STRONGER than
+  // the picker GET above and every other `/directory/*` route on this seam. Curation is the
+  // control OD-L1-2(a) names ("curated per-org binding table"): the whole point of a curated
+  // vocabulary is that the constrained principal (a template author, `approval-templates:manage`)
+  // cannot self-expand their own routing reach to a member set they cannot even enumerate — the
+  // picker returns id/name/memberCount only, never the roster. `approvalTemplateAdminGuard` is the
+  // SAME permission `/publish` requires and this repo deliberately admits non-admin authors under
+  // it, so gating bind/unbind there would make curation self-service for the exact principal it
+  // exists to constrain (mirrors the shipped `scope-templates/:templateId/member-groups/
+  // :action(assign|unassign)` admin pattern at routes/admin-users.ts:2383, whose first statement is
+  // `ensurePlatformAdmin` — as is EVERY other `platform_member_groups` write/list surface in this
+  // codebase; RA-1b's own named precedent, `roles.approval_usable`, has NO API write path at all).
+  // `groupId` existence is verified BEFORE bind so a dangling reference surfaces as a clean 404,
+  // never a raw FK-violation 500.
+  r.post('/api/approval-templates/directory/member-groups/:action(bind|unbind)', authenticate, async (req: Request, res: Response) => {
     try {
+      const adminUserId = await ensurePlatformAdmin(req, res)
+      if (!adminUserId) return
       const action = req.params.action
       const orgId = String(req.body?.orgId || '').trim()
       const groupId = String(req.body?.groupId || '').trim()
@@ -473,8 +491,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.status(404).json(approvalErrorResponse('PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found'))
       }
       if (action === 'bind') {
-        const actorUserId = resolveApprovalActorId(req)
-        await bindApprovalUsableMemberGroup(orgId, groupId, actorUserId ?? null)
+        await bindApprovalUsableMemberGroup(orgId, groupId, adminUserId)
       } else {
         await unbindApprovalUsableMemberGroup(orgId, groupId)
       }
