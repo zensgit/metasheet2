@@ -842,6 +842,22 @@
             <p class="template-authoring__hint">
               同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；仅对未单独设置去重规则的审批节点生效，返回上一节点后该节点重新计入本轮去重历史。
             </p>
+            <!-- M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover has a second,
+                 real server effect beyond the dedup cascade — it also exempts the graph from two
+                 publish-time duplicate-assignee checks for a parallel gateway (the static branch
+                 check `allowParallelDuplicateAssignees` and the dynamic-source preflight
+                 `assertNoParallelDynamicAssigneeConflicts`, ApprovalProductService.ts:4595/:4623-4625),
+                 because the merge machinery legitimately absorbs the same-approver overlap at
+                 runtime instead of leaving it to 409. Undisclosed, an admin could not know why a
+                 previously-rejected parallel graph now publishes. Scoped to the ACTUAL exemption
+                 (parallel branches only) — no other semantic invented. -->
+            <p
+              v-if="draft.autoApprovalDedupTier === 'merge_adjacent'"
+              class="template-authoring__hint"
+              data-testid="approval-template-dedup-tier-merge-adjacent-hint"
+            >
+              选择该项还会放宽并行分支的发布校验：同一审批人出现在同一并行网关的多个分支中不再阻止发布，运行时会自动跳过重复分支的指派。
+            </p>
             <p
               v-if="isAutoApprovalDedupTierLocked"
               class="template-authoring__hint template-authoring__hint--warn"

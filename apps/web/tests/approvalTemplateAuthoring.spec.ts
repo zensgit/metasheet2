@@ -2470,17 +2470,23 @@ describe('TemplateAuthoringView', () => {
       ])
     })
 
-    it('M7/M-2 census: 更多设置 is NOT an empty shell — it renders the dedup-tier radio group with 3 real, distinct options', async () => {
+    it('M7/M-2 census: 更多设置 is NOT an empty shell — it renders the dedup-tier radio group with 3 real, distinct, ENABLED options', async () => {
       await mountView()
       ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
       await flushUi()
 
       const group = container!.querySelector('[data-testid="approval-template-dedup-tier"]')
       expect(group).not.toBeNull()
-      expect(group!.querySelectorAll('input[type="radio"]').length).toBe(3)
+      const radios = Array.from(group!.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+      expect(radios.length).toBe(3)
       expect(container!.querySelector('[data-testid="approval-template-dedup-tier-none"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-template-dedup-tier-dedupe-historical"]')).not.toBeNull()
       expect(container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent"]')).not.toBeNull()
+      // Adversarial-gate P2 (PR #4967): renders-but-inert is a different failure than absent — a
+      // brand-new/non-locked template's control must actually be ENABLED, not permanently disabled
+      // theater that happens to still fire jsdom's change handler. This is the ONLY assertion that
+      // distinguishes "editable" from "renders disabled".
+      radios.forEach((radio) => expect(radio.disabled).toBe(false))
     })
 
     it('defaults to 不去重 (none) for a brand-new template — §2.2 no shipped default may change', async () => {
@@ -2489,6 +2495,32 @@ describe('TemplateAuthoringView', () => {
       await flushUi()
       const noneInput = container!.querySelector('[data-testid="approval-template-dedup-tier-none"]') as HTMLInputElement
       expect(noneInput.checked).toBe(true)
+    })
+
+    // M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover also exempts a parallel
+    // gateway from two publish-time duplicate-assignee checks (ApprovalProductService.ts:4595,
+    // :4623-4625) — a real side effect that must be disclosed, and disclosed ONLY while that tier
+    // is actually selected (it does not apply to 不去重 / 仅一次全自动同意).
+    it('M8: selecting 仅连续节点自动同意 discloses the parallel-branch publish-check relaxation; other tiers do not', async () => {
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent-hint"]')).toBeNull()
+
+      const dedupeInput = container!.querySelector('[data-testid="approval-template-dedup-tier-dedupe-historical"]') as HTMLInputElement
+      dedupeInput.checked = true
+      dedupeInput.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent-hint"]')).toBeNull()
+
+      const mergeAdjacentInput = container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent"]') as HTMLInputElement
+      mergeAdjacentInput.checked = true
+      mergeAdjacentInput.dispatchEvent(new Event('change'))
+      await flushUi()
+      const hint = container!.querySelector('[data-testid="approval-template-dedup-tier-merge-adjacent-hint"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent).toContain('并行')
     })
 
     it('selecting a tier (immediate-apply, no separate save transaction) and publishing carries autoApproval alongside allowRevoke', async () => {
