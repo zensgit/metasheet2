@@ -681,13 +681,15 @@ function stepDraftFromApprovalNode(
         .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
     : []
 
-  // P1-C: `unsupportedTemplateAuthoringReason` already forces the WHOLE template read-only for any
-  // mode outside the known union or a threshold missing its threshold — this total mapping is
-  // therefore never asked to coerce a genuinely-unknown value; it stays total only for the compiler.
+  // P1-C (master lock §P1-C): the out-of-union coercion branch is DELETED — this used to map any
+  // defined-but-unrecognized `approvalMode` to `'single'`, which is exactly the silent 会签→单人审批
+  // downgrade the lock's deletion clause exists to make impossible. `unsupportedTemplateAuthoringReason`
+  // (:1071-1076 below) is the SINGLE door for a defined-but-out-of-union `approvalMode`: it forces the
+  // whole template read-only and blocks `persistDraft`, so this line never re-decides that question.
+  // Hydration therefore preserves whatever was persisted verbatim (no substitution); only a genuinely
+  // ABSENT `approvalMode` takes the documented single-approver default.
   const approvalMode: ApprovalMode =
-    config.approvalMode === 'all' || config.approvalMode === 'any' || config.approvalMode === 'threshold'
-      ? config.approvalMode
-      : 'single'
+    config.approvalMode === undefined ? 'single' : (config.approvalMode as ApprovalMode)
   const approvalThreshold =
     Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1
       ? (config.approvalThreshold as number)
@@ -1104,7 +1106,9 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // P1-C: `approvalMode` itself must be a KNOWN value — the key-only check above can't see this.
     // An out-of-union value can never come from a real save (backend authoring `normalizeApprovalMode`
     // `failValidation`s any value outside single/all/any/threshold, ApprovalProductService.ts :570),
-    // so this must fail closed rather than let `stepDraftFromApprovalNode` coerce it to 'single'.
+    // so this must fail closed here — this check IS the single door: `stepDraftFromApprovalNode` no
+    // longer coerces an out-of-union value to 'single', it preserves it verbatim, and this reason
+    // string is what blocks `persistDraft` from ever re-saving it.
     if (
       config.approvalMode !== undefined
       && !['single', 'all', 'any', 'threshold'].includes(config.approvalMode as string)

@@ -275,6 +275,64 @@ describe('P1-C linear round-trip', () => {
   })
 })
 
+// P1-C gate P2-3 / master lock §P1-C verbatim: "Before lifting the read-only gate, this slice must
+// delete that latent flatten branch [...]" — `stepDraftFromApprovalNode`'s ternary used to map any
+// defined-but-out-of-union `approvalMode` to `'single'`. That branch is now deleted:
+// `unsupportedTemplateAuthoringReason` is the SINGLE door for a defined-but-out-of-union value (forces
+// the whole template read-only, blocks `persistDraft`); hydration itself no longer re-decides the
+// question and preserves whatever was persisted verbatim. Only a genuinely ABSENT `approvalMode` still
+// takes the documented single-approver default.
+describe('P1-C deleted flatten branch (gate P2-3, master lock §P1-C verbatim)', () => {
+  it('an out-of-union approvalMode is PRESERVED verbatim on hydrate — no longer silently coerced to single', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_THRESHOLD_GRAPH,
+      nodes: LINEAR_THRESHOLD_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { assigneeSources: n.config.assigneeSources, approvalMode: 'bogus' as never, emptyAssigneePolicy: 'error' } }
+        : n)),
+    }
+    const template = buildTemplate(graph)
+    // The single door: the whole template is forced read-only, which is what blocks a re-save.
+    expect(unsupportedTemplateAuthoringReason(template)).not.toBeNull()
+    // The deleted branch: hydration must preserve the raw value, not substitute 'single' for it.
+    // An exact positive equality (not `.not.toBe('single')`) — a notEqual assertion can't tell
+    // "preserved" apart from "failed for some other reason" (repo doctrine).
+    const draft = draftFromTemplate(template)
+    expect(draft.steps).toHaveLength(1)
+    expect(draft.steps[0].approvalMode).toBe('bogus')
+  })
+
+  it('positive control: every legitimate mode (all/any/threshold/single) plus an ABSENT approvalMode still hydrates correctly', () => {
+    const cases: Array<{ approvalMode?: 'all' | 'any' | 'threshold' | 'single'; expected: string }> = [
+      { approvalMode: 'all', expected: 'all' },
+      { approvalMode: 'any', expected: 'any' },
+      { approvalMode: 'threshold', expected: 'threshold' },
+      { approvalMode: 'single', expected: 'single' },
+      { approvalMode: undefined, expected: 'single' }, // ABSENT key -> documented single-approver default
+    ]
+    for (const { approvalMode, expected } of cases) {
+      const graph: ApprovalGraph = {
+        ...LINEAR_THRESHOLD_GRAPH,
+        nodes: LINEAR_THRESHOLD_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+          ? {
+              ...n,
+              config: {
+                assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }],
+                emptyAssigneePolicy: 'error',
+                ...(approvalMode !== undefined ? { approvalMode } : {}),
+                ...(approvalMode === 'threshold' ? { approvalThreshold: 1 } : {}),
+              },
+            }
+          : n)),
+      }
+      const template = buildTemplate(graph)
+      expect(unsupportedTemplateAuthoringReason(template)).toBeNull()
+      const draft = draftFromTemplate(template)
+      expect(draft.steps).toHaveLength(1)
+      expect(draft.steps[0].approvalMode).toBe(expected)
+    }
+  })
+})
+
 describe('P1-C linear validation preview (M6 dynamic-M honesty)', () => {
   it('rejects a non-integer / zero threshold', () => {
     const draft = draftFromTemplate(buildTemplate(LINEAR_THRESHOLD_GRAPH))
