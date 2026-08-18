@@ -2393,12 +2393,21 @@ action_soak_status() {
   } >> "$SOAK_STATUS_FILE"
 
   # --- cumulative count criteria (C1-C4) -------------------------------------------------
+  # [Q1]/[Q2] count BOTH regimes (post-merge review P1: the W4-side join is structurally
+  # empty for a legacy_only org, so C1/C2 evidence was unreachable for the control arm):
+  #  - W4-postured orgs: DISTINCT clean operations (calc completed, diff NULL|equal) — the
+  #    converged unit (a transient in-only mismatch row keeps its op out until it converges);
+  #  - legacy-postured orgs (rollout row absent or state='legacy'): COMPLETED PAIR DAYS —
+  #    attendance_records with BOTH boundaries set, created in-window, synthetic-family
+  #    users only — the same one-per-user-per-day converged unit in the regime that org
+  #    actually runs. Orgs are the config CLOSED SET; posture is read at query time (this
+  #    soak's postures are constant in-window by design — org walks are seed-time acts).
   soak_status_scalar "[Q1]_clean_punch_total_cumulative" \
-    "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
-  soak_status_rows "[Q2] per-org clean punches (cumulative; weakest org first)" \
-    "SELECT c.org_id, count(DISTINCT op.operation_id) AS clean_punch_count FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id ORDER BY clean_punch_count ASC;"
+    "SELECT (SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal')) + (SELECT count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now());" >/dev/null
+  soak_status_rows "[Q2] per-org clean punches (cumulative; BOTH regimes; weakest org first)" \
+    "SELECT org_id, sum(cnt)::int AS clean_punch_count FROM ( SELECT c.org_id, count(DISTINCT op.operation_id) AS cnt FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id UNION ALL SELECT r.org_id, count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now() GROUP BY r.org_id ) both_regimes GROUP BY org_id ORDER BY clean_punch_count ASC;"
   soak_status_rows "[Q3] org/posture classification (three-posture buckets; investigate any 'unclassified')" \
-    "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
+    "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
   soak_status_scalar "[Q4a]_w4_legacy_arm_clean_punches_cumulative" \
     "SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = op.org_id WHERE op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') AND COALESCE(w7.state, 'off') = 'off';" >/dev/null
   # [Q4b] MUST NOT join attendance_result_operations: a W7 group-shadow comparison row
@@ -2420,8 +2429,21 @@ action_soak_status() {
     "SELECT count(*) FROM pg_constraint WHERE conname IN ('fk_arc_record', 'fk_ar_current_calculation') AND contype = 'f';")"
   [[ "$v" == "2" ]] || alerts+=("Q15a_fk_constraints_missing=${v}")
 
+  # --- [Q2b] legacy-control byte-neutrality (post-merge review P1 follow-through): for
+  # every CONFIG org still legacy-postured, ANY W4 calculation or operation row is an
+  # alert — the control arm's evidence is that the W4 machinery never touched it.
+  local ctrl_state ctrl_rows org
+  for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
+    ctrl_state="$(soak_psql_ta "SELECT COALESCE((SELECT state FROM attendance_calculation_rollout_state WHERE org_id = '${org}'), 'legacy');")"
+    if [[ "$ctrl_state" == "legacy" ]]; then
+      ctrl_rows="$(soak_status_scalar "[Q2b]_legacy_control_w4_rows_${org:0:8}" \
+        "SELECT (SELECT count(*) FROM attendance_record_calculations WHERE org_id = '${org}') + (SELECT count(*) FROM attendance_result_operations WHERE org_id = '${org}');")"
+      [[ "$ctrl_rows" == "0" ]] || alerts+=("Q2b_legacy_control_w4_rows_${org:0:8}=${ctrl_rows}")
+    fi
+  done
+
   # --- per-org read set ------------------------------------------------------------------
-  local org org8
+  local org8
   for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
     org8="${org:0:8}"
     echo "" >> "$SOAK_STATUS_FILE"
