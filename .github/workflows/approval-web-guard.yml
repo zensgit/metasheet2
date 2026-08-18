@@ -164,6 +164,10 @@ on:
       - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
       - 'apps/web/tests/approval-form-field-update.test.ts'
       - 'apps/web/tests/approval-form-field-inspector.spec.ts'
+      # F4 (2026-08-18, delta §5 F4): production mount behind approvalCanvasV2 + the F2-gate
+      # handoff-condition-3 real-router drag-state-clearing spec. approvalTemplateAuthoring.spec.ts
+      # and TemplateAuthoringView.vue are already listed below.
+      - 'apps/web/tests/approval-form-builder-route-leak.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -431,6 +435,10 @@ on:
       - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
       - 'apps/web/tests/approval-form-field-update.test.ts'
       - 'apps/web/tests/approval-form-field-inspector.spec.ts'
+      # F4 (2026-08-18, delta §5 F4): production mount behind approvalCanvasV2 + the F2-gate
+      # handoff-condition-3 real-router drag-state-clearing spec. approvalTemplateAuthoring.spec.ts
+      # and TemplateAuthoringView.vue are already listed below.
+      - 'apps/web/tests/approval-form-builder-route-leak.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -623,6 +631,7 @@ jobs:
             approval-form-builder-slots \
             approval-form-field-update \
             approval-form-field-inspector \
+            approval-form-builder-route-leak \
             approval-date-range-field \
             approval-date-range-visibility \
             approval-date-range-inline-editor \

@@ -39,9 +39,10 @@ import type {
 /**
  * F1 production form-authoring adapter — the ONE typed command path of RATIFIED
  * FB-D4 (approval-form-builder-parity-delta-design-20260811.md), consumed by
- * the F2/F3 `ApprovalFormBuilder` behind `approvalCanvasV2`. The flag-OFF
- * inline editor fallback does not route through this module (delta §5 F1:
- * additive-only, no production mount until F4).
+ * the F2/F3 `ApprovalFormBuilder`, which F4 mounts in `TemplateAuthoringView.vue`
+ * behind `approvalCanvasV2` (default OFF). The flag-OFF inline editor fallback
+ * does not route through this module and never has (delta §5 F1: additive-only;
+ * §5 F4: the first and only production mount).
  *
  * Contract:
  * - Every structural edit flows through `approvalFormCommands` + the form

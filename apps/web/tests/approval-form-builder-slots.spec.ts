@@ -3,7 +3,10 @@
  * NEW Designer 2.0 `ApprovalFormBuilder.vue`: N+1 semantic insertion slots,
  * strict drag-codec drops, stale-anchor no-ops, transient drag-state clearing
  * on all five triggers, click/drag/keyboard convergence on the ONE adapter,
- * and the no-production-mount pin (F4 mounts behind `approvalCanvasV2`).
+ * and (F4) the flag-gated production-mount source pin: TemplateAuthoringView.vue is the ONE view
+ * that mounts the builder/palette, only inside the `showFormBuilderV2` (canvasV2Enabled &&
+ * formSessionHydrated) wrapper — see apps/web/tests/approvalTemplateAuthoring.spec.ts for the
+ * behavioral mounted-iff-flag proof this source pin does not substitute for.
  * Mount pattern: repo-standard `createApp` + real DOM events (no test-utils).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -1112,25 +1115,43 @@ describe('F2 no-mount pin — production views do not import the new builder (FB
     return out
   }
 
-  it('no file under src/views references ApprovalFormBuilder or ApprovalFormPalette (positive control: the F0 fallback IS imported)', () => {
+  it('F4 FLIPPED PIN: exactly TemplateAuthoringView.vue mounts the new builder/palette, and only inside the flag-gated v2 wrapper (FB-D8 production mount). The BEHAVIORAL mounted-iff-canvasV2 proof (OFF => absent + legacy intact; ON => present) lives in apps/web/tests/approvalTemplateAuthoring.spec.ts — this is a source-text scan, never a substitute for it.', () => {
     const viewsDir = join(__dirname, '..', 'src', 'views')
     const sources = collectViewSources(viewsDir)
     expect(sources.length).toBeGreaterThan(10)
-    const offenders: string[] = []
+    const mounters: string[] = []
     let inlineEditorSeen = false
     for (const file of sources) {
       const text = readFileSync(file, 'utf8')
       if (
-        text.includes('ApprovalFormBuilder') ||
-        text.includes('ApprovalFormPalette')
+        text.includes('<ApprovalFormBuilder') ||
+        text.includes('<ApprovalFormPalette')
       ) {
-        offenders.push(file)
+        mounters.push(file)
       }
       if (text.includes('ApprovalFormInlineEditor')) inlineEditorSeen = true
     }
-    expect(offenders).toEqual([])
-    // Positive control: the scan DOES see component imports — the extracted
-    // F0 fallback is mounted by TemplateAuthoringView on this baseline.
+    // F4 production mount: exactly ONE production view mounts the new builder/palette — a SECOND
+    // view sneaking an unauthorized mount (or the F0 fallback view losing its mount) fails here.
+    expect(mounters).toEqual([join(viewsDir, 'approval', 'TemplateAuthoringView.vue')])
+    // Positive control: the scan DOES see component imports — the extracted F0 fallback stays
+    // mounted too (flag-OFF byte-identical fallback path, delta §5 F0/FB-D8).
     expect(inlineEditorSeen).toBe(true)
+
+    // Source-level defense-in-depth: both mount markers sit inside the SAME flag-gated wrapper.
+    // `showFormBuilderV2` (canvasV2Enabled && formSessionHydrated, delta §5 F4) is the only
+    // condition guarding them — a source match here proves the guard identifier is PRESENT on the
+    // wrapper, never that it evaluates correctly at runtime (that is the behavioral spec's job).
+    const viewSource = readFileSync(mounters[0]!, 'utf8')
+    const wrapperMarkerIndex = viewSource.indexOf('template-authoring__form-designer-v2')
+    expect(wrapperMarkerIndex).toBeGreaterThan(-1)
+    const wrapperTagStart = viewSource.lastIndexOf('<div', wrapperMarkerIndex)
+    expect(wrapperTagStart).toBeGreaterThan(-1)
+    const builderIndex = viewSource.indexOf('<ApprovalFormBuilder', wrapperMarkerIndex)
+    const paletteIndex = viewSource.indexOf('<ApprovalFormPalette', wrapperMarkerIndex)
+    expect(builderIndex).toBeGreaterThan(wrapperMarkerIndex)
+    expect(paletteIndex).toBeGreaterThan(wrapperMarkerIndex)
+    const wrapperOpenTag = viewSource.slice(wrapperTagStart, wrapperMarkerIndex)
+    expect(wrapperOpenTag).toMatch(/v-else|v-if="[^"]*showFormBuilderV2[^"]*"/)
   })
 })

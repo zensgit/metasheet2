@@ -224,6 +224,14 @@
 # the namespace was entirely empty before this slice (one pre-existing `lock8` hit is a doc-comment
 # citation, not a test token).
 #
+# F4 (2026-08-18, delta §5 F4): `approval-form-builder-route-leak` — the F2-gate handoff condition 3
+# real-router spec (constructs a CANCELLED navigation mid-drag; the guard clears the shared drag
+# session as its first statement, before the dirty-draft confirm). The flag-gate mount/hydration/
+# single-seed tests ride the ALREADY-listed `approvalTemplateAuthoring` token below (extended in the
+# same PR, not a new file). Bare basename token; verified unique — no existing `approval-form-*`
+# token is a substring of it or vice versa (closest neighbor `approval-form-builder-slots` diverges
+# at `-r`).
+#
 # P1-C (2026-08-18, approval-parity-master-design-lock-20260817.md §P1-C): shipped timeout +
 # threshold frontend compatibility — two new tokens. `approval-template-authoring-threshold-
 # timeout-compat` (pure-logic: both allowlists' no-flatten status, linear + complex round-trip,
@@ -302,6 +310,7 @@ npx vitest run \
   approval-form-builder-slots \
   approval-form-field-update \
   approval-form-field-inspector \
+  approval-form-builder-route-leak \
   approval-date-range-field \
   approval-date-range-visibility \
   approval-date-range-inline-editor \
