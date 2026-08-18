@@ -895,7 +895,13 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   // ── Lock-0 P1-A acceptance gates (docs/development/approval-lock0-d0-interaction-delta-20260817.md) ──
 
-  it('A-1/A-2: the shipped registry renders exactly 审批人设置/表单权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
+  // Lock-5 §1.1 L5-A / gate E-1 landed the first server-enforced per-node operation policies, so the
+  // shipped registry now declares three tabs on an `approval` node. Lock-0 A-1/A-2 STILL HOLD — what
+  // changed is which fixture carries the absence half: Lock-5 E-1's positive control is "a registry
+  // fixture with zero ratified policies renders NO third tab", which is the dedicated test below
+  // ("A-2 (re-pointed by Lock-5 E-1) …"). This test keeps the per-tab-content and no-Save/Cancel
+  // halves of A-1/A-8 against the SHIPPED registry.
+  it('A-1/A-8: the shipped registry renders 审批人设置/表单权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
     routeParams = { id: 'tpl_a1_a2' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
@@ -910,7 +916,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tablist = inspector.querySelector('[data-testid="approval-canvas-inspector-tablist"]') as HTMLElement
     expect(tablist).not.toBeNull()
     const tabs = Array.from(tablist.querySelectorAll('[role="tab"]')) as HTMLElement[]
-    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限'])
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限', '操作权限'])
 
     // A-1 "per-tab content matches the L0-1 table" — not just tab labels: the CONTENT visibility
     // actually follows the active tab. `v-show` only toggles `style.display` (deliberately, so it
@@ -930,10 +936,15 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(assigneeSection.style.display).toBe('none')
     expect(fieldPermSection.style.display).not.toBe('none')
 
-    // A-2: no 操作权限 tab/content with the shipped (Lock-5-absent) registry.
-    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    // Lock-5 E-1: the 操作权限 tab now exists on the shipped registry, and its CONTENT follows the
+    // active tab exactly like the other two — it is `v-if`-mounted (not `v-show`), so absence while
+    // another tab is active is the assertion, and presence after clicking it is the control.
     expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
-    expect(inspector.textContent).not.toContain('操作权限')
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(assigneeSection.style.display).toBe('none')
+    expect(fieldPermSection.style.display).toBe('none')
+    expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).not.toBeNull()
 
     // A-8 (negative half): no Save/Cancel/Apply control anywhere in the inspector — tabs are
     // presentation only. Each label checked individually — `not.toEqual(arrayContaining([...]))`
@@ -1825,7 +1836,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     const node = makeApprovalNode('approval_x')
     const registry: ApprovalCapabilityRegistry = {
       assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
-      operationPoliciesByNodeType: { approval: [{ id: 'transfer', label: '转交' }] },
+      operationPoliciesByNodeType: {
+        approval: [{ id: 'transfer', label: '转交', policyKeys: ['allowTransfer'] }],
+      },
     }
     const { container: c, unmount } = mountDirectInspector({
       node,
@@ -1837,15 +1850,58 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-2: with the shipped (Lock-5-absent) registry, no 操作权限 element exists — the A-1 fixture proves the tab is not a dead path', () => {
+  // Lock-5 §1.1 landed the first ratified operation policies, so the SHIPPED registry now declares
+  // them and the tab renders. Lock-0 A-2's mechanism assertion is unchanged and still needs a
+  // negative: per Lock-5 gate E-1 ("a registry fixture with zero ratified policies renders NO third
+  // tab — Lock-0 A-1/A-2 still hold"), the fixture carrying that half is an EMPTY
+  // `operationPoliciesByNodeType`, paired with the A-1 positive control directly above. Asserting it
+  // against the shipped registry instead would now be asserting the opposite of the contract.
+  it('A-2 (re-pointed by Lock-5 E-1): a registry with ZERO ratified operation policies renders no 操作权限 element — the tab is registry-driven, not hardcoded', () => {
+    const node = makeApprovalNode('approval_x')
+    const registry: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
+      operationPoliciesByNodeType: {},
+    }
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry,
+      api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
+    })
+    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
+    expect(c.textContent).not.toContain('操作权限')
+    unmount()
+  })
+
+  // Lock-5 gate E-2 — "no inert control". The tab renders EXACTLY the registry's implemented
+  // fields. `returnReviewMode` (§1.2) and `commentRequired` (§1.3) are part of the persisted schema
+  // but have no landed enforcement, and `signaturePolicy` renders nothing anywhere (OD-L5-10(a)) —
+  // none of them may appear. Paired with the rendered-control assertions so the absence half is not
+  // green against an empty tab.
+  it('E-2: the 操作权限 tab renders the three implemented controls and NO control for an unenforced key', async () => {
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
       node,
       registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
       api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
     })
-    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
-    expect(c.textContent).not.toContain('操作权限')
+    ;(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const section = c.querySelector('[data-testid="approval-node-section-operations"]') as HTMLElement
+    expect(section).not.toBeNull()
+    // Rendered (enforcement landed this slice).
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-transfer"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).not.toBeNull()
+    expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(3)
+    // NOT rendered (declared in the schema, enforcement deferred) — and `signaturePolicy` nowhere.
+    expect(section.textContent).not.toContain('回退方式')
+    expect(section.textContent).not.toContain('审批意见')
+    expect(section.textContent).not.toContain('手写签名')
+    expect(c.querySelector('[data-testid*="signature"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="returnReviewMode"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="commentRequired"]')).toBeNull()
     unmount()
   })
 

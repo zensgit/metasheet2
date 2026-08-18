@@ -152,7 +152,18 @@ export interface HandlerNodeConfig {
   /** 办理意见; absent ≡ false (corpus C-7 default / OD-L3-3(a)). */
   opinionRequired?: boolean
   fieldPermissions?: NodeFieldPermission[]
+  /**
+   * Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler node admits a NARROWED `nodeOperationPolicy`:
+   * `allowTransfer` and `commentRequired` only. `allowAddSign` / `allowReduceSign` / `allowReturn`
+   * are rejected at the authoring choke with `APPROVAL_HANDLER_CONFIG_INVALID`, because Lock-3 §2.2
+   * already 409s those verbs at a handler node — a switch over an impossible verb is M8 theater.
+   * `allowTransfer` absent ≡ true replaces Lock-3's hardcoded transfer-allowed with NO behavior change.
+   */
+  nodeOperationPolicy?: Pick<NodeOperationPolicy, 'allowTransfer' | 'commentRequired'>
 }
+
+/** Lock-5 §1.6 — the `NodeOperationPolicy` sub-keys a `handler` node may carry (OD-L5-11(a)). */
+export const HANDLER_NODE_OPERATION_POLICY_KEYS = ['allowTransfer', 'commentRequired'] as const
 
 // T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wired `remind`
 // (a notification, no state mutation) and slice 2 wires `transfer` + `jump` (state mutations executed
@@ -205,7 +216,88 @@ export interface ApprovalNodeConfig {
   // separately ratified (mirrors the fieldPermissions readonly/auto_* declared-but-do-not-wire precedent).
   // Default-absent === no signature policy === current behavior (byte-stable).
   signaturePolicy?: SignaturePolicy
+  // Lock-5 §1.1 L5-A (OD-L5-1(a)) — per-node 操作权限. ONE object, not six flat keys (§1.1's
+  // four-allowlist arithmetic). Every field is absent-≡-today, so existing graphs are byte-stable
+  // and no migration touches stored JSON; an all-absent object is OMITTED rather than persisted
+  // as `{}`. Enforced server-side at the single dispatch choke (§2.1), never by the UI alone.
+  nodeOperationPolicy?: NodeOperationPolicy
 }
+
+/**
+ * Lock-5 §1.1 L5-A — the per-node member-action switches (`操作权限`), structurally modelled on
+ * `SignaturePolicy`. Every field is ABSENT ≡ TODAY'S BEHAVIOR (OD-L5-3(a)): absent ≡ allowed for
+ * the four verb switches, absent ≡ `'resume_forward'` for the return mode, absent ≡ the instance's
+ * `policy_snapshot.rejectCommentRequired` for the comment requirement (OD-L5-8(a)).
+ *
+ * Enforcement status per field (M7/M8 — a switch whose runtime never refuses must NOT render):
+ *   - `allowTransfer` / `allowAddSign` / `allowReduceSign` / `allowReturn`: ENFORCED at the §2.1
+ *     dispatch choke in this slice; rendered in the `操作权限` tab.
+ *   - `returnReviewMode`: schema-validated only. OD-L5-6(a) ships `'resume_forward'` (today's
+ *     behavior) in v1 and defers `'jump_back_to_current'`; §1.2 states flatly that no
+ *     `returnReviewMode` control renders. Declared here so an out-of-enum value FAILS publish
+ *     (gate A-6) rather than round-tripping as an unknown key.
+ *   - `commentRequired`: schema-validated only in this slice. Its enforcement moves BOTH shipped
+ *     hardcodings at once (§1.3) and lands in its own slice; until then it renders no control.
+ */
+export interface NodeOperationPolicy {
+  /** C-1 允许转交. Absent ≡ true. */
+  allowTransfer?: boolean
+  /** C-2 允许加签. Absent ≡ true. One authoring checkbox writes this AND `allowReduceSign` (OD-L5-2(a)). */
+  allowAddSign?: boolean
+  /** C-2 允许减签. Absent ≡ true. See `allowAddSign`. */
+  allowReduceSign?: boolean
+  /** C-7 允许回退. Absent ≡ true. */
+  allowReturn?: boolean
+  /** §1.2 / OD-L5-6(a). Absent ≡ 'resume_forward' (today's behavior). Declared-inert this slice. */
+  returnReviewMode?: 'resume_forward' | 'jump_back_to_current'
+  /** §1.3 / OD-L5-7(a). Absent ≡ the instance snapshot (≡ 'reject_only' today). Declared-inert this slice. */
+  commentRequired?: 'never' | 'reject_only' | 'always'
+}
+
+/** The `NodeOperationPolicy` keys that gate a member ACTION VERB at the §2.1 dispatch choke. */
+export type NodeOperationPolicyActionKey =
+  | 'allowTransfer'
+  | 'allowAddSign'
+  | 'allowReduceSign'
+  | 'allowReturn'
+
+/**
+ * Lock-5 §2.1 / gate A-1 — the single exported verb→policy-key table the dispatch choke iterates.
+ * A `Record` over the FULL `ApprovalActionType` union (not a hand-written array of the gated four)
+ * so adding a verb to `APPROVAL_ACTION_TYPES` without deciding its policy disposition is a
+ * TypeScript error HERE, at the declaration — the convergent "table plus exhaustiveness" form,
+ * not per-verb hand-written negatives.
+ *
+ * `null` = ungated BY DECISION, with the reason:
+ *   - `approve` / `reject` / `comment`: never switchable — "a node whose approver may not decide is
+ *     not an approval node" (§1.1 Scope).
+ *   - `revoke`: keeps its TEMPLATE-level carrier `RuntimePolicy.allowRevoke` (409
+ *     `APPROVAL_REVOKE_DISABLED`); moving it per-node would create a second precedence rule for one
+ *     semantic (§1.1, the shape Lock-4 OD-L4-4 rejected).
+ *   - `handle`: Lock-3's handler submit verb — a handler's completion action, not a member
+ *     operation over someone else's seat; Lock-3 §2.2 already governs handler verb legality and
+ *     §1.6 admits only `allowTransfer` (+ `commentRequired`) on a handler node.
+ */
+export const ACTION_POLICY_KEYS: Record<ApprovalActionType, NodeOperationPolicyActionKey | null> = {
+  approve: null,
+  reject: null,
+  comment: null,
+  revoke: null,
+  handle: null,
+  transfer: 'allowTransfer',
+  add_sign: 'allowAddSign',
+  reduce_sign: 'allowReduceSign',
+  return: 'allowReturn',
+}
+
+/**
+ * Lock-5 §1.4 / OD-L5-9(a) — the audit action written for a refused member operation. Deliberately
+ * NOT a member of `APPROVAL_ACTION_TYPES`: it is never a dispatchable request action, and adding it
+ * there would break gate A-1's exact-set partition and the attendance P26 pinned union. The
+ * `approval_records.action` CHECK is already a strict SUPERSET of the dispatch union (it also
+ * carries `created`/`sign`/`cc`/`remind`/`jump`/`reassign`), which is where this value lives.
+ */
+export const APPROVAL_POLICY_DENIED_ACTION = 'policy_denied' as const
 
 /**
  * T3-3 slice 1 (declared-inert): a node's signature/attestation requirement. `kind` is contract-OPEN
