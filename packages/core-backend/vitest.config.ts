@@ -380,7 +380,7 @@ export default defineConfig({
       // required no-DB `test (20.x)` job collected and describeIfDatabase-skip-greened it, and it
       // was named in NO real-DB lane — the exact FAIL-0 skip-green pattern. Excluded here so the
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the dedicated
-      // .github/workflows/approval-realdb-entry-epoch-anymode.yml workflow (standalone per the
+      // .github/workflows/approval-realdb-p7r1-coverage-repair.yml workflow (standalone per the
       // sealed-export-s6a-authority-row-lock.yml precedent — plugin-tests.yml is an s6a
       // sha256-pinned provenance input, deliberately not extended). Two-point wiring — both points
       // land in the SAME commit.
@@ -388,7 +388,7 @@ export default defineConfig({
       // P7-R1 (FAIL-0/FAIL-4): WP1 或签 (any-mode) first-wins + sibling-cancellation oracle. Same
       // shape and same fix as the entry immediately above — was NOT excluded here, skip-greened in
       // the no-DB job, named in no real-DB lane. Excluded here and wired as a WHOLE FILE into the
-      // SAME dedicated approval-realdb-entry-epoch-anymode.yml workflow (sibling job
+      // SAME dedicated approval-realdb-p7r1-coverage-repair.yml workflow (sibling job
       // approval-realdb-wp1-any-mode). Two-point wiring, same commit.
       'tests/integration/approval-wp1-any-mode.api.test.ts',
       // P7-R1 (FAIL-0 §5 mechanical sweep, 2026-08-18): seven MORE approval real-DB suites found

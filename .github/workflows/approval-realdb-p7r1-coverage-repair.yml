@@ -58,6 +58,11 @@ on:
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      # Gate P3-2 (2026-08-18): the other half of the two-point wiring — a rebase or PR that
+      # silently drops one of this file's exclude entries above must re-trigger this lane so a
+      # human sees a red job instead of the suite quietly returning to the required no-DB job's
+      # skip-green collection.
+      - 'packages/core-backend/vitest.config.ts'
       - '.github/workflows/approval-realdb-p7r1-coverage-repair.yml'
   push:
     branches: [main]
@@ -79,6 +84,11 @@ on:
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      # Gate P3-2 (2026-08-18): the other half of the two-point wiring — a rebase or PR that
+      # silently drops one of this file's exclude entries above must re-trigger this lane so a
+      # human sees a red job instead of the suite quietly returning to the required no-DB job's
+      # skip-green collection.
+      - 'packages/core-backend/vitest.config.ts'
       - '.github/workflows/approval-realdb-p7r1-coverage-repair.yml'
 
 permissions:
