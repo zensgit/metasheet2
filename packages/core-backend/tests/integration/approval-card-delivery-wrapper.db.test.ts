@@ -75,6 +75,51 @@ async function waitUntilBlockedOnInstanceLock(blockerPid: number, timeoutMs = 50
 }
 
 /**
+ * Wait until TWO distinct dispatch transactions are in the same instance-lock queue rooted at the
+ * holder. The second transaction may wait behind the first waiter rather than directly on the
+ * holder, so walk `pg_blocking_pids` transitively instead of requiring two direct blockers.
+ */
+async function waitUntilDistinctInstanceLockWaiters(
+  blockerPid: number,
+  expectedWaiters = 2,
+  timeoutMs = 5000,
+): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const r = await q(
+      `WITH RECURSIVE
+         waiters AS (
+           SELECT pid
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%approval_instances%'
+              AND query ILIKE '%for update%'
+         ),
+         lock_chain(waiter_pid, blocker_pid) AS (
+           SELECT waiters.pid, direct_blocker.pid
+             FROM waiters
+             CROSS JOIN LATERAL unnest(pg_blocking_pids(waiters.pid)) AS direct_blocker(pid)
+           UNION
+           SELECT lock_chain.waiter_pid, upstream_blocker.pid
+             FROM lock_chain
+             CROSS JOIN LATERAL unnest(pg_blocking_pids(lock_chain.blocker_pid)) AS upstream_blocker(pid)
+         )
+       SELECT DISTINCT waiter_pid::int AS pid
+         FROM lock_chain
+        WHERE blocker_pid = $1`,
+      [blockerPid],
+    )
+    const pids = (r.rows as Array<{ pid: number | string }>).map((row) => Number(row.pid))
+    if (pids.length >= expectedWaiters) return pids
+    await sleep(25)
+  }
+  throw new Error(
+    `timed out waiting for ${expectedWaiters} distinct dispatchAction lock waiters rooted at holder ${blockerPid}; the double-tap test became sequential or dispatchAction stopped locking approval_instances`,
+  )
+}
+
+/**
  * Same deterministic lock-wait proof, for the DELIVERY row (owner P1 2026-07-12). Correlated to OUR
  * holder via pg_blocking_pids so a foreign waiter can never satisfy it.
  */
@@ -576,20 +621,53 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
   test('CONCURRENCY tripwire: two simultaneous approves — exactly one engine action, one claim, loser gets the real terminal state', async () => {
     // The wrapper is dispatch-THEN-claim, so in a true concurrent window BOTH requests can enter
     // the engine — the engine's own gates (FOR UPDATE + status/version) must reduce them to one.
-    // A sequential duplicate-tap test cannot prove this; Promise.all does.
+    // A bare Promise.all cannot prove this: one call can complete before the other starts its
+    // transaction. Hold the engine's instance lock, park BOTH distinct dispatch transactions on it
+    // (verified through the full pg_blocking_pids chain), then release the shared barrier.
+    //
+    // Mutation proof: removing the engine's instance FOR UPDATE means neither request parks here;
+    // moving the second request below COMMIT leaves only one waiter. Both mutations time out at the
+    // barrier instead of quietly reducing this golden to a sequential duplicate-tap assertion.
     const instanceId = await newInstance()
     const deliveryId = await newSentDelivery(instanceId)
+    const holder = await poolManager.get().getInternalPool().connect()
+    let firstPromise: ReturnType<typeof executeApprovalActionFromCardDelivery> | undefined
+    let secondPromise: ReturnType<typeof executeApprovalActionFromCardDelivery> | undefined
+    try {
+      await holder.query('BEGIN')
+      await holder.query(
+        `SELECT id FROM approval_instances
+          WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'
+          FOR UPDATE`,
+        [instanceId],
+      )
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
 
-    const [first, second] = await Promise.all([
-      executeApprovalActionFromCardDelivery(
+      firstPromise = executeApprovalActionFromCardDelivery(
         { query: q, approvals },
         { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '并发A', actor: approverActor },
-      ),
-      executeApprovalActionFromCardDelivery(
+      )
+      await waitUntilBlockedOnInstanceLock(holderPid, 2500)
+
+      secondPromise = executeApprovalActionFromCardDelivery(
         { query: q, approvals },
         { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '并发B', actor: approverActor },
-      ),
-    ])
+      )
+      const waiterPids = await waitUntilDistinctInstanceLockWaiters(holderPid, 2, 2500)
+      expect(new Set(waiterPids).size).toBeGreaterThanOrEqual(2)
+
+      // Both requests are inside the same load-bearing engine lock window. Only now may either
+      // acquire the row and decide/claim.
+      await holder.query('COMMIT')
+    } catch (error) {
+      await holder.query('ROLLBACK').catch(() => {})
+      await Promise.allSettled([firstPromise, secondPromise].filter((promise): promise is Promise<unknown> => promise !== undefined))
+      throw error
+    } finally {
+      holder.release()
+    }
+
+    const [first, second] = await Promise.all([firstPromise!, secondPromise!])
     const outcomes = [first, second]
     const winners = outcomes.filter((o) => o.status === 'ok')
     expect(winners).toHaveLength(1)
@@ -611,10 +689,11 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       .filter((r) => r.metadata?.channel === 'dingtalk_card')
     expect(channelRecords).toHaveLength(1)
 
-    // exactly ONE acted claim on the card
+    // Exactly ONE durable claim on the card, paired with the one engine action above.
     const card = await q(`SELECT card_state, acted_by, acted_action FROM dingtalk_approval_card_deliveries WHERE id = $1`, [deliveryId])
     expect((card.rows[0] as { card_state: string }).card_state).toBe('acted')
     expect((card.rows[0] as { acted_action: string }).acted_action).toBe('approve')
+    expect((card.rows[0] as { acted_by: string }).acted_by).toBe(APPROVER)
   })
 
     test('non-assignee actor is rejected by the ENGINE (zero bypass), card stays claimable', async () => {
