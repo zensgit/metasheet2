@@ -301,7 +301,7 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
   const OBJECT_CONFIG_MENTION = /\bobjectConfig\b/
   const discovered = walk(libRoot)
     .filter((f) => OBJECT_CONFIG_MENTION.test(fs.readFileSync(f, 'utf8')))
-    .map((f) => path.relative(path.join(__dirname, '..'), f))
+    .map((f) => path.relative(path.join(__dirname, '..'), f).split(path.sep).join('/'))
     .sort()
   const {
     K3_NON_PROFILE_OBJECT_CONFIG_MODULES,
@@ -343,6 +343,7 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
 
   function stripComments(text) {
     return text
+      .replace(/\r\n?/g, '\n')
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .split('\n')
       .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
@@ -432,7 +433,7 @@ test('SWEEP CONTRACT: every objectConfig field, across EVERY consumer file, is T
     try {
       const rediscovered = walk(libRoot)
         .filter((f) => OBJECT_CONFIG_MENTION.test(fs.readFileSync(f, 'utf8')))
-        .map((f) => path.relative(path.join(__dirname, '..'), f))
+        .map((f) => path.relative(path.join(__dirname, '..'), f).split(path.sep).join('/'))
         .sort()
       assert.ok(rediscovered.includes(`lib/adapters/${name}`),
         `a consumer using this syntax must be DISCOVERED (${name}) — otherwise the predicate is narrower than the property`)
