@@ -36,8 +36,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 //             (MS-5/MS-9 as full runtime-predicate loops; MS-6/MS-11/MS-13's label/mark maps are
 //             TypeScript-`Record<AuthorableFieldType,…>`-literal COMPILE-forced — verified by
 //             `vue-tsc -b`, not a vitest row — MS-13's palette GROUPING is the one non-compile-
-//             forced part, covered by the pre-existing forcing function
-//             `approval-form-palette-chips.spec.ts:107`, generalized rather than reinvented).
+//             forced part. It has TWO independent registration sites: the F2
+//             `ApprovalFormPalette.vue` component's exported `APPROVAL_FORM_PALETTE_GROUPS`, covered
+//             by the pre-existing forcing function `approval-form-palette-chips.spec.ts:107`; and
+//             `TemplateAuthoringView.vue`'s own separate `fieldPaletteGroups` local (the array
+//             actually shipped into the live inline editor), NOT reachable from :107 (correction,
+//             gate P2-1: an earlier version of this comment claimed :107 was "generalized" to cover
+//             both — false; deleting `explanation` from the view's own array alone left every
+//             then-reachable spec green) — covered separately by
+//             apps/web/tests/approval-form-inline-editor-extract.spec.ts's "(o) MS-13 completeness"
+//             test, which mounts the real view and queries the rendered chip DOM).
 //   COVERED here, but against the COMMITTED artifact, not a live rebuild:
 //     - MS-7  OpenAPI (dist/openapi.json)  — reads the COMMITTED `packages/openapi/dist/
 //             openapi.json` this PR regenerated (`pnpm --filter @metasheet/openapi run

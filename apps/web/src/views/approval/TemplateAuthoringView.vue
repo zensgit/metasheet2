@@ -2974,8 +2974,13 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
 // source-scans every file under src/views for that literal component name and fails the build if
 // it appears, even as an import of its exported constants. This stays a SECOND, non-derived
 // registration site the F2 forcing-function test (approval-form-palette-chips.spec.ts:107) does
-// not cover; approval-date-range-field.test.ts census-checks this file's set is consistent with
-// AUTHORABLE_FIELD_TYPES instead.
+// NOT cover — and neither did approval-date-range-field.test.ts's own "census" (correction, gate
+// P2-1: an earlier version of this comment claimed that file checked THIS array; it only ever
+// re-read the F2 component's own APPROVAL_FORM_PALETTE_GROUPS, never `fieldPaletteGroups` below —
+// deleting `explanation` from this array alone left every then-reachable spec green). This array's
+// completeness against AUTHORABLE_FIELD_TYPES is covered by a REAL mount of this view (not a
+// duplicated literal): apps/web/tests/approval-form-inline-editor-extract.spec.ts's "(o) MS-13
+// completeness" test queries the rendered `approval-field-palette-*` chip DOM directly.
 const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   text: '文本',
   textarea: '多行文本',

@@ -25,12 +25,21 @@ import { isSelectableConditionOrVisibilityDependencyType } from '../src/approval
 //     - MS-11 four label/mark maps — all `Record<AuthorableFieldType|FormFieldType,…>` literals,
 //             compile-forced the same way.
 //     - MS-13 palette GROUPING (the one non-compile-forced part of MS-13 — plain string arrays, not
-//             a Record) — covered by the PRE-EXISTING forcing function
+//             a Record) has TWO independent registration sites, NOT one: the F2
+//             `ApprovalFormPalette.vue` component's exported `APPROVAL_FORM_PALETTE_GROUPS`, and
+//             `TemplateAuthoringView.vue`'s own separate `fieldPaletteGroups` local (the array
+//             actually shipped into the live inline editor). The PRE-EXISTING forcing function
 //             `approval-form-palette-chips.spec.ts:107` (`[...groupedTypes].sort() ===
-//             [...AUTHORABLE_FIELD_TYPES].sort()`), generalized rather than reinvented, and
-//             cross-checked again in approval-explanation-field.test.ts's own registration-
-//             completeness describe block. The inline-editor's per-type property block (the other
-//             half of MS-13) is a MOUNTED-component concern — see
+//             [...AUTHORABLE_FIELD_TYPES].sort()`) and approval-explanation-field.test.ts's own
+//             registration-completeness describe block BOTH read only `APPROVAL_FORM_PALETTE_GROUPS`
+//             — neither one is reachable from `TemplateAuthoringView.vue`'s copy (correction, gate
+//             P2-1: an earlier draft of this comment claimed :107 was "generalized" to cover it;
+//             that was false — deleting `explanation` from the view's own array alone left every
+//             then-reachable spec green). The view's own copy is covered separately, by a REAL
+//             mount (not a duplicated literal): `approval-form-inline-editor-extract.spec.ts`'s "(o)
+//             MS-13 completeness" test queries the rendered `approval-field-palette-*` chip DOM and
+//             asserts it against `AUTHORABLE_FIELD_TYPES` directly. The inline-editor's per-type
+//             property block (the other half of MS-13) is a MOUNTED-component concern — see
 //             approval-explanation-inline-editor.spec.ts.
 //     - MS-3/MS-12 are pinned by approval-explanation-field.test.ts's dedicated describe blocks
 //             (prefill / buildDisplayFields / summaryFields), not a type-indexed table — their
