@@ -723,7 +723,42 @@
             <el-option label="单人通过" value="single" />
             <el-option label="全部通过" value="all" />
             <el-option label="任一通过" value="any" />
+            <!-- P1-C (T2-4 N-of-M / 门槛会签): linear-only in v1 — the backend rejects a 'threshold'
+                 node inside a parallel region (APPROVAL_THRESHOLD_IN_PARALLEL). Disabled (not
+                 hidden) here so an already-threshold node picked up from outside a parallel region
+                 stays visibly selected if later moved into one; `setApprovalNodeMode` is the actual
+                 fail-closed floor (a disabled option cannot dispatch anyway, but that guard is not
+                 the ONLY enforcement point). -->
+            <el-option
+              label="门槛会签（N 人同意）"
+              value="threshold"
+              :disabled="approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-mode-threshold-option"
+            />
           </el-select>
+          <p
+            v-if="approvalNodeInParallelRegion(node.key)"
+            class="template-authoring__hint"
+            data-testid="approval-node-threshold-parallel-hint"
+          >位于并行分支内，暂不支持门槛会签（v1 仅支持线性路径）</p>
+        </el-form-item>
+        <!-- P1-C: typed N-of-M control, rendered only under 'threshold' mode. M is resolved from
+             this node's assignee-source UNION at runtime (the backend's static N<=M publish bound
+             applies only to the legacy assigneeType/assigneeIds shape this editor never emits), so
+             an unreachable N fails closed at dispatch (APPROVAL_THRESHOLD_UNREACHABLE), not here —
+             this hint says so honestly rather than pretending to validate M (M8). -->
+        <el-form-item v-if="approvalNodeMode(node.key) === 'threshold'" label="通过所需人数（N）">
+          <el-input-number
+            :model-value="approvalNodeThreshold(node.key)"
+            :min="1"
+            :step="1"
+            :disabled="readOnly"
+            data-testid="approval-node-threshold"
+            @update:model-value="(value: number) => setApprovalNodeThreshold(node.key, value ?? 1)"
+          />
+          <p class="template-authoring__hint">
+            需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
+          </p>
         </el-form-item>
         <el-form-item label="空审批人策略">
           <el-select
@@ -745,6 +780,129 @@
             @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
           >发起人自动通过（自审合并）</el-checkbox>
         </el-form-item>
+      </div>
+      <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
+           `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
+           scope as the policy grid above, never for a handler. -->
+      <div v-if="node.type === 'approval'" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+        <el-form-item label="节点超时">
+          <el-checkbox
+            :model-value="Boolean(approvalNodeTimeout(node.key))"
+            :disabled="readOnly || approvalNodeInParallelRegion(node.key)"
+            data-testid="approval-node-timeout-enabled"
+            @update:model-value="(enabled: boolean) => setApprovalNodeTimeoutEnabled(node.key, enabled)"
+          >启用超时处理</el-checkbox>
+          <p
+            v-if="approvalNodeInParallelRegion(node.key)"
+            class="template-authoring__hint"
+            data-testid="approval-node-timeout-parallel-hint"
+          >位于并行分支内，暂不支持节点超时（v1 仅支持线性路径）</p>
+        </el-form-item>
+        <template v-if="approvalNodeTimeout(node.key)">
+          <el-form-item label="超时时长（分钟）">
+            <el-input-number
+              :model-value="approvalNodeTimeout(node.key)?.afterMinutes"
+              :min="1"
+              :max="NODE_TIMEOUT_MAX_AFTER_MINUTES"
+              :step="1"
+              :disabled="readOnly"
+              data-testid="approval-node-timeout-after-minutes"
+              @update:model-value="(value: number) => setApprovalNodeTimeoutAfterMinutes(node.key, value ?? 1)"
+            />
+          </el-form-item>
+          <el-form-item label="超时后动作">
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.effect"
+              :disabled="readOnly"
+              class="ms-w-100pct"
+              data-testid="approval-node-timeout-effect"
+              @update:model-value="(effect: SupportedNodeTimeoutEffect) => setApprovalNodeTimeoutEffect(node.key, effect)"
+            >
+              <!-- P1-C: ONLY the effects `ApprovalSlaScheduler.fireNodeTimeouts` actually acts on and
+                   publish accepts — 'auto_approve'/'auto_reject' are reserved and NEVER offered here
+                   (M6/M8: do not invent a capability the engine doesn't implement). -->
+              <el-option
+                v-for="effect in NODE_TIMEOUT_SUPPORTED_EFFECTS"
+                :key="effect"
+                :label="nodeTimeoutEffectOptionLabel(effect)"
+                :value="effect"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="approvalNodeTimeout(node.key)?.effect === 'transfer'" label="转交给">
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.transferToUserId"
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-timeout-transfer-target"
+              @update:model-value="(userId: string) => setApprovalNodeTimeoutTransferToUserId(node.key, userId)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-else-if="approvalNodeTimeout(node.key)?.effect === 'jump'" label="跳转到节点">
+            <!-- Business labels only (`timeoutJumpTargetOptions`'s `label`) — never a raw node key in
+                 the rendered option text (M8). Options already exclude this node and any node inside
+                 a parallel region (mirrors `validateNodeTimeoutConfigs`'s jump-target legality). -->
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.jumpToNodeKey"
+              :disabled="readOnly"
+              class="ms-w-240"
+              placeholder="选择目标审批节点"
+              data-testid="approval-node-timeout-jump-target"
+              @update:model-value="(targetNodeKey: string) => setApprovalNodeTimeoutJumpToNodeKey(node.key, targetNodeKey)"
+            >
+              <el-option
+                v-for="option in timeoutJumpTargetOptions(node.key)"
+                :key="option.key"
+                :label="option.label"
+                :value="option.key"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="计时方式">
+            <div
+              class="approval-node-source-roster"
+              role="radiogroup"
+              aria-label="计时方式"
+              data-testid="approval-node-timeout-unit"
+            >
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  name="approval-node-timeout-unit"
+                  :checked="(approvalNodeTimeout(node.key)?.unit ?? 'wall_clock') === 'wall_clock'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-timeout-unit-wall-clock"
+                  @change="() => setApprovalNodeTimeoutUnit(node.key, 'wall_clock')"
+                />
+                <span>自然时间</span>
+              </label>
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  name="approval-node-timeout-unit"
+                  :checked="approvalNodeTimeout(node.key)?.unit === 'business'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-timeout-unit-business"
+                  @change="() => setApprovalNodeTimeoutUnit(node.key, 'business')"
+                />
+                <span>工作时间</span>
+              </label>
+            </div>
+          </el-form-item>
+        </template>
       </div>
       <!-- Lock-3 §1.1 — handler-node controls: 办理模式 (会签/或签) + 办理意见 (opt-in). NO empty policy,
            NO self-approval, NO fallback control renders here (M7). -->
@@ -855,6 +1013,7 @@ import type {
   NodeFieldAccess,
   ParallelNodeConfig,
   RequesterChoiceAssigneeSource,
+  SupportedNodeTimeoutEffect,
 } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
@@ -863,6 +1022,8 @@ import {
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
+  NODE_TIMEOUT_MAX_AFTER_MINUTES,
+  NODE_TIMEOUT_SUPPORTED_EFFECTS,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -959,6 +1120,26 @@ const addApprovalSourceCard = api.addApprovalSourceCard
 const removeApprovalSourceCard = api.removeApprovalSourceCard
 const approvalNodeMode = api.approvalNodeMode
 const setApprovalNodeMode = api.setApprovalNodeMode
+// P1-C (T2-4 N-of-M / 门槛会签 + T1-1 node timeout).
+const approvalNodeThreshold = api.approvalNodeThreshold
+const setApprovalNodeThreshold = api.setApprovalNodeThreshold
+const approvalNodeInParallelRegion = api.approvalNodeInParallelRegion
+const approvalNodeTimeout = api.approvalNodeTimeout
+const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled
+const setApprovalNodeTimeoutAfterMinutes = api.setApprovalNodeTimeoutAfterMinutes
+const setApprovalNodeTimeoutEffect = api.setApprovalNodeTimeoutEffect
+const setApprovalNodeTimeoutTransferToUserId = api.setApprovalNodeTimeoutTransferToUserId
+const setApprovalNodeTimeoutJumpToNodeKey = api.setApprovalNodeTimeoutJumpToNodeKey
+const setApprovalNodeTimeoutUnit = api.setApprovalNodeTimeoutUnit
+const timeoutJumpTargetOptions = api.timeoutJumpTargetOptions
+const NODE_TIMEOUT_EFFECT_OPTION_LABELS: Record<SupportedNodeTimeoutEffect, string> = {
+  remind: '催办提醒',
+  transfer: '转交他人',
+  jump: '跳转节点',
+}
+function nodeTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): string {
+  return NODE_TIMEOUT_EFFECT_OPTION_LABELS[effect]
+}
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
 const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester

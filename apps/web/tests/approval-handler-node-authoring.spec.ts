@@ -161,6 +161,22 @@ describe('Lock-3 — handler edit-model round-trip + validate', () => {
     const ok = validateApprovalNodeEdits({ handler_h: { nodeKey: 'handler_h', nodeType: 'handler', assigneeSources: [{ kind: 'requester' }], handlerMode: 'all' } })
     expect(ok).toEqual([])
   })
+
+  // Fix-round follow-up (gate P2-2's handler/nodeType note): §1.2 forbids `timeout`/`approvalThreshold`
+  // on a handler config outright — backend `APPROVAL_HANDLER_CONFIG_INVALID`
+  // (ApprovalProductService.ts :2449). A stray value on the edit model (no current producer — the
+  // render gate is `v-if="node.type === 'approval'"` and the setters are approval-node-only in
+  // practice today) must fail this preview rather than silently pass it as `ok` above does.
+  it('validate rejects a timeout / approvalThreshold on a handler edit (approval-node-only keys)', () => {
+    const withTimeout = validateApprovalNodeEdits({
+      handler_h: { nodeKey: 'handler_h', nodeType: 'handler', assigneeSources: [{ kind: 'requester' }], handlerMode: 'all', timeout: { afterMinutes: 30, effect: 'remind' } },
+    })
+    expect(withTimeout.some((e) => e.includes('不支持节点超时'))).toBe(true)
+    const withThreshold = validateApprovalNodeEdits({
+      handler_h: { nodeKey: 'handler_h', nodeType: 'handler', assigneeSources: [{ kind: 'requester' }], handlerMode: 'all', approvalThreshold: 2 },
+    })
+    expect(withThreshold.some((e) => e.includes('不支持门槛会签人数'))).toBe(true)
+  })
 })
 
 describe('Lock-3 — graphTopologyEdit.appendHandlerNode', () => {
