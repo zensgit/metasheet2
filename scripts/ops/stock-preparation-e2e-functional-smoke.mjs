@@ -33,6 +33,22 @@
 // S6A_ARM constant for the full rationale, and
 // scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs for how the primary-vs-mid-tier timing slope
 // is reassembled downstream from separate job outputs now that the arms are separate processes.
+//
+// S10 additions — E2E_WALK_MODE ('repo' | 'package', default 'repo') and E2E_LAB_MODE ('true' | 'false',
+// default 'false'). Both default to EXACTLY the pre-S10 behaviour; neither changes what an unset-env
+// invocation does.
+//   * walk mode: E2E_SERVER_ROOT / E2E_SERVER_CMD / E2E_SERVER_ARGS let this SAME harness drive an
+//     EXTRACTED on-prem package root (`node packages/core-backend/dist/src/index.js`, cwd = package root)
+//     instead of the repo tree's `pnpm run dev:core`. Every assertion, arm, tenant and evidence key is
+//     unchanged — "the same walk, from the package" is only a claim if it really is the same walk. The
+//     declared mode and the actual spawn target are required to AGREE (crossed combinations throw at load
+//     time), and the walk emits `walkMode` plus `packageTgzSha256` so the evidence names which artifact
+//     it drove. Closes #4708 item 1's repo-tree caveat; see the S10 walk-mode config block below.
+//   * lab mode: adds a post-ON flag-OFF RESTORATION arm after the flag-ON window (re-asserting the same
+//     three-part gate the pre-window arm asserts, that no committed file outside documentation prose and
+//     this harness's own child env arms the flag, and that the artifact-root capture directory is gone),
+//     which is #4708 item 8. It is gated because it restarts the server one more time — a behaviour
+//     change, not merely an extra evidence key.
 
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -114,6 +130,98 @@ const REQUEST_TIMEOUT_MS = 20000
 const HEALTH_TIMEOUT_MS = 90000
 const ARTIFACT_ROOT = process.env.E2E_ARTIFACT_ROOT || path.join(os.tmpdir(), 'stock-prep-e2e-artifact-root')
 const OUT_DIR = process.env.E2E_OUT_DIR || path.join(REPO_ROOT, 'output/stock-preparation-e2e-functional-smoke')
+
+// ── S10 walk-mode config (#4708 item 1: "package install in isolated runtime") ───────────────────────
+//
+// Until this block, startServer() hardcoded `spawn('pnpm', ['--filter','@metasheet/core-backend','run',
+// 'dev:core'], { cwd: REPO_ROOT })` — i.e. the walk ALWAYS drove a tsx-from-source server in the repo
+// checkout. That is a real S6-A walk, but it is not evidence that the SHIPPED on-prem package can stand
+// the same walk up: the package's compiled `packages/core-backend/dist/src/index.js`, its own pinned
+// dependency install, and its cwd-relative plugin discovery are all untested by a repo-tree run.
+// (Recorded as gap 1 in docs/development/s6a-synthetic-e2e-in-ci-feasibility-20260818.md.)
+//
+// The override is three env vars and nothing else — the harness's assertions, arms, tenants, fixtures and
+// evidence keys are IDENTICAL in both modes, which is the whole point: "the same walk, from the package"
+// is only a claim if it really is the same walk. An UNSET E2E_SERVER_ROOT/E2E_SERVER_CMD/E2E_SERVER_ARGS
+// reproduces the previous spawn byte-for-byte.
+//
+// walkMode is NOT inferred from whether an override happens to be set — it is declared, and then the two
+// are required to AGREE. A run that declares `package` while actually spawning the repo tree (or the
+// reverse) would emit a walkMode line that is simply false, which is worse than no line at all; both
+// crossed combinations are a hard throw at load time rather than a check that could be waived later.
+const WALK_VALID_MODES = new Set(['repo', 'package'])
+const WALK_MODE = String(process.env.E2E_WALK_MODE || 'repo').trim()
+if (!WALK_VALID_MODES.has(WALK_MODE)) {
+  throw new Error(`invalid E2E_WALK_MODE: ${JSON.stringify(process.env.E2E_WALK_MODE)} (want one of: ${[...WALK_VALID_MODES].join(', ')})`)
+}
+const DEFAULT_SERVER_CMD = 'pnpm'
+const DEFAULT_SERVER_ARGS = Object.freeze(['--filter', '@metasheet/core-backend', 'run', 'dev:core'])
+// JSON array form is preferred (it survives arguments containing spaces); a bare whitespace-separated
+// string is accepted because that is what a workflow `env:` line most naturally carries for the single
+// -argument package case (`packages/core-backend/dist/src/index.js`).
+function parseServerArgs(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return [...fallback]
+  const text = String(raw).trim()
+  if (text.startsWith('[')) {
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch (error) {
+      throw new Error(`E2E_SERVER_ARGS looks like JSON but did not parse: ${String(error && error.message || error)}`)
+    }
+    if (!Array.isArray(parsed) || parsed.some((v) => typeof v !== 'string')) {
+      throw new Error('E2E_SERVER_ARGS JSON form must be an array of strings')
+    }
+    return parsed
+  }
+  return text.split(/\s+/).filter(Boolean)
+}
+const SERVER_ROOT = path.resolve(process.env.E2E_SERVER_ROOT || REPO_ROOT)
+const SERVER_CMD = String(process.env.E2E_SERVER_CMD || '').trim() || DEFAULT_SERVER_CMD
+const SERVER_ARGS = parseServerArgs(process.env.E2E_SERVER_ARGS, DEFAULT_SERVER_ARGS)
+const SERVER_ROOT_IS_REPO_ROOT = SERVER_ROOT === path.resolve(REPO_ROOT)
+if (WALK_MODE === 'package' && SERVER_ROOT_IS_REPO_ROOT) {
+  throw new Error('E2E_WALK_MODE=package requires E2E_SERVER_ROOT to point at an EXTRACTED package root, not the repo checkout')
+}
+if (WALK_MODE === 'package' && SERVER_CMD === DEFAULT_SERVER_CMD && String(process.env.E2E_SERVER_CMD || '').trim() === '') {
+  throw new Error('E2E_WALK_MODE=package requires an explicit E2E_SERVER_CMD (the repo-tree `pnpm run dev:core` default cannot start a package root)')
+}
+if (WALK_MODE === 'repo' && !SERVER_ROOT_IS_REPO_ROOT) {
+  throw new Error('E2E_SERVER_ROOT was overridden but E2E_WALK_MODE still says `repo` — declare package mode or drop the override')
+}
+// Structural proof that package mode really is driving the package's OWN compiled entry point: when the
+// first argument is a script path, that file must exist UNDER the declared server root. A typo'd path
+// would otherwise surface only as a health-check timeout, indistinguishable from a boot failure.
+const SERVER_ENTRY_CANDIDATE = SERVER_ARGS.length > 0 && /\.[cm]?js$/.test(SERVER_ARGS[0]) ? SERVER_ARGS[0] : ''
+const SERVER_ENTRY_RESOLVED = SERVER_ENTRY_CANDIDATE === ''
+  ? 'NOT_APPLICABLE'
+  : String(fs.existsSync(path.resolve(SERVER_ROOT, SERVER_ENTRY_CANDIDATE)))
+if (SERVER_ENTRY_RESOLVED === 'false') {
+  throw new Error(`E2E_SERVER_ARGS names a script that does not exist under E2E_SERVER_ROOT: ${SERVER_ENTRY_CANDIDATE}`)
+}
+// A DIGEST is values-free by this repo's own convention (stock-prep-main-package-verify.yml publishes
+// packageTgzSha256 exactly this way) — it identifies the artifact under test without disclosing any of
+// its content. Shape-checked rather than trusted: an empty or truncated value passed through here would
+// make the evidence line claim an identity it does not actually have.
+const PACKAGE_TGZ_SHA256 = String(process.env.E2E_PACKAGE_TGZ_SHA256 || '').trim()
+if (WALK_MODE === 'package' && !/^[0-9a-f]{64}$/.test(PACKAGE_TGZ_SHA256)) {
+  throw new Error('E2E_WALK_MODE=package requires E2E_PACKAGE_TGZ_SHA256 to be a 64-char lowercase hex SHA-256')
+}
+
+// ── S10 lab mode (#4708 item 8 + item 5's lab-scale default) ────────────────────────────────────────
+//
+// OFF by default, and the default path is byte-identical to before this constant existed: the post-ON
+// flag-OFF restoration arm below does an extra server restart, which IS a behaviour change, so it is
+// gated rather than made unconditional. The workflow's own header records that a default-input dispatch
+// must not change, and this is what keeps that true. When the workflow's `lab_mode` input is 'true' the
+// lane additionally (a) defaults `s6a_row_count` to the product's declared bound (24999), which is the
+// workflow's job, not this file's, and (b) runs the post-window arm, which is this file's.
+const LAB_MODE_VALID = new Set(['true', 'false'])
+const LAB_MODE_RAW = String(process.env.E2E_LAB_MODE || 'false').trim().toLowerCase()
+if (!LAB_MODE_VALID.has(LAB_MODE_RAW)) {
+  throw new Error(`invalid E2E_LAB_MODE: ${JSON.stringify(process.env.E2E_LAB_MODE)} (want one of: ${[...LAB_MODE_VALID].join(', ')})`)
+}
+const LAB_MODE = LAB_MODE_RAW === 'true'
 
 // Postgres sealed-export authority roles the workflow already created + migrated against.
 const RUNTIME_DB_ROLE = process.env.E2E_S6A_RUNTIME_DB_ROLE || ''
@@ -362,8 +470,13 @@ export async function startServer(extraEnv, label) {
   // calls startServer() directly without ever creating it first.
   fs.mkdirSync(OUT_DIR, { recursive: true })
   const logFd = fs.openSync(logPath, 'a')
-  const proc = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'run', 'dev:core'], {
-    cwd: REPO_ROOT,
+  // SERVER_CMD/SERVER_ARGS/SERVER_ROOT default to EXACTLY the previous hardcoded
+  // `pnpm --filter @metasheet/core-backend run dev:core` in REPO_ROOT — see the S10 walk-mode config
+  // block. cwd is load-bearing in package mode: the on-prem package discovers its plugins relative to
+  // the process cwd (the same reason stock-prep-staging-window-rehearsal.yml starts the packaged
+  // backend with `working-directory: <pkg_root>`), so the server root is the cwd, never REPO_ROOT.
+  const proc = spawn(SERVER_CMD, SERVER_ARGS, {
+    cwd: SERVER_ROOT,
     env,
     stdio: ['ignore', logFd, logFd],
     // Its own process group leader, so stopServer() can signal the WHOLE tree pnpm spawns underneath it
@@ -376,7 +489,7 @@ export async function startServer(extraEnv, label) {
     await stopServer()
     throw new Error(`server (${label}) did not become healthy within ${HEALTH_TIMEOUT_MS}ms — see server-${label}.log`)
   }
-  note(`server (${label}) healthy`, `port=${PORT}`)
+  note(`server (${label}) healthy`, `port=${PORT} walkMode=${WALK_MODE}`)
   return true
 }
 
@@ -1416,6 +1529,10 @@ async function diagnoseS6APostCaptureRefusal() {
   }
 }
 
+// Set by attemptS6ARealRun() below; read ONLY by the S10 post-window cleanup arm. Module-private on
+// purpose — an operationId is a value, and this file's evidence block carries tokens and counts only.
+let lastPrimaryOperationId = ''
+
 async function attemptS6ARealRun() {
   const salt = `t${Math.floor(Date.now() / 1000)}`
   const systemId = `e2efunc-s6a-source-${salt}`
@@ -1712,6 +1829,11 @@ async function attemptS6ARealRun() {
     await requestJson('/api/integration/stock-preparation/mvp/ensure', { method: 'POST', token, body: {}, accept: [200, 201] })
 
     const operationId = `s6a-e2e-op-${salt}`
+    // Remembered (module-private, never emitted — it is a value, not a token) so the S10 post-window
+    // cleanup arm can snapshot THIS walk's run row after the flag-OFF restart. Assigned before the POST,
+    // not after, so a run that refuses still leaves the cleanup arm a real operationId to look up rather
+    // than silently degrading to the "matches nothing" scope.
+    lastPrimaryOperationId = operationId
     // Wall-clock (requirement 4), on the S6-A POST's own timeout — additive evidence only; this walk's
     // PASS/FAIL semantics are unchanged. Published as this job's own `primary_duration_ms` output (R9
     // restructure) and reassembled downstream, together with the mid-tier arm's own duration from its OWN
@@ -2457,6 +2579,191 @@ async function runS6ARejectionArm() {
 // downstream, from job outputs, by scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs (invoked by
 // the workflow's `scale-slope` job) — never fabricated here from a single arm's partial view.
 
+// ── S10 post-ON flag-OFF restoration + cleanup arm (#4708 item 8) ───────────────────────────────────
+//
+// Every flag arm in this file runs BEFORE the flag-ON window (phases 1-2b), so nothing re-proved the
+// route was gated again AFTERWARD — "unconditional flag-OFF restoration" was, until this arm, an
+// assertion about a state this lane never actually observed. (Recorded as gap 2 in
+// docs/development/s6a-synthetic-e2e-in-ci-feasibility-20260818.md.) The window itself is already
+// process-scoped by construction — the flag only ever reaches ONE spawned child's env, and that child is
+// gone by the time this arm starts — but "by construction" is exactly the kind of claim that stops being
+// true silently, which is what this arm exists to catch.
+//
+// It re-uses runFlagArm() rather than re-implementing the three-part probe (health capability false +
+// an ALWAYS-registered sibling route answering 200 + the S6-A path 404), so post-window restoration is
+// asserted by the SAME code, to the SAME standard, as the pre-window flag-OFF arm — see the long block
+// comment above runFlagArm() for why a bare `http === 404` is not sufficient on its own.
+const S6A_FLAG_NAME = 'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED'
+// stock-preparation-runtime-config.cjs's featureEnabled() is
+// `String(env[FLAG] ?? '').trim().toLowerCase() === 'true'`, so the set of ENABLING literals is exactly
+// {true} modulo case and surrounding whitespace/quotes — '1', 'yes' and 'on' are NOT enabling, which is
+// precisely what phase 2's exact-match arms prove empirically rather than by reading the source. This
+// detector is therefore narrowed to `true` on purpose: widening it to '1'/'yes' would flag committed
+// lines that demonstrably cannot enable anything, i.e. manufacture false findings.
+const FLAG_ENABLING_ASSIGNMENT_RE = new RegExp(`${S6A_FLAG_NAME}\\s*[:=]\\s*["'\`]?\\s*true\\b`, 'i')
+// The only two committed places a flag-name-to-enabling-value coupling is legitimate, as a CLOSED set:
+//   docs   — prose/runbook text (`.md`). A document configures no runtime; the operator runbook has to
+//            be able to print the line an operator would type. Counted and surfaced, never waived away.
+//   harness — THIS file's own per-arm child-process env objects (the flag-ON walk and the mid-tier
+//            scale walk). Those are `spawn()` argument literals, scoped to one child that is killed at
+//            the end of the arm; they are never written to disk, an env file, or a job/workflow `env:`.
+// Anything else is unaccounted and fails the arm. That includes a new workflow `env:` key, a docker
+// app.env template line, an ecosystem.config.js entry, or a second harness acquiring one.
+const FLAG_HARNESS_PATH = 'scripts/ops/stock-preparation-e2e-functional-smoke.mjs'
+
+function gitGrepFlagMentions() {
+  return new Promise((resolve) => {
+    // `-I` skips binaries, `-n` numbers lines, `-F -e` takes the flag name as a literal (never a
+    // pattern). git grep searches the TRACKED working tree — i.e. exactly "the checkout", which is the
+    // scope this assertion claims, not an arbitrary directory walk that could wander into node_modules.
+    const proc = spawn('git', ['grep', '-I', '-n', '-F', '-e', S6A_FLAG_NAME], {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    proc.stdout.on('data', (chunk) => { out += chunk.toString() })
+    proc.stderr.on('data', (chunk) => { err += chunk.toString() })
+    proc.on('close', (code) => resolve({ code, out, err }))
+    proc.on('error', (error) => resolve({ code: -1, out: '', err: String(error && error.message || error) }))
+  })
+}
+
+async function assertFlagAbsentFromCommittedConfiguration() {
+  // Detector self-test FIRST, on synthetic strings, so "we found nothing" can never be the silent
+  // output of a regex that matches nothing. Both directions are pinned: it must fire on the two shapes
+  // a real leak takes (dotenv/shell `=` and YAML/JS `:`), and must NOT fire on the values the product
+  // demonstrably treats as disabled.
+  const detectorFires = FLAG_ENABLING_ASSIGNMENT_RE.test(`${S6A_FLAG_NAME}=true`) &&
+    FLAG_ENABLING_ASSIGNMENT_RE.test(`  ${S6A_FLAG_NAME}: 'true'`) &&
+    FLAG_ENABLING_ASSIGNMENT_RE.test(`${S6A_FLAG_NAME}: "TRUE"`)
+  const detectorQuiet = !FLAG_ENABLING_ASSIGNMENT_RE.test(`${S6A_FLAG_NAME}=false`) &&
+    !FLAG_ENABLING_ASSIGNMENT_RE.test(`${S6A_FLAG_NAME}=1`) &&
+    !FLAG_ENABLING_ASSIGNMENT_RE.test(`${S6A_FLAG_NAME}=yes`)
+  const detectorLive = detectorFires && detectorQuiet
+  S.postWindowFlagScanDetectorLive = detectorLive ? 'PASS' : 'FAIL'
+  must('S10: the committed-flag detector fires on enabling assignments and stays quiet on disabled ones '
+    + '(so a zero finding below means "nothing there", not "nothing looked")', detectorLive,
+    `fires=${detectorFires} quiet=${detectorQuiet}`)
+
+  const grep = await gitGrepFlagMentions()
+  // git grep exits 1 when NOTHING matched. This file itself always mentions the flag, so a 1 here means
+  // the scan did not read the checkout at all (wrong cwd, no git, shallow/absent worktree) — a vacuous
+  // pass, which is the exact failure mode this whole arm exists to prevent.
+  if (grep.code !== 0) {
+    S.postWindowFlagMentionLineCount = 0
+    S.postWindowFlagEnablingLineCountDocs = 'NOT_RUN'
+    S.postWindowFlagEnablingLineCountHarness = 'NOT_RUN'
+    S.postWindowFlagEnablingLineCountOther = 'NOT_RUN'
+    must('S10: the committed-checkout flag scan actually read the checkout (this harness itself mentions '
+      + 'the flag, so a zero-match scan is a broken scan, not a clean repo)', false,
+      `gitGrepExit=${grep.code} stderr=${String(grep.err || '').split('\n')[0].slice(0, 120)}`)
+    return false
+  }
+
+  const mentions = grep.out.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    // `path:lineno:text` — split on the first two colons only; the TEXT may contain any number more.
+    const firstColon = line.indexOf(':')
+    const secondColon = line.indexOf(':', firstColon + 1)
+    return {
+      filePath: firstColon < 0 ? line : line.slice(0, firstColon),
+      text: secondColon < 0 ? line : line.slice(secondColon + 1),
+    }
+  })
+  const enabling = mentions.filter((m) => FLAG_ENABLING_ASSIGNMENT_RE.test(m.text))
+  const docs = enabling.filter((m) => m.filePath.endsWith('.md'))
+  const harness = enabling.filter((m) => m.filePath === FLAG_HARNESS_PATH)
+  const other = enabling.filter((m) => !m.filePath.endsWith('.md') && m.filePath !== FLAG_HARNESS_PATH)
+  S.postWindowFlagMentionLineCount = mentions.length
+  S.postWindowFlagEnablingLineCountDocs = docs.length
+  S.postWindowFlagEnablingLineCountHarness = harness.length
+  S.postWindowFlagEnablingLineCountOther = other.length
+  for (const hit of other) note('S10 unaccounted committed flag assignment', hit.filePath)
+
+  // End-to-end positive control on the WHOLE pipeline (git grep -> line split -> detector), not just on
+  // the synthetic strings above: this file's own flag-ON walk sets the flag to 'true' in its spawn env,
+  // so the harness bucket MUST be non-empty. If it is empty, the scan and the detector disagree with a
+  // fact this very process demonstrates every dispatch, and no conclusion drawn from it is trustworthy.
+  const pipelineLive = mentions.length > 0 && harness.length > 0
+  must('S10: the flag scan pipeline observed this harness\'s OWN known enabling assignments (end-to-end '
+    + 'positive control on git grep + line parsing + detector together)', pipelineLive,
+    `mentionLines=${mentions.length} harnessEnabling=${harness.length}`)
+
+  const noneUnaccounted = other.length === 0
+  must('S10: no committed file outside documentation prose and this harness\'s own per-arm child env '
+    + 'assigns the S6-A flag an enabling value', noneUnaccounted,
+    `unaccounted=${other.length} docs=${docs.length} harness=${harness.length}`)
+
+  // A GitHub repository/environment VARIABLE only reaches a runtime by being mapped into a job's `env:`,
+  // at which point it is inherited by this process — so this process's OWN environment is exactly the
+  // surface through which such a variable could arm the flag. (The flag never appears in this lane's
+  // job env: the workflow puts it only in the harness's spawned child env, one arm at a time.)
+  const inProcessEnv = String(process.env[S6A_FLAG_NAME] ?? '').trim().toLowerCase() === 'true'
+  S.postWindowFlagInHarnessProcessEnv = String(inProcessEnv)
+  must('S10: the flag is not armed in this job\'s own environment (the only path a repository/environment '
+    + 'variable could take to reach the runtime)', !inProcessEnv, `armedInProcessEnv=${inProcessEnv}`)
+
+  return detectorLive && pipelineLive && noneUnaccounted && !inProcessEnv
+}
+
+// Cleanup evidence (#4708 item 8's second half). Values-free throughout: a YES/NO/NOT_RUN token for the
+// directory, and COUNTS for what the walk left in the database. Containers are destroyed with the job by
+// GitHub itself, which is a property of the runner and is therefore NOT claimed here as something this
+// script observed.
+async function assertPostWindowCleanup() {
+  const artifactRoot = path.resolve(ARTIFACT_ROOT)
+  const captureRoot = path.join(artifactRoot, 'capture')
+  const existedBefore = fs.existsSync(captureRoot)
+  S.captureDirectoryExistedBeforeCleanup = String(existedBefore)
+  if (!existedBefore) {
+    // Removing a directory that was never created proves nothing about retention, so this reports
+    // NOT_RUN rather than a vacuous YES — the same discipline every other phase in this file follows.
+    S.captureDirectoryRemoved = 'NOT_RUN'
+    S.captureDirectoryRemovedReason = 'NO_CAPTURE_DIRECTORY'
+  } else {
+    try {
+      fs.rmSync(artifactRoot, { recursive: true, force: true })
+    } catch {
+      // fall through — the existence check below is what decides, never the absence of a throw
+    }
+    const gone = !fs.existsSync(captureRoot) && !fs.existsSync(artifactRoot)
+    S.captureDirectoryRemoved = gone ? 'YES' : 'NO'
+    must('S10: the flag-ON window\'s artifact-root capture directory is removed afterward', gone,
+      `captureRootGone=${!fs.existsSync(captureRoot)}`)
+  }
+
+  try {
+    const snapshot = await withApplicationPool((pool) =>
+      snapshotS6AWriteState(pool, lastPrimaryOperationId || '<no-such-operation-id>'))
+    S.postWindowRunRowCount = snapshot.counts.runs
+    S.postWindowGenerationCount = snapshot.counts.generations
+    S.postWindowIngestionSessionCount = snapshot.counts.ingestionSessions
+    S.postWindowGenerationRowCount = snapshot.counts.generationRows
+    S.postWindowActivePointerCount = snapshot.counts.activePointers
+    S.postWindowRunStatus = snapshot.runStatus
+  } catch (error) {
+    S.postWindowRunRowCount = 'NOT_RUN'
+    S.postWindowGenerationCount = 'NOT_RUN'
+    S.postWindowIngestionSessionCount = 'NOT_RUN'
+    S.postWindowGenerationRowCount = 'NOT_RUN'
+    S.postWindowActivePointerCount = 'NOT_RUN'
+    S.postWindowRunStatus = 'NOT_RUN'
+    must('S10: post-window run/generation counts read back', false, String(error && error.message || error))
+  }
+}
+
+async function runPostWindowFlagOffRestorationArm() {
+  // Restart flag-OFF (the flag env var is simply not passed — `undefined` is what runFlagArm() already
+  // treats as "no flag at all", identical to phase 1's arm) and re-assert the full three-part gate.
+  await runFlagArm(undefined, false, 'postWindowFlagOff')
+  const routeGateRestored = S.postWindowFlagOffPass === 'PASS'
+  const configClean = await assertFlagAbsentFromCommittedConfiguration()
+  await assertPostWindowCleanup()
+  const restored = routeGateRestored && configClean
+  S.postWindowFlagOffRestored = restored ? 'YES' : 'NO'
+  S.postWindowFlagOffReason = restored ? 'RESTORED' : 'ASSERTION_FAILED'
+}
+
 // ── negative arm helper (exported for the workflow's separate negative-control job) ───────────────────
 export async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true })
@@ -2469,6 +2776,24 @@ export async function main() {
   S.s6aArm = S6A_ARM
   S.s6aBoundMaxBusinessLines = MAX_BUSINESS_LINES
   S.s6aPrimaryRowCount = DEFAULT_S6A_ROW_COUNT
+
+  // S10 walk-mode evidence (#4708 item 1). Emitted on EVERY dispatch, in both modes: a key that only
+  // appears in package mode would make its absence indistinguishable from "the field was dropped" — the
+  // same finding (review #4724) that made every exit path of attemptS6ARealRun() emit its roll-up key.
+  // packageTgzSha256 is a DIGEST, values-free by this repo's own convention, and reads NOT_RUN in repo
+  // mode because there is no package under test to identify — never an empty string, never a fake zero.
+  S.walkMode = WALK_MODE
+  S.packageTgzSha256 = WALK_MODE === 'package' ? PACKAGE_TGZ_SHA256 : 'NOT_RUN'
+  S.serverRootIsRepoRoot = String(SERVER_ROOT_IS_REPO_ROOT)
+  S.serverEntryResolvedUnderServerRoot = SERVER_ENTRY_RESOLVED
+  // S10 lab mode (#4708 items 5 + 8). Seeded NOT_RUN with the reason this dispatch cannot run the
+  // post-window arm; the arm itself overwrites both when it does run. ARM_DID_NOT_COMPLETE is the
+  // honest reading if this process dies between here and there.
+  S.labMode = String(LAB_MODE)
+  S.postWindowFlagOffRestored = 'NOT_RUN'
+  S.postWindowFlagOffReason = !LAB_MODE
+    ? 'LAB_MODE_NOT_REQUESTED'
+    : (S6A_ARM === 'primary' ? 'ARM_DID_NOT_COMPLETE' : 'NOT_PRIMARY_ARM')
 
   if (S6A_ARM === 'primary') {
     // Phases 1-3 run inside their own try/catch for the SAME reason Phase 4 already had one: an unexpected
@@ -2519,6 +2844,22 @@ export async function main() {
       // the evidence write below entirely, which is exactly the failure mode this whole block exists to
       // avoid.
       await stopServer().catch(() => {})
+    }
+
+    // Phase 6 (S10, lab mode only): the post-ON flag-OFF restoration + cleanup arm. It MUST come after
+    // phase 4 — that is the entire point; the pre-window arms (phases 1-2) cannot say anything about the
+    // state the lane leaves behind once the flag-ON window has closed. Gated on lab mode so a
+    // default-input dispatch performs exactly the phases it always has (this arm restarts the server one
+    // more time, which is a behaviour change, not just an extra evidence key).
+    if (LAB_MODE) {
+      try {
+        await runPostWindowFlagOffRestorationArm()
+      } catch (error) {
+        S.postWindowFlagOffRestored = 'NO'
+        S.postWindowFlagOffReason = 'UNEXPECTED_ERROR'
+        must('S10: post-ON flag-OFF restoration arm attempted', false, String(error && error.message || error))
+        await stopServer().catch(() => {})
+      }
     }
   }
 

@@ -40,8 +40,27 @@ name: Stock Preparation E2E Functional Smoke
 # (MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED) is set ONLY inside this job's own spawned
 # core-backend server-process environment for the duration of one arm — never in a committed file, never
 # as a repository/environment variable default, and the process is always restarted flag-OFF afterward.
+# Under `lab_mode` that last clause stops being a promise and becomes an assertion: see the post-window
+# arm described under LAB MODE below.
 #
-# Six jobs:
+# LAB MODE (S10, gated by the `lab_mode` input below; default 'false' = this lane is UNCHANGED, exactly
+# as with `s6a_row_count` above — same jobs, same arms, same claims, no extra server restart). Dispatching
+# with `lab_mode: true` adds three things, all aimed at producing #4708's functional evidence list in ONE
+# dispatch rather than across a machine session:
+#   1. it DEFAULTS `s6a_row_count` to the product's own declared bound (24999) — the dispatcher opting
+#      into the lab walk should not also have to remember a magic number. An explicitly supplied
+#      `s6a_row_count` still wins; lab mode only supplies the default.
+#   2. it runs the `functional-smoke-package` job below — the SAME primary 3-row walk, driven against an
+#      on-prem package BUILT AND EXTRACTED IN THE JOB rather than against the repo tree (#4708 item 1).
+#   3. it runs a post-ON flag-OFF RESTORATION arm inside the primary walk (#4708 item 8): after the
+#      flag-ON window closes, the server is restarted with the flag absent and the SAME three-part gate
+#      the pre-window arm asserts is re-asserted (health capability false + always-registered sibling
+#      route 200 + S6-A route 404), the checkout is scanned for any committed file that assigns the flag
+#      an enabling value, and the artifact-root capture directory is removed and proven gone.
+# What lab mode does NOT change: no schedule, no push trigger, no customer data, no external write, no
+# release, no flag default, and `permissions: contents: read` still makes "never publishes" structural.
+#
+# Seven jobs:
 #   contract            — pull_request only: syntax-checks the harness scripts (no server, no DB, no
 #                         secrets). Exists ONLY so GitHub registers this workflow_dispatch workflow while
 #                         it lives on a feature branch — GitHub will not let a brand-new workflow_dispatch
@@ -60,11 +79,29 @@ name: Stock Preparation E2E Functional Smoke
 #                         values-free result block — never as PASS — and the job goes red if any check
 #                         that DID run failed. Publishes its own row count/duration/roll-up outcome, plus
 #                         the product's own declared row-count bound, as job outputs for the scale-slope
-#                         job below.
+#                         job below. Under `lab_mode` it ALSO runs the post-ON flag-OFF restoration arm
+#                         (see LAB MODE above); at the default input it does not, and its workload is
+#                         byte-for-byte what it has always been.
+#   functional-smoke-package — the SAME primary arm, walkMode=package, gated to run ONLY under
+#                         `lab_mode` (default input: SKIPPED, never reported as a pass). Builds an on-prem
+#                         package from THIS commit in-job (the same INSTALL_DEPS=0/BUILD_WEB=0/
+#                         BUILD_BACKEND=0 invocation stock-prep-main-package-verify.yml and
+#                         stock-prep-staging-window-rehearsal.yml use), runs the existing five-check
+#                         verifier over it, extracts it, installs the package's OWN pinned dependencies
+#                         with --frozen-lockfile, applies migrations with the PACKAGE's own compiled
+#                         runner (packages/core-backend/dist/src/db/migrate.js), and then drives the
+#                         identical 3-row walk against `node packages/core-backend/dist/src/index.js`
+#                         with the package root as cwd. The harness is the same file, the assertions are
+#                         the same assertions; only the server under test moves. Emits walkMode=package
+#                         and packageTgzSha256 (a digest — values-free by this repo's convention) so the
+#                         evidence names which artifact it drove. This closes #4708 item 1's "the walk
+#                         runs from the repo tree" caveat on a LINUX runner; it establishes nothing about
+#                         a Windows-host installer, which remains machine-only.
 #   scale-midtier        — the mid-tier arm (E2E_S6A_ARM=midtier), its OWN Postgres + SQL Server, gated to
-#                         run ONLY when `s6a_row_count` requests scale (default input: this job is
-#                         SKIPPED, never reported as a pass). Publishes its own row count/duration/roll-up
-#                         outcome as job outputs.
+#                         run ONLY when scale is requested — i.e. `s6a_row_count` is set to something
+#                         other than the default, OR `lab_mode` is true (which defaults that row count to
+#                         24999). At the default input this job is SKIPPED, never reported as a pass.
+#                         Publishes its own row count/duration/roll-up outcome as job outputs.
 #   scale-rejection       — the rejection arm (E2E_S6A_ARM=rejection) at the product's declared bound + 1,
 #                         its OWN Postgres + SQL Server, gated identically to scale-midtier. Publishes its
 #                         own row count/duration/roll-up outcome as job outputs.
@@ -102,10 +139,23 @@ on:
         description: >-
           S6-A fixture row count. Default 3 = today's behaviour, no scale legs. Any other value (e.g.
           2500) ALSO runs a mid-tier calibration walk at that row count plus a fixed rejection arm at the
-          product's declared bound (24999) + 1 — see the SCALE paragraph above.
+          product's declared bound (24999) + 1 — see the SCALE paragraph above. Left at 3 while
+          lab_mode=true, it is DEFAULTED to 24999 (an explicit value here always wins).
         required: false
         default: '3'
         type: string
+      lab_mode:
+        description: >-
+          Lab lane. 'false' (default) = this workflow is unchanged in every respect. 'true' = default
+          s6a_row_count to 24999, add the package-mode walk job, and run the post-ON flag-OFF restoration
+          arm — see the LAB MODE paragraph above. Still dispatch-only, still synthetic data only, still
+          no external write, still no release.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -262,7 +312,17 @@ jobs:
           # runs the primary arm — E2E_S6A_ARM is set explicitly (not left to the script's own default)
           # so that is true by construction, not by coincidence of an unset env var.
           E2E_S6A_ARM: primary
-          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count || '3' }}
+          # S10 effective row count. Identical to `${{ github.event.inputs.s6a_row_count || '3' }}` in
+          # every case EXCEPT `lab_mode=true` with the row count left at its default, where it becomes the
+          # product's declared bound. This job's own walk is ALWAYS 3 rows regardless (the harness's
+          # primary arm hardcodes that); the value only feeds the harness's scale-requested reasoning, so
+          # passing the effective value keeps s6aMidTierReason/s6aRejectionReason honest about whether the
+          # dedicated scale jobs were expected to run.
+          E2E_S6A_ROW_COUNT: ${{ (github.event.inputs.lab_mode == 'true' && (github.event.inputs.s6a_row_count == '' || github.event.inputs.s6a_row_count == '3')) && '24999' || (github.event.inputs.s6a_row_count || '3') }}
+          # S10: enables the post-ON flag-OFF restoration arm INSIDE this job (an extra flag-OFF server
+          # restart after the flag-ON window, plus the committed-flag scan and the capture-directory
+          # cleanup assertion). 'false' — the default — leaves this job's phase list exactly as it was.
+          E2E_LAB_MODE: ${{ github.event.inputs.lab_mode || 'false' }}
         run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
 
       - name: Write step summary
@@ -320,17 +380,249 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  functional-smoke-package:
+    name: containerized functional smoke — PACKAGE mode (identical walk, built+extracted in-job)
+    # Gated to lab mode only. At the default input this job is SKIPPED, never reported as a pass — the
+    # same discipline the scale jobs follow, and the reason the default-input path is unchanged.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.lab_mode == 'true'
+    needs: contract
+    runs-on: ubuntu-latest
+    # functional-smoke's 45m plus the measured package build/verify/extract/in-package-install cost
+    # (~4 min in stock-prep-main-package-verify.yml, plus a web+backend dist build this lane does not
+    # otherwise need). Comfortable headroom, not a claim it always needs this long.
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real credential.
+          MSSQL_SA_PASSWORD: 'E2eFunc!Probe2026'
+        ports:
+          - 1433:1433
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 9.15.9, NOT this lane's usual 10.16.1: the package stamps its own `packageManager` field to
+          # pnpm@9.15.9 (scripts/ops/multitable-onprem-package-build.sh), the packaged lockfile is
+          # verified against that version, and this job runs `pnpm install --frozen-lockfile` INSIDE the
+          # extracted package root. stock-prep-main-package-verify.yml and
+          # stock-prep-staging-window-rehearsal.yml both use 9.15.9 for the repo-root install as well,
+          # so a single version serves both installs here.
+          version: 9.15.9
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist (the package ships compiled output, never sources)
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build the on-prem package from THIS commit and run the five-check verifier over it
+        id: pkg
+        env:
+          PACKAGE_TAG: e2elab${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # Same invocation stock-prep-main-package-verify.yml and stock-prep-staging-window-rehearsal.yml
+          # use (INSTALL_DEPS/BUILD_WEB/BUILD_BACKEND all 0 — the three steps above already did that work).
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+          out_dir="output/releases/multitable-onprem"
+          pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          tgz_sha="$(sha256sum "$pkg_tgz" | awk '{print $1}')"
+          {
+            echo "pkg_tgz=${pkg_tgz}"
+            echo "tgz_sha256=${tgz_sha}"
+          } >> "$GITHUB_OUTPUT"
+          # A DIGEST only — values-free by this repo's convention (stock-prep-main-package-verify.yml
+          # publishes packageTgzSha256 the same way). It names the artifact under test; it discloses none
+          # of its content.
+          echo "packageVerify=PASS"
+          echo "packageTgzSha256=${tgz_sha}"
+
+      - name: Extract the package (this is the runtime the walk will drive)
+        id: unpack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pkgroot"
+          tar -xzf "${{ steps.pkg.outputs.pkg_tgz }}" -C "${RUNNER_TEMP}/pkgroot"
+          PKG_ROOT="$(find "${RUNNER_TEMP}/pkgroot" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$PKG_ROOT"
+          # The claim this job makes is "the package's OWN compiled entry point served the walk", so the
+          # entry point must exist in the extracted tree BEFORE anything else. The harness re-checks this
+          # too (E2E_SERVER_ARGS is resolved against E2E_SERVER_ROOT at load time); asserting it here as
+          # well means a packaging regression fails at the packaging step, not as a health-check timeout.
+          test -f "${PKG_ROOT}/packages/core-backend/dist/src/index.js"
+          test -f "${PKG_ROOT}/packages/core-backend/dist/src/db/migrate.js"
+          chmod +x "${PKG_ROOT}/scripts/ops/"*.sh
+          echo "pkg_root=${PKG_ROOT}" >> "$GITHUB_OUTPUT"
+          echo "packageEntryPointPresent=PASS"
+          echo "packageMigrationRunnerPresent=PASS"
+
+      - name: Install the package's OWN pinned dependencies (frozen lockfile — never relaxed)
+        working-directory: ${{ steps.unpack.outputs.pkg_root }}
+        run: pnpm install --frozen-lockfile --reporter=append-only
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter plugin-integration-core exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'E2eFunc!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Generate CI-local ephemeral secrets (masked, never logged, scoped to this run only)
+        run: |
+          set -euo pipefail
+          jwt_secret="$(openssl rand -hex 32)"
+          enc_key="$(openssl rand -hex 32)"
+          runtime_password="$(openssl rand -hex 16)"
+          provisioning_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$enc_key"
+          echo "::add-mask::$runtime_password"
+          echo "::add-mask::$provisioning_password"
+          {
+            echo "E2E_JWT_SECRET=$jwt_secret"
+            echo "E2E_INTEGRATION_ENCRYPTION_KEY=$enc_key"
+            echo "E2E_S6A_RUNTIME_DB_ROLE=e2e_s6a_runtime"
+            echo "E2E_S6A_RUNTIME_DB_PASSWORD=$runtime_password"
+            echo "E2E_S6A_PROVISIONING_DB_ROLE=e2e_s6a_provision"
+            echo "E2E_S6A_PROVISIONING_DB_PASSWORD=$provisioning_password"
+          } >> "$GITHUB_ENV"
+
+      - name: Provision sealed-export Postgres roles, then migrate with the PACKAGE's own runner
+        env:
+          PG_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          RUNTIME_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          RUNTIME_PASSWORD: ${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}
+          PROVISIONING_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          PROVISIONING_PASSWORD: ${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}
+          # The whole point of package mode: the schema this walk runs against comes from the PACKAGE's
+          # compiled migration runner (the same `node packages/core-backend/dist/src/db/migrate.js`
+          # invocation stock-prep-main-package-verify.yml and stock-prep-s6a-postgres17-validation.yml
+          # use), not from the repo checkout's TypeScript sources. The provisioning script still creates
+          # the two separated non-superuser roles and still makes both role GUCs visible to the very
+          # first migration connection — that part is identical in both modes.
+          E2E_MIGRATE_ROOT: ${{ steps.unpack.outputs.pkg_root }}
+          E2E_MIGRATE_CMD: node
+          E2E_MIGRATE_ARGS: packages/core-backend/dist/src/db/migrate.js
+        run: node scripts/ops/stock-preparation-e2e-provision-postgres-roles-and-migrate.mjs
+
+      - name: Run containerized functional smoke against the EXTRACTED PACKAGE
+        id: smoke
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          E2E_JWT_SECRET: ${{ env.E2E_JWT_SECRET }}
+          E2E_INTEGRATION_ENCRYPTION_KEY: ${{ env.E2E_INTEGRATION_ENCRYPTION_KEY }}
+          E2E_S6A_RUNTIME_DB_ROLE: ${{ env.E2E_S6A_RUNTIME_DB_ROLE }}
+          E2E_S6A_RUNTIME_DB_URL: postgresql://${{ env.E2E_S6A_RUNTIME_DB_ROLE }}:${{ env.E2E_S6A_RUNTIME_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          E2E_S6A_PROVISIONING_DB_ROLE: ${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}
+          E2E_S6A_PROVISIONING_DB_URL: postgresql://${{ env.E2E_S6A_PROVISIONING_DB_ROLE }}:${{ env.E2E_S6A_PROVISIONING_DB_PASSWORD }}@127.0.0.1:5432/metasheet
+          MSSQL_HOST: 127.0.0.1
+          MSSQL_PORT: '1433'
+          MSSQL_USERNAME: sa
+          MSSQL_PASSWORD: 'E2eFunc!Probe2026'
+          # The IDENTICAL primary walk: same arm, same 3 rows, same assertions, same evidence keys. Only
+          # the server under test moves — from `pnpm run dev:core` in the repo tree to the package's own
+          # compiled entry point with the package root as cwd (plugin discovery is cwd-relative, which is
+          # why stock-prep-staging-window-rehearsal.yml starts the packaged backend the same way).
+          E2E_S6A_ARM: primary
+          E2E_S6A_ROW_COUNT: '3'
+          E2E_WALK_MODE: package
+          E2E_SERVER_ROOT: ${{ steps.unpack.outputs.pkg_root }}
+          E2E_SERVER_CMD: node
+          E2E_SERVER_ARGS: packages/core-backend/dist/src/index.js
+          # Names the artifact this walk drove. The harness shape-checks it (64-char lowercase hex) rather
+          # than trusting it, so an empty or truncated value cannot become a false identity claim.
+          E2E_PACKAGE_TGZ_SHA256: ${{ steps.pkg.outputs.tgz_sha256 }}
+          # This job exists only under lab mode, so the post-ON flag-OFF restoration arm runs here too —
+          # #4708 item 8 is asserted in BOTH walk modes, not only against the repo tree.
+          E2E_LAB_MODE: 'true'
+        run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
+
+      - name: Write step summary
+        if: always()
+        run: |
+          echo "## Stock Preparation E2E Functional Smoke (PACKAGE mode, primary arm)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Functional testing on synthetic data only. Does NOT substitute for the #4695 controlled" >> "$GITHUB_STEP_SUMMARY"
+          echo "acceptance and establishes no real-customer, external-write, or rollout claim. The walk" >> "$GITHUB_STEP_SUMMARY"
+          echo "here is the SAME walk the repo-mode job runs; only the server under test differs (the" >> "$GITHUB_STEP_SUMMARY"
+          echo "package's own compiled entry point, its own pinned dependency install, its own migration" >> "$GITHUB_STEP_SUMMARY"
+          echo "runner). This is a LINUX runner: it establishes nothing about a Windows-host installer." >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/stock-preparation-e2e-functional-smoke/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-e2e-functional-smoke-package
+          path: |
+            output/stock-preparation-e2e-functional-smoke/summary.txt
+            output/stock-preparation-e2e-functional-smoke/checks.json
+            output/stock-preparation-e2e-functional-smoke/existing-chain/summary.txt
+            output/stock-preparation-e2e-functional-smoke/existing-chain/checks.json
+          if-no-files-found: warn
+          retention-days: 14
+
   scale-midtier:
     name: R9 scale leg — mid-tier calibration walk (own Postgres + SQL Server)
-    # Gated so this job is SKIPPED (never reported as a pass) unless `s6a_row_count` requests scale — the
-    # SAME condition, computed the SAME way, as scale-rejection below and as
+    # Gated so this job is SKIPPED (never reported as a pass) unless scale is requested — the SAME
+    # condition, computed the SAME way, as scale-rejection below and as
     # scripts/ops/stock-preparation-e2e-compute-scale-slope.mjs's own independent re-derivation of
-    # "was scale requested" (see that script's SCALE_REQUESTED_INPUT — it does not infer this from
-    # whether this job ran, on purpose).
+    # "was scale requested" (see that script's SCALE_REQUESTED_INPUT/LAB_MODE_INPUT — it does not infer
+    # this from whether this job ran, on purpose).
+    #
+    # S10 added the `lab_mode` term: lab mode defaults `s6a_row_count` to 24999 for the row-count env
+    # below, and a gate that looked only at the raw input would skip this job on exactly the dispatches
+    # that asked for the lab walk.
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.s6a_row_count != '' &&
-      github.event.inputs.s6a_row_count != '3'
+      (github.event.inputs.lab_mode == 'true' ||
+      (github.event.inputs.s6a_row_count != '' && github.event.inputs.s6a_row_count != '3'))
     needs: contract
     runs-on: ubuntu-latest
     # The mid-tier walk is a full capture -> private ingestion -> generation kernel -> apply -> activation
@@ -448,11 +740,12 @@ jobs:
           MSSQL_USERNAME: sa
           MSSQL_PASSWORD: 'E2eFunc!Probe2026'
           E2E_S6A_ARM: midtier
-          # This job only runs (see the job-level `if:` above) when this input requests scale, so the raw
-          # input is passed straight through — no `|| '3'` fallback (that fallback exists on
-          # functional-smoke's identically-named env var only to cover a default dispatch, which never
-          # reaches this job).
-          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count }}
+          # This job only runs (see the job-level `if:` above) when scale is requested. The expression is
+          # the S10 effective row count: the raw input when it names one, and the product's declared bound
+          # (24999) when `lab_mode` requested the lab walk without naming a row count. No `|| '3'`
+          # fallback — that fallback exists on functional-smoke's identically-named env var only to cover
+          # a default dispatch, which never reaches this job.
+          E2E_S6A_ROW_COUNT: ${{ (github.event.inputs.lab_mode == 'true' && (github.event.inputs.s6a_row_count == '' || github.event.inputs.s6a_row_count == '3')) && '24999' || (github.event.inputs.s6a_row_count || '3') }}
         run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
 
       - name: Write step summary
@@ -506,8 +799,8 @@ jobs:
     # Gated identically to scale-midtier above — see that job's comment.
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.s6a_row_count != '' &&
-      github.event.inputs.s6a_row_count != '3'
+      (github.event.inputs.lab_mode == 'true' ||
+      (github.event.inputs.s6a_row_count != '' && github.event.inputs.s6a_row_count != '3'))
     needs: contract
     runs-on: ubuntu-latest
     # The rejection arm seeds MAX_BUSINESS_LINES+1 (~25000) rows in batches of 500, then the product reads
@@ -625,11 +918,11 @@ jobs:
           MSSQL_USERNAME: sa
           MSSQL_PASSWORD: 'E2eFunc!Probe2026'
           E2E_S6A_ARM: rejection
-          # Same rationale as scale-midtier above: no `|| '3'` fallback, this job only runs when scale is
-          # requested. The rejection arm's OWN row count is always MAX_BUSINESS_LINES+1 regardless of the
-          # exact value here — this env var only feeds the script's S6A_SCALE_REQUESTED gate (see
-          # runS6ARejectionArm's caller in main()).
-          E2E_S6A_ROW_COUNT: ${{ github.event.inputs.s6a_row_count }}
+          # Same rationale as scale-midtier above: the S10 effective row count, no `|| '3'` fallback,
+          # this job only runs when scale is requested. The rejection arm's OWN row count is always
+          # MAX_BUSINESS_LINES+1 regardless of the exact value here — this env var only feeds the script's
+          # S6A_SCALE_REQUESTED gate (see runS6ARejectionArm's caller in main()).
+          E2E_S6A_ROW_COUNT: ${{ (github.event.inputs.lab_mode == 'true' && (github.event.inputs.s6a_row_count == '' || github.event.inputs.s6a_row_count == '3')) && '24999' || (github.event.inputs.s6a_row_count || '3') }}
         run: node scripts/ops/stock-preparation-e2e-functional-smoke.mjs
 
       - name: Write step summary
@@ -700,10 +993,13 @@ jobs:
       - name: Compute R9 two-point slope from job outputs (values-free; NOT_RUN if either data point is missing)
         id: slope
         env:
-          # The SAME raw input the scale jobs' own `if:` gates use — computed independently here rather
+          # The SAME raw inputs the scale jobs' own `if:` gates use — computed independently here rather
           # than inferred from whether those jobs ran, so a gate malfunction (job ran/skipped when it
-          # should not have) is DETECTABLE by comparing the two, not assumed away.
+          # should not have) is DETECTABLE by comparing the two, not assumed away. Both terms are passed
+          # RAW; the script re-derives "was scale requested" from them itself (S10 — a lab-mode dispatch
+          # requests scale without naming a row count, so the row count alone no longer decides).
           SCALE_REQUESTED_INPUT: ${{ github.event.inputs.s6a_row_count }}
+          LAB_MODE_INPUT: ${{ github.event.inputs.lab_mode }}
           # Bracket notation is required for hyphenated job ids in an expression context — dot notation on
           # `needs.scale-midtier` is not "scale" minus "midtier", it silently resolves to nothing.
           PRIMARY_JOB_RESULT: ${{ needs['functional-smoke'].result }}
