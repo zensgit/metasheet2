@@ -202,6 +202,20 @@ const api: ApprovalNodeConfigEditorApi = {
   },
   approvalNodeMode: () => 'single',
   setApprovalNodeMode: () => {},
+  // P1-C (T2-4 N-of-M / 门槛会签) + (T1-1) node-level timeout — out of THIS harness's scoped
+  // interaction surface (roster ArrowDown/ArrowUp + tab strip only, see file header); stubbed
+  // inert like approvalNodeMode/setApprovalNodeMode above, not wired to a live edit model.
+  approvalNodeThreshold: () => 1,
+  setApprovalNodeThreshold: () => {},
+  approvalNodeInParallelRegion: () => false,
+  approvalNodeTimeout: () => undefined,
+  setApprovalNodeTimeoutEnabled: () => {},
+  setApprovalNodeTimeoutAfterMinutes: () => {},
+  setApprovalNodeTimeoutEffect: () => {},
+  setApprovalNodeTimeoutTransferToUserId: () => {},
+  setApprovalNodeTimeoutJumpToNodeKey: () => {},
+  setApprovalNodeTimeoutUnit: () => {},
+  timeoutJumpTargetOptions: () => [],
   approvalNodeEmptyPolicy: () => 'error',
   setApprovalNodeEmptyPolicy: () => {},
   approvalNodeMergeWithRequester: () => false,
