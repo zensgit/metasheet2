@@ -296,13 +296,29 @@ package. This checklist is not pinned and is the correct place for it. Read runb
 for the role-creation procedure and this section for the PostgreSQL 16+ caveat that §2
 predates.
 
-**Where this is now proven.** `.github/workflows/stock-prep-s6a-postgres17-validation.yml`
-job `migrate-postgres-role-bound` reproduces exactly this on the PG16 and PG17 legs: a
+**Where this is now proven.** `.github/workflows/stock-prep-main-package-verify.yml` job
+`migrate-postgres-role-bound` reproduces exactly this on the PG16 and PG17 legs: a
 `CREATEROLE` non-superuser creates the roles with default `createrole_self_grant`, every
 other predicate leg is measured passing on those same roles, and the migration run must
 be REFUSED with `sealed-export role has unsafe authority`. The PG15 leg asserts the
 contrast — no automatic membership — so the version boundary above is measured, not
 assumed.
+
+The same job carries the POSITIVE arm: roles created with §2's attribute set, `PGOPTIONS`
+exported per §2, and then the grants measured directly — which is the only way to
+distinguish "migration recorded" from "grants landed", since the latent branch records the
+migration too and its `NOTICE` is never printed by the Node runner.
+
+It lives in that lane and not in
+`.github/workflows/stock-prep-s6a-postgres17-validation.yml` for a structural reason worth
+knowing before reading either lane's evidence: the frozen S6-A asset the PG17 lane pins
+**predates migrations 074 and 075** (#4695, 2026-08-04 disclosure). Dispatching the
+role-bound arm there failed all three legs at `--confirm 074…` with exit 2, "not found
+among the known migrations" (run 32136846204). A green PG17-lane run therefore says
+nothing about 074/075 at all; only the build-from-commit lane can. The role-bound job
+derives the three ledger names from the packaged migrations directory rather than
+hardcoding them, so this class of mismatch fails loudly at the derive step instead of
+part-way through an assertion.
 
 Consequence of B9 + `db:125-131`: each database URL later supplied to the runtime or
 provisioning path must authenticate **as the role itself**. Connecting as some other
