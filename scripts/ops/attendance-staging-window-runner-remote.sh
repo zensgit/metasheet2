@@ -2455,7 +2455,10 @@ action_soak_status() {
   # soak's plan (legacy|shadow) — e.g. 'suspended' — makes the org invisible to BOTH
   # regimes. Either voids the counting assumptions => mechanical alert.
   local pc_bad
-  pc_bad="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND (state NOT IN ('legacy','shadow') OR (state = 'legacy' AND prior_state IS NOT NULL));")"
+  # changed_at >= window_start catches the FORWARD walk too (legacy->shadow mid-window, or
+  # a round trip landing on a nominal-looking shape) — every seed-time walk precedes the
+  # window start, so this adds no false alarms (#4975 gate round-2 P3).
+  pc_bad="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND (state NOT IN ('legacy','shadow') OR (state = 'legacy' AND prior_state IS NOT NULL) OR changed_at >= '${window_start}'::timestamptz);")"
   echo "[Q3b]_posture_constancy_violations=${pc_bad}" >> "$SOAK_STATUS_FILE"
   [[ "$pc_bad" == "0" ]] || alerts+=("Q3b_posture_constancy_violations=${pc_bad}")
 

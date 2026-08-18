@@ -1159,8 +1159,14 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.match(
     slices.status,
-    /state NOT IN \('legacy','shadow'\) OR \(state = 'legacy' AND prior_state IS NOT NULL\)/,
-    'Q3b must catch BOTH the rolled-back shape and out-of-plan states',
+    /state NOT IN \('legacy','shadow'\) OR \(state = 'legacy' AND prior_state IS NOT NULL\) OR changed_at >= '\$\{window_start\}'::timestamptz/,
+    'Q3b must catch the rolled-back shape, out-of-plan states, AND any in-window posture change (forward walks land on nominal-looking shapes)',
+  )
+  // #4975 gate round-2 P3: the window scope is load-bearing on BOTH legacy branches.
+  assert.match(
+    q2Sql,
+    /r\.created_at >= '\$\{window_start\}'::timestamptz AND r\.created_at < now\(\)/,
+    '[Q2]ʼs legacy branch must be window-scoped too',
   )
   assert.ok(
     slices.status.includes('alerts+=("Q3b_posture_constancy_violations'),
