@@ -363,3 +363,64 @@ describe('Lock-8 L8-A resolveVisibilityFieldReference (BE runtime mirror)', () =
     expect(resolveVisibilityFieldReference('kind', fields)).toEqual({ field: fields[1] })
   })
 })
+
+// Lock-8 L8-A gate P2-2 (fix-round hardening): `applyHandlerFieldWrites` (the ONE other form_snapshot
+// write door besides create — the create door is closed by pruneHiddenFormData + the publish gates
+// above) gives record-link/attachment an explicit APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE refusal;
+// explanation — the one type carrying no value at any time — must join that refusal or a handler
+// node with no fieldPermissions matrix entry for it (OD-L7-9 absent≡editable) would let
+// `fieldWrites: {<id>: null}` reach the in-place `form_snapshot` UPDATE, falsifying A-1's "absent
+// from formSnapshot" contract. Calls the REAL private method (TS privacy is compile-time only) with
+// a fake `client.query` mock — no live DB needed since the method's only DB access is the single
+// UPDATE this test proves never runs.
+describe('Lock-8 L8-A gate P2-2: applyHandlerFieldWrites refuses an explanation write (form_snapshot absence, A-1)', () => {
+  const formSchema: FormSchema = {
+    fields: [
+      { id: 'note', type: 'explanation', label: '说明', props: { text: '仅供参考' } },
+      { id: 'reason', type: 'text', label: '事由' },
+    ],
+  }
+  // Minimal handler-node runtime graph: NO fieldPermissions entry for either field (OD-L7-9
+  // absent≡editable), NO routing driver — the exact "reachable in default config" shape the gate
+  // finding names (APPROVAL_NODE_TYPES handler nodes are not flag-gated).
+  const runtimeGraph = {
+    nodes: [{ key: 'h1', type: 'handler', config: {} }],
+  } as never
+
+  async function callApplyHandlerFieldWrites(fieldWrites: Record<string, unknown>) {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+    const client = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) }
+    const result = (service as unknown as {
+      applyHandlerFieldWrites(
+        client: { query: typeof client.query },
+        instanceId: string,
+        nodeKey: string,
+        rawWrites: unknown,
+        context: { runtimeGraph: unknown; formSchema: FormSchema; frozenSnapshot: Record<string, unknown> },
+      ): Promise<{ changedFieldIds: string[]; revisions: unknown[] }>
+    }).applyHandlerFieldWrites(client, 'inst_1', 'h1', fieldWrites, { runtimeGraph, formSchema, frozenSnapshot: {} })
+    return { result, client }
+  }
+
+  it('a null explanation write is refused 400 APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE, with ZERO rows (the UPDATE never runs)', async () => {
+    const { result, client } = await callApplyHandlerFieldWrites({ note: null })
+    await expect(result).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE' })
+    expect(client.query).not.toHaveBeenCalled()
+  })
+
+  it('a non-null (smuggled) explanation write is ALSO refused with the same code, not merely the null gap', async () => {
+    const { result, client } = await callApplyHandlerFieldWrites({ note: 'smuggled value' })
+    await expect(result).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE' })
+    expect(client.query).not.toHaveBeenCalled()
+  })
+
+  it('positive control: an ORDINARY field write in the SAME fixture/node is accepted and reaches the UPDATE — proves the harness is not vacuously fail-closed for every write', async () => {
+    const { result, client } = await callApplyHandlerFieldWrites({ reason: '出差申请' })
+    await expect(result).resolves.toMatchObject({ changedFieldIds: ['reason'] })
+    expect(client.query).toHaveBeenCalledTimes(1)
+    const [sql, params] = client.query.mock.calls[0] as [string, unknown[]]
+    expect(sql).toMatch(/UPDATE approval_instances/)
+    expect(JSON.parse(String(params[1]))).toEqual({ reason: '出差申请' })
+  })
+})

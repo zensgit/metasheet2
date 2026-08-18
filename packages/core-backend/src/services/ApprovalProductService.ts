@@ -9659,7 +9659,20 @@ export class ApprovalProductService {
       // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
       // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
       // approval-node write surface (OD-L7-3's named next slice) carries the binding surfaces.
-      if (field.type === 'record-link' || field.type === 'attachment') {
+      //
+      // Lock-8 L8-A (§1.1) gate P2-2 hardening: `explanation` joins this refusal for a DIFFERENT
+      // reason — it carries no value at ANY time (display-only, A-1). A handler node with NO matrix
+      // entry for it defaults to OD-L7-9 absent≡editable (`fieldAccessAtNodes` above), so the ONLY
+      // remaining backstop was `validateFieldType`'s explicit `case 'explanation'` arm
+      // (ApprovalGraphExecutor.ts) — which DOES refuse a non-null submitted value, but that function's
+      // own universal `value === undefined || value === null` early return (shared by every field
+      // type, not explanation-specific) lets a `null` write skip validation entirely. Without this
+      // arm, `fieldWrites: {<explanationId>: null}` would reach the `merge[fieldId] = value` in-place
+      // UPDATE below and add an `explanation` key to `form_snapshot` (plus a field-revision row) for a
+      // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
+      // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
+      // arm above, unaffected by this change.
+      if (field.type === 'record-link' || field.type === 'attachment' || field.type === 'explanation') {
         throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
       }
       // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a

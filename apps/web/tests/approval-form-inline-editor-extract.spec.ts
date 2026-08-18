@@ -12,7 +12,11 @@ import { computed, createApp, defineComponent, h, inject, nextTick, provide, ref
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import ApprovalFormInlineEditor from '../src/approvals/components/ApprovalFormInlineEditor.vue'
 import type { ApprovalTemplateDetailDTO } from '../src/types/approval'
-import { createEmptyFieldDraft, type FieldAuthoringDraft } from '../src/approvals/templateAuthoring'
+import {
+  AUTHORABLE_FIELD_TYPES,
+  createEmptyFieldDraft,
+  type FieldAuthoringDraft,
+} from '../src/approvals/templateAuthoring'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -797,5 +801,62 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
     // Positive control: the sweep DOES find the mandated replacement copy — not passing over an
     // empty string set (Lock-8 gate M-2).
     expect(text).toContain('格式化数字')
+  })
+
+  // Lock-8 L8-A gate P2-1 hardening: the (j) test above proves invalidateStaleRecordLinkDependencies
+  // fires on the "became record-link" direction; `bareBanned` also lists `explanation` (this PR's
+  // OWN addition — TemplateAuthoringView.vue's `invalidateStaleRecordLinkDependencies`), and until
+  // now nothing distinguished that arm from a no-op: deleting `|| changedField.type === 'explanation'`
+  // left every reachable spec green. This is the same scenario as (j), target type swapped.
+  it('(n) invalidate-record-link-deps ALSO clears a stale visibility dependency when the depended-on field is retyped to explanation (Lock-8 L8-A)', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Same setup as (j): the newly-added field is focused; give it a visibility rule depending on
+    // the ORIGINAL (create-mode default, index-1) field — still type='text' here, an eligible
+    // dependency.
+    const dependentRow = focusedFieldRow()
+    const dependsSelect = dependentRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    const dependencyOption = dependsSelect.querySelector('option:not([value=""])') as HTMLOptionElement
+    expect(dependencyOption).not.toBeNull()
+    const dependencyValue = dependencyOption.value
+    dependsSelect.value = dependencyValue
+    dependsSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(dependsSelect.value).toBe(dependencyValue)
+    // Ground-truth signal (same trap (j) documents): read the operator select's v-if, not the
+    // depends <select>'s own `.value` getter after its matching option disappears.
+    const operatorSelect = () => dependentRow.querySelector('[data-testid="approval-field-visibility-operator"]')
+    expect(operatorSelect()).not.toBeNull()
+
+    // Retype the ORIGINAL field (the dependency target) to explanation — the other field row.
+    const allRows = Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]'))
+    const targetRow = allRows.find((row) => row !== dependentRow) as HTMLElement
+    const typeSelect = targetRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'explanation'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The dependent field's stale visibility rule was cleared (server would fail-close on an
+    // illegal dependency, since explanation is never offered by visibilityFieldOptions):
+    expect(operatorSelect()).toBeNull()
+  })
+
+  // Lock-8 L8-A gate P2-1 hardening: `fieldPaletteGroups` (TemplateAuthoringView.vue) is a SECOND,
+  // independent copy of the F2 `APPROVAL_FORM_PALETTE_GROUPS` membership (approval-form-palette-
+  // chips.spec.ts:107 already forces THAT array's completeness against `AUTHORABLE_FIELD_TYPES`,
+  // but never covered this one — deleting `explanation` from this file's `fieldPaletteGroups` array
+  // alone left every reachable spec green). This mounts the REAL view (not a duplicated literal) and
+  // generalizes the same forcing-function shape to the actually-shipped chip DOM, so a future type
+  // added to AUTHORABLE_FIELD_TYPES but dropped from this file's `fieldPaletteGroups` reds here.
+  it('(o) MS-13 completeness: the VIEW-owned fieldPaletteGroups renders exactly one palette chip per AUTHORABLE_FIELD_TYPES member, no more, no fewer', async () => {
+    await mountView()
+    const chipTypes = Array.from(
+      container!.querySelectorAll('[data-testid^="approval-field-palette-"]'),
+    ).map((el) => (el.getAttribute('data-testid') ?? '').replace('approval-field-palette-', ''))
+    expect([...chipTypes].sort()).toEqual([...AUTHORABLE_FIELD_TYPES].sort())
+    // No duplicate registration of the same type across groups.
+    expect(chipTypes).toHaveLength(new Set(chipTypes).size)
   })
 })
