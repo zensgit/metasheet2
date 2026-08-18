@@ -344,7 +344,7 @@
                     size="small"
                     class="template-detail__node-mode"
                   >
-                    {{ approvalModeLabel((node.config as any).approvalMode) }}
+                    {{ approvalModeLabel((node.config as any).approvalMode) }}<template v-if="(node.config as any).approvalMode === 'threshold' && Number.isInteger((node.config as any).approvalThreshold)">（{{ (node.config as any).approvalThreshold }} 人同意）</template>
                   </el-tag>
                   <el-tag
                     v-if="node.type === 'approval' && (node.config as any).emptyAssigneePolicy"
@@ -353,6 +353,16 @@
                     class="template-detail__node-policy"
                   >
                     {{ emptyAssigneePolicyLabel((node.config as any).emptyAssigneePolicy) }}
+                  </el-tag>
+                  <!-- P1-C: business-label-only timeout indicator — never the raw effect enum string,
+                       a user id, or a node key (master §P1-C G1-p exit bullet 4). -->
+                  <el-tag
+                    v-if="node.type === 'approval' && nodeTimeoutEffectLabel((node.config as any).timeout?.effect)"
+                    size="small"
+                    type="info"
+                    class="template-detail__node-timeout"
+                  >
+                    {{ nodeTimeoutEffectLabel((node.config as any).timeout.effect) }}（{{ (node.config as any).timeout.afterMinutes }} 分钟）
                   </el-tag>
                 </div>
               </el-timeline-item>
@@ -1029,8 +1039,26 @@ function nodeTagType(type: ApprovalNodeType): string {
 }
 
 function approvalModeLabel(mode: ApprovalMode): string {
-  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签' }
+  // P1-C: 'threshold' (T2-4 N-of-M) is the shipped engine 4th mode — see the ApprovalMode doc
+  // comment (types/approval.ts) for the linear-only constraint this label does not itself enforce
+  // (a read-only detail view never authors the mode, only echoes what was published).
+  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签', threshold: '门槛会签' }
   return map[mode] ?? mode
+}
+
+// P1-C: business labels for the WIRED timeout effects only (`NODE_TIMEOUT_SUPPORTED_EFFECTS` — never
+// the raw enum string). No fallback-to-raw-value branch: an effect outside this map can only be
+// 'auto_approve'/'auto_reject' (reserved, unreachable — publish rejects them,
+// `APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED`) or genuinely malformed data, and this is a read-only
+// echo, not an authoring surface, so silently rendering nothing for that case is correct (never
+// invent a label for a capability that isn't real).
+const NODE_TIMEOUT_EFFECT_LABELS: Partial<Record<string, string>> = {
+  remind: '超时提醒',
+  transfer: '超时转交',
+  jump: '超时跳转',
+}
+function nodeTimeoutEffectLabel(effect: string | undefined): string {
+  return (effect && NODE_TIMEOUT_EFFECT_LABELS[effect]) ?? ''
 }
 
 function emptyAssigneePolicyLabel(policy: EmptyAssigneePolicy): string {

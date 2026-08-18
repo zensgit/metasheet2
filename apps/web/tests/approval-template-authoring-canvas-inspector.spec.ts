@@ -1454,6 +1454,72 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tabsInSequence = [tab1, tab2].filter((tab) => tab.tabIndex === 0)
     expect(tabsInSequence).toHaveLength(1)
   })
+
+  // Fix-round follow-up (gate P2-2): the mount spec for `ApprovalGraphNodeConfigEditor.vue` in
+  // approval-node-threshold-timeout-config.spec.ts uses a hand-built stub API whose
+  // `setApprovalNodeMode`/`setApprovalNodeTimeoutEnabled` carry NO parallel-region guard — it can
+  // only ever prove the render-layer `:disabled` option/checkbox, never the setter itself. THIS view
+  // mount uses the REAL `TemplateAuthoringView.vue` setters (via
+  // `provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, ...)`), so forcing the underlying
+  // `<select>`/`<input type=checkbox>` past its disabled affordance — exactly what a stray
+  // programmatic caller would do — reaches the real guard. `app_a`/`app_b` sit INSIDE `fork_1`'s
+  // parallel region in `buildMixedGraph` (same shape as the compat test's PARALLEL_GRAPH).
+  // Assertion is on the STRUCTURAL v-if (the N-input / timeout-detail block), not the raw stub
+  // `<select>`/`<input>`'s own DOM `.value`/`.checked`: Vue's component-update bail-out skips
+  // re-invoking a child (the el-select/el-checkbox stub) whose props are unchanged from the last
+  // render, so a manually-forced native DOM value that the guard correctly refused to adopt into
+  // reactive state does NOT get patched back — only the PARENT's own v-if (driven directly by the
+  // reactive `approvalNodeMode`/`approvalNodeTimeout` getters) reliably reflects whether the setter
+  // actually mutated anything.
+  it('setApprovalNodeMode refuses threshold for a node inside a parallel region even past the disabled option (setter guard, not just render-layer)', async () => {
+    routeParams = { id: 'tpl_setter_guard_mode' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    clickCanvasNode('app_a')
+    await flushUi()
+    const select = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(select.value).toBe('single')
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+
+    select.value = 'threshold'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The N-input is gated by `v-if="approvalNodeMode(node.key) === 'threshold'"` — it must stay
+    // ABSENT if (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+  })
+
+  it('setApprovalNodeTimeoutEnabled refuses to enable a timeout for a node inside a parallel region even past the disabled checkbox (setter guard, not just render-layer)', async () => {
+    routeParams = { id: 'tpl_setter_guard_timeout' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    clickCanvasNode('app_b')
+    await flushUi()
+    const checkbox = container!.querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    expect(checkbox).not.toBeNull()
+    expect(checkbox.checked).toBe(false)
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The detail block is gated by `v-if="approvalNodeTimeout(node.key)"` — it must stay ABSENT if
+    // (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────
@@ -1582,6 +1648,19 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       },
       approvalNodeMode: () => 'single',
       setApprovalNodeMode: () => {},
+      // P1-C — this spec never exercises threshold/timeout; stub-only so ApprovalGraphNodeConfigEditor's
+      // unconditional `node.type === 'approval'` calls to these don't throw.
+      approvalNodeThreshold: () => 1,
+      setApprovalNodeThreshold: () => {},
+      approvalNodeInParallelRegion: () => false,
+      approvalNodeTimeout: () => undefined,
+      setApprovalNodeTimeoutEnabled: () => {},
+      setApprovalNodeTimeoutAfterMinutes: () => {},
+      setApprovalNodeTimeoutEffect: () => {},
+      setApprovalNodeTimeoutTransferToUserId: () => {},
+      setApprovalNodeTimeoutJumpToNodeKey: () => {},
+      setApprovalNodeTimeoutUnit: () => {},
+      timeoutJumpTargetOptions: () => [],
       approvalNodeEmptyPolicy: () => 'error',
       setApprovalNodeEmptyPolicy: () => {},
       approvalNodeMergeWithRequester: () => false,
