@@ -35,7 +35,18 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *             create-time auto-approval cascade reaching the referencing node behaves the same
  *             ('error' ⇒ create fails with ZERO rows; 'auto-approve' ⇒ the instance completes
  *             with an EXPLICIT audited auto-approval record and no `system:*` assignee row —
- *             never a silent nobody).
+ *             never a silent nobody). NOTE: this create-time arm resolves against an ABSENT
+ *             `priorNodeApprovers` map (§K3: the map is never built on the create path), so it
+ *             does not exercise the sentinel-drop filter itself — see G-11 below for the arm that
+ *             does.
+ *  G-11       sentinel-drop reachability: the referenced node auto-approves under
+ *             `system:auto-approval` at CREATE (a COMMITTED, separate transaction — `gate`'s
+ *             cascade halts at a REAL human node before ever reaching the referencing node, unlike
+ *             the OD-L1-4(a) arm above). The referencing node activates LATER, on the acting
+ *             decider's OWN approve transaction, which forces `loadPriorNodeApproverDeciders` to
+ *             actually READ gate's persisted `system:auto-approval` row and DROP it — never a
+ *             vacuous "map absent" pass. EMPTY resolution, no `system:*` assignee row, audited
+ *             auto-approval instead.
  *  G-12       no cross-node dedup: the SAME person approves at the prior node and AGAIN at the
  *             referencing node (intra-node dedup is unit-covered).
  *  freeze     the RULE is frozen with the instance's pinned published definition: re-publishing
@@ -401,8 +412,11 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
     expect((await activeAssignees(iid, 'again')).map((a) => a.assignee_id)).toEqual([MID])
   })
 
-  // ── OD-L1-4(a) + G-11 — auto-approved referenced node: sentinel never assigned ───────────────
-  it('auto-approved referenced node: a create-time cascade reaching `again` fails the create 400 with ZERO rows under `error`; under an explicit `auto-approve` the instance completes with an AUDITED auto-approval record and NO system:* assignee row (never silent, G-11 arm)', async () => {
+  // ── OD-L1-4(a) — create-time cascade reaching the referencing node ───────────────────────────
+  // NOTE: this arm's `again` resolves against an ABSENT `priorNodeApprovers` map (the create path
+  // never builds one — §K3), so it does NOT exercise the sentinel-drop filter (G-11's actual
+  // reachability leg is below, "service-door reachability (G-11)"). Kept for OD-L1-4(a) coverage.
+  it('auto-approved referenced node: a create-time cascade reaching `again` fails the create 400 with ZERO rows under `error`; under an explicit `auto-approve` the instance completes with an AUDITED auto-approval record and NO system:* assignee row (never silent, OD-L1-4(a))', async () => {
     // gate resolves to the requester + mergeWithRequester → auto-approved at create (sentinel
     // decider) → `again` activates during the create cascade with no persisted round.
     const cascadeGraph = (againPolicy: 'error' | 'auto-approve') => pnaGraph({
@@ -438,6 +452,88 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
       [autoIid],
     )
     expect(auditedAuto.rows.length).toBeGreaterThan(0)
+  })
+
+  // ── G-11 — service-door reachability: the sentinel filter reads a REAL committed row ──────────
+  it('service-door reachability (G-11): `gate` auto-approves under `system:auto-approval` at CREATE (a COMMITTED transaction, cascade halted at a REAL human `mid` node before ever touching `again`); MID\'s LATER approve activates `again`, forcing loadPriorNodeApproverDeciders to actually read + drop gate\'s persisted sentinel row — EMPTY resolution, no system:* assignee, audited auto-approval', async () => {
+    // start -> gate (requester + mergeWithRequester ⇒ auto-approves AT CREATE, COMMITTED) ->
+    // mid (REAL human decider ⇒ the create-time cascade halts HERE, never reaching `again`) ->
+    // again (prior_node_approver -> 'gate', emptyAssigneePolicy 'auto-approve') -> end.
+    //
+    // Unlike the OD-L1-4(a) arm above (where `again` sits immediately downstream of the
+    // auto-approving node and resolves within the SAME create-time cascade — where
+    // `getPriorNodeApprovers` is omitted entirely, §K3), this graph puts a REAL decider (`mid`)
+    // between `gate` and `again`. `again` can only activate on MID's own approve — a SEPARATE,
+    // LATER transaction on the dispatch/act path, which DOES build the `priorNodeApprovers` map
+    // from `gate`'s already-committed row. That is the only path that exercises the service-side
+    // sentinel filter (`loadPriorNodeApproverDeciders`'s `pushDecider`) for real.
+    const svcDoorGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: 's', config: {} },
+        {
+          key: 'gate', type: 'approval', name: 'gate',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+            autoApprovalPolicy: { mergeWithRequester: true },
+          },
+        },
+        { key: 'mid', type: 'approval', name: 'mid', config: { assigneeSources: [{ kind: 'static_user', userIds: [MID] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        {
+          key: 'again', type: 'approval', name: 'again',
+          config: {
+            assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'auto-approve',
+          },
+        },
+        { key: 'end', type: 'end', name: 'e', config: {} },
+      ],
+      edges: [
+        { key: 's2g', source: 'start', target: 'gate' },
+        { key: 'g2m', source: 'gate', target: 'mid' },
+        { key: 'm2a', source: 'mid', target: 'again' },
+        { key: 'a2e', source: 'again', target: 'end' },
+      ],
+    }
+    const tid = await createPublished(`pna-${TS}-g11-svc-door`, svcDoorGraph)
+    const started = await createAsReq(tid)
+    expect(started.status, started.text).toBe(201)
+    const iid = started.iid!
+
+    // Reachability + COMMITTED: `gate`'s sentinel row already exists, from create()'s own
+    // transaction, BEFORE mid ever acts — not an in-flight merge on the SAME request.
+    const gateAuto = await query(
+      `SELECT id FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND actor_id = 'system:auto-approval' AND metadata->>'nodeKey' = 'gate'`,
+      [iid],
+    )
+    expect(gateAuto.rows.length).toBeGreaterThan(0)
+    // The create-time cascade halted at `mid` (a real human) — `again` was never touched at create.
+    expect(await activeAssignees(iid, 'again')).toHaveLength(0)
+    expect((await activeAssignees(iid, 'mid')).map((a) => a.assignee_id)).toEqual([MID])
+
+    // MID's approve is a NEW, LATER transaction: `again` activates and its
+    // prior_node_approver('gate') resolution reads gate's committed sentinel row for real.
+    const midApprove = await act(iid, midTok, { action: 'approve' })
+    expect(midApprove.status, await midApprove.clone().text()).toBeLessThan(300)
+
+    // No phantom `system:*` seat — an EMPTY resolution, never a leaked sentinel assignee.
+    expect(await activeAssignees(iid, 'again')).toHaveLength(0)
+    const sentinelAssignees = await query(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND assignee_id LIKE 'system:%'`,
+      [iid],
+    )
+    expect(sentinelAssignees.rows).toHaveLength(0)
+    // The empty resolution is an EXPLICIT audited auto-approval on `again` itself
+    // (emptyAssigneePolicy 'auto-approve') — never a silent nobody.
+    const auditedAuto = await query(
+      `SELECT id FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND actor_id = 'system:auto-approval' AND metadata->>'nodeKey' = 'again'`,
+      [iid],
+    )
+    expect(auditedAuto.rows.length).toBeGreaterThan(0)
+    const finalStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [iid])
+    expect(finalStatus.rows[0].status).toBe('approved')
   })
 
   // ── Freeze: the RULE rides the instance's pinned published definition ────────────────────────
