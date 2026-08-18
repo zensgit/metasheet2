@@ -4292,6 +4292,7 @@ components:
             - attachment
             - detail
             - date_range
+            - explanation
         label:
           type: string
         required:
@@ -4376,6 +4377,7 @@ components:
           attachment: '#/components/schemas/FormFieldGeneric'
           detail: '#/components/schemas/FormFieldGeneric'
           date_range: '#/components/schemas/FormFieldGeneric'
+          explanation: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:

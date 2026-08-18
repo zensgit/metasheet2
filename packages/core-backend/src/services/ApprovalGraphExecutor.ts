@@ -260,7 +260,11 @@ export function resolveVisibilityFieldReference(
   const fieldMap = new Map(fields.map((field) => [field.id, field]))
   const direct = fieldMap.get(rawFieldId)
   if (direct) {
-    return direct.type === 'date_range' ? null : { field: direct }
+    // Lock-8 L8-A (§1.1, MS-8): `explanation` carries no value at all — refused as a bare
+    // reference the same way date_range's WHOLE value is, and with no endpoint fallback (it has
+    // none). A saved graph can never legitimately reach this branch (publish already denies it,
+    // ApprovalProductService.ts), but this runtime resolver stays defensive independent of that.
+    return direct.type === 'date_range' || direct.type === 'explanation' ? null : { field: direct }
   }
   const dot = rawFieldId.lastIndexOf('.')
   if (dot <= 0 || dot === rawFieldId.length - 1) return null
@@ -559,6 +563,13 @@ export function validateFieldType(
       }
       return null
     }
+    // Lock-8 L8-A (§1.1, MS-3): explanation accepts NO submitted value — an explicit arm, not the
+    // fall-through `default: return null` above (which would make the type fail-OPEN: any value
+    // silently accepted). This function only reaches here when `value !== undefined && value !==
+    // null` (the early return above already lets an absent/unset value through) — so this arm ONLY
+    // fires when a client actually submitted something for a field that must carry nothing.
+    case 'explanation':
+      return `${field.id} does not accept a submitted value`
     default:
       return null
   }

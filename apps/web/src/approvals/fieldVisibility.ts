@@ -31,7 +31,9 @@ export function resolveVisibilityFieldReference(
   const fieldMap = new Map(fields.map((field) => [field.id, field]))
   const direct = fieldMap.get(rawFieldId)
   if (direct) {
-    return direct.type === 'date_range' ? null : { field: direct }
+    // Lock-8 L8-A (§1.1, MS-8/MS-9): `explanation` carries no value at all — refused as a bare
+    // reference the same way date_range's WHOLE value is, with no endpoint fallback (it has none).
+    return direct.type === 'date_range' || direct.type === 'explanation' ? null : { field: direct }
   }
   const dot = rawFieldId.lastIndexOf('.')
   if (dot <= 0 || dot === rawFieldId.length - 1) return null

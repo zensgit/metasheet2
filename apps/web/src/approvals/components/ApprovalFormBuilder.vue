@@ -309,6 +309,13 @@ const selectedFieldReferences = computed(() =>
  * Visibility depends-on candidates: other fields with an id, excluding
  * `record-link`/`detail` (server fail-closed as visibility dependencies).
  * Option TEXT is the business label only — ids ride the non-visible value.
+ *
+ * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, MS-9): `explanation` joins the
+ * exclusion — it carries no value at all, so offering it here would be an M7 inert control
+ * (always selectable, never publishable; the server rejects it unconditionally regardless of
+ * which authoring surface produced the reference). NOTE: `date_range` is NOT excluded here — this
+ * F2 track's own predicate predates it and stayed unaddressed by L8-B, out of this slice's scope;
+ * not re-fixed here to avoid an unrelated-scope edit riding along.
  */
 const visibilityOptions = computed(() => {
   const current = selectedField.value
@@ -319,7 +326,8 @@ const visibilityOptions = computed(() => {
         field.localId !== current.localId &&
         field.id.trim().length > 0 &&
         field.type !== 'record-link' &&
-        field.type !== 'detail',
+        field.type !== 'detail' &&
+        field.type !== 'explanation',
     )
     .map((field) => ({
       id: field.id.trim(),

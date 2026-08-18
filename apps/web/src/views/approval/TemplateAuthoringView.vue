@@ -1747,6 +1747,9 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 // visibilityFieldOptions below) — its `{start,end}` value has no per-type predicate for MS-9 in
 // this slice, and `validateConditionEdits` (conditionEdit.ts) rejects any rule that references one.
 // Offering it here would be an M7 inert control: always selectable, never publishable.
+// Lock-8 L8-A (§1.1): explanation carries no value at all — excluded the same way, an M7 inert
+// control would otherwise always fail publish (`validateConditionEdits` rejects any rule
+// referencing one).
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => (
@@ -1754,6 +1757,7 @@ const conditionFieldOptions = computed(() =>
       && field.type !== 'record-link'
       && field.type !== 'detail'
       && field.type !== 'date_range'
+      && field.type !== 'explanation'
     ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
@@ -2984,6 +2988,7 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
+  explanation: '说明',
 }
 const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   text: 'A',
@@ -2997,13 +3002,19 @@ const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   detail: '表',
   'record-link': '链',
   date_range: '区',
+  explanation: '明',
 }
+// Lock-8 L8-A (§2.6): the group needs an owner decision — placed in 其他 as a REVERSIBLE
+// presentation choice (goal-set provenance; see this repo's execution ledger §3), not a ratified
+// OD-L8-3 group. Same choice as the F2 Designer 2.0 palette component's independent copy
+// (apps/web/src/approvals/components/ApprovalForm + Palette.vue, split across this comment on
+// purpose — see that file's own doc comment for why the literal name can't appear here whole).
 const fieldPaletteGroups = [
   { id: 'text', label: '文本', types: ['text', 'textarea'] },
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
+  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
 ].map((group) => ({
   ...group,
   entries: group.types.map((type) => ({
@@ -3136,6 +3147,9 @@ function visibilityFieldOptions(current: FieldAuthoringDraft) {
     if (field.localId === current.localId) continue
     if (!field.id.trim()) continue
     if (field.type === 'record-link' || field.type === 'detail') continue
+    // Lock-8 L8-A (§1.1): explanation carries no value at all — never offered, bare or dotted (it
+    // has no endpoints, unlike date_range).
+    if (field.type === 'explanation') continue
     if (field.type === 'date_range') {
       const fieldId = field.id.trim()
       const label = fieldDisplayLabel(field)
@@ -3170,7 +3184,12 @@ function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft
   const changedId = changedField.id.trim()
   if (!changedId) return
   const bareBanned =
-    changedField.type === 'record-link' || changedField.type === 'detail' || changedField.type === 'date_range'
+    changedField.type === 'record-link'
+    || changedField.type === 'detail'
+    || changedField.type === 'date_range'
+    // Lock-8 L8-A (§1.1): explanation matches record-link/detail's ONE-direction shape — nothing
+    // could ever validly have depended on it, so only "became explanation" needs clearing.
+    || changedField.type === 'explanation'
   const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
     const dependsOn = field.visibility.dependsOnFieldId.trim()

@@ -114,6 +114,16 @@ export type FormFieldType =
    * endpoints are.
    */
   | 'date_range'
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3): a
+   * DISPLAY-ONLY field (说明) — renders authored `props.text` to the requester/approver. No
+   * submitted value: `required`/`defaultValue`/`options`/`placeholder` are all refused at
+   * publish (A-1), the field never enters `formSnapshot` or FWB source candidates, is excluded
+   * from detail columns (MS-4/MS-5), and is never a whole-value visibility/condition dependency
+   * (MS-8/MS-9/MS-10) — it has no value to compare. `label` stays authoring-list-only (BE
+   * requires a non-blank label for every field, `:786`); the rendered body is `props.text`.
+   */
+  | 'explanation'
 
 export interface ApprovalNode {
   key: string

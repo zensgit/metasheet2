@@ -272,6 +272,12 @@ on:
       - 'apps/web/tests/approval-date-range-field.test.ts'
       - 'apps/web/tests/approval-date-range-visibility.test.ts'
       - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
+      # L8-A (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.1): explanation (说明).
+      # No new src file (every touched src file already has a path entry above); three new spec
+      # files.
+      - 'apps/web/tests/approval-explanation-field.test.ts'
+      - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
+      - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -512,6 +518,11 @@ on:
       - 'apps/web/tests/approval-date-range-field.test.ts'
       - 'apps/web/tests/approval-date-range-visibility.test.ts'
       - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
+      # L8-A (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.1): explanation (same set
+      # as the pull_request block above).
+      - 'apps/web/tests/approval-explanation-field.test.ts'
+      - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
+      - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -579,6 +590,9 @@ jobs:
             approval-date-range-field \
             approval-date-range-visibility \
             approval-date-range-inline-editor \
+            approval-explanation-field \
+            approval-explanation-inline-editor \
+            approval-lock8-field-type-census \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract

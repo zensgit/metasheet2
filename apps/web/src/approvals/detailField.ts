@@ -548,6 +548,15 @@ export function buildDisplayFields(
   const knownFieldIds = new Set(fields.map((field) => field.id))
   const result: DisplayField[] = []
   const pipelineOn = options.attachmentPipelineEnabled === true
+  // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3): explanation carries no formSnapshot value at all (A-1),
+  // so "is this field's id a snapshot key" — the test every OTHER arm below uses — is never true
+  // for it and can't gate its render. Its visibility must instead be evaluated directly against
+  // the FROZEN schema + snapshot, mirroring the fill view's own live evaluation: a hidden
+  // explanation must render nothing here either, exactly like a hidden field whose value the
+  // requester never got to see is never in the snapshot for any OTHER type.
+  const visibleFieldIds = formSchema
+    ? new Set(getVisibleFormFields(formSchema, snapshot).map((field) => field.id))
+    : null
 
   for (const field of fields) {
     if (field.type === 'detail') continue
@@ -556,6 +565,12 @@ export function buildDisplayFields(
     // were the reader's data. They resolve through `attachmentRefs.ts` in their own block.
     // Flag OFF (default): keep rendering legacy string/object values inline — no new endpoint.
     if (field.type === 'attachment' && pipelineOn) continue
+    if (field.type === 'explanation') {
+      if (!visibleFieldIds?.has(field.id)) continue
+      const text = typeof field.props?.text === 'string' ? field.props.text : ''
+      result.push({ key: field.id, label: field.label || field.id, value: text })
+      continue
+    }
     if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
     result.push({
       key: field.id,
@@ -592,9 +607,11 @@ export function summaryFields(
   const fields = formSchema?.fields
   if (!Array.isArray(fields) || fields.length === 0) return []
 
+  // Lock-8 L8-A: explanation is authoring copy, not "data the requester filled in" — excluded from
+  // the compact glance line the same way attachment/detail are (each for its own reason).
   const eligibleFieldIds = new Set(
     fields
-      .filter((field) => field.type !== 'attachment' && field.type !== 'detail')
+      .filter((field) => field.type !== 'attachment' && field.type !== 'detail' && field.type !== 'explanation')
       .map((field) => field.id),
   )
   if (eligibleFieldIds.size === 0) return []
