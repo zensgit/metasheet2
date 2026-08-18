@@ -23,6 +23,19 @@
 // harness's job is narrower and browser-only: does a REAL ArrowDown/ArrowUp keypress on the REAL
 // native radio markup actually commit (Link B), and does the REST of the shipped UI (echo line,
 // tab strip roving tabindex, toolbar/tablist non-crossing) behave correctly around that.
+//
+// FAIL-5 fix (P7-R2, 20260818): production theme + design tokens, exactly as
+// apps/web/src/main.ts loads them. Without these every `var(--el-*)`/`var(--ms-*)` reference in
+// ApprovalCanvasNodeInspector.vue / ApprovalGraphNodeConfigEditor.vue's scoped CSS is undefined,
+// so Chromium drops the whole declaration and any focus-ring / paint measurement over this
+// harness is vacuously empty. CSS-only — deliberately NOT `import ElementPlus from 'element-plus'`
+// + `.use(ElementPlus)`: this harness stubs Element Plus with the native elements below on
+// purpose (see the header comment above) so a real browser measures native radiogroup/tablist
+// keyboard semantics, not Element Plus's own widget behavior. Registering the plugin would let
+// unstubbed `<el-*>` tags (e.g. `<el-input>` below) silently resolve to the real component,
+// changing what this spec measures for zero contrast benefit.
+import 'element-plus/dist/index.css'
+import '../src/styles/tokens.css'
 import { computed, createApp, defineComponent, h, ref } from 'vue'
 import ApprovalCanvasNodeInspector from '../src/approvals/components/ApprovalCanvasNodeInspector.vue'
 import ApprovalGraphNodeConfigEditor from '../src/approvals/components/ApprovalGraphNodeConfigEditor.vue'

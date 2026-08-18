@@ -59,10 +59,15 @@ vi.mock('../src/composables/useAuth', () => ({
   }),
 }))
 
+// P7-R2: settable (was hardcoded `null`/`null`) so the candidate #3 (nodeLabel values-free
+// fallback) tests below can construct a live/pinned template drift shape. Defaults to null/null,
+// so every pre-existing test in this file (none of which sets these) is unaffected.
+const mockDetailActiveTemplate = ref<any>(null)
+const mockDetailActiveVersion = ref<any>(null)
 vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
-    activeTemplate: null,
-    activeVersion: null,
+    get activeTemplate() { return mockDetailActiveTemplate.value },
+    get activeVersion() { return mockDetailActiveVersion.value },
     loadTemplate: vi.fn().mockResolvedValue(undefined),
     loadVersion: vi.fn().mockResolvedValue(undefined),
   }),
@@ -327,6 +332,8 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
     mockLoading.value = false
     mockCanAct.value = false
     mockApprovalMobileFlag.value = false
+    mockDetailActiveTemplate.value = null
+    mockDetailActiveVersion.value = null
     setViewport(false)
     executeActionSpy.mockReset()
     executeActionSpy.mockResolvedValue({})
@@ -488,12 +495,18 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
       expect(rows).toHaveLength(2)
 
       // Row 0 IS the real 'created' history row, rendered as itself (发起), not relabelled 提交.
-      expect(rows[0].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('start')
+      // P7-R2 candidate #3 fix: this file's templateStore mock stays `activeTemplate: null` /
+      // `activeVersion: null` (no template ever loaded), which is exactly `nodeLabel`'s
+      // no-template-reachable case — it now renders the values-free fallback instead of the raw
+      // node key ('start'/'approval_1' below). This assertion USED TO pin the raw-key leak; the
+      // updated value is the fix landing, not a relaxed check (see approval-flow-canvas-a11y-
+      // adjacent P7-R2 slice / ApprovalDetailView.vue `nodeLabel`).
+      expect(rows[0].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('节点已变更')
       expect(rows[0].querySelector('[data-el-cell="审批人"]')?.textContent?.trim()).toBe('张三')
       expect(rows[0].querySelector('[data-el-cell="审批结果/时间"]')?.textContent).toContain('发起')
 
       // Real row 2 (hist_2 'approve') — a specific row's actor/node, matching the fixture.
-      expect(rows[1].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('approval_1')
+      expect(rows[1].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('节点已变更')
       expect(rows[1].querySelector('[data-el-cell="审批人"]')?.textContent?.trim()).toBe('李四')
       expect(rows[1].querySelector('[data-el-cell="审批结果/时间"]')?.textContent).toContain('通过')
 
@@ -521,7 +534,8 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
       expect(rows).toHaveLength(2)
       expect(rows[0].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('提交')
       expect(rows[0].querySelector('[data-el-cell="审批人"]')?.textContent?.trim()).toBe('张三')
-      expect(rows[1].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('approval_1')
+      // P7-R2 candidate #3 fix — see the comment on the sibling assertion above.
+      expect(rows[1].querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()).toBe('节点已变更')
     })
 
     it('appends a synthetic 结束 row only once the instance is terminal', async () => {
@@ -670,6 +684,189 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
       await flushUi()
       expect(executeActionSpy).toHaveBeenCalledTimes(1)
       expect(executeActionSpy).toHaveBeenCalledWith('apv_1', { action: 'approve', comment: undefined })
+    })
+  })
+})
+
+// -----------------------------------------------------------------------------------------------
+// P7-R2 (P7 phase-A evidence ledger §2 "raw-exposure candidates", ApprovalDetailView.vue) — three
+// template-reachable, member-facing sites the ledger recorded as CANDIDATES (not FAILs) because
+// their triggering data shape was never constructed. Each block below constructs the exact named
+// shape, so it is both the confirmation (the shape reaches this code path in the real component)
+// and the fix pin (the humanized/values-free copy renders; the raw JSON/id/key never does). Each
+// was independently confirmed against the pre-fix source by a manual mutation revert
+// (cp-backup + sha256 restore) during P7-R2 verification — see the PR body for the mutation log.
+// -----------------------------------------------------------------------------------------------
+describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveApproval.value = baseInstance()
+    mockHistory.value = []
+    mockLoading.value = false
+    mockCanAct.value = false
+    mockApprovalMobileFlag.value = false
+    mockDetailActiveTemplate.value = null
+    mockDetailActiveVersion.value = null
+    setViewport(false)
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    pushSpy.mockClear()
+    mockCurrentUserId.value = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of ['ElDivider', 'ElEmpty', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElInput', 'ElTag']) {
+      app.component(name, stub(name))
+    }
+    app.component('ElDialog', ElDialog)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // Candidate #1 — formatFieldValue: an object-valued detail/sub-form cell used to render raw
+  // JSON via JSON.stringify (ApprovalDetailView.vue formatFieldValue, formerly :1629).
+  // -----------------------------------------------------------------------------------------
+  describe('candidate #1 — formatFieldValue never renders raw JSON for an object-valued detail cell', () => {
+    function detailFieldInstance(cellValue: unknown): any {
+      return baseInstance({
+        formSchema: {
+          fields: [
+            { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] },
+          ],
+        },
+        formSnapshot: { items: [{ note: cellValue }] },
+      })
+    }
+
+    it('a known display key (displayValue) resolves to that value, not the raw object', async () => {
+      mockActiveApproval.value = detailFieldInstance({ displayValue: '出差申请-001', internalRecordId: 'rec_secret_9f2' })
+      await mountView()
+
+      const cell = container!.querySelector('table.approval-detail__detail-table td[data-el-cell="备注"]')
+      expect(cell?.textContent?.trim()).toBe('出差申请-001')
+      expect(container!.textContent).not.toContain('rec_secret_9f2')
+      expect(container!.textContent).not.toContain('internalRecordId')
+    })
+
+    it('no known display key falls back to a values-free placeholder, never JSON.stringify', async () => {
+      mockActiveApproval.value = detailFieldInstance({ internalRowId: 'row_secret_7ac1', weird: true })
+      await mountView()
+
+      const cell = container!.querySelector('table.approval-detail__detail-table td[data-el-cell="备注"]')
+      expect(cell?.textContent?.trim()).toBe('复杂内容')
+      expect(container!.textContent).not.toContain('row_secret_7ac1')
+      expect(container!.textContent).not.toContain('internalRowId')
+      // No raw-object punctuation anywhere inside the rendered cell (the pre-fix JSON.stringify
+      // shape always contains a brace) — a mutation-proof net wider than the specific id string.
+      expect(cell?.textContent).not.toMatch(/[{}]/)
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // Candidate #2 — cancelledAssigneesLabel: an any-mode (或签) cancellation badge used to join
+  // raw `String(id)` user ids (ApprovalDetailView.vue cancelledAssigneesLabel, formerly :1612).
+  // -----------------------------------------------------------------------------------------
+  describe('candidate #2 — cancelledAssigneesLabel never renders a raw user id', () => {
+    function historyWithCancelled(cancelled: string[]): any[] {
+      return [{
+        id: 'hist_1', action: 'sign', actorId: 'user_100', actorName: '李四', comment: null,
+        fromStatus: 'pending', toStatus: 'pending', occurredAt: '2026-07-01T10:00:00.000Z',
+        metadata: { nodeKey: 'approval_1', aggregateCancelled: cancelled },
+      }]
+    }
+
+    it('resolves to the display name when the instance already carries it in assignment metadata', async () => {
+      mockActiveApproval.value = baseInstance({
+        assignments: [
+          { id: 'asg_1', type: 'user', assigneeId: 'user_secret_42', sourceStep: 1, nodeKey: 'approval_1', isActive: false, metadata: { assigneeName: '王五' } },
+        ],
+      })
+      mockHistory.value = historyWithCancelled(['user_secret_42'])
+      await mountView()
+
+      expect(container!.textContent).toContain('其他审批人已失效: 王五')
+      expect(container!.textContent).not.toContain('user_secret_42')
+    })
+
+    it('falls back to a values-free count when no display name is reachable, never the raw id', async () => {
+      mockActiveApproval.value = baseInstance({ assignments: [] })
+      mockHistory.value = historyWithCancelled(['user_secret_42', 'user_secret_43'])
+      await mountView()
+
+      expect(container!.textContent).toContain('其他 2 位审批人已失效')
+      expect(container!.textContent).not.toContain('user_secret_42')
+      expect(container!.textContent).not.toContain('user_secret_43')
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // Candidate #3 (ledger's HIGHEST PRIORITY — fires on ORDINARY template drift, not an exotic
+  // shape) — nodeLabel: a node absent from the live template used to fall back to the raw
+  // `nodeKey` (ApprovalDetailView.vue nodeLabel, formerly :1617).
+  // -----------------------------------------------------------------------------------------
+  describe('candidate #3 — nodeLabel never renders a raw node key on template drift', () => {
+    function historyWithNodeKey(nodeKey: string): any[] {
+      return [{
+        id: 'hist_1', action: 'approve', actorId: 'user_100', actorName: '李四', comment: null,
+        fromStatus: 'pending', toStatus: 'pending', occurredAt: '2026-07-01T10:00:00.000Z',
+        metadata: { nodeKey },
+      }]
+    }
+
+    it('a node key absent from BOTH the live and pinned template renders a values-free fallback, never the raw key', async () => {
+      mockHistory.value = historyWithNodeKey('ghost_node_removed_9f2')
+      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
+      mockDetailActiveVersion.value = null
+      await mountView()
+
+      expect(container!.textContent).toContain('节点已变更')
+      expect(container!.textContent).not.toContain('ghost_node_removed_9f2')
+    })
+
+    it('falls back to the PINNED (frozen) template name when the LIVE template has drifted past the node — never the raw key, never silently using the wrong name', async () => {
+      mockHistory.value = historyWithNodeKey('approval_1')
+      // Live template: node renamed/removed since this history row's node ran.
+      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
+      // Pinned (frozen) version: still carries the node under its name at instance-creation time.
+      mockDetailActiveVersion.value = { approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批（历史）', config: {} }], edges: [] } }
+      await mountView()
+
+      expect(container!.textContent).toContain('部门主管审批（历史）')
+      expect(container!.textContent).not.toContain('节点已变更')
+      expect(container!.textContent).not.toContain('approval_1')
+    })
+
+    it('a node key present in the live template resolves to its live name (unaffected, still the common case)', async () => {
+      mockHistory.value = historyWithNodeKey('approval_1')
+      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批', config: {} }], edges: [] } }
+      await mountView()
+
+      expect(container!.textContent).toContain('部门主管审批')
+      expect(container!.textContent).not.toContain('节点已变更')
     })
   })
 })

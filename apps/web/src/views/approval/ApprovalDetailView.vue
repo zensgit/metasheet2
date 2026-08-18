@@ -1605,17 +1605,48 @@ function approvalModeLabel(mode: string): string {
  * an any-mode (或签) first-wins resolution. Returns empty string when metadata carries no
  * aggregateCancelled list or when the list is empty — callers `v-if` on the truthy string.
  */
+// P7-R2 candidate #2 fix (values-free doctrine, confirmed member-facing raw-id exposure): resolve
+// each cancelled sibling to a display name using ONLY data already in scope (the instance's own
+// `assignments` array), mirroring the "don't fetch, just display" convention
+// `assignmentDisplayLabel` above already uses. If EVERY id resolves to a real name, join the
+// names; if any id has no reachable name, fall back to a values-free count instead of a partial
+// name list padded with a repeated generic placeholder (which would read as a formatting bug
+// more than a redaction). Either branch, a raw user id is never rendered.
 function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
   if (!metadata) return ''
   const cancelled = metadata.aggregateCancelled
   if (!Array.isArray(cancelled) || cancelled.length === 0) return ''
-  return `其他审批人已失效: ${cancelled.map((id) => String(id)).join(', ')}`
+  const assignments = approval.value?.assignments ?? []
+  const names: string[] = []
+  for (const id of cancelled) {
+    const match = assignments.find((a) => a.assigneeId === String(id))
+    const metaName = match?.metadata?.assigneeName
+    if (typeof metaName === 'string' && metaName.trim()) {
+      names.push(metaName.trim())
+      continue
+    }
+    // No display name reachable from already-loaded assignment metadata — render a values-free
+    // count rather than ever falling back to the raw id.
+    return `其他 ${cancelled.length} 位审批人已失效`
+  }
+  return `其他审批人已失效: ${names.join('、')}`
 }
 
+// P7-R2 candidate #3 fix (values-free doctrine, HIGHEST PRIORITY confirmed exposure — fires on
+// ordinary template drift, not an exotic shape): prefer the LIVE template's current name (the
+// common case, and the freshest one when the node still exists); when the live template no
+// longer carries this key (renamed/reordered/removed since this row's node ran — see the
+// `pinnedGraph` comment above), fall back to the FROZEN version pinned at instance creation
+// before EVER falling back to the raw internal node key. An ordinary user must never see a raw
+// node key (mirrors the "附件已删除" tombstone convention already used for a deleted attachment
+// ref above).
 function nodeLabel(nodeKey: string): string {
   if (!nodeKey) return '-'
-  const node = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
-  return node?.name?.trim() || nodeKey
+  const live = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  if (live?.name?.trim()) return live.name.trim()
+  const pinned = pinnedGraph.value?.nodes.find((entry) => entry.key === nodeKey)
+  if (pinned?.name?.trim()) return pinned.name.trim()
+  return '节点已变更'
 }
 
 function formatDate(dateStr: string) {
@@ -1623,10 +1654,23 @@ function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleString('zh-CN')
 }
 
+// P7-R2 candidate #1 fix (values-free doctrine, confirmed member-facing raw-JSON exposure):
+// detail/sub-form leaf columns are scalar-only by contract (`DETAIL_LEAF_FIELD_TYPES` excludes
+// `record-link`/`detail` nesting), so an object reaching here is either a legacy/malformed
+// snapshot or a richer shape than the leaf contract promises. Never render raw JSON to an
+// ordinary user — surface a known display key if the shape happens to carry one (mirrors
+// `recordLinkField.ts`'s displayValue convention), else a typed, values-free placeholder.
 function formatFieldValue(value: unknown): string {
   if (value === null || value === undefined) return '-'
   if (Array.isArray(value)) return value.join(', ')
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    for (const key of ['displayValue', 'name', 'label', 'title'] as const) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+    }
+    return '复杂内容'
+  }
   return String(value)
 }
 
