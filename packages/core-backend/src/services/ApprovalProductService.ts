@@ -45,6 +45,14 @@ import type {
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
 import {
+  effectiveCommentRequired,
+  isOperationAllowedAtNode,
+  nodeOperationPolicyAt,
+  resolveEffectiveNodeOperations,
+  seatNodeKeysForViewer,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
+import {
   ACTION_POLICY_KEYS,
   APPROVAL_POLICY_DENIED_ACTION,
   APPROVAL_TERMINAL_STATUSES,
@@ -6585,7 +6593,17 @@ export class ApprovalProductService {
           bundle.template.name,
           JSON.stringify(requesterSnapshot),
           JSON.stringify({ templateId: bundle.template.id, templateKey: bundle.template.key }),
-          JSON.stringify({ rejectCommentRequired: true, allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          // Lock-5 §1.3 — the SECOND hardcoding, moved in the same slice as the enforcement above.
+          // `rejectCommentRequired: true` is no longer written: the comment requirement is a NODE
+          // policy now, and a single instance-level literal cannot express a value that differs per
+          // node — worse, it would keep the bridge/card/FE readers disagreeing with the node, which
+          // is exactly the defect §1.3 names. The key is OMITTED rather than set to some other
+          // literal, and `effectiveCommentRequired` maps an ABSENT snapshot value to `'reject_only'`
+          // — byte-identical behavior to the `true` this replaces, for every reader
+          // (all of them already default an absent/`!== false` value to "required"). Instances
+          // created BEFORE this slice keep their stored `rejectCommentRequired: true` and resolve
+          // through the very same fallback (gate CR-2), so no backfill is needed.
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
           JSON.stringify(instanceMetadata),
           initial.currentStep ?? 0,
           initial.totalSteps,
@@ -7013,7 +7031,7 @@ export class ApprovalProductService {
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
-    const approval = await this.getApproval(id, actor.userId)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -7839,14 +7857,19 @@ export class ApprovalProductService {
       // `ACTION_POLICY_KEYS` table rather than naming verbs by hand (A-1).
       const nodeOperationPolicyKey: NodeOperationPolicyActionKey | null = ACTION_POLICY_KEYS[request.action]
       if (nodeOperationPolicyKey !== null && currentNodeKey) {
-        const gatedNodeConfig = runtimeGraph.nodes.find((entry) => entry.key === currentNodeKey)?.config
-        const gatedPolicy = isRecord(gatedNodeConfig)
-          ? (gatedNodeConfig as { nodeOperationPolicy?: NodeOperationPolicy }).nodeOperationPolicy
-          : undefined
+        // §2.3 "one predicate, two doors": the choke calls the SAME `isOperationAllowedAtNode` the
+        // detail DTO's `resolveEffectiveNodeOperations` is built from, so the server refusal and the
+        // FE mirror cannot drift apart. (Gate finding P3-3 on #4983: this used to be an inline copy
+        // of the predicate, which made the "single predicate" claim false and left the shared helper
+        // dead. Behaviour is identical — the inline form was `policy?.[key] === false`.)
         // Widen-only / OD-L5-3(a): ABSENT ≡ ALLOWED. Only an explicit `false` refuses, so every
         // pre-Lock-5 stored graph — which carries no `nodeOperationPolicy` at all — behaves exactly
         // as it does today, with no migration and no backfill.
-        if (gatedPolicy?.[nodeOperationPolicyKey] === false) {
+        if (!isOperationAllowedAtNode(
+          runtimeGraph as NodeOperationGraphView,
+          currentNodeKey,
+          nodeOperationPolicyKey,
+        )) {
           // §1.4 fact 1 / OD-L5-9(a) — the DENIAL ROW, durable and isolated. Every other refusal in
           // this method throws inside the transaction and is rolled back, so a denied click today
           // survives nothing. Here the transaction has written nothing, so we INSERT the row, COMMIT
@@ -8016,7 +8039,7 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'transfer') {
@@ -8048,7 +8071,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'add_sign') {
@@ -8108,7 +8131,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'reduce_sign') {
@@ -8175,7 +8198,7 @@ export class ApprovalProductService {
           targetUserId: targetAssignmentUserId,
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'revoke') {
@@ -8250,7 +8273,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (instance.status !== 'pending') {
@@ -8261,8 +8284,40 @@ export class ApprovalProductService {
         )
       }
 
-      if (request.action === 'reject' && !request.comment?.trim()) {
-        throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+      // Lock-5 §1.3 (L5-C/L5-D) / OD-L5-7(a) / OD-L5-8(a) — the comment requirement is now a
+      // three-valued NODE policy with the instance snapshot as its fallback, not an unconditional
+      // literal. This is one of the TWO hardcodings §1.3 requires to move IN THE SAME SLICE; the
+      // other is the `policy_snapshot` literal at instance CREATE. Either alone is a defect: leaving
+      // this strict makes the switch inert on the platform path, and leaving the literal makes the
+      // bridge/card/FE readers disagree with the node.
+      //
+      // Three values, not two booleans: the corpus switch (C-10) has two states and NEITHER is our
+      // default — OFF ⇒ 'never', ON ⇒ 'always', and today's reject-only asymmetry is expressible in
+      // neither. Absent ⇒ the instance snapshot ⇒ `'reject_only'` for every instance created before
+      // this slice, i.e. today's behavior exactly, as ONE rule rather than a literal racing a
+      // fallback.
+      //
+      // ERROR-CODE CONTRACT (§1.3): the REJECT side keeps emitting `REJECT_COMMENT_REQUIRED` because
+      // existing clients key on it; the APPROVE side gets a NEW `APPROVAL_COMMENT_REQUIRED`, so no
+      // shipped client's error handling changes meaning.
+      if (request.action === 'reject' || request.action === 'approve') {
+        const commentPolicy = effectiveCommentRequired(
+          nodeOperationPolicyAt(runtimeGraph as NodeOperationGraphView, currentNodeKey),
+          instance.policy_snapshot,
+        )
+        const hasComment = Boolean(request.comment?.trim())
+        if (request.action === 'reject' && !hasComment && commentPolicy !== 'never') {
+          throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+        }
+        if (request.action === 'approve' && !hasComment && commentPolicy === 'always') {
+          // §2.4 / X-1 values-free: `{ nodeKey }` only — never the actor, the comment, or the form.
+          throw new ServiceError(
+            'An approval comment is required at this node',
+            400,
+            'APPROVAL_COMMENT_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
       }
 
       if (!currentNodeKey) {
@@ -8347,7 +8402,7 @@ export class ApprovalProductService {
             await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
           }
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
 
         // Completion. 或签 'any' first-wins: cancel the remaining pending sibling seats (audit-preserved).
@@ -8481,7 +8536,7 @@ export class ApprovalProductService {
             nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey),
           )
         }
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'return') {
@@ -8579,7 +8634,7 @@ export class ApprovalProductService {
         if (resolution.currentNodeKey) {
           this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'reject') {
@@ -8628,7 +8683,7 @@ export class ApprovalProductService {
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
@@ -8678,7 +8733,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
       } else if (approvalMode === 'any') {
         // Deactivate actor's own assignment first.
@@ -8824,7 +8879,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
         // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
@@ -9109,7 +9164,7 @@ export class ApprovalProductService {
       client?.release()
     }
 
-    const approval = await this.getApproval(id, actor.userId)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -9186,7 +9241,21 @@ export class ApprovalProductService {
     })
   }
 
-  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
+  /**
+   * `viewerRoles` (Lock-5 §2.3 / gate A-2, adversarial-gate finding P2-R2 on PR #4983): this method
+   * builds the DTO EVERY dispatch verb branch returns, and the FE store overwrites `activeApproval`
+   * with it. It used to omit `nodeOperations` entirely, so the member bar's mirror EVAPORATED after
+   * the member's first successful action — post a 评论 at a node with `allowTransfer:false` and
+   * 转交/加签/减签/退回 all re-rendered, each click 409ing and minting another `policy_denied` row.
+   * That is the exact M7 exposure gate A-2 exists to close, surviving in the most routine sequence.
+   * The carrier is therefore populated HERE too, from the same frozen graph and the same shared seat
+   * predicate the detail read and the choke use — so a fresh GET and an action response agree.
+   */
+  async getApproval(
+    id: string,
+    viewerUserId?: string | null,
+    viewerRoles?: readonly string[] | null,
+  ): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     const result = await pool.query<ApprovalInstanceRow>(
@@ -9237,6 +9306,28 @@ export class ApprovalProductService {
         viewerUserId ?? null,
         queryFn,
       )
+    }
+
+    // Lock-5 §2.3 / gate A-2 (finding P2-R2) — the SAME carrier the detail read ships, so an action
+    // response never silently un-hides a policy-forbidden verb. Resolved from the instance's OWN
+    // frozen `published_definition_id` (never the parent template) and scoped by the shared
+    // `seatNodeKeysForViewer`, which is the choke's predicate. When the actor no longer holds a seat
+    // after the action (they approved and the node advanced past them), the honest value is exactly
+    // what a fresh GET would now return: no carrier — there is no bar to mirror.
+    if (viewerUserId && row.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [row.published_definition_id],
+      )
+      const runtimeGraphView = (runtimeResult.rows[0]?.runtime_graph ?? null) as NodeOperationGraphView | null
+      if (runtimeGraphView) {
+        const nodeOperations = resolveEffectiveNodeOperations(
+          runtimeGraphView,
+          seatNodeKeysForViewer(assignmentsResult.rows, viewerUserId, viewerRoles),
+          row.policy_snapshot,
+        )
+        if (nodeOperations) dto.nodeOperations = nodeOperations
+      }
     }
     return dto
   }

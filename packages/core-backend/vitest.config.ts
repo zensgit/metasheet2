@@ -60,6 +60,13 @@ export default defineConfig({
       // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-node-operation-policy.db.test.ts',
+      // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
+      // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
+      // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
+      // Excluded here so `describeIfDatabase` cannot skip-green them in the no-DB job; both are
+      // wired as WHOLE FILES into .github/workflows/approval-realdb-node-operation-policy.yml.
+      'tests/integration/approval-add-sign-honesty.db.test.ts',
+      'tests/integration/approval-comment-required.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job

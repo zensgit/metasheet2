@@ -507,7 +507,7 @@
                  control is additionally gated on `!isMobileLayout`. 评论 stays
                  visible on both surfaces. -->
             <el-button
-              v-if="canAct && !isMobileLayout && returnableNodes.length > 0"
+              v-if="canAct && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
               type="warning"
               :loading="inFlightAction === 'return'"
               data-testid="approval-return-button"
@@ -516,7 +516,7 @@
               退回
             </el-button>
             <el-button
-              v-if="canAct && !isMobileLayout"
+              v-if="canAct && !isMobileLayout && allowTransfer"
               type="warning"
               :loading="inFlightAction === 'transfer'"
               data-testid="approval-transfer-button"
@@ -526,7 +526,7 @@
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
-              v-if="canAct && !isMobileLayout"
+              v-if="canAct && !isMobileLayout && allowAddSign"
               type="primary"
               plain
               :loading="inFlightAction === 'add_sign'"
@@ -538,7 +538,7 @@
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
             <el-button
-              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0"
+              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
               type="primary"
               plain
               :loading="inFlightAction === 'reduce_sign'"
@@ -737,11 +737,16 @@
             @select="onAddSignUserSelected"
           />
         </el-form-item>
+        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio is RETIRED. Its
+             `前加签` arm claimed corpus C-3 semantics (insert a node BEFORE this one and come back
+             to it) that no shipped path implements — §0.1: both modes seat co-signers at the CURRENT
+             node in the SAME epoch, so outside a parallel region the arms were byte-identical (now
+             pinned by a real-DB test). A radio whose arms cannot be told apart is a fake switch, so
+             the arm is removed rather than relabelled and the surface states what add-sign really
+             does. The wire contract is unchanged: this client sends `'parallel'`, and the server
+             still accepts `'before'` from any other client. -->
         <el-form-item label="加签方式">
-          <el-radio-group v-model="addSignMode" data-testid="approval-add-sign-mode">
-            <el-radio value="parallel">并加签</el-radio>
-            <el-radio value="before">前加签</el-radio>
-          </el-radio-group>
+          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
         </el-form-item>
         <el-form-item label="加签说明">
           <el-input
@@ -906,7 +911,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -950,6 +955,8 @@ import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
+import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
@@ -1229,6 +1236,23 @@ const isRequester = computed(() => {
 // instances without a runtime graph. Consumes the existing flag only; no new policy invented.
 const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 
+// Lock-5 §2.3 / gate A-2 — the member-bar mirror of the per-node operation policy.
+//
+// The values are RESOLVED BY THE SERVER (`nodeOperations`, scoped to THIS viewer's own active
+// seats) and merely rendered here. That is the point: §2.3 requires the FE mirror to derive from
+// the SAME config the server enforces, with no second predicate, so the two doors cannot drift.
+// The server remains the authority — hiding a button is never the guard, and a direct HTTP call
+// still gets 409 `APPROVAL_NODE_OPERATION_DISABLED`.
+//
+// ABSENT ≡ ALLOWED (OD-L5-3(a)), deliberately the OPPOSITE of `allowRevoke`'s `=== true`
+// fail-closed idiom above. Copying that idiom would hide all four verbs on every pre-Lock-5
+// instance, on every bridged instance with no runtime graph, and for every seatless viewer.
+const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
+const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
+const allowAddSign = computed(() => nodeOperations.value?.allowAddSign !== false)
+const allowReduceSign = computed(() => nodeOperations.value?.allowReduceSign !== false)
+const allowReturn = computed(() => nodeOperations.value?.allowReturn !== false)
+
 // UX B2-13 (再次提交) — the reject→fix→resubmit loop is a requester's biggest-friction moment
 // today (hand-retype the whole form). Eligible ONLY for the CURRENT USER'S OWN instance (reuses
 // `isRequester` above) in a TERMINAL state that means "this didn't go through and nothing
@@ -1411,7 +1435,9 @@ const addSignUserIds = ref<string[]>([])
 // lookup, populated from the picker's richer `select` event).
 const addSignPickerValue = ref<string | null>(null)
 const addSignUserLabels = ref<Record<string, string>>({})
-const addSignMode = ref<'before' | 'parallel'>('parallel')
+// Lock-5 B-2: the mode is no longer user-selectable (the retired radio's two arms were
+// byte-identical outside a parallel region). It stays in the SUBMIT PAYLOAD, pinned to the one
+// semantic we implement, so the wire contract is unchanged for the server and for replay.
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
 
@@ -1461,12 +1487,29 @@ const actionDialogTitle = computed(() =>
 // an explicit `false` waives it, so an absent/legacy policy snapshot stays conservative. Scoped to
 // the reject action only; the 通过 dialog's "审批意见" stays optional (mirrors the add-sign
 // disabled-until-complete pattern already used by `submitAddSign`/`submitReduceSign` below).
-const rejectCommentRequired = computed(() =>
-  currentAction.value === 'reject' && approval.value?.policy?.rejectCommentRequired !== false,
-)
-const actionCommentLabel = computed(() => (rejectCommentRequired.value ? '驳回原因（必填）' : '审批意见'))
+// Lock-5 §1.3 / gate CR-3 — derived from the EFFECTIVE (node-level, snapshot-fallback) requirement
+// the server resolved, not from the `policy.rejectCommentRequired` literal. Three values, so the
+// APPROVE side is wired too and not merely relabelled: `'always'` requires a comment on 通过 as well
+// as 驳回, `'reject_only'` reproduces today exactly, `'never'` requires neither. The legacy literal
+// stays the fallback for a bridged/legacy instance that ships no `nodeOperations`.
+const effectiveCommentRequired = computed<'never' | 'reject_only' | 'always'>(() => {
+  const resolved = approval.value?.nodeOperations?.commentRequired
+  if (resolved) return resolved
+  return approval.value?.policy?.rejectCommentRequired === false ? 'never' : 'reject_only'
+})
+const commentRequiredForAction = computed(() => {
+  if (currentAction.value === 'reject') return effectiveCommentRequired.value !== 'never'
+  if (currentAction.value === 'approve') return effectiveCommentRequired.value === 'always'
+  return false
+})
+// Retained name: four template bindings and several specs key on the reject-side meaning.
+const rejectCommentRequired = computed(() => currentAction.value === 'reject' && commentRequiredForAction.value)
+const actionCommentLabel = computed(() => {
+  if (rejectCommentRequired.value) return '驳回原因（必填）'
+  return commentRequiredForAction.value ? '审批意见（必填）' : '审批意见'
+})
 const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? '请填写驳回原因' : '请输入审批意见'))
-const actionConfirmDisabled = computed(() => rejectCommentRequired.value && !actionComment.value.trim())
+const actionConfirmDisabled = computed(() => commentRequiredForAction.value && !actionComment.value.trim())
 
 // B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
 // recently-used phrases (most-recent-first) first, then the fixed preset list, deduped, capped
@@ -1858,6 +1901,26 @@ async function submitAction() {
   }
 }
 
+/**
+ * Lock-5 §2.3 (gate A-2 residual repair) — the ONE failure path all four deferred member verbs share.
+ *
+ * Factored out after gate finding P3-R1 on PR #4983: the four handlers were hand-copies, so the
+ * mounted pin on `submitTransfer` covered only that one — neutering `submitReturn` alone reded
+ * nothing. One helper means one pin covers all four, and a fifth verb cannot be added with a private
+ * copy of the rule.
+ *
+ * A policy denial is PERMANENT for this node, so it says so (values-free, no 请重试) and CLOSES the
+ * dialog: the old bare `catch {}` discarded the server's code, invited a retry, and every retry
+ * minted another `policy_denied` audit row that D-3 then hides from the timeline. Any OTHER failure
+ * surfaces the SERVER's own message when it has one (`fallback` is used only for a message-less or
+ * non-`Error` throw) and leaves the dialog OPEN, because retrying those is legitimate.
+ */
+function handleMemberActionFailure(error: unknown, fallback: string, dialogVisible: Ref<boolean>): void {
+  const failure = memberActionFailure(error, fallback)
+  ElMessage.error(failure.message)
+  if (failure.isPolicyDenial) dialogVisible.value = false
+}
+
 async function submitTransfer() {
   if (!transferUserId.value) return
   if (inFlightAction.value) return
@@ -1872,8 +1935,8 @@ async function submitTransfer() {
     ElMessage.success('已成功转交')
     transferDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('转交失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1883,7 +1946,6 @@ function openAddSignDialog() {
   addSignUserIds.value = []
   addSignUserLabels.value = {}
   addSignPickerValue.value = null
-  addSignMode.value = 'parallel'
   actionComment.value = ''
   addSignDialogVisible.value = true
 }
@@ -1914,13 +1976,13 @@ async function submitAddSign() {
       action: 'add_sign',
       comment: actionComment.value || undefined,
       targetUserIds: addSignUserIds.value,
-      addSignMode: addSignMode.value,
+      addSignMode: CLIENT_ADD_SIGN_MODE,
     })
     ElMessage.success('已成功加签')
     addSignDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('加签失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1946,8 +2008,8 @@ async function submitReduceSign() {
     ElMessage.success('已成功减签')
     reduceSignDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('减签失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1991,8 +2053,8 @@ async function submitReturn() {
     ElMessage.success('已退回审批')
     returnDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('退回失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible)
   } finally {
     inFlightAction.value = null
   }

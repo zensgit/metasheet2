@@ -14,6 +14,11 @@ import {
 } from '../federation/plm-approval-bridge'
 import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
 import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
+import {
+  resolveEffectiveNodeOperations,
+  seatNodeKeysForViewer,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -634,7 +639,20 @@ export class ApprovalBridgeService {
     }
   }
 
-  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
+  /**
+   * `viewerRoles` (Lock-5 §2.3 / gate A-2, adversarial-gate finding P2-1 on PR #4983): the viewer's
+   * ROLE ids. Required — not optional-in-spirit — because an approval seat may be ROLE-typed, and
+   * the dispatch choke treats such a seat as first-class (`assignmentMatchesActor` matches when the
+   * actor's roles contain the assignment's `assignee_id`). A carrier scoped to user-typed seats only
+   * left every role-seated approver with NO `nodeOperations`, so the member bar rendered all four
+   * verbs and the server 409'd each click. Callers that genuinely have no role context pass nothing
+   * and get the pre-existing user-only scoping.
+   */
+  async getApproval(
+    id: string,
+    viewerUserId?: string | null,
+    viewerRoles?: readonly string[] | null,
+  ): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     if (isPlmId(id)) {
@@ -675,6 +693,34 @@ export class ApprovalBridgeService {
         const accessMap = resolveFieldAccessAtNodes(detailRuntimeGraph, actorNodeKeys)
         if (accessMap.size > 0) dto.fieldAccess = Object.fromEntries(accessMap)
       }
+    }
+    // Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective operation policy, resolved from the SAME
+    // frozen graph the dispatch choke reads and shipped as DECIDED booleans so the client renders
+    // rather than re-derives. Scoped exactly like `fieldAccess` above:
+    //   * the viewer's OWN ACTIVE user-typed seats, NOT `row.current_node_key`. Inside a parallel
+    //     region the cursor is the fork GATEWAY while the choke resolves policy from the actor's own
+    //     assignment `node_key` — deriving from the cursor would mirror the wrong node's policy on
+    //     every parallel instance (the divergence class §2.3 forbids compounding);
+    //   * BOTH user-typed and ROLE-typed seats. A role seat is first-class at the choke
+    //     (`assignmentMatchesActor` matches when the actor's roles contain the assignment's
+    //     `assignee_id`), so scoping the mirror to user seats made it silently absent for every
+    //     role-seated approver — who DOES have a bar, because FE `canAct` is global RBAC
+    //     `approvals:act`, not an assignment check. The earlier comment here claimed such a viewer
+    //     "has no member-action bar to gate"; that was FALSE and is corrected (gate finding P2-1);
+    //   * a viewer holding NO seat of either kind still gets nothing — correct, and the reason the
+    //     `null` return of `resolveEffectiveNodeOperations` is kept;
+    //   * multi-seat is most-restrictive, so the client can never over-report a capability the
+    //     server would then refuse.
+    if (dto && viewerUserId && detailRuntimeGraph) {
+      // ONE shared predicate (`seatNodeKeysForViewer`), not a hand-copy: it mirrors the choke's
+      // `assignmentMatchesActor` exactly, including refusing a `'source_queue'` seat outright.
+      const seatNodeKeys = seatNodeKeysForViewer(instanceAssignments, viewerUserId, viewerRoles)
+      const nodeOperations = resolveEffectiveNodeOperations(
+        detailRuntimeGraph as NodeOperationGraphView,
+        seatNodeKeys,
+        row.policy_snapshot,
+      )
+      if (nodeOperations) dto.nodeOperations = nodeOperations
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).

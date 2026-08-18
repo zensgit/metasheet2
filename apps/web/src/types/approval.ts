@@ -215,6 +215,23 @@ export const RENDERED_NODE_OPERATION_POLICY_KEYS = [
 ] as const
 export type RenderedNodeOperationPolicyKey = typeof RENDERED_NODE_OPERATION_POLICY_KEYS[number]
 
+/**
+ * Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective policy the SERVER resolved for this viewer at
+ * their claimed seat(s), shipped on the DETAIL read only. Byte-mirrors the backend
+ * `EffectiveNodeOperations`.
+ *
+ * Every field is a DECIDED value. The client renders it and MUST NOT re-derive: §2.3 requires the
+ * FE mirror to come from the SAME config the server enforces, with no second predicate. Absent
+ * (a seatless viewer, a bridged instance with no graph) ⇒ no member-action gating to apply.
+ */
+export interface EffectiveNodeOperations {
+  allowTransfer: boolean
+  allowAddSign: boolean
+  allowReduceSign: boolean
+  allowReturn: boolean
+  commentRequired: 'never' | 'reject_only' | 'always'
+}
+
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
 // The authoring UI only owns `mergeWithRequester` (self-approver / merge-with-requester);
 // the other three fields are carried for round-trip preservation (no silent flatten).
@@ -447,6 +464,8 @@ export interface UnifiedApprovalDTO {
    * a parallel region (length ≥ 2). Absent on linear state.
    */
   currentNodeKeys?: string[] | null
+  /** Lock-5 §2.3 / A-2 — server-resolved effective operations for THIS viewer. Detail read only. */
+  nodeOperations?: EffectiveNodeOperations | null
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`

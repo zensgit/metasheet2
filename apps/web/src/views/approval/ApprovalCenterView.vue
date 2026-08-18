@@ -1001,6 +1001,25 @@ function openBatchReject(): void {
 // B1-04 (宽恕型错误三件套 part 3): batch reject pre-flight. List rows already carry `policy`
 // (UnifiedApprovalDTO.policy), so this mirrors the single-instance reject dialog's conservative
 // default — required unless EVERY selected row's policy explicitly opts out with `false`.
+// Lock-5 §1.3 / gate CR-3 — PARTIAL here, and the scope of that is stated precisely (gate finding
+// P3-2 on #4983 corrected an earlier over-broad claim). The LIST DTO deliberately stays
+// byte-identical (no `nodeOperations` on it), so this row-level predicate keeps reading the instance
+// policy literal, which for every pre-Lock-5 instance and every instance whose node declares nothing
+// resolves to exactly today's answer.
+//
+// On the REJECT side that is conservative-never-permissive: a row whose NODE says `'never'` is still
+// surfaced as "comment required", the engine then accepts the bare reject, so this dialog can ask for
+// a comment the server would not have demanded but never skips one it requires.
+//
+// The APPROVE side is NOT covered by that reasoning and must not be described as if it were:
+// `handleBatchApprove` sends `comment: ''`, so at a node with `commentRequired:'always'` every
+// selected row is refused 400 `APPROVAL_COMMENT_REQUIRED` and lands in the failure manifest with the
+// server's message. That is FAIL-LOUD, not a silent skip — no decision is recorded and the operator
+// sees each failure — but it is a real usability gap, not a conservative default.
+//
+// Closing either side needs the effective value on the LIST read, which is a separate slice (it
+// would change the shared `toUnifiedDTO` the list path uses). Disclosed rather than silently
+// divergent.
 const batchRejectCommentRequired = computed(() =>
   selectedPending.value.some((row) => row.policy?.rejectCommentRequired !== false),
 )
@@ -1053,6 +1072,8 @@ function openRowReject(row: UnifiedApprovalDTO): void {
 }
 
 // B1-04-style conservative default: required unless THIS row's policy explicitly opts out.
+// Lock-5 §1.3 / CR-3 — same LIST-path limit as the batch predicate above: no `nodeOperations` on
+// the list DTO, so this stays on the instance literal. Conservative, never permissive (see above).
 const rowRejectCommentRequired = computed(() => rowRejectTarget.value?.policy?.rejectCommentRequired !== false)
 const rowRejectConfirmDisabled = computed(() => rowRejectCommentRequired.value && !rowRejectComment.value.trim())
 

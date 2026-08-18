@@ -8,6 +8,7 @@
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
 import type { ApprovalNodeType, FormSchema, NodeFieldAccess } from '../types/approval-product'
+import type { EffectiveNodeOperations } from './approval-effective-node-operations'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -48,6 +49,18 @@ export interface UnifiedApprovalDTO {
    * to render `readonly` fields read-only; it is presentation only — enforcement is server-side.
    */
   fieldAccess?: Record<string, NodeFieldAccess> | null
+  /**
+   * Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective per-node operation policy for THIS viewer
+   * at their claimed seat(s). Present ONLY on the DETAIL read (`getApproval`) — the list DTO stays
+   * byte-identical — and absent for a seatless viewer, mirroring `fieldAccess` above.
+   *
+   * Every field is a DECIDED value, not a config echo: the server resolves it with the SAME
+   * `resolveEffectiveNodeOperations` the dispatch choke's predicate is built from, so the FE mirror
+   * is not a second predicate (§2.3's "the FE mirror derives from the SAME config the server
+   * enforces"). Presentation only — the 409 `APPROVAL_NODE_OPERATION_DISABLED` refusal remains the
+   * authority, and hiding a button is never the guard.
+   */
+  nodeOperations?: EffectiveNodeOperations | null
   /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
