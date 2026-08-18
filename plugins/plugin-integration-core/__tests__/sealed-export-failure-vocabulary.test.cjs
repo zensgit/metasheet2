@@ -623,7 +623,7 @@ function controlledConsumerSweep() {
       'sweep must traverse ' + label + ', scanned=' + (real.scannedByRoot[label] || 0))
   }
   assert.deepEqual(
-    real.offenders.map((f) => path.relative(repoRoot, f)),
+    real.offenders.map((f) => path.relative(repoRoot, f).split(path.sep).join('/')),
     [
       'plugins/plugin-integration-core/index.cjs',
       'plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs',

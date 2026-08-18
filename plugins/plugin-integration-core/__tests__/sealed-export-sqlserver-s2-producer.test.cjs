@@ -456,15 +456,17 @@ async function positiveStreamingCaptureAndSigning() {
       true,
     )
 
-    assert.equal(
-      fs.statSync(output.artifact.directory).mode & 0o777,
-      0o700,
-    )
-    for (const file of [
-      output.artifact.artifactPath,
-      ...output.artifact.chunkPaths,
-    ]) {
-      assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') {
+      assert.equal(
+        fs.statSync(output.artifact.directory).mode & 0o777,
+        0o700,
+      )
+      for (const file of [
+        output.artifact.artifactPath,
+        ...output.artifact.chunkPaths,
+      ]) {
+        assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+      }
     }
     assert.deepEqual(
       (await fsPromises.readdir(output.artifact.directory))
