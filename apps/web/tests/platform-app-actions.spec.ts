@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolvePlatformAppInstallState,
+  resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
+  resolvePlatformAppProjectLabel,
   type PlatformAppRuntimeInstallState,
   type PlatformAppSummary,
 } from '../src/composables/usePlatformApps'
@@ -204,7 +206,7 @@ describe('resolvePlatformAppPrimaryAction', () => {
 
     expect(action).toMatchObject({
       kind: 'inspect',
-      label: 'Inspect shell',
+      label: 'Admin diagnostics',
       route: '/apps/after-sales',
     })
   })
@@ -225,6 +227,27 @@ describe('resolvePlatformAppPrimaryAction', () => {
       label: 'Open app',
       route: '/attendance',
     })
+  })
+
+  it('localizes direct-runtime actions and non-applicable instance metadata', () => {
+    const app = createAppSummary({
+      id: 'attendance',
+      pluginId: 'plugin-attendance',
+      pluginName: 'plugin-attendance',
+      displayName: 'Attendance',
+      runtimeModel: 'direct',
+      entryPath: '/attendance',
+      instance: null,
+    })
+
+    expect(resolvePlatformAppPrimaryAction(app, undefined, true)).toMatchObject({
+      kind: 'open',
+      label: '打开应用',
+      description: '从标准入口直接打开应用，无需为当前租户安装。',
+      route: '/attendance',
+    })
+    expect(resolvePlatformAppProjectLabel(app, true)).toBe('无需项目')
+    expect(resolvePlatformAppInstanceLabel(app, true)).toBe('直接运行')
   })
 
   it('reports direct install state for direct-runtime apps', () => {
