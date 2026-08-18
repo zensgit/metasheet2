@@ -287,6 +287,11 @@ on:
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
       - 'apps/web/tests/approval-node-operation-policy.test.ts'
+      # P5-B (approval-lock5-node-operation-policy-20260817.md B-2/§1.3/§2.3): 前加签 honesty, commentRequired, member-bar mirror.
+      - 'apps/web/src/approvals/addSignHonestyCopy.ts'
+      - 'apps/web/src/approvals/memberActionErrorCopy.ts'
+      - 'apps/web/src/approvals/cardDecision.ts'
+      - 'apps/web/tests/approval-member-bar-operation-policy.spec.ts'
       # P7-R1 (FAIL-0/FAIL-7): 批量驳回 (batch reject) core module — bounded-concurrency fan-out,
       # per-row isolation, {succeeded, failed} failure manifest. Had no path entry before this fix,
       # so an edit to either file never triggered this guard.
@@ -546,6 +551,11 @@ on:
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
       - 'apps/web/tests/approval-node-operation-policy.test.ts'
+      # P5-B (approval-lock5-node-operation-policy-20260817.md B-2/§1.3/§2.3): 前加签 honesty, commentRequired, member-bar mirror.
+      - 'apps/web/src/approvals/addSignHonestyCopy.ts'
+      - 'apps/web/src/approvals/memberActionErrorCopy.ts'
+      - 'apps/web/src/approvals/cardDecision.ts'
+      - 'apps/web/tests/approval-member-bar-operation-policy.spec.ts'
       # P7-R1 (FAIL-0/FAIL-7): same set as the pull_request block above.
       - 'apps/web/src/approvals/useApprovalBatchActions.ts'
       - 'apps/web/tests/useApprovalBatchActions.spec.ts'

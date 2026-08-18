@@ -2449,7 +2449,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const bridgeService = getBridgeService(options)
       // FWB-0 Layer 2 P1-1: pass viewer identity so record-link fields are projected/redacted
       // server-side (raw stored record ids never leave the API for unauthorized viewers).
-      const approval = await bridgeService.getApproval(req.params.id, resolveApprovalActorId(req))
+      // Lock-5 §2.3 / A-2 (gate finding P2-1): roles ride along so a ROLE-typed seat gets the same
+      // `nodeOperations` scoping the choke enforces on it. `resolveApprovalActorRoles` is the same
+      // helper the dispatch/act routes already use, so the two doors read one notion of "actor".
+      const approval = await bridgeService.getApproval(
+        req.params.id,
+        resolveApprovalActorId(req),
+        resolveApprovalActorRoles(req),
+      )
       if (!approval) {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),

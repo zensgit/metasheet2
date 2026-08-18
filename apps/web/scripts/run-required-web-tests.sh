@@ -309,7 +309,7 @@ npx vitest run \
   approval-explanation-inline-editor \
   approval-lock8-field-type-census \
   approval-node-operation-policy \
-  --reporter=dot
+  approval-member-bar-operation-policy --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
 npx vitest run fwb-rule-authoring-helpers fwb-rule-authoring --reporter=dot

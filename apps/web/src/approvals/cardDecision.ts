@@ -22,7 +22,11 @@ export interface ApprovalCardSummary {
     requestNo: string | null
     status: string
     currentNodeKey: string | null
+    /** Lock-5 §1.3 / CR-3 — derived server-side from the effective NODE policy (`!== 'never'`). */
     rejectCommentRequired: boolean
+    /** Lock-5 §1.3 — the full three-valued effective requirement at this delivery's node. Optional
+     *  so an older server (which does not send it) degrades to the reject-only reading above. */
+    commentRequired?: 'never' | 'reject_only' | 'always'
   }
   actedAction: string | null
   actedAt: string | null

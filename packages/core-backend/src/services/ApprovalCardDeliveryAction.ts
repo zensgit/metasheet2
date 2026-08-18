@@ -43,6 +43,12 @@ import {
   findDingTalkApprovalCardDeliveryById,
   type DingTalkApprovalCardDeliveryRow,
 } from '../integrations/dingtalk/approval-card-deliveries'
+import {
+  effectiveCommentRequired,
+  nodeOperationPolicyAt,
+  type CommentRequired,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
@@ -67,8 +73,19 @@ export interface ApprovalCardDeliverySummary {
     requestNo: string | null
     status: string
     currentNodeKey: string | null
-    /** Mirrors the engine's hard gate so the page can make the comment required BEFORE submit. */
+    /**
+     * Mirrors the engine's hard gate so the page can make the comment required BEFORE submit.
+     * Lock-5 §1.3 / CR-3: now DERIVED from the effective node policy (`commentRequired !== 'never'`)
+     * rather than read off `policy_snapshot`, so the card agrees with the node. The field is kept —
+     * and keeps its meaning — so no shipped card client breaks.
+     */
     rejectCommentRequired: boolean
+    /**
+     * Lock-5 §1.3 — the full three-valued effective requirement at THIS delivery's node, so the card
+     * can also require a comment on the APPROVE side when the node says `'always'` (CR-3: "the
+     * approve side is wired, not just relabelled").
+     */
+    commentRequired: CommentRequired
   }
   actedAction: string | null
   actedAt: string | null
@@ -116,6 +133,10 @@ interface InstanceSummaryRow {
   status: string
   current_node_key: string | null
   policy_snapshot: unknown
+  /** Lock-5 §1.3 / CR-3 — the instance's FROZEN runtime graph, joined so the card resolves the
+   *  effective comment requirement at the DELIVERY's node. `null` for a bridged/legacy instance
+   *  with no published definition, in which case the snapshot fallback governs (today's behavior). */
+  runtime_graph: unknown
   /**
    * P1-1: TRUE iff an ACTIVE `approval_assignments` row still matches the delivery's node +
    * recipient + epoch (STRICT: a NON-NULL delivery epoch equal to a NON-NULL live-seat epoch; a
@@ -129,14 +150,11 @@ interface InstanceSummaryRow {
   has_active_assignment: boolean
 }
 
-function rejectCommentRequiredFromPolicy(policySnapshot: unknown): boolean {
-  if (policySnapshot && typeof policySnapshot === 'object' && !Array.isArray(policySnapshot)) {
-    const value = (policySnapshot as Record<string, unknown>).rejectCommentRequired
-    // The engine treats anything but an explicit false as required — mirror that default.
-    return value !== false
-  }
-  return true
-}
+// Lock-5 §1.3 / CR-3: the snapshot-ONLY `rejectCommentRequiredFromPolicy` helper is RETIRED. It read
+// `policy_snapshot.rejectCommentRequired` and was blind to the node, so a node saying `'never'` still
+// produced a card that demanded a reject comment. Its replacement is the shared
+// `effectiveCommentRequired` (node value → instance-snapshot fallback) — the SAME resolver the
+// dispatch choke and the detail DTO use, so there is exactly one predicate in the codebase.
 
 async function buildSummary(
   query: QueryFn,
@@ -157,7 +175,12 @@ async function buildSummary(
   //     outright (no epoch inference: a pre-column card has no provable original-round anchor), never
   //     re-authorized by a permissive read.
   const result = await query(
+    // Lock-5 §1.3 / gate CR-3 — the card is the FOURTH reader that must agree with the NODE, so it
+    // joins the instance's FROZEN published definition and resolves the effective comment
+    // requirement at the DELIVERY's own node (`$2`), not at whatever the instance cursor happens to
+    // be. Reading `policy_snapshot` alone is exactly the disagreement §1.3 names.
     `SELECT i.id, i.title, i.request_no, i.status, i.current_node_key, i.policy_snapshot,
+            pd.runtime_graph AS runtime_graph,
             EXISTS (
               SELECT 1 FROM approval_assignments aa
                WHERE aa.instance_id = $1
@@ -167,11 +190,22 @@ async function buildSummary(
                  AND aa.entry_epoch IS NOT NULL
                  AND aa.entry_epoch = $4::int
             ) AS has_active_assignment
-       FROM approval_instances i WHERE i.id = $1`,
+       FROM approval_instances i
+       LEFT JOIN approval_published_definitions pd ON pd.id = i.published_definition_id
+      WHERE i.id = $1`,
     [delivery.instance_id, delivery.node_key, delivery.recipient_user_id, delivery.entry_epoch],
   )
   const instance = (result.rows[0] ?? null) as InstanceSummaryRow | null
   if (!instance) return null
+  // §1.3 / OD-L5-8(a): node value first, instance snapshot as the fallback — the SAME resolver the
+  // dispatch choke and the detail DTO use, so the card can never disagree with the engine.
+  const cardCommentRequired = effectiveCommentRequired(
+    nodeOperationPolicyAt(
+      (instance.runtime_graph ?? null) as NodeOperationGraphView | null,
+      delivery.node_key,
+    ),
+    instance.policy_snapshot,
+  )
   return {
     deliveryId: delivery.id,
     cardState: delivery.card_state,
@@ -190,7 +224,8 @@ async function buildSummary(
       requestNo: instance.request_no,
       status: instance.status,
       currentNodeKey: instance.current_node_key,
-      rejectCommentRequired: rejectCommentRequiredFromPolicy(instance.policy_snapshot),
+      rejectCommentRequired: cardCommentRequired !== 'never',
+      commentRequired: cardCommentRequired,
     },
     actedAction: delivery.acted_action,
     actedAt: delivery.acted_at ? new Date(delivery.acted_at as string | Date).toISOString() : null,
