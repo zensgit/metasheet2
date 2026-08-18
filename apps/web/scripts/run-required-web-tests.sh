@@ -236,6 +236,19 @@
 # `approval-template-authoring-*` / `approval-node-*` namespaces is a substring of either or vice
 # versa (closest neighbors: `approval-template-authoring-approval-node-edit` and
 # `approval-node-source-*`-shaped data-testids, neither collides).
+# L5 (2026-08-18, docs/development/approval-lock5-node-operation-policy-20260817.md §1.1/§2.2):
+# per-node operation policy (`操作权限`) — ONE new token, `approval-node-operation-policy`
+# (apps/web/tests/approval-node-operation-policy.test.ts: the OD-L5-2(a)/OD-L5-3(a) pure projection,
+# gate A-6 emptiness, gate A-7 mixed-state read-only + sibling preservation, gate A-3's
+# four-allowlist "stays EDITABLE in BOTH editors" with the `signaturePolicy`-still-read-only positive
+# control, and the linear/canvas round-trip). Bare basename token; verified unique — the
+# `approval-node-` prefix is now SHARED with P1-C's `approval-node-threshold-timeout-config` (landed
+# on main after this comment was first written), and neither of those two is a substring of the
+# other; nor is any other neighbour (`approval-handler-node-config`, `approval-handler-node-
+# authoring`, `approval-template-authoring-approval-node-edit`) a substring of it or vice versa.
+# The MOUNTED Lock-5 assertions (E-1/E-2, the handler F-1 FE half) extend the already-collected
+# `approval-template-authoring-canvas-inspector` and `approval-handler-node-config` specs, so they
+# need no new token.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -264,6 +277,7 @@ npx vitest run \
   approval-explanation-field \
   approval-explanation-inline-editor \
   approval-lock8-field-type-census \
+  approval-node-operation-policy \
   --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot

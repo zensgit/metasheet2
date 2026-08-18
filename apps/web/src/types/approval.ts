@@ -148,6 +148,8 @@ export interface HandlerNodeConfig {
   handlerMode?: HandlerMode
   opinionRequired?: boolean
   fieldPermissions?: NodeFieldPermission[]
+  // Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler admits `allowTransfer` + `commentRequired` only.
+  nodeOperationPolicy?: Pick<NodeOperationPolicy, 'allowTransfer' | 'commentRequired'>
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts NodeFieldAccess (P1-C
@@ -180,7 +182,38 @@ export interface ApprovalNodeConfig {
   // see `NodeTimeoutConfig`. Never present on a `handler` node config (§1.2 forbidden-key list,
   // ApprovalProductService.ts :2449) — timeout is `approval`-node-only.
   timeout?: NodeTimeoutConfig
+  // Lock-5 §1.1 L5-A (OD-L5-1(a)) — per-node 操作权限. Byte-mirrors the backend
+  // `NodeOperationPolicy`. Absent ≡ today's behavior for every field.
+  nodeOperationPolicy?: NodeOperationPolicy
 }
+
+/**
+ * Lock-5 §1.1 L5-A — byte-mirrors backend
+ * `packages/core-backend/src/types/approval-product.ts` `NodeOperationPolicy`.
+ *
+ * Only the four boolean switches have LANDED server enforcement (the §2.1 dispatch choke, 409
+ * `APPROVAL_NODE_OPERATION_DISABLED`) and therefore only they may render a control (master M7/M8,
+ * Lock-5 gate E-2). `returnReviewMode` (OD-L5-6(a) ships `'resume_forward'` only; §1.2: "no
+ * `returnReviewMode` control renders") and `commentRequired` (§1.3, its own slice) are carried for
+ * round-trip preservation and publish-time validation ONLY — do not add controls for them here.
+ */
+export interface NodeOperationPolicy {
+  allowTransfer?: boolean
+  allowAddSign?: boolean
+  allowReduceSign?: boolean
+  allowReturn?: boolean
+  returnReviewMode?: 'resume_forward' | 'jump_back_to_current'
+  commentRequired?: 'never' | 'reject_only' | 'always'
+}
+
+/** The `NodeOperationPolicy` keys whose enforcement has landed and which therefore render. */
+export const RENDERED_NODE_OPERATION_POLICY_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+] as const
+export type RenderedNodeOperationPolicyKey = typeof RENDERED_NODE_OPERATION_POLICY_KEYS[number]
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
 // The authoring UI only owns `mergeWithRequester` (self-approver / merge-with-requester);

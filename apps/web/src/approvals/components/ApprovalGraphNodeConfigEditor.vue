@@ -972,21 +972,49 @@
       </div>
     </section>
 
-    <!-- Lock-0 L0-1: 操作权限 tab content. Only reachable when the tabs context is active AND the
-         registry declared ≥1 ratified operation policy for this node type — never true at the
-         shipped baseline (operationPoliciesByNodeType is empty everywhere), so this renders
-         nothing in production. Content, when it exists, echoes the registry's OWN data rather than
-         fabricating UI ("empty tab theater" — Lock-0 delta §1 L0-1). -->
+    <!-- Lock-0 L0-1 / Lock-5 §1.1 L5-A: 操作权限 tab content. Only reachable when the tabs context is
+         active AND the registry declared ≥1 ratified operation policy for this node type. Every row
+         is driven by `operationPoliciesForNode` — the registry's OWN data — so a capability whose
+         server enforcement has not landed cannot render a control (master M7/M8, gate E-2), and a
+         registry fixture with no entries renders no tab at all (gate E-1's positive control).
+
+         `returnReviewMode` and `commentRequired` deliberately have NO control here: they are part of
+         the persisted schema (publish validates them) but are not enforced yet — Lock-5 §1.2 ("no
+         `returnReviewMode` control renders") and §1.3 respectively. `signaturePolicy` renders no
+         control anywhere (OD-L5-10(a)). -->
     <section
       v-if="isTabbed && activeTabId === 'operations'"
       class="template-authoring__approval-node-section"
       data-testid="approval-node-section-operations"
     >
-      <p
-        v-for="policy in operationPoliciesForNode"
-        :key="policy.id"
-        class="template-authoring__hint"
-      >{{ policy.label }}</p>
+      <div class="template-authoring__field-perms" data-testid="approval-node-operation-policies">
+        <div
+          v-for="policy in operationPoliciesForNode"
+          :key="policy.id"
+          class="template-authoring__field-perm-row"
+          data-testid="approval-node-operation-policy-row"
+        >
+          <el-checkbox
+            :model-value="operationPolicyChecked(policy)"
+            :disabled="readOnly || operationPolicyIsMixed(policy)"
+            :data-testid="`approval-node-operation-policy-${policy.id}`"
+            @update:model-value="(allowed: boolean) => setOperationPolicy(policy, allowed)"
+          >{{ policy.label }}</el-checkbox>
+          <!-- A-7 / M8: a persisted MIXED add/reduce pair is unrepresentable by one checkbox, so the
+               control is disabled and says exactly why — never silently picking an arm. -->
+          <span
+            v-if="operationPolicyIsMixed(policy)"
+            class="template-authoring__hint template-authoring__hint--warn"
+            :data-testid="`approval-node-operation-policy-mixed-${policy.id}`"
+          >{{ OPERATION_POLICY_MIXED_HINT }}</span>
+        </div>
+        <!-- §1.1 A-4: an in-flight instance pins its own frozen `published_definition_id`, so a flip
+             reaches only instances created AFTER the next publish. The authoring copy must say so or
+             an administrator reads the checkbox as immediate. -->
+        <p class="template-authoring__hint" data-testid="approval-node-operation-policy-scope-hint">
+          {{ OPERATION_POLICY_SCOPE_HINT }}
+        </p>
+      </div>
     </section>
     </div>
 
@@ -1011,6 +1039,7 @@ import type {
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
+  NodeOperationPolicy,
   ParallelNodeConfig,
   RequesterChoiceAssigneeSource,
   SupportedNodeTimeoutEffect,
@@ -1031,7 +1060,14 @@ import {
   assigneeSourceRoster,
   isRegisteredAssigneeSourceKind,
   type ApprovalCapabilityRegistry,
+  type ApprovalOperationPolicyCapability,
 } from '../approvalCapabilityRegistry'
+import {
+  OPERATION_POLICY_MIXED_HINT,
+  OPERATION_POLICY_SCOPE_HINT,
+  applyOperationPolicyControl,
+  operationPolicyControlState,
+} from '../nodeOperationPolicyEdit'
 import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
 import { FIELD_PERMISSION_ROUTING_HINT } from '../fieldPermissionHonestyCopy'
 
@@ -1062,6 +1098,38 @@ const assigneeSourceRosterForNode = computed(() => assigneeSourceRoster(registry
 const operationPoliciesForNode = computed(
   () => registry.value.operationPoliciesByNodeType[props.node.type] ?? [],
 )
+
+// ── Lock-5 §1.1 L5-A — 操作权限 controls ───────────────────────────────────────────────────────
+// The tab reads and writes the SAME `nodeOperationPolicy` object the server enforces (§2.3: one
+// config, two doors — the FE mirror is not a second predicate). All projection logic lives in the
+// pure `nodeOperationPolicyEdit` module so it is testable without mounting.
+const nodeOperationPolicy = computed<NodeOperationPolicy | undefined>(() => {
+  const edit = approvalNodeEditFor(props.node.key)
+  // `null` ≡ the author cleared every switch; the persisted key is being removed.
+  if (edit && edit.nodeOperationPolicy !== undefined) return edit.nodeOperationPolicy ?? undefined
+  const config = props.node.config as { nodeOperationPolicy?: NodeOperationPolicy } | undefined
+  return config?.nodeOperationPolicy
+})
+
+function operationPolicyIsMixed(capability: ApprovalOperationPolicyCapability): boolean {
+  return operationPolicyControlState(nodeOperationPolicy.value, capability).kind === 'mixed'
+}
+
+function operationPolicyChecked(capability: ApprovalOperationPolicyCapability): boolean {
+  const state = operationPolicyControlState(nodeOperationPolicy.value, capability)
+  // A mixed pair has no single truth to show; the box renders unchecked AND disabled, with the
+  // honest hint beside it saying the editor cannot express the persisted combination.
+  return state.kind === 'editable' ? state.allowed : false
+}
+
+function setOperationPolicy(capability: ApprovalOperationPolicyCapability, allowed: boolean): void {
+  const edit = approvalNodeEditFor(props.node.key)
+  if (!edit) return
+  // Fail-closed at the mutator, not only via `:disabled`: a disabled Element-Plus checkbox still
+  // has a programmatic update path, and a mixed pair must never be collapsed by a stray write.
+  if (operationPolicyIsMixed(capability)) return
+  edit.nodeOperationPolicy = applyOperationPolicyControl(nodeOperationPolicy.value, capability, allowed) ?? null
+}
 
 function unwrap<T>(value: ComputedRef<T> | Ref<T> | T): T {
   return unref(value as ComputedRef<T> | Ref<T> | T)
