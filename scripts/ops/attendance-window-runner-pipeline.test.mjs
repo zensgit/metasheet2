@@ -85,7 +85,7 @@ trap cleanup_deploy_env_snapshot EXIT
 prepare_deploy_env_snapshot
 snapshot="$DEPLOY_ENV_SNAPSHOT"
 cmp -s "$STAGING_ENV_FILE" "$snapshot"
-mode="$(stat -f '%Lp' "$snapshot" 2>/dev/null || stat -c '%a' "$snapshot")"
+mode="$(stat -c '%a' "$snapshot" 2>/dev/null || stat -f '%Lp' "$snapshot")"
 printf 'mode=%s\\n' "$mode"
 printf 'selected_snapshot=%s\\n' "$([[ "$COMPOSE_ENV_FILE" == "$snapshot" ]] && echo 1 || echo 0)"
 cleanup_deploy_env_snapshot
