@@ -7,8 +7,10 @@
 #
 # EXECUTABLE:
 #   status  — read-only snapshot (booleans / counts / reason classes / SHA only)
-#   observe — read-only callback/corp-anchor/card-update result classes for one
-#             validated expected delivery UUID; never emits raw logs or ids
+#   observe-baseline — capture values-free per-delivery callback log counts before
+#             the human click; writes only a sealed local observer checkpoint
+#   observe — require callback/corp-anchor evidence to increase beyond that
+#             checkpoint for one validated delivery UUID; never emits raw logs or ids
 #   prepare — transport Stream credentials via chmod-600 files, derive exactly
 #             one active integration for live DINGTALK_CORP_ID with >=2 active
 #             linked local users, atomically write the four credential/id env
@@ -46,7 +48,7 @@ set -euo pipefail
 log() { echo "[stream-uat] $*"; }
 fail() { echo "[stream-uat][error] $*" >&2; exit 1; }
 
-ACTION="${ACTION:?ACTION is required (status|observe|prepare|on|off|https-on|https-off)}"
+ACTION="${ACTION:?ACTION is required (status|observe-baseline|observe|prepare|on|off|https-on|https-off)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 EXPECTED_DELIVERY_ID="${EXPECTED_DELIVERY_ID:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
@@ -508,6 +510,7 @@ STAGING_ENV_FILE="${STAGING_DIR}/docker/app.staging.env"
 STREAM_UAT_PERSIST_DIR="${HOME}/.metasheet2/stream-uat"
 mkdir -p "$STREAM_UAT_PERSIST_DIR"
 chmod 700 "$STREAM_UAT_PERSIST_DIR" 2>/dev/null || true
+OBSERVE_BASELINE_FILE="${STREAM_UAT_PERSIST_DIR}/callback-observer-baseline"
 HTTPS_GATEWAY_PERSIST_DIR="${HOME}/.metasheet2/staging-https-gateway"
 HTTPS_ENV_BACKUP="${HTTPS_GATEWAY_PERSIST_DIR}/app.staging.env.before-https"
 HTTPS_ENV_BACKUP_SHA256="${HTTPS_ENV_BACKUP}.sha256"
@@ -1729,6 +1732,90 @@ action_status() {
   log "action=status complete (read-only)"
 }
 
+observer_delivery_hash() {
+  printf '%s' "$EXPECTED_DELIVERY_ID" | sha256sum | awk '{print $1}'
+}
+
+read_scoped_callback_counts() {
+  local log_file="$1"
+  local anchor_count handled_count
+  anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$log_file" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$log_file" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  printf '%s %s\n' "$anchor_count" "$handled_count"
+}
+
+write_observer_baseline_state() {
+  local delivery_hash="$1" anchor_count="$2" handled_count="$3"
+  local candidate
+  [[ "$delivery_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$anchor_count" =~ ^[0-9]+$ && "$handled_count" =~ ^[0-9]+$ ]] || return 1
+  candidate="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer-baseline.XXXXXX")"
+  register_ephemeral "$candidate"
+  umask 077
+  {
+    echo "schema=dingtalk-interactive-card-stream-callback-baseline-v1"
+    echo "delivery_id_sha256=${delivery_hash}"
+    echo "callback_anchor_log_count=${anchor_count}"
+    echo "callback_handled_count=${handled_count}"
+  } >"$candidate"
+  chmod 600 "$candidate"
+  mv -f "$candidate" "$OBSERVE_BASELINE_FILE"
+  chmod 600 "$OBSERVE_BASELINE_FILE"
+}
+
+read_observer_baseline_state() {
+  local expected_hash="$1"
+  local schema delivery_hash anchor_count handled_count
+  [[ -f "$OBSERVE_BASELINE_FILE" ]] || return 1
+  [[ "$(wc -l <"$OBSERVE_BASELINE_FILE" | tr -d '[:space:]')" == "4" ]] || return 1
+  [[ "$(grep -F -c 'schema=' "$OBSERVE_BASELINE_FILE" || true)" == "1" ]] || return 1
+  [[ "$(grep -F -c 'delivery_id_sha256=' "$OBSERVE_BASELINE_FILE" || true)" == "1" ]] || return 1
+  [[ "$(grep -F -c 'callback_anchor_log_count=' "$OBSERVE_BASELINE_FILE" || true)" == "1" ]] || return 1
+  [[ "$(grep -F -c 'callback_handled_count=' "$OBSERVE_BASELINE_FILE" || true)" == "1" ]] || return 1
+  schema="$(awk -F= '$1 == "schema" { print $2 }' "$OBSERVE_BASELINE_FILE")"
+  delivery_hash="$(awk -F= '$1 == "delivery_id_sha256" { print $2 }' "$OBSERVE_BASELINE_FILE")"
+  anchor_count="$(awk -F= '$1 == "callback_anchor_log_count" { print $2 }' "$OBSERVE_BASELINE_FILE")"
+  handled_count="$(awk -F= '$1 == "callback_handled_count" { print $2 }' "$OBSERVE_BASELINE_FILE")"
+  [[ "$schema" == "dingtalk-interactive-card-stream-callback-baseline-v1" ]] || return 1
+  [[ "$delivery_hash" == "$expected_hash" ]] || return 1
+  [[ "$anchor_count" =~ ^[0-9]+$ && "$handled_count" =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$anchor_count" "$handled_count"
+}
+
+action_observe_baseline() {
+  assert_staging_only
+  require_exact_deployed_sha "observe-baseline"
+  require_lifecycle_flags_off "observe-baseline"
+  require_log_level_info_or_debug "observe-baseline"
+  [[ "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+    || fail "action=observe-baseline requires expected_delivery_id as a lowercase UUID"
+
+  local live_flag tmp delivery_hash anchor_count handled_count
+  live_flag="$(read_flag_from_container "$FLAG_STREAM" || echo unknown)"
+  [[ "$live_flag" == "true" ]] \
+    || fail "action=observe-baseline requires live Stream ON (got stream_enabled=${live_flag})"
+  tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
+  register_ephemeral "$tmp"
+  chmod 600 "$tmp"
+  docker logs "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
+    || fail "action=observe-baseline could not read current backend container logs"
+  read -r anchor_count handled_count < <(read_scoped_callback_counts "$tmp")
+  delivery_hash="$(observer_delivery_hash)"
+  write_observer_baseline_state "$delivery_hash" "$anchor_count" "$handled_count" \
+    || fail "action=observe-baseline could not persist a valid observer checkpoint"
+  rm -f "$tmp"
+  {
+    echo "schema=dingtalk-interactive-card-stream-callback-observer-v2"
+    echo "action=observe-baseline"
+    echo "reason=baseline_captured"
+    echo "stream_enabled=true"
+    echo "callback_anchor_log_count=${anchor_count}"
+    echo "callback_handled_count=${handled_count}"
+  } > "${OUTPUT_DIR}/callback-observer.txt"
+  cp "${OUTPUT_DIR}/callback-observer.txt" "${OUTPUT_DIR}/summary.txt"
+  log "action=observe-baseline complete; perform exactly one human callback before action=observe"
+}
+
 action_observe() {
   assert_staging_only
   require_exact_deployed_sha "observe"
@@ -1742,7 +1829,8 @@ action_observe() {
   [[ "$live_flag" == "true" ]] \
     || fail "action=observe requires live Stream ON (got stream_enabled=${live_flag})"
 
-  local tmp anchor_count handled_count window_handler_error_count update_failed_count
+  local tmp delivery_hash baseline_anchor_count baseline_handled_count
+  local anchor_count handled_count anchor_delta handled_delta window_handler_error_count update_failed_count
   local header_present="" body_present="" handled_outcome=""
   tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
   register_ephemeral "$tmp"
@@ -1750,18 +1838,22 @@ action_observe() {
   docker logs "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
     || fail "action=observe could not read current backend container logs"
 
-  anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
-  handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  read -r anchor_count handled_count < <(read_scoped_callback_counts "$tmp")
   # The worker's catch log intentionally carries no delivery id. Keep it as a
   # window-level diagnostic; it must never be presented as scoped evidence for
   # EXPECTED_DELIVERY_ID.
   window_handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
   update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
 
-  [[ "$anchor_count" -gt 0 ]] \
-    || fail "action=observe requires scoped callback anchor evidence (callback_anchor_log_count=${anchor_count})"
-  [[ "$handled_count" -gt 0 ]] \
-    || fail "action=observe requires scoped callback handled evidence (callback_handled_count=${handled_count})"
+  delivery_hash="$(observer_delivery_hash)"
+  read -r baseline_anchor_count baseline_handled_count < <(read_observer_baseline_state "$delivery_hash") \
+    || fail "action=observe requires a valid same-delivery checkpoint; run observe-baseline immediately before the human click"
+  [[ "$anchor_count" -gt "$baseline_anchor_count" ]] \
+    || fail "action=observe requires new scoped callback anchor evidence (before=${baseline_anchor_count};after=${anchor_count})"
+  [[ "$handled_count" -gt "$baseline_handled_count" ]] \
+    || fail "action=observe requires new scoped callback handled evidence (before=${baseline_handled_count};after=${handled_count})"
+  anchor_delta=$((anchor_count - baseline_anchor_count))
+  handled_delta=$((handled_count - baseline_handled_count))
 
   if [[ "$anchor_count" -gt 0 ]]; then
     local anchor_line
@@ -1794,18 +1886,24 @@ action_observe() {
 
   rm -f "$tmp"
   {
-    echo "schema=dingtalk-interactive-card-stream-callback-observer-v1"
+    echo "schema=dingtalk-interactive-card-stream-callback-observer-v2"
     echo "action=observe"
     echo "reason=ok"
     echo "stream_enabled=true"
     echo "callback_anchor_log_count=${anchor_count}"
+    echo "callback_anchor_log_count_before=${baseline_anchor_count}"
+    echo "callback_anchor_log_count_delta=${anchor_delta}"
     echo "header_event_corp_id_present=${header_present}"
     echo "body_corp_id_present=${body_present}"
     echo "callback_handled_count=${handled_count}"
+    echo "callback_handled_count_before=${baseline_handled_count}"
+    echo "callback_handled_count_delta=${handled_delta}"
     echo "latest_callback_outcome=${handled_outcome}"
     echo "window_callback_handler_error_count=${window_handler_error_count}"
     echo "card_update_failed_count=${update_failed_count}"
   } > "${OUTPUT_DIR}/callback-observer.txt"
+  write_observer_baseline_state "$delivery_hash" "$anchor_count" "$handled_count" \
+    || fail "action=observe could not advance the observer checkpoint"
   cp "${OUTPUT_DIR}/callback-observer.txt" "${OUTPUT_DIR}/summary.txt"
   log "action=observe complete (values-free callback classes only)"
 }
@@ -2087,13 +2185,14 @@ chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
 
 case "$ACTION" in
   status) action_status ;;
+  observe-baseline) action_observe_baseline ;;
   observe) action_observe ;;
   prepare) action_prepare ;;
   on) action_on ;;
   off) action_off ;;
   https-on) action_https_on ;;
   https-off) action_https_off ;;
-  *) fail "invalid ACTION='${ACTION}' (expected status|observe|prepare|on|off|https-on|https-off)" ;;
+  *) fail "invalid ACTION='${ACTION}' (expected status|observe-baseline|observe|prepare|on|off|https-on|https-off)" ;;
 esac
 
 log "done action=${ACTION}"

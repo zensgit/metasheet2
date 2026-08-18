@@ -6,10 +6,11 @@ run-name: "DingTalk Stream Staging UAT: ${{ inputs.action }}"
 # One dispatch = ONE action. Stream stays OFF except explicit action=on.
 # Lifecycle flags are NEVER written by this lane.
 #
-# EXECUTABLE: status | observe | prepare | on | off | https-on | https-off
+# EXECUTABLE: status | observe-baseline | observe | prepare | on | off | https-on | https-off
 #   status  = read-only values-free snapshot (booleans / counts / reason classes)
-#   observe = read-only callback/corp-anchor/card-update result classes from the
-#             current Stream-ON backend container; never emits raw logs or ids
+#   observe-baseline = capture values-free per-delivery log counts before one human click
+#   observe = require callback/corp-anchor evidence to increase beyond the persisted
+#             same-delivery baseline; never emits raw logs or ids
 #   prepare = transport Stream credentials (chmod-600 files), derive exactly one
 #             active integration for live DINGTALK_CORP_ID with >=2 linked local users,
 #             atomically write the four credential/id env keys into
@@ -38,18 +39,18 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status | observe | prepare | on | off | https-on | https-off'
+        description: 'status | observe-baseline | observe | prepare | on | off | https-on | https-off'
         required: true
         type: choice
         # Quote 'on'/'off' — YAML 1.1 bare on/off become booleans.
-        options: [status, observe, prepare, 'on', 'off', https-on, https-off]
+        options: [status, observe-baseline, observe, prepare, 'on', 'off', https-on, https-off]
         default: status
       deploy_sha:
         description: 'FULL 40-char lowercase commit SHA currently deployed on staging. Required for every non-status action; optional for status exact-match reporting.'
         required: false
         default: ''
       expected_delivery_id:
-        description: 'Lowercase delivery UUID required only for observe; used for matching and never emitted.'
+        description: 'Lowercase delivery UUID required for observe-baseline/observe; used for matching and never emitted.'
         required: false
         default: ''
 
@@ -80,7 +81,7 @@ jobs:
           # (bash -n and other children must not inherit raw secret env).
         run: |
           set -euo pipefail
-          case "$ACTION" in status|observe|prepare|on|off|https-on|https-off) ;; *)
+          case "$ACTION" in status|observe-baseline|observe|prepare|on|off|https-on|https-off) ;; *)
             echo "invalid action: $ACTION" >&2; exit 2
           ;; esac
 
@@ -97,13 +98,13 @@ jobs:
             exit 2
           fi
 
-          if [[ "$ACTION" == "observe" ]]; then
+          if [[ "$ACTION" == "observe" || "$ACTION" == "observe-baseline" ]]; then
             if [[ ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-              echo "observe requires expected_delivery_id as a lowercase UUID" >&2
+              echo "${ACTION} requires expected_delivery_id as a lowercase UUID" >&2
               exit 2
             fi
           elif [[ -n "$EXPECTED_DELIVERY_ID" ]]; then
-            echo "expected_delivery_id is accepted only for action=observe" >&2
+            echo "expected_delivery_id is accepted only for action=observe-baseline/observe" >&2
             exit 2
           fi
 
@@ -158,7 +159,7 @@ jobs:
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
           # prepare secrets are materialized INSIDE this step under EXIT trap —
           # never via a prior step secrets_dir output (cross-step leak / cancel).
-          # status/observe/on/off do not receive credential secrets.
+          # status/observe-baseline/observe/on/off do not receive credential secrets.
           STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_ID || '' }}
           STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET || '' }}
           STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID || '' }}
@@ -177,7 +178,7 @@ jobs:
 
           ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-          case "$ACTION" in status|observe|prepare|on|off|https-on|https-off) ;; *)
+          case "$ACTION" in status|observe-baseline|observe|prepare|on|off|https-on|https-off) ;; *)
             echo "refusing invalid action in remote execution step" >&2
             exit 2
           ;; esac
@@ -190,13 +191,13 @@ jobs:
             echo "refusing invalid optional deploy_sha in remote execution step" >&2
             exit 2
           fi
-          if [[ "$ACTION" == "observe" ]]; then
+          if [[ "$ACTION" == "observe" || "$ACTION" == "observe-baseline" ]]; then
             if [[ ! "$EXPECTED_DELIVERY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
               echo "refusing invalid expected_delivery_id in remote execution step" >&2
               exit 2
             fi
           elif [[ -n "$EXPECTED_DELIVERY_ID" ]]; then
-            echo "refusing expected_delivery_id outside action=observe" >&2
+            echo "refusing expected_delivery_id outside action=observe-baseline/observe" >&2
             exit 2
           fi
           for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
@@ -361,7 +362,8 @@ jobs:
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             echo ""
-            echo "**Executable:** status / observe / prepare / on / off / https-on / https-off."
+            echo "**Executable:** status / observe-baseline / observe / prepare / on / off / https-on / https-off."
+            echo "For every human callback: run observe-baseline first, click once, then run observe; successful observe advances the checkpoint."
             echo "prepare forces Stream OFF after writing credentials + derived integration id."
             echo "on flips ONLY Stream flag true after prerequisite + LOG_LEVEL checks; proves worker_started only."
             echo "stream_connected is always unknown here (SDK connect resolves + retries forever; not log-proven)."
