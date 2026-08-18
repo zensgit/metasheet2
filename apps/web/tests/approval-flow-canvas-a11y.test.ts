@@ -122,7 +122,10 @@ describe('ApprovalFlowCanvas flat-card grammar (P1-D, structural)', () => {
   })
 
   it('per-type accent is a left-border token on the CARD, one rule per node type, token-only', () => {
-    for (const type of ['approval', 'cc', 'condition', 'parallel']) {
+    // 'handler' added by the FAIL-6 fix (P7-R2, gate fix round) — was the only one of seven
+    // shipped node types with no accent at all (fell through to the CARD's own default
+    // `--el-border-color-lighter`), until this rule landed.
+    for (const type of ['approval', 'cc', 'condition', 'parallel', 'handler']) {
       const re = new RegExp(
         `\\.template-authoring__canvas-node\\[data-node-type='${type}'\\]\\s*\\{[\\s\\S]{0,120}border-left-color:\\s*var\\(--el-color-`,
       )
@@ -220,5 +223,110 @@ describe('ApprovalFlowCanvas flat-card grammar — computed-style mechanism guar
     // that would make the equality check below vacuously true.
     expect(values.every((v) => v.backgroundOnly !== '')).toBe(true)
     expect(new Set(values.map((v) => v.paint)).size).toBe(1)
+  })
+})
+
+// FAIL-2 fix (P7 phase-A evidence ledger, P7-R2, 20260818): 13 of 19 flow-canvas controls used
+// `--el-color-primary-light-5` (#92b1f5) for the keyboard focus ring, measured 2.05-2.14:1 against
+// every abutting surface in real Chromium — below the ratified >=3:1 (V-6,
+// approval-canvas-v2-interaction-design-lock-20260721.md:412). `--el-color-primary` (#2563eb)
+// measured 4.45-5.17:1 on every surface (the P7-A ledger's own table).
+//
+// P2-1 hardening precedent (this file, above): a pin keyed to a specific selector SPELLING is
+// defeated by restating the same rule under a different selector. This block guards the MECHANISM
+// instead — it enumerates every rule in the component's own raw stylesheet text whose selector
+// contains `:focus-visible`, then asserts three properties over that DERIVED set, not over two
+// named line numbers:
+//   1. the set is non-empty (so the loop below cannot pass vacuously);
+//   2. no rule in the set references the sub-3:1 `--el-color-primary-light-5` ring token;
+//   3. every rule in the set declares a non-color channel (`outline` or `box-shadow`) — colour
+//      alone never carries focus state (also closes the §7 checklist "colour is not the sole
+//      carrier of state" finding tied to the same root cause);
+//   4. no rule in the set ships a bare `outline: none` (a removal with no replacement ring).
+// A future contributor who re-adds a light-5 (or color-only, or outline:none) focus-visible rule
+// ANYWHERE in this component — new selector text included — trips this without editing the test.
+describe('ApprovalFlowCanvas focus-ring contrast (FAIL-2 / V-6, P7-R2 fix, mechanism guard)', () => {
+  // P7-R2 gate hardening (P2-3): the original non-global `.match()` here only ever captured the
+  // FIRST `<style>` block — a second block anywhere in the file would carry zero test signal
+  // through any of the four assertions below (reproduced: an appended hostile second block with a
+  // light-5, colour-only, bare-outline:none rule left every assertion green). Mirrors the
+  // sibling-file fix already shipped in `ui-foundation-style-guard.spec.ts`'s `extractStyleBlocks`
+  // (global regex + `exec` loop, concatenating every block) rather than inventing a new pattern.
+  const STYLE_BLOCK_RE = /<style[^>]*>([\s\S]*?)<\/style>/g
+  function extractStyleBlock(src: string): string {
+    const blocks: string[] = []
+    let match: RegExpExecArray | null
+    STYLE_BLOCK_RE.lastIndex = 0
+    while ((match = STYLE_BLOCK_RE.exec(src))) {
+      blocks.push(match[1])
+    }
+    if (blocks.length === 0) throw new Error('no <style> block found in ApprovalFlowCanvas.vue')
+    return blocks.join('\n')
+  }
+
+  function focusVisibleRuleBlocks(styleBlock: string): string[] {
+    // Strip `/* ... */` comments FIRST. Several of THIS FIX's own explanatory comments discuss
+    // `:focus-visible` and quote the exact prohibited declaration (`outline: none`) as prose —
+    // without stripping, that comment text would glue onto the adjacent rule's captured selector
+    // (nothing but the comment separates it from the next `{`) and produce a false positive on
+    // the "no bare outline: none" check below purely from the comment's own words.
+    const withoutComments = styleBlock.replace(/\/\*[\s\S]*?\*\//g, '')
+    // `<selector(s) containing :focus-visible> { <declarations> }` — the selector segment can be
+    // comma-separated (none currently are, post-fix, but the pattern doesn't assume otherwise).
+    const blocks: string[] = []
+    const ruleRe = /([^{}]*:focus-visible[^{}]*)\{([^}]*)\}/g
+    let m: RegExpExecArray | null
+    // eslint-disable-next-line no-cond-assign
+    while ((m = ruleRe.exec(withoutComments))) {
+      blocks.push(`${m[1].trim()} {${m[2]}}`)
+    }
+    return blocks
+  }
+
+  const styleBlock = extractStyleBlock(CANVAS_SRC)
+  const blocks = focusVisibleRuleBlocks(styleBlock)
+
+  it('the enumeration finds every shipped :focus-visible rule (cannot pass vacuously)', () => {
+    // Mutation probe: deleting a `:focus-visible` rule from the component must shrink this count —
+    // proving the loop-based assertions below are actually exercised, not skipped over an empty set.
+    expect(blocks.length).toBe(5)
+  })
+
+  it('no :focus-visible rule anywhere in the component references the sub-3:1 light-5 ring token', () => {
+    for (const block of blocks) {
+      expect(block).not.toMatch(/--el-color-primary-light-5/)
+    }
+  })
+
+  it('every :focus-visible rule declares a non-color channel (outline or box-shadow) — colour is never the sole carrier of focus state', () => {
+    for (const block of blocks) {
+      const hasNonColorChannel = /\boutline\s*:/.test(block) || /\bbox-shadow\s*:/.test(block)
+      expect(hasNonColorChannel).toBe(true)
+    }
+  })
+
+  it('no :focus-visible rule ships a bare `outline: none` (a removal with no replacement ring)', () => {
+    for (const block of blocks) {
+      expect(block).not.toMatch(/outline\s*:\s*none\b/)
+    }
+  })
+})
+
+// FAIL-2 fix, second root cause (P7-R2, discovered during real-Chromium re-measurement, not named
+// by line number in the original ledger finding): the canvas toolbar buttons (撤销/重做/缩小/
+// 100%/放大/适应画布) are real `<el-button>`s, so their `:focus-visible` ring is NOT painted by any
+// rule in this component's own stylesheet at all — it comes from Element Plus's OWN base
+// `.el-button` default, which sets `--el-button-outline-color: var(--el-color-primary-light-5)`.
+// Measured in real Chromium: 2.14:1 before this fix, 5.17:1 after (scoped override below).
+// Deliberately NOT overriding Element Plus's app-wide default (that is a separate, unratified,
+// much larger surface) — only the canvas toolbar's own buttons.
+describe('ApprovalFlowCanvas toolbar buttons — Element Plus default ring override (FAIL-2, P7-R2)', () => {
+  it('scopes an --el-button-outline-color override to the canvas toolbar only, off the sub-3:1 light-5 default', () => {
+    const rule = CANVAS_SRC.match(
+      /\.template-authoring__canvas-toolbar\s+:deep\(\.el-button\)\s*\{([^}]*)\}/,
+    )
+    expect(rule).not.toBeNull()
+    expect(rule![1]).toMatch(/--el-button-outline-color:\s*var\(--el-color-primary\)/)
+    expect(rule![1]).not.toMatch(/--el-color-primary-light-5/)
   })
 })
