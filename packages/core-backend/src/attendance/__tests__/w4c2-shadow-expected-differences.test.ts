@@ -18,8 +18,12 @@ import type {
 import { calculateAttendanceSegmentsV1 } from '../w4c1-segment-calculator'
 import {
   ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1,
+  ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1,
   AttendanceW4ShadowExpectedDifferenceError,
+  assertAttendanceW4C2RosterV1,
   isExpectedAttendanceShadowDifferenceV1,
+  isExpectedAttendanceW4C2ReadSideDifferenceV1,
+  parseAttendanceW4C2ReadSideProbeV1,
 } from '../w4c2-shadow-expected-differences'
 
 const sh = (time: string): string => `2026-07-01T${time}:00+08:00`
@@ -104,10 +108,17 @@ const EXPECTED_PROBE = {
 } as const
 
 describe('w4c2 expected shadow differences (#4607 handover P0)', () => {
-  it('roster names exactly the ratified correction_applied_daily_adjusted entry as status_changed', () => {
+  it('roster is exactly the three ratified entries — (id, code, evaluator) whole-array equality', () => {
+    // Pin CHANGED deliberately under owner ruling issue-4556.comment-5317181927 (entries 2-3;
+    // mechanism per issue-4556.comment-5322708492) — 测试冻结≠批准: the ruling, not this test,
+    // authorizes the membership; a FOURTH entry still reds this pin.
     expect(
-      ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1.map((entry) => [entry.id, entry.shadowDiffCode]),
-    ).toEqual([['correction_applied_daily_adjusted', 'status_changed']])
+      ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1.map((entry) => [entry.id, entry.shadowDiffCode, entry.evaluator]),
+    ).toEqual([
+      ['correction_applied_daily_adjusted', 'status_changed', 'write_probe_v1'],
+      ['transient_partial_day_in_only_late', 'late_minutes_mismatch', 'read_convergence_v1'],
+      ['transient_partial_day_out_only_early_leave', 'early_leave_minutes_mismatch', 'read_convergence_v1'],
+    ])
   })
 
   it('W4 side of the divergence is real: correction-applied, no-anomaly, zero leave/OT day is daily adjusted with correction reason', () => {
@@ -158,5 +169,115 @@ describe('w4c2 expected shadow differences (#4607 handover P0)', () => {
         AttendanceW4ShadowExpectedDifferenceError,
       )
     }
+  })
+
+  // ---- read-convergence mechanism (entries 2-3; ruling issue-4556.comment-5317181927) ----
+
+  const READ_PROBE_IN_ONLY = {
+    shadowDiffCode: 'late_minutes_mismatch',
+    changedFields: ['lateMinutes'],
+    projectedStatus: 'partial',
+    projectedFirstInPresent: true,
+    projectedLastOutPresent: false,
+    absoluteMinuteDelta: 90,
+    projectedLateMinutes: 90,
+    projectedEarlyLeaveMinutes: 0,
+    convergedToEqual: true,
+  } as const
+
+  const READ_PROBE_OUT_ONLY = {
+    shadowDiffCode: 'early_leave_minutes_mismatch',
+    changedFields: ['earlyLeaveMinutes'],
+    projectedStatus: 'partial',
+    projectedFirstInPresent: false,
+    projectedLastOutPresent: true,
+    absoluteMinuteDelta: 45,
+    projectedLateMinutes: 0,
+    projectedEarlyLeaveMinutes: 45,
+    convergedToEqual: true,
+  } as const
+
+  it('read evaluator accepts BOTH converged one-boundary lifecycles (in-only late; out-only early-leave)', () => {
+    expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(READ_PROBE_IN_ONLY)).toBe(true)
+    expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(READ_PROBE_OUT_ONLY)).toBe(true)
+  })
+
+  it('read evaluator DEPARTURE MATRIX — every single-conjunct departure from the in-only accept flips to false', () => {
+    const departures: Array<[string, Record<string, unknown>]> = [
+      ['not converged (open day at a window edge)', { ...READ_PROBE_IN_ONLY, convergedToEqual: false }],
+      ['completed day (both boundaries present) — a genuine miscalculation shape', { ...READ_PROBE_IN_ONLY, projectedLastOutPresent: true }],
+      ['no boundary at all', { ...READ_PROBE_IN_ONLY, projectedFirstInPresent: false }],
+      ['delta does not equal the witness minutes', { ...READ_PROBE_IN_ONLY, absoluteMinuteDelta: 91 }],
+      ['witness minutes zero', { ...READ_PROBE_IN_ONLY, absoluteMinuteDelta: 0, projectedLateMinutes: 0 }],
+      ['other minute field nonzero', { ...READ_PROBE_IN_ONLY, projectedEarlyLeaveMinutes: 5 }],
+      ['other minute field null', { ...READ_PROBE_IN_ONLY, projectedEarlyLeaveMinutes: null }],
+      ['status not partial', { ...READ_PROBE_IN_ONLY, projectedStatus: 'late' }],
+      ['status null (incomplete projection)', { ...READ_PROBE_IN_ONLY, projectedStatus: null }],
+      ['extra changed field', { ...READ_PROBE_IN_ONLY, changedFields: ['status', 'lateMinutes'] }],
+      ['wrong code for the shape', { ...READ_PROBE_IN_ONLY, shadowDiffCode: 'work_minutes_mismatch', changedFields: ['workMinutes'] }],
+    ]
+    for (const [label, probe] of departures) {
+      expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(probe), label).toBe(false)
+    }
+  })
+
+  it('read probe parser fails closed on malformed input (missing/extra keys, out-of-domain values, non-canonical field order)', () => {
+    const bad: unknown[] = [
+      null,
+      [],
+      {},
+      { ...READ_PROBE_IN_ONLY, extra: 1 },
+      (() => { const { convergedToEqual: _omitted, ...rest } = READ_PROBE_IN_ONLY; return rest })(),
+      { ...READ_PROBE_IN_ONLY, shadowDiffCode: 'not_a_code' },
+      { ...READ_PROBE_IN_ONLY, changedFields: ['lateMinutes', 'lateMinutes'] },
+      { ...READ_PROBE_IN_ONLY, changedFields: ['lateMinutes', 'status'] }, // non-canonical order
+      { ...READ_PROBE_IN_ONLY, absoluteMinuteDelta: -1 },
+      { ...READ_PROBE_IN_ONLY, projectedLateMinutes: 1.5 },
+      { ...READ_PROBE_IN_ONLY, convergedToEqual: 'yes' },
+    ]
+    for (const probe of bad) {
+      expect(() => isExpectedAttendanceW4C2ReadSideDifferenceV1(probe)).toThrowError(
+        AttendanceW4ShadowExpectedDifferenceError,
+      )
+    }
+  })
+
+  it('write predicate presented code is DERIVED from the roster write entry (no floating literal)', () => {
+    expect(ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1).toBe('status_changed')
+    // Behaviour-identity pin: the write predicate still accepts exactly the entry-1 probe.
+    expect(isExpectedAttendanceShadowDifferenceV1(EXPECTED_PROBE)).toBe(true)
+  })
+
+  it('module-load roster assert fails closed on every invalid roster shape (driven against synthetic rosters)', () => {
+    const write = ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1[0]
+    const readIn = ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1[1]
+    const expectInvalid = (roster: unknown, label: string) => {
+      expect(
+        () => assertAttendanceW4C2RosterV1(roster as never),
+        label,
+      ).toThrowError(AttendanceW4ShadowExpectedDifferenceError)
+    }
+    // shipped roster passes (positive control)
+    expect(() => assertAttendanceW4C2RosterV1(ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1)).not.toThrow()
+    expectInvalid([write, write], 'duplicate ids')
+    expectInvalid([readIn], 'zero write entries')
+    expectInvalid([write, { ...write, id: 'second-write' }], 'two write entries')
+    expectInvalid([write, { ...readIn, shadowDiffCode: 'review_required' }], 'read entry on a CRITICAL code')
+    expectInvalid([write, { ...readIn, shadowDiffCode: 'equal' }], 'read entry on equal')
+    expectInvalid(
+      [write, { ...readIn, shadowDiffCode: 'status_changed' }],
+      'SAFETY: read entry sharing the write presented code (would re-arm the relabel branch)',
+    )
+    expectInvalid([write, { ...readIn, minuteWitness: undefined }], 'read entry missing minuteWitness')
+    expectInvalid([write, { ...readIn, readProbeCore: undefined }], 'read entry missing readProbeCore')
+    expectInvalid([{ ...write, minuteWitness: 'late' }, readIn], 'write entry carrying a read-only field')
+    expectInvalid([write, { ...readIn, ratifiedBy: 'no issue ref' }], 'implausible ratifiedBy')
+    expectInvalid([write, { ...readIn, evaluator: 'other_v1' }], 'unknown evaluator')
+  })
+
+  it('read evaluator is roster-driven: an empty-read roster accepts nothing; a synthetic roster decides', () => {
+    expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(READ_PROBE_IN_ONLY, [ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1[0]])).toBe(false)
+    const parsed = parseAttendanceW4C2ReadSideProbeV1(READ_PROBE_IN_ONLY)
+    expect(parsed.shadowDiffCode).toBe('late_minutes_mismatch')
   })
 })
