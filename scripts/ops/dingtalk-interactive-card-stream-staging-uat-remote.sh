@@ -1743,7 +1743,7 @@ action_observe() {
     || fail "action=observe requires live Stream ON (got stream_enabled=${live_flag})"
 
   local tmp anchor_count handled_count window_handler_error_count update_failed_count
-  local header_present="unknown" body_present="unknown" handled_outcome="unknown"
+  local header_present="" body_present="" handled_outcome=""
   tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
   register_ephemeral "$tmp"
   chmod 600 "$tmp"
@@ -1757,6 +1757,11 @@ action_observe() {
   # EXPECTED_DELIVERY_ID.
   window_handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
   update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+
+  [[ "$anchor_count" -gt 0 ]] \
+    || fail "action=observe requires scoped callback anchor evidence (callback_anchor_log_count=${anchor_count})"
+  [[ "$handled_count" -gt 0 ]] \
+    || fail "action=observe requires scoped callback handled evidence (callback_handled_count=${handled_count})"
 
   if [[ "$anchor_count" -gt 0 ]]; then
     local anchor_line
@@ -1783,7 +1788,7 @@ action_observe() {
       *'(link_secret_unavailable delivery='*) handled_outcome="link_secret_unavailable" ;;
       *'(engine_rejected:'*) handled_outcome="engine_rejected" ;;
       *'(wrapper_not_found delivery='*) handled_outcome="wrapper_not_found" ;;
-      *) handled_outcome="other" ;;
+      *) fail "action=observe observed callback outcome outside closed set (callback_handled_count=${handled_count})" ;;
     esac
   fi
 

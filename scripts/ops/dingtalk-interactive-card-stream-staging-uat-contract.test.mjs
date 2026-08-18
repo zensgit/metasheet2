@@ -35,6 +35,21 @@ const WORKFLOW = join(
   'workflows',
   'dingtalk-interactive-card-stream-staging-uat.yml',
 )
+const UAT_CHECKLIST = join(
+  REPO_ROOT,
+  'docs',
+  'development',
+  'approval-dingtalk-slice-b-uat-checklist-20260710.md',
+)
+const DINGTALK_CLIENT = join(
+  REPO_ROOT,
+  'packages',
+  'core-backend',
+  'src',
+  'integrations',
+  'dingtalk',
+  'client.ts',
+)
 const ATTENDANCE_WORKFLOW = join(
   REPO_ROOT,
   '.github',
@@ -94,6 +109,54 @@ function actionBody(source, name, nextNames = []) {
   const mainIdx = source.indexOf('\n# --- main', start + 1)
   if (mainIdx !== -1 && mainIdx < end) end = mainIdx
   return source.slice(start, end)
+}
+
+function runObserveFixture(observe, { dir, expected, lines }) {
+  const output = join(dir, 'output')
+  const logs = join(dir, 'backend.log')
+  const harness = join(dir, 'harness.sh')
+  writeFileSync(logs, `${lines.join('\n')}\n`)
+  writeFileSync(
+    harness,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'log() { :; }',
+      'fail() { echo "$*" >&2; exit 1; }',
+      'assert_staging_only() { :; }',
+      'require_exact_deployed_sha() { :; }',
+      'require_lifecycle_flags_off() { :; }',
+      'require_log_level_info_or_debug() { :; }',
+      'register_ephemeral() { :; }',
+      'read_flag_from_container() { printf true; }',
+      'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
+      'BACKEND_CONTAINER=metasheet-staging-backend',
+      'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+      'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+      observe,
+      'action_observe',
+    ].join('\n'),
+  )
+  const result = spawnSync('bash', [harness], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EXPECTED_DELIVERY_ID: expected,
+      LOG_FIXTURE: logs,
+      OUTPUT_DIR: output,
+      STREAM_UAT_PERSIST_DIR: dir,
+    },
+  })
+  return { output, result }
+}
+
+function removeObserveGuard(observe, condition) {
+  const start = observe.indexOf(`  [[ "${condition}" -gt 0 ]] ` + '\\')
+  assert.notEqual(start, -1, `${condition} guard must exist for mutation test`)
+  const firstEnd = observe.indexOf('\n', start)
+  const secondEnd = observe.indexOf('\n', firstEnd + 1)
+  assert.notEqual(secondEnd, -1, `${condition} guard must have a failure line`)
+  return observe.slice(0, start) + observe.slice(secondEnd + 1)
 }
 
 // --- parse / presence -----------------------------------------------------------------
@@ -192,6 +255,26 @@ test('contract suite is wired into the required Node 20 plugin-tests lane', () =
     step.run,
     /node --test scripts\/ops\/dingtalk-interactive-card-stream-staging-uat-contract\.test\.mjs/,
   )
+})
+
+test('U6 keeps card forwarding disabled and uses controlled callback injection for B', () => {
+  const checklist = read(UAT_CHECKLIST)
+  assert.match(
+    checklist,
+    /\| U6 \| 非受理人 B 的受控技术注入同意回调（不依赖卡片转发） \|[^\n]*supportForward=false/,
+  )
+  assert.doesNotMatch(checklist, /\| U6 \|[^\n]*转发的卡/)
+  assert.match(read(DINGTALK_CLIENT), /supportForward:\s*false/)
+})
+
+test('U11-a distinguishes an absent corp anchor from a real corp mismatch', () => {
+  const checklist = read(UAT_CHECKLIST)
+  const u11a = checklist.split('\n').find((line) => line.startsWith('| **U11-a**'))
+  assert.ok(u11a, 'U11-a checklist row must exist')
+  assert.match(checklist, /两者都缺 ⇒ 判 `corp_anchor_absent`/)
+  assert.match(u11a, /`corp_anchor_absent` ⇒ 真实帧缺企业锚点/)
+  assert.match(u11a, /`corp_mismatch` ⇒ 锚点存在但企业确实不一致/)
+  assert.doesNotMatch(u11a, /corp_mismatch.*根本不带/)
 })
 
 // --- exact-SHA gate -------------------------------------------------------------------
@@ -329,6 +412,10 @@ test('observe is read-only and emits values-free callback classes without raw lo
   assert.match(observe, /latest_callback_outcome=/)
   assert.match(observe, /window_callback_handler_error_count=/)
   assert.match(observe, /card_update_failed_count=/)
+  assert.match(observe, /callback_anchor_log_count=\$\{anchor_count\}/)
+  assert.match(observe, /callback_handled_count=\$\{handled_count\}/)
+  assert.match(observe, /outside closed set/)
+  assert.doesNotMatch(observe, /handled_outcome="(?:other|unknown)"/)
   for (const outcome of [
     'ignored_unsupported_action',
     'delivery_not_found',
@@ -458,7 +545,13 @@ test('observe precisely classifies scoped out_track_id terminal outcomes', () =>
         'delivery_not_found',
       ],
     ]) {
-      writeFileSync(logs, `${line}\n`)
+      writeFileSync(
+        logs,
+        [
+          `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`,
+          line,
+        ].join('\n') + '\n',
+      )
       const result = spawnSync('bash', [harness], {
         encoding: 'utf8',
         env: {
@@ -476,6 +569,82 @@ test('observe precisely classifies scoped out_track_id terminal outcomes', () =>
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('observe fails closed for missing scoped evidence and an unknown outcome', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-negative-'))
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const anchor = `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`
+  try {
+    for (const { name, lines, reason } of [
+      {
+        name: 'anchor_count=0',
+        lines: [`info: DingTalk interactive-card callback handled (executed delivery=${expected})`],
+        reason: /callback_anchor_log_count=0/,
+      },
+      {
+        name: 'handled_count=0',
+        lines: [anchor],
+        reason: /callback_handled_count=0/,
+      },
+      {
+        name: 'outcome outside closed set',
+        lines: [anchor, `info: DingTalk interactive-card callback handled (unexpected delivery=${expected})`],
+        reason: /outside closed set/,
+      },
+    ]) {
+      const { output, result } = runObserveFixture(observe, { dir, expected, lines })
+      assert.notEqual(result.status, 0, `${name} must fail`)
+      assert.match(result.stderr, reason)
+      assert.doesNotMatch(result.stderr, new RegExp(expected))
+      assert.equal(existsSync(join(output, 'callback-observer.txt')), false)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('observe evidence and outcome guards are mutation-killed', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const anchor = `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`
+  const mutations = [
+    {
+      name: 'remove anchor_count guard',
+      lines: [`info: DingTalk interactive-card callback handled (executed delivery=${expected})`],
+      mutate: (body) => removeObserveGuard(body, '$anchor_count'),
+    },
+    {
+      name: 'remove handled_count guard',
+      lines: [anchor],
+      mutate: (body) => removeObserveGuard(body, '$handled_count'),
+    },
+    {
+      name: 'restore open outcome fallback',
+      lines: [anchor, `info: DingTalk interactive-card callback handled (unexpected delivery=${expected})`],
+      mutate: (body) => body.replace(
+        '      *) fail "action=observe observed callback outcome outside closed set (callback_handled_count=${handled_count})" ;;',
+        '      *) handled_outcome="executed" ;;',
+      ),
+    },
+  ]
+
+  for (const { name, lines, mutate } of mutations) {
+    const dir = mkdtempSync(join(tmpdir(), 'stream-observer-mutation-'))
+    try {
+      const original = runObserveFixture(observe, { dir, expected, lines })
+      assert.notEqual(original.result.status, 0, `${name}: original must fail`)
+      const mutatedObserve = mutate(observe)
+      assert.notEqual(mutatedObserve, observe, `${name}: mutation must change the body`)
+      const mutated = runObserveFixture(mutatedObserve, { dir, expected, lines })
+      assert.equal(mutated.result.status, 0, `${name}: mutation must be caught by the test fixture`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 })
 
