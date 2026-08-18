@@ -15,6 +15,8 @@
 //      migration — including 073 — sees them from the very first connection.
 //
 // Env in: PG_SUPERUSER_URL, RUNTIME_ROLE, RUNTIME_PASSWORD, PROVISIONING_ROLE, PROVISIONING_PASSWORD.
+// Optional (S10 package mode, all unset => byte-identical to before): E2E_MIGRATE_ROOT, E2E_MIGRATE_CMD,
+// E2E_MIGRATE_ARGS — see the comment above the spawn in main().
 // Never logs a password or a full connection string.
 
 import { spawn } from 'node:child_process'
@@ -79,9 +81,25 @@ async function main() {
   const migrateUrl = new URL(superuserUrl)
   migrateUrl.searchParams.set('options', options)
 
+  // S10 package-mode override. Unset env => byte-identical to before: the repo tree's own
+  // `pnpm --filter @metasheet/core-backend run migrate` (tsx over src/db/migrate.ts) in REPO_ROOT.
+  // When the e2e lane runs its package-mode leg, the migrations must come from the PACKAGE's own
+  // compiled runner (`node packages/core-backend/dist/src/db/migrate.js`, cwd = extracted package root
+  // — the same invocation stock-prep-main-package-verify.yml and stock-prep-s6a-postgres17-validation.yml
+  // already use), otherwise the "installed package in an isolated runtime" claim would quietly rest on
+  // the repo checkout's TypeScript sources for its schema.
+  const migrateRoot = process.env.E2E_MIGRATE_ROOT ? path.resolve(process.env.E2E_MIGRATE_ROOT) : REPO_ROOT
+  const migrateCmd = (process.env.E2E_MIGRATE_CMD || '').trim() || 'pnpm'
+  const migrateArgs = (process.env.E2E_MIGRATE_ARGS || '').trim()
+    ? (process.env.E2E_MIGRATE_ARGS || '').trim().split(/\s+/).filter(Boolean)
+    : ['--filter', '@metasheet/core-backend', 'run', 'migrate']
+  const migrateMode = migrateRoot === REPO_ROOT ? 'repo' : 'package'
+  // Values-free: a closed-set token, never the path (which is a runner temp location, not evidence).
+  process.stdout.write(`migrateMode=${migrateMode}\n`)
+
   const exitCode = await new Promise((resolve) => {
-    const proc = spawn('pnpm', ['--filter', '@metasheet/core-backend', 'run', 'migrate'], {
-      cwd: REPO_ROOT,
+    const proc = spawn(migrateCmd, migrateArgs, {
+      cwd: migrateRoot,
       env: { ...process.env, DATABASE_URL: migrateUrl.toString() },
       stdio: 'inherit',
     })
