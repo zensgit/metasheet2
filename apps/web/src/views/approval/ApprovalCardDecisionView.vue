@@ -45,7 +45,7 @@
         />
         <div class="card-decision__comment">
           <label class="card-decision__label">
-            处理意见<span v-if="summary.approval.rejectCommentRequired">（驳回必填）</span>
+            处理意见<span v-if="cardCommentRequired === 'always'">（必填）</span><span v-else-if="cardCommentRequired === 'reject_only'">（驳回必填）</span>
           </label>
           <el-input
             v-model="comment"
@@ -68,7 +68,7 @@
             type="success"
             size="large"
             :loading="submitting === 'approve'"
-            :disabled="submitting !== ''"
+            :disabled="submitting !== '' || approveBlocked"
             data-testid="card-decision-approve"
             @click="submit('approve')"
           >
@@ -87,6 +87,9 @@
         </div>
         <p v-if="rejectBlocked" class="card-decision__hint" data-testid="card-decision-reject-hint">
           驳回前请先填写处理意见。
+        </p>
+        <p v-if="approveBlocked" class="card-decision__hint" data-testid="card-decision-approve-hint">
+          此节点要求填写审批意见后才能同意。
         </p>
       </template>
     </template>
@@ -125,8 +128,19 @@ const submitError = ref('')
 const deliveryId = computed(() => (typeof route.query.d === 'string' ? route.query.d : ''))
 const token = computed(() => (typeof route.query.t === 'string' ? route.query.t : ''))
 
+// Lock-5 §1.3 / gate CR-3 — both sides now derive from the EFFECTIVE node requirement the server
+// resolved at THIS delivery's node (it joins the frozen runtime graph for exactly this). The
+// three-valued field is optional so an older server degrades to the shipped reject-only reading.
+const cardCommentRequired = computed<'never' | 'reject_only' | 'always'>(() => {
+  const resolved = summary.value?.approval.commentRequired
+  if (resolved) return resolved
+  return (summary.value?.approval.rejectCommentRequired ?? true) ? 'reject_only' : 'never'
+})
 const rejectBlocked = computed(() =>
-  (summary.value?.approval.rejectCommentRequired ?? true) && comment.value.trim().length === 0,
+  cardCommentRequired.value !== 'never' && comment.value.trim().length === 0,
+)
+const approveBlocked = computed(() =>
+  cardCommentRequired.value === 'always' && comment.value.trim().length === 0,
 )
 
 const staleTitle = computed(() => {

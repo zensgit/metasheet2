@@ -1,7 +1,9 @@
 /**
  * F2 mounted palette spec (delta §3.1, Gate F2) — the NEW Designer 2.0
  * `ApprovalFormPalette.vue` (FB-D8: separate from the extracted flag-OFF
- * `ApprovalFormInlineEditor` fallback; no production mount until F4).
+ * `ApprovalFormInlineEditor` fallback; F4 performs the production mount behind
+ * `approvalCanvasV2` in `TemplateAuthoringView.vue` — see
+ * apps/web/tests/approvalTemplateAuthoring.spec.ts for the mounted contract).
  * Mount pattern: repo-standard `createApp` + real DOM events (no test-utils).
  */
 import { afterEach, describe, expect, it } from 'vitest'

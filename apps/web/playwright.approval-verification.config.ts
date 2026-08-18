@@ -6,6 +6,14 @@ import { defineConfig, devices } from '@playwright/test'
 // ApprovalFormBuilder via verification/approval-form-builder-harness.html, and
 // asserts exact-slot DataTransfer drags, cancelled-drag no-ops, strict codec
 // rejection, and the stale-anchor no-op.
+//
+// F4 (delta §5 F4, F2-gate handoff condition 1) extends this SAME lane with
+// approval-form-builder-mounted-matrix.spec.ts: the B1-B12 real-browser matrix
+// driven by genuine mouse drags (`locator.dragTo`, never synthetic DataTransfer)
+// against the MOUNTED production surface (the real TemplateAuthoringView.vue,
+// real Vue Router, real Element Plus — verification/
+// approval-form-builder-mounted-harness.html/.ts), flag ON.
+//
 // Run: `pnpm --filter @metasheet/web exec playwright test
 //       --config playwright.approval-verification.config.ts` (cwd = apps/web).
 // Port 5175 keeps this lane's server disjoint from the multitable lane (5174).
@@ -13,7 +21,10 @@ const PORT = 5175
 
 export default defineConfig({
   testDir: './verification',
-  testMatch: '**/approval-form-builder-parity.spec.ts',
+  testMatch: [
+    '**/approval-form-builder-parity.spec.ts',
+    '**/approval-form-builder-mounted-matrix.spec.ts',
+  ],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

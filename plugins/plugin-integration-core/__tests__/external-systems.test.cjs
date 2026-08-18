@@ -778,6 +778,14 @@ async function testInstanceDigestIsProductionBehaviour() {
   await put('d', 'plm:yuantus-wrapper', 'https://k3.example.test', { username: 'u', password: 'p', acctId: '001' })
   await put('e', K3, 'https://k3.example.test', { username: 'u', password: 'p' })
   await put('f', K3, 'not-a-url', { username: 'u', password: 'p', acctId: '001' })
+  await put('url-only', K3, undefined, { username: 'u', password: 'p', acctId: '001' }, {
+    url: 'https://k3.example.test/URL-ALIAS-PATH',
+  })
+  await put('base-url-wins', K3, 'https://k3.example.test/BASE-PATH', {
+    username: 'u', password: 'p', acctId: '001',
+  }, {
+    url: 'https://k3-other.example.test/IGNORED-PATH',
+  })
 
   const [dA, dB, dA2, dC, dD, dE, dF] = await Promise.all(
     ['a', 'b', 'a2', 'c', 'd', 'e', 'f'].map(digest))
@@ -792,6 +800,10 @@ async function testInstanceDigestIsProductionBehaviour() {
   assert.equal(dE, null, 'no authenticatable acctId must yield null, not a digest')
   assert.equal(dF, null, 'an unparseable baseUrl must yield null, not a digest')
   assert.equal(await digest('missing'), null, 'an unknown system must yield null')
+  assert.equal(await digest('url-only'), dA,
+    'config.url must identify the same instance when config.baseUrl is absent, matching the adapter alias')
+  assert.equal(await digest('base-url-wins'), dA,
+    'config.baseUrl must win when both baseUrl and url are present, matching adapter || precedence')
 
   // The digest must not carry the account set in recoverable form: an unkeyed hash of the
   // material would be trivially brute-forced (the review recovered "001" in milliseconds).

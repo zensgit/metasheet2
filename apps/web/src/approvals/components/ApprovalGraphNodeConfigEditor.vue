@@ -664,6 +664,40 @@
             data-testid="approval-node-source-prior-node-empty"
           >当前节点上游没有可引用的审批节点（引用目标必须位于每条可达路径的上游）</p>
         </el-form-item>
+        <!-- Lock-1 §K1 (用户组) authoring sub-form: a TYPED multi-select restricted to groups
+             BOUND to the template's org (D0 §10.2 — never a free-text/raw-id input). A group
+             outside the binding fails publish (values-free 400), never at dispatch; the picker
+             only OFFERS bound candidates so authoring stays honest without relaxing the backend
+             arbiter (`assertUserGroupSourcesBoundToOrg`). -->
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'user_group'"
+          label="选择用户组"
+        >
+          <el-select
+            :model-value="approvalSourceGroupIds(node.key, sourceIndex)"
+            multiple
+            filterable
+            size="small"
+            :disabled="readOnly"
+            :loading="memberGroupOptionsLoading"
+            class="ms-w-360"
+            placeholder="选择已绑定的用户组"
+            data-testid="approval-node-source-group-picker"
+            @update:model-value="(ids: string[]) => setApprovalSourceGroupIds(node.key, sourceIndex, ids)"
+          >
+            <el-option
+              v-for="group in memberGroupOptions"
+              :key="group.id"
+              :label="formatMemberGroupLabel(group)"
+              :value="group.id"
+            />
+          </el-select>
+          <p
+            v-if="!readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-source-group-empty"
+          >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
+        </el-form-item>
         <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
              so the admin replaces it before publish (rather than hitting the publish-time 400).
              P1-B: scoped to THIS card's own source, not the node-wide aggregate — a node with N
@@ -723,7 +757,42 @@
             <el-option label="单人通过" value="single" />
             <el-option label="全部通过" value="all" />
             <el-option label="任一通过" value="any" />
+            <!-- P1-C (T2-4 N-of-M / 门槛会签): linear-only in v1 — the backend rejects a 'threshold'
+                 node inside a parallel region (APPROVAL_THRESHOLD_IN_PARALLEL). Disabled (not
+                 hidden) here so an already-threshold node picked up from outside a parallel region
+                 stays visibly selected if later moved into one; `setApprovalNodeMode` is the actual
+                 fail-closed floor (a disabled option cannot dispatch anyway, but that guard is not
+                 the ONLY enforcement point). -->
+            <el-option
+              label="门槛会签（N 人同意）"
+              value="threshold"
+              :disabled="approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-mode-threshold-option"
+            />
           </el-select>
+          <p
+            v-if="approvalNodeInParallelRegion(node.key)"
+            class="template-authoring__hint"
+            data-testid="approval-node-threshold-parallel-hint"
+          >位于并行分支内，暂不支持门槛会签（v1 仅支持线性路径）</p>
+        </el-form-item>
+        <!-- P1-C: typed N-of-M control, rendered only under 'threshold' mode. M is resolved from
+             this node's assignee-source UNION at runtime (the backend's static N<=M publish bound
+             applies only to the legacy assigneeType/assigneeIds shape this editor never emits), so
+             an unreachable N fails closed at dispatch (APPROVAL_THRESHOLD_UNREACHABLE), not here —
+             this hint says so honestly rather than pretending to validate M (M8). -->
+        <el-form-item v-if="approvalNodeMode(node.key) === 'threshold'" label="通过所需人数（N）">
+          <el-input-number
+            :model-value="approvalNodeThreshold(node.key)"
+            :min="1"
+            :step="1"
+            :disabled="readOnly"
+            data-testid="approval-node-threshold"
+            @update:model-value="(value: number) => setApprovalNodeThreshold(node.key, value ?? 1)"
+          />
+          <p class="template-authoring__hint">
+            需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
+          </p>
         </el-form-item>
         <el-form-item label="空审批人策略">
           <el-select
@@ -745,6 +814,129 @@
             @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
           >发起人自动通过（自审合并）</el-checkbox>
         </el-form-item>
+      </div>
+      <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
+           `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
+           scope as the policy grid above, never for a handler. -->
+      <div v-if="node.type === 'approval'" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+        <el-form-item label="节点超时">
+          <el-checkbox
+            :model-value="Boolean(approvalNodeTimeout(node.key))"
+            :disabled="readOnly || approvalNodeInParallelRegion(node.key)"
+            data-testid="approval-node-timeout-enabled"
+            @update:model-value="(enabled: boolean) => setApprovalNodeTimeoutEnabled(node.key, enabled)"
+          >启用超时处理</el-checkbox>
+          <p
+            v-if="approvalNodeInParallelRegion(node.key)"
+            class="template-authoring__hint"
+            data-testid="approval-node-timeout-parallel-hint"
+          >位于并行分支内，暂不支持节点超时（v1 仅支持线性路径）</p>
+        </el-form-item>
+        <template v-if="approvalNodeTimeout(node.key)">
+          <el-form-item label="超时时长（分钟）">
+            <el-input-number
+              :model-value="approvalNodeTimeout(node.key)?.afterMinutes"
+              :min="1"
+              :max="NODE_TIMEOUT_MAX_AFTER_MINUTES"
+              :step="1"
+              :disabled="readOnly"
+              data-testid="approval-node-timeout-after-minutes"
+              @update:model-value="(value: number) => setApprovalNodeTimeoutAfterMinutes(node.key, value ?? 1)"
+            />
+          </el-form-item>
+          <el-form-item label="超时后动作">
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.effect"
+              :disabled="readOnly"
+              class="ms-w-100pct"
+              data-testid="approval-node-timeout-effect"
+              @update:model-value="(effect: SupportedNodeTimeoutEffect) => setApprovalNodeTimeoutEffect(node.key, effect)"
+            >
+              <!-- P1-C: ONLY the effects `ApprovalSlaScheduler.fireNodeTimeouts` actually acts on and
+                   publish accepts — 'auto_approve'/'auto_reject' are reserved and NEVER offered here
+                   (M6/M8: do not invent a capability the engine doesn't implement). -->
+              <el-option
+                v-for="effect in NODE_TIMEOUT_SUPPORTED_EFFECTS"
+                :key="effect"
+                :label="nodeTimeoutEffectOptionLabel(effect)"
+                :value="effect"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="approvalNodeTimeout(node.key)?.effect === 'transfer'" label="转交给">
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.transferToUserId"
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-timeout-transfer-target"
+              @update:model-value="(userId: string) => setApprovalNodeTimeoutTransferToUserId(node.key, userId)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-else-if="approvalNodeTimeout(node.key)?.effect === 'jump'" label="跳转到节点">
+            <!-- Business labels only (`timeoutJumpTargetOptions`'s `label`) — never a raw node key in
+                 the rendered option text (M8). Options already exclude this node and any node inside
+                 a parallel region (mirrors `validateNodeTimeoutConfigs`'s jump-target legality). -->
+            <el-select
+              :model-value="approvalNodeTimeout(node.key)?.jumpToNodeKey"
+              :disabled="readOnly"
+              class="ms-w-240"
+              placeholder="选择目标审批节点"
+              data-testid="approval-node-timeout-jump-target"
+              @update:model-value="(targetNodeKey: string) => setApprovalNodeTimeoutJumpToNodeKey(node.key, targetNodeKey)"
+            >
+              <el-option
+                v-for="option in timeoutJumpTargetOptions(node.key)"
+                :key="option.key"
+                :label="option.label"
+                :value="option.key"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="计时方式">
+            <div
+              class="approval-node-source-roster"
+              role="radiogroup"
+              aria-label="计时方式"
+              data-testid="approval-node-timeout-unit"
+            >
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  name="approval-node-timeout-unit"
+                  :checked="(approvalNodeTimeout(node.key)?.unit ?? 'wall_clock') === 'wall_clock'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-timeout-unit-wall-clock"
+                  @change="() => setApprovalNodeTimeoutUnit(node.key, 'wall_clock')"
+                />
+                <span>自然时间</span>
+              </label>
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  name="approval-node-timeout-unit"
+                  :checked="approvalNodeTimeout(node.key)?.unit === 'business'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-timeout-unit-business"
+                  @change="() => setApprovalNodeTimeoutUnit(node.key, 'business')"
+                />
+                <span>工作时间</span>
+              </label>
+            </div>
+          </el-form-item>
+        </template>
       </div>
       <!-- Lock-3 §1.1 — handler-node controls: 办理模式 (会签/或签) + 办理意见 (opt-in). NO empty policy,
            NO self-approval, NO fallback control renders here (M7). -->
@@ -814,21 +1006,49 @@
       </div>
     </section>
 
-    <!-- Lock-0 L0-1: 操作权限 tab content. Only reachable when the tabs context is active AND the
-         registry declared ≥1 ratified operation policy for this node type — never true at the
-         shipped baseline (operationPoliciesByNodeType is empty everywhere), so this renders
-         nothing in production. Content, when it exists, echoes the registry's OWN data rather than
-         fabricating UI ("empty tab theater" — Lock-0 delta §1 L0-1). -->
+    <!-- Lock-0 L0-1 / Lock-5 §1.1 L5-A: 操作权限 tab content. Only reachable when the tabs context is
+         active AND the registry declared ≥1 ratified operation policy for this node type. Every row
+         is driven by `operationPoliciesForNode` — the registry's OWN data — so a capability whose
+         server enforcement has not landed cannot render a control (master M7/M8, gate E-2), and a
+         registry fixture with no entries renders no tab at all (gate E-1's positive control).
+
+         `returnReviewMode` and `commentRequired` deliberately have NO control here: they are part of
+         the persisted schema (publish validates them) but are not enforced yet — Lock-5 §1.2 ("no
+         `returnReviewMode` control renders") and §1.3 respectively. `signaturePolicy` renders no
+         control anywhere (OD-L5-10(a)). -->
     <section
       v-if="isTabbed && activeTabId === 'operations'"
       class="template-authoring__approval-node-section"
       data-testid="approval-node-section-operations"
     >
-      <p
-        v-for="policy in operationPoliciesForNode"
-        :key="policy.id"
-        class="template-authoring__hint"
-      >{{ policy.label }}</p>
+      <div class="template-authoring__field-perms" data-testid="approval-node-operation-policies">
+        <div
+          v-for="policy in operationPoliciesForNode"
+          :key="policy.id"
+          class="template-authoring__field-perm-row"
+          data-testid="approval-node-operation-policy-row"
+        >
+          <el-checkbox
+            :model-value="operationPolicyChecked(policy)"
+            :disabled="readOnly || operationPolicyIsMixed(policy)"
+            :data-testid="`approval-node-operation-policy-${policy.id}`"
+            @update:model-value="(allowed: boolean) => setOperationPolicy(policy, allowed)"
+          >{{ policy.label }}</el-checkbox>
+          <!-- A-7 / M8: a persisted MIXED add/reduce pair is unrepresentable by one checkbox, so the
+               control is disabled and says exactly why — never silently picking an arm. -->
+          <span
+            v-if="operationPolicyIsMixed(policy)"
+            class="template-authoring__hint template-authoring__hint--warn"
+            :data-testid="`approval-node-operation-policy-mixed-${policy.id}`"
+          >{{ OPERATION_POLICY_MIXED_HINT }}</span>
+        </div>
+        <!-- §1.1 A-4: an in-flight instance pins its own frozen `published_definition_id`, so a flip
+             reaches only instances created AFTER the next publish. The authoring copy must say so or
+             an administrator reads the checkbox as immediate. -->
+        <p class="template-authoring__hint" data-testid="approval-node-operation-policy-scope-hint">
+          {{ OPERATION_POLICY_SCOPE_HINT }}
+        </p>
+      </div>
     </section>
     </div>
 
@@ -853,8 +1073,10 @@ import type {
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
+  NodeOperationPolicy,
   ParallelNodeConfig,
   RequesterChoiceAssigneeSource,
+  SupportedNodeTimeoutEffect,
 } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
@@ -863,6 +1085,8 @@ import {
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
+  NODE_TIMEOUT_MAX_AFTER_MINUTES,
+  NODE_TIMEOUT_SUPPORTED_EFFECTS,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -870,7 +1094,14 @@ import {
   assigneeSourceRoster,
   isRegisteredAssigneeSourceKind,
   type ApprovalCapabilityRegistry,
+  type ApprovalOperationPolicyCapability,
 } from '../approvalCapabilityRegistry'
+import {
+  OPERATION_POLICY_MIXED_HINT,
+  OPERATION_POLICY_SCOPE_HINT,
+  applyOperationPolicyControl,
+  operationPolicyControlState,
+} from '../nodeOperationPolicyEdit'
 import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
 import { FIELD_PERMISSION_ROUTING_HINT } from '../fieldPermissionHonestyCopy'
 
@@ -902,6 +1133,38 @@ const operationPoliciesForNode = computed(
   () => registry.value.operationPoliciesByNodeType[props.node.type] ?? [],
 )
 
+// ── Lock-5 §1.1 L5-A — 操作权限 controls ───────────────────────────────────────────────────────
+// The tab reads and writes the SAME `nodeOperationPolicy` object the server enforces (§2.3: one
+// config, two doors — the FE mirror is not a second predicate). All projection logic lives in the
+// pure `nodeOperationPolicyEdit` module so it is testable without mounting.
+const nodeOperationPolicy = computed<NodeOperationPolicy | undefined>(() => {
+  const edit = approvalNodeEditFor(props.node.key)
+  // `null` ≡ the author cleared every switch; the persisted key is being removed.
+  if (edit && edit.nodeOperationPolicy !== undefined) return edit.nodeOperationPolicy ?? undefined
+  const config = props.node.config as { nodeOperationPolicy?: NodeOperationPolicy } | undefined
+  return config?.nodeOperationPolicy
+})
+
+function operationPolicyIsMixed(capability: ApprovalOperationPolicyCapability): boolean {
+  return operationPolicyControlState(nodeOperationPolicy.value, capability).kind === 'mixed'
+}
+
+function operationPolicyChecked(capability: ApprovalOperationPolicyCapability): boolean {
+  const state = operationPolicyControlState(nodeOperationPolicy.value, capability)
+  // A mixed pair has no single truth to show; the box renders unchecked AND disabled, with the
+  // honest hint beside it saying the editor cannot express the persisted combination.
+  return state.kind === 'editable' ? state.allowed : false
+}
+
+function setOperationPolicy(capability: ApprovalOperationPolicyCapability, allowed: boolean): void {
+  const edit = approvalNodeEditFor(props.node.key)
+  if (!edit) return
+  // Fail-closed at the mutator, not only via `:disabled`: a disabled Element-Plus checkbox still
+  // has a programmatic update path, and a mixed pair must never be collapsed by a stray write.
+  if (operationPolicyIsMixed(capability)) return
+  edit.nodeOperationPolicy = applyOperationPolicyControl(nodeOperationPolicy.value, capability, allowed) ?? null
+}
+
 function unwrap<T>(value: ComputedRef<T> | Ref<T> | T): T {
   return unref(value as ComputedRef<T> | Ref<T> | T)
 }
@@ -915,6 +1178,9 @@ const directoryUsers = computed(() => unwrap(api.directoryUsers))
 const directoryUsersLoading = computed(() => Boolean(unwrap(api.directoryUsersLoading)))
 const directoryRoles = computed(() => unwrap(api.directoryRoles))
 const formulaRoles = computed(() => unwrap(api.formulaRoles))
+// Lock-1 §K1: org-scoped bound-group picker options + loading flag.
+const memberGroupOptions = computed(() => unwrap(api.memberGroupOptions))
+const memberGroupOptionsLoading = computed(() => Boolean(unwrap(api.memberGroupOptionsLoading)))
 
 const conditionEditFor = api.conditionEditFor
 const parallelEditFor = api.parallelEditFor
@@ -946,6 +1212,9 @@ const setApprovalSourceKind = api.setApprovalSourceKind
 const syncApprovalNodeOptions = api.syncApprovalNodeOptions
 const approvalSourceIds = api.approvalSourceIds
 const setApprovalSourceIdsFromPicker = api.setApprovalSourceIdsFromPicker
+// Lock-1 §K1: the user_group source's dedicated id carrier.
+const approvalSourceGroupIds = api.approvalSourceGroupIds
+const setApprovalSourceGroupIds = api.setApprovalSourceGroupIds
 const approvalSourceFieldId = api.approvalSourceFieldId
 const setApprovalSourceFieldId = api.setApprovalSourceFieldId
 const approvalSourceLevel = api.approvalSourceLevel
@@ -959,6 +1228,26 @@ const addApprovalSourceCard = api.addApprovalSourceCard
 const removeApprovalSourceCard = api.removeApprovalSourceCard
 const approvalNodeMode = api.approvalNodeMode
 const setApprovalNodeMode = api.setApprovalNodeMode
+// P1-C (T2-4 N-of-M / 门槛会签 + T1-1 node timeout).
+const approvalNodeThreshold = api.approvalNodeThreshold
+const setApprovalNodeThreshold = api.setApprovalNodeThreshold
+const approvalNodeInParallelRegion = api.approvalNodeInParallelRegion
+const approvalNodeTimeout = api.approvalNodeTimeout
+const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled
+const setApprovalNodeTimeoutAfterMinutes = api.setApprovalNodeTimeoutAfterMinutes
+const setApprovalNodeTimeoutEffect = api.setApprovalNodeTimeoutEffect
+const setApprovalNodeTimeoutTransferToUserId = api.setApprovalNodeTimeoutTransferToUserId
+const setApprovalNodeTimeoutJumpToNodeKey = api.setApprovalNodeTimeoutJumpToNodeKey
+const setApprovalNodeTimeoutUnit = api.setApprovalNodeTimeoutUnit
+const timeoutJumpTargetOptions = api.timeoutJumpTargetOptions
+const NODE_TIMEOUT_EFFECT_OPTION_LABELS: Record<SupportedNodeTimeoutEffect, string> = {
+  remind: '催办提醒',
+  transfer: '转交他人',
+  jump: '跳转节点',
+}
+function nodeTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): string {
+  return NODE_TIMEOUT_EFFECT_OPTION_LABELS[effect]
+}
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
 const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
@@ -974,6 +1263,7 @@ const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel
 const formatRoleLabel = api.formatRoleLabel
+const formatMemberGroupLabel = api.formatMemberGroupLabel
 // L0-6/D5 — wired: `TemplateAuthoringView.vue` provides its graph-wide `routingDriverFieldIds`
 // computed here (see nodeConfigEditorContext.ts's doc comment for why it must union the linear
 // `draft.steps` model with the graph `draft.approvalNodeEdits` model). Falls back to an empty set

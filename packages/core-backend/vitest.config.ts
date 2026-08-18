@@ -53,6 +53,20 @@ export default defineConfig({
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
       'tests/integration/approval-template-authoring-uat.api.test.ts',
+      // Lock-5 per-node operation policy (`操作权限`) real-DB acceptance — the §2.1 dispatch choke,
+      // the `policy_denied` audit row + its CHECK migration, the two timeline exclusions, and the
+      // placement / strictness / in-flight-freeze gates. Requires real PostgreSQL (it asserts a CHECK
+      // constraint violation and a records-only COMMIT that survives a thrown request). Excluded from
+      // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-node-operation-policy.db.test.ts',
+      // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
+      // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
+      // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
+      // Excluded here so `describeIfDatabase` cannot skip-green them in the no-DB job; both are
+      // wired as WHOLE FILES into .github/workflows/approval-realdb-node-operation-policy.yml.
+      'tests/integration/approval-add-sign-honesty.db.test.ts',
+      'tests/integration/approval-comment-required.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
@@ -342,6 +356,14 @@ export default defineConfig({
       // sentinel) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both
       // points land in the SAME commit.
       'tests/integration/approval-prior-node-approver.db.test.ts',
+      // Lock-1 §K1 user_group real-DB acceptance (G-1/G-5/G-6/G-7/G-17/G-18, curated bind/unbind
+      // path, picker org-scoping, empty-group fail-closed/auto-approve). DATABASE_URL-gated;
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by
+      // the SAME dedicated .github/workflows/approval-realdb-acceptance.yml workflow (sibling job
+      // approval-realdb-k1, EXPECT_DB=1 arming the top-level anti-skip sentinel) —
+      // plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both points land in
+      // the SAME commit.
+      'tests/integration/approval-user-group.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
@@ -367,6 +389,39 @@ export default defineConfig({
       // no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
       'tests/integration/approval-nofm-threshold.test.ts',
+      // P7-R1 (FAIL-0/FAIL-3): T2-4 nodeEntryEpoch durable threshold round-scoping oracle — the
+      // direct evidence for approval-parity-final-verification-20260817.md matrix rows I7/R8.
+      // DATABASE_URL-gated (describeIfDatabase). Was NOT excluded here before this fix, so the
+      // required no-DB `test (20.x)` job collected and describeIfDatabase-skip-greened it, and it
+      // was named in NO real-DB lane — the exact FAIL-0 skip-green pattern. Excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the dedicated
+      // .github/workflows/approval-realdb-p7r1-coverage-repair.yml workflow (standalone per the
+      // sealed-export-s6a-authority-row-lock.yml precedent — plugin-tests.yml is an s6a
+      // sha256-pinned provenance input, deliberately not extended). Two-point wiring — both points
+      // land in the SAME commit.
+      'tests/integration/approval-node-entry-epoch.test.ts',
+      // P7-R1 (FAIL-0/FAIL-4): WP1 或签 (any-mode) first-wins + sibling-cancellation oracle. Same
+      // shape and same fix as the entry immediately above — was NOT excluded here, skip-greened in
+      // the no-DB job, named in no real-DB lane. Excluded here and wired as a WHOLE FILE into the
+      // SAME dedicated approval-realdb-p7r1-coverage-repair.yml workflow (sibling job
+      // approval-realdb-wp1-any-mode). Two-point wiring, same commit.
+      'tests/integration/approval-wp1-any-mode.api.test.ts',
+      // P7-R1 (FAIL-0 §5 mechanical sweep, 2026-08-18): seven MORE approval real-DB suites found
+      // by a systematic "every approval* test file vs every known lane" sweep — same skip-green
+      // pattern as the two entries immediately above (describeIfDatabase-gated, referenced in NO
+      // workflow, collected+skip-greened by the required no-DB job). Excluded here and wired as
+      // WHOLE FILES into the SAME dedicated approval-realdb-p7r1-coverage-repair.yml workflow
+      // (sibling job approval-realdb-p7r1-sweep). Two-point wiring, same commit.
+      // approval-calendar-sla.test.ts was ALSO red on a fresh DB (fixture rot, same
+      // grantApprovalWriteForIntegrationActor gap, fixed in the same commit); the other six were
+      // already green.
+      'tests/integration/approval-calendar-sla.test.ts',
+      'tests/integration/approval-delegation-selfservice.db.test.ts',
+      'tests/integration/approval-wp2-source-filter.api.test.ts',
+      'tests/integration/approval-wp3-pending-count.api.test.ts',
+      'tests/integration/approval-wp3-reads.api.test.ts',
+      'tests/integration/approval-wp3-remind.api.test.ts',
+      'tests/integration/approval-wp4-template-categories.api.test.ts',
       // T2-1+2 scoped approval admins + bulk handover: real-DB route/service boundary with RBAC and
       // approval_records CHECK coverage. Excluded from the no-DB default and wired into approval real-DB CI.
       'tests/integration/approval-bulk-reassign.api.test.ts',

@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -152,7 +152,18 @@ export interface HandlerNodeConfig {
   /** 办理意见; absent ≡ false (corpus C-7 default / OD-L3-3(a)). */
   opinionRequired?: boolean
   fieldPermissions?: NodeFieldPermission[]
+  /**
+   * Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler node admits a NARROWED `nodeOperationPolicy`:
+   * `allowTransfer` and `commentRequired` only. `allowAddSign` / `allowReduceSign` / `allowReturn`
+   * are rejected at the authoring choke with `APPROVAL_HANDLER_CONFIG_INVALID`, because Lock-3 §2.2
+   * already 409s those verbs at a handler node — a switch over an impossible verb is M8 theater.
+   * `allowTransfer` absent ≡ true replaces Lock-3's hardcoded transfer-allowed with NO behavior change.
+   */
+  nodeOperationPolicy?: Pick<NodeOperationPolicy, 'allowTransfer' | 'commentRequired'>
 }
+
+/** Lock-5 §1.6 — the `NodeOperationPolicy` sub-keys a `handler` node may carry (OD-L5-11(a)). */
+export const HANDLER_NODE_OPERATION_POLICY_KEYS = ['allowTransfer', 'commentRequired'] as const
 
 // T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wired `remind`
 // (a notification, no state mutation) and slice 2 wires `transfer` + `jump` (state mutations executed
@@ -205,7 +216,88 @@ export interface ApprovalNodeConfig {
   // separately ratified (mirrors the fieldPermissions readonly/auto_* declared-but-do-not-wire precedent).
   // Default-absent === no signature policy === current behavior (byte-stable).
   signaturePolicy?: SignaturePolicy
+  // Lock-5 §1.1 L5-A (OD-L5-1(a)) — per-node 操作权限. ONE object, not six flat keys (§1.1's
+  // four-allowlist arithmetic). Every field is absent-≡-today, so existing graphs are byte-stable
+  // and no migration touches stored JSON; an all-absent object is OMITTED rather than persisted
+  // as `{}`. Enforced server-side at the single dispatch choke (§2.1), never by the UI alone.
+  nodeOperationPolicy?: NodeOperationPolicy
 }
+
+/**
+ * Lock-5 §1.1 L5-A — the per-node member-action switches (`操作权限`), structurally modelled on
+ * `SignaturePolicy`. Every field is ABSENT ≡ TODAY'S BEHAVIOR (OD-L5-3(a)): absent ≡ allowed for
+ * the four verb switches, absent ≡ `'resume_forward'` for the return mode, absent ≡ the instance's
+ * `policy_snapshot.rejectCommentRequired` for the comment requirement (OD-L5-8(a)).
+ *
+ * Enforcement status per field (M7/M8 — a switch whose runtime never refuses must NOT render):
+ *   - `allowTransfer` / `allowAddSign` / `allowReduceSign` / `allowReturn`: ENFORCED at the §2.1
+ *     dispatch choke in this slice; rendered in the `操作权限` tab.
+ *   - `returnReviewMode`: schema-validated only. OD-L5-6(a) ships `'resume_forward'` (today's
+ *     behavior) in v1 and defers `'jump_back_to_current'`; §1.2 states flatly that no
+ *     `returnReviewMode` control renders. Declared here so an out-of-enum value FAILS publish
+ *     (gate A-6) rather than round-tripping as an unknown key.
+ *   - `commentRequired`: schema-validated only in this slice. Its enforcement moves BOTH shipped
+ *     hardcodings at once (§1.3) and lands in its own slice; until then it renders no control.
+ */
+export interface NodeOperationPolicy {
+  /** C-1 允许转交. Absent ≡ true. */
+  allowTransfer?: boolean
+  /** C-2 允许加签. Absent ≡ true. One authoring checkbox writes this AND `allowReduceSign` (OD-L5-2(a)). */
+  allowAddSign?: boolean
+  /** C-2 允许减签. Absent ≡ true. See `allowAddSign`. */
+  allowReduceSign?: boolean
+  /** C-7 允许回退. Absent ≡ true. */
+  allowReturn?: boolean
+  /** §1.2 / OD-L5-6(a). Absent ≡ 'resume_forward' (today's behavior). Declared-inert this slice. */
+  returnReviewMode?: 'resume_forward' | 'jump_back_to_current'
+  /** §1.3 / OD-L5-7(a). Absent ≡ the instance snapshot (≡ 'reject_only' today). Declared-inert this slice. */
+  commentRequired?: 'never' | 'reject_only' | 'always'
+}
+
+/** The `NodeOperationPolicy` keys that gate a member ACTION VERB at the §2.1 dispatch choke. */
+export type NodeOperationPolicyActionKey =
+  | 'allowTransfer'
+  | 'allowAddSign'
+  | 'allowReduceSign'
+  | 'allowReturn'
+
+/**
+ * Lock-5 §2.1 / gate A-1 — the single exported verb→policy-key table the dispatch choke iterates.
+ * A `Record` over the FULL `ApprovalActionType` union (not a hand-written array of the gated four)
+ * so adding a verb to `APPROVAL_ACTION_TYPES` without deciding its policy disposition is a
+ * TypeScript error HERE, at the declaration — the convergent "table plus exhaustiveness" form,
+ * not per-verb hand-written negatives.
+ *
+ * `null` = ungated BY DECISION, with the reason:
+ *   - `approve` / `reject` / `comment`: never switchable — "a node whose approver may not decide is
+ *     not an approval node" (§1.1 Scope).
+ *   - `revoke`: keeps its TEMPLATE-level carrier `RuntimePolicy.allowRevoke` (409
+ *     `APPROVAL_REVOKE_DISABLED`); moving it per-node would create a second precedence rule for one
+ *     semantic (§1.1, the shape Lock-4 OD-L4-4 rejected).
+ *   - `handle`: Lock-3's handler submit verb — a handler's completion action, not a member
+ *     operation over someone else's seat; Lock-3 §2.2 already governs handler verb legality and
+ *     §1.6 admits only `allowTransfer` (+ `commentRequired`) on a handler node.
+ */
+export const ACTION_POLICY_KEYS: Record<ApprovalActionType, NodeOperationPolicyActionKey | null> = {
+  approve: null,
+  reject: null,
+  comment: null,
+  revoke: null,
+  handle: null,
+  transfer: 'allowTransfer',
+  add_sign: 'allowAddSign',
+  reduce_sign: 'allowReduceSign',
+  return: 'allowReturn',
+}
+
+/**
+ * Lock-5 §1.4 / OD-L5-9(a) — the audit action written for a refused member operation. Deliberately
+ * NOT a member of `APPROVAL_ACTION_TYPES`: it is never a dispatchable request action, and adding it
+ * there would break gate A-1's exact-set partition and the attendance P26 pinned union. The
+ * `approval_records.action` CHECK is already a strict SUPERSET of the dispatch union (it also
+ * carries `created`/`sign`/`cc`/`remind`/`jump`/`reassign`), which is where this value lives.
+ */
+export const APPROVAL_POLICY_DENIED_ACTION = 'policy_denied' as const
 
 /**
  * T3-3 slice 1 (declared-inert): a node's signature/attestation requirement. `kind` is contract-OPEN
@@ -321,6 +413,24 @@ export type ApprovalAssigneeSource =
    * instance's reference.
    */
   | { kind: 'prior_node_approver'; nodeKey: string }
+  /**
+   * Lock-1 §K1 — 用户组 (user group) approver, over `platform_member_groups`
+   * (`zzzz20260409154000_create_platform_member_groups_and_delegated_group_scopes.ts:11-26`),
+   * members in `platform_member_group_members` (`:31-37`). RATIFIED OD-L1-1(a) EAGER_EXPANSION:
+   * every referenced group's member list is read ONCE at create and frozen into
+   * `ApprovalRequesterSnapshot.groupMemberIds` (group id → ordered local user ids) — the resolver
+   * expands purely from that frozen map, exactly like `managerChainIds`. A membership change
+   * AFTER create does NOT reach an in-flight instance (the owner's actual trade vs. the shipped
+   * `static_role` precedent — see the design lock's honesty note). `groupIds` is a non-empty
+   * array; an EMPTY group resolves to EMPTY assignment and falls to `emptyAssigneePolicy` like an
+   * unresolvable manager. A group id that does not exist, or is not bound to the publishing org
+   * (RATIFIED OD-L1-2(a) curated per-org binding table, `approval_usable_member_groups`), is a
+   * DIFFERENT case — rejected at PUBLISH (`assertUserGroupSourcesBoundToOrg`), never at dispatch.
+   * Fingerprint: `user_group:<sorted groupIds joined by ','>` (§2.4). Cc-as-recipient (OD-L1-7,
+   * widening `CcNodeConfig.targetType`) is a SEPARATE contract/registry row and is NOT part of
+   * this shape — deferred to its own slice (§K1 "cc is a second contract, not a rider").
+   */
+  | { kind: 'user_group'; groupIds: string[] }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -341,6 +451,12 @@ export interface ApprovalAssigneeResolutionMetadata {
      * values-free).
      */
     priorNodeKey?: string
+    /**
+     * Lock-1 §K1 (`user_group` only): the SPECIFIC group id this member was resolved from — a
+     * `user_group` source may carry multiple `groupIds`, so the sourceIndex alone cannot answer
+     * "which group". Template-authored id, values-free per §2.6 (never the group's membership).
+     */
+    groupId?: string
   }
   /**
    * Set when a delegation (委托) substituted this assignee: the original delegator's
@@ -545,6 +661,19 @@ export interface ApprovalRequesterSnapshot {
    * never alters it — the sanctioned in-flight mutation is `transfer`.
    */
   requesterChoices?: Record<string, string[]>
+  /**
+   * Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — the FROZEN member list of every
+   * `user_group` group id the published runtime graph references, keyed by group id (ordered local
+   * user ids, as read from `platform_member_group_members` at create). OPT-IN: populated only when
+   * the graph actually uses a `user_group` source (`collectApprovalGraphMemberGroupIds`, mirroring
+   * `includeManagerChain`'s posture — unrelated approvals pay nothing). The resolver reads ONLY
+   * this map — no live `platform_member_group_members` read at dispatch/return/admin-jump/timeout —
+   * so a membership change after create never reaches an in-flight instance; a group deleted after
+   * publish simply freezes `[]` for that id (falls to `emptyAssigneePolicy`, never a dispatch-time
+   * failure — the org/existence boundary is enforced only at publish). Purely additive; existing
+   * snapshots omit it.
+   */
+  groupMemberIds?: Record<string, string[]>
   [key: string]: unknown
 }
 
@@ -778,6 +907,23 @@ export interface PublishApprovalTemplateRequest {
    * Required when the form schema contains any `record-link` field; fail-closed when missing.
    */
   actorUserId?: string | null
+  /**
+   * Lock-1 §K1 / OD-L1-2(a) — the curated NAMESPACE the publish request is validated against for
+   * `approval_usable_member_groups`. NOT a tenant boundary and not identity-resolved: this
+   * codebase has no `orgs` table and the kernel create path never resolves an actor's org, so the
+   * caller states the namespace explicitly, exactly like every other `org_id`-scoped table here —
+   * a caller MAY name any namespace (fix-round P2-b/ii correction: an earlier comment overclaimed
+   * this as a per-caller boundary; it is not). The gate it scopes still guarantees every
+   * referenced group has been explicitly curated — via `ensurePlatformAdmin`-gated bind — into AT
+   * LEAST the named namespace; a group with zero curation anywhere can never be referenced.
+   * Optional, mirroring the S7 §3.3 `orgId` idiom ("existing kernel callers that omit it keep
+   * today's [default] behavior" — bracketed because S7's own callers default to UNSCOPED, not a
+   * bucket; this slice is stricter: blank/absent normalizes to the repo-wide
+   * `DEFAULT_ORG_ID = 'default'` bucket, matching `directory_integrations.org_id` /
+   * `attendance_groups.org_id`'s own default, rather than an org-agnostic match). Ignored when the
+   * graph carries no `user_group` source (no read, no gate).
+   */
+  orgId?: string | null
 }
 
 export interface RestoreApprovalTemplateVersionRequest {

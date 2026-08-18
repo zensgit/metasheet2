@@ -90,11 +90,23 @@ if (primaryJobResult !== 'success' && primaryJobResult !== 'failure') {
   plumbingFailures.push('PRIMARY_JOB_DID_NOT_EXECUTE')
 }
 
-// scaleRequested is computed independently from the SAME raw input the two scale jobs' own workflow-level
-// `if:` gates use (never inferred from job skip/run status, which would make this check circular).
+// scaleRequested is computed independently from the SAME raw inputs the two scale jobs' own
+// workflow-level `if:` gates use (never inferred from job skip/run status, which would make this check
+// circular).
+//
+// S10 added the second term. `lab_mode: true` requests the lab-scale walk WITHOUT the dispatcher having
+// to also type a row count (the workflow defaults `s6a_row_count` to the product's declared bound in
+// that case), so the scale jobs' gate is `lab_mode == 'true' || row_count not in {'', '3'}`. Deriving
+// scaleRequested from the row count ALONE would then report SCALE_NOT_REQUESTED on exactly the
+// dispatches where scale WAS requested, and this job would raise MIDTIER_JOB_RAN_BUT_SCALE_NOT_REQUESTED
+// against a gate that behaved correctly — a false plumbing finding. Both terms are re-derived here from
+// the inputs, not read back off the gate.
 const scaleRequestedInput = process.env.SCALE_REQUESTED_INPUT || ''
-const scaleRequested = scaleRequestedInput !== '' && scaleRequestedInput !== '3'
+const labModeInput = String(process.env.LAB_MODE_INPUT || '').trim().toLowerCase()
+const scaleRequested = labModeInput === 'true' ||
+  (scaleRequestedInput !== '' && scaleRequestedInput !== '3')
 S.scaleRequested = String(scaleRequested)
+S.labMode = String(labModeInput === 'true')
 
 let slopeNotRunReason = null
 

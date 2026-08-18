@@ -2677,7 +2677,10 @@ function latentByEnumeration() {
       let text
       try { text = fs.readFileSync(full, 'utf8') } catch (_error) { continue }
       for (const name of modules) {
-        if (text.includes(name)) hits.push(`${path.relative(repoRoot, full)}::${name}`)
+        if (text.includes(name)) {
+          const relative = path.relative(repoRoot, full).split(path.sep).join('/')
+          hits.push(`${relative}::${name}`)
+        }
       }
     }
   }

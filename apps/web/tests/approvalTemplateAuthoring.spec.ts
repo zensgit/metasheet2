@@ -806,6 +806,26 @@ describe('approval template authoring helpers', () => {
     )
   })
 
+  it('Lock-1 §K1: round-trips a user_group source incl. groupIds (save emits {kind, groupIds}; the array survives the real wire) — the linear editor accepted-kind list mirror site', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ug'
+    draft.name = '用户组审批'
+    draft.steps[0].sourceKind = 'user_group'
+    draft.steps[0].groupIds = ['grp-1', 'grp-2']
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'user_group', groupIds: ['grp-1', 'grp-2'] }])
+
+    // wire-vs-fixture trap: assert `groupIds` survives the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('user_group')
+    expect(rehydrated.steps[0].groupIds).toEqual(['grp-1', 'grp-2'])
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
   it('round-trips a manager_at_level source incl. level (save emits {kind, level}; level survives the real wire)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'mal'
@@ -886,6 +906,17 @@ describe('approval template authoring helpers', () => {
     const shifted = buildCreateTemplatePayload(draft)
     expect((shifted.approvalGraph.nodes[3]?.config as any).assigneeSources)
       .toEqual([{ kind: 'prior_node_approver', nodeKey: 'approval_2' }])
+  })
+
+  it('Lock-1 §K1 validation: a user_group step with zero selected groups is flagged; ≥1 selected group passes (positive control)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ug-validate'
+    draft.name = '用户组审批'
+    draft.steps[0].sourceKind = 'user_group'
+    draft.steps[0].groupIds = []
+    expect(validateTemplateApprovalFlow(draft).some((e) => e.includes('用户组'))).toBe(true)
+    draft.steps[0].groupIds = ['grp-1']
+    expect(validateTemplateApprovalFlow(draft).filter((e) => e.includes('用户组'))).toEqual([])
   })
 
   it('Lock-1 §K3 validation: a prior_node_approver step with no chosen reference — or referencing a NON-earlier step — is flagged; a valid earlier reference passes (positive control)', () => {
@@ -2259,6 +2290,20 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-step-dept-head-level"]') as HTMLInputElement)).not.toBeNull() // the level input renders for this kind
   })
 
+  it('Lock-1 §K1: user_group reads back editable: a saved user_group template is NOT fail-closed (sourceKind + typed group multi-select hydrated, registry-admitted)', async () => {
+    routeParams = { id: 'tpl_ug' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('user_group') // hydrated back
+    expect((container!.querySelector('[data-testid="approval-step-group-picker"]') as HTMLElement)).not.toBeNull() // the typed group multi-select renders for this kind
+  })
+
   it('Lock-1 §K3: prior_node_approver reads back editable on a 2-step linear graph: sourceKind + the TYPED prior-step picker hydrated (registry-admitted, reference resolved to the earlier step)', async () => {
     routeParams = { id: 'tpl_k3' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -3402,6 +3447,146 @@ describe('TemplateAuthoringView', () => {
     expect(optionValues).toContain('amount')
     expect(optionValues).not.toContain('note')
   })
+
+  // ── F4 production mount (delta §5 F4 / §10 FB-D8) ──
+  describe('F4 production mount: flag-gated Designer 2.0 (approvalCanvasV2)', () => {
+    it('flag OFF: only the legacy inline editor renders — Designer 2.0 (palette/builder/inspector) is entirely absent from the DOM, and the legacy click-append path still works (positive control, byte-identical fallback)', async () => {
+      approvalCanvasV2.value = false
+      await mountView()
+
+      expect(container!.querySelector('[data-testid="approval-form-designer"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-designer-v2"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-palette"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-builder"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-field-inspector"]')).toBeNull()
+
+      // Positive control: the legacy palette's click-to-append chip is present and still appends a
+      // field — proving "absent" above is guard-selected, not a broken mount. (The toolbar's
+      // 添加字段 button lives in the ElCard `#header` slot, which this file's ElCard stub does not
+      // render — https://.../installStubs `passthrough` only forwards `$slots.default` — so it is
+      // unreachable through THIS mounted harness regardless of F4; the palette chip below lives in
+      // the default slot and is reachable.)
+      const before = container!.querySelectorAll('[id^="approval-field-row-"]').length
+      const chip = container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLElement
+      expect(chip).not.toBeNull()
+      chip.click()
+      await flushUi()
+      const after = container!.querySelectorAll('[id^="approval-field-row-"]').length
+      expect(after).toBe(before + 1)
+    })
+
+    it('flag ON + hydrated: Designer 2.0 mounts (exactly one palette, one builder, one inspector); the legacy inline editor is absent (M7: no duplicate surface)', async () => {
+      approvalCanvasV2.value = true
+      await mountView()
+
+      expect(container!.querySelector('[data-testid="approval-form-designer"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-designer-v2"]')).not.toBeNull()
+      expect(container!.querySelectorAll('[data-testid="approval-form-palette"]')).toHaveLength(1)
+      expect(container!.querySelectorAll('[data-testid="approval-form-builder"]')).toHaveLength(1)
+      expect(container!.querySelectorAll('[data-testid="approval-form-field-inspector"]')).toHaveLength(1)
+      // The legacy palette's click-to-append chip is gone with the rest of ApprovalFormInlineEditor
+      // — Designer 2.0's own palette (asserted above) is the only add-field path left (M7).
+      expect(container!.querySelector('[data-testid="approval-field-palette-text"]')).toBeNull()
+    })
+
+    it('hydration gate: while an edit-mode template fetch is in flight, the legacy fallback renders (never an empty Designer 2.0 shell); once hydration resolves, the builder mounts seeded with the REAL fetched fields, not the empty placeholder', async () => {
+      approvalCanvasV2.value = true
+      routeParams = { id: 'tpl_1' }
+      let resolveFetch: ((value: unknown) => void) | null = null
+      getTemplateSpy.mockImplementation(
+        () => new Promise((resolve) => { resolveFetch = resolve }),
+      )
+      await mountView()
+
+      // In flight: the flag is ON but the session has not hydrated — the legacy fallback is the
+      // safe transient default, NOT an empty Designer 2.0 shell.
+      expect(container!.querySelector('[data-testid="approval-form-designer-v2"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-form-designer"]')).not.toBeNull()
+
+      resolveFetch!(buildTemplate({ id: 'tpl_1' }))
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-form-designer-v2"]')).not.toBeNull()
+      // buildTemplate()'s fixture carries 2 fields (amount, reviewer) — the session must reflect
+      // the REAL fetched draft, proving it did not seed early from the empty placeholder.
+      const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
+      expect(cards).toHaveLength(2)
+    })
+
+    it('hydration single-seed: re-entering the "fields" section (switch away, switch back) does NOT reseed the builder session — an edit made through the builder survives the round trip', async () => {
+      approvalCanvasV2.value = true
+      await mountView()
+
+      const before = container!.querySelectorAll('[data-testid="approval-form-builder-card"]').length
+      const chip = container!.querySelector('[data-testid="approval-form-palette-chip-text"]') as HTMLElement
+      expect(chip).not.toBeNull()
+      chip.click()
+      await flushUi()
+      const afterAdd = container!.querySelectorAll('[data-testid="approval-form-builder-card"]').length
+      expect(afterAdd).toBe(before + 1)
+
+      // A field list count comparison alone is NOT discriminating here: the field list is mirrored
+      // into `draft.value` on every commit (`@draft-change`), so even a REMOUNTED builder would
+      // reseed from a draft that already carries the new field, and the counts would still match.
+      // A remount is only detectable through state the mirrored draft does NOT carry — selection.
+      // §3.5: "After add: focus/select the new field" — assert the SELECTED card is the appended
+      // one (last in the list) before re-entry.
+      function selectedLocalId(): string | null {
+        return (
+          container!.querySelector('[data-testid="approval-form-builder-card"][data-selected="true"]')
+            ?.getAttribute('data-field-local-id') ?? null
+        )
+      }
+      const lastCardLocalId = () => {
+        const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
+        return cards[cards.length - 1]?.getAttribute('data-field-local-id') ?? null
+      }
+      expect(selectedLocalId()).toBe(lastCardLocalId())
+      const selectedBeforeReentry = selectedLocalId()
+
+      // Re-entry: leave the "fields" section and come back (v-show step chrome, not v-if — the
+      // builder must stay the SAME mounted instance, per the module doc in TemplateAuthoringView.vue).
+      // A remounted instance re-seeds `selectedLocalId` to `draft.fields[0]` (the FIRST field,
+      // never the appended one) — this is what a "reseed on re-entry" bug would flip.
+      const flowTab = container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLElement
+      flowTab.click()
+      await flushUi()
+      const fieldsTab = container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLElement
+      fieldsTab.click()
+      await flushUi()
+
+      const afterReentry = container!.querySelectorAll('[data-testid="approval-form-builder-card"]').length
+      expect(afterReentry).toBe(afterAdd)
+      expect(selectedLocalId()).toBe(selectedBeforeReentry)
+    })
+
+    it('post-save resync: a successful "保存草稿" deliberately reseeds the v2 session from the server response — NOT a routine re-seed (this is the ONE explicit resync path, distinct from the re-entry case above)', async () => {
+      approvalCanvasV2.value = true
+      await mountView()
+
+      const chip = container!.querySelector('[data-testid="approval-form-palette-chip-text"]') as HTMLElement
+      chip.click()
+      await flushUi()
+      setInput('approval-template-key', 'expense')
+      setInput('approval-template-name', '费用审批')
+      await flushUi()
+
+      const beforeSave = container!.querySelectorAll('[data-testid="approval-form-builder-card"]').length
+      const saveButton = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLElement
+      saveButton.click()
+      await flushUi()
+      await flushUi()
+
+      // Proves the save actually reached the API (not a validation-blocked no-op that would make
+      // the length assertion below vacuous).
+      expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+      // The server's echoed response is what the session now reflects (createTemplateSpy's mock
+      // returns the SAME formSchema it was sent, so the field count is preserved through the
+      // deliberate resync, not silently reset to some OTHER count).
+      const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
+      expect(cards.length).toBe(beforeSave)
+    })
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {
@@ -3511,8 +3696,10 @@ describe('L8-C: formatted-number authoring (docs/development/approval-lock8-fiel
   it('gate C-1: a template carrying all L8-C display props stays EDITABLE — paired with the positive control (an unauthorable field type still locks the template read-only, §2.2)', () => {
     // `unsupportedTemplateAuthoringReason` is the single production gate that decides whole-
     // template read-only (§2.2, :718-722) — TemplateAuthoringView.vue's `readOnly`/`!canSave`
-    // both derive from it, and it is the only live authoring surface (ApprovalFormFieldInspector.vue
-    // / Designer 2.0 is unmounted in production — see this PR's description).
+    // both derive from it, regardless of which form surface is mounted: the legacy inline editor
+    // (flag OFF, default) or Designer 2.0 / ApprovalFormFieldInspector.vue (flag ON, F4 production
+    // mount behind `approvalCanvasV2` — see approval-form-builder-parity-delta-design-20260811.md
+    // §5 F4). Both surfaces read the same `readOnly` computed; neither has its own gate.
     const propped = unsupportedTemplateAuthoringReason(buildTemplate({
       formSchema: {
         fields: [{
@@ -3540,3 +3727,4 @@ describe('L8-C: formatted-number authoring (docs/development/approval-lock8-fiel
     expect(unauthorable).not.toBeNull()
   })
 })
+

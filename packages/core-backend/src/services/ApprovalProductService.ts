@@ -32,6 +32,8 @@ import type {
   HandlerNodeConfig,
   NodeFieldAccess,
   NodeFieldPermission,
+  NodeOperationPolicy,
+  NodeOperationPolicyActionKey,
   SignaturePolicy,
   NodeTimeoutConfig,
   NodeTimeoutEffect,
@@ -42,7 +44,21 @@ import type {
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { APPROVAL_TERMINAL_STATUSES, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval-product'
+import {
+  effectiveCommentRequired,
+  isOperationAllowedAtNode,
+  nodeOperationPolicyAt,
+  resolveEffectiveNodeOperations,
+  seatNodeKeysForViewer,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
+import {
+  ACTION_POLICY_KEYS,
+  APPROVAL_POLICY_DENIED_ACTION,
+  APPROVAL_TERMINAL_STATUSES,
+  HANDLER_ASSIGNEE_SOURCE_KINDS,
+  HANDLER_NODE_OPERATION_POLICY_KEYS,
+} from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -81,7 +97,7 @@ import {
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
-import { fetchCuratedApprovalRoleIds } from './approval-directory'
+import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -568,6 +584,14 @@ export type ApprovalNodeTimeoutEffectOutcome =
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
+// Lock-1 §K1 / OD-L1-2(a) — single-tenant default bucket for `approval_usable_member_groups.org_id`
+// when `PublishApprovalTemplateRequest.orgId` is omitted/blank. Mirrors the `DEFAULT_ORG_ID =
+// 'default'` idiom re-declared per-module across this codebase (directory-sync.ts,
+// admin-directory-routing-policy.ts, admin-directory-local.ts, admin-directory-department-bindings.ts)
+// rather than importing a shared symbol none of those export. NEVER `?? ''` / bare `||` here — a
+// blank string must normalize to this constant, not to an org-agnostic `WHERE org_id = ''` that
+// would match nothing (or, worse, get built without the predicate at all).
+const DEFAULT_ORG_ID = 'default'
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -752,6 +776,22 @@ function normalizeApprovalAssigneeSources(
           failValidation(context, `${sourcePath}.nodeKey is required`)
         }
         return { kind: 'prior_node_approver', nodeKey: source.nodeKey.trim() }
+      }
+      case 'user_group': {
+        // Lock-1 §K1 + G-1: exact-shape validation — `groupIds` is a non-empty string array
+        // (byte-identical to `normalizeStringArray`'s posture for static_user/static_role) and
+        // (the Lock-1 G-1 posture for NEW kinds) unknown extra keys are REJECTED. Whether every
+        // referenced id resolves to a REAL group bound to the publishing org is the PUBLISH gate's
+        // job (`assertUserGroupSourcesBoundToOrg`) — normalize stays a shape check so stored
+        // drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'groupIds'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for user_group`)
+        }
+        return {
+          kind: 'user_group',
+          groupIds: normalizeStringArray(source.groupIds, context, `${sourcePath}.groupIds`),
+        }
       }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
@@ -1544,6 +1584,89 @@ function normalizeNodeSignaturePolicy(
   }
 }
 
+/** Lock-5 §1.1 — the complete `nodeOperationPolicy` sub-key set an `approval` node admits. */
+const NODE_OPERATION_POLICY_BOOLEAN_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+] as const
+const NODE_OPERATION_POLICY_RETURN_REVIEW_MODES = ['resume_forward', 'jump_back_to_current'] as const
+const NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES = ['never', 'reject_only', 'always'] as const
+
+/**
+ * Lock-5 §1.1 L5-A — normalize a node's `nodeOperationPolicy`. Modelled key-for-key on
+ * `normalizeNodeSignaturePolicy` above (gate A-6):
+ *   - an UNKNOWN sub-key `failValidation`s (400) — never silently stripped;
+ *   - an out-of-enum `returnReviewMode` / `commentRequired` `failValidation`s — never COERCED to a
+ *     default (the shipped `addSignMode` coercion is exactly the mislabel this program is repairing);
+ *   - absent, or an object whose every switch is absent, → `undefined` so the CALLER OMITS the key.
+ *     Authoring all-default switches therefore leaves the persisted config byte-identical (A-6's
+ *     emptiness half + Lock-4 §0's `buildStepConfig` omit-empty discipline).
+ *
+ * `admittedKeys` narrows the admitted set per node type (§2.5, the registry's job): an `approval`
+ * node admits all six; a `handler` node admits `allowTransfer` + `commentRequired` only (§1.6 /
+ * OD-L5-11(a)) and the caller raises `APPROVAL_HANDLER_CONFIG_INVALID` for the other three BEFORE
+ * calling this, so the message a handler author sees names the handler contract.
+ *
+ * DISCLOSED HAZARD (inherited from `signaturePolicy`, NOT introduced here — §1.1): because
+ * `normalizeApprovalGraph` also runs on every LOAD (`asApprovalGraph` / `asRuntimeGraph`),
+ * strict-on-unknown means a sub-key written by a NEWER server makes the graph unloadable on an
+ * older one. The fix, if wanted, is a forward-compatibility slice covering BOTH keys — never a
+ * weakening here.
+ */
+function normalizeNodeOperationPolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+  admittedKeys: readonly string[] = [
+    ...NODE_OPERATION_POLICY_BOOLEAN_KEYS,
+    'returnReviewMode',
+    'commentRequired',
+  ],
+): NodeOperationPolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  const allowed = new Set(admittedKeys)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      failValidation(context, `${path}.${key} is not supported`)
+    }
+  }
+  const normalized: NodeOperationPolicy = {}
+  for (const key of NODE_OPERATION_POLICY_BOOLEAN_KEYS) {
+    const raw = value[key]
+    if (raw === undefined) continue
+    if (typeof raw !== 'boolean') {
+      failValidation(context, `${path}.${key} must be a boolean`)
+    }
+    normalized[key] = raw as boolean
+  }
+  if (value.returnReviewMode !== undefined) {
+    if (!(NODE_OPERATION_POLICY_RETURN_REVIEW_MODES as readonly unknown[]).includes(value.returnReviewMode)) {
+      failValidation(
+        context,
+        `${path}.returnReviewMode must be ${NODE_OPERATION_POLICY_RETURN_REVIEW_MODES.join(' or ')}`,
+      )
+    }
+    normalized.returnReviewMode = value.returnReviewMode as NodeOperationPolicy['returnReviewMode']
+  }
+  if (value.commentRequired !== undefined) {
+    if (!(NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES as readonly unknown[]).includes(value.commentRequired)) {
+      failValidation(
+        context,
+        `${path}.commentRequired must be one of ${NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES.join(', ')}`,
+      )
+    }
+    normalized.commentRequired = value.commentRequired as NodeOperationPolicy['commentRequired']
+  }
+  // An all-absent object is OMITTED rather than persisted as `{}` (§1.1) — byte-stability for a
+  // template whose author opened the tab and changed nothing.
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
 /**
  * T1-1: preserve a node's `timeout` config through normalization so it survives into the stored /
  * runtime graph (the surrounding `normalizedNode.config` is a strict whitelist — an un-copied field is
@@ -1635,10 +1758,11 @@ function validateNodeFieldPermissionsAgainstFormSchema(
  * Lock-7 L7-B pins 1 & 3 — the NEW publish-time fail-closed field-edit-enforcement pins, raised at all
  * FIVE authoring entry points beside `validateNodeFieldPermissionsAgainstFormSchema` (restore, create,
  * update, publish, clone). NOT called on the dispatch re-normalize path (`asRuntimeGraph`), so it never
- * makes an in-flight instance undispatchable (§2.1). Pin 2 (editable on a non-write-capable node type)
- * lives in `normalizeApprovalGraph` — it must inspect the raw per-type config BEFORE the switch drops
- * the key. This function reads the NORMALIZED graph: `editable` entries survive only on approval /
- * handler nodes, and driver references survive on approval / handler / condition nodes, so it has
+ * makes an in-flight instance undispatchable (§2.1). Pin 2 (D-1 fix slice: ANY `fieldPermissions` entry
+ * on a non-write-capable node type, not just `editable`) lives in `normalizeApprovalGraph` — it must
+ * inspect the raw per-type config BEFORE the switch drops the key. This function reads the NORMALIZED
+ * graph: `fieldPermissions` entries survive only on approval / handler nodes, and driver references
+ * survive on approval / handler / condition nodes, so it has
  * everything it needs.
  */
 /**
@@ -1985,6 +2109,12 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       // `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` 409 guard
       // (`assertNoActiveAssignmentConflicts`), which sees the actual chosen ids. Publish cannot.
       return null
+    case 'user_group':
+      // Lock-1 §K1 / §2.4 locked entry: `user_group:<sorted groupIds joined by ','>` — SORTED so
+      // [a,b] and [b,a] fingerprint identically (provably the same resolved set either order).
+      // Two branches referencing the same group set are provably identical (EAGER_EXPANSION
+      // freezes the SAME snapshot for both), so parallel-duplicate publish-blocking applies.
+      return `user_group:${[...source.groupIds].sort().join(',')}`
     default: {
       const _exhaustive: never = source
       return _exhaustive
@@ -2415,27 +2545,71 @@ function normalizeApprovalGraph(
       config: {} as Record<string, unknown>,
     }
 
-    // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12) — `editable` on a node type with NO write surface is a 400,
-    // not the shipped SILENT drop (defect D-1). The switch below rebuilds cc/parallel/condition from a
-    // whitelist and sends start/end to `default: config = {}`, dropping `fieldPermissions` with no error
-    // — an author who marks a field editable on a cc node gets no effect and no warning. Lock-7 must not
-    // inherit that for the WRITE axis, so `editable` here fails closed. ONLY `editable` is rejected;
-    // `readonly`/`hidden` on these types stay silently dropped (D-1's read axis is a SEPARATE fix slice,
-    // §2.7 — Lock-7 neither fixes nor inherits it). Gated OFF for the dispatch re-normalize
-    // (STORED_RUNTIME_CONTEXT): a stored graph already had the key dropped at publish, so re-rejecting
-    // would make an in-flight instance undispatchable (§2.1).
+    // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12), WIDENED by the D-1 fix slice
+    // (docs/development/approval-lock7-field-edit-enforcement-20260817.md §2.7 D-1) — a PRESENT
+    // `fieldPermissions` key (any shape, not just an array of entries) on a node type with NO
+    // field-permission surface is REJECTED here, not the shipped SILENT drop. The switch below
+    // rebuilds cc/parallel/condition from a per-type whitelist and sends start/end to
+    // `default: config = {}`, so ANY `fieldPermissions` value was previously dropped with no error and
+    // no effect — an author configuring it believed the field hidden/read-only/protected when it was
+    // not. P4-B originally closed only the `editable` arm (the load-bearing privilege-escalation
+    // half); this closes the `readonly`/`hidden` arm D-1 left open, per OD-L7-4's ratified boundary:
+    // field permissions belong to approval + handler node types ONLY — every OTHER access value on
+    // these types is equally unsupported, not just `editable`.
+    //
+    // The guard is `!== undefined` on the RAW key, not `Array.isArray(...) && length > 0`: a
+    // non-array shape (an object, a string, `null`) is exactly the same silent-loss class D-1 names —
+    // it is not an array, so the switch below drops it unconditionally too, and
+    // `normalizeNodeFieldPermissions` hard-400s the identical shape on an approval/handler node
+    // (`must be an array`), so tolerating it here would leave a type-asymmetric residual channel.
+    // Deliberately NOT `'fieldPermissions' in node.config`: `in` is true for a key explicitly present
+    // with value `undefined`, and `publishTemplate` re-normalizes an ALREADY-NORMALIZED graph (whose
+    // spread may carry an explicit `undefined`), so `in` would 400 a legitimate republish.
+    //
+    // An EMPTY array IS tolerated (OD-L7-9 absent/empty ≡ no permissions) — a conservative default,
+    // not an FE-compat requirement: no live authoring surface actually sends `fieldPermissions: []`
+    // on any of these five node types (the linear editor's `fieldPermissions: []` step-draft default
+    // is for APPROVAL steps only, a type this guard exempts, and `approvalNodeEdit.ts` deletes an
+    // empty array before emitting even there; the cc/condition/parallel edit models never carry the
+    // key at all). Tolerating `[]` costs nothing and matches the shipped omit-when-empty convention
+    // used throughout this file (`normalizeNodeFieldPermissions` itself returns `undefined` for `[]`).
+    //
+    // Gated OFF for the dispatch re-normalize (STORED_RUNTIME_CONTEXT): the normalizer has NEVER
+    // copied `fieldPermissions` into a stored cc/start/end/condition/parallel node's config (see the
+    // switch below), so no LEGITIMATELY published graph can carry one — but a defensively-constructed
+    // or hand-edited stored graph must still tolerate-and-drop rather than fail dispatch, so an
+    // in-flight instance is never made undispatchable (§2.1 widen-only rule; D-1 / OD-L7-4).
     if (node.type !== 'approval' && node.type !== 'handler' && context !== STORED_RUNTIME_CONTEXT) {
       const rawPermissions = (node.config as { fieldPermissions?: unknown }).fieldPermissions
-      if (Array.isArray(rawPermissions)) {
-        for (const permission of rawPermissions) {
-          if (isRecord(permission) && permission.access === 'editable') {
-            failValidation(
-              context,
-              `approvalGraph.nodes[${index}].config.fieldPermissions marks a field editable on a ${node.type} node, which has no write surface (Lock-7 OD-L7-4)`,
-            )
-          }
-        }
+      const isTolerableEmptyArray = Array.isArray(rawPermissions) && rawPermissions.length === 0
+      if (rawPermissions !== undefined && !isTolerableEmptyArray) {
+        throw new ServiceError(
+          `approvalGraph.nodes[${index}].config.fieldPermissions is not supported on a ${node.type} node; field permissions apply to approval and handler nodes only (Lock-7 D-1 / OD-L7-4)`,
+          400,
+          'APPROVAL_NODE_FIELD_PERMISSIONS_UNSUPPORTED_NODE_TYPE',
+          { nodeKey: normalizedNode.key, nodeType: node.type },
+        )
       }
+    }
+
+    // Lock-5 §2.5 / gate A-5 — `nodeOperationPolicy` is a MEMBER-ACTION policy, so it is admitted
+    // ONLY on the two node types that hold a member seat: `approval` (all six §1.1 fields) and
+    // `handler` (two, §1.6). On `start`/`end`/`cc`/`condition`/`parallel` it fails the AUTHORING
+    // choke with a 400 rather than being silently dropped by the per-type rebuild below (the
+    // `default: config = {}` arm). Unlike Lock-7's `editable` gate above this is NOT relaxed for
+    // `STORED_RUNTIME_CONTEXT`: the key is new in this slice, so no stored graph can legitimately
+    // carry it on such a node — a graph that does is structurally invalid, and fail-closed is
+    // correct. `normalizeApprovalGraph` re-runs on every load, so this also pins the placement for
+    // reads, not just publish.
+    if (
+      node.type !== 'approval'
+      && node.type !== 'handler'
+      && (node.config as { nodeOperationPolicy?: unknown }).nodeOperationPolicy !== undefined
+    ) {
+      failValidation(
+        context,
+        `approvalGraph.nodes[${index}].config.nodeOperationPolicy is not supported on a ${node.type} node`,
+      )
     }
 
     switch (node.type) {
@@ -2514,6 +2688,16 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.signaturePolicy`,
           )
+          // Lock-5 §1.1 L5-A / §2.2 — this is the FIRST of the four allowlists the key must land in
+          // (the other three are on the FE, `templateAuthoring.ts`). An un-copied field is silently
+          // dropped by this fixed spread, so omitting it here would make the key vanish on save AND
+          // on every reload (`asApprovalGraph` / `asRuntimeGraph` re-normalize) — `signaturePolicy`'s
+          // live failure mode.
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            node.config.nodeOperationPolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.nodeOperationPolicy`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -2529,6 +2713,7 @@ function normalizeApprovalGraph(
             ...(fieldPermissions ? { fieldPermissions } : {}),
             ...(timeout ? { timeout } : {}),
             ...(signaturePolicy ? { signaturePolicy } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
           }
         }
         break
@@ -2708,11 +2893,37 @@ function normalizeApprovalGraph(
             context,
             `${handlerPath}.fieldPermissions`,
           )
+          // Lock-5 §1.6 L5-F / OD-L5-11(a): a handler admits a NARROWED nodeOperationPolicy —
+          // `allowTransfer` + `commentRequired` ONLY. Lock-3 §2.2 already 409s add_sign/reduce_sign/
+          // return at a handler node, so a switch over those verbs is M8 theater; they are rejected
+          // HERE, at the authoring choke, with Lock-3's own code so the message names the handler
+          // contract. `allowTransfer` absent ≡ true reproduces Lock-3's hardcoded transfer-allowed
+          // with no behavior change (gate F-1's positive control).
+          const rawOperationPolicy = rawConfig.nodeOperationPolicy
+          if (isRecord(rawOperationPolicy)) {
+            for (const key of Object.keys(rawOperationPolicy)) {
+              if (!(HANDLER_NODE_OPERATION_POLICY_KEYS as readonly string[]).includes(key)) {
+                throw new ServiceError(
+                  `${handlerPath}.nodeOperationPolicy.${key} is not allowed on a handler node`,
+                  400,
+                  'APPROVAL_HANDLER_CONFIG_INVALID',
+                  { nodeKey: normalizedNode.key },
+                )
+              }
+            }
+          }
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            rawOperationPolicy,
+            context,
+            `${handlerPath}.nodeOperationPolicy`,
+            HANDLER_NODE_OPERATION_POLICY_KEYS,
+          )
           normalizedNode.config = {
             assigneeSources,
             ...(handlerMode ? { handlerMode } : {}),
             ...(opinionRequired !== undefined ? { opinionRequired } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
           }
         }
         break
@@ -3794,6 +4005,80 @@ export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: Runtim
     }
   }
   return targets
+}
+
+/**
+ * Lock-1 §K1: every group id referenced by a `user_group` source, over ANY graph — typed on the
+ * plain `ApprovalGraph` shape (not `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors
+ * above: the publish HARD GATE (`assertUserGroupSourcesBoundToOrg`) must run BEFORE
+ * `buildRuntimeGraph` (on the same `approvalGraph` the other publish-time authoring gates read),
+ * while the create-time freeze runs AFTER (`asRuntimeGraph`'s published/frozen graph) —
+ * `RuntimeGraph extends ApprovalGraph`, so one function structurally serves both call sites. This
+ * is the ONE opt-in gate in the `runtimeGraphUsesManagerChain` family that is keyed to
+ * `node.type === 'approval'` (§2.3 registry: `user_group` is admitted on `approval` only this
+ * slice — cc-as-recipient, OD-L1-7, is a SEPARATE contract deferred to its own slice, so there is
+ * no cc-node group shape to scan for yet; extending this collector to `cc` nodes is that
+ * follow-up's job, not this one's — the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s own
+ * doc comment names: keep detector scope in exact lockstep with what is actually admitted).
+ */
+export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
+  const groupIds = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) continue
+      for (const groupId of source.groupIds) {
+        if (typeof groupId === 'string' && groupId.trim().length > 0) groupIds.add(groupId.trim())
+      }
+    }
+  }
+  return groupIds
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — the PUBLISH HARD GATE: every group id any `user_group` source
+ * references MUST be bound to `orgId` in `approval_usable_member_groups` (curated set, empty by
+ * default). A group with NO binding row for this org — dangling (bound nowhere) or foreign (bound
+ * to a DIFFERENT org only) — fails publish, values-free (the group id itself is template-authored,
+ * like `prior_node_approver`'s `nodeKey`, and is permitted per §2.6; the rejection never touches
+ * group MEMBERSHIP). UNCONDITIONAL like the K3 dominance gate: no policy exemption makes a
+ * foreign/dangling group reference resolvable.
+ */
+export function assertUserGroupSourcesBoundToOrg(
+  approvalGraph: ApprovalGraph,
+  curatedGroupIds: ReadonlySet<string>,
+): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
+    // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
+    // before any graph reaches publish), but the two functions read the SAME field and should not
+    // differ in how defensively they do it.
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    sources.forEach((source: unknown, sourceIndex: number) => {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) return
+      for (const rawGroupId of source.groupIds) {
+        // Trimmed the same way collectApprovalGraphMemberGroupIds trims before adding to the
+        // curated set — untrimmed comparison was harmless today (normalizeStringArray already
+        // trims at authoring time) but the two functions read this field with different
+        // normalization, which is a latent inconsistency (fix-round NIT-2).
+        const groupId = typeof rawGroupId === 'string' ? rawGroupId.trim() : ''
+        if (!groupId || !curatedGroupIds.has(groupId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] user_group references a group not bound to this organization`,
+            400,
+            'APPROVAL_ASSIGNEE_GROUP_NOT_BOUND',
+            { nodeKey: node.key, sourceIndex, groupId, reason: 'not-bound' },
+          )
+        }
+      }
+    })
+  }
 }
 
 /**
@@ -4993,6 +5278,35 @@ export class ApprovalProductService {
       // UNCONDITIONAL (unlike the parallel-conflict gate below): no policy exemption makes an
       // undominated reference resolvable.
       assertPriorNodeApproverReferencesUpstream(approvalGraph)
+      // Lock-1 §K1 / OD-L1-2(a) — THE HARD GATE (RA-1b shape): every group id any `user_group`
+      // source references must have a binding row for the NAMED org (`approval_usable_member_groups`,
+      // empty by default). Only when the graph actually uses `user_group` do we fetch the curated
+      // set (one read, on THIS transaction client) and reject any reference with ZERO binding rows
+      // for that org — dangling (bound nowhere) or simply never curated there.
+      //
+      // FIX-ROUND CORRECTION (gate finding P2-b/ii): the PRIOR comment here overclaimed "an author
+      // can never publish a reference to a group nobody curated for this org" as if `orgId` were a
+      // tenant boundary the CALLER is confined to. It is not, and per the owner's G-6 adjudication
+      // it is not supposed to be (OD-L1-2(a) delivers a curation NAMESPACE, not identity-resolved
+      // tenant anchoring — this codebase has no `orgs` table and the kernel create path never
+      // resolves an actor's org). `orgId` is a caller-supplied partition key on BOTH this gate and
+      // the picker: an author MAY name a different org's namespace (e.g. `org-b`) and publish a
+      // reference to whatever is bound THERE, even with no relationship to that namespace. What
+      // this gate actually guarantees: every referenced group has been explicitly curated — via
+      // `ensurePlatformAdmin`-gated bind, fix-round P1 — into AT LEAST the named namespace; a group
+      // with zero curation anywhere can never be referenced, regardless of which orgId is named.
+      // `orgId` mirrors the S7 §3.3 idiom: blank/absent normalizes to `DEFAULT_ORG_ID` — NEVER an
+      // org-agnostic match (a group bound only elsewhere still 400s under the default), so the
+      // default path fails closed exactly like an explicit one. UNCONDITIONAL like the K3 dominance
+      // gate above: no policy exemption makes a wholly-uncurated group reference resolvable.
+      const memberGroupIds = collectApprovalGraphMemberGroupIds(approvalGraph)
+      if (memberGroupIds.size > 0) {
+        const publishOrgId = typeof request.orgId === 'string' && request.orgId.trim().length > 0
+          ? request.orgId.trim()
+          : DEFAULT_ORG_ID
+        const curatedGroupIds = await fetchCuratedApprovalMemberGroupIds(publishOrgId, client.query.bind(client))
+        assertUserGroupSourcesBoundToOrg(approvalGraph, curatedGroupIds)
+      }
       // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
       // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
       // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
@@ -6081,6 +6395,23 @@ export class ApprovalProductService {
       )
     }
 
+    // Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — freeze-at-create: read the
+    // CURRENT member list of every group id the published runtime graph references, ONCE, into
+    // `groupMemberIds`. OPT-IN (same posture as includeManagerChain/needsDeptHeadChain above) — a
+    // graph without a `user_group` source does no work. No org check here: the org boundary is the
+    // PUBLISH-time hard gate (assertUserGroupSourcesBoundToOrg) — by the time a template is
+    // published its user_group sources already passed it, so create only needs the members. A
+    // group deleted/emptied after publish simply freezes `[]` for that id (§K1: never a
+    // dispatch-time failure — falls through to emptyAssigneePolicy like any other empty
+    // resolution). Best-effort is NOT appropriate here (unlike delegation below): a thrown read
+    // propagates the request failure structurally, exactly like every other snapshot-plumbing read
+    // in this method — there is no "genuine absence" reading for a DB error on a local table.
+    const memberGroupIds = collectApprovalGraphMemberGroupIds(runtimeGraph)
+    let frozenGroupMemberIds: Record<string, string[]> | undefined
+    if (memberGroupIds.size > 0) {
+      frozenGroupMemberIds = await fetchMemberGroupSnapshot(memberGroupIds, pool.query.bind(pool))
+    }
+
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
     // template + the create instant) into the snapshot BEFORE the executor resolves the
     // initial state, so the resolver's pushResolved substitution reads a frozen set and an
@@ -6123,6 +6454,10 @@ export class ApprovalProductService {
       // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.
       ...(frozenRequesterChoices && Object.keys(frozenRequesterChoices).length > 0
         ? { requesterChoices: frozenRequesterChoices }
+        : {}),
+      // Lock-1 §K1: freeze the group member snapshot baked above (opt-in, memberGroupIds).
+      ...(frozenGroupMemberIds && Object.keys(frozenGroupMemberIds).length > 0
+        ? { groupMemberIds: frozenGroupMemberIds }
         : {}),
     }
     // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no
@@ -6412,7 +6747,17 @@ export class ApprovalProductService {
           bundle.template.name,
           JSON.stringify(requesterSnapshot),
           JSON.stringify({ templateId: bundle.template.id, templateKey: bundle.template.key }),
-          JSON.stringify({ rejectCommentRequired: true, allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          // Lock-5 §1.3 — the SECOND hardcoding, moved in the same slice as the enforcement above.
+          // `rejectCommentRequired: true` is no longer written: the comment requirement is a NODE
+          // policy now, and a single instance-level literal cannot express a value that differs per
+          // node — worse, it would keep the bridge/card/FE readers disagreeing with the node, which
+          // is exactly the defect §1.3 names. The key is OMITTED rather than set to some other
+          // literal, and `effectiveCommentRequired` maps an ABSENT snapshot value to `'reject_only'`
+          // — byte-identical behavior to the `true` this replaces, for every reader
+          // (all of them already default an absent/`!== false` value to "required"). Instances
+          // created BEFORE this slice keep their stored `rejectCommentRequired: true` and resolve
+          // through the very same fallback (gate CR-2), so no backfill is needed.
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
           JSON.stringify(instanceMetadata),
           initial.currentStep ?? 0,
           initial.totalSteps,
@@ -6840,7 +7185,7 @@ export class ApprovalProductService {
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
-    const approval = await this.getApproval(id, actor.userId)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -7639,6 +7984,87 @@ export class ApprovalProductService {
         )
       }
 
+      // ─────────────────────────────────────────────────────────────────────────────────────────
+      // Lock-5 §2.1 / §1.4 — THE SINGLE PER-NODE OPERATION-POLICY CHOKE (gates A-1, D-1, X-1).
+      //
+      // WHY HERE, and nowhere else. Three placement facts, each load-bearing:
+      //  (1) AFTER the authorization gate (`APPROVAL_ASSIGNMENT_REQUIRED`, above): the actor must
+      //      already hold a seat, which is what makes the 409-not-403 choice right (§1.1: the actor
+      //      IS authorized; this is a template-configuration state, not a re-authenticate signal)
+      //      AND what makes the denial row safe (D-2: the denied actor is already a participant by
+      //      the assignment clause, so the four `actor_id`-keyed readers gain nothing from it).
+      //  (2) AFTER Lock-3's handler verb gate (immediately above): a handler node's
+      //      add_sign/reduce_sign/return keep returning `APPROVAL_HANDLER_ACTION_NOT_ALLOWED`. The
+      //      operation policy must never RESURRECT a verb Lock-3 §2.2 forbids, and no shipped
+      //      client's error handling for those verbs changes.
+      //  (3) BEFORE the card-delivery block below — NOT merely "before the first verb branch". That
+      //      block takes `FOR UPDATE` on `dingtalk_approval_card_deliveries` and CLAIMS the card
+      //      (`SET card_state='acted'`) inside this transaction. The records-only COMMIT below would
+      //      carry that claim with it and CONSUME a card for an operation that never happened. At
+      //      THIS point the transaction holds only `SELECT … FOR UPDATE` and has written nothing
+      //      (`guardAttendanceCentralMutationOrThrow` is SELECT-only), so committing the denial row
+      //      commits the denial row and nothing else.
+      //
+      // ONE gate, not one per verb branch: `comment`/`transfer`/`add_sign`/`reduce_sign`/`revoke`
+      // all `return` early BEFORE the reject-comment / pending checks further down, so a gate placed
+      // near those would silently miss four of the five. The gate iterates the exported
+      // `ACTION_POLICY_KEYS` table rather than naming verbs by hand (A-1).
+      const nodeOperationPolicyKey: NodeOperationPolicyActionKey | null = ACTION_POLICY_KEYS[request.action]
+      if (nodeOperationPolicyKey !== null && currentNodeKey) {
+        // §2.3 "one predicate, two doors": the choke calls the SAME `isOperationAllowedAtNode` the
+        // detail DTO's `resolveEffectiveNodeOperations` is built from, so the server refusal and the
+        // FE mirror cannot drift apart. (Gate finding P3-3 on #4983: this used to be an inline copy
+        // of the predicate, which made the "single predicate" claim false and left the shared helper
+        // dead. Behaviour is identical — the inline form was `policy?.[key] === false`.)
+        // Widen-only / OD-L5-3(a): ABSENT ≡ ALLOWED. Only an explicit `false` refuses, so every
+        // pre-Lock-5 stored graph — which carries no `nodeOperationPolicy` at all — behaves exactly
+        // as it does today, with no migration and no backfill.
+        if (!isOperationAllowedAtNode(
+          runtimeGraph as NodeOperationGraphView,
+          currentNodeKey,
+          nodeOperationPolicyKey,
+        )) {
+          // §1.4 fact 1 / OD-L5-9(a) — the DENIAL ROW, durable and isolated. Every other refusal in
+          // this method throws inside the transaction and is rolled back, so a denied click today
+          // survives nothing. Here the transaction has written nothing, so we INSERT the row, COMMIT
+          // that records-only transaction, and throw: one connection, atomic, no post-rollback second
+          // write. The outer `catch` still calls `rollbackQuietly`, which is a no-op once committed
+          // (it swallows "no transaction in progress"), so the row survives and the operation's own
+          // effects — assignment, epoch bump, version bump, status change — never happen (D-1).
+          const deniedNodeEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+          await this.insertApprovalRecord(client, id, {
+            action: APPROVAL_POLICY_DENIED_ACTION,
+            actorId: actor.userId,
+            actorName,
+            comment: null,
+            // from/to unchanged: a denial is not a transition. Version is NOT bumped either — the
+            // instance row is not touched at all by this path.
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: instance.version,
+            metadata: {
+              nodeKey: currentNodeKey,
+              ...(deniedNodeEntryEpoch !== null ? { nodeEntryEpoch: deniedNodeEntryEpoch } : {}),
+              operation: request.action,
+              policyKey: nodeOperationPolicyKey,
+            },
+          }, actor)
+          await client.query('COMMIT')
+          // §1.1: 409, not 403 — matches `APPROVAL_REVOKE_DISABLED` and the `*_UNSUPPORTED` refusals.
+          // §2.4 / X-1: `details` IS serialized to clients, so it carries `{ nodeKey, operation }`
+          // ONLY — never an actor id, target id, seat count, or form value — and the message is
+          // values-free too (the verb and node key are the same two facts `details` already carries).
+          throw new ServiceError(
+            `Operation ${request.action} is disabled at this node`,
+            409,
+            'APPROVAL_NODE_OPERATION_DISABLED',
+            { nodeKey: currentNodeKey, operation: request.action },
+          )
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────────────────────────
+
       // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
       // (ApprovalCardDeliveryAction.buildSummary) runs OUTSIDE this FOR UPDATE txn, so a concurrent
       // advance can slip a card issued for a PRIOR node/round past it and into the engine — where
@@ -7767,7 +8193,7 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'transfer') {
@@ -7799,7 +8225,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'add_sign') {
@@ -7859,7 +8285,7 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'reduce_sign') {
@@ -7926,7 +8352,7 @@ export class ApprovalProductService {
           targetUserId: targetAssignmentUserId,
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'revoke') {
@@ -8001,7 +8427,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (instance.status !== 'pending') {
@@ -8012,8 +8438,40 @@ export class ApprovalProductService {
         )
       }
 
-      if (request.action === 'reject' && !request.comment?.trim()) {
-        throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+      // Lock-5 §1.3 (L5-C/L5-D) / OD-L5-7(a) / OD-L5-8(a) — the comment requirement is now a
+      // three-valued NODE policy with the instance snapshot as its fallback, not an unconditional
+      // literal. This is one of the TWO hardcodings §1.3 requires to move IN THE SAME SLICE; the
+      // other is the `policy_snapshot` literal at instance CREATE. Either alone is a defect: leaving
+      // this strict makes the switch inert on the platform path, and leaving the literal makes the
+      // bridge/card/FE readers disagree with the node.
+      //
+      // Three values, not two booleans: the corpus switch (C-10) has two states and NEITHER is our
+      // default — OFF ⇒ 'never', ON ⇒ 'always', and today's reject-only asymmetry is expressible in
+      // neither. Absent ⇒ the instance snapshot ⇒ `'reject_only'` for every instance created before
+      // this slice, i.e. today's behavior exactly, as ONE rule rather than a literal racing a
+      // fallback.
+      //
+      // ERROR-CODE CONTRACT (§1.3): the REJECT side keeps emitting `REJECT_COMMENT_REQUIRED` because
+      // existing clients key on it; the APPROVE side gets a NEW `APPROVAL_COMMENT_REQUIRED`, so no
+      // shipped client's error handling changes meaning.
+      if (request.action === 'reject' || request.action === 'approve') {
+        const commentPolicy = effectiveCommentRequired(
+          nodeOperationPolicyAt(runtimeGraph as NodeOperationGraphView, currentNodeKey),
+          instance.policy_snapshot,
+        )
+        const hasComment = Boolean(request.comment?.trim())
+        if (request.action === 'reject' && !hasComment && commentPolicy !== 'never') {
+          throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+        }
+        if (request.action === 'approve' && !hasComment && commentPolicy === 'always') {
+          // §2.4 / X-1 values-free: `{ nodeKey }` only — never the actor, the comment, or the form.
+          throw new ServiceError(
+            'An approval comment is required at this node',
+            400,
+            'APPROVAL_COMMENT_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
       }
 
       if (!currentNodeKey) {
@@ -8098,7 +8556,7 @@ export class ApprovalProductService {
             await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
           }
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
 
         // Completion. 或签 'any' first-wins: cancel the remaining pending sibling seats (audit-preserved).
@@ -8232,7 +8690,7 @@ export class ApprovalProductService {
             nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey),
           )
         }
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'return') {
@@ -8330,7 +8788,7 @@ export class ApprovalProductService {
         if (resolution.currentNodeKey) {
           this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'reject') {
@@ -8379,7 +8837,7 @@ export class ApprovalProductService {
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
-        return (await this.getApproval(id, actor.userId))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
@@ -8429,7 +8887,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
       } else if (approvalMode === 'any') {
         // Deactivate actor's own assignment first.
@@ -8575,7 +9033,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id, actor.userId))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
         // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
@@ -8860,7 +9318,7 @@ export class ApprovalProductService {
       client?.release()
     }
 
-    const approval = await this.getApproval(id, actor.userId)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -8937,7 +9395,21 @@ export class ApprovalProductService {
     })
   }
 
-  async getApproval(id: string, viewerUserId?: string | null): Promise<UnifiedApprovalDTO | null> {
+  /**
+   * `viewerRoles` (Lock-5 §2.3 / gate A-2, adversarial-gate finding P2-R2 on PR #4983): this method
+   * builds the DTO EVERY dispatch verb branch returns, and the FE store overwrites `activeApproval`
+   * with it. It used to omit `nodeOperations` entirely, so the member bar's mirror EVAPORATED after
+   * the member's first successful action — post a 评论 at a node with `allowTransfer:false` and
+   * 转交/加签/减签/退回 all re-rendered, each click 409ing and minting another `policy_denied` row.
+   * That is the exact M7 exposure gate A-2 exists to close, surviving in the most routine sequence.
+   * The carrier is therefore populated HERE too, from the same frozen graph and the same shared seat
+   * predicate the detail read and the choke use — so a fresh GET and an action response agree.
+   */
+  async getApproval(
+    id: string,
+    viewerUserId?: string | null,
+    viewerRoles?: readonly string[] | null,
+  ): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     const result = await pool.query<ApprovalInstanceRow>(
@@ -8988,6 +9460,28 @@ export class ApprovalProductService {
         viewerUserId ?? null,
         queryFn,
       )
+    }
+
+    // Lock-5 §2.3 / gate A-2 (finding P2-R2) — the SAME carrier the detail read ships, so an action
+    // response never silently un-hides a policy-forbidden verb. Resolved from the instance's OWN
+    // frozen `published_definition_id` (never the parent template) and scoped by the shared
+    // `seatNodeKeysForViewer`, which is the choke's predicate. When the actor no longer holds a seat
+    // after the action (they approved and the node advanced past them), the honest value is exactly
+    // what a fresh GET would now return: no carrier — there is no bar to mirror.
+    if (viewerUserId && row.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [row.published_definition_id],
+      )
+      const runtimeGraphView = (runtimeResult.rows[0]?.runtime_graph ?? null) as NodeOperationGraphView | null
+      if (runtimeGraphView) {
+        const nodeOperations = resolveEffectiveNodeOperations(
+          runtimeGraphView,
+          seatNodeKeysForViewer(assignmentsResult.rows, viewerUserId, viewerRoles),
+          row.policy_snapshot,
+        )
+        if (nodeOperations) dto.nodeOperations = nodeOperations
+      }
     }
     return dto
   }

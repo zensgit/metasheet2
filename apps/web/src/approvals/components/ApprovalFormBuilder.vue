@@ -163,10 +163,11 @@ export const GENERIC_RETRY_MESSAGE = '操作未完成，请重试。'
 /**
  * F2 Designer 2.0 form canvas (delta §3.2/§3.3, FB-D1..D4, FB-D8) — the NEW
  * builder, SEPARATE from the extracted flag-OFF `ApprovalFormInlineEditor`
- * fallback. It has NO production mount in this slice: F4 performs the first
- * mount in `TemplateAuthoringView.vue` behind the existing `approvalCanvasV2`
- * flag. Until then it is fully exercisable standalone (mounted tests + the
- * owned browser harness under `apps/web/verification/`).
+ * fallback. F4 mounts it in `TemplateAuthoringView.vue` behind the existing
+ * `approvalCanvasV2` flag (default OFF) — the flag-OFF path still renders only
+ * the legacy inline editor, byte-identical. Exercisable standalone (mounted
+ * tests + the owned browser harness under `apps/web/verification/`) and, once
+ * hydrated with the flag ON, as the production form surface.
  *
  * Contract highlights:
  * - ONE command path (FB-D4): palette click (`appendField`), palette drag,
@@ -523,6 +524,36 @@ function onMoveByOffset(localId: string, offset: -1 | 1): void {
   applyResult(adapter.moveFieldByOffset(sessionRef.value, localId, offset))
 }
 
+/**
+ * F4 production mount (delta §5 F4 / §9.5): the undo/redo AFFORDANCE. F1
+ * built the session history mechanics and F3 made committed inspector edits
+ * undoable, but neither F2 nor F3 wired a trigger — this component had no
+ * consumer-facing undo/redo path before F4. The integrating view (
+ * `TemplateAuthoringView.vue`) reuses its existing 撤销/重做 toolbar buttons,
+ * redirected to these exposed methods while `approvalCanvasV2` is mounted,
+ * so there is exactly ONE undo/redo control — never a second, divergent
+ * history stack (M7).
+ */
+function undo(): boolean {
+  if (props.readOnly) return false
+  if (!settleInspector()) return false
+  return applyResult(adapter.undo(sessionRef.value))
+}
+
+function redo(): boolean {
+  if (props.readOnly) return false
+  if (!settleInspector()) return false
+  return applyResult(adapter.redo(sessionRef.value))
+}
+
+function canUndo(): boolean {
+  return adapter.canUndo(sessionRef.value)
+}
+
+function canRedo(): boolean {
+  return adapter.canRedo(sessionRef.value)
+}
+
 // --- insertion slot interactions -------------------------------------------
 
 function onSlotClick(descriptor: InsertionSlotDescriptor): void {
@@ -766,6 +797,10 @@ defineExpose({
   insertFieldAt,
   moveFieldToAnchor,
   removeField,
+  undo,
+  redo,
+  canUndo,
+  canRedo,
   getSession: () => sessionRef.value,
   getDragSession: () => dragSession,
 })

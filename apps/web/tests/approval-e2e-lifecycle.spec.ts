@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../src/approvals/addSignHonestyCopy'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -1180,7 +1181,13 @@ describe('Approval E2E Lifecycle', () => {
       }
     }
 
-    it('clicking "加签" opens the add-sign dialog with a mode radio', async () => {
+    // Lock-5 gate B-2 (`'before'` honesty) RE-POINTED this test. The dialog used to ship a two-arm
+    // 加签方式 radio whose `前加签` label claimed corpus C-3 node-insertion semantics that no shipped
+    // path implements — §0.1: both arms seat co-signers at the CURRENT node in the SAME epoch, so
+    // outside a parallel region they were byte-identical (now pinned by a real-DB test). A radio
+    // whose arms cannot be told apart is a fake switch, so the arm is retired and the dialog states
+    // what add-sign really does. Asserting the radio still exists would be asserting the defect.
+    it('clicking "加签" opens the add-sign dialog with the honest mode hint and NO mode radio (B-2)', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1193,12 +1200,19 @@ describe('Approval E2E Lifecycle', () => {
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')
       expect(dialog).toBeTruthy()
-      // parallel + before mode radios present.
-      const radios = dialog!.querySelectorAll('[data-el-radio-value]')
-      expect(radios.length).toBe(2)
+      // B-2: no mode radio at all — the inert choice is gone.
+      expect(dialog!.querySelectorAll('[data-el-radio-value]').length).toBe(0)
+      expect(dialog!.textContent).not.toContain('前加签')
+      // …replaced by copy that describes the ONE semantic we implement (corpus C-5 并加签).
+      const hint = dialog!.querySelector('[data-testid="approval-add-sign-mode-hint"]')
+      expect(hint).toBeTruthy()
+      expect(hint!.textContent).toBe(ADD_SIGN_MODE_HINT)
+      // M8 honesty, pinned on the string itself: it must not claim node insertion or a skip.
+      expect(ADD_SIGN_MODE_HINT).toContain('不会插入新的审批节点')
+      expect(ADD_SIGN_MODE_HINT).toContain('不会跳过当前节点')
     })
 
-    it('confirming 加签 calls executeAction with action=add_sign, targetUserIds (array) and addSignMode', async () => {
+    it('confirming 加签 calls executeAction with action=add_sign, targetUserIds (array) and the pinned addSignMode (B-2)', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
@@ -1219,22 +1233,20 @@ describe('Approval E2E Lifecycle', () => {
       select.dispatchEvent(new Event('change', { bubbles: true }))
       await flushUi()
 
-      // Pick the 前加签 (before) mode radio to assert it round-trips.
-      const beforeRadio = Array.from(dialog.querySelectorAll('[data-el-radio-value]'))
-        .find((r) => r.getAttribute('data-el-radio-value') === 'before') as HTMLButtonElement
-      beforeRadio.click()
-      await flushUi()
-
       const confirmBtn = Array.from(dialog.querySelectorAll('button'))
         .find((b) => b.textContent?.includes('确认加签'))
       confirmBtn!.click()
       await flushUi()
 
+      // B-2: the WIRE CONTRACT is unchanged — `addSignMode` is still sent, pinned to the one
+      // semantic this client implements. The server's accepted set is untouched (widen-only), so no
+      // other client breaks; only the FE's inert CHOICE is gone.
       expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', expect.objectContaining({
         action: 'add_sign',
         targetUserIds: ['user_2'],
-        addSignMode: 'before',
+        addSignMode: CLIENT_ADD_SIGN_MODE,
       }))
+      expect(CLIENT_ADD_SIGN_MODE).toBe('parallel')
     })
 
     it('hides "减签" when no add-signed rows exist at the current node', async () => {
@@ -1526,7 +1538,7 @@ describe('Approval E2E Lifecycle', () => {
   // UX B2-08: current handler + upcoming nodes
   // =========================================================================
   describe('UX B2-08: current handler + upcoming nodes', () => {
-    it('a pending instance renders 当前处理人 with the active assignee + 已等待', async () => {
+    it('a pending instance renders 当前处理人 with a values-free label + 已等待', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1537,8 +1549,50 @@ describe('Approval E2E Lifecycle', () => {
       const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
       expect(item).toBeTruthy()
       expect(item!.textContent).toContain('当前处理人')
-      expect(item!.textContent).toContain('user_current') // the fixture's active assigneeId
+      // P7-R2 gate hardening (P2-2): this used to pin the raw `assigneeId` leak — the fixture's
+      // assignment carries no `metadata.assigneeName` (matches production: that field has zero
+      // producers repo-wide), so `assignmentDisplayLabel` now renders the values-free "审批人"
+      // placeholder instead of ever falling back to the raw id.
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_current') // the fixture's raw assigneeId
       expect(item!.textContent).toContain('已等待')
+    })
+
+    // P7-R2 gate hardening (P2-2) — the gate's own probe named this the most reachable
+    // member-facing raw-id leak in ApprovalDetailView.vue: not a drift/exotic shape, the ORDINARY
+    // pending-instance case. Constructs the exact leak shape and confirms both branches.
+    it('P2-2: never renders the raw assigneeId, even with a distinctive id shape', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item).toBeTruthy()
+      expect(item!.textContent).toContain('审批人')
+      expect(item!.textContent).not.toContain('user_secret_777')
+      expect(container!.innerHTML).not.toContain('user_secret_777')
+    })
+
+    it('P2-2: resolves to a real display name when the assignment already carries one', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: { assigneeName: '王五' },
+        }],
+      })
+      await mountDetailView()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item!.textContent).toContain('王五')
+      expect(item!.textContent).not.toContain('user_secret_777')
     })
 
     it('a non-pending instance renders NO current/upcoming section', async () => {

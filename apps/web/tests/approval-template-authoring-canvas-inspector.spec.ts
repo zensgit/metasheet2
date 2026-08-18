@@ -895,7 +895,13 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   // ── Lock-0 P1-A acceptance gates (docs/development/approval-lock0-d0-interaction-delta-20260817.md) ──
 
-  it('A-1/A-2: the shipped registry renders exactly 审批人设置/表单权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
+  // Lock-5 §1.1 L5-A / gate E-1 landed the first server-enforced per-node operation policies, so the
+  // shipped registry now declares three tabs on an `approval` node. Lock-0 A-1/A-2 STILL HOLD — what
+  // changed is which fixture carries the absence half: Lock-5 E-1's positive control is "a registry
+  // fixture with zero ratified policies renders NO third tab", which is the dedicated test below
+  // ("A-2 (re-pointed by Lock-5 E-1) …"). This test keeps the per-tab-content and no-Save/Cancel
+  // halves of A-1/A-8 against the SHIPPED registry.
+  it('A-1/A-8: the shipped registry renders 审批人设置/表单权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
     routeParams = { id: 'tpl_a1_a2' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
@@ -910,7 +916,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tablist = inspector.querySelector('[data-testid="approval-canvas-inspector-tablist"]') as HTMLElement
     expect(tablist).not.toBeNull()
     const tabs = Array.from(tablist.querySelectorAll('[role="tab"]')) as HTMLElement[]
-    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限'])
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '表单权限', '操作权限'])
 
     // A-1 "per-tab content matches the L0-1 table" — not just tab labels: the CONTENT visibility
     // actually follows the active tab. `v-show` only toggles `style.display` (deliberately, so it
@@ -930,10 +936,15 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(assigneeSection.style.display).toBe('none')
     expect(fieldPermSection.style.display).not.toBe('none')
 
-    // A-2: no 操作权限 tab/content with the shipped (Lock-5-absent) registry.
-    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    // Lock-5 E-1: the 操作权限 tab now exists on the shipped registry, and its CONTENT follows the
+    // active tab exactly like the other two — it is `v-if`-mounted (not `v-show`), so absence while
+    // another tab is active is the assertion, and presence after clicking it is the control.
     expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
-    expect(inspector.textContent).not.toContain('操作权限')
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(assigneeSection.style.display).toBe('none')
+    expect(fieldPermSection.style.display).toBe('none')
+    expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).not.toBeNull()
 
     // A-8 (negative half): no Save/Cancel/Apply control anywhere in the inspector — tabs are
     // presentation only. Each label checked individually — `not.toEqual(arrayContaining([...]))`
@@ -983,7 +994,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all twelve assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all thirteen assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -1008,11 +1019,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // (Lock-1 §2.3 table: "Admitted when: OD-L1-3 + OD-L1-4 decided; dominance validator
       // landed" — both recorded (a) in the §4 block).
       prior_node_approver: '节点审批人',
+      // Lock-1 §K1 (RATIFIED 2026-08-17) — the 用户组 registry row, admitted in the SAME slice
+      // that lands the resolver arm + org binding + picker end to end (Lock-1 §2.3 table:
+      // "Admitted when: OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed").
+      // The cc-as-recipient row (OD-L1-7) is a SEPARATE row NOT admitted by this slice.
+      user_group: '用户组',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 13th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 14th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(12)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(13)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1454,6 +1470,72 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     const tabsInSequence = [tab1, tab2].filter((tab) => tab.tabIndex === 0)
     expect(tabsInSequence).toHaveLength(1)
   })
+
+  // Fix-round follow-up (gate P2-2): the mount spec for `ApprovalGraphNodeConfigEditor.vue` in
+  // approval-node-threshold-timeout-config.spec.ts uses a hand-built stub API whose
+  // `setApprovalNodeMode`/`setApprovalNodeTimeoutEnabled` carry NO parallel-region guard — it can
+  // only ever prove the render-layer `:disabled` option/checkbox, never the setter itself. THIS view
+  // mount uses the REAL `TemplateAuthoringView.vue` setters (via
+  // `provide(APPROVAL_NODE_CONFIG_EDITOR_KEY, ...)`), so forcing the underlying
+  // `<select>`/`<input type=checkbox>` past its disabled affordance — exactly what a stray
+  // programmatic caller would do — reaches the real guard. `app_a`/`app_b` sit INSIDE `fork_1`'s
+  // parallel region in `buildMixedGraph` (same shape as the compat test's PARALLEL_GRAPH).
+  // Assertion is on the STRUCTURAL v-if (the N-input / timeout-detail block), not the raw stub
+  // `<select>`/`<input>`'s own DOM `.value`/`.checked`: Vue's component-update bail-out skips
+  // re-invoking a child (the el-select/el-checkbox stub) whose props are unchanged from the last
+  // render, so a manually-forced native DOM value that the guard correctly refused to adopt into
+  // reactive state does NOT get patched back — only the PARENT's own v-if (driven directly by the
+  // reactive `approvalNodeMode`/`approvalNodeTimeout` getters) reliably reflects whether the setter
+  // actually mutated anything.
+  it('setApprovalNodeMode refuses threshold for a node inside a parallel region even past the disabled option (setter guard, not just render-layer)', async () => {
+    routeParams = { id: 'tpl_setter_guard_mode' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    clickCanvasNode('app_a')
+    await flushUi()
+    const select = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(select.value).toBe('single')
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+
+    select.value = 'threshold'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The N-input is gated by `v-if="approvalNodeMode(node.key) === 'threshold'"` — it must stay
+    // ABSENT if (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-threshold"]')).toBeNull()
+  })
+
+  it('setApprovalNodeTimeoutEnabled refuses to enable a timeout for a node inside a parallel region even past the disabled checkbox (setter guard, not just render-layer)', async () => {
+    routeParams = { id: 'tpl_setter_guard_timeout' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    clickCanvasNode('app_b')
+    await flushUi()
+    const checkbox = container!.querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    expect(checkbox).not.toBeNull()
+    expect(checkbox.checked).toBe(false)
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // The detail block is gated by `v-if="approvalNodeTimeout(node.key)"` — it must stay ABSENT if
+    // (and only if) the setter's parallel-region guard actually held.
+    expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────
@@ -1526,7 +1608,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                     : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
                       // Lock-1 §K5-b: same default shape as manager_at_level.
                       : kind === 'dept_head_at_level' ? { kind, level: 1 }
-                        : { kind }
+                        // Lock-1 §K1: '' = no group selected yet.
+                        : kind === 'user_group' ? { kind, groupIds: [] }
+                          : { kind }
         const nextSources = edit.assigneeSources.slice()
         nextSources[sourceIndex] = next
         edit.assigneeSources = nextSources
@@ -1541,6 +1625,13 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         if (!source) return
         if (source.kind === 'static_user') source.userIds = ids
         else if (source.kind === 'static_role') source.roleIds = ids
+      },
+      // Lock-1 §K1: the user_group source's dedicated id carrier.
+      approvalSourceGroupIds: (nodeKey: string, sourceIndex: number) =>
+        (edits[nodeKey]?.assigneeSources[sourceIndex]?.groupIds as string[]) ?? [],
+      setApprovalSourceGroupIds: (nodeKey: string, sourceIndex: number, ids: string[]) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
+        if (source && source.kind === 'user_group') source.groupIds = ids
       },
       approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.fieldId as string) ?? '',
       setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => {
@@ -1572,7 +1663,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                   : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 }
                     : defaultKind === 'continuous_dept_heads' ? { kind: defaultKind, levels: 1 }
                       : defaultKind === 'dept_head_at_level' ? { kind: defaultKind, level: 1 }
-                        : { kind: defaultKind }
+                        : defaultKind === 'user_group' ? { kind: defaultKind, groupIds: [] }
+                          : { kind: defaultKind }
         edit.assigneeSources = [...edit.assigneeSources, next]
       },
       removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => {
@@ -1582,6 +1674,19 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       },
       approvalNodeMode: () => 'single',
       setApprovalNodeMode: () => {},
+      // P1-C — this spec never exercises threshold/timeout; stub-only so ApprovalGraphNodeConfigEditor's
+      // unconditional `node.type === 'approval'` calls to these don't throw.
+      approvalNodeThreshold: () => 1,
+      setApprovalNodeThreshold: () => {},
+      approvalNodeInParallelRegion: () => false,
+      approvalNodeTimeout: () => undefined,
+      setApprovalNodeTimeoutEnabled: () => {},
+      setApprovalNodeTimeoutAfterMinutes: () => {},
+      setApprovalNodeTimeoutEffect: () => {},
+      setApprovalNodeTimeoutTransferToUserId: () => {},
+      setApprovalNodeTimeoutJumpToNodeKey: () => {},
+      setApprovalNodeTimeoutUnit: () => {},
+      timeoutJumpTargetOptions: () => [],
       approvalNodeEmptyPolicy: () => 'error',
       setApprovalNodeEmptyPolicy: () => {},
       approvalNodeMergeWithRequester: () => false,
@@ -1600,8 +1705,16 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       directoryUsersLoading: false,
       directoryRoles: [],
       formulaRoles: [],
+      // Lock-1 §K1: two fixture options, both bound — enough to exercise the multi-select without
+      // an empty-roster hint masking the mount.
+      memberGroupOptions: [
+        { id: 'grp-1', name: '销售组', memberCount: 3 },
+        { id: 'grp-2', name: '财务组', memberCount: 5 },
+      ],
+      memberGroupOptionsLoading: false,
       formatUserLabel: (u: { id: string }) => u.id,
       formatRoleLabel: (r: { id: string }) => r.id,
+      formatMemberGroupLabel: (g: { id: string; name: string; memberCount: number }) => `${g.name || g.id}（${g.memberCount} 人）`,
     }
   }
 
@@ -1746,7 +1859,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     const node = makeApprovalNode('approval_x')
     const registry: ApprovalCapabilityRegistry = {
       assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
-      operationPoliciesByNodeType: { approval: [{ id: 'transfer', label: '转交' }] },
+      operationPoliciesByNodeType: {
+        approval: [{ id: 'transfer', label: '转交', policyKeys: ['allowTransfer'] }],
+      },
     }
     const { container: c, unmount } = mountDirectInspector({
       node,
@@ -1758,23 +1873,66 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-2: with the shipped (Lock-5-absent) registry, no 操作权限 element exists — the A-1 fixture proves the tab is not a dead path', () => {
+  // Lock-5 §1.1 landed the first ratified operation policies, so the SHIPPED registry now declares
+  // them and the tab renders. Lock-0 A-2's mechanism assertion is unchanged and still needs a
+  // negative: per Lock-5 gate E-1 ("a registry fixture with zero ratified policies renders NO third
+  // tab — Lock-0 A-1/A-2 still hold"), the fixture carrying that half is an EMPTY
+  // `operationPoliciesByNodeType`, paired with the A-1 positive control directly above. Asserting it
+  // against the shipped registry instead would now be asserting the opposite of the contract.
+  it('A-2 (re-pointed by Lock-5 E-1): a registry with ZERO ratified operation policies renders no 操作权限 element — the tab is registry-driven, not hardcoded', () => {
+    const node = makeApprovalNode('approval_x')
+    const registry: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval') },
+      operationPoliciesByNodeType: {},
+    }
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry,
+      api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
+    })
+    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-section-operations"]')).toBeNull()
+    expect(c.textContent).not.toContain('操作权限')
+    unmount()
+  })
+
+  // Lock-5 gate E-2 — "no inert control". The tab renders EXACTLY the registry's implemented
+  // fields. `returnReviewMode` (§1.2) and `commentRequired` (§1.3) are part of the persisted schema
+  // but have no landed enforcement, and `signaturePolicy` renders nothing anywhere (OD-L5-10(a)) —
+  // none of them may appear. Paired with the rendered-control assertions so the absence half is not
+  // green against an empty tab.
+  it('E-2: the 操作权限 tab renders the three implemented controls and NO control for an unenforced key', async () => {
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
       node,
       registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
       api: createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } }),
     })
-    expect(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]')).toBeNull()
-    expect(c.textContent).not.toContain('操作权限')
+    ;(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const section = c.querySelector('[data-testid="approval-node-section-operations"]') as HTMLElement
+    expect(section).not.toBeNull()
+    // Rendered (enforcement landed this slice).
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-transfer"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).not.toBeNull()
+    expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(3)
+    // NOT rendered (declared in the schema, enforcement deferred) — and `signaturePolicy` nowhere.
+    expect(section.textContent).not.toContain('回退方式')
+    expect(section.textContent).not.toContain('审批意见')
+    expect(section.textContent).not.toContain('手写签名')
+    expect(c.querySelector('[data-testid*="signature"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="returnReviewMode"]')).toBeNull()
+    expect(c.querySelector('[data-testid*="commentRequired"]')).toBeNull()
     unmount()
   })
 
-  it('A-3: roster equals the twelve-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the thirteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
     // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
-    // `dept_head_at_level`, K3 `prior_node_approver`.
-    const CANONICAL_TWELVE = [
+    // `dept_head_at_level`, K3 `prior_node_approver`, K1 `user_group`.
+    const CANONICAL_THIRTEEN = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
@@ -1787,11 +1945,12 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       'requester_choice',
       'static_role',
       'static_user',
+      'user_group',
     ]
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_TWELVE)
+    expect(roster).toEqual(CANONICAL_THIRTEEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1804,7 +1963,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_TWELVE)
+    expect(rendered).toEqual(CANONICAL_THIRTEEN)
     unmount()
   })
 
@@ -1843,6 +2002,39 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(roster.checked).toBe(true)
     expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-1 §K1 — user_group authoring sub-form: registry-admitted, renders EDITABLE with the
+  // TYPED bound-group multi-select (D0 §10.2 — never a free-text/raw-id input), no unknown-kind
+  // hint. An empty option list shows the honest no-bound-groups hint (mirrors K3's empty-candidate
+  // posture) rather than an inert always-selectable-nothing control.
+  it('K1: user_group renders EDITABLE with the typed bound-group multi-select (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_ug')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ug: { assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-user_group"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-group-picker"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  it('K1: user_group with zero bound options shows the honest empty-roster hint, not an inert control', () => {
+    const node = makeApprovalNode('approval_ug_empty')
+    const api = createStubConfigApi({ approval_ug_empty: { assigneeSources: [{ kind: 'user_group', groupIds: [] }] } })
+    api.memberGroupOptions = []
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).not.toBeNull()
     unmount()
   })
 

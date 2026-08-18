@@ -200,6 +200,13 @@ function mockPublishedTemplatePool(
         rowCount: 1,
       }
     }
+    // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+    // effective node operations, which reads the SAME published-definition row through a
+    // narrower projection. Answered from the same fixture — this suite asserts metrics and
+    // publish gates, not the carrier (that is the real-DB lane's job).
+    if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+      return { rows: [] }
+    }
     if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
       return {
         rows: [{
@@ -1060,6 +1067,13 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: [sourceVersion], rowCount: 1 }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return { rows: [], rowCount: 0 }
@@ -3226,6 +3240,13 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
           return { rows: [version], rowCount: 1 }
         }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return { rows: [], rowCount: 0 }
         }
@@ -3897,6 +3918,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -4023,6 +4051,13 @@ describe('ApprovalProductService', () => {
           }],
           rowCount: 1,
         }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
@@ -4175,6 +4210,13 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2')) {
           return { rows: [versionRow], rowCount: 1 }
         }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return { rows: [], rowCount: 0 }
         }
@@ -4269,6 +4311,13 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
           return { rows: [versionRow], rowCount: 1 }
         }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return {
             rows: [{
@@ -4343,6 +4392,13 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
           return { rows: [versionRow], rowCount: 1 }
+        }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
         }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return { rows: [], rowCount: 0 }
@@ -4433,6 +4489,13 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: [{ id: 'ver-2', template_id: 'tpl-1', version: 2, status: 'published', form_schema: { fields: [] }, approval_graph: graph, created_at: new Date(), updated_at: new Date() }], rowCount: 1 }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return { rows: [{ id: 'pub-2', template_id: 'tpl-1', template_version_id: 'ver-2', runtime_graph: graph, is_active: true, published_at: new Date() }], rowCount: 1 }
@@ -4716,6 +4779,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -4816,6 +4886,13 @@ describe('ApprovalProductService', () => {
           }],
           rowCount: 1,
         }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
@@ -4949,6 +5026,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -5065,6 +5149,13 @@ describe('ApprovalProductService', () => {
           }],
           rowCount: 1,
         }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
@@ -5359,6 +5450,13 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: versionRow ? [versionRow] : [], rowCount: versionRow ? 1 : 0 }
+      }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
       }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {

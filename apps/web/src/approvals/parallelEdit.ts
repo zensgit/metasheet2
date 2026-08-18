@@ -180,6 +180,11 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       // guard's job (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`), which sees the actual
       // chosen ids. Authoring/publish cannot, and must not block the shape.
       return null
+    case 'user_group':
+      // Lock-1 §K1 / §2.4 locked entry (backend mirror — keep in lockstep): SORTED so [a,b] and
+      // [b,a] fingerprint identically. Two branches referencing the same group set are provably
+      // identical under EAGER_EXPANSION (the SAME frozen snapshot serves both).
+      return `user_group:${[...source.groupIds].sort().join(',')}`
     default: {
       const _exhaustive: never = source
       return _exhaustive

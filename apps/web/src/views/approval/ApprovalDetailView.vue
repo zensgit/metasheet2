@@ -211,7 +211,7 @@
                   :label="column.label"
                 >
                   <template #default="{ row }">
-                    {{ formatFieldValue(row.cells[column.id]) }}
+                    {{ formatFieldValue(row.cells[column.id], column) }}
                   </template>
                 </el-table-column>
               </el-table>
@@ -507,7 +507,7 @@
                  control is additionally gated on `!isMobileLayout`. 评论 stays
                  visible on both surfaces. -->
             <el-button
-              v-if="canAct && !isMobileLayout && returnableNodes.length > 0"
+              v-if="canAct && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
               type="warning"
               :loading="inFlightAction === 'return'"
               data-testid="approval-return-button"
@@ -516,7 +516,7 @@
               退回
             </el-button>
             <el-button
-              v-if="canAct && !isMobileLayout"
+              v-if="canAct && !isMobileLayout && allowTransfer"
               type="warning"
               :loading="inFlightAction === 'transfer'"
               data-testid="approval-transfer-button"
@@ -526,7 +526,7 @@
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
-              v-if="canAct && !isMobileLayout"
+              v-if="canAct && !isMobileLayout && allowAddSign"
               type="primary"
               plain
               :loading="inFlightAction === 'add_sign'"
@@ -538,7 +538,7 @@
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
             <el-button
-              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0"
+              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
               type="primary"
               plain
               :loading="inFlightAction === 'reduce_sign'"
@@ -737,11 +737,16 @@
             @select="onAddSignUserSelected"
           />
         </el-form-item>
+        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio is RETIRED. Its
+             `前加签` arm claimed corpus C-3 semantics (insert a node BEFORE this one and come back
+             to it) that no shipped path implements — §0.1: both modes seat co-signers at the CURRENT
+             node in the SAME epoch, so outside a parallel region the arms were byte-identical (now
+             pinned by a real-DB test). A radio whose arms cannot be told apart is a fake switch, so
+             the arm is removed rather than relabelled and the surface states what add-sign really
+             does. The wire contract is unchanged: this client sends `'parallel'`, and the server
+             still accepts `'before'` from any other client. -->
         <el-form-item label="加签方式">
-          <el-radio-group v-model="addSignMode" data-testid="approval-add-sign-mode">
-            <el-radio value="parallel">并加签</el-radio>
-            <el-radio value="before">前加签</el-radio>
-          </el-radio-group>
+          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
         </el-form-item>
         <el-form-item label="加签说明">
           <el-input
@@ -906,7 +911,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -934,6 +939,7 @@ import {
   buildDetailRowsForDisplay,
   buildDisplayFields,
   findDetailFieldInSchema,
+  type DetailDisplayColumn,
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
@@ -949,6 +955,8 @@ import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
+import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
@@ -1228,6 +1236,23 @@ const isRequester = computed(() => {
 // instances without a runtime graph. Consumes the existing flag only; no new policy invented.
 const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 
+// Lock-5 §2.3 / gate A-2 — the member-bar mirror of the per-node operation policy.
+//
+// The values are RESOLVED BY THE SERVER (`nodeOperations`, scoped to THIS viewer's own active
+// seats) and merely rendered here. That is the point: §2.3 requires the FE mirror to derive from
+// the SAME config the server enforces, with no second predicate, so the two doors cannot drift.
+// The server remains the authority — hiding a button is never the guard, and a direct HTTP call
+// still gets 409 `APPROVAL_NODE_OPERATION_DISABLED`.
+//
+// ABSENT ≡ ALLOWED (OD-L5-3(a)), deliberately the OPPOSITE of `allowRevoke`'s `=== true`
+// fail-closed idiom above. Copying that idiom would hide all four verbs on every pre-Lock-5
+// instance, on every bridged instance with no runtime graph, and for every seatless viewer.
+const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
+const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
+const allowAddSign = computed(() => nodeOperations.value?.allowAddSign !== false)
+const allowReduceSign = computed(() => nodeOperations.value?.allowReduceSign !== false)
+const allowReturn = computed(() => nodeOperations.value?.allowReturn !== false)
+
 // UX B2-13 (再次提交) — the reject→fix→resubmit loop is a requester's biggest-friction moment
 // today (hand-retype the whole form). Eligible ONLY for the CURRENT USER'S OWN instance (reuses
 // `isRequester` above) in a TERMINAL state that means "this didn't go through and nothing
@@ -1322,12 +1347,20 @@ interface CurrentHandlerEntry {
 }
 
 // `assignment.metadata` carries no display name today — only `assigneeId` (see
-// `ApprovalAssignmentDTO`). This defensively prefers a future `metadata.assigneeName` if the
-// backend ever adds one, else falls back to the raw id — same "don't fetch, just display"
-// convention `reducibleAssignees` already uses above.
+// `ApprovalAssignmentDTO`). Prefers a future `metadata.assigneeName` if the backend ever adds one.
+//
+// P7-R2 gate hardening (P2-2): this used to fall back to the raw `assigneeId`, rendered
+// unconditionally at `当前处理人：{{ entry.label }}` on every PENDING instance with an active user
+// assignment — the single most reachable member-facing raw-id leak found in this file (not an
+// exotic drift shape, the ordinary case). `metadata.assigneeName` has zero producers repo-wide
+// today, so this reachable branch is effectively always the one that renders — never the raw id
+// (values-free doctrine). No richer resolution is available from data already in scope (unlike
+// `cancelledAssigneesLabel` below, this function sees only the ONE assignment row, not the full
+// list, so there is nothing else here to cross-reference).
 function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   const metaName = assignment.metadata.assigneeName
-  return typeof metaName === 'string' && metaName.trim() ? metaName : assignment.assigneeId
+  if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  return '审批人'
 }
 
 // One entry per ACTIVE assignment at the current node(s) — every currently-pending handler, not
@@ -1402,7 +1435,9 @@ const addSignUserIds = ref<string[]>([])
 // lookup, populated from the picker's richer `select` event).
 const addSignPickerValue = ref<string | null>(null)
 const addSignUserLabels = ref<Record<string, string>>({})
-const addSignMode = ref<'before' | 'parallel'>('parallel')
+// Lock-5 B-2: the mode is no longer user-selectable (the retired radio's two arms were
+// byte-identical outside a parallel region). It stays in the SUBMIT PAYLOAD, pinned to the one
+// semantic we implement, so the wire contract is unchanged for the server and for replay.
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
 
@@ -1452,12 +1487,29 @@ const actionDialogTitle = computed(() =>
 // an explicit `false` waives it, so an absent/legacy policy snapshot stays conservative. Scoped to
 // the reject action only; the 通过 dialog's "审批意见" stays optional (mirrors the add-sign
 // disabled-until-complete pattern already used by `submitAddSign`/`submitReduceSign` below).
-const rejectCommentRequired = computed(() =>
-  currentAction.value === 'reject' && approval.value?.policy?.rejectCommentRequired !== false,
-)
-const actionCommentLabel = computed(() => (rejectCommentRequired.value ? '驳回原因（必填）' : '审批意见'))
+// Lock-5 §1.3 / gate CR-3 — derived from the EFFECTIVE (node-level, snapshot-fallback) requirement
+// the server resolved, not from the `policy.rejectCommentRequired` literal. Three values, so the
+// APPROVE side is wired too and not merely relabelled: `'always'` requires a comment on 通过 as well
+// as 驳回, `'reject_only'` reproduces today exactly, `'never'` requires neither. The legacy literal
+// stays the fallback for a bridged/legacy instance that ships no `nodeOperations`.
+const effectiveCommentRequired = computed<'never' | 'reject_only' | 'always'>(() => {
+  const resolved = approval.value?.nodeOperations?.commentRequired
+  if (resolved) return resolved
+  return approval.value?.policy?.rejectCommentRequired === false ? 'never' : 'reject_only'
+})
+const commentRequiredForAction = computed(() => {
+  if (currentAction.value === 'reject') return effectiveCommentRequired.value !== 'never'
+  if (currentAction.value === 'approve') return effectiveCommentRequired.value === 'always'
+  return false
+})
+// Retained name: four template bindings and several specs key on the reject-side meaning.
+const rejectCommentRequired = computed(() => currentAction.value === 'reject' && commentRequiredForAction.value)
+const actionCommentLabel = computed(() => {
+  if (rejectCommentRequired.value) return '驳回原因（必填）'
+  return commentRequiredForAction.value ? '审批意见（必填）' : '审批意见'
+})
 const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? '请填写驳回原因' : '请输入审批意见'))
-const actionConfirmDisabled = computed(() => rejectCommentRequired.value && !actionComment.value.trim())
+const actionConfirmDisabled = computed(() => commentRequiredForAction.value && !actionComment.value.trim())
 
 // B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
 // recently-used phrases (most-recent-first) first, then the fixed preset list, deduped, capped
@@ -1605,17 +1657,61 @@ function approvalModeLabel(mode: string): string {
  * an any-mode (或签) first-wins resolution. Returns empty string when metadata carries no
  * aggregateCancelled list or when the list is empty — callers `v-if` on the truthy string.
  */
+// P7-R2 candidate #2 fix (values-free doctrine, confirmed member-facing raw-id exposure): resolve
+// each cancelled sibling to a display name using ONLY data already in scope (the instance's own
+// `assignments` array) — no new fetch, same "don't fetch, just display" convention as the rest of
+// this file. If EVERY id resolves to a real name, join the names; if any id has no reachable name,
+// fall back to a values-free count instead of a partial name list padded with a repeated generic
+// placeholder (which would read as a formatting bug
+// more than a redaction). Either branch, a raw user id is never rendered.
 function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
   if (!metadata) return ''
   const cancelled = metadata.aggregateCancelled
   if (!Array.isArray(cancelled) || cancelled.length === 0) return ''
-  return `其他审批人已失效: ${cancelled.map((id) => String(id)).join(', ')}`
+  const assignments = approval.value?.assignments ?? []
+  const names: string[] = []
+  for (const id of cancelled) {
+    const match = assignments.find((a) => a.assigneeId === String(id))
+    const metaName = match?.metadata?.assigneeName
+    if (typeof metaName === 'string' && metaName.trim()) {
+      names.push(metaName.trim())
+      continue
+    }
+    // No display name reachable from already-loaded assignment metadata — render a values-free
+    // count rather than ever falling back to the raw id.
+    return `其他 ${cancelled.length} 位审批人已失效`
+  }
+  return `其他审批人已失效: ${names.join('、')}`
 }
 
+// P7-R2 candidate #3 fix (values-free doctrine, HIGHEST PRIORITY confirmed exposure — fires on
+// ordinary template drift, not an exotic shape): prefer the LIVE template's current name (the
+// common case, and the freshest one when the node still exists); when the live template no
+// longer carries this key (renamed/reordered/removed since this row's node ran), fall back to a
+// values-free "节点已变更" — never the raw internal node key (mirrors the "附件已删除" tombstone
+// convention already used for a deleted attachment ref above).
+//
+// P7-R2 gate hardening (P2-1): an earlier revision also tried `pinnedGraph` (the FROZEN template
+// version pinned at instance creation) as a second fallback before the values-free placeholder.
+// That branch is dead for its intended audience: `pinnedGraph` only resolves once
+// `templateStore.activeVersion` loads, and `loadVersion` calls
+// `GET /api/approval-templates/:id/versions/:versionId`, which is
+// `approvalTemplateAdminGuard`-gated (routes/approvals.ts:756, requiring
+// `approval-templates:manage`/`approvals:admin-templates`) — ordinary members never have
+// permission to reach it, so `activeVersion` stays null and `pinnedGraph` null-coalesces straight
+// back to `activeTemplate?.approvalGraph`, the SAME live graph already searched one line above.
+// Removed rather than left as a branch that only ever fires for template admins while its own
+// comment implied it worked for everyone. Showing the historical name to ordinary members is a
+// real enhancement worth having, but it needs the pinned graph exposed on a surface members can
+// already read (e.g. frozen alongside `formSchema` on the instance DTO itself, the way
+// `formSchema` is already frozen from the pinned version without an admin-guarded fetch) — that is
+// backend work and a separate follow-up slice, not something this frontend-only fix can do without
+// adding a new endpoint or widening the admin guard (both out of scope here).
 function nodeLabel(nodeKey: string): string {
   if (!nodeKey) return '-'
-  const node = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
-  return node?.name?.trim() || nodeKey
+  const live = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  if (live?.name?.trim()) return live.name.trim()
+  return '节点已变更'
 }
 
 function formatDate(dateStr: string) {
@@ -1623,10 +1719,50 @@ function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleString('zh-CN')
 }
 
-function formatFieldValue(value: unknown): string {
+// P7-R2 candidate #1 fix (values-free doctrine, confirmed member-facing raw-JSON exposure):
+// detail/sub-form leaf columns are scalar-only by contract (`DETAIL_LEAF_FIELD_TYPES` excludes
+// `record-link`/`detail` nesting), so an object reaching here is either a legacy/malformed
+// snapshot or a richer shape than the leaf contract promises. Never render raw JSON to an
+// ordinary user — surface a known display key if the shape happens to carry one (mirrors
+// `recordLinkField.ts`'s displayValue convention), else a typed, values-free placeholder.
+function objectDisplayValue(value: Record<string, unknown>): string {
+  for (const key of ['displayValue', 'name', 'label', 'title'] as const) {
+    const candidate = value[key]
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return '复杂内容'
+}
+
+// P7-R2 gate hardening (P2-2/P3-2): the array branch used to `.join(', ')` every element
+// verbatim, including a leaf-contract-violating array of raw record/user ids (only `multi-select`
+// legitimately produces an array here, and only as a set of the column's OWN defined option
+// values). A bare string element has no structural signal distinguishing "a raw id" from "a
+// legitimate option value" — resolving that ambiguity with a hand-built id-shape heuristic would
+// be exactly the kind of home-grown normalizer the values-free doctrine warns against. Use the
+// REPO'S OWN whitelist instead: `column.options` (already defined at authoring time for every
+// select/multi-select field). A stored value found in that whitelist renders its label; anything
+// else — including a contract-violating raw id — renders a values-free placeholder, never
+// verbatim. Object elements resolve through the same known-key-or-placeholder logic as a
+// single object value above.
+function formatFieldValue(value: unknown, column?: DetailDisplayColumn): string {
   if (value === null || value === undefined) return '-'
-  if (Array.isArray(value)) return value.join(', ')
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) {
+    const byValue = column?.options?.length
+      ? new Map(column.options.map((opt) => [opt.value, opt.label]))
+      : null
+    return value
+      .map((entry) => {
+        if (byValue) return byValue.get(String(entry)) ?? '未知选项'
+        if (entry !== null && typeof entry === 'object') return objectDisplayValue(entry as Record<string, unknown>)
+        // No options whitelist for this column and a bare (non-object) element — every leaf type
+        // other than `multi-select` expects a single scalar, so an array reaching here at all is
+        // already an anomalous/contract-violating shape; a values-free placeholder is the safe
+        // default rather than trusting an unvalidated element.
+        return '未知选项'
+      })
+      .join(', ')
+  }
+  if (typeof value === 'object') return objectDisplayValue(value as Record<string, unknown>)
   return String(value)
 }
 
@@ -1765,6 +1901,26 @@ async function submitAction() {
   }
 }
 
+/**
+ * Lock-5 §2.3 (gate A-2 residual repair) — the ONE failure path all four deferred member verbs share.
+ *
+ * Factored out after gate finding P3-R1 on PR #4983: the four handlers were hand-copies, so the
+ * mounted pin on `submitTransfer` covered only that one — neutering `submitReturn` alone reded
+ * nothing. One helper means one pin covers all four, and a fifth verb cannot be added with a private
+ * copy of the rule.
+ *
+ * A policy denial is PERMANENT for this node, so it says so (values-free, no 请重试) and CLOSES the
+ * dialog: the old bare `catch {}` discarded the server's code, invited a retry, and every retry
+ * minted another `policy_denied` audit row that D-3 then hides from the timeline. Any OTHER failure
+ * surfaces the SERVER's own message when it has one (`fallback` is used only for a message-less or
+ * non-`Error` throw) and leaves the dialog OPEN, because retrying those is legitimate.
+ */
+function handleMemberActionFailure(error: unknown, fallback: string, dialogVisible: Ref<boolean>): void {
+  const failure = memberActionFailure(error, fallback)
+  ElMessage.error(failure.message)
+  if (failure.isPolicyDenial) dialogVisible.value = false
+}
+
 async function submitTransfer() {
   if (!transferUserId.value) return
   if (inFlightAction.value) return
@@ -1779,8 +1935,8 @@ async function submitTransfer() {
     ElMessage.success('已成功转交')
     transferDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('转交失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1790,7 +1946,6 @@ function openAddSignDialog() {
   addSignUserIds.value = []
   addSignUserLabels.value = {}
   addSignPickerValue.value = null
-  addSignMode.value = 'parallel'
   actionComment.value = ''
   addSignDialogVisible.value = true
 }
@@ -1821,13 +1976,13 @@ async function submitAddSign() {
       action: 'add_sign',
       comment: actionComment.value || undefined,
       targetUserIds: addSignUserIds.value,
-      addSignMode: addSignMode.value,
+      addSignMode: CLIENT_ADD_SIGN_MODE,
     })
     ElMessage.success('已成功加签')
     addSignDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('加签失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1853,8 +2008,8 @@ async function submitReduceSign() {
     ElMessage.success('已成功减签')
     reduceSignDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('减签失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible)
   } finally {
     inFlightAction.value = null
   }
@@ -1898,8 +2053,8 @@ async function submitReturn() {
     ElMessage.success('已退回审批')
     returnDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('退回失败，请重试')
+  } catch (error) {
+    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible)
   } finally {
     inFlightAction.value = null
   }

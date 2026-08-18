@@ -101,15 +101,25 @@ describe('approval history routing', () => {
         total: 2,
       },
     })
+    // Lock-5 gate D-3 (approval-lock5-node-operation-policy-20260817.md §1.4 fact 2): BOTH the
+    // count and the page query now exclude the `action:'policy_denied'` audit row a refused member
+    // operation writes. They must exclude it with the SAME predicate — a count that still counts
+    // denials would silently shift `total` and the page boundaries — so both parameter lists are
+    // pinned here, and the real-DB suite proves the behavioural half end to end.
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
       1,
-      'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1',
-      ['inst-1'],
+      'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
+      ['inst-1', 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('COALESCE(to_version, version) AS version'),
-      ['inst-1', 1, 1],
+      ['inst-1', 1, 1, 'policy_denied'],
+    )
+    expect(pgState.pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('AND action <> $4'),
+      ['inst-1', 1, 1, 'policy_denied'],
     )
   })
 

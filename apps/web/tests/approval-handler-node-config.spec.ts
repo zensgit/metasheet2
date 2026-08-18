@@ -187,23 +187,46 @@ function handlerNode(key = 'handler_h'): ApprovalNode {
 }
 
 describe('Lock-3 handler config surface + inspector tabs', () => {
-  it('G-14: a handler inspector renders exactly 办理人设置 + 表单权限 (no 操作权限)', () => {
+  // Lock-3 G-14 explicitly DEFERRED the 操作权限 tab to Lock-5: "`操作权限` MUST NOT render UNTIL
+  // Lock-5 lands ≥1 functional server-enforced per-node policy — same gate, same mechanism, one more
+  // node type" (Lock-3 §1.5). Lock-5 §1.6 / OD-L5-11(a) has now landed `allowTransfer` for the
+  // handler node type (server-enforced at the §2.1 dispatch choke), so the gate's CONDITION is met
+  // and the tab renders. The mechanism assertion G-14 exists to prove — that the strip is the
+  // registry's doing, not hardcoded — is unchanged and is carried by the empty-registry test below,
+  // which is Lock-5 gate E-1's own positive control.
+  it('G-14 (Lock-5 §1.6 landed): a handler inspector renders 办理人设置 + 表单权限 + 操作权限 with the shipped registry', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
     const c = mountInspector(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
+    const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim())
+    expect(tabs).toEqual(['办理人设置', '表单权限', '操作权限'])
+  })
+
+  it('G-14 mechanism control: a registry declaring NO handler operation policy renders no 操作权限 tab', () => {
+    const registryWithoutOps: ApprovalCapabilityRegistry = {
+      assigneeSourcesByNodeType: { handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler') },
+      operationPoliciesByNodeType: {},
+    }
+    const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
+    const c = mountInspector(handlerNode(), registryWithoutOps, api)
     const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim())
     expect(tabs).toEqual(['办理人设置', '表单权限'])
     expect(c.textContent).not.toContain('操作权限')
   })
 
-  it('G-14 positive control: a registry declaring a handler operation policy DOES render the third 操作权限 tab', () => {
-    const registryWithOps: ApprovalCapabilityRegistry = {
-      assigneeSourcesByNodeType: { handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler') },
-      operationPoliciesByNodeType: { handler: [{ id: 'transfer', label: '允许转交' }] },
-    }
+  // Lock-5 gate F-1 (FE half) — §1.6 / OD-L5-11(a): a handler admits `allowTransfer` ONLY among the
+  // rendered keys. Rendering 允许加签/减签 or 允许回退 here would be M8 theater: Lock-3 §2.2 already
+  // 409s those verbs at a handler node, and the backend authoring choke rejects the keys outright.
+  it('F-1 (FE): the handler 操作权限 tab renders 允许转交 ONLY — never add/reduce-sign or return', async () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
-    const c = mountInspector(handlerNode(), registryWithOps, api)
-    const tabs = Array.from(c.querySelectorAll('[role="tab"]')).map((t) => t.textContent?.trim())
-    expect(tabs).toEqual(['办理人设置', '表单权限', '操作权限'])
+    const c = mountInspector(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
+    ;(c.querySelector('[data-testid="approval-canvas-inspector-tab-operations"]') as HTMLButtonElement).click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const section = c.querySelector('[data-testid="approval-node-section-operations"]') as HTMLElement
+    expect(section).not.toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-transfer"]')).not.toBeNull()
+    expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(1)
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).toBeNull()
   })
 
   it('renders the seven-member handler roster; the mode picker (会签/或签) and 办理意见 opt-in; NO approval-only controls (M7)', () => {

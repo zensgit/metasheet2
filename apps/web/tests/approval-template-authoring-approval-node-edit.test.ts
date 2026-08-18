@@ -284,6 +284,25 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
     })[0]).toMatch(/prior_node_approver/)
   })
+
+  it('Lock-1 §K1: user_group — a non-empty groupIds array passes; empty / blank-only entries are flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: [] }] },
+    })[0]).toMatch(/user_group/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: ['   '] }] },
+    })[0]).toMatch(/user_group/)
+  })
+  // Lock-3 §1.5: user_group (K1) has NO handler row at all (§2.3 registry: "Node types: approval"
+  // only) — a handler carrying it must fail closed.
+  it('Lock-1 §K1 / Lock-3 §1.5: a HANDLER node carrying user_group is rejected (not in the seven-member handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
+    })[0]).toMatch(/user_group/)
+  })
 })
 
 // Lock-1 §K3 — legalPriorApproverNodeKeys: the FE mirror of the backend publish dominance gate
@@ -462,6 +481,18 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   })
   it('K3: a prior_node_approver source with an unknown extra key forces read-only', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_0', futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-1 §K1 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: user_group must be ALLOWED
+  // (present in the allowlist) on the complex path, and an extra key on it must still be caught
+  // (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K1: user_group is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K1: a user_group source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'], futureFlag: true }] })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })

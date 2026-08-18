@@ -419,6 +419,16 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   background: color-mix(in srgb, var(--el-bg-color) 92%, transparent);
   box-shadow: var(--el-box-shadow-lighter);
 }
+/* FAIL-2/V-6 fix (P7-R2, second root cause): these are real `<el-button>`s, so their
+   `:focus-visible` ring does NOT come from a rule in this file at all — it comes from Element
+   Plus's OWN base `.el-button` default, which sets `--el-button-outline-color:
+   var(--el-color-primary-light-5)` (measured 2.14:1 here, same as every other light-5 ring in
+   this component). Overriding the custom property, scoped to just this toolbar, fixes the ring
+   without touching Element Plus's app-wide default for every other plain button in the product —
+   that is a separate, unratified, much larger surface this fix round does not touch. */
+.template-authoring__canvas-toolbar :deep(.el-button) {
+  --el-button-outline-color: var(--el-color-primary);
+}
 .template-authoring__canvas-zoom-label {
   min-width: 58px;
   font-variant-numeric: tabular-nums;
@@ -439,8 +449,15 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   border-radius: 0;
   background: var(--el-fill-color-lighter);
 }
+/* FAIL-2/V-6 fix (P7-R2, 20260818): the previous ring token, `--el-color-primary-light-5`,
+   measured 2.05-2.14:1 against every abutting canvas surface in real Chromium — below the
+   ratified >= 3:1 focus-ring contrast (approval-canvas-v2-interaction-design-lock-20260721.md:412).
+   `--el-color-primary` measured 4.45-5.17:1 on every surface this ring can abut (already the
+   token the passing edge-insert-btn ring below used) — see the P7 phase-A evidence ledger FAIL-2
+   table. UF-6 note: exact color values are recorded in the ledger, not as literals here — this
+   file's own zero-hex-literal guard scans <style> block comment text too. */
 .template-authoring__canvas-viewport:focus-visible {
-  outline: 2px solid var(--el-color-primary-light-5);
+  outline: 2px solid var(--el-color-primary);
   outline-offset: 2px;
 }
 .template-authoring__canvas-stage {
@@ -518,6 +535,17 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
 .template-authoring__canvas-node[data-node-type='parallel'] {
   border-left-color: var(--el-color-info);
 }
+/* FAIL-6 fix (P7-R2, gate fix round): the P4-A slice added the `handler` (办理) node type to the
+   canvas without a per-type accent, so it fell through to the CARD's own default
+   `border-left: 3px solid var(--el-border-color-lighter)` — the only one of seven shipped types
+   with no accent at all. Extends the SAME info-token-sharing trade-off already recorded above for
+   `parallel` (start/end/parallel all already share `--el-color-info`, D0's only hard requirement
+   being that type stays TEXT-carried, never six mutually distinct colors) rather than reaching for
+   `--el-color-danger`/`--el-color-error`, which stay reserved elsewhere in this component for a
+   future validation marker, never a node TYPE. */
+.template-authoring__canvas-node[data-node-type='handler'] {
+  border-left-color: var(--el-color-info);
+}
 /* Selection accent — a ring plus border-color change on the CARD itself, applied uniformly across
    every node type (never a per-type fill). Declared AFTER the per-type accent rules above so its
    equal-specificity `border-left-color` actually wins the cascade instead of being shadowed by the
@@ -542,8 +570,9 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   cursor: pointer;
   outline: none;
 }
+/* FAIL-2/V-6 fix (P7-R2): same light-5 -> primary swap as the viewport ring above. */
 .template-authoring__canvas-node-selector:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--el-color-primary-light-5);
+  box-shadow: inset 0 0 0 2px var(--el-color-primary);
 }
 .template-authoring__canvas-node-summary {
   flex: 1 1 auto;
@@ -621,9 +650,18 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   color: var(--el-text-color-regular);
   border-radius: 6px;
 }
-.template-authoring__canvas-edge-insert-menu button:hover,
+.template-authoring__canvas-edge-insert-menu button:hover {
+  color: var(--el-color-primary);
+}
+/* FAIL-2 sub-finding fix (P7-R2): this selector used to be shared with `:hover` above and set
+   ONLY `color:` — signalling focus by TEXT COLOR alone, no ring (also a §7 checklist "colour is
+   not the sole carrier of state" trip). Split from hover and given its own non-color channel
+   (`outline`) so every `:focus-visible` rule in this file carries a real ring — the hover-only
+   look above is unchanged. */
 .template-authoring__canvas-edge-insert-menu button:focus-visible {
   color: var(--el-color-primary);
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 .template-authoring__canvas-edge-insert-icon {
   width: 32px;
@@ -664,11 +702,19 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
   cursor: pointer;
   font-size: 12px;
 }
-.template-authoring__canvas-move-target:hover,
+.template-authoring__canvas-move-target:hover {
+  border-style: solid;
+  background: var(--el-color-primary-light-9);
+}
+/* FAIL-2 sub-finding fix (P7-R2): this selector used to be shared with `:hover` above and shipped
+   a bare `outline: none` — a removal with no replacement ring. Split from hover and given a real
+   >=3:1 ring (`outline`) so every `:focus-visible` rule in this file carries a non-color channel —
+   the hover-only look above is unchanged. */
 .template-authoring__canvas-move-target:focus-visible {
   border-style: solid;
   background: var(--el-color-primary-light-9);
-  outline: none;
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 .template-authoring__canvas-minimap {
   position: absolute;

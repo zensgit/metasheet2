@@ -235,6 +235,91 @@ Note B13 subsumes B14 for direct and chained memberships (any chain has a
 `pg_auth_members` row touching the candidate); B14 remains as defense in depth, so
 both error messages are listed in Part C.
 
+### B13 caveat — PostgreSQL 16+ `CREATEROLE` auto-grants the membership B13 forbids
+
+**This is the single most likely way a correct-looking DBA procedure fails B13, and
+nothing in the migration says so.**
+
+From PostgreSQL 16 onward, a **non-superuser** role holding `CREATEROLE` is
+automatically granted membership **WITH ADMIN OPTION** in every role it creates. That
+automatic grant is a `pg_auth_members` row whose `roleid` is the newly created role, so
+B13 (`073:508-514`, and the identical preambles at `074:121-127` and `075:164-170`) is
+violated the instant the role exists — even though every one of B4–B12 passes and the
+`CREATE ROLE` statement matched the runbook text character for character.
+
+The related GUC is **`createrole_self_grant`** (also new in 16). Read its default
+carefully before relying on it: it controls only whether `SET` and/or `INHERIT` ride
+along on that automatic grant. It does **not** control whether the `pg_auth_members` row
+exists, and leaving it at its default does **not** suppress the row. Searching for
+`createrole_self_grant` is how most operators will arrive at this section; the setting is
+the signpost, not the fix.
+
+On PostgreSQL 15 and earlier the automatic grant does not happen, which is why a
+procedure that worked on 15 can fail on the same host after a major upgrade.
+
+Detection (run as any role that can read the catalogs, before migrating):
+
+```sql
+SELECT r.rolname, count(m.*) AS membership_rows
+FROM pg_roles r
+LEFT JOIN pg_auth_members m ON m.roleid = r.oid OR m.member = r.oid
+WHERE r.rolname IN ('<RUNTIME_ROLE>', '<PROVISIONING_ROLE>')
+GROUP BY r.rolname;
+```
+
+Both counts must be `0`. Any non-zero count is B13, and migration 073 will abort with
+F4 (`sealed-export role has unsafe authority`) without naming the cause.
+
+Remediation, in order of preference:
+
+1. **Create the two roles as a `SUPERUSER`.** A superuser's `CREATE ROLE` produces no
+   automatic membership on any version. This is what the vitest lane and the CI
+   role-bound arm both do, so it is the path with coverage.
+2. If the roles must be created by a `CREATEROLE` non-superuser, **revoke the automatic
+   grant before migrating** — `REVOKE "<RUNTIME_ROLE>" FROM "<creating-role>";` and the
+   same for the provisioning role — then re-run the detection query and require `0`.
+   Note that revoking the ADMIN OPTION removes the creator's ability to drop or alter
+   that role afterwards on 16+, so confirm the ownership model first.
+
+Do **not** attempt to relax the predicate, and do not edit migration 073, 074 or 075 to
+work around this. Beyond the ordinary rule that applied migrations are not amended, 073
+is a content-digest pin of the frozen S6-A package
+(`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`
+→ `migrations."073"`, asserted by `verifyPinnedMigrations` in
+`sealed-export-package-provenance.cjs`), so a one-byte edit invalidates the package.
+
+**Why this caveat is here and not in the runbook.**
+`docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md` is itself a
+frozen runtime-file pin (`runtimeFiles.s6aOnpremRunbook` in the same pins file, asserted
+by `verifyPinnedRuntimeFiles`), so its §2 cannot be amended without breaking the frozen
+package. This checklist is not pinned and is the correct place for it. Read runbook §2
+for the role-creation procedure and this section for the PostgreSQL 16+ caveat that §2
+predates.
+
+**Where this is now proven.** `.github/workflows/stock-prep-main-package-verify.yml` job
+`migrate-postgres-role-bound` reproduces exactly this on the PG16 and PG17 legs: a
+`CREATEROLE` non-superuser creates the roles with default `createrole_self_grant`, every
+other predicate leg is measured passing on those same roles, and the migration run must
+be REFUSED with `sealed-export role has unsafe authority`. The PG15 leg asserts the
+contrast — no automatic membership — so the version boundary above is measured, not
+assumed.
+
+The same job carries the POSITIVE arm: roles created with §2's attribute set, `PGOPTIONS`
+exported per §2, and then the grants measured directly — which is the only way to
+distinguish "migration recorded" from "grants landed", since the latent branch records the
+migration too and its `NOTICE` is never printed by the Node runner.
+
+It lives in that lane and not in
+`.github/workflows/stock-prep-s6a-postgres17-validation.yml` for a structural reason worth
+knowing before reading either lane's evidence: the frozen S6-A asset the PG17 lane pins
+**predates migrations 074 and 075** (#4695, 2026-08-04 disclosure). Dispatching the
+role-bound arm there failed all three legs at `--confirm 074…` with exit 2, "not found
+among the known migrations" (run 32136846204). A green PG17-lane run therefore says
+nothing about 074/075 at all; only the build-from-commit lane can. The role-bound job
+derives the three ledger names from the packaged migrations directory rather than
+hardcoding them, so this class of mismatch fails loudly at the derive step instead of
+part-way through an assertion.
+
 Consequence of B9 + `db:125-131`: each database URL later supplied to the runtime or
 provisioning path must authenticate **as the role itself**. Connecting as some other
 login and issuing `SET ROLE` fails the readiness assertion, because `session_user`
@@ -256,6 +341,15 @@ recording state with A2.4.
 | F3 | ERROR: `sealed-export role does not exist` | A named role has no `pg_roles` row | Create the missing role first (when authorized), with exactly the Part B attributes; verify with A2.1/A2.2. `073:480-497` |
 | F4 | ERROR: `sealed-export role has unsafe authority` | Any single branch of B4–B13 fails for either role | Run A2.2 to identify which role fails; recreate or `ALTER ROLE`/`REVOKE` (when authorized) until A2.2 shows `true` for both. The message intentionally does not say which branch failed — A2.2 is the diagnostic. `073:498-518` |
 | F5 | ERROR: `sealed-export runtime and provisioning roles must not inherit each other` | `pg_has_role` reachable in either direction between the two roles | Remove the membership path (when authorized); verify with A2.3. `073:521-528` |
+
+**F4 on PostgreSQL 16 or 17 — check B13 first.** F4 covers eight branches with one
+message, and on 16+ the overwhelmingly most common branch is B13, because a
+non-superuser `CREATEROLE` DBA is auto-granted ADMIN OPTION membership in the roles it
+creates. If the roles look correct in every attribute and F4 still fires, run the
+`pg_auth_members` detection query in "B13 caveat — PostgreSQL 16+ `CREATEROLE`
+auto-grants the membership B13 forbids" (Part B) before touching anything else. The
+related setting to search for is `createrole_self_grant`; note that it does not suppress
+the row.
 
 ### C2. Post-migration trigger errors (also `SQLSTATE 55000` — not operator errors)
 

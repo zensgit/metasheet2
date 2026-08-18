@@ -42,7 +42,13 @@ function normalizeId(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
-function metadataFor(source: ApprovalAssigneeSource, sourceIndex: number): ApprovalAssigneeResolutionMetadata {
+function metadataFor(
+  source: ApprovalAssigneeSource,
+  sourceIndex: number,
+  // Lock-1 §K1 — the SPECIFIC group id this member was resolved from (a `user_group` source may
+  // carry multiple `groupIds`; the sourceIndex alone cannot answer "which group").
+  resolvedGroupId?: string,
+): ApprovalAssigneeResolutionMetadata {
   return {
     resolvedFrom: {
       kind: source.kind,
@@ -51,6 +57,7 @@ function metadataFor(source: ApprovalAssigneeSource, sourceIndex: number): Appro
       // Lock-1 §K3 audit: the referenced prior node's key on the row (§2.6 — a template-authored
       // node key, values-free), so "why is this person an approver" is answerable from the row.
       ...(source.kind === 'prior_node_approver' ? { priorNodeKey: source.nodeKey } : {}),
+      ...(source.kind === 'user_group' && resolvedGroupId ? { groupId: resolvedGroupId } : {}),
     },
   }
 }
@@ -130,6 +137,8 @@ export function resolveApprovalAssignees(
     assigneeId: string,
     source: ApprovalAssigneeSource | null,
     sourceIndex: number,
+    // Lock-1 §K1 — see metadataFor's resolvedGroupId param.
+    resolvedGroupId?: string,
   ): void => {
     // Delegation (委托): a resolved USER assignee who is an active delegator routes to
     // the delegatee. Substituted HERE — before the dedup key — so `seen` dedups on the
@@ -150,7 +159,7 @@ export function resolveApprovalAssignees(
     // Legacy (no source) stays metadata-free UNLESS a delegation applied — then it
     // carries `delegatedFrom` only (no `resolvedFrom`, so downstream dynamic-source
     // discriminators still treat it as a legacy/non-dynamic assignment).
-    const base = source ? metadataFor(source, sourceIndex) : undefined
+    const base = source ? metadataFor(source, sourceIndex, resolvedGroupId) : undefined
     const metadata = delegatedFrom ? { ...(base ?? {}), delegatedFrom } : base
     resolved.push({
       assignmentType,
@@ -352,6 +361,31 @@ export function resolveApprovalAssignees(
         if (headId && headId !== requesterId) {
           pushResolved('user', headId, source, sourceIndex)
         }
+        break
+      }
+      case 'user_group': {
+        // Lock-1 §K1 (RATIFIED OD-L1-1(a) EAGER_EXPANSION): resolve to the FROZEN member list of
+        // every referenced group id, read ONLY from the create-time snapshot
+        // (`requesterSnapshot.groupMemberIds`) — no live `platform_member_group_members` read
+        // happens here, so a membership change after create never reaches an in-flight instance
+        // (return/admin-jump/timeout re-resolve the SAME frozen list). A group id absent from the
+        // snapshot (never baked, or deleted after publish) contributes nothing — an empty group is
+        // a normal empty resolution, falling to `emptyAssigneePolicy`, never a resolver-thrown
+        // error (§K1: the org/existence boundary is enforced only at publish). NO self-exclusion
+        // (deliberate — matches `static_user`/`static_role`: a finite explicit membership list, not
+        // an org-hierarchy walk; self-approval semantics stay owned by
+        // `autoApprovalPolicy.mergeWithRequester`). Each member carries `resolvedFrom.groupId` so
+        // "why is this person here" answers WHICH group when a source lists more than one.
+        const rawGroupMap = options.requesterSnapshot?.groupMemberIds
+        const groupMap = isRecord(rawGroupMap) ? rawGroupMap : {}
+        source.groupIds.forEach((groupId) => {
+          const rawMembers = groupMap[groupId]
+          const members = Array.isArray(rawMembers) ? rawMembers : []
+          members.forEach((entry) => {
+            const memberId = normalizeId(entry)
+            if (memberId) pushResolved('user', memberId, source, sourceIndex, groupId)
+          })
+        })
         break
       }
       default:
