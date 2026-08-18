@@ -601,6 +601,21 @@
                 <el-option label="指定层级部门负责人" value="dept_head_at_level" />
                 <el-option label="节点审批人" value="prior_node_approver" />
                 <el-option label="用户组" value="user_group" />
+                <!-- Lock-2 §2.4 C-7 form-schema precondition (D-6): the contact-extension kinds
+                     are OFFERED only when the form declares a user field — the affordance is
+                     schema-selected; a persisted selection stays rendered via the v-if's
+                     already-selected escape so a stored value is never orphaned. The backend
+                     publish validator remains the enforcement. -->
+                <el-option
+                  v-if="userFields.length > 0 || step.sourceKind === 'form_field_user_manager'"
+                  label="表单内联系人上级"
+                  value="form_field_user_manager"
+                />
+                <el-option
+                  v-if="userFields.length > 0 || step.sourceKind === 'form_field_user_dept_head'"
+                  label="表单内联系人部门负责人"
+                  value="form_field_user_dept_head"
+                />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -749,6 +764,33 @@
                 />
               </el-select>
             </el-form-item>
+            <!-- Lock-2 §L2-C (表单内联系人上级/部门负责人) linear authoring: typed field picker
+                 over the form's user fields (never a raw field-id input) + a single level input,
+                 reusing the shared `fieldId` and `level` draft fields. The hint discloses the
+                 publish pins (required + no visibility rule) at authoring time. -->
+            <template v-if="step.sourceKind === 'form_field_user_manager' || step.sourceKind === 'form_field_user_dept_head'">
+              <el-form-item label="表单内联系人字段">
+                <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-contact-field">
+                  <el-option
+                    v-for="field in userFields"
+                    :key="field.id"
+                    :label="fieldDisplayLabel(field)"
+                    :value="field.id"
+                  />
+                </el-select>
+                <p class="template-authoring__hint" data-testid="approval-step-contact-field-hint">所选联系人字段须为必填且不带显示条件，发布时校验</p>
+              </el-form-item>
+              <el-form-item :label="step.sourceKind === 'form_field_user_manager' ? '指定联系人上级层级' : '指定联系人部门负责人层级'">
+                <el-input-number
+                  v-model="step.level"
+                  :min="1"
+                  :max="10"
+                  :step="1"
+                  :disabled="readOnly"
+                  data-testid="approval-step-contact-level"
+                />
+              </el-form-item>
+            </template>
             <!-- Lock-1 §K2 (提交人自选) linear authoring: mode + scope with typed pickers only
                  (the scope id list rides the shared idsText chip carrier via stepIds/setStepIds). -->
             <el-form-item v-if="step.sourceKind === 'requester_choice'" label="选择方式">
@@ -2432,6 +2474,10 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
             : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
               // Lock-1 §K4: same default shape as continuous_managers.
               : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                // Lock-2 §L2-C: field picker + single level — fieldId starts unchosen ('' is
+                // invalid to save; the picker must be used) and level defaults to 1 (直属).
+                : kind === 'form_field_user_manager' ? { kind, fieldId: '', level: 1 }
+                  : kind === 'form_field_user_dept_head' ? { kind, fieldId: '', level: 1 }
                 // Lock-1 §K5-b: same default shape as manager_at_level.
                 : kind === 'dept_head_at_level' ? { kind, level: 1 }
                   // Lock-1 §K3: '' = not yet chosen — invalid to save until the typed picker
@@ -3089,9 +3135,18 @@ function setApprovalSourceIdsFromPicker(nodeKey: string, sourceIndex: number, id
 }
 function approvalSourceFieldId(nodeKey: string, sourceIndex: number): string {
   const source = approvalNodeSourceAt(nodeKey, sourceIndex)
-  return source?.kind === 'form_field_user' ? source.fieldId : ''
+  if (source?.kind === 'form_field_user') return source.fieldId
+  // Lock-2 §L2-C: the contact-extension kinds carry a fieldId too (field picker + level).
+  if (source?.kind === 'form_field_user_manager' || source?.kind === 'form_field_user_dept_head') return source.fieldId
+  return ''
 }
 function setApprovalSourceFieldId(nodeKey: string, sourceIndex: number, fieldId: string): void {
+  const current = approvalNodeSourceAt(nodeKey, sourceIndex)
+  // Lock-2 §L2-C: preserve the kind + configured level — only the referenced field changes.
+  if (current?.kind === 'form_field_user_manager' || current?.kind === 'form_field_user_dept_head') {
+    setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: current.kind, fieldId, level: current.level })
+    return
+  }
   setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'form_field_user', fieldId })
 }
 function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
@@ -3102,6 +3157,8 @@ function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
   if (source?.kind === 'continuous_dept_heads') return source.levels
   // Lock-1 §K5-b: same shared-field shape as manager_at_level.
   if (source?.kind === 'dept_head_at_level') return source.level
+  // Lock-2 §L2-C: the contact-extension kinds carry a single level beside their fieldId.
+  if (source?.kind === 'form_field_user_manager' || source?.kind === 'form_field_user_dept_head') return source.level
   return 1
 }
 function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: number): void {
@@ -3110,6 +3167,12 @@ function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: num
   else if (kind === 'continuous_managers') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
   else if (kind === 'continuous_dept_heads') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
   else if (kind === 'dept_head_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
+  else if (kind === 'form_field_user_manager' || kind === 'form_field_user_dept_head') {
+    // Lock-2 §L2-C: preserve the configured fieldId — only the level changes.
+    const current = approvalNodeSourceAt(nodeKey, sourceIndex)
+    const fieldId = current?.kind === kind ? current.fieldId : ''
+    setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, fieldId, level: value })
+  }
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
@@ -3131,12 +3194,14 @@ const fieldPermissionFields = computed(() => draft.value.fields.filter((field) =
 // condition because they read the identical Set, not two independently-derived ones.
 const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
+  const driverKinds = new Set(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'])
   for (const step of draft.value.steps) {
-    if (step.sourceKind === 'form_field_user' && step.fieldId.trim()) ids.add(step.fieldId.trim())
+    if (driverKinds.has(step.sourceKind) && step.fieldId.trim()) ids.add(step.fieldId.trim())
   }
   for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
     for (const source of edit.assigneeSources) {
-      if (source.kind === 'form_field_user' && source.fieldId.trim()) ids.add(source.fieldId.trim())
+      // Lock-2 §L2-C: the contact-extension kinds reference a driver field too — same hint.
+      if ((source.kind === 'form_field_user' || source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') && source.fieldId.trim()) ids.add(source.fieldId.trim())
     }
   }
   return ids

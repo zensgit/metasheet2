@@ -28,6 +28,11 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
     case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`
     case 'continuous_dept_heads': return `连续多级部门负责人（${source.levels} 级）`
     case 'dept_head_at_level': return `指定层级部门负责人（第 ${source.level} 级）`
+    // Lock-2 §L2-C: the concrete person derives from the contact chosen in the referenced form
+    // field at submit time — the summary names the template-authored field id + level (values-free;
+    // never a person id), mirroring the shipped form_field_user summary's field-id posture.
+    case 'form_field_user_manager': return `表单内联系人上级：${source.fieldId}（第 ${source.level} 级）`
+    case 'form_field_user_dept_head': return `表单内联系人部门负责人：${source.fieldId}（第 ${source.level} 级）`
     // Lock-1 §K2: pre-choice placeholder — the approver is unknowable until the requester
     // chooses at submit time, so the flow/route preview says exactly that.
     case 'requester_choice': return '提交人自选（提交时选择）'

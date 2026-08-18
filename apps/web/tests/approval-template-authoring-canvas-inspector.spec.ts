@@ -994,7 +994,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all thirteen assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all fifteen assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -1024,11 +1024,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // "Admitted when: OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed").
       // The cc-as-recipient row (OD-L1-7) is a SEPARATE row NOT admitted by this slice.
       user_group: '用户组',
+      // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
+      // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
+      // fieldDerivedAssigneeIds snapshot end to end (Lock-2 §2.4 table).
+      form_field_user_manager: '表单内联系人上级',
+      form_field_user_dept_head: '表单内联系人部门负责人',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 14th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 16th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(13)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(15)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1928,17 +1933,21 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the thirteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the fifteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
     // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
-    // `dept_head_at_level`, K3 `prior_node_approver`, K1 `user_group`.
-    const CANONICAL_THIRTEEN = [
+    // `dept_head_at_level`, K3 `prior_node_approver`, K1 `user_group`; Lock-2 §2.4 adds the
+    // contact-derived pair `form_field_user_manager` / `form_field_user_dept_head` in the SAME
+    // slice as the kinds.
+    const CANONICAL_FIFTEEN = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
       'dept_head_at_level',
       'direct_manager',
       'form_field_user',
+      'form_field_user_dept_head',
+      'form_field_user_manager',
       'manager_at_level',
       'prior_node_approver',
       'requester',
@@ -1947,10 +1956,14 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       'static_user',
       'user_group',
     ]
+    // Lock-2 §2.4 hazard closure: the roster ORDER array and the LABELS record must name the
+    // exact same kind set — a kind present in the labels record but absent from the order array
+    // used to render with a green build and a green suite; this set-equality makes that red.
+    expect([...Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)].sort()).toEqual(CANONICAL_FIFTEEN)
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_THIRTEEN)
+    expect(roster).toEqual(CANONICAL_FIFTEEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1963,7 +1976,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_THIRTEEN)
+    expect(rendered).toEqual(CANONICAL_FIFTEEN)
     unmount()
   })
 
@@ -2025,6 +2038,28 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
+  // Lock-2 §L2-C — the contact-extension pair's authoring sub-form (canvas/graph inspector
+  // surface): registry-admitted, renders EDITABLE with the TYPED contact-field picker (a select
+  // over the form's user fields — never a raw field-id input) PLUS the single level input, the
+  // publish-pins disclosure hint, and no unknown-kind warning. Both kinds share one sub-form.
+  it('K6: form_field_user_manager renders EDITABLE with the contact-field picker + level input (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_ffum')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ffum: { assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'reviewer', level: 2 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-contact-level"]')).not.toBeNull()
+    // OD-L2-4 authoring-copy disclosure: the pins hint renders with the picker.
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field-hint"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
   it('K1: user_group with zero bound options shows the honest empty-roster hint, not an inert control', () => {
     const node = makeApprovalNode('approval_ug_empty')
     const api = createStubConfigApi({ approval_ug_empty: { assigneeSources: [{ kind: 'user_group', groupIds: [] }] } })
@@ -2036,6 +2071,63 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     })
     expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).not.toBeNull()
     unmount()
+  })
+
+  it('K6: form_field_user_dept_head renders EDITABLE with the same contact sub-form (pointer-distinct kind, same shape)', () => {
+    const node = makeApprovalNode('approval_ffudh')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ffudh: { assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'reviewer', level: 1 }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-contact-field"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-contact-level"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
+  // OFFERED only when the form declares an eligible user field — the affordance is
+  // schema-selected. Negative arm: no user field → neither radio renders (while the rest of the
+  // roster still does — the filter is kind-selected, not blanket). Positive control: the SAME
+  // node with a user field present renders both. Already-configured escape: a node ALREADY
+  // carrying the kind keeps its radio even with zero user fields, so a persisted value is never
+  // orphaned by a later form edit.
+  it('D-6: contact-extension kinds are schema-selected — absent without a user field, present with one, and a configured source survives field removal', () => {
+    const node = makeApprovalNode('approval_d6')
+    const apiNoUserFields = createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    apiNoUserFields.userFields = []
+    const bare = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: apiNoUserFields })
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]')).toBeNull()
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).toBeNull()
+    // kind-selected, not blanket: the rest of the roster still renders.
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-direct_manager"]')).not.toBeNull()
+    expect(bare.container.querySelector('[data-testid="approval-node-source-kind-form_field_user"]')).not.toBeNull()
+    bare.unmount()
+
+    // Positive control: with a user field declared, both radios render (schema-selected).
+    const withField = mountDirectInspector({
+      node: makeApprovalNode('approval_d6'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'direct_manager' }] } }),
+    })
+    expect(withField.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]')).not.toBeNull()
+    expect(withField.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).not.toBeNull()
+    withField.unmount()
+
+    // Already-configured escape: zero user fields but the node ALREADY carries the kind — its
+    // radio stays (checked), while the OTHER unconfigured extension kind stays absent.
+    const apiConfigured = createStubConfigApi({ approval_d6: { assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'gone', level: 1 }] } })
+    apiConfigured.userFields = []
+    const configured = mountDirectInspector({ node: makeApprovalNode('approval_d6'), registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: apiConfigured })
+    const kept = configured.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_manager"]') as HTMLInputElement
+    expect(kept).not.toBeNull()
+    expect(kept.checked).toBe(true)
+    expect(configured.container.querySelector('[data-testid="approval-node-source-kind-form_field_user_dept_head"]')).toBeNull()
+    configured.unmount()
   })
 
   // Lock-1 §K3 — prior_node_approver authoring sub-form: registry-admitted, renders EDITABLE with

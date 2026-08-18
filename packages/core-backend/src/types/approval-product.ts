@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -36,6 +36,15 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'direct_manager',
   'dept_head',
   'manager_at_level',
+  // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows are ratified for node types
+  // `approval` AND `handler` ("The handler rows are corpus-evidenced, not an M11 widening (C-6);
+  // Lock-3 §1.5's forward-row sentence names only 表单内部门 although its own roster lists
+  // 表单内联系人, so the two contact-derived rows supply what fell between the locks"). Each row
+  // lands in the SAME slice as its kind, so the exact-set roster grows 7→9 here — deliberately,
+  // with the G-13 exact-set tests updated in the same commit (they exist to make this growth a
+  // reviewed decision, not to forbid ratified rows).
+  'form_field_user_manager',
+  'form_field_user_dept_head',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 
@@ -431,6 +440,49 @@ export type ApprovalAssigneeSource =
    * this shape — deferred to its own slice (§K1 "cc is a second contract, not a rider").
    */
   | { kind: 'user_group'; groupIds: string[] }
+  /**
+   * Lock-2 §L2-C — 表单内联系人上级 (C-3 联系人上级): the person chosen in a `user` form field is
+   * the ANCHOR, and the source resolves that person's manager at chain position `level` (level 1 =
+   * the chosen anchor's own direct manager) via the `leader_in_dept` LEADER pointer — the SAME
+   * walk `resolveManagerChain` performs for the requester-anchored kinds, re-anchored on the
+   * chosen contact. FIELD-anchored, not requester-anchored: mutating the REQUESTER's own org
+   * relations never changes the resolution; mutating the CHOSEN contact's relations changes only
+   * NEWLY created approvals (freeze-at-create).
+   *
+   * Freeze semantics (Lock-2 §0 Correction 2 — submit IS create): the chosen contact travels in
+   * the create payload, so the create path resolves the extension AT CREATE from the directory and
+   * freezes the resolved ids into `ApprovalRequesterSnapshot.fieldDerivedAssigneeIds`, keyed by
+   * this source's fingerprint (`form_field_user_manager:<fieldId>:<level>`). The resolver reads
+   * ONLY that frozen map — no live directory read at dispatch/return/admin-jump/timeout (§2.1).
+   * `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time; UPWARD only in v1
+   * (the downward variant stays blocked on Lock-1 OD-L1-6, inherited not re-owned).
+   * Publish pins (§L2-C): the referenced field must exist TOP-LEVEL, be `type: 'user'`,
+   * `required: true`, carry NO `visibilityRule`, and not declare `selection: 'multi'` (OD-L2-7).
+   * A value present but resolving to nobody (contact without a directory account, chain shorter
+   * than `level`) is EMPTY resolution → `emptyAssigneePolicy` (§2.6); an empty referenced field is
+   * the independent create-time 422 `APPROVAL_FORM_ROUTING_FIELD_EMPTY` (§2.2 door 2); a failed
+   * directory read/misconfigured routing policy is the fail-closed create wedge (§2.3) — three
+   * different things, never conflated. NO requester self-exclusion (deliberate, §L2-C: shipped
+   * `dept_head`'s requester-exclusion is a requester-anchored artifact; same-person composes
+   * through `autoApprovalPolicy.mergeWithRequester`).
+   */
+  | { kind: 'form_field_user_manager'; fieldId: string; level: number }
+  /**
+   * Lock-2 §L2-C — 表单内联系人部门负责人 (C-3 联系人部门负责人): the chosen contact's PRIMARY
+   * department, then the department PARENT tree (`external_parent_department_id`), reading
+   * `dept_manager_userid_list` per level — the SAME walk K4's `resolveDeptHeadChain` performs for
+   * the requester, re-anchored on the chosen contact; level 1 = the chosen anchor's own listed
+   * department head. Lock-1 §K4's RATIFIED continue-past-empty-level posture BINDS this walk (a
+   * level whose manager list is empty or resolves to no linked local user contributes nothing and
+   * the walk CONTINUES upward — the chain is DENSE, so `level` addresses the level-th *resolved*
+   * head walking up, exactly as `dept_head_at_level` does over the requester's chain). A DIFFERENT
+   * pointer from `form_field_user_manager` (leader pointer vs parent tree — the two coincide only
+   * where every department's leader is also its listed manager). Everything else — freeze into
+   * `fieldDerivedAssigneeIds` at create keyed by `form_field_user_dept_head:<fieldId>:<level>`,
+   * publish pins, door-2 empty-field 422, fail-closed wedge, no requester self-exclusion, upward
+   * only — is identical to the `form_field_user_manager` doc comment above.
+   */
+  | { kind: 'form_field_user_dept_head'; fieldId: string; level: number }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -445,6 +497,12 @@ export interface ApprovalAssigneeResolutionMetadata {
     kind: ApprovalAssigneeSourceKind
     sourceIndex: number
     fieldId?: string
+    /**
+     * Lock-2 §2.6 (`form_field_user_manager` / `form_field_user_dept_head`): the configured chain
+     * level this seat was resolved at, so "why is this person an approver" is answerable from the
+     * row alone. Template-authored (values-free); rides beside the existing optional `fieldId`.
+     */
+    level?: number
     /**
      * Lock-1 §K3 (`prior_node_approver` only): the referenced prior node's key, so "why is this
      * person an approver" is answerable from the row alone (§2.6 — a template-authored node key,
@@ -674,6 +732,21 @@ export interface ApprovalRequesterSnapshot {
    * snapshots omit it.
    */
   groupMemberIds?: Record<string, string[]>
+  /**
+   * Lock-2 §L2-C (form-field contact extensions) — the FROZEN field-derived resolution map:
+   * source fingerprint (`form_field_user_manager:<fieldId>:<level>` /
+   * `form_field_user_dept_head:<fieldId>:<level>`, see `fieldDerivedAssigneeSourceKey`) → resolved
+   * local user ids, resolved AT CREATE from the person chosen in the referenced `user` form field
+   * (submit IS create — Lock-2 §0 Correction 2) and never re-read afterwards. Keyed by fingerprint
+   * so identical sources share ONE entry and the resolver stays a pure map lookup (§2.1 — no
+   * resolver-internal database access; dispatch/return/admin-jump/timeout never touch the
+   * directory). OPT-IN: present only when the published runtime graph carries such a source
+   * (unrelated approvals pay nothing). An entry that is an EMPTY array means the create-time read
+   * ran and resolved nobody (contact without a directory account, chain shorter than the
+   * configured level) — EMPTY resolution falling to `emptyAssigneePolicy` (§2.6); a FAILED read
+   * never reaches this map (the create wedge fails closed 422/503 before any insert, §2.3).
+   */
+  fieldDerivedAssigneeIds?: Record<string, string[]>
   [key: string]: unknown
 }
 

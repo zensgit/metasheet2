@@ -278,6 +278,15 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
     // normalizeApprovalAssigneeSources stays the arbiter on the ceiling).
     case 'dept_head_at_level':
       return Number.isInteger(source.level) && source.level >= 1
+    // Lock-2 §L2-C PREVIEW: a non-empty fieldId referencing a TOP-LEVEL `user` field (the shipped
+    // form_field_user posture) plus a level integer ≥ 1 (backend normalizeApprovalAssigneeSources
+    // stays the arbiter on the ceiling; the required/visibility/selection pins are the backend
+    // publish validator's job — the FE field picker only OFFERS eligible fields).
+    case 'form_field_user_manager':
+    case 'form_field_user_dept_head':
+      if (source.fieldId.trim().length === 0) return false
+      if (!Number.isInteger(source.level) || source.level < 1) return false
+      return topLevelUserFieldIds ? topLevelUserFieldIds.has(source.fieldId.trim()) : true
     // Lock-1 §K3 PREVIEW: a non-empty referenced node key. Whether the reference is legal
     // (an approval node strictly upstream on every runtime-reachable path) is the backend
     // PUBLISH gate's job (`assertPriorNodeApproverReferencesUpstream`); the FE picker only

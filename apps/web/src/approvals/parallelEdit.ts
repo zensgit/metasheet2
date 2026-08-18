@@ -170,6 +170,13 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
+    // Lock-2 §2.5 locked entries — `<kind>:<fieldId>:<level>`, provably identical for the same
+    // field and level. Backend mirror: ApprovalAssigneeResolver.fieldDerivedAssigneeSourceKey
+    // (consumed by BOTH the backend fingerprint and the frozen-snapshot key) — keep in lockstep.
+    case 'form_field_user_manager':
+      return `form_field_user_manager:${source.fieldId.trim()}:${source.level}`
+    case 'form_field_user_dept_head':
+      return `form_field_user_dept_head:${source.fieldId.trim()}:${source.level}`
     case 'static_user':
     case 'static_role':
       return null

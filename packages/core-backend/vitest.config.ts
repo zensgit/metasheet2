@@ -364,6 +364,16 @@ export default defineConfig({
       // plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both points land in
       // the SAME commit.
       'tests/integration/approval-user-group.db.test.ts',
+      // Lock-2 §L2-C form-field contact extensions (form_field_user_manager /
+      // form_field_user_dept_head) real-DB acceptance (choke, publish pins C-1/C-2, door-2 422,
+      // create-time freeze + dispatch over both pointers, C-4 distinctness, empty-vs-wedge split,
+      // D-4 freeze purity, D-2 wedge, handler admission). DATABASE_URL-gated; excluded here so
+      // the no-DB default job cannot collect-and-skip-green it, and carried by the SAME dedicated
+      // .github/workflows/approval-realdb-acceptance.yml workflow (sibling job
+      // approval-realdb-k6-contact, EXPECT_DB=1 arming the top-level anti-skip sentinel) —
+      // plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both points land in
+      // the SAME commit.
+      'tests/integration/approval-form-contact-extensions.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

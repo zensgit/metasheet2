@@ -18,7 +18,7 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 // P1-C (approval-parity-master-design-lock-20260817.md §P1-C / M6): 'threshold' is the shipped
 // ENGINE 4th mode (N-of-M / 门槛会签, ApprovalGraphExecutor.ts `normalizeApprovalMode`) — this type
 // was FE-unexposed until this slice. Byte-mirrors backend packages/core-backend/src/types/
@@ -75,6 +75,12 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'direct_manager',
   'dept_head',
   'manager_at_level',
+  // Lock-2 §2.4 (RATIFIED 2026-08-17): the two contact-derived rows are ratified for node types
+  // `approval` AND `handler` (corpus C-6; Lock-2 resolves the between-locks gap Lock-3 §1.5 left —
+  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grows the
+  // exact set 7→9 in the SAME slice as the kinds, with the G-13 exact-set tests updated together.
+  'form_field_user_manager',
+  'form_field_user_dept_head',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 // Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
@@ -302,6 +308,26 @@ export type ApprovalAssigneeSource =
    * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
    */
   | { kind: 'user_group'; groupIds: string[] }
+  /**
+   * Lock-2 §L2-C — 表单内联系人上级 (C-3 联系人上级). Byte-mirrors the backend union member: the
+   * person chosen in the referenced TOP-LEVEL `user` field is the ANCHOR, and the source resolves
+   * that person's manager at chain position `level` (level 1 = the anchor's own direct manager)
+   * via the `leader_in_dept` LEADER pointer, resolved AND FROZEN at create (submit IS create) into
+   * the instance snapshot — never re-read at dispatch. Publish pins: the field must exist
+   * top-level, be `type: 'user'`, `required: true`, carry NO `visibilityRule`, and not declare
+   * `selection: 'multi'`. Authoring shape = field picker + a single level input (upward only in
+   * v1; downward stays blocked on Lock-1 OD-L1-6).
+   */
+  | { kind: 'form_field_user_manager'; fieldId: string; level: number }
+  /**
+   * Lock-2 §L2-C — 表单内联系人部门负责人 (C-3 联系人部门负责人). Same anchor and freeze semantics
+   * as `form_field_user_manager` above, but a DIFFERENT pointer: the chosen contact's PRIMARY
+   * department, then the department PARENT tree reading `dept_manager_userid_list` per level
+   * (K4's walker re-anchored; the ratified continue-past-empty-level posture binds it — the chain
+   * is DENSE, so `level` addresses the level-th *resolved* head walking up). Same publish pins,
+   * same field-picker + level-input authoring shape.
+   */
+  | { kind: 'form_field_user_dept_head'; fieldId: string; level: number }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 

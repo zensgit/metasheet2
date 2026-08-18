@@ -46,6 +46,12 @@ describe('assigneeSourceSummary (single source)', () => {
     expect(assigneeSourceSummary({ kind: 'continuous_dept_heads', levels: 3 })).toBe('连续多级部门负责人（3 级）')
   })
 
+  it('form_field_user_manager: names the template-authored field id + level, never a person id (Lock-2 §L2-C)', () => {
+    expect(assigneeSourceSummary({ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 })).toBe('表单内联系人上级：contact（第 2 级）')
+  })
+  it('form_field_user_dept_head: names the template-authored field id + level, never a person id (Lock-2 §L2-C)', () => {
+    expect(assigneeSourceSummary({ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 })).toBe('表单内联系人部门负责人：contact（第 1 级）')
+  })
   it('dept_head_at_level: includes the specific level (Lock-1 §K5-b)', () => {
     expect(assigneeSourceSummary({ kind: 'dept_head_at_level', level: 2 })).toBe('指定层级部门负责人（第 2 级）')
   })

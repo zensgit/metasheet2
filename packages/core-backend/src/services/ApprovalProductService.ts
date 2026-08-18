@@ -3,6 +3,7 @@ import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
   ApprovalAssigneeSource,
+  ApprovalAssigneeSourceKind,
   ApprovalAutoApprovalReason,
   AutoApprovalActorMode,
   AutoApprovalMergeReason,
@@ -76,7 +77,7 @@ import {
   resolveVisibilityFieldReference,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
-import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import {
@@ -801,6 +802,32 @@ function normalizeApprovalAssigneeSources(
           kind: 'form_field_user',
           fieldId: source.fieldId.trim(),
         }
+      case 'form_field_user_manager':
+      case 'form_field_user_dept_head': {
+        // Lock-2 §L2-C + the Lock-1 G-1 posture for NEW kinds: exact-shape validation — unknown
+        // extra keys are REJECTED, never silently dropped; `fieldId` is a required non-empty
+        // string; `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` byte-identically to the
+        // shipped level-addressed kinds (out-of-range / non-integer / missing is rejected, never
+        // silently defaulted — enum-strictness). This normalize runs on save, publish, and
+        // restore, so pin (5) (level in range) holds on every stored graph. Whether the
+        // referenced field exists top-level, is a `user` field, is required, and carries no
+        // visibilityRule is the cross-schema validator's job
+        // (`validateApprovalAssigneeSourcesAgainstFormSchema` — pins (1)-(4)+(6)); normalize
+        // stays a shape check so stored drafts remain readable/re-saveable while being fixed.
+        const kind = source.kind as 'form_field_user_manager' | 'form_field_user_dept_head'
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'fieldId', 'level'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for ${kind}`)
+        }
+        if (!isNonEmptyString(source.fieldId)) {
+          failValidation(context, `${sourcePath}.fieldId is required`)
+        }
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind, fieldId: source.fieldId.trim(), level }
+      }
       case 'requester_choice': {
         // Lock-1 §K2 + G-1: exact-shape validation — mode enum, scope discriminated by type,
         // and (stricter than the shipped kinds, per the Lock-1 G-1 gate for NEW kinds) unknown
@@ -869,13 +896,64 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
     if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
-      if (source.kind !== 'form_field_user') continue
-      const field = fieldById.get(source.fieldId)
-      if (!field || field.type !== 'user') {
-        failValidation(
-          context,
-          `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
-        )
+      if (source.kind === 'form_field_user') {
+        const field = fieldById.get(source.fieldId)
+        if (!field || field.type !== 'user') {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
+          )
+        }
+        continue
+      }
+      // Lock-2 §L2-C publish pins for the form-field contact extensions — closing the silent-skip
+      // this loop otherwise carries for every non-form_field_user kind (the kind-axis twin of
+      // Lock-3 R-10's node-type axis on this same function). Pins, in order:
+      //   (1) the referenced field exists and is TOP-LEVEL only (`fieldById` maps top-level fields
+      //       only — a detail sub-field has N row-values and is ambiguous as a single approver);
+      //   (2) the field's type is `user`;
+      //   (3) `required: true` — alone it closes nothing, because `validateApprovalFormData`
+      //       enforces `required` for VISIBLE fields only;
+      //   (4) NO `visibilityRule` — which makes the (3)+(4) pair provably sufficient: a field with
+      //       no rule is visible on both visibility passes regardless of data (OD-L2-5(a); the
+      //       independent create-time door 2 — APPROVAL_FORM_ROUTING_FIELD_EMPTY — backs this pair
+      //       so neither door covers for the other);
+      //   (5) `level` in range — enforced by `normalizeApprovalAssigneeSources`, which runs on
+      //       every save/publish/restore path ahead of this validator;
+      //   (6) the field must not declare `selection: 'multi'` until OD-L2-7's array support lands
+      //       in the SAME slice as the prop (props are unvalidated free text today, so the pin
+      //       reads the key defensively rather than trusting a typed carrier).
+      // NOTE (OD-L2-4, deliberately deferred): the ratified required-pin RETROFIT onto the shipped
+      // `form_field_user` arm above applies "to all four kinds at the next save/publish" and lands
+      // in its own slice with the authoring-copy disclosure — this slice pins only the kinds it
+      // ships, and the shipped arm keeps its shipped acceptance until that slice lands.
+      if (source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') {
+        const field = fieldById.get(source.fieldId)
+        if (!field || field.type !== 'user') {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a top-level user field`,
+          )
+        }
+        if (field.required !== true) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a required user field`,
+          )
+        }
+        if (field.visibilityRule !== undefined) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a field with a visibility rule`,
+          )
+        }
+        if (isRecord(field.props) && field.props.selection === 'multi') {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a multi-select user field`,
+          )
+        }
+        continue
       }
     }
   })
@@ -2096,6 +2174,14 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId}`
+    case 'form_field_user_manager':
+    case 'form_field_user_dept_head':
+      // Lock-2 §2.5 locked entries: `<kind>:<fieldId>:<level>` — provably identical for the same
+      // field and level (the same chosen contact walks the same chain to the same position on
+      // every request), so identical sources on parallel branches are publish-blocked, unlike
+      // K2's deliberate `null`. Delegates to the SAME exported producer the create-time snapshot
+      // freeze and the resolver arms use, so fingerprint and snapshot key cannot drift.
+      return fieldDerivedAssigneeSourceKey(source)
     case 'static_user':
     case 'static_role':
       // Statics are owned by collectBranchAssignees' duplicate check, not this gate.
@@ -3881,6 +3967,86 @@ function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | nu
 }
 
 /**
+ * Lock-2 §2.3 (locked refactor, performed by the first slice to land after the lock): the per-kind
+ * capability traits that drive the create-time detectors below. The detectors used to be FOUR
+ * hand-maintained `||` chains over the same kinds ("hand-maintained disjunctions in four places do
+ * not converge") — each detector's kind set is now DERIVED from this ONE table, and the table is a
+ * `Record` over the full `ApprovalAssigneeSourceKind` union, so adding a kind without classifying
+ * it is a COMPILE error here (the same enforcement posture as the fingerprint `_exhaustive`
+ * guard). A mechanical exact-set test pins each derived set; editing a trait row — touching no
+ * detector — reds that test (Lock-2 gate D-3's "the set must first be proven DERIVED" arm).
+ *
+ * Traits:
+ *  - `requesterOrgRead`  — resolves from the REQUESTER's create-frozen org relations; arms the
+ *                          B5-b org-read fail-closed wedge (`runtimeGraphUsesOrgAssigneeSource`).
+ *  - `managerChain`      — consumes the requester `managerChainIds` snapshot (opt-in
+ *                          `includeManagerChain` bake).
+ *  - `deptHeadChain`     — consumes the requester `deptHeadChainIds` snapshot (opt-in
+ *                          `includeDeptHeadChain` bake).
+ *  - `fieldDerivedOrgRead` — Lock-2 §L2-C: resolves from a FORM-FIELD-CHOSEN principal's org
+ *                          relations at create (its OWN detector + wedge — deliberately NOT an
+ *                          extension of `runtimeGraphUsesOrgAssigneeSource`, which gates whether
+ *                          the REQUESTER's relations are read: folding these in would make every
+ *                          such template pay a requester org read it does not need, while omitting
+ *                          them would leave the new reads uncovered by any wedge).
+ */
+interface ApprovalAssigneeSourceKindTraits {
+  requesterOrgRead: boolean
+  managerChain: boolean
+  deptHeadChain: boolean
+  fieldDerivedOrgRead: boolean
+}
+
+const NO_ORG_TRAITS: ApprovalAssigneeSourceKindTraits = {
+  requesterOrgRead: false,
+  managerChain: false,
+  deptHeadChain: false,
+  fieldDerivedOrgRead: false,
+}
+
+export const APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS: Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSourceKindTraits> = {
+  static_user: NO_ORG_TRAITS,
+  static_role: NO_ORG_TRAITS,
+  requester: NO_ORG_TRAITS,
+  // Shipped form_field_user resolves the chosen person THEMSELVES from the form snapshot — no
+  // directory read at all, so no org trait (C-3's 联系人自己 needs no extension machinery).
+  form_field_user: NO_ORG_TRAITS,
+  direct_manager: { ...NO_ORG_TRAITS, requesterOrgRead: true },
+  dept_head: { ...NO_ORG_TRAITS, requesterOrgRead: true },
+  continuous_managers: { ...NO_ORG_TRAITS, requesterOrgRead: true, managerChain: true },
+  manager_at_level: { ...NO_ORG_TRAITS, requesterOrgRead: true, managerChain: true },
+  // Lock-1 §K2: resolves from the create-frozen requester CHOICE, not the org directory.
+  requester_choice: NO_ORG_TRAITS,
+  continuous_dept_heads: { ...NO_ORG_TRAITS, requesterOrgRead: true, deptHeadChain: true },
+  dept_head_at_level: { ...NO_ORG_TRAITS, requesterOrgRead: true, deptHeadChain: true },
+  // Lock-1 §K3: resolves from INSTANCE-INTERNAL audit rows — deliberately NOT org-armed (§K3:
+  // arming the org wedge for it would fail creates that need no org read at all).
+  prior_node_approver: NO_ORG_TRAITS,
+  // Lock-1 §K1: user_group resolves purely from the create-frozen `groupMemberIds` snapshot — no
+  // live directory read at dispatch — so it arms NONE of the org detectors/wedges (mirrors
+  // requester_choice / prior_node_approver). Giving it any org trait would silently re-arm the
+  // REQUESTER org wedge, which its EAGER_EXPANSION freeze deliberately does not need.
+  user_group: NO_ORG_TRAITS,
+  // Lock-2 §L2-C: field-derived contact extensions — their org read is anchored on the CHOSEN
+  // contact, not the requester, so they arm ONLY the field-derived detector/wedge.
+  form_field_user_manager: { ...NO_ORG_TRAITS, fieldDerivedOrgRead: true },
+  form_field_user_dept_head: { ...NO_ORG_TRAITS, fieldDerivedOrgRead: true },
+}
+
+function assigneeSourceKindsWithTrait(trait: keyof ApprovalAssigneeSourceKindTraits): ReadonlySet<string> {
+  return new Set(
+    (Object.keys(APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS) as ApprovalAssigneeSourceKind[])
+      .filter((kind) => APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS[kind][trait]),
+  )
+}
+
+/** Derived, not enumerated (Lock-2 §2.3) — exported for the mechanical exact-set assertions. */
+export const ORG_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('requesterOrgRead')
+export const MANAGER_CHAIN_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('managerChain')
+export const DEPT_HEAD_CHAIN_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('deptHeadChain')
+export const FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('fieldDerivedOrgRead')
+
+/**
  * True when any approval node's assignee sources include a management-chain source
  * (`continuous_managers` or `manager_at_level`). Used at create time to decide
  * whether to walk the (more expensive) management chain into the requester snapshot
@@ -3898,7 +4064,7 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
     return sources.some(
-      (source) => isRecord(source) && (source.kind === 'continuous_managers' || source.kind === 'manager_at_level'),
+      (source) => isRecord(source) && typeof source.kind === 'string' && MANAGER_CHAIN_ASSIGNEE_SOURCE_KINDS.has(source.kind),
     )
   })
 }
@@ -3930,7 +4096,7 @@ export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boole
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
     return sources.some(
-      (source) => isRecord(source) && (source.kind === 'continuous_dept_heads' || source.kind === 'dept_head_at_level'),
+      (source) => isRecord(source) && typeof source.kind === 'string' && DEPT_HEAD_CHAIN_ASSIGNEE_SOURCE_KINDS.has(source.kind),
     )
   })
 }
@@ -3964,16 +4130,55 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
     return sources.some(
-      (source) =>
-        isRecord(source) &&
-        (source.kind === 'direct_manager' ||
-          source.kind === 'dept_head' ||
-          source.kind === 'continuous_managers' ||
-          source.kind === 'manager_at_level' ||
-          source.kind === 'continuous_dept_heads' ||
-          source.kind === 'dept_head_at_level'),
+      (source) => isRecord(source) && typeof source.kind === 'string' && ORG_ASSIGNEE_SOURCE_KINDS.has(source.kind),
     )
   })
+}
+
+/**
+ * Lock-2 §L2-C / §2.3 — every form-field contact-extension source in the published runtime graph,
+ * deduped by its fingerprint key (`fieldDerivedAssigneeSourceKey` — identical sources share ONE
+ * frozen entry) with the FIRST carrying node's key retained for values-free error reporting.
+ * Drives the create-time freeze (`resolveAndFreezeFieldDerivedAssignees`) and IS the new
+ * detector: a non-empty map means the create path performs field-derived org reads and the NEW
+ * fail-closed wedge arms; an empty map means no field-derived work at all (the
+ * `includeManagerChain` opt-in posture — unrelated approvals pay nothing). Node types `approval`
+ * AND `handler` — the Lock-2 §2.4 registry rows admit both, and leaving `handler` out would
+ * reproduce the exact R-13/R-14 "silent skip" class (a handler-carried source would never bake
+ * its snapshot entry and would resolve empty at dispatch). The kind membership is DERIVED from
+ * the trait table (`FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS`), not a fourth hand-edited chain.
+ * `kind`/`fieldId`/`level` are read structurally (same posture as the other detectors above).
+ */
+export function collectRuntimeGraphFieldDerivedSources(
+  runtimeGraph: RuntimeGraph,
+): Map<string, { nodeKey: string; source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user_manager' | 'form_field_user_dept_head' }> }> {
+  const byKey = new Map<string, { nodeKey: string; source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user_manager' | 'form_field_user_dept_head' }> }>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval' && node.type !== 'handler') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (
+        !isRecord(source)
+        || typeof source.kind !== 'string'
+        || !FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS.has(source.kind)
+        || typeof source.fieldId !== 'string'
+        || source.fieldId.trim().length === 0
+        || typeof source.level !== 'number'
+        || !Number.isInteger(source.level)
+        || source.level < 1
+      ) continue
+      const typed = {
+        kind: source.kind as 'form_field_user_manager' | 'form_field_user_dept_head',
+        fieldId: source.fieldId.trim(),
+        level: source.level,
+      }
+      const key = fieldDerivedAssigneeSourceKey(typed)
+      if (!byKey.has(key)) byKey.set(key, { nodeKey: node.key, source: typed })
+    }
+  }
+  return byKey
 }
 
 /**
@@ -5903,6 +6108,114 @@ export class ApprovalProductService {
   }
 
   /**
+   * Lock-2 §L2-C — resolve every form-field contact-extension source AT CREATE from the person
+   * chosen in its referenced `user` field, and return the FROZEN map (source fingerprint →
+   * resolved local user ids) the requester snapshot carries. Order inside the method (§2.1
+   * validation-first): door 2 — the independent create-time 422 `APPROVAL_FORM_ROUTING_FIELD_EMPTY`
+   * for an EMPTY referenced field (§2.2; it survives any later widening of the publish pins, and
+   * fires BEFORE any field-derived org read so a payload failure never costs a directory read) —
+   * then ONE org-relations read per DISTINCT chosen contact.
+   *
+   * Anchoring (§L2-C corp-scoping): the contact's org relations resolve through the SAME
+   * machinery — and therefore the same routing-policy anchor — as the requester's own create-time
+   * read (`resolveApprovalRequesterOrgRelations`: policy-canonical integration when a policy
+   * governs, S7/legacy pick otherwise; every chain read is integration-scoped, never global). A
+   * contact linked in more than one policy-governed org raises the shipped
+   * `ApprovalRoutingPolicyError` and surfaces as the fail-closed 422
+   * `APPROVAL_ROUTING_POLICY_MISCONFIGURED`; any other read failure is a retryable 503
+   * `APPROVAL_FORM_ROUTING_ORG_UNRESOLVED` (the NEW wedge, §2.3) — both BEFORE any insert, zero
+   * rows. Genuine data absence (contact has no directory account / no primary department / a
+   * chain shorter than the configured level) is NOT a failure: the entry freezes as the resolved
+   * (possibly empty) list and empty resolution falls to the node's `emptyAssigneePolicy` (§2.6).
+   *
+   * The chains are the SHIPPED walks re-anchored on the contact (`form_field_user_manager` →
+   * `resolveManagerChain`'s leader-pointer walk via `includeManagerChain`;
+   * `form_field_user_dept_head` → K4's `resolveDeptHeadChain` parent-tree walk via
+   * `includeDeptHeadChain`, whose RATIFIED continue-past-empty-level posture binds this use), and
+   * `level` addresses the DENSE chain positionally (`chain[level - 1]`), byte-identical to
+   * `manager_at_level` / `dept_head_at_level` semantics. Anchor self-exclusion (the contact is
+   * never their own manager/head) is inherent to the walks; REQUESTER self-exclusion is
+   * deliberately NOT applied (§L2-C — the resolver arm documents the posture).
+   *
+   * Every error is values-free: node keys, field ids, and source fingerprint params are
+   * template-authored and permitted (§2.6); the chosen contact's id IS a form value and never
+   * appears in any message or details.
+   */
+  private async resolveAndFreezeFieldDerivedAssignees(
+    sources: ReturnType<typeof collectRuntimeGraphFieldDerivedSources>,
+    formData: Record<string, unknown>,
+  ): Promise<Record<string, string[]>> {
+    if (!pool) throw new Error('Database not available')
+
+    // Door 2 first (payload-level, no DB): every referenced field must carry a resolvable single
+    // value. The publish pins ((3) required + (4) no visibilityRule) make absence unreachable for
+    // templates published on this contract; this door is deliberately independent of them (§2.2).
+    const anchorNeeds = new Map<string, { includeManagerChain: boolean; includeDeptHeadChain: boolean }>()
+    const anchorBySourceKey = new Map<string, string>()
+    for (const [key, occurrence] of sources) {
+      const anchorId = resolveFormUserValue(formData[occurrence.source.fieldId])
+      if (!anchorId) {
+        throw new ServiceError(
+          `Approval node ${occurrence.nodeKey} routes on form field ${occurrence.source.fieldId}, which is empty`,
+          422,
+          'APPROVAL_FORM_ROUTING_FIELD_EMPTY',
+          { nodeKey: occurrence.nodeKey, fieldId: occurrence.source.fieldId },
+        )
+      }
+      anchorBySourceKey.set(key, anchorId)
+      const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
+      if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
+      else needs.includeDeptHeadChain = true
+      anchorNeeds.set(anchorId, needs)
+    }
+
+    // ONE read per distinct anchor, walking only the chain(s) the referencing sources need.
+    const relationsByAnchor = new Map<string, ApprovalRequesterOrgRelations>()
+    for (const [anchorId, needs] of anchorNeeds) {
+      try {
+        relationsByAnchor.set(
+          anchorId,
+          await resolveApprovalRequesterOrgRelations(anchorId, pool.query.bind(pool), {
+            includeManagerChain: needs.includeManagerChain,
+            includeDeptHeadChain: needs.includeDeptHeadChain,
+          }),
+        )
+      } catch (error) {
+        // Values-free log: the anchor is a form value — never echo it.
+        metricsLogger.warn(
+          `Failed to resolve field-derived org relations for a form-chosen contact: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        )
+        if (error instanceof ApprovalRoutingPolicyError) {
+          throw new ServiceError(
+            'The directory routing policy governing a form-chosen contact is misconfigured, so approver resolution cannot run. Contact an administrator.',
+            422,
+            'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+          )
+        }
+        throw new ServiceError(
+          'Could not resolve the organization relations of a form-chosen contact required by this approval template. Please retry.',
+          503,
+          'APPROVAL_FORM_ROUTING_ORG_UNRESOLVED',
+        )
+      }
+    }
+
+    const frozen: Record<string, string[]> = {}
+    for (const [key, occurrence] of sources) {
+      const anchorId = anchorBySourceKey.get(key)
+      const relations = (anchorId ? relationsByAnchor.get(anchorId) : undefined) ?? {}
+      const chain = occurrence.source.kind === 'form_field_user_manager'
+        ? (relations.managerChainIds ?? [])
+        : (relations.deptHeadChainIds ?? [])
+      const resolved = chain[occurrence.source.level - 1]
+      frozen[key] = typeof resolved === 'string' && resolved.trim().length > 0 ? [resolved.trim()] : []
+    }
+    return frozen
+  }
+
+  /**
    * Lock-1 §K2 — validate the submit-time requester choices against every published
    * `requester_choice` node's configured scope, and return the FROZEN map (node key → chosen
    * local user ids) the requester snapshot carries. Every rejection is a values-free 422
@@ -6380,6 +6693,24 @@ export class ApprovalProductService {
       )
     }
 
+    // Lock-2 §L2-C (form-field contact extensions) — resolve the chosen contact's manager /
+    // department-head extension AT CREATE (submit IS create: the anchor travels in this very
+    // payload) and FREEZE the result; the resolver then reads only the frozen map, so no live
+    // directory read ever happens at dispatch/return/admin-jump/timeout. Placed HERE, in the
+    // pre-`BEGIN` band with the shipped wedge guards above and BEFORE any instance/assignment
+    // insert: every failure — door-2 empty field 422, routing-policy 422, transient read 503 —
+    // leaves zero rows. Its own detector + wedge, deliberately NOT `runtimeGraphUsesOrgAssigneeSource`
+    // (§2.3): the requester wedge above stays requester-scoped, and a field-derived-only template
+    // never pays a requester org read it does not need. OPT-IN — an empty collection does no work.
+    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
+    let frozenFieldDerivedAssigneeIds: Record<string, string[]> | undefined
+    if (fieldDerivedSources.size > 0) {
+      frozenFieldDerivedAssigneeIds = await this.resolveAndFreezeFieldDerivedAssignees(
+        fieldDerivedSources,
+        normalizedFormData,
+      )
+    }
+
     // Lock-1 §K2 (requester_choice) — validate the submitter's choices against each published
     // node's configured scope and freeze them. Placed HERE, with the org/role wedge guards
     // above and BEFORE any instance/assignment insert (mirroring the B5-b fail-closed
@@ -6459,6 +6790,13 @@ export class ApprovalProductService {
       ...(frozenGroupMemberIds && Object.keys(frozenGroupMemberIds).length > 0
         ? { groupMemberIds: frozenGroupMemberIds }
         : {}),
+      // Lock-2 §L2-C: freeze the field-derived contact-extension resolution (source fingerprint →
+      // resolved local user ids). Present whenever the graph carries such a source — INCLUDING
+      // entries frozen as `[]` (read ran, resolved nobody → emptyAssigneePolicy at the node), so
+      // "resolved to nobody" is distinguishable from "never baked". The resolver reads ONLY this
+      // map — immutable across return/admin-jump/timeout; a directory change after create never
+      // alters it (the sanctioned in-flight mutation is `transfer`).
+      ...(frozenFieldDerivedAssigneeIds ? { fieldDerivedAssigneeIds: frozenFieldDerivedAssigneeIds } : {}),
     }
     // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no
     // instance exists yet, so there are no audit rows to read. A `prior_node_approver` node can

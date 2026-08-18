@@ -256,6 +256,38 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', assigneeSources: [{ kind: 'dept_head_at_level', level: 1.5 }] },
     })[0]).toMatch(/dept_head_at_level/)
   })
+  it('Lock-2 §L2-C: form_field_user_manager / form_field_user_dept_head — a schema-present fieldId + positive integer level passes; blank/dangling fieldId and 0/non-integer level are flagged (isAssigneeSourceValid mirror site)', () => {
+    const fields = [{ id: 'contact', type: 'user' as const, label: '联系人' }]
+    for (const kind of ['form_field_user_manager', 'form_field_user_dept_head'] as const) {
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 2 }] },
+      }, fields)).toEqual([])
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: '', level: 2 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'dangling', level: 2 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 0 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+      expect(validateApprovalNodeEdits({
+        a: { nodeKey: 'a', assigneeSources: [{ kind, fieldId: 'contact', level: 1.5 }] },
+      }, fields)[0]).toMatch(new RegExp(kind))
+    }
+  })
+  // Lock-2 §2.4: the contact-extension pair IS handler-admitted (unlike K5-b below) — a handler
+  // edit carrying either kind must PASS the roster check (positive control for the 7→9 growth).
+  it('Lock-2 §2.4: a HANDLER node carrying form_field_user_manager / form_field_user_dept_head passes the (now nine-member) handler roster', () => {
+    const fields = [{ id: 'contact', type: 'user' as const, label: '联系人' }]
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }] },
+    }, fields)).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }] },
+    }, fields)).toEqual([])
+  })
+
   // Lock-3 §1.5 deferral invariant: dept_head_at_level (K5-b) is NOT in the handler roster in
   // this slice (Lock-3's forward ADMIT is a separate follow-up — see
   // approval-handler-node-authoring.spec.ts's exact-set test). A handler carrying it must fail
@@ -470,6 +502,26 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   it('K5-b: a dept_head_at_level source with an unknown extra key forces read-only', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2, futureFlag: true }] })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-2 §L2-C — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: the contact-extension pair
+  // must be ALLOWED (present in the allowlist) on the complex path, and an extra key must still
+  // be caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K6: form_field_user_manager / form_field_user_dept_head are allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }] }),
+    ))).toBeNull()
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }] }),
+    ))).toBeNull()
+  })
+  it('K6: a contact-extension source with an unknown extra key forces read-only', () => {
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2, futureFlag: true }] }),
+    ))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(
+      complexWith({ assigneeSources: [{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1, futureFlag: true }] }),
+    ))).not.toBeNull()
   })
 
   // Lock-1 §K3 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: prior_node_approver must be
