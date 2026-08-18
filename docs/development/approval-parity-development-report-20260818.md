@@ -1,19 +1,19 @@
 # 审批对标程序 — 开发报告（FINAL，2026-08-18）
 
-**Status:** FINAL — 实现尾部已全部落地。**唯一在飞行中的实现切片是 K6 `#4993`**（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C，OPEN，非 draft，已 rebase 到当前 main、CI 运行中；闸门 **MERGE-CLEAN（0 P1）** @ `093830c4bc`，FIX-ROUND 仅在 rebase-readiness 且已完成）。
+**Status:** FINAL — **审批实现切片全部落地**。曾唯一在飞行的 K6 `#4993`（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C）已于 **`ffa3a5f595`**（squash merge，2026-08-18T14:58:58Z）落地，闸门 **MERGE-CLEAN（0 P1）**；落地后派单人 union = **15 成员**（前后端逐字一致）。
 八个 P7 phase-A FAIL 已由 **P7 phase-B 在 fresh `origin/main` 复核 = 8/8 FIXED**（FAIL-0 = FIXED-with-named-residual，见 §5.8）。
 本文件**不 ratify 任何东西**，不授权运行时能力、租户 UAT、部署或 feature flag，**不是完成声明**。
-所有剩余事项要么是 K6 这一个切片，要么是 owner 专属项（第 7 节）。
+**所有剩余事项均为 owner 专属项 + 残留硬化项（第 7 节）**——无一个在飞行的实现切片。
 
 | 锚点 | 值 |
 |---|---|
 | 仓库 | `zensgit/metasheet2` |
 | 撰写日期 | 2026-08-18 |
 | 程序起点（母锁落地） | `5b31cb4349` — `docs(approval): unify parity development program (#4935)` |
-| **审批程序当前 head** | `6abd241925` — `feat(approval): K1 — user_group assignee kind (Lock-1 §K1) (#4995)` |
-| **当前 `origin/main`** | `350325094a` — `docs(stock-prep): line status ledger (#4990)`。K1 之后落的 **7 个提交全部为非审批**（stock-prep / gip / ops 的 docs+ci），故审批 head 与 main tip 之间无审批语义差 |
+| **审批程序当前 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions form_field_user_manager / form_field_user_dept_head (Lock-2 §L2-C) (#4993)`（= 当前 `origin/main` tip） |
+| **当前 `origin/main`** | `ffa3a5f595`（K6 = main tip）。K1（`6abd241925`）与 K6 之间落的两个提交（#4990 stock-prep docs、#4989 sealed-export S6-A）为非审批 |
 | 程序基线（母锁 header 自陈） | `origin/main@d33a6a0fa120452b721ea76d449dfa1463727463` |
-| 已合并审批切片 | **43 个 PR**（12 文档锁 + 31 实现，逐条见 §3.1）。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..6abd241925 \| grep -iE "approval"` 返回 **44** 行，其中 `f2ed020d1b` (#4970, `ci: add merge_group triggers …`) 是 CI 触发器改动而非程序切片 ⇒ **44 − 1 = 43**。从 git 枚举，非清单背诵 |
+| 已合并审批切片 | **44 个 PR**（12 文档锁 + 32 实现，逐条见 §3.1）。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..ffa3a5f595 \| grep -iE "approval"` 返回 **45** 行，其中 `f2ed020d1b` (#4970, `ci: add merge_group triggers …`) 是 CI 触发器改动而非程序切片 ⇒ **45 − 1 = 44**。从 git 枚举，非清单背诵 |
 | Flags | **全程 OFF**，无一次改动（§1.4） |
 | 完成标签 | CORE-PARITY: **NO** · DATA-CLOSURE: **NO** · PRODUCT-FINAL: **NO**（三者均需 owner 签署，见 §7.2） |
 
@@ -38,6 +38,7 @@ DRAFT（`3335ccc435` = #4972 P1-C 为 head）之后落地的 **6 个审批实现
 | P7-R1 测试覆盖修复（FAIL-0/1/3/4/7） | #4984 | `512f0df608` | TAIL-PENDING（无独立闸门 MD） | **LANDED** — 现有独立闸门 MD（`/tmp/pr4984-p7r1-gate-20260818.md`），APPROVE-with-hardening；**残留 P2-1**（见 §5.8） |
 | F4 生产挂载（Designer 2.0，canvasV2 后） | #4994 | `345a1f1c0e` | 未起草（把 P0 钉为不可完成） | **LANDED** — MERGE-CLEAN；**F10 挂载缺席声明 DISCHARGED**（见 §3.2） |
 | K1 `user_group` 派单人种类 | #4995 | `6abd241925` | 未落地 | **LANDED** — 第 13 个派单人 union 成员；对标语料的「用户组」审批人行闭合（见 §4） |
+| K6 表单内联系人上级/部门负责人（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C） | #4993 | `ffa3a5f595` | DRAFT/上一版 FINAL 记为「唯一在飞行」 | **LANDED** — 第 14、15 个派单人 union 成员（union 15/15 前后端逐字一致）；闸门 MERGE-CLEAN（0 P1），仅 rebase-readiness 需处理且已 clean 解决；trait 表 `user_group: NO_ORG_TRAITS`（避免重开 requester-org wedge）；BE tsc + web 复合 type-check 均 exit 0、BE approval 单测 857/857、FE approval 300、canvas-inspector 48/48、9 required + `approval-realdb-k6-contact` 均绿。**对标派单人种类因此由「部分」翻「已达」（见 §4）** |
 
 另外三个 DRAFT 已入表的切片（#4973 K3、#4974 P6-explanation、#4979 D-1）在 DRAFT head 之前即已落地，本 FINAL 沿用其记录。
 
@@ -143,7 +144,7 @@ git show origin/main:docs/development/approval-lock<N>-*.md | grep -oE "OD-L<N>-
 |---|---|---|---|---|---|
 | **Lock-0** D0 交互增量 | **0**（用 `L0-1..L0-6` 增量方案，非 OD 前缀） | **A-1..A-13**（13） | 独立 fable 评审 | 六个增量 L0-1..L0-6 接受；`操作权限` 标签在 Lock-5 落下**至少一个功能性策略**前**不渲染**（空标签 = theater）——该条件已被 #4980 解除 |
 | **Lock-1** 企业派单人种类 | **7**（OD-L1-1..7） | **G-1..G-20**（20） | 独立 fable 评审 | K1-K6 契约；K1(`user_group`)/K2/K3/K4/K5-b **已落地**；K6(`sequential`) 仍未落地（母锁 §8 非目标，除非另开能力锁）；group 端点由 K1 #4995 落地 |
-| **Lock-2** 组织控件、字段派生派单人、部门路由 | **8**（OD-L2-1..8） | **21 行** | **REQUEST-CHANGES**（#4953 @ `a30970af13`）：1 P1 / 1 P2 / 1 P3 / 4 NIT；P1 = Lock-1 §K4 处置错误重开一个已 ratify 决定；均在评审轮 `a1a932ddc3` 闭合；15 组承重声明抽验，**零条代码声明被推翻** | **§L2-C（form-field 派生的 manager/dept-head 派单人）实现在飞行中 = K6 #4993**；Lock-2 其余（字段派生部门路由、部门/联系人字段类型）**未起始** |
+| **Lock-2** 组织控件、字段派生派单人、部门路由 | **8**（OD-L2-1..8） | **21 行** | **REQUEST-CHANGES**（#4953 @ `a30970af13`）：1 P1 / 1 P2 / 1 P3 / 4 NIT；P1 = Lock-1 §K4 处置错误重开一个已 ratify 决定；均在评审轮 `a1a932ddc3` 闭合；15 组承重声明抽验，**零条代码声明被推翻** | **§L2-C（form-field 派生的 manager/dept-head 派单人）由 K6 #4993 (`ffa3a5f595`) 落地**；Lock-2 其余（字段派生部门路由、部门/联系人字段类型）**未起始** |
 | **Lock-3** 办理/业务操作节点 | **7**（OD-L3-1..7） | **G-1..G-18**（18） | 独立 fable 评审 | 办理节点契约 + 25 行爆炸半径 + Lock-7 接缝；**P4-A #4956 已落地** |
 | **Lock-4** 自动决策/兜底/去重/同人 | **10**（OD-L4-1..10） | **22 行** | 独立 fable 评审 | F4-A..E 契约；**退回置空危险被锁定（OD-L4-10）并配 D-3 闸门**；L6-A 轮次作用域 #4965 已落地（V-3 已 DISCHARGE）；`auto_reject` 与 P3-A 剩余语义仍推迟 |
 | **Lock-5** 逐节点操作与成员动作策略 | **11**（OD-L5-1..11） | **25 行** | 独立 fable 评审 | **L5-A（操作权限）= #4980 已落地**；**L5-C/L5-D（`commentRequired` 三值键）= #4983 已落地**；**L5-B 的诚实性半边（移除 placebo 前加签）= #4983 已落地**，其**后加签运行时半边（OD-L5-4/5 节点插入 + `addSignAggregation`）仍推迟**；**L5-E（`signaturePolicy` 声明即惰性等）推迟并指定 owner 切片**；L6-E 归属孤儿见 §7.8 |
@@ -195,6 +196,7 @@ git show origin/main:docs/development/approval-lock<N>-*.md | grep -oE "OD-L<N>-
 | | K5-b `dept_head_at_level` | #4962 | `150cdb0848` | **APPROVE (MERGE-CLEAN)** @ `618ca00688…`（0P1/0P2） | 首轮即净判 |
 | | K3 `prior_node_approver` + fail-closed `normalizeApprovalMode` | #4973 | `90c41fbf60` | APPROVE-with-hardening @ `1c315e5a3e…`（0P1/1P2/3P3/1NIT） | 无前置闸门 |
 | | **K1 `user_group`（第 13 个 union 成员）** | **#4995** | **`6abd241925`** | Round-1 FIX-ROUND @ `f7e2780366`（P1 self-service bind + P2×3）；Round-2 requalify @ `0b7d0860bf` = **NOT-CLEAR**（抓到同类新 P1 = harness rot）。**两个 P1 均已闭合并 merged**：write-side bind 移到 `ensurePlatformAdmin`（live-probe 403 验证）；harness 5 成员 + `user_group` 分支在当前 head 机械核为**存在**（`approval-inspector-keyboard-harness.ts`）。**残留：G-6「不可满足」= owner 裁；picker 跨命名空间元数据 = 已诚实披露非权限放大** | 是（见 §5.9） |
+| | **K6 表单内联系人上级/部门负责人（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C，第 14/15 个 union 成员）** | **#4993** | **`ffa3a5f595`** | **MERGE-CLEAN — 0 P1 @ `093830c4bc`**（3 承重守卫 mutation-proven）；唯一 blocker = rebase-readiness（K6 分叉早于 K1 的 `user_group`），已 clean 解决：15 成员 union / label / order / trait 表对齐，trait 表 `user_group: NO_ORG_TRAITS`；两处 exact-set 测试更新加 `user_group`；合并前 BE tsc + web 复合 type-check exit 0、BE 857/857、FE 300、canvas-inspector 48/48、9 required + `approval-realdb-k6-contact` 均绿 | 仅 rebase-readiness（已完成） |
 | **P3** | L6-P1 修复模板编辑策略载体 | #4957 | `0cbae291bc` | **MERGE-CLEAN** @ `99b6e5713a…`（P1:none. P2:none.） | 首个闸门 |
 | | L6-A 轮次作用域 dedup（OD-L4-10(a)） | #4965 | `57a7443ede` | FIX-ROUND @ `5f18dec85f…` → requalified `62140682bc…` = NOT-CLEAR（一个 test-only P2）。**V-3 DISCHARGED**：合并后 main 上两条 floor 臂 mutation-proven（§0 / 验证报告 §3.5） | 是（closure evidence `/tmp/pr4965-v3-closure-20260818.md`） |
 | | 发布顺序修复 | #4966 | `d002b1883a` | **MERGE-CLEAN** @ `d7a560b3b3…`（0P1/0P2/0P3/0NIT） | 无 |
@@ -249,7 +251,7 @@ git diff --name-status 5b31cb4349..6abd241925 -- packages/core-backend/src/db/mi
 
 ---
 
-## 4. 对标结论（Feishu 参考语料 vs 当前审批 head `6abd241925`）
+## 4. 对标结论（Feishu 参考语料 vs 当前审批 head `ffa3a5f595`）
 
 > **M11 强制措辞**：下表左列一律是「参考语料证实了什么」，不是「竞品有/没有什么」。
 > 语料自身的边界（母锁 §0.1 逐字）：「The corpus proves documented Feishu behaviors;
@@ -262,7 +264,7 @@ git diff --name-status 5b31cb4349..6abd241925 -- packages/core-backend/src/db/mi
 |---|---|---|---|
 | 表单构建器 | 组件面板、中央表单、属性配置 | F0/F1/F2/F3 底座 + **F4 生产挂载已落地**（`showFormBuilderV2` 后，canvasV2 默认 OFF）；F10 由必需 job 收集 | **部分**（挂载已达；四视口义务窄化 + 检查器 number/date_range 缺口 + 租户 UAT 未跑，见 §3.2） |
 | 流程拓扑 | 线性与条件路由 | 线性/条件/并行图 + 受约束语义移动（Canvas flag 后）+ **办理节点**（P4-A） | **已达**（默认 OFF flag 之后；租户 UAT 未跑） |
-| 派单人选择 | 上级、部门负责人、用户组、发起人自选/本人、前节点与**字段派生来源** | **13 种，前后端逐字一致**：`static_user, static_role, requester, form_field_user, direct_manager, dept_head, continuous_managers, manager_at_level, requester_choice, continuous_dept_heads, dept_head_at_level, prior_node_approver, user_group`。**K1 `user_group`（用户组）落地闭合语料点名的「用户组」审批人**；多来源编辑（P1-B）已落地 | **部分** — 语料点名的审批人种类里，`user_group`（用户组）由 K1 #4995 闭合；**字段派生来源**在 main 上以 `form_field_user` 形态存在，其 **manager / dept-head 派生（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C）仍在飞行（K6 #4993，唯一在飞行实现切片）** ⇒ 该行未满 |
+| 派单人选择 | 上级、部门负责人、用户组、发起人自选/本人、前节点与**字段派生来源** | **15 种，前后端逐字一致**（BE `approval-product.ts:19` = FE `types/approval.ts:21`）：前 13 种 + `form_field_user_manager` + `form_field_user_dept_head`。`user_group`（用户组）K1 #4995 落地；**字段派生来源**已从 `form_field_user` 扩到其 manager / dept-head 派生（K6 #4993 `ffa3a5f595`）；多来源编辑（P1-B）已落地 | **已达** — 语料点名的审批人种类（上级 / 部门负责人 / 用户组 / 发起人自选·本人 / 前节点 / 字段派生来源）**全部在 main**；K6 落地后再无在飞行的派单人切片 |
 | 聚合模式 | 全部、任一、顺序 | `single/all/any/threshold`（P1-C 使前后端 4 成员对齐）；`ApprovalMode` 在 BE `approval-product.ts:20` 与 FE `types/approval.ts:29` 均为 4 成员 | **部分** — **`sequential`（依次审批，Lock-1 §K6）未落地**；母锁 §8 已把 ordered-within-node 列为**非目标**，除非另开能力锁（**不由 K6 #4993 承载**——那是 Lock-2 §L2-C 的字段派生种类，非聚合模式） |
 | 字段与操作权限 | 字段矩阵 + 节点操作策略 | **字段轴已达**：Lock-7 服务端强制（P4-B #4961），D-1 read 轴收口（#4979）。**操作策略轴已达**：`nodeOperationPolicy` 落地（P5 L5-A #4980），`operationPoliciesByNodeType` 对 `approval` 与 `handler` 已 populate（`approvalCapabilityRegistry.ts`） | **已达**（两轴都落地；A-2 成员栏镜像 PARTIAL，见「成员动作」行） |
 | 办理/业务节点 | 有文档记载的办理节点 | P4-A 落地：贯穿所有图遍历、事务边界、版本 | **已达**（flag 后） |
@@ -270,12 +272,12 @@ git diff --name-status 5b31cb4349..6abd241925 -- packages/core-backend/src/db/mi
 | 成员动作 | 动作对话框、转交/加签/退回/评论/催办等 | `commentRequired` 强制（#4983）；**前加签 placebo 已诚实移除（#4983 B-2）**；A-2 成员操作栏镜像**下调为 PARTIAL**——FE 镜像对 role 席位审批人不下发，但**服务端仍正确拒绝**（409/400）⇒ 显示缺口非权限放大；**后加签（`'after'`）运行时未落地**；未统一动作对话框语法（P5-C `NOT STARTED`） | **部分**（A-2 PARTIAL；CR-3 PARTIAL；L5-B 后加签运行时 / L5-E 推迟） |
 | 版本治理 | 语料不作为我方实现的权威 | 不可变版本、比对、恢复为新草稿已存在 + 编辑器头部版本入口（P1-D） | **已达** |
 | 数据闭环 | 不用作竞品缺席声明 | 持久 FWB 与附件在各自独立 flag 后；`exact_number_mapping_unavailable` 在 5 个生产站点存在并被测试断言 | **部分**（flag OFF）／**精确金额：按 M10 + §8 非目标未达** |
-| 表单字段词汇 | 组件面板 | **13 种，前后端逐字一致**：`text textarea number date datetime select multi-select user attachment detail record-link date_range explanation` | **部分** — 部门/联系人属 Lock-2（K6 #4993 在飞行）；**公式（L8-D）按设计推迟并带负契约**；精确金额按 M10 排除 |
+| 表单字段词汇 | 组件面板 | **13 种，前后端逐字一致**：`text textarea number date datetime select multi-select user attachment detail record-link date_range explanation`（K6 加的是**派单人种类**非字段类型，此行不变） | **部分** — 部门/联系人**字段类型**属 Lock-2，未起始（K6 §L2-C 落的是派单人种类，非字段类型）；**公式（L8-D）按设计推迟并带负契约**；精确金额按 M10 排除 |
 
 ### 4.1 六项超出对标基线的能力（superiority points）
 
 母本 §9 把这六项当作「smoke rows」跑过，判定见验证报告 §2.1；此处只记能力与其边界。
-现在 **派单人 union（13）+ 办理节点(handler) + 去重(dedup) + 字段词汇 + 操作策略(operation policy)** 全部在 main。
+现在 **派单人 union（15）+ 办理节点(handler) + 去重(dedup) + 字段词汇 + 操作策略(operation policy)** 全部在 main。
 **P7 phase-B 在 fresh `origin/main` 对这六项 re-smoke = 6/6 PASS**（FWB 仍是 code 半边，功能半边 owner-only）：
 
 | # | 能力 | 我方形态 | 边界 |
@@ -348,13 +350,13 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 
 ---
 
-## 6. 尾部未竟（唯一在飞行的实现切片 + 合并时未闭合的闸门项）
+## 6. 尾部未竟（实现切片全部落地 + 合并时未闭合的闸门项）
 
-### 6.1 在飞行中的实现切片（**唯一一个**）
+### 6.1 实现切片：**全部落地**（曾唯一在飞行的 K6 已合并）
 
 | PR | 切片 | 状态 | 备注 |
 |---|---|---|---|
-| **#4993** | **K6 — form-field contact extensions `form_field_user_manager` / `form_field_user_dept_head`（Lock-2 §L2-C）** | **OPEN，非 draft，base main，已 rebase 到当前 main、CI 运行中（mergeStateStatus=BLOCKED=检查 pending）；闸门 MERGE-CLEAN — 0 P1 @ `093830c4bc`**（FIX-ROUND 仅在 rebase-readiness，已完成；3 个承重守卫 mutation-proven） | 加两个字段派生的 manager/dept-head 派单人种类；rebase 后 exact-set 钉 **13 → 15**（`CANONICAL_THIRTEEN` / `toHaveLength` / label map / union / 两处 fingerprint switch / registry order；BE 857/857 + FE 300 单测已验证），并加 `approval-realdb-acceptance.yml` job；`vitest.config.ts` 与 run-list 冲突按 **UNION** 解。**注意：这是 Lock-2 §L2-C，不是 Lock-1 §K6 `sequential`**（后者是聚合模式，母锁 §8 非目标）。**最终落地 SHA 待 CI 通过后填。** |
+| **#4993** | **K6 — form-field contact extensions `form_field_user_manager` / `form_field_user_dept_head`（Lock-2 §L2-C）** | **LANDED @ `ffa3a5f595`**（squash merge，2026-08-18T14:58:58Z，auto-merge）；闸门 **MERGE-CLEAN — 0 P1 @ `093830c4bc`**（3 个承重守卫 mutation-proven；唯一 blocker 是 rebase-readiness，已 clean 解决） | 加两个字段派生的 manager/dept-head 派单人种类；rebase 后 exact-set 钉 **13 → 15**（union / label / order / trait 表 / 两处 fingerprint switch）；trait 表 `user_group: NO_ORG_TRAITS`（它从 create-frozen `groupMemberIds` 快照解析、不 arm org detector，给它 org trait 会重开 requester-org wedge）；两处 exact-set 测试（FE A-3 十五成员、BE trait-table 十五成员）更新加 `user_group`。合并前验证：BE tsc + web 复合 type-check（含 verification-approval）均 exit 0、BE approval 单测 857/857、FE approval 300、canvas-inspector 48/48；9 required + `approval-realdb-k6-contact` 均绿。**注意：这是 Lock-2 §L2-C，不是 Lock-1 §K6 `sequential`**（后者是聚合模式，母锁 §8 非目标，仍未落地）。 |
 
 ### 6.2 已落地、无需再动的旧 TAIL-PENDING
 
@@ -363,15 +365,16 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | **F4 / P0-B5 生产挂载** | **LANDED** #4994；F10 缺席声明 DISCHARGED（§3.2） |
 | **K1 `user_group`** | **LANDED** #4995（第 13 个 union 成员） |
 | **P5 #4980 / #4983（Lock-5 L5-A / L5-B 诚实半边 + L5-C/D）** | **LANDED**；R7 与 `操作权限` 标签解除；#4983 base 已 retarget 到 main（旧「必需检查不跑」已解除） |
-| **P7-R1 #4984 / P7-R2 #4981** | **LANDED**；八个 FAIL 修复全部在 main（LANDED-VERIFY，§5.8） |
+| **P7-R1 #4984 / P7-R2 #4981** | **LANDED**；八个 FAIL 修复全部在 main（phase-B 复核 8/8 FIXED，§5.8） |
 | **V-3（#4965 NOT-CLEAR-then-merged）** | **DISCHARGED**（§5.1） |
+| **K6 #4993（曾唯一在飞行实现切片）** | **LANDED @ `ffa3a5f595`**；派单人 union 15/15；对标派单人种类翻「已达」（§4） |
 
 ### 6.3 未起草 / 未开始的切片（各带缺席证据）
 
-| 切片 | 缺席证据（`6abd241925` 上机械核实） | 它解除什么 |
+| 切片 | 缺席证据（`ffa3a5f595` 上机械核实） | 它解除什么 |
 |---|---|---|
 | **K6 `sequential` 审批模式（Lock-1 §K6）** | BE 与 FE `ApprovalMode` 均 4 成员，无 `sequential` | 聚合表「顺序」一行。**母锁 §8 已把 ordered-within-node 列为非目标，除非另开能力锁** |
-| **Lock-2 其余实现** | ledger §2 `LOCK RATIFIED — implementation NOT STARTED`；§L2-C 部分由 K6 #4993 承载 | 字段派生部门路由、部门/联系人字段类型 |
+| **Lock-2 其余实现** | ledger §2 `LOCK RATIFIED — implementation NOT STARTED`；**§L2-C 已由 K6 #4993 (`ffa3a5f595`) 落地**，其余未起始 | 字段派生部门路由、部门/联系人**字段类型** |
 | **P3-A（Lock-4 缺失语义）** | ledger §2 `NOT DRAFTED` | 自动通过/拒绝、扩展空派单人兜底、离职兜底、`auto_reject` |
 | **P5-C 共享对话框 / 详情表格 / 中心主从（成员动作对话框语法统一）** | ledger §2 `NOT STARTED` | 成员动作对话框语法统一 |
 | **L5-B 后加签运行时（OD-L5-4/5）／L5-E（`signaturePolicy` 等）** | Lock-5 §1.5：`'after'` 未落地、`signaturePolicy` 声明即惰性 | 后加签节点插入 + 手写签名 owner 切片 |
@@ -422,7 +425,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 
 | Label | 当前值 | 所缺 |
 |---|---|---|
-| CORE-PARITY | **NO** | P0-P5 实现（P0 生产挂载已达；操作策略轴已达；**剩 K6 #4993 的 §L2-C 字段派生种类 + 成员动作对话框统一 P5-C + Canvas 租户 UAT**）+ 精确 merged-main 验证 + 浏览器/a11y + **owner 显式签署** |
+| CORE-PARITY | **NO** | P0-P5 实现（P0 生产挂载已达；操作策略轴已达；派单人 union 15/15、K6 §L2-C 已落地；**剩成员动作对话框统一 P5-C + Canvas 租户 UAT**）+ 精确 merged-main 验证 + 浏览器/a11y + **owner 显式签署** |
 | DATA-CLOSURE | **NO** | 已批准的 P6 范围 + merged main 上精确 DATA 矩阵 + FWB 与附件租户 UAT + **owner 显式签署** |
 | PRODUCT-FINAL | **NO** | 上述两标签 + 分级发布/回滚证据 + 已接受的残留项 + **owner 显式签署** |
 
@@ -470,6 +473,6 @@ Lock-7 §2.7 把 D-5 read-scope 留作 OPEN 的 owner 问题；P4-B 闸门补充
 ## 8. 本报告自身的边界
 
 - 本报告是 FINAL 而非完成声明。它**不 ratify、不授权、不启用**任何东西。
-- 唯一在飞行的实现切片是 **K6 #4993**（Lock-2 §L2-C）。其余剩余项全部 owner 专属（§7）。
+- **实现切片全部落地**（K6 #4993 = `ffa3a5f595` 为最后一个）。**无一个在飞行的实现切片**；剩余项全部 owner 专属（§7）+ 残留硬化项。
 - 本 FINAL 新做的机械核实（均已在正文标注出处）：尾部六切片的合并 SHA 与闸门判定；派单人/字段/`ApprovalMode`/`nodeOperationPolicy` 的 union 与 registry 实测；F10 挂载与必需 job 收集；四个迁移枚举；run-list / vitest.config UNION 存活；V-3 闭合证据引用。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。

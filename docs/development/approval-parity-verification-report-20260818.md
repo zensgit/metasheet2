@@ -1,6 +1,6 @@
 # 审批对标程序 — 验证报告（FINAL，2026-08-18）
 
-**Status:** FINAL — 实现尾部已全部落地（唯一在飞行的实现切片 = K6 `#4993`，Lock-2 §L2-C；已 rebase、CI 运行中、闸门 MERGE-CLEAN 0 P1）。
+**Status:** FINAL — **审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
 **P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 带一个具名 carried-forward 残留）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
 本文件**不是完成声明**，不 ratify 任何东西，不授权任何 flag、部署或 UAT。
 
@@ -8,8 +8,8 @@
 |---|---|
 | 仓库 | `zensgit/metasheet2` |
 | 撰写日期 | 2026-08-18 |
-| **审批程序当前 head** | `6abd241925` — `feat(approval): K1 — user_group assignee kind (#4995)` |
-| **当前 `origin/main`** | `350325094a`（K1 之后 7 个提交全为非审批 docs/ci） |
+| **审批程序当前 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions (Lock-2 §L2-C) (#4993)`（= 当前 `origin/main` tip） |
+| **当前 `origin/main`** | `ffa3a5f595`（K6 = main tip；K1 `6abd241925` 与 K6 之间两个提交为非审批） |
 | **P7 phase-A 验证执行 SHA** | `680e93c018490b6d98cf7251fe431458c350afb5`（**≠ 当前 head**，见 §2.0） |
 | 治理设计权威 | `docs/development/approval-parity-master-design-lock-20260817.md`（RATIFIED，§9） |
 | 执行真相 | `docs/development/approval-parity-execution-ledger-20260817.md`（LIVING） |
@@ -71,7 +71,7 @@ Phase-A 台账用六级（`PASS` / `PASS-POSITIVE-ONLY` / `FAIL` / `NOT-YET-LAND
 
 ### 2.0 ⚠️ SHA 作用域声明（读本节前必读）
 
-Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`6abd241925`**，其间落了一整串审批提交。DRAFT 记的 9 行 `SUPERSEDED-BY-LANDING` 现在其承载切片**都已在 main**：
+Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`ffa3a5f595`**（#4993 K6），其间落了一整串审批提交。DRAFT 记的 9 行 `SUPERSEDED-BY-LANDING` 现在其承载切片**都已在 main**（末行 K6 是 phase-B 之后的新落地，phase-B verified SHA 为 `6abd241925`）：
 
 | 落地提交 | PR | 影响的 Phase-A 行 | 现分层 |
 |---|---|---|---|
@@ -84,6 +84,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | `512f0df608` | #4984 P7-R1 | FAIL-0/1/3/4/7 | **FIXED**（FAIL-0 = FIXED-with-named-residual，phase-B §2.5） |
 | `345a1f1c0e` | #4994 F4 | §3 gate 5 mount canary、F10 | **翻转**：mount 已达（§2.3 gate 5；phase-B 两侧闸复核 PASS） |
 | `6abd241925` | #4995 K1 | 派单人 union、I 族 roster 行 | **PASS**（phase-B §2.5 Part 2） |
+| `ffa3a5f595` | #4993 K6 | 派单人 union 13→15、I10/R12 absence-list | **§2.0 核实（15/15 union）**；闸门 MERGE-CLEAN 0 P1；phase-B 之后落地 |
 
 已用当前 head 源码机械复核的取代事实（这是取代/翻转，不是重跑矩阵）：
 
@@ -91,7 +92,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 |---|---|---|
 | FE `ApprovalMode` | `apps/web/src/types/approval.ts:29` | `'single' \| 'all' \| 'any' \| 'threshold'` — **4 成员，与后端一致**（Phase-A 时为 3） |
 | BE `ApprovalMode` | `approval-product.ts:20` | 同 4 成员；**`sequential` 未落地** |
-| 派单人种类联合 | BE `approval-product.ts:19` + FE `approvalCapabilityRegistry.ts` | **13 种，前后端逐字一致**（K1 `user_group` 落地，Phase-A 时为 11，DRAFT head 12） |
+| 派单人种类联合 | BE `approval-product.ts:19` + FE `types/approval.ts:21` | **15 种，前后端逐字一致**（K6 `form_field_user_manager`/`form_field_user_dept_head` 落地；K1 时 13、Phase-A 时 11） |
 | 表单字段类型联合 | BE / FE | **13 种，前后端逐字一致** |
 | `nodeOperationPolicy` | `approvalCapabilityRegistry.ts`（`operationPoliciesByNodeType` 对 `approval`/`handler` populate） | **操作策略轴已落地**（P5 L5-A #4980，解除 R7） |
 | D-1 read axis | `ApprovalProductService.ts`（#4979） | 由「静默丢弃」改为对 `readonly`/`hidden`/非数组形状**返回 400**（可逆收窄，§6.2） |
@@ -182,12 +183,12 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 | 组 | 行数 | PASS/FIXED | FAIL | carried-fwd | 说明 |
 |---|---|---|---|---|---|
 | Part 1 — 8 个 phase-A FAIL | 8 | **8 FIXED**（7 完全；FAIL-0 = FIXED-with-named-residual） | **0** | 1（FAIL-0 枚举守卫） | §2.4 |
-| Part 2 — 已落地特性判别检查 | 15 | **15 PASS** | **0** | 0 | P1-C×7（含 I12 coercion 分支**已删**、BE/FE `ApprovalMode` divergence CLOSED）+ K3 + L8-A + D-1（真库 values-free 400，read 轴 CLOSED）+ K1（union 13/13）+ Lock-5 操作策略 choke + L6-A/P3-B + F4 两侧闸 |
+| Part 2 — 已落地特性判别检查 | 15 | **15 PASS** | **0** | 0 | P1-C×7（含 I12 coercion 分支**已删**、BE/FE `ApprovalMode` divergence CLOSED）+ K3 + L8-A + D-1（真库 values-free 400，read 轴 CLOSED）+ K1（union 13/13 @ phase-B SHA；K6 后 **15/15**，§2.0 核实）+ Lock-5 操作策略 choke + L6-A/P3-B + F4 两侧闸 |
 | Part 3 — 六项优越性 re-smoke | 6 | **6 PASS** | **0** | 0 | 全部仍可用；FWB 仅 code 半边（功能半边 owner-only） |
 | Part 4 — carried-forward（owner/env） | — | — | — | ~14 | 按设计未执行（§6.3/§6.4） |
 | **phase-B 内新 FAIL** | | | **0** | | 仅限 re-verified 子集，非全面无回归声明 |
 
-几处判别证据（逐字/锚点）：**I12** 的无守卫 coercion 分支在 `templateAuthoring.ts:707-715` **被删**（out-of-union `approvalMode` 强制 read-only，不再静默塌缩 `single`）；**§10** BE=FE `ApprovalMode` 均 4 成员（phase-A 点名的唯一 FE/BE divergence CLOSED）；**D-1** 真库「every access value on every non-write-capable node type is REJECTED with a typed values-free 400」，read 轴 CLOSED（`ApprovalProductService.ts:2582-2587`）；**F4** 两侧行为闸（`approvalTemplateAuthoring.spec.ts:3453` flag OFF 仅 legacy、Designer 2.0 完全缺席；`:3478` flag ON+hydrated 挂载、legacy 缺席），F10 pin **inverted-not-deleted**（`slots.spec.ts:1146-1155`）。**I10/R12 absence-list 已刷新**：FE 与 BE `ApprovalAssigneeSourceKind` 是**同一 13 成员 union**（resolver case-arm 奇偶未机械再确认——裸串 regex 不可靠，该行只落在实测到的两个事实上）；`sequential`（K6）+ Lock-6 B–F 标识符仍缺。
+几处判别证据（逐字/锚点）：**I12** 的无守卫 coercion 分支在 `templateAuthoring.ts:707-715` **被删**（out-of-union `approvalMode` 强制 read-only，不再静默塌缩 `single`）；**§10** BE=FE `ApprovalMode` 均 4 成员（phase-A 点名的唯一 FE/BE divergence CLOSED）；**D-1** 真库「every access value on every non-write-capable node type is REJECTED with a typed values-free 400」，read 轴 CLOSED（`ApprovalProductService.ts:2582-2587`）；**F4** 两侧行为闸（`approvalTemplateAuthoring.spec.ts:3453` flag OFF 仅 legacy、Designer 2.0 完全缺席；`:3478` flag ON+hydrated 挂载、legacy 缺席），F10 pin **inverted-not-deleted**（`slots.spec.ts:1146-1155`）。**I10/R12 absence-list 已刷新**：FE 与 BE `ApprovalAssigneeSourceKind` 在 phase-B SHA 是**同一 13 成员 union**（resolver case-arm 奇偶未机械再确认——裸串 regex 不可靠，该行只落在实测到的两个事实上）；**K6 落地（`ffa3a5f595`）后为同一 15 成员 union**（本 FINAL §2.0 核实）；`sequential`（Lock-1 §K6）+ Lock-6 B–F 标识符仍缺。
 
 **这不推翻 §6.5 的 PASS-POSITIVE-ONLY 债**：phase-B 是子集复核，那 63 行绿测试所欠的判别性反例（33 显式点名子集）**没有**在 phase-B 构造——V-1 / V-12 仍 OPEN。
 
@@ -230,7 +231,7 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 | K3 `prior_node_approver` + fail-closed `normalizeApprovalMode` | #4973 | `1c315e5a3e…` — APPROVE-with-hardening | 0/1/3/1 | `90c41fbf60` |
 | **K1 `user_group`（第 13 个 union 成员）** | **#4995** | Round-1 `f7e2780366` FIX-ROUND（P1 self-service bind + P2×3）；Round-2 requalify `0b7d0860bf` = **NOT-CLEAR**（同类新 P1 = harness rot）。**两个 P1 均已闭合 merged**（bind → `ensurePlatformAdmin` live-probe 403；harness 5 成员 + `user_group` 分支当前 head 存在）。**残留 owner：G-6 UNSATISFIABLE；picker 跨命名空间元数据（已披露非权限放大）** | **`6abd241925`** |
 
-**K 系列尾部**：**K1（`user_group`）已落地** ⇒ 语料点名的最后一个审批人种类闭合；**K6（Lock-1 §K6 `sequential`）未落地**（母锁 §8 非目标）；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）在飞行**（不同于 §K6 sequential）。
+**K 系列尾部**：**K1（`user_group`）已落地** ⇒ 语料点名的用户组审批人闭合；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）已落地 @ `ffa3a5f595`**（闸门 MERGE-CLEAN 0 P1 @ `093830c4bc`，仅 rebase-readiness 处理并已 clean 解决，union 13→15，trait 表 `user_group: NO_ORG_TRAITS`，`approval-realdb-k6-contact` 绿）⇒ 语料点名的**字段派生来源**扩到 manager/dept-head；**注意与 Lock-1 §K6 `sequential`（聚合模式，母锁 §8 非目标，仍未落地）是两回事**。
 
 ### 3.5 P3 流程策略 / More settings
 
@@ -314,6 +315,7 @@ enforce_admins.enabled       = true
 | `approval-realdb-l6a-roundscoping.yml` | **否** | Lock-4 OD-L4-10(a) / L6-A gate A-7 |
 | `approval-realdb-node-operation-policy.yml` | **否** | **Lock-5 L5-A 操作策略（#4980）** |
 | `approval-realdb-p7r1-coverage-repair.yml` | **否** | **P7-R1 孤儿真库套件（#4984）** |
+| `approval-realdb-acceptance.yml` → job `approval-realdb-k6-contact` | **否** | **K6 Lock-2 §L2-C 表单内联系人上级/部门负责人（#4993）**（`approval-form-contact-extensions.db.test.ts`；合并头绿） |
 | `approval-template-policy-carrier-realdb.yml` | **否** | L6-P1 policy carrier |
 | `approval-browser-verify.yml` | **否** | F2 / F4 真 Chromium DataTransfer |
 | `approval-web-guard.yml` | **否** | 定向审批 FE helper/round-trip specs |
@@ -356,7 +358,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 | **V-6** | `approval-web-guard` 无效窗口未定 | **OPEN**（§4.4） |
 | **V-7** | PPO 计数不自洽：§1 汇总 **63**，§15 第 4 条写「the discriminating-negative half of **33**」 | **OPEN**：**63 = 绿测试总行数**；**33 = 显式点名了所欠反例的子集**。本 FINAL 保留两个数并保留 V-7 为**未解决**（不静默塌缩成 33）；owner/后续版本机械重算 |
 | **V-8 / F10** | F10 / P0 完成度 | ✅ **DISCHARGED（挂载半边）**：F4 #4994 落地，F10 由必需 job 收集（§2.3 gate 5）；CORE-PARITY 仍 NO（owner UAT/签署/分支保护步） |
-| **V-9** | K1（`user_group`）、K6（`sequential`）未落地 | **K1 ✅ LANDED（#4995）**；**K6 `sequential`（Lock-1 §K6）仍 OPEN**（母锁 §8 非目标）；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）唯一在飞行**——已 rebase 到当前 main、CI 运行中、闸门 MERGE-CLEAN 0 P1 @ `093830c4bc`；落地后 union 13→15 |
+| **V-9** | K1（`user_group`）、K6（`sequential`）未落地 | **K1 ✅ LANDED（#4995）**；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）✅ LANDED @ `ffa3a5f595`**（闸门 MERGE-CLEAN 0 P1，union 13→15）；**仅 K6 = Lock-1 §K6 `sequential` 仍 OPEN**（母锁 §8 非目标） |
 | **V-10** | P5 #4980 + 堆叠 #4983 均 OPEN；R7 NOT-YET-LANDED；#4983 base 非 main | ✅ **DISCHARGED**：两 PR 合并（`d034b1f710` / `327ac6427b`）；R7 LANDED；#4983 retarget 到 main（§3.7） |
 | **V-11** | Lock-6 B–F 零命中 | **OPEN**（各自切片；L6-F1 v1 REJECTED 为惰性） |
 | **V-12** | 33 个 PASS-POSITIVE-ONLY 行所欠判别性反例（每行点名） | **OPEN**——本程序公开的最大一块验证债，主动标注非被发现（§6.5） |
@@ -405,6 +407,6 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 ## 7. 本报告自身的边界
 
 - 本报告是 FINAL 而非完成声明。它**没有**重跑 phase-A 的**完整** 127 行矩阵；§2.1–2.3 的判定绑 `680e93c018`，§2.0 逐条标出落地取代/翻转的行。**P7 phase-B（§2.5）在 fresh `origin/main` 真复核了一个子集**（8 FAIL + 15 特性 + 6 优越性），把这些行升为带证据的 FIXED/PASS；其余行仍 `LANDED-VERIFY` / `PASS-POSITIVE-ONLY`。
-- 本 FINAL **新做/纳入**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、派单人 13、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）；⑦ **P7 phase-B 子集复核（8/8 FAIL FIXED + 15/15 特性 + 6/6 优越性，§2.5）**。
+- 本 FINAL **新做/纳入**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、**派单人 15**（K6 后）、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）；⑦ **P7 phase-B 子集复核（8/8 FAIL FIXED + 15/15 特性 + 6/6 优越性，§2.5）**。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。
 - 本报告**不 ratify、不授权、不启用**任何东西。所有 owner 事项集中在开发报告 §7。
