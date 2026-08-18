@@ -220,6 +220,79 @@ describe('ApprovalAssigneeResolver', () => {
     expect(resolveDeptHeadAtLevel(3, { id: 'requester-1', deptHeadChainIds: ['h1', null as never, 'h3'] })).toEqual([dhalEntry('h3')])
   })
 
+  // prior_node_approver (Lock-1 §K3) — resolves the referenced prior node's ACTUAL deciders from
+  // the CALLER-supplied priorNodeApprovers map (instance-internal audit-row actors, latest round;
+  // read by the caller at activation — the resolver adds no DB access, §2.1).
+  function resolvePrior(
+    nodeKey: string,
+    priorNodeApprovers: Record<string, string[]> | undefined,
+    requesterSnapshot: Record<string, unknown> | null = { id: 'requester-1' },
+  ) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey }] },
+      formSnapshot: {},
+      requesterSnapshot,
+      ...(priorNodeApprovers !== undefined ? { priorNodeApprovers } : {}),
+    })
+  }
+
+  const priorEntry = (assigneeId: string, priorNodeKey = 'gate') => ({
+    assignmentType: 'user', assigneeId, nodeKey: 'review', sourceStep: 2,
+    metadata: { resolvedFrom: { kind: 'prior_node_approver', sourceIndex: 0, priorNodeKey } },
+  })
+
+  it('resolves prior_node_approver to the referenced node deciders from the caller-supplied map, stamping resolvedFrom.priorNodeKey (positive control)', () => {
+    expect(resolvePrior('gate', { gate: ['decider-1', 'decider-2'] }))
+      .toEqual([priorEntry('decider-1'), priorEntry('decider-2')])
+    // Keyed by the SOURCE's nodeKey, not the resolving node's — a map entry for a different node
+    // contributes nothing (reference-selected, not map-order-selected).
+    expect(resolvePrior('gate', { other: ['decider-9'] })).toEqual([])
+  })
+
+  it('resolves prior_node_approver to empty when the map is absent (create-time cascade / preview) or the entry is missing/empty — falls to emptyAssigneePolicy (OD-L1-4(a)), never a throw', () => {
+    expect(resolvePrior('gate', undefined)).toEqual([])
+    expect(resolvePrior('gate', {})).toEqual([])
+    expect(resolvePrior('gate', { gate: [] })).toEqual([])
+  })
+
+  it('drops system sentinel actors (system:auto-approval / system:approval-timeout) — never assigned, even from a hand-assembled map (G-11 pure re-check; the human decider in the SAME list survives)', () => {
+    expect(resolvePrior('gate', { gate: ['system:auto-approval', 'system:approval-timeout'] })).toEqual([])
+    // Actor-selected, not blanket: a human decider alongside the sentinels still resolves.
+    expect(resolvePrior('gate', { gate: ['system:auto-approval', 'decider-1'] })).toEqual([priorEntry('decider-1')])
+  })
+
+  it('does NOT self-exclude prior_node_approver (deliberate §K2-posture: a prior decider who is the requester keeps the seat; self-approval stays owned by autoApprovalPolicy)', () => {
+    expect(resolvePrior('gate', { gate: ['requester-1'] })).toEqual([priorEntry('requester-1')])
+  })
+
+  it('keeps intra-node identity dedup (G-12 positive control): the same decider listed twice — or resolved by two sources — collapses to ONE seat at this node', () => {
+    expect(resolvePrior('gate', { gate: ['decider-1', 'decider-1'] })).toEqual([priorEntry('decider-1')])
+    // Two prior_node_approver sources resolving the same person: one seat, first source wins.
+    expect(resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: {
+        assigneeSources: [
+          { kind: 'prior_node_approver', nodeKey: 'gate' },
+          { kind: 'prior_node_approver', nodeKey: 'gate2' },
+        ],
+      },
+      formSnapshot: {},
+      requesterSnapshot: { id: 'requester-1' },
+      priorNodeApprovers: { gate: ['decider-1'], gate2: ['decider-1'] },
+    })).toEqual([priorEntry('decider-1')])
+  })
+
+  it('applies delegation substitution to a prior_node_approver decider (expansion happens BEFORE pushResolved, so the frozen delegation map covers this kind too)', () => {
+    expect(resolvePrior('gate', { gate: ['decider-1'] }, { id: 'requester-1', delegations: { 'decider-1': 'delegatee-7' } }))
+      .toEqual([{
+        assignmentType: 'user', assigneeId: 'delegatee-7', nodeKey: 'review', sourceStep: 2,
+        metadata: { resolvedFrom: { kind: 'prior_node_approver', sourceIndex: 0, priorNodeKey: 'gate' }, delegatedFrom: 'decider-1' },
+      }])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [

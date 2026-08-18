@@ -571,6 +571,7 @@
                 <el-option label="提交人自选" value="requester_choice" />
                 <el-option label="连续多级部门负责人" value="continuous_dept_heads" />
                 <el-option label="指定层级部门负责人" value="dept_head_at_level" />
+                <el-option label="节点审批人" value="prior_node_approver" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -619,6 +620,26 @@
                 :disabled="readOnly"
                 data-testid="approval-step-dept-head-level"
               />
+            </el-form-item>
+            <!-- Lock-1 §K3 (节点审批人) linear authoring: a TYPED picker over the STRICTLY-EARLIER
+                 steps only (never a free-text node key). The reference is stored as the earlier
+                 step's stable localId, so insert/reorder can never silently retarget it; the
+                 builder emits that step's current positional key at save. -->
+            <el-form-item v-if="step.sourceKind === 'prior_node_approver'" label="引用审批步骤">
+              <el-select
+                v-model="step.priorStepLocalId"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="选择之前的审批步骤"
+                data-testid="approval-step-prior-node"
+              >
+                <el-option
+                  v-for="option in priorStepOptions(index)"
+                  :key="option.localId"
+                  :label="option.label"
+                  :value="option.localId"
+                />
+              </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
               <el-select
@@ -1219,6 +1240,7 @@ import {
   isPlaceholderRoleSource,
   addAssigneeSourceCard,
   removeAssigneeSourceCard,
+  legalPriorApproverNodeKeys,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1860,6 +1882,25 @@ function graphNodeLabel(nodeKey: string): string {
   return node.name?.trim() || nodeTypeLabel(node.type)
 }
 
+// Lock-1 §K3 — the LEGAL candidates for a prior_node_approver picker on `nodeKey`'s card:
+// approval nodes strictly upstream on every runtime-reachable path of the LIVE effective graph
+// (`legalPriorApproverNodeKeys`, the FE mirror of the backend publish dominance gate — which
+// stays the sole arbiter). Labels reuse `graphNodeLabel` (template-authored names, never ids).
+function priorApproverNodeOptions(nodeKey: string): Array<{ key: string; label: string }> {
+  return legalPriorApproverNodeKeys(canvasEffectiveGraph.value, nodeKey)
+    .map((key) => ({ key, label: graphNodeLabel(key) }))
+}
+
+// Lock-1 §K3 — the linear editor's picker candidates for step `index`: the STRICTLY-EARLIER
+// steps only (referenced by stable localId; the builder emits the referenced step's current
+// positional key at save — see ApprovalStepDraft.priorStepLocalId).
+function priorStepOptions(index: number): Array<{ localId: string; label: string }> {
+  return draft.value.steps.slice(0, index).map((candidate, candidateIndex) => ({
+    localId: candidate.localId,
+    label: candidate.name.trim() || `审批人 ${candidateIndex + 1}`,
+  }))
+}
+
 function graphEdgeTargetLabel(nodeKey: string, edgeKey: string): string {
   const edge = canvasEffectiveGraph.value.edges.find(
     (candidate) => candidate.source === nodeKey && candidate.key === edgeKey,
@@ -2025,7 +2066,10 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
               : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
                 // Lock-1 §K5-b: same default shape as manager_at_level.
                 : kind === 'dept_head_at_level' ? { kind, level: 1 }
-                  : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+                  // Lock-1 §K3: '' = not yet chosen — invalid to save until the typed picker
+                  // selects a legal upstream node (never silently defaulted to one).
+                  : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
+                    : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 function setApprovalSourceKind(nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind): void {
   const cacheKey = approvalSourceKindCacheKey(nodeKey, sourceIndex)
@@ -2854,6 +2898,8 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionEdgeLabel,
   graphEdgeTargetLabel,
   graphNodeLabel,
+  // Lock-1 §K3: legal upstream candidates for the prior_node_approver typed node picker.
+  priorApproverNodeOptions,
   parallelJoinModeLabel,
   ccTargetTypeLabel,
   approvalSourceKind,

@@ -31,6 +31,10 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
     // Lock-1 §K2: pre-choice placeholder — the approver is unknowable until the requester
     // chooses at submit time, so the flow/route preview says exactly that.
     case 'requester_choice': return '提交人自选（提交时选择）'
+    // Lock-1 §K3: the concrete person is unknowable until the referenced node decides at
+    // runtime, so the summary names the referenced node key (a template-authored identifier,
+    // §2.6-permitted — never a person id).
+    case 'prior_node_approver': return `节点审批人（引用节点 ${source.nodeKey}）`
     // Lock-1 §2.5 item 5: values-free fallback. The previous `JSON.stringify(source)` default
     // leaked raw config (including raw IDs) into an ordinary-user surface for any kind this
     // switch does not know — a defect, not a precedent, per the ratified lock. An unknown kind

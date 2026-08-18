@@ -718,6 +718,22 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'dept_head_at_level', level }
       }
+      case 'prior_node_approver': {
+        // Lock-1 §K3 + G-1: exact-shape validation — `nodeKey` is a required non-empty string,
+        // and (the Lock-1 G-1 posture for NEW kinds, stricter than the shipped kinds) unknown
+        // extra keys are REJECTED, never silently dropped. Whether the referenced node exists,
+        // is an approval node, and is strictly upstream on every runtime-reachable path is the
+        // PUBLISH gate's job (`assertPriorNodeApproverReferencesUpstream`) — normalize stays a
+        // shape check so stored drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'nodeKey'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for prior_node_approver`)
+        }
+        if (!isNonEmptyString(source.nodeKey)) {
+          failValidation(context, `${sourcePath}.nodeKey is required`)
+        }
+        return { kind: 'prior_node_approver', nodeKey: source.nodeKey.trim() }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)
@@ -1880,6 +1896,10 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_dept_heads:${source.levels}`
     case 'dept_head_at_level':
       return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry: provably identical for the same referenced node — two
+      // branches asking "the deciders of node X" resolve the same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId}`
     case 'static_user':
@@ -2051,6 +2071,96 @@ function runtimeSuccessorTargets(
 
   const firstEdge = outgoingBySource.get(node.key)?.[0]
   return firstEdge ? [firstEdge.target] : []
+}
+
+/**
+ * Lock-1 §K3 publish gate: every `prior_node_approver` reference must name an `approval` node
+ * STRICTLY UPSTREAM on EVERY runtime-reachable path from the start node to the carrying node —
+ * a DOMINANCE check ("every path" is load-bearing: a node reachable only through one condition
+ * branch resolves empty on the other, and a node inside a parallel region referenced from outside
+ * it may not have decided when the referencing node activates). No shipped gate performs this —
+ * `assertNoParallelDynamicAssigneeConflicts` walks FORWARD from a branch entry unioning
+ * fingerprints, a different predicate; what THIS gate reuses is its primitives
+ * (`runtimeSuccessorTargets`, the edge maps, the visited set), exactly as Lock-1 §K3 instructs.
+ *
+ * Mechanism: T strictly dominates C in the runtime-successor graph rooted at the start node ⟺
+ * removing T makes C unreachable from start (with T ≠ C). The removal-reachability test is run
+ * per reference; explicit dangling / non-approval / self checks come first so each failure names
+ * its reason. Deliberately CONSERVATIVE for parallel regions: a target inside one parallel branch
+ * never dominates a node past the join (a sibling-branch path avoids it), so such references are
+ * rejected even under joinMode 'all' — the lock's "may not have decided" posture; a reference to
+ * an upstream node WITHIN the same branch passes (no path through a sibling branch can re-enter
+ * this branch before the join).
+ *
+ * Deliberately publish-scoped (NOT create/update, NOT normalize) like
+ * `assertNoParallelDynamicAssigneeConflicts`: stored drafts stay readable and re-saveable while
+ * being fixed; instances only ever run PUBLISHED graphs, so publish is the single admission point
+ * (§2.2: an illegal reference is an authoring-time 400, never a dispatch-time surprise). Errors
+ * are values-free: node keys and source indexes only (§2.6 — template-authored identifiers).
+ */
+export function assertPriorNodeApproverReferencesUpstream(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of approvalGraph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  const startKey = approvalGraph.nodes.find((node) => node.type === 'start')?.key ?? null
+
+  // Keys reachable from start over runtime-possible successors, treating `skipKey` (the reference
+  // target under test) as removed. FIFO worklist + visited set (cycle-safe, each node once).
+  const reachableWithout = (skipKey: string): Set<string> => {
+    const visited = new Set<string>()
+    if (startKey === null || startKey === skipKey) return visited
+    const queue: string[] = [startKey]
+    for (let head = 0; head < queue.length; head += 1) {
+      const currentKey = queue[head]
+      if (currentKey === skipKey || visited.has(currentKey)) continue
+      visited.add(currentKey)
+      const current = nodeByKey.get(currentKey)
+      if (!current) continue
+      for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+        queue.push(target)
+      }
+    }
+    return visited
+  }
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+    sources.forEach((source, sourceIndex) => {
+      if (source.kind !== 'prior_node_approver') return
+      const targetNodeKey = source.nodeKey
+      const fail = (reason: string, message: string): never => {
+        throw new ServiceError(message, 400, 'APPROVAL_ASSIGNEE_PRIOR_NODE_REFERENCE_INVALID', {
+          nodeKey: node.key,
+          sourceIndex,
+          targetNodeKey,
+          reason,
+        })
+      }
+      const target = nodeByKey.get(targetNodeKey)
+      if (!target) {
+        fail('dangling', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references a node (${targetNodeKey}) that does not exist`)
+      }
+      if (target.key === node.key) {
+        fail('self', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references its own node`)
+      }
+      if (target.type !== 'approval') {
+        fail('not-approval', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver must reference an approval node (${targetNodeKey} is ${target.type})`)
+      }
+      // Strict dominance by removal-reachability: if the carrier is still reachable from start
+      // with the target removed, SOME runtime-reachable path avoids the target (downstream,
+      // sibling condition branch, or sibling parallel branch) — reject. An entirely-unreachable
+      // carrier passes vacuously (it can never activate; other gates own dead-node hygiene).
+      if (reachableWithout(targetNodeKey).has(node.key)) {
+        fail('not-upstream-on-every-path', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver target ${targetNodeKey} is not strictly upstream on every runtime-reachable path`)
+      }
+    })
+  }
 }
 
 /**
@@ -3580,6 +3690,37 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
 }
 
 /**
+ * Lock-1 §K3: the set of node keys referenced by any `prior_node_approver` source in the published
+ * runtime graph. OPT-IN gate in the `runtimeGraphUsesManagerChain` posture: an empty set means the
+ * runtime paths do no K3 work at all (no audit-row read), so unrelated approvals pay nothing.
+ * `kind`/`nodeKey` are read structurally (same posture as the other detectors above).
+ *
+ * Deliberately NOT added to `runtimeGraphUsesOrgAssigneeSource`: K3 resolves from INSTANCE-INTERNAL
+ * audit rows, not the org directory — §2.1 extends that org-read fail-closed detector to K4 and
+ * K5-b only, and arming it for K3 would fail creates that need no org read at all.
+ */
+export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: RuntimeGraph): Set<string> {
+  const targets = new Set<string>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (
+        isRecord(source)
+        && source.kind === 'prior_node_approver'
+        && typeof source.nodeKey === 'string'
+        && source.nodeKey.trim().length > 0
+      ) {
+        targets.add(source.nodeKey.trim())
+      }
+    }
+  }
+  return targets
+}
+
+/**
  * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
  * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
  * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
@@ -3850,6 +3991,20 @@ function buildApprovalAssignmentResolver(options: {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
   requesterSnapshot: Record<string, unknown> | null
+  /**
+   * Lock-1 §K3 — LATE-BOUND provider of the prior-node decider map (referenced node key → actual
+   * decider user ids), read by the CALLER from instance-internal `approval_records` rows at node
+   * activation and threaded here so the resolver itself stays pure (§2.1: no resolver-internal
+   * database access; K3's input is caller-supplied alongside the snapshots). A PROVIDER rather
+   * than a plain map because dispatchAction constructs its executor before the actor's effective
+   * branch node — and therefore the in-flight approve merge — is known; the provider is invoked
+   * only when the executor actually resolves a node, which is always after the caller populated
+   * it. Omitted on the create/preview path (no instance rows exist yet): a `prior_node_approver`
+   * node reached by a create-time auto-approval cascade resolves EMPTY and falls to
+   * `emptyAssigneePolicy` (OD-L1-4(a)), and a route preview shows the honest EMPTY_ASSIGNEES
+   * marker (the §K2 pre-choice precedent).
+   */
+  getPriorNodeApprovers?: () => Record<string, string[]> | undefined
 }): ApprovalGraphAssignmentResolver {
   return ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
     nodeKey,
@@ -3858,6 +4013,7 @@ function buildApprovalAssignmentResolver(options: {
     formSchema: options.formSchema,
     formSnapshot: options.formSnapshot,
     requesterSnapshot: options.requesterSnapshot,
+    priorNodeApprovers: options.getPriorNodeApprovers?.(),
   })
 }
 
@@ -4755,6 +4911,12 @@ export class ApprovalProductService {
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
+      // Lock-1 §K3: every prior_node_approver reference must be an approval node strictly
+      // upstream on EVERY runtime-reachable path (dominance) — dangling / downstream / self /
+      // condition-branch-only / parallel-sibling references fail publish here, values-free.
+      // UNCONDITIONAL (unlike the parallel-conflict gate below): no policy exemption makes an
+      // undominated reference resolvable.
+      assertPriorNodeApproverReferencesUpstream(approvalGraph)
       // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
       // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
       // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
@@ -5887,6 +6049,15 @@ export class ApprovalProductService {
         ? { requesterChoices: frozenRequesterChoices }
         : {}),
     }
+    // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no
+    // instance exists yet, so there are no audit rows to read. A `prior_node_approver` node can
+    // only activate here through a same-transaction auto-approval cascade (publish guarantees its
+    // target is strictly upstream, so it is never the first pending node); in that case it
+    // resolves EMPTY and falls to `emptyAssigneePolicy` (OD-L1-4(a) — the cascade's decider is
+    // the system sentinel, which is dropped by definition; under `actorMode:'original_approver'`
+    // the attributable decider is not re-materialized from an unpersisted round either — the
+    // fail-closed arm, never a silent wrong approver). Route previews show the honest
+    // EMPTY_ASSIGNEES marker for such nodes (the §K2 pre-choice precedent).
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
       assignmentResolver: buildApprovalAssignmentResolver({
         formSchema,
@@ -6453,10 +6624,21 @@ export class ApprovalProductService {
       const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: the jump (re)activates a node that may carry a `prior_node_approver` source —
+      // read the referenced nodes' persisted deciders (LATEST round, sentinels dropped) before
+      // resolution. No in-flight merge: the jumping admin is not a decider. A referenced node the
+      // jump SKIPPED OVER (never decided) yields an empty entry → emptyAssigneePolicy
+      // (OD-L1-4(a): the "node was skipped" arm). OPT-IN — undefined when the graph has no such
+      // source.
+      const jumpReferencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      const jumpPriorNodeApprovers = jumpReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, jumpReferencedPriorNodeKeys)
+        : undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => jumpPriorNodeApprovers,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
@@ -7002,10 +7184,23 @@ export class ApprovalProductService {
 
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: a timeout JUMP (re)activates a node that may carry a `prior_node_approver`
+      // source — read the referenced nodes' persisted deciders (LATEST round, sentinels dropped)
+      // before resolution. No in-flight merge: the timeout scanner is a system actor, never a
+      // decider. A referenced node the jump skips over yields an empty entry →
+      // emptyAssigneePolicy (OD-L1-4(a)). OPT-IN — undefined when the graph has no such source
+      // (the transfer effect re-resolves nothing, so the read is skipped for it too).
+      const timeoutReferencedPriorNodeKeys = scannedEffect === 'jump'
+        ? collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+        : new Set<string>()
+      const timeoutPriorNodeApprovers = timeoutReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, timeoutReferencedPriorNodeKeys)
+        : undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
         }),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -7239,10 +7434,17 @@ export class ApprovalProductService {
       const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3 — late-bound decider map for any `prior_node_approver` source in this graph.
+      // Populated ONCE below (after the actor's effective branch node + action authorization are
+      // resolved) and BEFORE any resolution entry point runs; the provider indirection exists
+      // because the executor is constructed here, earlier than that point. Stays undefined when
+      // the graph carries no such source (OPT-IN — zero extra reads for unrelated approvals).
+      let priorNodeApprovers: Record<string, string[]> | undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => priorNodeApprovers,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
@@ -7290,6 +7492,29 @@ export class ApprovalProductService {
 
       if (request.action !== 'revoke' && !actorCanAct) {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
+      }
+
+      // Lock-1 §K3 — populate the prior-node decider map (declared beside the executor above)
+      // when this graph references any prior node. Read ONCE per dispatch from instance-internal
+      // audit rows, BEFORE any of this transaction's own writes, and AFTER the authorization
+      // guard above (so a 403 stays a 403). For an `approve`, the acting user IS a decider of
+      // the CURRENT node's round — their own approve record is inserted only after resolution —
+      // so they are merged in scoped to the current round's epoch (resolved from the node's
+      // still-active assignments, exactly like the threshold tally's own capture). Partial-vote
+      // paths (all-mode with siblings remaining / threshold unmet) commit before any resolution,
+      // so the merge is only ever consumed when the node actually completes. A node auto-approved
+      // by THIS transaction's cascade has no persisted round yet and resolves EMPTY →
+      // emptyAssigneePolicy (OD-L1-4(a)).
+      const referencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      if (referencedPriorNodeKeys.size > 0) {
+        const inFlightApprove = request.action === 'approve' && currentNodeKey && referencedPriorNodeKeys.has(currentNodeKey)
+          ? {
+              nodeKey: currentNodeKey,
+              actorId: actor.userId,
+              epoch: await this.currentNodeEntryEpoch(client, id, currentNodeKey),
+            }
+          : undefined
+        priorNodeApprovers = await this.loadPriorNodeApproverDeciders(client, id, referencedPriorNodeKeys, inFlightApprove)
       }
 
       // Lock-7 L7-C / OD-L7-3(a): `fieldWrites` is meaningful ONLY on a `handle` submission at a
@@ -9061,6 +9286,88 @@ export class ApprovalProductService {
     }
     const only = result.rows[0]?.entry_epoch
     return only === null || only === undefined ? null : Number(only)
+  }
+
+  // Lock-1 §K3 — the referenced prior nodes' ACTUAL deciders, read from instance-internal
+  // `approval_records` audit rows on the SAME transaction client (never a directory read;
+  // instance-internal reads are not directory reads — §2.1 keeps the resolver pure by having the
+  // CALLER read this at activation and pass it in alongside the snapshots).
+  //
+  // Round scoping (OD-L1-3(a), LATEST round only — matching the threshold tally's epoch-scoped
+  // posture): per referenced node, keep only the `action='approve'` rows whose
+  // `metadata.nodeEntryEpoch` equals the node's LATEST recorded epoch. Rows with NO epoch exist
+  // only on legacy pre-epoch instances — unreachable for K3 (the kind postdates epoch stamping,
+  // and an instance pins its published definition, which could not have carried the kind before
+  // this slice) — but are handled totally: they count only when NO epoched row exists.
+  //
+  // Sentinel actors (`system:auto-approval`, `system:approval-timeout` — the `system:` namespace,
+  // the repo-wide non-user actor convention) are DROPPED, never assigned (§K3); under
+  // `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's real id
+  // and is therefore kept. Deciders keep audit-row order (occurred_at, id), deduped.
+  //
+  // `inFlight` (approve path only): the acting user IS a decider of the CURRENT node's round, but
+  // their own approve record is inserted only AFTER resolution — so the caller passes them here,
+  // scoped to the current round's epoch (persisted partial votes of THIS round are kept; any
+  // PRIOR round's rows are excluded even when the current round has no rows yet).
+  private async loadPriorNodeApproverDeciders(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    referencedNodeKeys: ReadonlySet<string>,
+    inFlight?: { nodeKey: string; actorId: string; epoch: number | null },
+  ): Promise<Record<string, string[]>> {
+    const map: Record<string, string[]> = {}
+    if (referencedNodeKeys.size === 0) return map
+    const result = await client.query<{ actor_id: string; node_key: string; metadata: Record<string, unknown> | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key, metadata
+         FROM approval_records
+        WHERE instance_id = $1
+          AND action = 'approve'
+          AND metadata->>'nodeKey' = ANY($2::text[])
+        ORDER BY occurred_at ASC, id ASC`,
+      [instanceId, [...referencedNodeKeys]],
+    )
+    const rowsByNode = new Map<string, Array<{ actorId: string; epoch: number | null }>>()
+    for (const row of result.rows) {
+      const rawEpoch = toNullableRecord(row.metadata)?.nodeEntryEpoch
+      const epoch = typeof rawEpoch === 'number' && Number.isInteger(rawEpoch)
+        ? rawEpoch
+        : typeof rawEpoch === 'string' && /^\d+$/.test(rawEpoch)
+          ? Number.parseInt(rawEpoch, 10)
+          : null
+      const list = rowsByNode.get(row.node_key)
+      const entry = { actorId: row.actor_id, epoch }
+      if (list) list.push(entry)
+      else rowsByNode.set(row.node_key, [entry])
+    }
+    for (const nodeKey of referencedNodeKeys) {
+      const rows = rowsByNode.get(nodeKey) ?? []
+      let roundRows: Array<{ actorId: string; epoch: number | null }>
+      if (inFlight && inFlight.nodeKey === nodeKey) {
+        // The in-flight round is authoritative: keep only THIS round's persisted partial votes
+        // (epoch equality; a null in-flight epoch — legacy — keeps only epoch-less rows).
+        roundRows = rows.filter((row) => row.epoch === inFlight.epoch)
+      } else {
+        const epochs = rows.map((row) => row.epoch).filter((epoch): epoch is number => epoch !== null)
+        if (epochs.length > 0) {
+          const latest = Math.max(...epochs)
+          roundRows = rows.filter((row) => row.epoch === latest)
+        } else {
+          roundRows = rows
+        }
+      }
+      const deciders: string[] = []
+      const seen = new Set<string>()
+      const pushDecider = (actorId: string): void => {
+        const id = actorId.trim()
+        if (!id || id.startsWith('system:') || seen.has(id)) return
+        seen.add(id)
+        deciders.push(id)
+      }
+      for (const row of roundRows) pushDecider(row.actorId)
+      if (inFlight && inFlight.nodeKey === nodeKey) pushDecider(inFlight.actorId)
+      map[nodeKey] = deciders
+    }
+    return map
   }
 
   // Dynamic-source discriminator. `metadata.resolvedFrom` is written ONLY by

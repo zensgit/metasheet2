@@ -10,6 +10,11 @@ name: Approval real-DB acceptance (Lock-1 assignee kinds)
 #     deptHeadChainIds snapshot field)
 #     (tests/integration/approval-dept-head-at-level.db.test.ts — G-1/G-2, positional-not-hop-count
 #      over real SQL, out-of-range→emptyAssigneePolicy, freeze-purity/temporal)
+#   - approval-realdb-k3: §K3 `prior_node_approver` (instance-internal audit-row resolution — no
+#     directory fixture at all, deliberately)
+#     (tests/integration/approval-prior-node-approver.db.test.ts — G-1/G-2/G-10 dominance publish
+#      gate, actual-decider happy path + multi-seat all/any, OD-L1-3(a) latest-round via return,
+#      OD-L1-4(a) skipped/auto-approved fail-closed, G-12 no-dedup, freeze-of-rule)
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no
 # flag change.
 #
@@ -41,6 +46,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-requester-choice.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-chain.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-prior-node-approver.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
@@ -56,6 +62,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-requester-choice.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-chain.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-prior-node-approver.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
@@ -298,6 +305,85 @@ jobs:
             echo "suite=approval-dept-head-at-level.db.test.ts"
             echo "lock=approval-lock1-enterprise-assignees-20260817 §K5-b"
             echo "gates=G-1,G-2 (positional-not-hop-count over real SQL, out-of-range->emptyAssigneePolicy, freeze-purity/temporal)"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-realdb-k3:
+    name: approval-realdb-k3
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's TOP-LEVEL anti-skip-green sentinel (the K2 posture — deliberately not
+      # the inside-describeIfDatabase variant): a run in this lane with a missing/broken
+      # DATABASE_URL goes RED instead of silently reporting the whole suite as skipped.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see the T8 note there and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md
+          # for the per-item detail) — this lane provisions the identical schema the
+          # approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-1 §K3 prior_node_approver real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit
+        # green and hide regressions; verbose prints every collected test so an empty
+        # collection shows in the log instead of reading as green.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-prior-node-approver.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-prior-node-approver.db.test.ts"
+            echo "lock=approval-lock1-enterprise-assignees-20260817 §K3"
+            echo "gates=G-1,G-2,G-10,G-11,G-12,G-18 (+OD-L1-3a latest-round, OD-L1-4a skipped/auto-approved fail-closed, freeze-of-rule)"
+            echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
             echo "externalWrite=false"

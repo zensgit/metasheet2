@@ -163,6 +163,11 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_dept_heads:${source.levels}`
     case 'dept_head_at_level':
       return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry (backend mirror — keep in lockstep): provably identical
+      // for the same referenced node — two branches asking "the deciders of node X" resolve the
+      // same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
     case 'static_user':
@@ -182,7 +187,10 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
   }
 }
 
-function runtimeSuccessorTargets(
+// Exported for `approvalNodeEdit.ts`'s Lock-1 §K3 `legalPriorApproverNodeKeys` (the prior-node
+// picker's dominance walk) so both FE graph walks share ONE runtime-successor semantic — the
+// mirror of the backend's own `runtimeSuccessorTargets`.
+export function runtimeSuccessorTargets(
   node: ApprovalNode,
   edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
   outgoingBySource: Map<string, ApprovalGraph['edges']>,

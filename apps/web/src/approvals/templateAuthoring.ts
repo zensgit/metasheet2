@@ -68,7 +68,7 @@ export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './paralle
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
-export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -178,6 +178,13 @@ export interface ApprovalStepDraft {
   // chooser to a configured list, carried in the SAME `idsText` chip carrier the static
   // pickers use (userIds for members, roleIds for role) — sourceFromStep re-shapes it.
   requesterChoiceScopeType: 'company' | 'members' | 'role'
+  // Lock-1 §K3 (节点审批人) — meaningful only when `sourceKind === 'prior_node_approver'`: the
+  // `localId` of the EARLIER step whose actual decider(s) this step re-asks. Deliberately a
+  // step-localId reference, NOT a raw node key: the linear builder regenerates node keys
+  // positionally (`approval_${index+1}`), so a stored key would silently RETARGET when steps are
+  // inserted/reordered — the localId reference follows the intended step and `sourceFromStep`
+  // emits that step's CURRENT key at build time. `''` = not yet chosen (invalid to save).
+  priorStepLocalId: string
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
   // Self-approver authoring: the editable toggle (merge the requester in as an
@@ -344,6 +351,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     level: 1,
     requesterChoiceMode: 'single',
     requesterChoiceScopeType: 'company',
+    priorStepLocalId: '',
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
@@ -538,6 +546,9 @@ function stepDraftFromApprovalNode(
   let level = 1
   let requesterChoiceMode: 'single' | 'multi' = 'single'
   let requesterChoiceScopeType: 'company' | 'members' | 'role' = 'company'
+  // Lock-1 §K3: hydrated as '' here (this per-node projection has no cross-step context);
+  // `draftFromTemplate` resolves the stored nodeKey to the referenced EARLIER step's localId in a
+  // post-pass over the ordered chain.
   if (source?.kind === 'static_user') {
     sourceKind = 'static_user'
     idsText = formatIds(source.userIds)
@@ -575,6 +586,10 @@ function stepDraftFromApprovalNode(
     requesterChoiceScopeType = source.scope.type
     if (source.scope.type === 'members') idsText = formatIds(source.scope.userIds)
     else if (source.scope.type === 'role') idsText = formatIds(source.scope.roleIds)
+  } else if (source?.kind === 'prior_node_approver') {
+    // Lock-1 §K3: the stored nodeKey → step-localId resolution happens in draftFromTemplate's
+    // post-pass (see priorStepLocalId's field doc for why the draft carries a localId reference).
+    sourceKind = 'prior_node_approver'
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -607,6 +622,7 @@ function stepDraftFromApprovalNode(
     level,
     requesterChoiceMode,
     requesterChoiceScopeType,
+    priorStepLocalId: '',
     approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
@@ -728,6 +744,8 @@ const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   continuous_dept_heads: ['kind', 'levels'],
   // Lock-1 §K5-b: same flat 2-level shape as manager_at_level.
   dept_head_at_level: ['kind', 'level'],
+  // Lock-1 §K3: flat 2-level shape — the referenced prior node's key.
+  prior_node_approver: ['kind', 'nodeKey'],
   form_field_user: ['kind', 'fieldId'],
   // Lock-1 §K2: `scope` is the ONE nested object in the source union (see
   // requesterChoiceSourceHasBackendDrop below for its per-type key check — the flat 2-level
@@ -924,10 +942,23 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver'].includes(source?.kind)) return true
       // Lock-1 §K2: a malformed requester_choice shape must fail-closed to read-only here too —
       // hydrate would otherwise re-derive a default mode/scope and silently flatten it on save.
       if (source?.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source as unknown as Record<string, unknown>)) return true
+      // Lock-1 §K3: a prior_node_approver whose nodeKey is NOT an earlier approval node of this
+      // ordered linear chain (dangling / self / downstream) must fail-closed to read-only —
+      // hydrate's post-pass could not resolve it to a step-localId, so a re-save through the
+      // linear builder would silently emit an empty/retargeted reference. (The backend publish
+      // dominance gate is the arbiter; this only refuses to EDIT what the linear model cannot
+      // faithfully carry.)
+      if (source?.kind === 'prior_node_approver') {
+        const priorApprovalKeys = ordered
+          .slice(0, ordered.indexOf(node))
+          .filter((candidate) => candidate.type === 'approval')
+          .map((candidate) => candidate.key)
+        if (!priorApprovalKeys.includes(source.nodeKey)) return true
+      }
     }
     // T1-4: `buildStepConfig` re-emits only { fieldId, access } per entry (the backend allowlist),
     // so a linear node carrying an ARRAY-shaped fieldPermissions with an extra key or non-object
@@ -976,6 +1007,30 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     : ordered
         .map(stepDraftFromApprovalNode)
         .filter((step): step is ApprovalStepDraft => step !== null)
+
+  // Lock-1 §K3 post-pass: resolve each stored `prior_node_approver` nodeKey into the referenced
+  // EARLIER step's localId (steps[i] ↔ the i-th approval node of the ordered linear chain). The
+  // localId reference — not the raw key — is what the draft carries, so inserting/reordering
+  // steps can never silently retarget the reference (the builder re-emits the referenced step's
+  // CURRENT positional key). A reference that does not resolve to an earlier approval node stays
+  // '' — `unsupportedTemplateAuthoringReason` already forces such a template read-only (save
+  // disabled), so the '' default is unreachable on an editable draft.
+  if (!complex) {
+    const orderedApprovalNodes = ordered.filter((node) => node.type === 'approval')
+    orderedApprovalNodes.forEach((node, index) => {
+      const step = steps[index]
+      if (!step || step.sourceKind !== 'prior_node_approver') return
+      const config = node.config as Record<string, unknown>
+      const source = Array.isArray(config.assigneeSources)
+        ? config.assigneeSources[0] as ApprovalAssigneeSource | undefined
+        : undefined
+      if (source?.kind !== 'prior_node_approver') return
+      const referencedIndex = orderedApprovalNodes.findIndex((candidate) => candidate.key === source.nodeKey)
+      if (referencedIndex >= 0 && referencedIndex < index) {
+        step.priorStepLocalId = steps[referencedIndex].localId
+      }
+    })
+  }
 
   return {
     templateId: template.id,
@@ -1140,8 +1195,15 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
 
 /** Exported (G-B2-06) so `linearStepSpine.ts` can derive the same `ApprovalAssigneeSource` the
  * saved graph would carry and feed it to the shared `assigneeSourceSummary` humanizer, instead of
- * re-deriving a second sourceKind→text switch that could drift from this one. */
-export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
+ * re-deriving a second sourceKind→text switch that could drift from this one.
+ *
+ * Lock-1 §K3: `allSteps` (the draft's full ordered step list) is needed ONLY by
+ * `prior_node_approver` — the emitted `nodeKey` is the referenced step's CURRENT positional key
+ * (`approval_${index+1}`, the linear builder's own key scheme), derived from the step-localId
+ * reference at build time so insert/reorder can never silently retarget it. Callers without the
+ * list (none in-repo) would emit an empty `nodeKey`, which both the FE validation and the backend
+ * normalize choke reject — fail-closed, never a silently-wrong reference. */
+export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepDraft[]): ApprovalAssigneeSource {
   if (step.sourceKind === 'static_user') {
     return { kind: 'static_user', userIds: parseIdsText(step.idsText) }
   }
@@ -1181,6 +1243,18 @@ export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource 
           : { type: 'company' as const }
     return { kind: 'requester_choice', mode: step.requesterChoiceMode, scope }
   }
+  if (step.sourceKind === 'prior_node_approver') {
+    // Lock-1 §K3: emit the referenced step's CURRENT positional key (see the docstring). An
+    // unresolved reference (missing localId / referenced step deleted or not EARLIER than this
+    // one) emits '' — rejected by validateTemplateApprovalFlow and by the backend normalize
+    // choke, never silently pointed elsewhere.
+    const stepIndex = allSteps?.findIndex((candidate) => candidate.localId === step.localId) ?? -1
+    const referencedIndex = allSteps?.findIndex((candidate) => candidate.localId === step.priorStepLocalId) ?? -1
+    const nodeKey = referencedIndex >= 0 && stepIndex >= 0 && referencedIndex < stepIndex
+      ? `approval_${referencedIndex + 1}`
+      : ''
+    return { kind: 'prior_node_approver', nodeKey }
+  }
   return { kind: 'requester' }
 }
 
@@ -1192,7 +1266,7 @@ export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource 
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
  * bare `{}` is never persisted.
  */
-function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): ApprovalNodeConfig {
+function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>, allSteps: ApprovalStepDraft[]): ApprovalNodeConfig {
   const autoApprovalPolicy: AutoApprovalPolicy = {
     ...step.originalAutoApprovalPolicy,
     ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
@@ -1211,7 +1285,7 @@ function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): Approv
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
   return {
-    assigneeSources: [sourceFromStep(step)],
+    assigneeSources: [sourceFromStep(step, allSteps)],
     approvalMode: step.approvalMode,
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
@@ -1243,7 +1317,9 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
     key: `approval_${index + 1}`,
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
-    config: buildStepConfig(step, fieldIds),
+    // Lock-1 §K3: the full step list rides along so a prior_node_approver step can emit its
+    // referenced step's CURRENT positional key (localId reference → key at build time).
+    config: buildStepConfig(step, fieldIds, draft.steps),
   }))
   const nodes: ApprovalGraph['nodes'] = [
     { key: 'start', type: 'start', name: '发起', config: {} },
@@ -1597,6 +1673,16 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
       && parseIdsText(step.idsText).length === 0
     ) {
       errors.push(`${label} 的提交人自选范围需要选择成员/角色`)
+    }
+    // Lock-1 §K3 PREVIEW (the backend publish dominance gate is the final arbiter): the
+    // referenced step must exist and be STRICTLY EARLIER than this one — a missing choice, a
+    // deleted referenced step, a self-reference, or a reference that ended up at/after this step
+    // via reorder all fail here (matching what `sourceFromStep` would emit as an empty nodeKey).
+    if (step.sourceKind === 'prior_node_approver') {
+      const referencedIndex = draft.steps.findIndex((candidate) => candidate.localId === step.priorStepLocalId)
+      if (referencedIndex < 0 || referencedIndex >= index) {
+        errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
+      }
     }
   })
   return errors

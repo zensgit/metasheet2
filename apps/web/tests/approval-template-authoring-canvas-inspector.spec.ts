@@ -983,7 +983,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all eleven assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all twelve assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -1003,11 +1003,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // SAME slice that lands the resolver arm end to end (Lock-1 §2.3 table: "Admitted when: K4
       // landed").
       dept_head_at_level: '指定层级部门负责人',
+      // Lock-1 §K3 (RATIFIED 2026-08-17) — the 节点审批人 registry row, admitted in the SAME
+      // slice that lands the dominance validator + caller-supplied decider resolution end to end
+      // (Lock-1 §2.3 table: "Admitted when: OD-L1-3 + OD-L1-4 decided; dominance validator
+      // landed" — both recorded (a) in the §4 block).
+      prior_node_approver: '节点审批人',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 12th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 13th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(11)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(12)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1765,11 +1770,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the eleven-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the twelve-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
     // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
-    // `dept_head_at_level`.
-    const CANONICAL_ELEVEN = [
+    // `dept_head_at_level`, K3 `prior_node_approver`.
+    const CANONICAL_TWELVE = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
@@ -1777,6 +1782,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       'direct_manager',
       'form_field_user',
       'manager_at_level',
+      'prior_node_approver',
       'requester',
       'requester_choice',
       'static_role',
@@ -1785,7 +1791,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_ELEVEN)
+    expect(roster).toEqual(CANONICAL_TWELVE)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1798,7 +1804,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_ELEVEN)
+    expect(rendered).toEqual(CANONICAL_TWELVE)
     unmount()
   })
 
@@ -1838,6 +1844,41 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
     unmount()
+  })
+
+  // Lock-1 §K3 — prior_node_approver authoring sub-form: registry-admitted, renders EDITABLE with
+  // the TYPED node picker (a select over the api-supplied legal-upstream candidates — D0 §10.2:
+  // never a free-text node-key input), no unknown-kind hint. The api's `priorApproverNodeOptions`
+  // is the OPTIONAL member the shipped view provides via legalPriorApproverNodeKeys.
+  it('K3: prior_node_approver renders EDITABLE with the typed upstream-node picker; an empty candidate list shows the honest no-upstream hint', () => {
+    const node = makeApprovalNode('approval_k3')
+    const api = createStubConfigApi({ approval_k3: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] } })
+    api.priorApproverNodeOptions = (nodeKey: string) => (nodeKey === 'approval_k3' ? [{ key: 'gate', label: '预审' }] : [])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-prior_node_approver"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-prior-node"]')).not.toBeNull()
+    // With ≥1 legal candidate the no-upstream hint must NOT render (hint is candidate-selected).
+    expect(c.querySelector('[data-testid="approval-node-source-prior-node-empty"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+
+    // Empty candidate list (e.g. the FIRST approval node, nothing upstream): the picker stays
+    // (typed, still no free-text path) and the honest hint renders.
+    const apiEmpty = createStubConfigApi({ approval_k3: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '' }] } })
+    apiEmpty.priorApproverNodeOptions = () => []
+    const emptyMount = mountDirectInspector({
+      node: makeApprovalNode('approval_k3'),
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: apiEmpty,
+    })
+    expect(emptyMount.container.querySelector('[data-testid="approval-node-source-prior-node-empty"]')).not.toBeNull()
+    emptyMount.unmount()
   })
 
   // A-4 SCOPE NOTE: this proves the ROSTER COMPONENT's own branching mechanism — given an

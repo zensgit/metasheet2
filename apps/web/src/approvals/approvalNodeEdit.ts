@@ -11,6 +11,7 @@ import type {
   NodeFieldPermission,
 } from '../types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval'
+import { runtimeSuccessorTargets } from './parallelEdit'
 
 const HANDLER_ASSIGNEE_SOURCE_KIND_SET = new Set<string>(HANDLER_ASSIGNEE_SOURCE_KINDS)
 
@@ -217,6 +218,13 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
     // normalizeApprovalAssigneeSources stays the arbiter on the ceiling).
     case 'dept_head_at_level':
       return Number.isInteger(source.level) && source.level >= 1
+    // Lock-1 §K3 PREVIEW: a non-empty referenced node key. Whether the reference is legal
+    // (an approval node strictly upstream on every runtime-reachable path) is the backend
+    // PUBLISH gate's job (`assertPriorNodeApproverReferencesUpstream`); the FE picker only
+    // OFFERS legal candidates (`legalPriorApproverNodeKeys` below), so this shape check plus
+    // the picker keep authoring honest without relaxing the backend arbiter.
+    case 'prior_node_approver':
+      return source.nodeKey.trim().length > 0
     case 'requester_choice':
       // Lock-1 §K2 PREVIEW (backend normalizeApprovalAssigneeSources stays the arbiter):
       // mode + scope discriminator, and a members/role scope needs ≥1 configured id.
@@ -295,6 +303,59 @@ export function validateApprovalNodeEdits(
     }
   }
   return errors
+}
+
+/**
+ * Lock-1 §K3 — the node keys a `prior_node_approver` source on `nodeKey`'s card may legally
+ * reference: `approval` nodes STRICTLY UPSTREAM on EVERY runtime-reachable path from the start
+ * node to the carrying node. FE mirror of the backend publish gate
+ * (`assertPriorNodeApproverReferencesUpstream`, ApprovalProductService.ts — the sole arbiter;
+ * this never relaxes it): T is offered ⟺ T is an approval node, T ≠ carrier, and removing T
+ * makes the carrier unreachable from start over `runtimeSuccessorTargets` (strict dominance by
+ * removal-reachability — the same conservative parallel posture: a node inside one parallel
+ * branch is never offered past the join or to a sibling branch, and a node reachable only
+ * through one condition branch is never offered after the merge). Drives the typed node PICKER
+ * (D0 §10.2 — never a free-text key input); order follows the graph's node-declaration order.
+ */
+export function legalPriorApproverNodeKeys(graph: ApprovalGraph, nodeKey: string): string[] {
+  const edgeByKey = new Map(graph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of graph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  const startKey = graph.nodes.find((node) => node.type === 'start')?.key ?? null
+  if (startKey === null) return []
+
+  const reachableWithout = (skipKey: string | null): Set<string> => {
+    const visited = new Set<string>()
+    if (startKey === skipKey) return visited
+    const queue: string[] = [startKey]
+    for (let head = 0; head < queue.length; head += 1) {
+      const currentKey = queue[head]
+      if (currentKey === skipKey || visited.has(currentKey)) continue
+      visited.add(currentKey)
+      const current = nodeByKey.get(currentKey)
+      if (!current) continue
+      for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+        queue.push(target)
+      }
+    }
+    return visited
+  }
+
+  // An unreachable carrier has no runtime-reachable paths at all — offer nothing (the backend
+  // gate passes such references vacuously, but a picker offering candidates for a dead node
+  // would be authoring theater).
+  if (!reachableWithout(null).has(nodeKey)) return []
+  return graph.nodes
+    .filter((candidate) =>
+      candidate.type === 'approval'
+      && candidate.key !== nodeKey
+      && !reachableWithout(candidate.key).has(nodeKey))
+    .map((candidate) => candidate.key)
 }
 
 /**

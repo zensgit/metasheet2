@@ -43,6 +43,12 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // NOT admitted on `handler` — Lock-3 §1.5's forward ADMIT row is a separate follow-up (see
   // HANDLER_ASSIGNEE_SOURCE_KINDS below, which deliberately does not include this kind).
   dept_head_at_level: '指定层级部门负责人',
+  // Lock-1 §K3 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the dominance
+  // validator + caller-supplied decider resolution end to end (registry table row: 节点审批人 /
+  // approval; "Admitted when: OD-L1-3 + OD-L1-4 decided; dominance validator landed" — both ODs
+  // are recorded (a) in the §4 ratification block). NOT admitted on `handler` (Lock-3 §1.5 lists
+  // no forward row for this kind at all).
+  prior_node_approver: '节点审批人',
 }
 
 /** Display order matches parent §10.3's listed order. Kept as an explicit array (rather than
@@ -63,6 +69,8 @@ const SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER: readonly ApprovalAssigneeSourceKind[] 
   'continuous_dept_heads',
   // Lock-1 §K5-b: appended after K4 (strictly downstream of it).
   'dept_head_at_level',
+  // Lock-1 §K3: appended after K5-b (ratified-kind append order).
+  'prior_node_approver',
 ]
 
 export interface ApprovalAssigneeSourceCapability {

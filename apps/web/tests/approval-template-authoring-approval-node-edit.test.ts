@@ -11,6 +11,7 @@ import {
   addAssigneeSourceCard,
   applyApprovalNodeEditsToGraph,
   approvalNodeEditsFromGraph,
+  legalPriorApproverNodeKeys,
   placeholderRoleNodeKeys,
   removeAssigneeSourceCard,
   validateApprovalNodeEdits,
@@ -264,6 +265,81 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] },
     })[0]).toMatch(/dept_head_at_level/)
   })
+
+  it('Lock-1 §K3: prior_node_approver — a non-empty nodeKey passes; an empty/blank one is flagged (isAssigneeSourceValid mirror site)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '' }] },
+    })[0]).toMatch(/prior_node_approver/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: '   ' }] },
+    })[0]).toMatch(/prior_node_approver/)
+  })
+  // Lock-3 §1.5: prior_node_approver (K3) has NO handler row at all (not even a forward ADMIT) —
+  // a handler carrying it must fail closed.
+  it('Lock-1 §K3 / Lock-3 §1.5: a HANDLER node carrying prior_node_approver is rejected (not in the seven-member handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
+    })[0]).toMatch(/prior_node_approver/)
+  })
+})
+
+// Lock-1 §K3 — legalPriorApproverNodeKeys: the FE mirror of the backend publish dominance gate
+// (`assertPriorNodeApproverReferencesUpstream`), driving the typed node picker. Candidate ⟺
+// approval node, ≠ carrier, strictly upstream on EVERY runtime-reachable path (removal test).
+// The full shape matrix (condition-branch / parallel-sibling / downstream / dangling) is owned by
+// the backend gate's own unit suite; this proves the MIRROR agrees on the discriminating shapes.
+describe('Lock-1 §K3: legalPriorApproverNodeKeys (typed picker candidates)', () => {
+  it('linear chain: offers exactly the strictly-earlier approval nodes (never self, never downstream, never start/end)', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'a1', type: 'approval', name: '一审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'a2', type: 'approval', name: '二审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'a3', type: 'approval', name: '三审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'a1' },
+        { key: 'e2', source: 'a1', target: 'a2' },
+        { key: 'e3', source: 'a2', target: 'a3' },
+        { key: 'e4', source: 'a3', target: 'end' },
+      ],
+    }
+    expect(legalPriorApproverNodeKeys(graph, 'a3')).toEqual(['a1', 'a2'])
+    expect(legalPriorApproverNodeKeys(graph, 'a2')).toEqual(['a1'])
+    // The first approval node has nothing upstream — an empty candidate list (positive control
+    // that the non-empty lists above are carrier-selected, not a constant).
+    expect(legalPriorApproverNodeKeys(graph, 'a1')).toEqual([])
+  })
+
+  it('condition merge: a node reachable only through ONE branch is NOT offered after the merge; the pre-condition node is', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'pre', type: 'approval', name: '预审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'route', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'edge-b1', rules: [{ fieldId: 'amount', operator: 'gt', value: 1 }] }], defaultEdgeKey: 'edge-b2' } },
+        { key: 'branch-a', type: 'approval', name: '高额', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'branch-b', type: 'approval', name: '低额', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'merge', type: 'approval', name: '终审', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'pre' },
+        { key: 'e2', source: 'pre', target: 'route' },
+        { key: 'edge-b1', source: 'route', target: 'branch-a' },
+        { key: 'edge-b2', source: 'route', target: 'branch-b' },
+        { key: 'e3', source: 'branch-a', target: 'merge' },
+        { key: 'e4', source: 'branch-b', target: 'merge' },
+        { key: 'e5', source: 'merge', target: 'end' },
+      ],
+    }
+    expect(legalPriorApproverNodeKeys(graph, 'merge')).toEqual(['pre'])
+    // Within a branch, the pre-condition node is still on every path — offered.
+    expect(legalPriorApproverNodeKeys(graph, 'branch-a')).toEqual(['pre'])
+  })
 })
 
 describe('G-5 fail-closed — complex approval-node config must stay within the BACKEND allowlist', () => {
@@ -374,6 +450,18 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
   })
   it('K5-b: a dept_head_at_level source with an unknown extra key forces read-only', () => {
     const graph = complexWith({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2, futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Lock-1 §K3 — BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND mirror site: prior_node_approver must be
+  // ALLOWED (present in the allowlist) on the complex path, and an extra key on it must still be
+  // caught (the allowlist is per-kind exact, not a blanket pass-through).
+  it('K3: prior_node_approver is allowed on the complex path (registered in BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_0' }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('K3: a prior_node_approver source with an unknown extra key forces read-only', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'approval_0', futureFlag: true }] })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })

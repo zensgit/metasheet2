@@ -65,6 +65,11 @@ describe('assigneeSourceSummary (single source)', () => {
     expect(membersScoped).not.toContain('secret_user_1')
   })
 
+  it('prior_node_approver: names the referenced node key (template-authored, §2.6-permitted) — never a person id (Lock-1 §K3)', () => {
+    expect(assigneeSourceSummary({ kind: 'prior_node_approver', nodeKey: 'approval_1' }))
+      .toBe('节点审批人（引用节点 approval_1）')
+  })
+
   // Lock-1 §2.5 item 5: the old `JSON.stringify(source)` default leaked raw config (raw IDs
   // included) into an ordinary-user surface — a defect, not a precedent. The default is now a
   // VALUES-FREE fixed label. G-16's "no JSON.stringify fallback reaches any surface" half.

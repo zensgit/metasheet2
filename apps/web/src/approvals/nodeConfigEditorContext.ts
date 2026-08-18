@@ -109,6 +109,17 @@ export interface ApprovalNodeConfigEditorApi {
    * always present on the shipped app's api object.
    */
   routingDriverFieldIds?: ComputedRef<Set<string>> | Ref<Set<string>> | Set<string>
+  /**
+   * Lock-1 §K3 — the LEGAL candidates for a `prior_node_approver` picker on `nodeKey`'s card:
+   * approval nodes strictly upstream on every runtime-reachable path (the shipped provider derives
+   * them from the live effective graph via `legalPriorApproverNodeKeys`, approvalNodeEdit.ts —
+   * the FE mirror of the backend publish dominance gate), each with its display label. The
+   * editor renders a TYPED node select over exactly this list (D0 §10.2 — never a free-text key
+   * input). OPTIONAL only so component-level tests that don't exercise K3 can omit it (the
+   * property is always present on the shipped app's api object); absent ⇒ the picker offers no
+   * candidates (fail-closed: nothing to select, nothing mutated).
+   */
+  priorApproverNodeOptions?: (nodeKey: string) => Array<{ key: string; label: string }>
   onUserSearch: (query: string) => void | Promise<void>
   directoryUsers: ComputedRef<Array<{ id: string }>> | Ref<Array<{ id: string }>> | Array<{ id: string }>
   directoryUsersLoading: ComputedRef<boolean> | Ref<boolean> | boolean

@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -281,6 +281,36 @@ export type ApprovalAssigneeSource =
    * dispatch-time failure).
    */
   | { kind: 'dept_head_at_level'; level: number }
+  /**
+   * Lock-1 §K3 — 节点审批人 (prior-node approver): resolves to the referenced prior node's ACTUAL
+   * decider(s) from INSTANCE state — the audited `action='approve'` actors at that node — never
+   * from that node's config and never from a directory read. `nodeKey` MUST reference an
+   * `approval` node strictly upstream on EVERY runtime-reachable path to the carrying node
+   * (a DOMINANCE check, enforced at publish by `assertPriorNodeApproverReferencesUpstream` —
+   * dangling / non-approval / self / not-on-every-path references are a publish-time 400,
+   * never a dispatch-time surprise).
+   *
+   * This is the ONE kind whose resolution is not a pure function of the create-time snapshot
+   * (§2.1 "K3 alone"): the deciders are unknowable at create, so the CALLER reads them at node
+   * activation from instance-internal `approval_records` rows (LATEST `nodeEntryEpoch` round only
+   * — OD-L1-3(a)) and passes them in alongside the snapshots
+   * (`ResolveApprovalAssigneesOptions.priorNodeApprovers`); the resolver itself stays pure and
+   * adds no database access. System sentinel actors (`system:auto-approval`,
+   * `system:approval-timeout` — the `system:` namespace) are DROPPED, never assigned; when
+   * dropping leaves nothing (or the referenced node was skipped / not reached), resolution is
+   * EMPTY and falls to the node's `emptyAssigneePolicy` (OD-L1-4(a) — under the default 'error'
+   * that is a fail-closed APPROVAL_ASSIGNEE_EMPTY, and under an explicit 'auto-approve' an
+   * AUDITED auto-approval event, never a silent nobody).
+   *
+   * Explicit NO-DEDUP across nodes (§K3): the same person approves AGAIN at the referencing node;
+   * intra-node identity dedup (the resolver's `seen` set) still collapses one identity to one
+   * seat WITHIN this node. NO self-exclusion (deliberate, the §K2 posture): a prior decider who
+   * happens to be the requester still gets the seat — self-approval semantics stay owned by
+   * `autoApprovalPolicy.mergeWithRequester`. The RULE (which node to reference) is frozen in the
+   * instance's pinned published runtime graph, so a re-publish never alters an in-flight
+   * instance's reference.
+   */
+  | { kind: 'prior_node_approver'; nodeKey: string }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -295,6 +325,12 @@ export interface ApprovalAssigneeResolutionMetadata {
     kind: ApprovalAssigneeSourceKind
     sourceIndex: number
     fieldId?: string
+    /**
+     * Lock-1 §K3 (`prior_node_approver` only): the referenced prior node's key, so "why is this
+     * person an approver" is answerable from the row alone (§2.6 — a template-authored node key,
+     * values-free).
+     */
+    priorNodeKey?: string
   }
   /**
    * Set when a delegation (委托) substituted this assignee: the original delegator's

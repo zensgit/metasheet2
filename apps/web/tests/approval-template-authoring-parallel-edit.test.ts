@@ -418,6 +418,17 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toEqual([])
   })
 
+  it('Lock-1 §K3: flags identical prior_node_approver references — the fingerprint mirror (`prior_node_approver:<nodeKey>`) is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'prior_node_approver', nodeKey: 'gate' }], [{ kind: 'prior_node_approver', nodeKey: 'gate' }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT referenced nodes are NOT flagged (parameterized, not
+    // kind-blanket — different prior nodes may have different deciders).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'prior_node_approver', nodeKey: 'gate' }], [{ kind: 'prior_node_approver', nodeKey: 'gate2' }]),
+    )).toEqual([])
+  })
+
   it('Lock-1 §K2 / G-17: requester_choice × requester_choice is NOT flagged (null fingerprint DELIBERATE — same-person collision is the runtime 409 guard\'s job)', () => {
     // Two requester_choice sources on parallel branches are NOT provably identical — the
     // requester may pick different people per branch — so the publish preflight must not block

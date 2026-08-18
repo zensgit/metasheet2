@@ -18,7 +18,7 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -173,6 +173,16 @@ export type ApprovalAssigneeSource =
    * level count).
    */
   | { kind: 'dept_head_at_level'; level: number }
+  /**
+   * Lock-1 §K3 — 节点审批人 (prior-node approver). Byte-mirrors the backend union member:
+   * `nodeKey` references an `approval` node strictly upstream on EVERY runtime-reachable path
+   * (a publish-time dominance check — dangling / downstream / self / branch-only references fail
+   * publish). Resolution happens at dispatch from the INSTANCE's own audit rows (the referenced
+   * node's actual deciders, latest round, system sentinels dropped) — never a directory read.
+   * The authoring picker is a TYPED node select restricted to the legal upstream set
+   * (`legalPriorApproverNodeKeys`), never a free-text key input.
+   */
+  | { kind: 'prior_node_approver'; nodeKey: string }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
