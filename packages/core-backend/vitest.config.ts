@@ -53,6 +53,13 @@ export default defineConfig({
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
       'tests/integration/approval-template-authoring-uat.api.test.ts',
+      // Lock-5 per-node operation policy (`操作权限`) real-DB acceptance — the §2.1 dispatch choke,
+      // the `policy_denied` audit row + its CHECK migration, the two timeline exclusions, and the
+      // placement / strictness / in-flight-freeze gates. Requires real PostgreSQL (it asserts a CHECK
+      // constraint violation and a records-only COMMIT that survives a thrown request). Excluded from
+      // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-node-operation-policy.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job

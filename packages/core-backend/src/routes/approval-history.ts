@@ -7,6 +7,7 @@ import { pool } from '../db/pg'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import type { ApprovalBridgePlmAdapter } from '../services/approval-bridge-types'
 import { parsePagination } from '../util/response'
+import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
 
 interface ApprovalHistoryRouterOptions {
   injector?: Injector
@@ -81,7 +82,17 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       }
 
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
-      const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id])
+      // Lock-5 §1.4 fact 2 / gate D-3 — this is one of the TWO unfiltered full-timeline readers, and
+      // the ONLY one that paginates. A refused member operation writes an `action:'policy_denied'`
+      // audit row (§1.4); without this exclusion a click the server REFUSED would appear in the
+      // member timeline as if something had happened, and — because the count below is the same
+      // unfiltered predicate — would silently shift `total` and therefore the page boundaries. The
+      // exclusion is applied to BOTH the count and the page query, with the same literal, so the two
+      // can never disagree.
+      const countRes = await pool.query(
+        'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
+        [id, APPROVAL_POLICY_DENIED_ACTION],
+      )
       const total = Number(countRes.rows[0]?.c || 0)
       const { rows } = await pool.query(
         `SELECT
@@ -98,9 +109,10 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
            to_version
          FROM approval_records
          WHERE instance_id = $1
+           AND action <> $4
          ORDER BY occurred_at DESC
          LIMIT $2 OFFSET $3`,
-        [id, pageSize, offset],
+        [id, pageSize, offset, APPROVAL_POLICY_DENIED_ACTION],
       )
 
       return res.json({
