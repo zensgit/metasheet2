@@ -21,6 +21,16 @@ on:
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue' # UI-P2-2c drawer CSS lives here (gate NIT-3)
       - 'apps/web/src/multitable/components/MetaRecordInspector.vue' # W2 S7: .meta-record-drawer--overlay CSS lives here
       - 'apps/web/src/multitable/utils/conditional-formatting.ts'
+      # P7-R1 (FAIL-0/FAIL-1): this lane also carries approval-inspector-keyboard.spec.ts (its
+      # ONLY lane — testMatch is '**/*.spec.ts' over the whole verification/ dir, so it already
+      # EXECUTES here). Before this addition the filter above never included any
+      # apps/web/src/approvals/** path, so a PR that only touched ApprovalNodeConfigEditorApi or
+      # its consumers (#4963/#4956/#4961) never re-triggered this workflow at all — the exact
+      # mechanism that let the spec rot red on main undetected (see FAIL-1).
+      - 'apps/web/src/approvals/nodeConfigEditorContext.ts'
+      - 'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
+      - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
+      - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/verification/**'
       - 'apps/web/playwright.verification.config.ts'
       - '.github/workflows/multitable-browser-verify.yml'

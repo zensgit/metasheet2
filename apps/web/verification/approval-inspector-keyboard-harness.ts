@@ -1,9 +1,17 @@
-// Browser-verification harness (dev/CI only — NOT part of the app build/typecheck; lives outside
-// src/ so vue-tsc + vite build ignore it). Mounts the REAL ApprovalCanvasNodeInspector.vue +
-// ApprovalGraphNodeConfigEditor.vue — the exact shipped markup (native `role="radiogroup"` +
-// `input[type=radio]` roster; native `role="tablist"`/`role="tab"` tab strip) — via the same
-// provide/inject wiring (`APPROVAL_NODE_CONFIG_EDITOR_KEY`) TemplateAuthoringView.vue uses in
-// production, so a real browser drives the real shipped DOM, not a hand-copied replica.
+// Browser-verification harness (dev/CI only — NOT part of the app build/typecheck via the DEFAULT
+// tsconfig.app.json; lives outside src/ so vite build ignores it). This ONE file, however, IS
+// covered by tsconfig.verification-approval.json (see that file's header) — a standalone,
+// non-composite project that type-checks it against the SAME live src/ tree, specifically so a
+// future `ApprovalNodeConfigEditorApi` change cannot rot this harness silently again (P7-R1 /
+// FAIL-1 rot-class closure: 8 missing members + a 2-vs-3-arg signature drift on
+// `setApprovalSourceKind` produced ZERO compile-time signal before this file existed, because
+// `vue-tsc -b`'s only referenced project is `src/**`).
+//
+// Mounts the REAL ApprovalCanvasNodeInspector.vue + ApprovalGraphNodeConfigEditor.vue — the exact
+// shipped markup (native `role="radiogroup"` + `input[type=radio]` roster; native `role="tablist"`/
+// `role="tab"` tab strip) — via the same provide/inject wiring (`APPROVAL_NODE_CONFIG_EDITOR_KEY`)
+// TemplateAuthoringView.vue uses in production, so a real browser drives the real shipped DOM, not
+// a hand-copied replica.
 //
 // Element Plus itself is stubbed with plain native elements, mirroring the convention already
 // established in apps/web/tests/approval-template-authoring-canvas-inspector.spec.ts's
@@ -12,17 +20,17 @@
 // / A-13) from Element Plus's own widget behavior, which is unrelated and already covered by the
 // existing jsdom suite + this repo's other verification harnesses.
 //
-// `setApprovalSourceKind` below MIRRORS (does not re-derive) the P1-1 fix landed in
-// TemplateAuthoringView.vue: before switching kind, cache the outgoing per-kind payload; if
-// switching TO a kind with a cached payload, restore it verbatim. Mounting the full
+// The `api` object below MIRRORS (does not re-derive) TemplateAuthoringView.vue's node-config-
+// editor accessors — same field shapes, same `approvalSourceKindCache` per-(nodeKey,sourceIndex)
+// payload-preservation strategy (P1-1 fix), same P1-B sourceIndex threading. Mounting the full
 // TemplateAuthoringView (router + template-load API mocking) is out of scope for this fixture per
 // the gate's own adjudication ("a fixture page or a component-level browser mount, not the full
-// app"). The LOGIC correctness of the real production `setApprovalSourceKind` is pinned separately
-// by a full-mount jsdom regression test in approval-template-authoring-canvas-inspector.spec.ts
-// (search "P1-1 regression") that fails red if that function's algorithm regresses to lossy. This
-// harness's job is narrower and browser-only: does a REAL ArrowDown/ArrowUp keypress on the REAL
-// native radio markup actually commit (Link B), and does the REST of the shipped UI (echo line,
-// tab strip roving tabindex, toolbar/tablist non-crossing) behave correctly around that.
+// app"). The LOGIC correctness of the real production accessors is pinned separately by full-mount
+// jsdom regression tests in approval-template-authoring-canvas-inspector.spec.ts (search "P1-1
+// regression"). This harness's job is narrower and browser-only: does a REAL ArrowDown/ArrowUp
+// keypress on the REAL native radio markup actually commit (Link B), and does the REST of the
+// shipped UI (echo line, tab strip roving tabindex, toolbar/tablist non-crossing) behave correctly
+// around that.
 //
 // FAIL-5 fix (P7-R2, 20260818): production theme + design tokens, exactly as
 // apps/web/src/main.ts loads them. Without these every `var(--el-*)`/`var(--ms-*)` reference in
@@ -40,7 +48,7 @@ import { computed, createApp, defineComponent, h, ref } from 'vue'
 import ApprovalCanvasNodeInspector from '../src/approvals/components/ApprovalCanvasNodeInspector.vue'
 import ApprovalGraphNodeConfigEditor from '../src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import { APPROVAL_NODE_CONFIG_EDITOR_KEY, type ApprovalNodeConfigEditorApi } from '../src/approvals/nodeConfigEditorContext'
-import type { ApprovalAssigneeSource, ApprovalAssigneeSourceKind, ApprovalNode } from '../src/types/approval'
+import type { ApprovalAssigneeSource, ApprovalAssigneeSourceKind, ApprovalNode, HandlerMode } from '../src/types/approval'
 
 const node: ApprovalNode = { key: 'app_b', type: 'approval', name: '分支 B', config: {} }
 
@@ -48,20 +56,53 @@ const node: ApprovalNode = { key: 'app_b', type: 'approval', name: '分支 B', c
 // instructions name.
 const assigneeSources = ref<ApprovalAssigneeSource[]>([{ kind: 'static_role', roleIds: ['legal'] }])
 
-const kindCache: Partial<Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource>> = {}
+function sourceAt(key: string, sourceIndex: number): ApprovalAssigneeSource | undefined {
+  return key === node.key ? assigneeSources.value[sourceIndex] : undefined
+}
+// P1-B: replace ONLY the card at sourceIndex, mirroring setApprovalNodeSourceAt's out-of-range
+// no-op refusal.
+function setSourceAt(key: string, sourceIndex: number, source: ApprovalAssigneeSource): void {
+  if (key !== node.key) return
+  if (sourceIndex < 0 || sourceIndex >= assigneeSources.value.length) return
+  const next = assigneeSources.value.slice()
+  next[sourceIndex] = source
+  assigneeSources.value = next
+}
+
+// P1-1 payload-preservation cache, keyed by `${nodeKey}:${sourceIndex}` — mirrors
+// TemplateAuthoringView.vue's `approvalSourceKindCache`.
+const kindCache: Record<string, Partial<Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource>>> = {}
+function cacheKeyFor(nodeKey: string, sourceIndex: number): string {
+  return `${nodeKey}:${sourceIndex}`
+}
 function cloneSource(source: ApprovalAssigneeSource): ApprovalAssigneeSource {
   return JSON.parse(JSON.stringify(source)) as ApprovalAssigneeSource
 }
+// Mirrors TemplateAuthoringView.vue's defaultApprovalSourceForKind exactly — every current
+// ApprovalAssigneeSourceKind that carries its own required extra field(s) has its own named arm;
+// only the three trivial `{ kind }`-only members (requester/direct_manager/dept_head) share the
+// fallback. A future kind landing with its own required extra field(s) and no named arm here
+// would silently type-check against that fallback's cast and only fail at runtime — exactly
+// FAIL-1's rot class — so any new member with extra fields MUST get its own arm here, mirroring
+// production.
 function defaultForKind(kind: ApprovalAssigneeSourceKind): ApprovalAssigneeSource {
   return kind === 'static_user' ? { kind, userIds: [] }
     : kind === 'static_role' ? { kind, roleIds: [] }
       : kind === 'form_field_user' ? { kind, fieldId: '' }
         : kind === 'continuous_managers' ? { kind, levels: 1 }
           : kind === 'manager_at_level' ? { kind, level: 1 }
-            : { kind }
+            : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
+              : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                : kind === 'dept_head_at_level' ? { kind, level: 1 }
+                  // Lock-1 §K3: '' = not yet chosen — mirrors production's own comment: invalid
+                  // to save until the typed picker selects a legal upstream node.
+                  : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
+                    : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 
 const changeEventLog = ref<string[]>([])
+const handlerMode = ref<HandlerMode>('all')
+const handlerOpinionRequired = ref(false)
 
 const api: ApprovalNodeConfigEditorApi = {
   readOnly: false,
@@ -90,73 +131,113 @@ const api: ApprovalNodeConfigEditorApi = {
   conditionOutgoingEdgeKeys: () => [],
   conditionEdgeLabel: () => '',
   graphEdgeTargetLabel: () => '',
-  graphNodeLabel: (key: string) => key,
+  graphNodeLabel: (key) => key,
   parallelJoinModeLabel: () => '',
   ccTargetTypeLabel: () => '用户',
   setCcTargetIds: () => {},
   syncCcOptions: () => {},
-  approvalSourceKind: (key) => (key === node.key ? assigneeSources.value[0]?.kind ?? 'requester' : 'requester'),
-  // P1-1 fix mirror — see file header comment.
-  setApprovalSourceKind: (key, kind) => {
+  approvalSourceKind: (key, sourceIndex) => sourceAt(key, sourceIndex)?.kind ?? 'requester',
+  // P1-1 fix mirror (see file header) — 3-arg (nodeKey, sourceIndex, kind), current contract.
+  setApprovalSourceKind: (key, sourceIndex, kind) => {
     changeEventLog.value = [...changeEventLog.value, `change:${kind}`]
     if (key !== node.key) return
-    const current = assigneeSources.value[0]
-    if (current && current.kind !== kind) kindCache[current.kind] = cloneSource(current)
-    const cached = kindCache[kind]
-    const next = cached ? cloneSource(cached) : defaultForKind(kind)
-    assigneeSources.value = [next, ...assigneeSources.value.slice(1)]
+    const cacheKey = cacheKeyFor(key, sourceIndex)
+    const current = sourceAt(key, sourceIndex)
+    if (current && current.kind !== kind) {
+      const cacheForCard = kindCache[cacheKey] ?? {}
+      cacheForCard[current.kind] = cloneSource(current)
+      kindCache[cacheKey] = cacheForCard
+    }
+    const cached = kindCache[cacheKey]?.[kind]
+    setSourceAt(key, sourceIndex, cached ? cloneSource(cached) : defaultForKind(kind))
   },
   syncApprovalNodeOptions: () => {},
-  approvalSourceIds: (key) => {
-    const source = key === node.key ? assigneeSources.value[0] : undefined
+  approvalSourceIds: (key, sourceIndex) => {
+    const source = sourceAt(key, sourceIndex)
     if (source?.kind === 'static_user') return source.userIds
     if (source?.kind === 'static_role') return source.roleIds
     return []
   },
-  setApprovalSourceIdsFromPicker: (key, ids) => {
-    if (key !== node.key) return
-    const source = assigneeSources.value[0]
-    if (source?.kind === 'static_user') source.userIds = ids
-    else if (source?.kind === 'static_role') source.roleIds = ids
+  setApprovalSourceIdsFromPicker: (key, sourceIndex, ids) => {
+    const source = sourceAt(key, sourceIndex)
+    if (source?.kind === 'static_user') setSourceAt(key, sourceIndex, { ...source, userIds: ids })
+    else if (source?.kind === 'static_role') setSourceAt(key, sourceIndex, { ...source, roleIds: ids })
   },
-  approvalSourceFieldId: (key) => {
-    const source = key === node.key ? assigneeSources.value[0] : undefined
+  approvalSourceFieldId: (key, sourceIndex) => {
+    const source = sourceAt(key, sourceIndex)
     return source?.kind === 'form_field_user' ? source.fieldId : ''
   },
-  setApprovalSourceFieldId: (key, fieldId) => {
-    if (key !== node.key) return
-    const source = assigneeSources.value[0]
-    if (source?.kind === 'form_field_user') source.fieldId = fieldId
+  setApprovalSourceFieldId: (key, sourceIndex, fieldId) => {
+    setSourceAt(key, sourceIndex, { kind: 'form_field_user', fieldId })
   },
-  approvalSourceLevel: (key) => {
-    const source = key === node.key ? assigneeSources.value[0] : undefined
+  approvalSourceLevel: (key, sourceIndex) => {
+    const source = sourceAt(key, sourceIndex)
     if (source?.kind === 'manager_at_level') return source.level
     if (source?.kind === 'continuous_managers') return source.levels
+    if (source?.kind === 'continuous_dept_heads') return source.levels
+    if (source?.kind === 'dept_head_at_level') return source.level
     return 1
   },
-  setApprovalSourceLevel: (key, value) => {
-    if (key !== node.key) return
-    const source = assigneeSources.value[0]
-    if (source?.kind === 'manager_at_level') source.level = value
-    else if (source?.kind === 'continuous_managers') source.levels = value
+  setApprovalSourceLevel: (key, sourceIndex, value) => {
+    const kind = sourceAt(key, sourceIndex)?.kind
+    if (kind === 'manager_at_level') setSourceAt(key, sourceIndex, { kind, level: value })
+    else if (kind === 'continuous_managers') setSourceAt(key, sourceIndex, { kind, levels: value })
+    else if (kind === 'continuous_dept_heads') setSourceAt(key, sourceIndex, { kind, levels: value })
+    else if (kind === 'dept_head_at_level') setSourceAt(key, sourceIndex, { kind, level: value })
   },
   approvalSourceIsPlaceholder: () => false,
+  // P1-B: card count for the v-for + the "keep ≥1" remove-guard's disabled state.
+  approvalSourceCount: (key) => (key === node.key ? assigneeSources.value.length : 0),
+  addApprovalSourceCard: (key, defaultKind) => {
+    if (key !== node.key) return
+    assigneeSources.value = [...assigneeSources.value, defaultForKind(defaultKind)]
+  },
+  // Fail-closed: refuses (no-op) when the node has exactly one source — mirrors
+  // removeAssigneeSourceCard's ≥1-source guard living in the mutator itself, not only in a
+  // disabled button.
+  removeApprovalSourceCard: (key, sourceIndex) => {
+    if (key !== node.key) return
+    if (assigneeSources.value.length <= 1) return
+    assigneeSources.value = assigneeSources.value.filter((_, index) => index !== sourceIndex)
+  },
   approvalNodeMode: () => 'single',
   setApprovalNodeMode: () => {},
+  // P1-C (T2-4 N-of-M / 门槛会签) + (T1-1) node-level timeout — out of THIS harness's scoped
+  // interaction surface (roster ArrowDown/ArrowUp + tab strip only, see file header); stubbed
+  // inert like approvalNodeMode/setApprovalNodeMode above, not wired to a live edit model.
+  approvalNodeThreshold: () => 1,
+  setApprovalNodeThreshold: () => {},
+  approvalNodeInParallelRegion: () => false,
+  approvalNodeTimeout: () => undefined,
+  setApprovalNodeTimeoutEnabled: () => {},
+  setApprovalNodeTimeoutAfterMinutes: () => {},
+  setApprovalNodeTimeoutEffect: () => {},
+  setApprovalNodeTimeoutTransferToUserId: () => {},
+  setApprovalNodeTimeoutJumpToNodeKey: () => {},
+  setApprovalNodeTimeoutUnit: () => {},
+  timeoutJumpTargetOptions: () => [],
   approvalNodeEmptyPolicy: () => 'error',
   setApprovalNodeEmptyPolicy: () => {},
   approvalNodeMergeWithRequester: () => false,
   setApprovalNodeMergeWithRequester: () => {},
+  // Lock-3 §1.1 — handler-node mode (会签/或签) + 办理意见 required.
+  handlerNodeMode: () => handlerMode.value,
+  setHandlerNodeMode: (_key, mode) => { handlerMode.value = mode },
+  handlerNodeOpinionRequired: () => handlerOpinionRequired.value,
+  setHandlerNodeOpinionRequired: (_key, required) => { handlerOpinionRequired.value = required },
   approvalNodeFieldAccess: () => 'editable',
   setApprovalNodeFieldAccess: () => {},
   nodeConfigSummary: () => [],
+  // Lock-0 L0-6/D5 — optional per the interface's own doc comment; this fixture has no
+  // form_field_user routing-driver scenario, so an empty set is the honest value.
+  routingDriverFieldIds: new Set<string>(),
   onUserSearch: () => {},
   directoryUsers: [],
   directoryUsersLoading: false,
-  directoryRoles: [{ id: 'legal', name: '法务' }],
+  directoryRoles: [{ id: 'legal' }],
   formulaRoles: [],
-  formatUserLabel: (u: { id: string; name?: string }) => u.name ?? u.id,
-  formatRoleLabel: (r: { id: string; name?: string }) => r.name ?? r.id,
+  formatUserLabel: (u) => u.name ?? u.id,
+  formatRoleLabel: (r) => r.name ?? r.id,
 }
 
 // Minimal native-element stand-ins for Element Plus (see file header) — same idiom as the jsdom
