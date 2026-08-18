@@ -1,3 +1,75 @@
 scripts/ops/stock-preparation-prep-line-extended-smoke.mjs text eol=lf
 scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs text eol=lf
 scripts/ops/stock-preparation-rca-window-pm2-sample.mjs text eol=lf
+
+# ---------------------------------------------------------------------------
+# content-digest-pinned by sealed-export-package-provenance
+# ---------------------------------------------------------------------------
+# plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs
+# hashes each of the files below byte-for-byte (`sha256File`, and
+# `verifyPinnedMigrations` for the 06x/07x SQL) and compares the result against
+# the frozen manifest
+#   plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json
+# Those pins were computed from LF bytes, so on a `core.autocrlf=true` checkout
+# (the default on Windows dev hosts) every single entry mismatches and
+# `sealed-export-package-provenance` / `sealed-export-s5-evidence` fail closed.
+#
+# `text eol=lf` — not `-text` — is deliberate. Both give an LF working tree, but
+# `text` also normalises on `git add`, so a CRLF-writing editor cannot push CRLF
+# bytes into the blob and break the pin for *every* platform. The index blobs
+# are already pure LF today, so these rules are a no-op for existing content.
+#
+# The digest must stay byte-exact: do NOT "fix" this by making `sha256File`
+# LF-normalise before hashing. A normalising digest would silently accept a
+# CRLF-tampered file, which is exactly what this gate exists to catch.
+#
+# Keep in sync with the PINNED_* rosters in
+# sealed-export-package-provenance.cjs.
+
+# PINNED_S1..S6_MODULES + the frozen pin manifest itself (its sha256 is emitted
+# as `frozenManifestDigest`). Directory-wide on purpose: PINNED_MODULE_RELATIVE_DIR
+# *is* this directory, all 31 tracked .cjs in it are pinned today, and every
+# module landed here becomes a pin candidate for the next stage — a per-file
+# list would silently miss the next one. Nothing binary lives here (.cjs/.json only).
+plugins/plugin-integration-core/lib/sealed-export/** text eol=lf
+
+# PINNED_MIGRATIONS — listed per file, not `migrations/*.sql`: only 6 of the 63
+# tracked migrations are pinned and the repo pins narrowly on purpose.
+packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql text eol=lf
+packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql text eol=lf
+packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql text eol=lf
+packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql text eol=lf
+packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql text eol=lf
+packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql text eol=lf
+
+# PINNED_EXTERNAL_MODULES — 7 of the 144 .cjs directly under
+# plugins/plugin-integration-core/lib/, so no directory rule here either.
+plugins/plugin-integration-core/lib/gip-profile-certification-contracts.cjs text eol=lf
+plugins/plugin-integration-core/lib/gip-canonical-json.cjs text eol=lf
+plugins/plugin-integration-core/lib/db.cjs text eol=lf
+plugins/plugin-integration-core/lib/stock-preparation-sealed-snapshot-decoder.cjs text eol=lf
+plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs text eol=lf
+plugins/plugin-integration-core/lib/stock-preparation-plm-source-persist-bridge.cjs text eol=lf
+plugins/plugin-integration-core/lib/stock-preparation-sync-run-persist.cjs text eol=lf
+
+# PINNED_RUNTIME_FILES
+plugins/plugin-integration-core/package.json text eol=lf
+pnpm-lock.yaml text eol=lf
+plugins/plugin-integration-core/index.cjs text eol=lf
+plugins/plugin-integration-core/lib/http-routes.cjs text eol=lf
+plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs text eol=lf
+scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1 text eol=lf
+docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md text eol=lf
+scripts/ops/multitable-onprem-package-verify.sh text eol=lf
+
+# PINNED_EVIDENCE_FILES
+.github/workflows/sealed-export-s5-sqlserver.yml text eol=lf
+scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs text eol=lf
+scripts/ops/verify-sealed-export-s5-sqlserver-evidence.cjs text eol=lf
+plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs text eol=lf
+packages/core-backend/tests/integration/sealed-export-signer-authority-lifecycle-migration.db.test.ts text eol=lf
+packages/core-backend/tests/integration/sealed-export-s6a-runtime-authority.db.test.ts text eol=lf
+scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1 text eol=lf
+plugins/plugin-integration-core/__tests__/sealed-export-s6a-product-runtime.test.cjs text eol=lf
+scripts/ops/multitable-onprem-package-build.sh text eol=lf
+.github/workflows/plugin-tests.yml text eol=lf
