@@ -8,6 +8,25 @@ const { failSealedExport } = require('./failure-vocabulary.cjs')
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{64}$/
 
+// NTFS exposes no directory-fsync primitive. `fs.open(dir, 'r')` succeeds on win32
+// but the subsequent `handle.sync()` raises EPERM for EVERY directory, so the
+// durability barrier in syncDirectory() below is unreachable there — not
+// occasionally, always. Before this constant existed, the first writeChunk() of the
+// first run on a Windows host hardlinked the chunk into place and THEN refused with
+// SEALED_EXPORT_STAGING_WRITE_FAILED, so the chunk was on disk while the caller was
+// told the write had failed, and every retry re-entered the same refusal.
+//
+// The skip is narrow and it is only a DURABILITY barrier that is skipped:
+//   - the per-file fsync in writeChunk() still runs on every platform;
+//   - the chunk digest, the manifest digest and the EXISTING_IDENTICAL byte compare
+//     are untouched, so no integrity control is weakened;
+//   - on POSIX this module is byte-identical to its previous behaviour, including
+//     the fail-closed refusal for any other syncDirectory() error.
+// What a win32 host loses is the crash-consistency guarantee that the directory
+// entry survives a power loss; a lost entry re-presents as a missing chunk, which
+// the chunk-set completeness check already refuses.
+const DIRECTORY_FSYNC_SUPPORTED = process.platform !== 'win32'
+
 function assertSessionId(sessionId) {
   if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
@@ -83,6 +102,7 @@ function createPrivateIngestionBlobStore({ rootDir } = {}) {
   }
 
   async function syncDirectory(directory) {
+    if (!DIRECTORY_FSYNC_SUPPORTED) return
     let handle = null
     try {
       handle = await fs.open(directory, 'r')

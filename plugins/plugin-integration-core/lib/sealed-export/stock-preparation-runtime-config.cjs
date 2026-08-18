@@ -35,7 +35,12 @@ const ENV = Object.freeze({
     'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_RUNTIME_DATABASE_URL',
   signerPrivateKeyFile:
     'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_SIGNER_PRIVATE_KEY_FILE',
+  win32ArtifactAclAttested:
+    'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_WIN32_ARTIFACT_ACL_ATTESTED',
 })
+// Exact literal. Deliberately NOT trimmed and NOT lower-cased: an attestation is an
+// operator act, so 'TRUE', ' true ' and '1' are refusals, not near-misses.
+const WIN32_ARTIFACT_ACL_ATTESTATION = 'true'
 const PROVISIONING_SPEC_FIELDS = Object.freeze([
   'binding',
   'externalSystem',
@@ -167,10 +172,40 @@ function readProvisioningSpec(fileName) {
   return spec
 }
 
+// The sealed-export artifact tree asserts its confidentiality with POSIX modes:
+// mkdir({ mode: 0o700 }) / chmod(0o700) on the artifact and staging directories and
+// chmod(0o600) on every chunk and artifact file. On win32 those calls SUCCEED and
+// then no-op — the mode reads back 0o666 — so the control the code claims is simply
+// absent at runtime, and nothing in this package applies the NTFS equivalent
+// (`icacls <root> /inheritance:r /grant:r "<svc>:(OI)(CI)F"`).
+//
+// This gate refuses to boot the S6-A runtime on win32 unless an operator has
+// explicitly attested that the artifact root carries an equivalent NTFS ACL. The
+// chmod calls stay exactly where they are: they remain the POSIX control, and this
+// is the win32 substitute for the assurance they cannot give there.
+//
+// The refusal rides SEALED_EXPORT_PROFILE_UNCERTIFIED — the §10 reason for "this
+// deployment is not certified to produce sealed exports" — because the §10 failure
+// vocabulary was RATIFIED and frozen at exactly 30 tokens on 2026-07-27 and no
+// reason may be added, removed or renamed without a fresh owner ruling. The specific
+// unmet control is named in the details field instead, which IS an open surface.
+function assertArtifactRootModeEnforceable(env, platform) {
+  if (platform !== 'win32') return
+  if (env[ENV.win32ArtifactAclAttested] !== WIN32_ARTIFACT_ACL_ATTESTATION) {
+    failSealedExport('SEALED_EXPORT_PROFILE_UNCERTIFIED', {
+      field: 'win32ArtifactAclAttested',
+    })
+  }
+}
+
 function loadStockPreparationRuntimeConfig({
   env = process.env,
+  platform = process.platform,
 } = {}) {
   if (!env || typeof env !== 'object') {
+    failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
+  }
+  if (typeof platform !== 'string' || platform.length < 1) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
   if (!featureEnabled(env)) {
@@ -180,6 +215,7 @@ function loadStockPreparationRuntimeConfig({
   if (!path.isAbsolute(artifactRoot)) {
     failSealedExport('SEALED_EXPORT_INTERNAL_ERROR')
   }
+  assertArtifactRootModeEnforceable(env, platform)
   const privateSignerMaterial = readSignerMaterial(
     env[ENV.signerPrivateKeyFile],
   )
@@ -229,6 +265,7 @@ function loadStockPreparationProvisioningConfig({
 module.exports = Object.freeze({
   ENV,
   FEATURE_FLAG,
+  WIN32_ARTIFACT_ACL_ATTESTATION,
   loadStockPreparationProvisioningConfig,
   loadStockPreparationRuntimeConfig,
 })
