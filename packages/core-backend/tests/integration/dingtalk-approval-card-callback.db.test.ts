@@ -440,6 +440,17 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
       return null
     }
 
+    /** Atomic completion evidence: anchor provenance + corp gate + outcome from one invocation. */
+    const completionLogFor = (deliveryId: string): Record<string, unknown> | null => {
+      for (const call of infoSpy.mock.calls) {
+        const [msg, meta] = call as [string, Record<string, unknown> | undefined]
+        if (msg === 'DingTalk interactive-card callback completed evidence' && meta?.deliveryId === deliveryId) {
+          return meta
+        }
+      }
+      return null
+    }
+
     /** Every string that ever reached ANY logger call this test — used to prove no corp value leaked. */
     const allLoggedText = (): string =>
       infoSpy.mock.calls.map((c) => JSON.stringify(c)).join(' | ')
@@ -463,6 +474,12 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
       )
       expect(res.outcome).toBe('executed')
       expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: false })
+      expect(completionLogFor(deliveryId)).toMatchObject({
+        headerEventCorpIdPresent: true,
+        bodyCorpIdPresent: false,
+        corpGateResult: 'matched',
+        callbackOutcome: 'executed',
+      })
     })
 
     test('BODY-ONLY (no header) → executes; presence logged as header=false body=true — THIS is the §0-a answer that says the header does not exist on real frames', async () => {
@@ -480,6 +497,12 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
       expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'corp_anchor_absent' })
       expect(await approveRecordCount(instanceId)).toBe(0)
       expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: false, bodyCorpIdPresent: false })
+      expect(completionLogFor(deliveryId)).toMatchObject({
+        headerEventCorpIdPresent: false,
+        bodyCorpIdPresent: false,
+        corpGateResult: 'corp_anchor_absent',
+        callbackOutcome: 'operator_unresolved',
+      })
     })
 
     test('CONFLICT (header ≠ body) → corp_anchor_conflict, NOT absent — a disagreement must never be misreported as "no anchor exists"', async () => {
@@ -546,6 +569,12 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
       const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(deliveryId, DD_OP_B, {}, 'approve', CORP_A))
       expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'corp_mismatch' })
       expect(await approveRecordCount(instanceId)).toBe(0)
+      expect(completionLogFor(deliveryId)).toMatchObject({
+        headerEventCorpIdPresent: false,
+        bodyCorpIdPresent: true,
+        corpGateResult: 'corp_mismatch',
+        callbackOutcome: 'operator_unresolved',
+      })
     })
 
     test('VALUES-FREE: no corp id, user id, form value or raw payload EVER reaches a log line', async () => {
@@ -565,6 +594,7 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
 
       // ...while the presence booleans ARE there. Absent this, the test would pass by logging nothing.
       expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: true })
+      expect(completionLogFor(deliveryId)).toMatchObject({ corpGateResult: 'matched', callbackOutcome: 'executed' })
     })
   })
 

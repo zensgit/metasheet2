@@ -83,11 +83,12 @@ DingTalk interactive-card callback corp anchor
 | U7 | 未绑定钉钉的操作者点卡 | 无引擎调用；卡面「请先在网页端绑定钉钉后再处理」 | ⬜ |
 | U8 | 点「驳回」 | 跳 Slice-A 决策页（深链），页面强制意见后驳回成功 | ⬜ |
 
-**U4–U8 每次点击的证据纪律**：先对该 delivery 运行 `observe-baseline`，确认
-`reason=baseline_captured`；再执行**恰一次**点击/技术注入；最后运行 `observe`。`observe`
-必须证明同一 delivery 的 anchor/handled 计数均相对 checkpoint 严格增加，成功后自动推进
-checkpoint。不得拿 U4 留下的历史日志作为 U5 的证据；未先捕获 checkpoint、日志计数回退
-（容器重建）或本轮无增量都必须判失败并重新从 `observe-baseline` 开始。
+**U4–U7 每次回调的证据纪律**：对该 delivery 启动 `observe`，看到
+`observer_armed=true` 后立即执行**恰一次**点击/受控技术注入，并等待完整五分钟观察窗结束。
+`observe` 只读取该固定窗口内的日志，并要求恰好一条原子 completion-evidence 记录；该记录把 delivery、corp 锚点判定与
+callback outcome 绑定在同一次完成调用中。不得拿 U4 的历史日志证明 U5；容器在窗口内重建、
+零条或多条 completion evidence 都必须失败。U8 是网页深链，不产生 Stream callback；以网页
+响应、审批审计与原卡终态更新三者证明，不套用 `observe`。
 
 ## 3. 卡片终态（B-4 面）
 
