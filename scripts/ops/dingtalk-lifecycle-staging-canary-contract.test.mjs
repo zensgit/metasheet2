@@ -643,10 +643,11 @@ test('staging compose derives health build identity from the exact image tag, no
   assert.ok(envFileIndex >= 0 && environmentIndex > envFileIndex)
 })
 
-test('P1 backend recreate reuses the exact running image pin instead of latest or unknown', () => {
+test('P1 backend recreate reuses the exact running tag pin instead of latest or unknown', () => {
   const source = read(REMOTE_SH)
   assert.match(source, /resolve_live_backend_image_pin\(\)/)
   assert.match(source, /metasheet2-backend:\(\[0-9a-f\]\{40\}\)/)
+  assert.match(source, /metasheet2-backend@sha256:\[0-9a-f\]\{64\}/)
   assert.match(
     source,
     /IMAGE_OWNER="\$image_owner" IMAGE_TAG="\$image_tag" \\\n\s+docker compose --project-directory "\$STAGING_DIR"/,
@@ -689,6 +690,71 @@ test('P1 backend recreate reuses the exact running image pin instead of latest o
   )
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, new RegExp(`^zensgit\\|${sha}\\|compose `))
+})
+
+test('P1 backend recreate accepts a digest only when the completion record and persisted override match it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lifecycle-digest-pin-'))
+  const identity = join(dir, 'deploy-identity.env')
+  const override = join(dir, 'attendance.override.yml')
+  const sha = 'c'.repeat(40)
+  const digest = `ghcr.io/zensgit/metasheet2-backend@sha256:${'d'.repeat(64)}`
+  writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=${digest}\n`)
+  writeFileSync(override, `services:\n  backend:\n    image: ${digest}\n`)
+
+  const run = () => spawnSync(
+    'bash',
+    [
+      '-o',
+      'pipefail',
+      '-c',
+      `source "$1"
+       STAGING_DIR=/tmp
+       STAGING_COMPOSE_FILE=/tmp/docker-compose.app.staging.yml
+       ATTENDANCE_DEPLOY_IDENTITY_FILE="$2"
+       ATTENDANCE_OVERRIDE_FILE="$3"
+       LIFECYCLE_OVERRIDE_FILE=/tmp/not-present-lifecycle
+       docker() {
+         if [[ "$1" == "inspect" ]]; then
+           printf '%s' "$LIVE_DIGEST"
+         else
+           printf '%s|%s|%s' "$IMAGE_OWNER" "$IMAGE_TAG" "$*"
+         fi
+       }
+       compose_staging_cmd "" config`,
+      'bash',
+      REMOTE_SH,
+      identity,
+      override,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTION: 'status',
+        OUTPUT_DIR: '/tmp/lifecycle-canary-contract-source-only',
+        RUN_STAMP: 'contract',
+        LIFECYCLE_CANARY_SOURCE_ONLY: 'true',
+        LIVE_DIGEST: digest,
+      },
+    },
+  )
+
+  try {
+    const accepted = run()
+    assert.equal(accepted.status, 0, accepted.stderr)
+    assert.match(accepted.stdout, new RegExp(`^zensgit\\|${sha}\\|compose `))
+
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=ghcr.io/zensgit/metasheet2-backend@sha256:${'e'.repeat(64)}\n`)
+    const rejectedRecord = run()
+    assert.notEqual(rejectedRecord.status, 0, 'a mismatched completion record must fail closed')
+
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=${digest}\n`)
+    writeFileSync(override, 'services:\n  backend:\n    image: ghcr.io/zensgit/metasheet2-backend:mutable\n')
+    const rejectedOverride = run()
+    assert.notEqual(rejectedOverride.status, 0, 'a persisted override that does not retain the digest must fail closed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('P1 rollback recreate retains the proven image pin after the backend container disappears', () => {

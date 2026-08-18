@@ -3,7 +3,7 @@
 #
 # Remote (deploy-host) half of .github/workflows/attendance-staging-window-runner.yml.
 # Executes ONE action per invocation against the STAGING stack only:
-#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
+#   deploy         — resolve a full-SHA tag to immutable backend+web digests, migrate, verify build+auth
 #   smoke          — run one of the five window smokes in-container (bundle doc:
 #                    docs/development/attendance-staging-window-bundle-20260702.md)
 #   status         — read-only snapshot (containers, health, settings, pending migrations)
@@ -128,6 +128,28 @@ STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
 IN_CONTAINER_BASE_URL="http://127.0.0.1:8900"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
+CANDIDATE_DB_ENV_KEYS=(
+  DATABASE_URL
+  NODE_ENV
+  SECRET_PROVIDER
+  ALLOW_SECRET_FALLBACK
+  DB_SSL
+  DB_SSL_REJECT_UNAUTHORIZED
+  DB_SSL_CA
+  DB_SSL_CERT
+  DB_SSL_KEY
+  DB_POOL_MAX
+  DB_POOL_MIN
+  DB_IDLE_TIMEOUT
+  DB_CONNECT_TIMEOUT
+  DB_QUERY_TIMEOUT
+  DB_STATEMENT_TIMEOUT
+  DB_SLOW_MS
+  APP_NAME
+  NODE_EXTRA_CA_CERTS
+  MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL
+  MIGRATION_EXCLUDE
+)
 # Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
 # postgres container/server as staging, never on a different host, and is always dropped
 # (created fresh each run — never assumed to persist).
@@ -150,6 +172,9 @@ resolve_home_path() {
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
 LEGACY_STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
+STAGING_ENV_FILE="${STAGING_DIR}/docker/app.staging.env"
+COMPOSE_ENV_FILE="$STAGING_ENV_FILE"
+DEPLOY_ENV_SNAPSHOT=""
 # The override MUST persist across runs. `docker compose up -d` stamps each container's
 # com.docker.compose.project.config_files label with the -f paths it was given, so any later
 # `docker compose config` (e.g. the recovery-flag containment check) re-reads THIS file BY PATH.
@@ -163,6 +188,7 @@ LEGACY_STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 RUNNER_PERSIST_DIR="${HOME}/.metasheet2/window-runner"
 OVERRIDE_FILE="${RUNNER_PERSIST_DIR}/docker-compose.window-runner.override.yml"
 PERSISTENT_STAGING_COMPOSE_FILE="${RUNNER_PERSIST_DIR}/docker-compose.app.staging.yml"
+DEPLOY_IDENTITY_FILE="${RUNNER_PERSIST_DIR}/deploy-identity.env"
 STAGING_COMPOSE_FILE="$LEGACY_STAGING_COMPOSE_FILE"
 if [[ -f "$PERSISTENT_STAGING_COMPOSE_FILE" ]]; then
   STAGING_COMPOSE_FILE="$PERSISTENT_STAGING_COMPOSE_FILE"
@@ -220,10 +246,122 @@ require_compose_v2() {
   fail "docker compose v2 plugin is required (legacy docker-compose v1 breaks up -d against existing containers; see docs/development/staging-deploy-d88ad587b-20260426.md)"
 }
 
+cleanup_deploy_env_snapshot() {
+  if [[ -n "$DEPLOY_ENV_SNAPSHOT" ]]; then
+    rm -f "$DEPLOY_ENV_SNAPSHOT"
+    DEPLOY_ENV_SNAPSHOT=""
+  fi
+  COMPOSE_ENV_FILE="$STAGING_ENV_FILE"
+}
+
+prepare_deploy_env_snapshot() {
+  [[ -f "$STAGING_ENV_FILE" ]] || fail "canonical staging env file missing: ${STAGING_ENV_FILE}"
+  mkdir -p "$RUNNER_PERSIST_DIR"
+  find "$RUNNER_PERSIST_DIR" -maxdepth 1 -type f -name '.deploy-env.*' -mmin +60 -delete
+  local attempt before after snapshot_hash candidate
+  for attempt in 1 2 3; do
+    before="$(hash_value "$STAGING_ENV_FILE")"
+    candidate="$(mktemp "${RUNNER_PERSIST_DIR}/.deploy-env.XXXXXX")"
+    DEPLOY_ENV_SNAPSHOT="$candidate"
+    chmod 600 "$candidate"
+    cp "$STAGING_ENV_FILE" "$candidate"
+    chmod 600 "$candidate"
+    after="$(hash_value "$STAGING_ENV_FILE")"
+    snapshot_hash="$(hash_value "$candidate")"
+    if [[ "$before" == "$after" && "$after" == "$snapshot_hash" ]]; then
+      COMPOSE_ENV_FILE="$DEPLOY_ENV_SNAPSHOT"
+      log "captured stable per-run staging env snapshot (values suppressed)"
+      return 0
+    fi
+    rm -f "$candidate"
+    DEPLOY_ENV_SNAPSHOT=""
+  done
+  fail "canonical staging env changed during three snapshot attempts; refusing deployment"
+}
+
+resolve_immutable_repo_digest() {
+  local tagged_image="$1"
+  local repository="${tagged_image%:*}"
+  local digest
+  digest="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$tagged_image" \
+    | awk -v prefix="${repository}@" 'index($0, prefix) == 1 { print; exit }')"
+  [[ "$digest" == "${repository}@sha256:"* && "${digest#"${repository}@sha256:"}" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "pulled image has no immutable digest for ${repository}"
+  printf '%s' "$digest"
+}
+
+read_deploy_identity_field() {
+  local key="$1"
+  local -a values=()
+  [[ -f "$DEPLOY_IDENTITY_FILE" ]] || fail "deploy identity record missing: ${DEPLOY_IDENTITY_FILE}"
+  mapfile -t values < <(sed -n "s/^${key}=//p" "$DEPLOY_IDENTITY_FILE")
+  [[ "${#values[@]}" -eq 1 && -n "${values[0]}" ]] \
+    || fail "deploy identity record must contain exactly one non-empty ${key}"
+  printf '%s' "${values[0]}"
+}
+
+write_deploy_identity_record() {
+  local deploy_sha="$1" backend_digest="$2" web_digest="$3" env_sha256="$4" candidate
+  candidate="$(mktemp "${RUNNER_PERSIST_DIR}/.deploy-identity.XXXXXX")"
+  chmod 600 "$candidate"
+  {
+    echo "deploy_sha=${deploy_sha}"
+    echo "backend_digest=${backend_digest}"
+    echo "web_digest=${web_digest}"
+    echo "env_sha256=${env_sha256}"
+  } > "$candidate"
+  mv -f "$candidate" "$DEPLOY_IDENTITY_FILE"
+  log "persisted values-free deploy identity record"
+}
+
+assert_deploy_env_snapshot_matches_record() {
+  local recorded actual
+  recorded="$(read_deploy_identity_field env_sha256)"
+  [[ "$recorded" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "deploy identity record has an invalid env fingerprint"
+  actual="$(hash_value "$COMPOSE_ENV_FILE")"
+  [[ "$actual" == "$recorded" ]] \
+    || fail "staging env differs from the env snapshot used by the recorded deploy; use action=deploy before changing soak flags"
+}
+
+assert_running_image_digests() {
+  local backend_digest="$1" web_digest="$2" live_backend live_web
+  [[ "$backend_digest" == "ghcr.io/${IMAGE_OWNER}/metasheet2-backend@sha256:"* \
+     && "${backend_digest#"ghcr.io/${IMAGE_OWNER}/metasheet2-backend@sha256:"}" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "expected backend image has an invalid immutable digest"
+  [[ "$web_digest" == "ghcr.io/${IMAGE_OWNER}/metasheet2-web@sha256:"* \
+     && "${web_digest#"ghcr.io/${IMAGE_OWNER}/metasheet2-web@sha256:"}" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "expected web image has an invalid immutable digest"
+  live_backend="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  live_web="$(docker inspect -f '{{.Config.Image}}' "$WEB_CONTAINER" 2>/dev/null || true)"
+  [[ "$live_backend" == "$backend_digest" ]] \
+    || fail "running backend image differs from the recorded immutable digest"
+  [[ "$live_web" == "$web_digest" ]] \
+    || fail "running web image differs from the recorded immutable digest"
+}
+
+assert_running_deploy_identity() {
+  local expected_sha="$1" recorded_sha backend_digest web_digest
+  recorded_sha="$(read_deploy_identity_field deploy_sha)"
+  backend_digest="$(read_deploy_identity_field backend_digest)"
+  web_digest="$(read_deploy_identity_field web_digest)"
+  [[ "$recorded_sha" == "$expected_sha" ]] \
+    || fail "deploy identity record is for ${recorded_sha}, expected ${expected_sha}"
+  assert_running_image_digests "$backend_digest" "$web_digest"
+}
+
+assert_current_recorded_deploy_identity() {
+  local recorded_sha
+  recorded_sha="$(read_deploy_identity_field deploy_sha)"
+  [[ "$recorded_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "deploy identity record has an invalid deploy SHA"
+  assert_running_deploy_identity "$recorded_sha"
+}
+
 compose_staging() {
   # The ONLY compose entry point in this script: staging compose file + runner override.
-  (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
-    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@")
+  (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \
+    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@")
 }
 
 prepare_staging_compose_for_deploy() {
@@ -240,8 +378,8 @@ prepare_staging_compose_for_deploy() {
   mkdir -p "$RUNNER_PERSIST_DIR"
   STAGING_COMPOSE_CANDIDATE_TMP="$(mktemp "${RUNNER_PERSIST_DIR}/.staging-compose.XXXXXX")"
   cp "$candidate" "$STAGING_COMPOSE_CANDIDATE_TMP"
-  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
-    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" config) >/dev/null 2>&1; then
+  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \
+    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_CANDIDATE_TMP" config) >/dev/null 2>&1; then
     rm -f "$STAGING_COMPOSE_CANDIDATE_TMP"
     STAGING_COMPOSE_CANDIDATE_TMP=""
     fail "checked-out staging compose candidate failed validation; kept ${STAGING_COMPOSE_FILE}"
@@ -304,10 +442,11 @@ except Exception:
 }
 
 wait_for_health_commit() {
-  local expected="$1" attempts="${2:-30}" delay="${3:-4}" i commit
+  local expected="$1" expected_digest="$2" expected_web_digest="$3" attempts="${4:-30}" delay="${5:-4}" i commit
   for ((i = 1; i <= attempts; i += 1)); do
     commit="$(fetch_health_commit)"
     if [[ "$commit" == "$expected" ]]; then
+      assert_running_image_digests "$expected_digest" "$expected_web_digest"
       log "health build.commit matches deploy sha (attempt ${i}/${attempts})"
       return 0
     fi
@@ -318,20 +457,21 @@ wait_for_health_commit() {
   # L6 precedent (tracker 2026-06-21 annual-leave staging closeout, re-proven by run
   # 29314093729): the staging stack's env file can pin a stale METASHEET_BUILD_COMMIT,
   # so /api/health build metadata is NOT a reliable deploy identity on staging. The
-  # accepted deploy evidence is the CONTAINER IMAGE TAG. Health must still be
+  # accepted deploy evidence is the immutable CONTAINER IMAGE DIGEST. Health must still be
   # RESPONDING (fetch_health_commit returned a body above); identity falls back to
   # docker inspect. Fail closed if neither channel matches.
   local live_image
   live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
-  if [[ "$live_image" == *":${expected}" ]]; then
+  if [[ "$live_image" == "$expected_digest" ]]; then
+    assert_running_image_digests "$expected_digest" "$expected_web_digest"
     if ! curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true'; then
-      fail "backend image tag matches ${expected} but /api/health is not ok — not accepting image-tag identity for an unhealthy backend"
+      fail "backend image digest matches ${expected} but /api/health is not ok — not accepting digest identity for an unhealthy backend"
     fi
-    log "health build.commit is stale (env-pinned; L6 precedent) but backend container image tag matches deploy sha: ${live_image}"
-    echo "identity_channel=image-tag health_commit_stale=1 live_image=${live_image}" > "${OUTPUT_DIR}/deploy-identity.txt"
+    log "health build.commit is stale (env-pinned; L6 precedent) but backend container image matches the preflighted digest: ${live_image}"
+    echo "identity_channel=image-digest health_commit_stale=1 live_image=${live_image}" > "${OUTPUT_DIR}/deploy-identity.txt"
     return 0
   fi
-  fail "staging deploy identity failed BOTH channels: /api/health build.commit never matched ${expected} AND backend image is '${live_image:-<none>}'"
+  fail "staging deploy identity failed BOTH channels: /api/health build.commit never matched ${expected} AND backend image is not the preflighted digest"
 }
 
 prepare_container_runner() {
@@ -430,16 +570,142 @@ auth_round_trip() {
   log "auth round-trip OK (me=200, settings=200)"
 }
 
+live_database_env_fingerprint() {
+  python3 -c 'import hashlib,json,sys
+items=json.load(open(sys.argv[1], encoding="utf-8"))
+env=dict(item.split("=", 1) for item in items if "=" in item)
+keys=sys.argv[2:]
+payload=[[key, key in env, env.get(key, "")] for key in keys]
+print(hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest())' \
+    <(docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER") \
+    "${CANDIDATE_DB_ENV_KEYS[@]}"
+}
+
+candidate_database_env_fingerprint() {
+  local backend_image="$1"
+  local base_candidate="$2"
+  local override_candidate="$3"
+  python3 -c 'import hashlib,json,sys
+def env_list(path):
+    items=json.load(open(path, encoding="utf-8"))
+    return dict(item.split("=", 1) for item in items if "=" in item)
+env=env_list(sys.argv[1])
+config=json.load(open(sys.argv[2], encoding="utf-8"))
+for key,value in config["services"]["backend"].get("environment", {}).items():
+    if value is None:
+        env.pop(key, None)
+    else:
+        env[key]=str(value)
+keys=sys.argv[3:]
+payload=[[key, key in env, env.get(key, "")] for key in keys]
+print(hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest())' \
+    <(docker image inspect -f '{{json .Config.Env}}' "$backend_image") \
+    <((cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \
+      docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$base_candidate" -f "$override_candidate" config --format json)) \
+    "${CANDIDATE_DB_ENV_KEYS[@]}"
+}
+
+run_candidate_migration_preflight() {
+  local backend_image="$1"
+  local base_candidate="$2"
+  local override_candidate="$3"
+  local list_file="${OUTPUT_DIR}/candidate-migrate-list-before.txt"
+  local stdout_file="${OUTPUT_DIR}/candidate-migration-alignment-stdout.txt"
+  local report_dir="${OUTPUT_DIR}/candidate-migration-report"
+  local live_fingerprint candidate_fingerprint secret_provider
+  local -a decisions=()
+
+  [[ -f "$COMPOSE_ENV_FILE" ]] || {
+    echo "[window-runner][error] per-run staging env snapshot missing" >&2
+    return 1
+  }
+  docker inspect "$BACKEND_CONTAINER" >/dev/null 2>&1 || {
+    echo "[window-runner][error] staging backend container not found: ${BACKEND_CONTAINER}" >&2
+    return 1
+  }
+  rm -rf "$report_dir"
+
+  live_fingerprint="$(live_database_env_fingerprint)" || {
+    echo "[window-runner][error] could not fingerprint the live backend DB/migration environment" >&2
+    return 1
+  }
+  candidate_fingerprint="$(candidate_database_env_fingerprint "$backend_image" "$base_candidate" "$override_candidate")" || {
+    echo "[window-runner][error] could not fingerprint the candidate backend DB/migration environment" >&2
+    return 1
+  }
+  if [[ "$live_fingerprint" != "$candidate_fingerprint" ]]; then
+    echo "[window-runner][error] candidate DB/migration environment differs from the live backend (values suppressed); refusing cross-target preflight" >&2
+    return 1
+  fi
+
+  secret_provider="$(docker exec "$BACKEND_CONTAINER" printenv SECRET_PROVIDER 2>/dev/null || true)"
+  case "$secret_provider" in
+    ''|env) ;;
+    *)
+      echo "[window-runner][error] candidate migration preflight requires SECRET_PROVIDER=env or unset; got a non-env provider (value suppressed)" >&2
+      return 1
+      ;;
+  esac
+
+  if ! (
+    local key value
+    local -a env_args=()
+    for key in "${CANDIDATE_DB_ENV_KEYS[@]}"; do
+      if value="$(docker exec "$BACKEND_CONTAINER" printenv "$key" 2>/dev/null)"; then
+        printf -v "$key" '%s' "$value"
+        export "$key"
+        env_args+=(--env "$key")
+      fi
+    done
+    [[ -n "${DATABASE_URL:-}" ]] || exit 1
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      --network "container:${BACKEND_CONTAINER}" \
+      "${env_args[@]}" \
+      "$backend_image" node "$MIGRATE_JS" --list < /dev/null
+  ) 2>&1 | tee "$list_file"; then
+    echo "[window-runner][error] candidate image could not list migrations against the live staging DB" >&2
+    return 1
+  fi
+
+  if ! docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --network none \
+    -v "${OUTPUT_DIR}:${CONTAINER_RUNNER_DIR}" \
+    "$backend_image" node /app/scripts/ops/staging-migration-alignment-report.mjs \
+    --migrate-list-file "${CONTAINER_RUNNER_DIR}/candidate-migrate-list-before.txt" \
+    --out-dir "${CONTAINER_RUNNER_DIR}/candidate-migration-report" < /dev/null 2>&1 \
+    | tee "$stdout_file"; then
+    echo "[window-runner][error] candidate image migration alignment report failed" >&2
+    return 1
+  fi
+
+  mapfile -t decisions < <(sed -n 's/^\[staging-migration-alignment-report\] decision=//p' "$stdout_file")
+  if [[ "${#decisions[@]}" -ne 1 || "${decisions[0]}" != "aligned" ]]; then
+    echo "[window-runner][error] candidate migration alignment must emit exactly one decision=aligned; got: ${decisions[*]:-(missing)}" >&2
+    return 1
+  fi
+  log "candidate migration preflight OK before persistent config or live-container changes"
+}
+
 # --- actions ---------------------------------------------------------------------------
 
 action_deploy() {
   require_sha
   require_compose_v2
+  trap cleanup_deploy_env_snapshot EXIT
+  prepare_deploy_env_snapshot
   local STAGING_COMPOSE_CANDIDATE_TMP=""
   prepare_staging_compose_for_deploy
 
   local backend_image="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}"
   local web_image="ghcr.io/${IMAGE_OWNER}/metasheet2-web:${DEPLOY_SHA}"
+  docker pull "$backend_image" 2>&1 | tee "${OUTPUT_DIR}/candidate-backend-pull.log"
+  docker pull "$web_image" 2>&1 | tee "${OUTPUT_DIR}/candidate-web-pull.log"
+  local backend_immutable web_immutable
+  backend_immutable="$(resolve_immutable_repo_digest "$backend_image")"
+  web_immutable="$(resolve_immutable_repo_digest "$web_image")"
+  log "resolved candidate images to immutable repository digests"
 
   local pg_id_before redis_id_before
   pg_id_before="$(docker inspect -f '{{.Id}}' "$POSTGRES_CONTAINER")" \
@@ -460,18 +726,18 @@ action_deploy() {
   override_tmp="$(mktemp "${RUNNER_PERSIST_DIR}/.override.XXXXXX")"
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
-    echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
+    echo "# backend/web images to immutable digests resolved from one full-SHA tag; env flips happen ONLY here, together with"
     echo "# the deploy (bundle §3.4). Redeploying with set_window_env=none removes the flags."
     echo "services:"
     echo "  backend:"
-    echo "    image: ${backend_image}"
+    echo "    image: ${backend_immutable}"
     if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then
       echo "    environment:"
       echo "      ATTENDANCE_SCHEDULER_ENABLED: \"true\""
       echo "      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: \"true\""
     fi
     echo "  web:"
-    echo "    image: ${web_image}"
+    echo "    image: ${web_immutable}"
   } > "$override_tmp"
   # Validate the candidate renders against the staging compose file BEFORE it goes live — a broken
   # override would otherwise dangle EVERY container's config_files label. On failure, keep the
@@ -479,11 +745,23 @@ action_deploy() {
   # Validate in the SAME cwd as compose_staging() above: staging compose uses relative
   # env_file + .env interpolation, so `cd "$STAGING_DIR"` first — otherwise we'd validate a
   # different resolved config than the one `up -d` actually executes.
-  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
-    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config) >/dev/null 2>&1; then
+  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \
+    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config) >/dev/null 2>&1; then
     rm -f "$override_tmp" "$STAGING_COMPOSE_CANDIDATE_TMP"
     fail "candidate base/override pair failed 'docker compose config' validation; kept previous persistent files"
   fi
+  local preflight_rc=0
+  run_candidate_migration_preflight "$backend_immutable" "$STAGING_COMPOSE_CANDIDATE_TMP" "$override_tmp" || preflight_rc=$?
+  if [[ "$preflight_rc" -ne 0 ]]; then
+    rm -f "$override_tmp" "$STAGING_COMPOSE_CANDIDATE_TMP"
+    STAGING_COMPOSE_CANDIDATE_TMP=""
+    fail "candidate migration preflight failed before deployment; live staging containers and persistent compose files were not changed"
+  fi
+  # From this point onward the persistent compose pair and live containers may change. An
+  # earlier success record must not survive a partial redeploy (including a same-SHA retry),
+  # or smoke/soak could mistake a failed transition for a completed deployment.
+  rm -f "$DEPLOY_IDENTITY_FILE"
+  log "invalidated prior deploy identity before persistent or live state changes"
   # Both candidates are validated as one pair before either persistent file changes. Each
   # same-directory rename is atomic; workflow concurrency serializes staging transitions.
   mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"
@@ -493,7 +771,6 @@ action_deploy() {
   log "staging compose installed atomically at persistent path: ${STAGING_COMPOSE_FILE}"
   log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
 
-  compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
   # NEVER recreate postgres/redis: only backend+web, --no-deps.
   local -a up_args=(up -d --no-deps)
   if [[ "$FORCE_RECREATE" == "true" ]]; then
@@ -509,12 +786,14 @@ action_deploy() {
   [[ "$redis_id_before" == "$redis_id_after" ]] || fail "staging redis container was recreated — hard constraint violated"
   log "postgres/redis untouched (container ids unchanged)"
 
-  local running_backend_image
+  local running_backend_image running_web_image
   running_backend_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")"
-  [[ "$running_backend_image" == "$backend_image" ]] \
-    || fail "backend container image is ${running_backend_image}, expected ${backend_image}"
-
-  wait_for_health_commit "$DEPLOY_SHA"
+  running_web_image="$(docker inspect -f '{{.Config.Image}}' "$WEB_CONTAINER")"
+  [[ "$running_backend_image" == "$backend_immutable" ]] \
+    || fail "backend container image is ${running_backend_image}, expected immutable digest ${backend_immutable}"
+  [[ "$running_web_image" == "$web_immutable" ]] \
+    || fail "web container image is ${running_web_image}, expected immutable digest ${web_immutable}"
+  wait_for_health_commit "$DEPLOY_SHA" "$backend_immutable" "$web_immutable"
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json"
   curl -fsS --max-time 10 "$STAGING_BACKEND_HEALTH_URL" > "${OUTPUT_DIR}/health-backend.json" || true
 
@@ -531,8 +810,10 @@ action_deploy() {
     --out-dir "${CONTAINER_RUNNER_DIR}/migration-report" < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/migration-alignment-stdout.txt"
   docker cp "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migration-report" "${OUTPUT_DIR}/migration-report" || true
-  if grep -q 'decision=do_not_run_full_migrate' "${OUTPUT_DIR}/migration-alignment-stdout.txt"; then
-    fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
+  local -a live_decisions=()
+  mapfile -t live_decisions < <(sed -n 's/^\[staging-migration-alignment-report\] decision=//p' "${OUTPUT_DIR}/migration-alignment-stdout.txt")
+  if [[ "${#live_decisions[@]}" -ne 1 || "${live_decisions[0]}" != "aligned" ]]; then
+    fail "live migration alignment must emit exactly one decision=aligned before migrate; got: ${live_decisions[*]:-(missing)}"
   fi
 
   staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
@@ -550,8 +831,17 @@ action_deploy() {
     echo "force_recreate=${FORCE_RECREATE}"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
+    echo "backend_immutable=${backend_immutable}"
+    echo "web_immutable=${web_immutable}"
     echo "result=ok"
   } > "${OUTPUT_DIR}/summary.txt"
+  local deploy_env_sha256
+  deploy_env_sha256="$(hash_value "$COMPOSE_ENV_FILE")"
+  cleanup_deploy_env_snapshot
+  trap - EXIT
+  # This record is the completed-deploy capability consumed by smoke/soak. Persist it only
+  # after health, migration, auth, and snapshot gates have all passed.
+  write_deploy_identity_record "$DEPLOY_SHA" "$backend_immutable" "$web_immutable" "$deploy_env_sha256"
   log "deploy OK: ${DEPLOY_SHA}"
 }
 
@@ -604,20 +894,16 @@ action_smoke() {
   local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
   [[ -f "$smoke_src" ]] || fail "smoke script missing in host-synced repo: ${smoke_src}"
 
-  # The deployed build must BE the SHA the stamps will name (bundle §2). Same dual-channel
-  # identity as the deploy verifier: staging /api/health build.commit is env-pinned stale
-  # (L6 precedent; proven again by run 29378042837), so fall back to the backend container
-  # image tag — but only for a HEALTHY backend (health must answer ok:true).
-  local live_commit live_image
+  # The deployed build must BE the SHA the stamps will name (bundle §2). The persistent
+  # values-free deploy identity maps that SHA to the immutable backend/web digests; health
+  # metadata remains an informational second channel because staging can pin it stale.
+  local live_commit
   live_commit="$(fetch_health_commit)"
+  assert_running_deploy_identity "$DEPLOY_SHA"
+  curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true' \
+    || fail "staging backend is not healthy; refusing smoke"
   if [[ "$live_commit" != "$DEPLOY_SHA" ]]; then
-    live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
-    if [[ "$live_image" == "ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}" ]] \
-       && curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true'; then
-      log "smoke identity: health build.commit stale ('${live_commit:-<unreachable>}', env-pinned) but backend image tag matches deploy sha: ${live_image}"
-    else
-      fail "staging identity failed BOTH channels for smoke: /api/health build.commit='${live_commit:-<unreachable>}' and backend image='${live_image:-<none>}' vs deploy_sha=${DEPLOY_SHA}; refusing to smoke a mismatched build"
-    fi
+    log "smoke identity: health build.commit stale ('${live_commit:-<unreachable>}', env-pinned) but recorded immutable digests match deploy sha ${DEPLOY_SHA}"
   fi
 
   prepare_container_runner
@@ -1284,12 +1570,13 @@ soak_require_backend_clis() {
 }
 
 soak_backend_image_sha() {
-  # stdout: the RUNNING backend image's full-SHA tag; fails when the pin is not full-SHA.
-  local live_image
-  live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")"
-  [[ "$live_image" =~ :([0-9a-f]{40})$ ]] \
-    || fail "backend image tag is not a full-SHA pin: '${live_image}'"
-  printf '%s' "${BASH_REMATCH[1]}"
+  # stdout: the full deploy SHA whose recorded immutable digests match both RUNNING images.
+  local recorded_sha
+  recorded_sha="$(read_deploy_identity_field deploy_sha)"
+  [[ "$recorded_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "deploy identity record has an invalid full SHA"
+  assert_running_deploy_identity "$recorded_sha"
+  printf '%s' "$recorded_sha"
 }
 
 action_soak_baseline() {
@@ -1305,12 +1592,11 @@ action_soak_baseline() {
     fail "refusing to capture the p95 baseline: ${SOAK_W4_ENV_NAME}='${w4_env:-<unset>}' ${SOAK_W7_ENV_NAME}='${w7_env:-<unset>}' already set on the serving backend — the baseline must precede the flags (P95-BASELINE-CAPTURE-PACK-20260816; an unanchored +5% claim is not evidence)"
   fi
   soak_resolve_pg
-  # Build identity = the CONTAINER IMAGE TAG SHA. This is the accepted staging deploy
+  # Build identity = the deploy SHA whose persisted record pins both CONTAINER IMAGE DIGESTS.
+  # This is the accepted staging deploy
   # identity (L6 precedent: /api/health build.commit can be env-pinned stale, so it is NOT a
   # reliable identity — recorded below only as an informational cross-check). Recording the
-  # image-tag SHA is load-bearing for the soak-flags SHA-scope gate (P2-2): soak-flags
-  # requires DEPLOY_SHA == the running image tag, so the marker's staging_build_commit must
-  # be that same channel or the comparison would false-mismatch on a stale health commit.
+  # recorded SHA is load-bearing for the soak-flags SHA-scope gate (P2-2).
   local live_commit commit sha8 ts
   live_commit="$(fetch_health_commit)"
   commit="$(soak_backend_image_sha)"
@@ -1889,6 +2175,8 @@ action_soak_flags() {
   soak_require_orgs
   require_sha
   require_compose_v2
+  trap cleanup_deploy_env_snapshot EXIT
+  prepare_deploy_env_snapshot
   # ORDER ENFORCEMENT (second half of the baseline<->flags gate): the marker only exists
   # once action=soak-baseline captured a PRE-enablement p95 baseline.
   [[ -f "$SOAK_BASELINE_MARKER" ]] \
@@ -1907,14 +2195,12 @@ action_soak_flags() {
   if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' "$OVERRIDE_FILE"; then
     fail "existing runner override carries rd-window env flags; refusing to rewrite them from a soak action — redeploy with set_window_env=none first"
   fi
-  # This action changes ENV only, never images: deploy_sha must equal BOTH running images.
+  # This action changes ENV only, never images: deploy_sha must map to BOTH running digests.
+  assert_running_deploy_identity "$DEPLOY_SHA"
+  assert_deploy_env_snapshot_matches_record
   local backend_image web_image
   backend_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")"
   web_image="$(docker inspect -f '{{.Config.Image}}' "$WEB_CONTAINER")"
-  [[ "$backend_image" == "ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}" ]] \
-    || fail "deploy_sha must equal the RUNNING backend image tag (running: ${backend_image}) — soak-flags flips env only, never images; use action=deploy to change images"
-  [[ "$web_image" == "ghcr.io/${IMAGE_OWNER}/metasheet2-web:${DEPLOY_SHA}" ]] \
-    || fail "deploy_sha must equal the RUNNING web image tag (running: ${web_image})"
 
   local pg_id_before redis_id_before web_id_before
   pg_id_before="$(docker inspect -f '{{.Id}}' "$POSTGRES_CONTAINER")"
@@ -1941,8 +2227,8 @@ action_soak_flags() {
     echo "  web:"
     echo "    image: ${web_image}"
   } > "$soak_override_tmp"
-  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \
-    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$soak_override_tmp" config) >/dev/null 2>&1; then
+  if ! (cd "$STAGING_DIR" && IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \
+    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_FILE" -f "$soak_override_tmp" config) >/dev/null 2>&1; then
     rm -f "$soak_override_tmp"
     fail "candidate soak override failed 'docker compose config' validation; kept previous override at ${OVERRIDE_FILE}"
   fi
@@ -1999,6 +2285,8 @@ action_soak_flags() {
     echo "window_start=$(cat "$SOAK_WINDOW_START_FILE")"
     echo "result=ok"
   } > "${OUTPUT_DIR}/summary.txt"
+  cleanup_deploy_env_snapshot
+  trap - EXIT
   log "soak-flags OK: W4=${SOAK_ORG1_SHORT},${SOAK_ORG2_SHORT},${SOAK_ORG3_SHORT} W7=${SOAK_ORG3_SHORT} live on the backend"
 }
 
@@ -2139,6 +2427,7 @@ soak_run_classify() {
 
 action_soak_run() {
   soak_validate_opts
+  assert_current_recorded_deploy_identity
   local punch_target config_path
   # Default `auto` = this run's ONE-DAY BATCH: with the 2/user/day cap (one in/out pair per
   # user per wall-clock day — same-day session packing floods §4.2-critical review_required
@@ -2359,6 +2648,7 @@ soak_status_rows() {
 
 action_soak_status() {
   soak_validate_opts
+  assert_current_recorded_deploy_identity
   soak_resolve_pg
   local window_start
   window_start="$(soak_opt window_start '')"

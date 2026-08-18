@@ -96,6 +96,14 @@ function actionBody(source, name, nextNames = []) {
   return source.slice(start, end)
 }
 
+function extractShellFunction(source, name) {
+  const start = source.indexOf(`${name}() {`)
+  assert.notEqual(start, -1, `shell function missing: ${name}`)
+  const end = source.indexOf('\n}\n', start)
+  assert.notEqual(end, -1, `shell function end missing: ${name}`)
+  return source.slice(start, end + 3)
+}
+
 // --- parse / presence -----------------------------------------------------------------
 
 test('remote script and workflow files exist', () => {
@@ -316,6 +324,66 @@ test('remote script require_exact_deployed_sha used by every non-status action a
   assert.match(httpsOn, /require_exact_deployed_sha/)
   assert.match(httpsOff, /require_exact_deployed_sha/)
   assert.doesNotMatch(status, /require_exact_deployed_sha/)
+})
+
+test('digest-pinned staging resolves only through the matching completed deploy record and persisted override', () => {
+  const source = read(REMOTE_SH)
+  assert.match(source, /ATTENDANCE_DEPLOY_IDENTITY_FILE=/)
+  assert.match(source, /metasheet2-backend@sha256:\[0-9a-f\]\{64\}/)
+  assert.match(source, /grep -Fqx "    image: \$\{recorded_digest\}" "\$ATTENDANCE_OVERRIDE_FILE"/)
+
+  const dir = mkdtempSync(join(tmpdir(), 'stream-uat-digest-pin-'))
+  const identity = join(dir, 'deploy-identity.env')
+  const override = join(dir, 'attendance.override.yml')
+  const sha = 'c'.repeat(40)
+  const digest = `ghcr.io/zensgit/metasheet2-backend@sha256:${'d'.repeat(64)}`
+  const functions = [
+    extractShellFunction(source, 'read_attendance_deploy_identity_field'),
+    extractShellFunction(source, 'resolve_live_backend_image_pin'),
+    extractShellFunction(source, 'resolve_deployed_sha'),
+  ].join('\n')
+
+  const run = () => spawnSync(
+    'bash',
+    ['-o', 'pipefail', '-c', `set -euo pipefail
+${functions}
+ATTENDANCE_DEPLOY_IDENTITY_FILE="$IDENTITY_FILE"
+ATTENDANCE_OVERRIDE_FILE="$OVERRIDE_FILE"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() { printf '%s' "$LIVE_DIGEST"; }
+fetch_health_commit() { printf stale-health-metadata; }
+resolve_live_backend_image_pin
+printf '\n'
+resolve_deployed_sha`],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        IDENTITY_FILE: identity,
+        OVERRIDE_FILE: override,
+        LIVE_DIGEST: digest,
+      },
+    },
+  )
+
+  try {
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=${digest}\n`)
+    writeFileSync(override, `services:\n  backend:\n    image: ${digest}\n`)
+    const accepted = run()
+    assert.equal(accepted.status, 0, accepted.stderr)
+    assert.equal(accepted.stdout, `zensgit ${sha}\n${sha}`)
+
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=ghcr.io/zensgit/metasheet2-backend@sha256:${'e'.repeat(64)}\n`)
+    const rejectedRecord = run()
+    assert.notEqual(rejectedRecord.status, 0, 'a mismatched completion record must fail closed')
+
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=${digest}\n`)
+    writeFileSync(override, 'services:\n  backend:\n    image: ghcr.io/zensgit/metasheet2-backend:mutable\n')
+    const rejectedOverride = run()
+    assert.notEqual(rejectedOverride.status, 0, 'a persisted override that does not retain the digest must fail closed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('observe is read-only and emits values-free callback classes without raw logs or ids', () => {

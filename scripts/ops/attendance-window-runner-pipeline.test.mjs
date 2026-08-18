@@ -41,6 +41,89 @@ function runPlainBash(script) {
   return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
 }
 
+function extractShellFunction(source, name) {
+  const start = source.indexOf(`${name}() {`)
+  assert.notEqual(start, -1, `shell function missing: ${name}`)
+  const end = source.indexOf('\n}\n', start)
+  assert.notEqual(end, -1, `shell function end missing: ${name}`)
+  return source.slice(start, end + 3)
+}
+
+function runImmutableResolver(source, taggedImage, inspectOutput) {
+  const resolver = extractShellFunction(source, 'resolve_immutable_repo_digest')
+  return spawnSync('bash', ['-o', 'pipefail', '-c', `set -euo pipefail
+fail() { printf '%s\\n' "$*" >&2; exit 1; }
+docker() { printf '%s\\n' "$MOCK_INSPECT"; }
+${resolver}
+resolve_immutable_repo_digest "$TAGGED_IMAGE"`], {
+    encoding: 'utf8',
+    env: { ...process.env, TAGGED_IMAGE: taggedImage, MOCK_INSPECT: inspectOutput },
+  })
+}
+
+function runDeployEnvSnapshot(source, { failCopy = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-env-snapshot-'))
+  const envFile = join(dir, 'staging.env')
+  writeFileSync(envFile, 'DATABASE_URL=postgresql://staging.example/db\nSECRET_VALUE=not-logged\n')
+
+  const hashValue = extractShellFunction(source, 'hash_value')
+  const cleanup = extractShellFunction(source, 'cleanup_deploy_env_snapshot')
+  const prepare = extractShellFunction(source, 'prepare_deploy_env_snapshot')
+  const copyOverride = failCopy ? 'cp() { return 7; }' : ''
+  const script = `set -euo pipefail
+log() { :; }
+fail() { printf '%s\\n' "$*" >&2; exit 1; }
+${hashValue}
+${cleanup}
+${prepare}
+${copyOverride}
+STAGING_ENV_FILE="$TEST_ENV_FILE"
+RUNNER_PERSIST_DIR="$TEST_PERSIST_DIR"
+COMPOSE_ENV_FILE="$STAGING_ENV_FILE"
+DEPLOY_ENV_SNAPSHOT=""
+trap cleanup_deploy_env_snapshot EXIT
+prepare_deploy_env_snapshot
+snapshot="$DEPLOY_ENV_SNAPSHOT"
+cmp -s "$STAGING_ENV_FILE" "$snapshot"
+mode="$(stat -f '%Lp' "$snapshot" 2>/dev/null || stat -c '%a' "$snapshot")"
+printf 'mode=%s\\n' "$mode"
+printf 'selected_snapshot=%s\\n' "$([[ "$COMPOSE_ENV_FILE" == "$snapshot" ]] && echo 1 || echo 0)"
+cleanup_deploy_env_snapshot
+trap - EXIT
+printf 'cleanup=%s\\n' "$([[ ! -e "$snapshot" && "$COMPOSE_ENV_FILE" == "$STAGING_ENV_FILE" ]] && echo 1 || echo 0)"`
+
+  const result = spawnSync('bash', ['-o', 'pipefail', '-c', script], {
+    encoding: 'utf8',
+    env: { ...process.env, TEST_ENV_FILE: envFile, TEST_PERSIST_DIR: dir },
+  })
+  const residue = readdirSync(dir).filter((name) => name.startsWith('.deploy-env.'))
+  rmSync(dir, { recursive: true, force: true })
+  return { ...result, residue }
+}
+
+function assertImmutableResolverContract(remote) {
+  const repository = 'ghcr.io/zensgit/metasheet2-backend'
+  const tag = `${repository}:${'a'.repeat(40)}`
+  const expected = `${repository}@sha256:${'b'.repeat(64)}`
+  const good = runImmutableResolver(
+    remote,
+    tag,
+    [`other.example/backend@sha256:${'c'.repeat(64)}`, expected, `${repository}@sha256:${'d'.repeat(64)}`].join('\n'),
+  )
+  assert.equal(good.status, 0, good.stderr)
+  assert.equal(good.stdout, expected, 'resolver must return the first exact-repository digest, never the mutable tag')
+
+  for (const inspectOutput of [
+    '',
+    `other.example/backend@sha256:${'c'.repeat(64)}`,
+    `${repository}@sha256:${'b'.repeat(63)}`,
+    `${repository}@sha256:${'g'.repeat(64)}`,
+  ]) {
+    const rejected = runImmutableResolver(remote, tag, inspectOutput)
+    assert.notEqual(rejected.status, 0, `resolver must reject invalid inspect output: ${inspectOutput}`)
+  }
+}
+
 test('leg (a): zero grep matches in the pipeline still exits 0 (normal outcome)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'window-runner-pipe-'))
   const out = join(dir, 'filtered.log')
@@ -153,18 +236,18 @@ function assertPersistentComposeContract({ workflow, remote, lifecycleRemote, st
   assert.match(stagingCompose, /METASHEET_BUILD_IMAGE_TAG: \$\{IMAGE_TAG:-unknown\}/)
   assert.match(
     remote,
-    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s+docker compose --project-directory "\$STAGING_DIR" -f "\$STAGING_COMPOSE_FILE" -f "\$OVERRIDE_FILE"/,
+    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" APP_ENV_FILE="\$COMPOSE_ENV_FILE" \\\n\s+docker compose --project-directory "\$STAGING_DIR" --env-file "\$COMPOSE_ENV_FILE" -f "\$STAGING_COMPOSE_FILE" -f "\$OVERRIDE_FILE"/,
     'live pull/up must render health identity from the exact deploy SHA',
   )
   assert.match(
     deploy,
-    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s+docker compose --project-directory "\$STAGING_DIR" -f "\$STAGING_COMPOSE_CANDIDATE_TMP" -f "\$override_tmp" config/,
+    /IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" APP_ENV_FILE="\$COMPOSE_ENV_FILE" \\\n\s+docker compose --project-directory "\$STAGING_DIR" --env-file "\$COMPOSE_ENV_FILE" -f "\$STAGING_COMPOSE_CANDIDATE_TMP" -f "\$override_tmp" config/,
     'base/override validation must use the same exact-SHA interpolation as live pull/up',
   )
   assert.equal(
     (remote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
-    4,
-    'every non-version-check attendance compose invocation must pin the staging project directory (compose_staging, deploy compose-candidate validation, deploy pair validation, soak-flags pair validation)',
+    5,
+    'every non-version-check attendance compose invocation must pin the staging project directory (compose_staging, deploy compose-candidate validation, deploy pair validation, candidate-env fingerprint, soak-flags pair validation)',
   )
   assert.equal(
     (lifecycleRemote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []).length,
@@ -176,6 +259,215 @@ function assertPersistentComposeContract({ workflow, remote, lifecycleRemote, st
   }
 }
 
+function composeServiceBlock(source, serviceName) {
+  const marker = `  ${serviceName}:\n`
+  const start = source.indexOf(marker)
+  assert.notEqual(start, -1, `compose service missing: ${serviceName}`)
+  const tail = source.slice(start + marker.length)
+  const next = tail.search(/\n  [A-Za-z0-9_-]+:\n|\nvolumes:\n/)
+  return source.slice(start, next === -1 ? source.length : start + marker.length + next)
+}
+
+function assertCandidateMigrationPreflightContract({ remote, stagingCompose }) {
+  assert.match(
+    remote,
+    /STAGING_ENV_FILE="\$\{STAGING_DIR\}\/docker\/app\.staging\.env"/,
+    'attendance deploy must name the canonical staging env file explicitly',
+  )
+  assert.match(remote, /COMPOSE_ENV_FILE="\$STAGING_ENV_FILE"/)
+  assert.match(remote, /DEPLOY_ENV_SNAPSHOT="\$candidate"/)
+  assert.match(remote, /COMPOSE_ENV_FILE="\$DEPLOY_ENV_SNAPSHOT"/)
+  assert.match(remote, /DEPLOY_IDENTITY_FILE="\$\{RUNNER_PERSIST_DIR\}\/deploy-identity\.env"/)
+  assert.match(
+    remote,
+    /before="\$\(hash_value "\$STAGING_ENV_FILE"\)"[\s\S]*?cp "\$STAGING_ENV_FILE" "\$candidate"[\s\S]*?after="\$\(hash_value "\$STAGING_ENV_FILE"\)"[\s\S]*?snapshot_hash="\$\(hash_value "\$candidate"\)"[\s\S]*?"\$before" == "\$after" && "\$after" == "\$snapshot_hash"/,
+    'deploy env snapshot must prove a stable copy before use',
+  )
+  assert.match(remote, /chmod 600 "\$candidate"/)
+  assert.match(
+    remote,
+    /find "\$RUNNER_PERSIST_DIR" -maxdepth 1 -type f -name '\.deploy-env\.\*' -mmin \+60 -delete/,
+    'a new deploy must remove abandoned secret snapshots left by untrappable process death',
+  )
+
+  const composeInvocations = remote.match(/docker compose --project-directory "\$STAGING_DIR"/g) || []
+  const envFileBindings = remote.match(
+    /docker compose --project-directory "\$STAGING_DIR" --env-file "\$COMPOSE_ENV_FILE"/g,
+  ) || []
+  assert.equal(
+    envFileBindings.length,
+    composeInvocations.length,
+    'every attendance compose invocation must bind the selected canonical-or-snapshot env file',
+  )
+  assert.equal(
+    (remote.match(/APP_ENV_FILE="\$COMPOSE_ENV_FILE"/g) || []).length,
+    composeInvocations.length,
+    'every attendance compose invocation must use the same selected env_file interpolation',
+  )
+  for (const serviceName of ['postgres', 'backend']) {
+    assert.match(
+      composeServiceBlock(stagingCompose, serviceName),
+      /env_file:\n\s+- \$\{APP_ENV_FILE:-\.\/docker\/app\.staging\.env\}/,
+      `${serviceName} must consume the APP_ENV_FILE interpolation pinned by the runner`,
+    )
+  }
+
+  const envKeysMatch = remote.match(/CANDIDATE_DB_ENV_KEYS=\(\n([\s\S]*?)\n\)/)
+  assert.ok(envKeysMatch, 'candidate DB env allowlist must exist')
+  const envKeys = envKeysMatch[1].trim().split(/\s+/)
+  assert.deepEqual(envKeys, [
+    'DATABASE_URL',
+    'NODE_ENV',
+    'SECRET_PROVIDER',
+    'ALLOW_SECRET_FALLBACK',
+    'DB_SSL',
+    'DB_SSL_REJECT_UNAUTHORIZED',
+    'DB_SSL_CA',
+    'DB_SSL_CERT',
+    'DB_SSL_KEY',
+    'DB_POOL_MAX',
+    'DB_POOL_MIN',
+    'DB_IDLE_TIMEOUT',
+    'DB_CONNECT_TIMEOUT',
+    'DB_QUERY_TIMEOUT',
+    'DB_STATEMENT_TIMEOUT',
+    'DB_SLOW_MS',
+    'APP_NAME',
+    'NODE_EXTRA_CA_CERTS',
+    'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL',
+    'MIGRATION_EXCLUDE',
+  ])
+
+  const preflightStart = remote.indexOf('run_candidate_migration_preflight() {')
+  const preflightEnd = remote.indexOf('\naction_deploy() {', preflightStart)
+  assert.ok(preflightStart >= 0 && preflightEnd > preflightStart, 'candidate migration preflight function must exist')
+  const preflight = remote.slice(preflightStart, preflightEnd)
+  assert.match(preflight, /docker run --rm/)
+  assert.match(preflight, /--network "container:\$\{BACKEND_CONTAINER\}"/)
+  assert.match(preflight, /for key in "\$\{CANDIDATE_DB_ENV_KEYS\[@\]\}"/)
+  assert.match(preflight, /env_args\+=\(--env "\$key"\)/)
+  assert.match(preflight, /"\$\{env_args\[@\]\}"/)
+  assert.doesNotMatch(preflight, /docker run[\s\S]*?--env-file\b/)
+  assert.match(preflight, /"\$backend_image" node "\$MIGRATE_JS" --list/)
+
+  const offlineStart = preflight.indexOf('  if ! docker run --rm', preflight.indexOf('tee "$list_file"'))
+  const offlineEnd = preflight.indexOf('  mapfile -t decisions', offlineStart)
+  assert.ok(offlineStart >= 0 && offlineEnd > offlineStart, 'offline alignment-report leg must exist')
+  const offlineLeg = preflight.slice(offlineStart, offlineEnd)
+  assert.match(
+    offlineLeg,
+    /docker run --rm \\\n\s+--user "\$\(id -u\):\$\(id -g\)" \\\n\s+--network none \\\n[\s\S]*?staging-migration-alignment-report\.mjs/,
+    'the offline report must run without network, secrets, or root-owned host artifacts',
+  )
+  assert.doesNotMatch(offlineLeg, /--env(?:-file)?\b|env_args/, 'offline report must receive no environment input')
+  assert.match(preflight, /live_fingerprint="\$\(live_database_env_fingerprint\)"/)
+  assert.match(preflight, /candidate_fingerprint="\$\(candidate_database_env_fingerprint "\$backend_image" "\$base_candidate" "\$override_candidate"\)"/)
+  assert.match(
+    preflight,
+    /if \[\[ "\$live_fingerprint" != "\$candidate_fingerprint" \]\]; then[\s\S]*?return 1[\s\S]*?fi/,
+    'candidate and live DB/migration environments must match before the networked probe',
+  )
+  assert.match(remote, /config\["services"\]\["backend"\]\.get\("environment", \{\}\)/)
+  assert.match(
+    preflight,
+    /mapfile -t decisions < <\(sed -n '[^']*decision=[^']*' "\$stdout_file"\)[\s\S]*?if \[\[ "\$\{#decisions\[@\]\}" -ne 1 \|\| "\$\{decisions\[0\]\}" != "aligned" \]\]; then[\s\S]*?return 1[\s\S]*?fi/,
+    'only one exact aligned decision may pass the preflight',
+  )
+
+  const deployStart = remote.indexOf('action_deploy() {')
+  const deployEnd = remote.indexOf('\naction_smoke() {', deployStart)
+  const deploy = remote.slice(deployStart, deployEnd)
+  const imagePullIndex = deploy.indexOf('docker pull "$backend_image"')
+  const preflightCallIndex = deploy.indexOf('run_candidate_migration_preflight "$backend_immutable"')
+  const baseMoveIndex = deploy.indexOf('mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"')
+  const liveUpIndex = deploy.indexOf('compose_staging "${up_args[@]}"')
+  const snapshotIndex = deploy.indexOf('prepare_deploy_env_snapshot')
+  const snapshotTrapIndex = deploy.indexOf('trap cleanup_deploy_env_snapshot EXIT')
+  const identityInvalidateIndex = deploy.indexOf('rm -f "$DEPLOY_IDENTITY_FILE"')
+  const identityWriteIndex = deploy.indexOf('write_deploy_identity_record "$DEPLOY_SHA" "$backend_immutable" "$web_immutable" "$deploy_env_sha256"')
+  const healthIndex = deploy.indexOf('wait_for_health_commit "$DEPLOY_SHA" "$backend_immutable" "$web_immutable"')
+  const authIndex = deploy.indexOf('auth_round_trip')
+  const summaryIndex = deploy.indexOf('> "${OUTPUT_DIR}/summary.txt"')
+  assert.match(
+    deploy,
+    /mapfile -t live_decisions < <\(sed -n '[^']*decision=[^']*' "\$\{OUTPUT_DIR\}\/migration-alignment-stdout\.txt"\)[\s\S]*?if \[\[ "\$\{#live_decisions\[@\]\}" -ne 1 \|\| "\$\{live_decisions\[0\]\}" != "aligned" \]\]; then[\s\S]*?fail "live migration alignment must emit exactly one decision=aligned/,
+    'the post-up report must repeat the exact-aligned gate before migrate',
+  )
+  assert.ok(imagePullIndex >= 0, 'candidate backend image must be pulled before its preflight runs')
+  assert.match(
+    deploy,
+    /run_candidate_migration_preflight "\$backend_immutable" "\$STAGING_COMPOSE_CANDIDATE_TMP" "\$override_tmp" \|\| preflight_rc=\$\?[\s\S]*?if \[\[ "\$preflight_rc" -ne 0 \]\]; then[\s\S]*?fail "candidate migration preflight failed before deployment;/,
+    'deploy must stop on every candidate preflight failure before changing live state',
+  )
+  assert.ok(snapshotIndex >= 0 && snapshotIndex < preflightCallIndex, 'deploy must snapshot env before preflight')
+  assert.ok(snapshotTrapIndex >= 0 && snapshotTrapIndex < snapshotIndex, 'snapshot cleanup trap must be armed before snapshot creation')
+  assert.match(deploy, /trap cleanup_deploy_env_snapshot EXIT/)
+  assert.match(deploy, /cleanup_deploy_env_snapshot\n\s+trap - EXIT/)
+  assert.match(deploy, /backend_immutable="\$\(resolve_immutable_repo_digest "\$backend_image"\)"/)
+  assert.match(deploy, /web_immutable="\$\(resolve_immutable_repo_digest "\$web_image"\)"/)
+  assert.match(deploy, /echo "    image: \$\{backend_immutable\}"/)
+  assert.match(deploy, /echo "    image: \$\{web_immutable\}"/)
+  assert.equal((deploy.match(/docker pull "\$backend_image"/g) || []).length, 1)
+  assert.equal((deploy.match(/docker pull "\$web_image"/g) || []).length, 1)
+  assert.doesNotMatch(
+    deploy.slice(preflightCallIndex),
+    /(?:docker|compose_staging) pull\b/,
+    'no image may be pulled again after immutable digests have been preflighted',
+  )
+  assert.doesNotMatch(
+    deploy,
+    /STAGING_ENV_FILE/,
+    'deploy must use only its immutable per-run env snapshot after capture',
+  )
+  assert.match(deploy, /running_backend_image.*?== "\$backend_immutable"/s)
+  assert.match(deploy, /running_web_image.*?== "\$web_immutable"/s)
+  assert.ok(
+    preflightCallIndex < identityInvalidateIndex && identityInvalidateIndex < baseMoveIndex,
+    'deploy must invalidate any prior completion record after preflight but before persistent or live state changes',
+  )
+  assert.ok(
+    liveUpIndex < healthIndex && healthIndex < authIndex && authIndex < summaryIndex && summaryIndex < identityWriteIndex,
+    'deploy must persist its completion identity only after health, migration/auth, and summary gates pass',
+  )
+  assert.match(
+    remote,
+    /write_deploy_identity_record\(\)[\s\S]*?mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.deploy-identity\.XXXXXX"[\s\S]*?chmod 600 "\$candidate"[\s\S]*?echo "env_sha256=\$\{env_sha256\}"[\s\S]*?mv -f "\$candidate" "\$DEPLOY_IDENTITY_FILE"/,
+    'the values-free deploy identity record must be written atomically',
+  )
+  assert.match(
+    remote,
+    /wait_for_health_commit\(\)[\s\S]*?local expected="\$1" expected_digest="\$2" expected_web_digest="\$3"[\s\S]*?if \[\[ "\$live_image" == "\$expected_digest" \]\]; then/,
+    'health fallback must compare the running image to the preflighted immutable digest',
+  )
+  assert.equal(
+    (extractShellFunction(remote, 'wait_for_health_commit').match(/assert_running_image_digests "\$expected_digest" "\$expected_web_digest"/g) || []).length,
+    2,
+    'both health-commit and digest-fallback success paths must recheck the running backend and web digests',
+  )
+  assert.match(
+    remote,
+    /action_smoke\(\)[\s\S]*?assert_running_deploy_identity "\$DEPLOY_SHA"[\s\S]*?"ok":true/,
+    'smoke must verify the persisted SHA-to-digest mapping and live health',
+  )
+  assert.match(
+    remote,
+    /soak_backend_image_sha\(\)[\s\S]*?assert_running_deploy_identity "\$recorded_sha"[\s\S]*?printf '%s' "\$recorded_sha"/,
+    'soak baseline identity must resolve through the same immutable deploy record',
+  )
+  assert.ok(
+    imagePullIndex < preflightCallIndex,
+    'candidate backend image must be pulled before the candidate migration preflight',
+  )
+  assert.ok(
+    preflightCallIndex < baseMoveIndex,
+    'candidate migration preflight must pass before persistent compose files change',
+  )
+  assert.ok(
+    preflightCallIndex < liveUpIndex,
+    'candidate migration preflight must pass before backend/web containers are recreated',
+  )
+}
+
 test('deploy ships and atomically installs the checked-out staging compose at a persistent path', () => {
   assertPersistentComposeContract({
     workflow: readFileSync(WORKFLOW, 'utf8'),
@@ -183,6 +475,289 @@ test('deploy ships and atomically installs the checked-out staging compose at a 
     lifecycleRemote: readFileSync(LIFECYCLE_REMOTE_SH, 'utf8'),
     stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
   })
+})
+
+test('deploy preflights candidate-image migrations before persistent config or live containers change', () => {
+  assertCandidateMigrationPreflightContract({
+    remote: readFileSync(REMOTE_SH, 'utf8'),
+    stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+  })
+})
+
+test('immutable image resolver accepts only a valid digest for the exact repository', () => {
+  assertImmutableResolverContract(readFileSync(REMOTE_SH, 'utf8'))
+})
+
+test('deploy env snapshot is exact, mode 0600, selected for the run, and removed', () => {
+  const result = runDeployEnvSnapshot(readFileSync(REMOTE_SH, 'utf8'))
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /^mode=600$/m)
+  assert.match(result.stdout, /^selected_snapshot=1$/m)
+  assert.match(result.stdout, /^cleanup=1$/m)
+  assert.deepEqual(result.residue, [], 'successful cleanup must leave no per-run env snapshot')
+})
+
+test('deploy env snapshot is removed when copying the canonical env fails', () => {
+  const result = runDeployEnvSnapshot(readFileSync(REMOTE_SH, 'utf8'), { failCopy: true })
+  assert.notEqual(result.status, 0, 'copy failure must fail closed')
+  assert.deepEqual(result.residue, [], 'the EXIT trap must remove a partially-created env snapshot')
+})
+
+test('MUTATION: returning the original tag from the immutable resolver turns the executable contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const resolver = extractShellFunction(original, 'resolve_immutable_repo_digest')
+  const mutatedResolver = resolver.replace(`printf '%s' "$digest"`, `printf '%s' "$tagged_image"`)
+  assert.notEqual(mutatedResolver, resolver, 'mutation anchor must replace the resolver output')
+  const mutated = original.replace(resolver, mutatedResolver)
+  assert.throws(() => assertImmutableResolverContract(mutated), /first exact-repository digest/)
+})
+
+test('MUTATION: moving the candidate migration preflight after persistent-file replacement turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const call = '  run_candidate_migration_preflight "$backend_immutable" "$STAGING_COMPOSE_CANDIDATE_TMP" "$override_tmp" || preflight_rc=$?\n'
+  const move = '  mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"\n'
+  const mutated = original.replace(call, '').replace(move, `${move}${call}`)
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /stop on every candidate preflight failure|before persistent compose files change/,
+  )
+})
+
+test('MUTATION: dropping the selected env-file binding from attendance compose turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replaceAll(' --env-file "$COMPOSE_ENV_FILE"', '')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /bind the selected canonical-or-snapshot env file/,
+  )
+})
+
+test('MUTATION: rereading the canonical env after snapshot capture turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const deployStart = original.indexOf('action_deploy() {')
+  const deployEnd = original.indexOf('\naction_smoke() {', deployStart)
+  const deploy = original.slice(deployStart, deployEnd)
+  const mutatedDeploy = deploy.replace(
+    '--env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config',
+    '--env-file "$STAGING_ENV_FILE" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config',
+  )
+  assert.notEqual(mutatedDeploy, deploy, 'mutation fixture must replace one deploy env snapshot binding')
+  const mutated = original.slice(0, deployStart) + mutatedDeploy + original.slice(deployEnd)
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /immutable per-run env snapshot|bind the selected canonical-or-snapshot env file/,
+  )
+})
+
+test('MUTATION: pulling the backend again after preflight turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const move = '  mv -f "$STAGING_COMPOSE_CANDIDATE_TMP" "$PERSISTENT_STAGING_COMPOSE_FILE"\n'
+  const mutated = original.replace(move, `  docker pull "$backend_image"\n${move}`)
+  assert.notEqual(mutated, original, 'mutation fixture must add a post-preflight pull')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /no image may be pulled again|Expected values to be strictly equal/,
+  )
+})
+
+test('MUTATION: restoring mutable tags in the persisted override turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original
+    .replace('echo "    image: ${backend_immutable}"', 'echo "    image: ${backend_image}"')
+    .replace('echo "    image: ${web_immutable}"', 'echo "    image: ${web_image}"')
+  assert.notEqual(mutated, original, 'mutation fixture must restore mutable image tags')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /backend_immutable|web_immutable/,
+  )
+})
+
+test('MUTATION: restoring tag-only health fallback turns the identity contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  if [[ "$live_image" == "$expected_digest" ]]; then\n',
+    '  if [[ "$live_image" == *":${expected}" ]]; then\n',
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must restore the tag-only fallback')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /health fallback must compare.*immutable digest/,
+  )
+})
+
+test('MUTATION: removing the persisted deploy identity write turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  write_deploy_identity_record "$DEPLOY_SHA" "$backend_immutable" "$web_immutable" "$deploy_env_sha256"\n',
+    '',
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must remove the deploy identity write')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /persist (?:the verified SHA-to-digest|its completion) identity/,
+  )
+})
+
+test('MUTATION: retaining an old deploy identity across the first live change turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('  rm -f "$DEPLOY_IDENTITY_FILE"\n', '')
+  assert.notEqual(mutated, original, 'mutation anchor must remove the prior-identity invalidation')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /invalidate any prior completion record/,
+  )
+})
+
+test('MUTATION: persisting deploy identity before health and auth gates turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const write = '  write_deploy_identity_record "$DEPLOY_SHA" "$backend_immutable" "$web_immutable" "$deploy_env_sha256"\n'
+  const health = '  wait_for_health_commit "$DEPLOY_SHA" "$backend_immutable" "$web_immutable"\n'
+  const mutated = original.replace(write, '').replace(health, `${write}${health}`)
+  assert.notEqual(mutated, original, 'mutation anchor must move the completion record before health')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /only after health, migration\/auth, and summary gates pass/,
+  )
+})
+
+test('MUTATION: arming snapshot cleanup after snapshot creation turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const deployStart = original.indexOf('action_deploy() {')
+  const deployEnd = original.indexOf('\naction_smoke() {', deployStart)
+  const deploy = original.slice(deployStart, deployEnd)
+  const mutatedDeploy = deploy
+    .replace('  trap cleanup_deploy_env_snapshot EXIT\n', '')
+    .replace('  prepare_deploy_env_snapshot\n', '  prepare_deploy_env_snapshot\n  trap cleanup_deploy_env_snapshot EXIT\n')
+  assert.notEqual(mutatedDeploy, deploy, 'mutation fixture must move the cleanup trap')
+  const mutated = original.slice(0, deployStart) + mutatedDeploy + original.slice(deployEnd)
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /cleanup trap must be armed before snapshot creation/,
+  )
+})
+
+test('MUTATION: accepting every non-do-not decision turns the exact-aligned contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  if [[ "${#decisions[@]}" -ne 1 || "${decisions[0]}" != "aligned" ]]; then\n',
+    '  if [[ "${decisions[0]:-}" == "do_not_run_full_migrate" ]]; then\n',
+  )
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /only one exact aligned decision may pass/,
+  )
+})
+
+test('MUTATION: weakening the post-up migration decision gate turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  if [[ "${#live_decisions[@]}" -ne 1 || "${live_decisions[0]}" != "aligned" ]]; then\n',
+    '  if [[ "${live_decisions[0]:-}" == "do_not_run_full_migrate" ]]; then\n',
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must weaken the post-up decision gate')
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /post-up report must repeat the exact-aligned gate/,
+  )
+})
+
+for (const serviceName of ['postgres', 'backend']) {
+  test(`MUTATION: removing APP_ENV_FILE consumption from ${serviceName} turns the contract red`, () => {
+    const original = readFileSync(STAGING_COMPOSE, 'utf8')
+    const block = composeServiceBlock(original, serviceName)
+    const mutated = original.replace(
+      block,
+      block.replace('${APP_ENV_FILE:-./docker/app.staging.env}', './docker/other.env'),
+    )
+    assert.throws(
+      () => assertCandidateMigrationPreflightContract({
+        remote: readFileSync(REMOTE_SH, 'utf8'),
+        stagingCompose: mutated,
+      }),
+      new RegExp(`${serviceName} must consume`),
+    )
+  })
+}
+
+test('MUTATION: expanding the candidate DB env allowlist to a DingTalk secret turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  DATABASE_URL\n',
+    '  DATABASE_URL\n  DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET\n',
+  )
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /deep-equal/,
+  )
+})
+
+test('MUTATION: passing DB environment into the offline report turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '    --network none \\\n',
+    '    --network none \\\n    --env DATABASE_URL \\\n',
+  )
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /offline report must receive no environment input/,
+  )
+})
+
+test('MUTATION: dropping the live-vs-candidate DB environment comparison turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    '  if [[ "$live_fingerprint" != "$candidate_fingerprint" ]]; then\n',
+    '  if false; then\n',
+  )
+  assert.throws(
+    () => assertCandidateMigrationPreflightContract({
+      remote: mutated,
+      stagingCompose: readFileSync(STAGING_COMPOSE, 'utf8'),
+    }),
+    /candidate and live DB\/migration environments must match/,
+  )
 })
 
 test('MUTATION: removing the deploy compose preparation call turns the full contract red', () => {
@@ -207,8 +782,8 @@ test('MUTATION: removing the deploy compose preparation call turns the full cont
 test('MUTATION: dropping exact-SHA interpolation from live compose turns the health contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
   const mutated = original.replace(
-    'IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" \\\n    docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
-    'docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
+    'IMAGE_OWNER="$IMAGE_OWNER" IMAGE_TAG="$DEPLOY_SHA" APP_ENV_FILE="$COMPOSE_ENV_FILE" \\\n    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
+    'APP_ENV_FILE="$COMPOSE_ENV_FILE" \\\n    docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_FILE" -f "$OVERRIDE_FILE"',
   )
   assert.throws(
     () => assertPersistentComposeContract({
@@ -419,14 +994,14 @@ test('persistent override: lives under $HOME/.metasheet2/window-runner, NOT the 
 test('persistent override: written atomically — mktemp candidate + docker compose config validation + rename, never a truncating write straight onto the live file', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
   assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX"\)"/, 'expected a mktemp candidate override in the persist dir (X placeholder at the END — no trailing suffix)')
-  const validateIdx = remote.indexOf('docker compose --project-directory "$STAGING_DIR" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config')
+  const validateIdx = remote.indexOf('docker compose --project-directory "$STAGING_DIR" --env-file "$COMPOSE_ENV_FILE" -f "$STAGING_COMPOSE_CANDIDATE_TMP" -f "$override_tmp" config')
   const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
   assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
   // the validation MUST run in the same cwd as compose_staging() (cd "$STAGING_DIR"), or it
   // resolves relative env_file/.env differently than the config `up -d` actually executes
   assert.match(
     remote.slice(Math.max(0, validateIdx - 120), validateIdx),
-    /\(cd "\$STAGING_DIR" && IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" \\\n\s*$/,
+    /\(cd "\$STAGING_DIR" && IMAGE_OWNER="\$IMAGE_OWNER" IMAGE_TAG="\$DEPLOY_SHA" APP_ENV_FILE="\$COMPOSE_ENV_FILE" \\\n\s*$/,
     'candidate pair validation must use the staging cwd and exact-SHA interpolation, matching compose_staging()',
   )
   assert.notEqual(mvIdx, -1, 'candidate override must be atomically renamed into place')
@@ -558,7 +1133,15 @@ function assertSoakContract({ remote, workflow }) {
   assert.match(
     workflow,
     /"\$ACTION" == "deploy" \|\| "\$ACTION" == "smoke" \|\| "\$ACTION" == "soak-flags"/,
-    'deploy_sha must be required for soak-flags (env-only action still pins the RUNNING image tags)',
+    'deploy_sha must be required for soak-flags (env-only action still pins the RUNNING image digests)',
+  )
+  assert.ok(
+    slices.run.includes('assert_current_recorded_deploy_identity'),
+    'soak-run must verify both running image digests against the recorded completed deploy',
+  )
+  assert.ok(
+    slices.status.includes('assert_current_recorded_deploy_identity'),
+    'soak-status must verify both running image digests against the recorded completed deploy',
   )
   assert.match(workflow, /export SOAK_ORGS='\$\{SOAK_ORGS\}'/, 'validated soak_orgs must reach the remote script')
   assert.match(workflow, /export SOAK_OPTS='\$\{SOAK_OPTS\}'/, 'validated soak_opts must reach the remote script')
@@ -853,10 +1436,16 @@ function assertSoakContract({ remote, workflow }) {
   // candidate->validate->rename via the SAME persistent override; backend-only recreate
   // with postgres/redis/web container-id assertions; exact env verification + health.
   const markerGateIdx = slices.flags.indexOf('[[ -f "$SOAK_BASELINE_MARKER" ]]')
+  const snapshotTrapIdx = slices.flags.indexOf('trap cleanup_deploy_env_snapshot EXIT')
+  const snapshotIdx = slices.flags.indexOf('prepare_deploy_env_snapshot')
   const overrideTmpIdx = slices.flags.indexOf('mktemp "${RUNNER_PERSIST_DIR}/.soak-override.XXXXXX"')
   const flagsValidateIdx = slices.flags.indexOf('-f "$soak_override_tmp" config')
   const flagsRenameIdx = slices.flags.indexOf('mv -f "$soak_override_tmp" "$OVERRIDE_FILE"')
   assert.notEqual(markerGateIdx, -1, 'soak-flags must gate on the soak-baseline marker (baseline BEFORE flags)')
+  assert.ok(
+    snapshotTrapIdx >= 0 && snapshotTrapIdx < snapshotIdx && snapshotIdx < markerGateIdx,
+    'soak-flags must arm cleanup and freeze the env before every validation or live change',
+  )
   // P2-2: the marker gate must be SHA-scoped — a stale-build marker (mid-soak redeploy) must
   // not satisfy it, or every later O4-2 "+5% vs baseline" anchors to the wrong image.
   assert.match(
@@ -877,6 +1466,18 @@ function assertSoakContract({ remote, workflow }) {
     slices.flags.includes('carries rd-window env flags'),
     'soak-flags must refuse to silently rewrite an rd-window override',
   )
+  assert.match(
+    slices.flags,
+    /assert_running_deploy_identity "\$DEPLOY_SHA"/,
+    'soak-flags must bind DEPLOY_SHA to both running immutable image digests before rewriting env',
+  )
+  assert.match(
+    slices.flags,
+    /assert_deploy_env_snapshot_matches_record/,
+    'soak-flags must refuse canonical env drift since the recorded deploy',
+  )
+  assert.match(slices.flags, /echo "    image: \$\{backend_image\}"/)
+  assert.match(slices.flags, /echo "    image: \$\{web_image\}"/)
   assert.match(
     slices.flags,
     /compose_staging up -d --no-deps backend 2>&1/,
@@ -909,6 +1510,7 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.ok(slices.flags.includes('"ok":true'), 'soak-flags must health-check after the recreate')
   assert.match(slices.flags, /> "\$SOAK_WINDOW_START_FILE"/, 'soak-flags must record the soak window start')
+  assert.match(slices.flags, /cleanup_deploy_env_snapshot\n\s+trap - EXIT/)
 
   // soak-run: real login route only (never minted tokens), ruled rate ceiling + daily
   // quota, generator + exact execute confirmation, flags-live order gate, tokens never
@@ -1148,6 +1750,44 @@ test('MUTATION: deleting the soak-flags baseline-marker gate turns the soak cont
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /baseline marker|baseline-marker/,
+  )
+})
+
+test('MUTATION: deleting the soak-flags immutable identity gate turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const mutatedFlags = slices.flags.replace('  assert_running_deploy_identity "$DEPLOY_SHA"\n', '')
+  const mutated = original.replace(slices.flags, mutatedFlags)
+  assert.notEqual(mutated, original, 'mutation anchor must hit the soak-flags identity gate')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /both running immutable image digests/,
+  )
+})
+
+for (const action of ['run', 'status']) {
+  test(`MUTATION: deleting the soak-${action} recorded deploy identity gate turns the soak contract red`, () => {
+    const original = readFileSync(REMOTE_SH, 'utf8')
+    const slices = extractSoakSlices(original)
+    const mutatedSlice = slices[action].replace('  assert_current_recorded_deploy_identity\n', '')
+    const mutated = original.replace(slices[action], mutatedSlice)
+    assert.notEqual(mutated, original, `mutation anchor must hit the soak-${action} identity gate`)
+    assert.throws(
+      () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+      new RegExp(`soak-${action} must verify both running image digests`),
+    )
+  })
+}
+
+test('MUTATION: deleting the soak-flags env snapshot binding turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const mutatedFlags = slices.flags.replace('  assert_deploy_env_snapshot_matches_record\n', '')
+  const mutated = original.replace(slices.flags, mutatedFlags)
+  assert.notEqual(mutated, original, 'mutation anchor must hit the soak-flags env identity gate')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /canonical env drift/,
   )
 })
 

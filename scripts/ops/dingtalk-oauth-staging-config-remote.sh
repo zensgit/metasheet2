@@ -46,6 +46,7 @@ LEGACY_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 ATTENDANCE_DIR="${HOME}/.metasheet2/window-runner"
 PERSISTENT_COMPOSE_FILE="${ATTENDANCE_DIR}/docker-compose.app.staging.yml"
 ATTENDANCE_OVERRIDE_FILE="${ATTENDANCE_DIR}/docker-compose.window-runner.override.yml"
+ATTENDANCE_DEPLOY_IDENTITY_FILE="${ATTENDANCE_DIR}/deploy-identity.env"
 LIFECYCLE_OVERRIDE_FILE="${HOME}/.metasheet2/lifecycle-canary/docker-compose.lifecycle-canary.override.yml"
 PERSIST_DIR="${HOME}/.metasheet2/dingtalk-oauth-config"
 STAGING_COMPOSE_FILE="$LEGACY_COMPOSE_FILE"
@@ -130,9 +131,18 @@ except Exception: print("")' || true
 }
 
 deployed_sha() {
-  local image image_sha="" http_sha
+  local image image_sha="" http_sha image_pin=""
   image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
   [[ "$image" =~ :([0-9a-f]{40})$ ]] && image_sha="${BASH_REMATCH[1]}"
+  if [[ "$image" == *@sha256:* ]]; then
+    if image_pin="$(resolve_live_backend_image_pin)"; then
+      read -r _ image_sha <<< "$image_pin"
+      printf '%s' "$image_sha"
+    else
+      printf unknown
+    fi
+    return 0
+  fi
   http_sha="$(health_commit)"
   if [[ "$image_sha" =~ ^[0-9a-f]{40}$ && "$http_sha" == "$image_sha" ]]; then
     printf '%s' "$image_sha"
@@ -165,12 +175,38 @@ write_status() {
   cp "${OUTPUT_DIR}/status.txt" "${OUTPUT_DIR}/summary.txt"
 }
 
-resolve_image_pin() {
-  local image
+read_attendance_deploy_identity_field() {
+  local key="$1" value count
+  [[ -f "$ATTENDANCE_DEPLOY_IDENTITY_FILE" ]] || return 1
+  value="$(sed -n "s/^${key}=//p" "$ATTENDANCE_DEPLOY_IDENTITY_FILE" | head -n 1)"
+  count="$(sed -n "s/^${key}=//p" "$ATTENDANCE_DEPLOY_IDENTITY_FILE" | wc -l | tr -d '[:space:]')"
+  [[ "$count" == "1" && -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+resolve_live_backend_image_pin() {
+  local image image_owner recorded_sha recorded_digest
   image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
-  [[ "$image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend:([0-9a-f]{40})$ ]] \
-    || fail "backend image is not pinned to a full SHA"
-  printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  if [[ "$image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend:([0-9a-f]{40})$ ]]; then
+    printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend@sha256:[0-9a-f]{64}$ ]]; then
+    image_owner="${BASH_REMATCH[1]}"
+    recorded_sha="$(read_attendance_deploy_identity_field deploy_sha)" || return 1
+    recorded_digest="$(read_attendance_deploy_identity_field backend_digest)" || return 1
+    [[ "$recorded_sha" =~ ^[0-9a-f]{40}$ && "$recorded_digest" == "$image" ]] || return 1
+    [[ -f "$ATTENDANCE_OVERRIDE_FILE" ]] || return 1
+    grep -Fqx "    image: ${recorded_digest}" "$ATTENDANCE_OVERRIDE_FILE" || return 1
+    printf '%s %s' "$image_owner" "$recorded_sha"
+    return 0
+  fi
+  return 1
+}
+
+resolve_image_pin() {
+  resolve_live_backend_image_pin \
+    || fail "backend image lacks an exact full-SHA tag or matching immutable deploy identity"
 }
 
 compose_with_env() {
