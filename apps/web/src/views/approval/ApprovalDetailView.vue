@@ -211,7 +211,7 @@
                   :label="column.label"
                 >
                   <template #default="{ row }">
-                    {{ formatFieldValue(row.cells[column.id]) }}
+                    {{ formatFieldValue(row.cells[column.id], column) }}
                   </template>
                 </el-table-column>
               </el-table>
@@ -934,6 +934,7 @@ import {
   buildDetailRowsForDisplay,
   buildDisplayFields,
   findDetailFieldInSchema,
+  type DetailDisplayColumn,
   type DetailDisplayTable,
   type DisplayField,
 } from '../../approvals/detailField'
@@ -1322,12 +1323,20 @@ interface CurrentHandlerEntry {
 }
 
 // `assignment.metadata` carries no display name today — only `assigneeId` (see
-// `ApprovalAssignmentDTO`). This defensively prefers a future `metadata.assigneeName` if the
-// backend ever adds one, else falls back to the raw id — same "don't fetch, just display"
-// convention `reducibleAssignees` already uses above.
+// `ApprovalAssignmentDTO`). Prefers a future `metadata.assigneeName` if the backend ever adds one.
+//
+// P7-R2 gate hardening (P2-2): this used to fall back to the raw `assigneeId`, rendered
+// unconditionally at `当前处理人：{{ entry.label }}` on every PENDING instance with an active user
+// assignment — the single most reachable member-facing raw-id leak found in this file (not an
+// exotic drift shape, the ordinary case). `metadata.assigneeName` has zero producers repo-wide
+// today, so this reachable branch is effectively always the one that renders — never the raw id
+// (values-free doctrine). No richer resolution is available from data already in scope (unlike
+// `cancelledAssigneesLabel` below, this function sees only the ONE assignment row, not the full
+// list, so there is nothing else here to cross-reference).
 function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   const metaName = assignment.metadata.assigneeName
-  return typeof metaName === 'string' && metaName.trim() ? metaName : assignment.assigneeId
+  if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  return '审批人'
 }
 
 // One entry per ACTIVE assignment at the current node(s) — every currently-pending handler, not
@@ -1605,17 +1614,61 @@ function approvalModeLabel(mode: string): string {
  * an any-mode (或签) first-wins resolution. Returns empty string when metadata carries no
  * aggregateCancelled list or when the list is empty — callers `v-if` on the truthy string.
  */
+// P7-R2 candidate #2 fix (values-free doctrine, confirmed member-facing raw-id exposure): resolve
+// each cancelled sibling to a display name using ONLY data already in scope (the instance's own
+// `assignments` array) — no new fetch, same "don't fetch, just display" convention as the rest of
+// this file. If EVERY id resolves to a real name, join the names; if any id has no reachable name,
+// fall back to a values-free count instead of a partial name list padded with a repeated generic
+// placeholder (which would read as a formatting bug
+// more than a redaction). Either branch, a raw user id is never rendered.
 function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
   if (!metadata) return ''
   const cancelled = metadata.aggregateCancelled
   if (!Array.isArray(cancelled) || cancelled.length === 0) return ''
-  return `其他审批人已失效: ${cancelled.map((id) => String(id)).join(', ')}`
+  const assignments = approval.value?.assignments ?? []
+  const names: string[] = []
+  for (const id of cancelled) {
+    const match = assignments.find((a) => a.assigneeId === String(id))
+    const metaName = match?.metadata?.assigneeName
+    if (typeof metaName === 'string' && metaName.trim()) {
+      names.push(metaName.trim())
+      continue
+    }
+    // No display name reachable from already-loaded assignment metadata — render a values-free
+    // count rather than ever falling back to the raw id.
+    return `其他 ${cancelled.length} 位审批人已失效`
+  }
+  return `其他审批人已失效: ${names.join('、')}`
 }
 
+// P7-R2 candidate #3 fix (values-free doctrine, HIGHEST PRIORITY confirmed exposure — fires on
+// ordinary template drift, not an exotic shape): prefer the LIVE template's current name (the
+// common case, and the freshest one when the node still exists); when the live template no
+// longer carries this key (renamed/reordered/removed since this row's node ran), fall back to a
+// values-free "节点已变更" — never the raw internal node key (mirrors the "附件已删除" tombstone
+// convention already used for a deleted attachment ref above).
+//
+// P7-R2 gate hardening (P2-1): an earlier revision also tried `pinnedGraph` (the FROZEN template
+// version pinned at instance creation) as a second fallback before the values-free placeholder.
+// That branch is dead for its intended audience: `pinnedGraph` only resolves once
+// `templateStore.activeVersion` loads, and `loadVersion` calls
+// `GET /api/approval-templates/:id/versions/:versionId`, which is
+// `approvalTemplateAdminGuard`-gated (routes/approvals.ts:756, requiring
+// `approval-templates:manage`/`approvals:admin-templates`) — ordinary members never have
+// permission to reach it, so `activeVersion` stays null and `pinnedGraph` null-coalesces straight
+// back to `activeTemplate?.approvalGraph`, the SAME live graph already searched one line above.
+// Removed rather than left as a branch that only ever fires for template admins while its own
+// comment implied it worked for everyone. Showing the historical name to ordinary members is a
+// real enhancement worth having, but it needs the pinned graph exposed on a surface members can
+// already read (e.g. frozen alongside `formSchema` on the instance DTO itself, the way
+// `formSchema` is already frozen from the pinned version without an admin-guarded fetch) — that is
+// backend work and a separate follow-up slice, not something this frontend-only fix can do without
+// adding a new endpoint or widening the admin guard (both out of scope here).
 function nodeLabel(nodeKey: string): string {
   if (!nodeKey) return '-'
-  const node = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
-  return node?.name?.trim() || nodeKey
+  const live = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  if (live?.name?.trim()) return live.name.trim()
+  return '节点已变更'
 }
 
 function formatDate(dateStr: string) {
@@ -1623,10 +1676,50 @@ function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleString('zh-CN')
 }
 
-function formatFieldValue(value: unknown): string {
+// P7-R2 candidate #1 fix (values-free doctrine, confirmed member-facing raw-JSON exposure):
+// detail/sub-form leaf columns are scalar-only by contract (`DETAIL_LEAF_FIELD_TYPES` excludes
+// `record-link`/`detail` nesting), so an object reaching here is either a legacy/malformed
+// snapshot or a richer shape than the leaf contract promises. Never render raw JSON to an
+// ordinary user — surface a known display key if the shape happens to carry one (mirrors
+// `recordLinkField.ts`'s displayValue convention), else a typed, values-free placeholder.
+function objectDisplayValue(value: Record<string, unknown>): string {
+  for (const key of ['displayValue', 'name', 'label', 'title'] as const) {
+    const candidate = value[key]
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return '复杂内容'
+}
+
+// P7-R2 gate hardening (P2-2/P3-2): the array branch used to `.join(', ')` every element
+// verbatim, including a leaf-contract-violating array of raw record/user ids (only `multi-select`
+// legitimately produces an array here, and only as a set of the column's OWN defined option
+// values). A bare string element has no structural signal distinguishing "a raw id" from "a
+// legitimate option value" — resolving that ambiguity with a hand-built id-shape heuristic would
+// be exactly the kind of home-grown normalizer the values-free doctrine warns against. Use the
+// REPO'S OWN whitelist instead: `column.options` (already defined at authoring time for every
+// select/multi-select field). A stored value found in that whitelist renders its label; anything
+// else — including a contract-violating raw id — renders a values-free placeholder, never
+// verbatim. Object elements resolve through the same known-key-or-placeholder logic as a
+// single object value above.
+function formatFieldValue(value: unknown, column?: DetailDisplayColumn): string {
   if (value === null || value === undefined) return '-'
-  if (Array.isArray(value)) return value.join(', ')
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) {
+    const byValue = column?.options?.length
+      ? new Map(column.options.map((opt) => [opt.value, opt.label]))
+      : null
+    return value
+      .map((entry) => {
+        if (byValue) return byValue.get(String(entry)) ?? '未知选项'
+        if (entry !== null && typeof entry === 'object') return objectDisplayValue(entry as Record<string, unknown>)
+        // No options whitelist for this column and a bare (non-object) element — every leaf type
+        // other than `multi-select` expects a single scalar, so an array reaching here at all is
+        // already an anomalous/contract-violating shape; a values-free placeholder is the safe
+        // default rather than trusting an unvalidated element.
+        return '未知选项'
+      })
+      .join(', ')
+  }
+  if (typeof value === 'object') return objectDisplayValue(value as Record<string, unknown>)
   return String(value)
 }
 
