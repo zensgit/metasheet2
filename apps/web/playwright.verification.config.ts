@@ -9,10 +9,15 @@ const PORT = 5174
 export default defineConfig({
   testDir: './verification',
   testMatch: '**/*.spec.ts',
-  // The approval form-builder spec runs in its OWN lane
+  // The approval form-builder specs run in their OWN lane
   // (playwright.approval-verification.config.ts / approval-browser-verify.yml)
-  // so an approval-harness failure cannot red the multitable lane.
-  testIgnore: '**/approval-form-builder-parity.spec.ts',
+  // so an approval-harness failure cannot red the multitable lane. F4 added
+  // approval-form-builder-mounted-matrix.spec.ts to that same disjoint lane —
+  // ignored here for the same reason.
+  testIgnore: [
+    '**/approval-form-builder-parity.spec.ts',
+    '**/approval-form-builder-mounted-matrix.spec.ts',
+  ],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

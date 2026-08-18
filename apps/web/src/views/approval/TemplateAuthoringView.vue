@@ -259,21 +259,24 @@
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
-                :disabled="readOnly || !canUndoFormFieldHistory"
+                :disabled="readOnly || !(showFormBuilderV2 ? builderCanUndo : canUndoFormFieldHistory)"
                 data-testid="approval-form-undo"
-                @click="onFormFieldUndo"
+                @click="onFormUndoRedoClick('undo')"
               >
                 撤销
               </el-button>
               <el-button
                 size="small"
-                :disabled="readOnly || !canRedoFormFieldHistory"
+                :disabled="readOnly || !(showFormBuilderV2 ? builderCanRedo : canRedoFormFieldHistory)"
                 data-testid="approval-form-redo"
-                @click="onFormFieldRedo"
+                @click="onFormUndoRedoClick('redo')"
               >
                 重做
               </el-button>
+              <!-- Designer 2.0's palette (click/keyboard slot insertion) supersedes this button —
+                   hiding it under the flag avoids a second, divergent add-field path (M7). -->
               <el-button
+                v-if="!showFormBuilderV2"
                 size="small"
                 :disabled="readOnly"
                 data-testid="approval-template-add-field"
@@ -287,6 +290,7 @@
         </template>
 
         <ApprovalFormInlineEditor
+          v-if="!showFormBuilderV2"
           data-testid="approval-form-designer"
           :fields="draft.fields"
           :read-only="readOnly"
@@ -316,6 +320,30 @@
           @add-detail-column="addDetailColumn"
           @remove-detail-column="removeDetailColumn"
         />
+        <!-- F4 production mount (delta §5 F4, FB-D8): Designer 2.0 — the SAME composition shape
+             as the owned browser harness (`verification/approval-form-builder-harness.ts`): one
+             shared `dragSession`, palette + builder as siblings. `formBuilderSessionEpoch` is the
+             ONLY thing that remounts this (see `reseedFormBuilderSessionIfActive`); no `:key` is
+             derived from `draft` itself, so routine edits/tab-switches never reseed the session. -->
+        <div
+          v-else
+          class="template-authoring__form-designer-v2"
+          data-testid="approval-form-designer-v2"
+        >
+          <ApprovalFormPalette
+            :read-only="readOnly"
+            :drag-session="approvalFormDragSession"
+            @append-field="onFormBuilderPaletteAppend"
+          />
+          <ApprovalFormBuilder
+            :key="formBuilderSessionEpoch"
+            ref="formBuilderRef"
+            :draft="draft"
+            :read-only="readOnly"
+            :drag-session="approvalFormDragSession"
+            @draft-change="onFormBuilderDraftChange"
+          />
+        </div>
       </el-card>
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
@@ -1327,6 +1355,9 @@ import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewF
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import ApprovalFormInlineEditor from '../../approvals/components/ApprovalFormInlineEditor.vue'
+import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
+import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
+import { createApprovalFormDragSession } from '../../approvals/approvalFormDragPayload'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalCanvasNodeInspector from '../../approvals/components/ApprovalCanvasNodeInspector.vue'
@@ -1482,6 +1513,79 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+
+// ── F4 production mount (delta §5 F4, FB-D8) ──
+// The hardened Designer 2.0 builder mounts behind the EXISTING `approvalCanvasV2` flag — no new
+// flag (FB-D8). `formSessionHydrated` gates the mount on top of the flag: `ApprovalFormBuilder`
+// seeds its session ONCE, synchronously, from `props.draft` at component creation (F1/F2 — the
+// component never re-seeds from a later prop change), so mounting it before `loadTemplateForEdit`
+// resolves the real draft would permanently strand the session on the empty placeholder. Both
+// `showFormBuilderV2` inputs only ever transition false→true for the life of one view instance:
+// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once in
+// `loadTemplateForEdit` and never reset — so `showFormBuilderV2` cannot flip back to false, and the
+// `v-if` mount is NOT re-evaluated by ordinary editing/tab-switching (the outer step chrome uses
+// v-show, not v-if — see `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY
+// thing that remounts (reseeds) the builder, and it is bumped ONLY at the three existing
+// server-round-trip points (`persistDraft` update/create, `createFromPreset`) that already call
+// `reseedFormHistoryFromDraft()` for the legacy history stack — never on routine field edits.
+const formSessionHydrated = ref(false)
+const formBuilderSessionEpoch = ref(0)
+const showFormBuilderV2 = computed(() => canvasV2Enabled.value && formSessionHydrated.value)
+/** Shared transient drag session (palette <-> builder), created once per view instance. */
+const approvalFormDragSession = createApprovalFormDragSession()
+interface ApprovalFormBuilderExposed {
+  getDragSession(): ReturnType<typeof createApprovalFormDragSession>
+  appendField(type: AuthorableFieldType): boolean
+  undo(): boolean
+  redo(): boolean
+  canUndo(): boolean
+  canRedo(): boolean
+}
+const formBuilderRef = ref<ApprovalFormBuilderExposed | null>(null)
+const builderCanUndo = ref(false)
+const builderCanRedo = ref(false)
+
+/** Refresh the toolbar's undo/redo enabled state after a builder-originated commit. */
+function refreshFormBuilderHistoryFlags(): void {
+  builderCanUndo.value = formBuilderRef.value?.canUndo() ?? false
+  builderCanRedo.value = formBuilderRef.value?.canRedo() ?? false
+}
+
+/**
+ * The v2 builder is the SINGLE writer of `draft.value` while mounted (FB-D4): every add / move /
+ * remove / retype / property-update / undo / redo commit re-emits the CURRENT draft here so the
+ * rest of the view (save/publish payload, header field count, dirty-check) stays in sync — a
+ * commit that never reached `draft.value` would be silently unsaved (M8).
+ */
+function onFormBuilderDraftChange(nextDraft: TemplateAuthoringDraft, focusLocalId: string | null): void {
+  draft.value = nextDraft
+  formFieldFocusLocalId.value = focusLocalId
+  refreshFormBuilderHistoryFlags()
+}
+
+/** Deliberate resync after a genuine server round-trip (save/create/preset) — NOT a routine reseed. */
+function reseedFormBuilderSessionIfActive(): void {
+  if (!showFormBuilderV2.value) return
+  formBuilderSessionEpoch.value += 1
+  builderCanUndo.value = false
+  builderCanRedo.value = false
+}
+
+/** Palette click path (§3.1): append via the SAME ONE adapter the builder's own drag/slot paths use. */
+function onFormBuilderPaletteAppend(type: AuthorableFieldType): void {
+  formBuilderRef.value?.appendField(type)
+}
+
+function onFormUndoRedoClick(direction: 'undo' | 'redo'): void {
+  if (readOnly.value) return
+  if (showFormBuilderV2.value) {
+    if (direction === 'undo') formBuilderRef.value?.undo()
+    else formBuilderRef.value?.redo()
+    return
+  }
+  if (direction === 'undo') onFormFieldUndo()
+  else onFormFieldRedo()
+}
 
 // FWB-0 Layer 2: typed base/sheet catalog for record-link authoring (IDs persist on the draft,
 // never shown as ordinary free-text labels). Loaded via MultitableApiClient listBases/listSheets.
@@ -3529,6 +3633,10 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // F4 hydration gate: a NEW template's starter draft is available synchronously (no fetch) —
+    // seed the v2 session in the SAME tick, before first paint, so there is no builder-mounts-empty
+    // flash even for a brand-new template.
+    formSessionHydrated.value = true
     return
   }
   loading.value = true
@@ -3550,6 +3658,12 @@ async function loadTemplateForEdit() {
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
   } finally {
     loading.value = false
+    // F4 hydration gate: set exactly ONCE per view instance, success or failure — `draft.value`
+    // holds whatever the load produced (the real template, or the pre-existing empty fallback on
+    // failure) and `ApprovalFormBuilder` seeds from it here for the first and only time. A later
+    // `draft.value` reassignment (e.g. after save) never re-triggers this — see
+    // `reseedFormBuilderSessionIfActive` for the ONE deliberate, explicit resync path.
+    formSessionHydrated.value = true
   }
 }
 
@@ -3599,6 +3713,7 @@ async function persistDraft() {
       templateLatestVersionId.value = updated.latestVersionId
       reseedCanvasHistoryFromDraft()
       reseedFormHistoryFromDraft()
+      reseedFormBuilderSessionIfActive()
       snapshotDraft()
       return updated
     }
@@ -3610,6 +3725,7 @@ async function persistDraft() {
     templateLatestVersionId.value = created.latestVersionId
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
+    reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
@@ -3637,6 +3753,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     syncAllCcOptions()
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
+    reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -3813,6 +3930,14 @@ onMounted(() => {
 // surface and previously lost all edits on a stray back-click. Route leaves confirm when
 // dirty; hard reloads/closures get the browser-native prompt (same pattern as WorkflowDesigner).
 onBeforeRouteLeave(async () => {
+  // F4 route-level drag-state clearing (delta §5 F4 handoff condition 3): `v-show` keeps the
+  // step chrome — and therefore the mounted `ApprovalFormBuilder` — mounted across
+  // `activeAuthoringSection` switches, so `onUnmounted`'s existing drag-session clear (F2) only
+  // fires on a GENUINE unmount. The dirty-draft confirm below can be CANCELLED (user picks 留下),
+  // in which case no unmount ever happens even though a navigation attempt began and any in-flight
+  // drag was already visually interrupted. Clearing here — unconditionally, before the dirty
+  // check/confirm — covers exactly that gap regardless of whether the navigation proceeds.
+  formBuilderRef.value?.getDragSession().clear()
   if (!isDraftDirty.value) return true
   try {
     await ElMessageBox.confirm('有未保存的更改，离开将丢失编辑内容。确定离开吗？', '未保存的更改', {
@@ -4330,6 +4455,53 @@ pre {
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {
     flex-direction: column;
+  }
+}
+
+/* F4 production mount (delta §5 F4, FB-D1/FB-D2): the Designer 2.0 three-region wrapper. The
+   palette and `ApprovalFormBuilder` (canvas + inspector) are separate components (§5 F2/F3), so the
+   fixed-width palette column and the >=1100px three-region contract are assembled HERE, matching
+   the SAME >=1100px / <1100px two-tier breakpoint the extracted legacy shell above already ships
+   (there is no shipped third tier at 768px on this baseline to diverge from). `:deep()` reaches
+   into the child components' own scoped roots — neither owns a fixed width itself. */
+.template-authoring__form-designer-v2 {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  min-height: min(68vh, 720px);
+  margin: -8px -12px -16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  max-width: 100%;
+}
+.template-authoring__form-designer-v2 :deep(.approval-form-palette) {
+  flex: 0 0 228px;
+  min-width: 0;
+  border-right: 1px solid var(--el-border-color-lighter);
+}
+.template-authoring__form-designer-v2 :deep(.approval-form-builder) {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 0;
+  background: transparent;
+}
+@media (max-width: 1100px) {
+  .template-authoring__form-designer-v2 {
+    flex-direction: column;
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-palette) {
+    flex: 0 0 auto;
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-builder) {
+    flex-direction: column;
+  }
+  .template-authoring__form-designer-v2 :deep(.approval-form-builder__inspector) {
+    flex: 1 1 auto;
+    min-width: 0;
+    border-left: 0;
+    border-top: 1px solid var(--el-border-color-lighter);
   }
 }
 
