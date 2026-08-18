@@ -994,7 +994,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "iterate the exported table" mechanical assertion, not per-kind spot checks), so any single
   // label reverting to pre-D1 wording (or drifting to anything else) reds here regardless of
   // whether it happens to be one of the two kinds the D1/D2 test exercises.
-  it('D1 (P2-2): all twelve assignee-source labels equal the ratified map by exact object equality', () => {
+  it('D1 (P2-2): all thirteen assignee-source labels equal the ratified map by exact object equality', () => {
     const RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<string, string> = {
       static_user: '指定成员',
       static_role: '指定角色',
@@ -1019,11 +1019,16 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       // (Lock-1 §2.3 table: "Admitted when: OD-L1-3 + OD-L1-4 decided; dominance validator
       // landed" — both recorded (a) in the §4 block).
       prior_node_approver: '节点审批人',
+      // Lock-1 §K1 (RATIFIED 2026-08-17) — the 用户组 registry row, admitted in the SAME slice
+      // that lands the resolver arm + org binding + picker end to end (Lock-1 §2.3 table:
+      // "Admitted when: OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed").
+      // The cc-as-recipient row (OD-L1-7) is a SEPARATE row NOT admitted by this slice.
+      user_group: '用户组',
     }
     expect(APPROVAL_ASSIGNEE_SOURCE_LABELS).toEqual(RATIFIED_APPROVAL_ASSIGNEE_SOURCE_LABELS)
-    // Also pin the count so a stray 13th entry (which would still satisfy `toEqual` on the keys
+    // Also pin the count so a stray 14th entry (which would still satisfy `toEqual` on the keys
     // above via structural superset checks in some matcher semantics) cannot slip through unnoticed.
-    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(12)
+    expect(Object.keys(APPROVAL_ASSIGNEE_SOURCE_LABELS)).toHaveLength(13)
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
@@ -1603,7 +1608,9 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                     : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
                       // Lock-1 §K5-b: same default shape as manager_at_level.
                       : kind === 'dept_head_at_level' ? { kind, level: 1 }
-                        : { kind }
+                        // Lock-1 §K1: '' = no group selected yet.
+                        : kind === 'user_group' ? { kind, groupIds: [] }
+                          : { kind }
         const nextSources = edit.assigneeSources.slice()
         nextSources[sourceIndex] = next
         edit.assigneeSources = nextSources
@@ -1618,6 +1625,13 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
         if (!source) return
         if (source.kind === 'static_user') source.userIds = ids
         else if (source.kind === 'static_role') source.roleIds = ids
+      },
+      // Lock-1 §K1: the user_group source's dedicated id carrier.
+      approvalSourceGroupIds: (nodeKey: string, sourceIndex: number) =>
+        (edits[nodeKey]?.assigneeSources[sourceIndex]?.groupIds as string[]) ?? [],
+      setApprovalSourceGroupIds: (nodeKey: string, sourceIndex: number, ids: string[]) => {
+        const source = edits[nodeKey]?.assigneeSources[sourceIndex]
+        if (source && source.kind === 'user_group') source.groupIds = ids
       },
       approvalSourceFieldId: (nodeKey: string, sourceIndex: number) => (edits[nodeKey]?.assigneeSources[sourceIndex]?.fieldId as string) ?? '',
       setApprovalSourceFieldId: (nodeKey: string, sourceIndex: number, fieldId: string) => {
@@ -1649,7 +1663,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
                   : defaultKind === 'manager_at_level' ? { kind: defaultKind, level: 1 }
                     : defaultKind === 'continuous_dept_heads' ? { kind: defaultKind, levels: 1 }
                       : defaultKind === 'dept_head_at_level' ? { kind: defaultKind, level: 1 }
-                        : { kind: defaultKind }
+                        : defaultKind === 'user_group' ? { kind: defaultKind, groupIds: [] }
+                          : { kind: defaultKind }
         edit.assigneeSources = [...edit.assigneeSources, next]
       },
       removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => {
@@ -1690,8 +1705,16 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       directoryUsersLoading: false,
       directoryRoles: [],
       formulaRoles: [],
+      // Lock-1 §K1: two fixture options, both bound — enough to exercise the multi-select without
+      // an empty-roster hint masking the mount.
+      memberGroupOptions: [
+        { id: 'grp-1', name: '销售组', memberCount: 3 },
+        { id: 'grp-2', name: '财务组', memberCount: 5 },
+      ],
+      memberGroupOptionsLoading: false,
       formatUserLabel: (u: { id: string }) => u.id,
       formatRoleLabel: (r: { id: string }) => r.id,
+      formatMemberGroupLabel: (g: { id: string; name: string; memberCount: number }) => `${g.name || g.id}（${g.memberCount} 人）`,
     }
   }
 
@@ -1905,11 +1928,11 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
-  it('A-3: roster equals the twelve-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
+  it('A-3: roster equals the thirteen-member ApprovalAssigneeSourceKind union by exact set equality, not count or subset', () => {
     // Lock-1 §2.3: the exact-set gate grows from eight to eight-plus-ratified-K-kinds in the
     // SAME commit that lands each kind — K2 `requester_choice`, K4 `continuous_dept_heads`, K5-b
-    // `dept_head_at_level`, K3 `prior_node_approver`.
-    const CANONICAL_TWELVE = [
+    // `dept_head_at_level`, K3 `prior_node_approver`, K1 `user_group`.
+    const CANONICAL_THIRTEEN = [
       'continuous_dept_heads',
       'continuous_managers',
       'dept_head',
@@ -1922,11 +1945,12 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       'requester_choice',
       'static_role',
       'static_user',
+      'user_group',
     ]
     const roster = [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval')]
       .map((opt) => opt.kind)
       .sort()
-    expect(roster).toEqual(CANONICAL_TWELVE)
+    expect(roster).toEqual(CANONICAL_THIRTEEN)
 
     const node = makeApprovalNode('approval_x')
     const { container: c, unmount } = mountDirectInspector({
@@ -1939,7 +1963,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     )
       .map((el) => el.getAttribute('data-testid')?.replace('approval-node-source-kind-', ''))
       .sort()
-    expect(rendered).toEqual(CANONICAL_TWELVE)
+    expect(rendered).toEqual(CANONICAL_THIRTEEN)
     unmount()
   })
 
@@ -1978,6 +2002,39 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(roster.checked).toBe(true)
     expect(c.querySelector('[data-testid="approval-node-source-level"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  // Lock-1 §K1 — user_group authoring sub-form: registry-admitted, renders EDITABLE with the
+  // TYPED bound-group multi-select (D0 §10.2 — never a free-text/raw-id input), no unknown-kind
+  // hint. An empty option list shows the honest no-bound-groups hint (mirrors K3's empty-candidate
+  // posture) rather than an inert always-selectable-nothing control.
+  it('K1: user_group renders EDITABLE with the typed bound-group multi-select (registry-admitted)', () => {
+    const node = makeApprovalNode('approval_ug')
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: createStubConfigApi({ approval_ug: { assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] } }),
+    })
+    const roster = c.querySelector('[data-testid="approval-node-source-kind-user_group"]') as HTMLInputElement
+    expect(roster).not.toBeNull()
+    expect(roster.checked).toBe(true)
+    expect(c.querySelector('[data-testid="approval-node-source-group-picker"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-source-kind-unknown"]')).toBeNull()
+    unmount()
+  })
+
+  it('K1: user_group with zero bound options shows the honest empty-roster hint, not an inert control', () => {
+    const node = makeApprovalNode('approval_ug_empty')
+    const api = createStubConfigApi({ approval_ug_empty: { assigneeSources: [{ kind: 'user_group', groupIds: [] }] } })
+    api.memberGroupOptions = []
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api,
+    })
+    expect(c.querySelector('[data-testid="approval-node-source-group-empty"]')).not.toBeNull()
     unmount()
   })
 

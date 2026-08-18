@@ -16,7 +16,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 
 /**
@@ -413,6 +413,24 @@ export type ApprovalAssigneeSource =
    * instance's reference.
    */
   | { kind: 'prior_node_approver'; nodeKey: string }
+  /**
+   * Lock-1 §K1 — 用户组 (user group) approver, over `platform_member_groups`
+   * (`zzzz20260409154000_create_platform_member_groups_and_delegated_group_scopes.ts:11-26`),
+   * members in `platform_member_group_members` (`:31-37`). RATIFIED OD-L1-1(a) EAGER_EXPANSION:
+   * every referenced group's member list is read ONCE at create and frozen into
+   * `ApprovalRequesterSnapshot.groupMemberIds` (group id → ordered local user ids) — the resolver
+   * expands purely from that frozen map, exactly like `managerChainIds`. A membership change
+   * AFTER create does NOT reach an in-flight instance (the owner's actual trade vs. the shipped
+   * `static_role` precedent — see the design lock's honesty note). `groupIds` is a non-empty
+   * array; an EMPTY group resolves to EMPTY assignment and falls to `emptyAssigneePolicy` like an
+   * unresolvable manager. A group id that does not exist, or is not bound to the publishing org
+   * (RATIFIED OD-L1-2(a) curated per-org binding table, `approval_usable_member_groups`), is a
+   * DIFFERENT case — rejected at PUBLISH (`assertUserGroupSourcesBoundToOrg`), never at dispatch.
+   * Fingerprint: `user_group:<sorted groupIds joined by ','>` (§2.4). Cc-as-recipient (OD-L1-7,
+   * widening `CcNodeConfig.targetType`) is a SEPARATE contract/registry row and is NOT part of
+   * this shape — deferred to its own slice (§K1 "cc is a second contract, not a rider").
+   */
+  | { kind: 'user_group'; groupIds: string[] }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
@@ -433,6 +451,12 @@ export interface ApprovalAssigneeResolutionMetadata {
      * values-free).
      */
     priorNodeKey?: string
+    /**
+     * Lock-1 §K1 (`user_group` only): the SPECIFIC group id this member was resolved from — a
+     * `user_group` source may carry multiple `groupIds`, so the sourceIndex alone cannot answer
+     * "which group". Template-authored id, values-free per §2.6 (never the group's membership).
+     */
+    groupId?: string
   }
   /**
    * Set when a delegation (委托) substituted this assignee: the original delegator's
@@ -637,6 +661,19 @@ export interface ApprovalRequesterSnapshot {
    * never alters it — the sanctioned in-flight mutation is `transfer`.
    */
   requesterChoices?: Record<string, string[]>
+  /**
+   * Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — the FROZEN member list of every
+   * `user_group` group id the published runtime graph references, keyed by group id (ordered local
+   * user ids, as read from `platform_member_group_members` at create). OPT-IN: populated only when
+   * the graph actually uses a `user_group` source (`collectApprovalGraphMemberGroupIds`, mirroring
+   * `includeManagerChain`'s posture — unrelated approvals pay nothing). The resolver reads ONLY
+   * this map — no live `platform_member_group_members` read at dispatch/return/admin-jump/timeout —
+   * so a membership change after create never reaches an in-flight instance; a group deleted after
+   * publish simply freezes `[]` for that id (falls to `emptyAssigneePolicy`, never a dispatch-time
+   * failure — the org/existence boundary is enforced only at publish). Purely additive; existing
+   * snapshots omit it.
+   */
+  groupMemberIds?: Record<string, string[]>
   [key: string]: unknown
 }
 
@@ -870,6 +907,17 @@ export interface PublishApprovalTemplateRequest {
    * Required when the form schema contains any `record-link` field; fail-closed when missing.
    */
   actorUserId?: string | null
+  /**
+   * Lock-1 §K1 / OD-L1-2(a) — the org this template is being published FOR, scoping the
+   * `approval_usable_member_groups` curated-binding hard gate (§K1 "the requesting org's
+   * binding"). Optional, mirroring the S7 §3.3 `orgId` idiom ("existing kernel callers that omit
+   * it keep today's [default] behavior"): blank/absent normalizes to the repo-wide
+   * `DEFAULT_ORG_ID = 'default'` single-tenant bucket, matching `directory_integrations.org_id`
+   * / `attendance_groups.org_id`'s own default. No new identity→org resolution is added — the
+   * caller states the org explicitly, exactly like every other `org_id`-scoped table in this
+   * codebase. Ignored when the graph carries no `user_group` source (no read, no gate).
+   */
+  orgId?: string | null
 }
 
 export interface RestoreApprovalTemplateVersionRequest {

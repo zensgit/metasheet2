@@ -145,6 +145,19 @@ export interface ApprovalNodeConfigEditorApi {
    * candidates (fail-closed: nothing to select, nothing mutated).
    */
   priorApproverNodeOptions?: (nodeKey: string) => Array<{ key: string; label: string }>
+  /**
+   * Lock-1 §K1 — the `user_group` source's DEDICATED id carrier (NOT `approvalSourceIds`, which
+   * is hardcoded to static_user/static_role's `userIds`/`roleIds`). Reads/writes
+   * `{ kind: 'user_group'; groupIds }.groupIds` on the card at `sourceIndex`.
+   */
+  approvalSourceGroupIds: (nodeKey: string, sourceIndex: number) => string[]
+  setApprovalSourceGroupIds: (nodeKey: string, sourceIndex: number, ids: string[]) => void
+  /** Lock-1 §K1 — org-scoped bound-group picker options (values-free: id + name + member COUNT
+   *  only). The editor renders a TYPED multi-select over exactly this list (D0 §10.2 — never a
+   *  free-text/raw-id input). */
+  memberGroupOptions: ComputedRef<Array<{ id: string; name: string; memberCount: number }>> | Ref<Array<{ id: string; name: string; memberCount: number }>> | Array<{ id: string; name: string; memberCount: number }>
+  memberGroupOptionsLoading: ComputedRef<boolean> | Ref<boolean> | boolean
+  formatMemberGroupLabel: (group: { id: string; name: string; memberCount: number }) => string
   onUserSearch: (query: string) => void | Promise<void>
   directoryUsers: ComputedRef<Array<{ id: string }>> | Ref<Array<{ id: string }>> | Array<{ id: string }>
   directoryUsersLoading: ComputedRef<boolean> | Ref<boolean> | boolean

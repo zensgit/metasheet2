@@ -10,7 +10,7 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
-import { pool } from '../db/pg'
+import { pool, query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
@@ -45,6 +45,9 @@ import {
   listDirectoryRoles,
   listFormulaConditionRoles,
   fetchCuratedApprovalRoleIds,
+  listBoundMemberGroups,
+  bindApprovalUsableMemberGroup,
+  unbindApprovalUsableMemberGroup,
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
@@ -426,6 +429,62 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Lock-1 §K1 / OD-L1-2(a) — the `user_group` authoring PICKER: org-scoped listing of groups
+  // CURATED (bound) for approval use — id + name + member COUNT only, never the member list
+  // itself (values-free). Convenience only, same split as /directory/formula-roles vs. the publish
+  // hard gate: the actual boundary is `assertUserGroupSourcesBoundToOrg`, independent of this
+  // route. `orgId` is REQUIRED here so a caller can never accidentally list an unscoped view.
+  r.get('/api/approval-templates/directory/member-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_ORG_ID_REQUIRED', 'orgId is required'))
+      }
+      const groups = await listBoundMemberGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_MEMBER_GROUPS_FAILED', 'Failed to list bound member groups')
+    }
+  })
+
+  // Lock-1 §K1 / OD-L1-2(a) — THE CURATED PATH: the only sanctioned way to add/remove an
+  // `(org_id, group_id)` binding row. Mirrors the shipped
+  // `scope-templates/:templateId/member-groups/:action(assign|unassign)` admin pattern
+  // (routes/admin-users.ts) under the SAME template-admin guard the rest of this picker seam uses
+  // (curating which groups a template AUTHOR may reference is itself a template-authoring action,
+  // not a platform-admin one). `groupId` existence is verified BEFORE bind so a dangling reference
+  // surfaces as a clean 404, never a raw FK-violation 500.
+  r.post('/api/approval-templates/directory/member-groups/:action(bind|unbind)', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const action = req.params.action
+      const orgId = String(req.body?.orgId || '').trim()
+      const groupId = String(req.body?.groupId || '').trim()
+      if (!orgId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_ORG_ID_REQUIRED', 'orgId is required'))
+      }
+      if (!groupId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      const groupExists = await query<{ id: string }>(
+        'SELECT id FROM platform_member_groups WHERE id = $1 LIMIT 1',
+        [groupId],
+      )
+      if (!groupExists.rows.length) {
+        return res.status(404).json(approvalErrorResponse('PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found'))
+      }
+      if (action === 'bind') {
+        const actorUserId = resolveApprovalActorId(req)
+        await bindApprovalUsableMemberGroup(orgId, groupId, actorUserId ?? null)
+      } else {
+        await unbindApprovalUsableMemberGroup(orgId, groupId)
+      }
+      const groups = await listBoundMemberGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_MEMBER_GROUP_BIND_FAILED', 'Failed to update member group binding')
+    }
+  })
+
   // FC-4 — approval-specific formula-condition dry-run. This intentionally uses the
   // exact approval evaluator from publish/execution and stays separate from the
   // sheet-scoped multitable formula dry-run API.
@@ -675,6 +734,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         note: req.body?.note,
         // FWB-0 Layer 2: publisher identity for record-link target sheet read authorization.
         actorUserId: actorUserId ?? null,
+        // Lock-1 §K1 / OD-L1-2(a) — optional; the service normalizes blank/absent to DEFAULT_ORG_ID.
+        orgId: typeof req.body?.orgId === 'string' ? req.body.orgId : null,
       })
       res.json(version)
     } catch (error) {

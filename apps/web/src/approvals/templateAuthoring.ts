@@ -209,6 +209,13 @@ export interface ApprovalStepDraft {
   // inserted/reordered — the localId reference follows the intended step and `sourceFromStep`
   // emits that step's CURRENT key at build time. `''` = not yet chosen (invalid to save).
   priorStepLocalId: string
+  // Lock-1 §K1 (用户组) — meaningful only when `sourceKind === 'user_group'`. Group ids from the
+  // TYPED bound-group picker (never free text) — the picker lists only groups bound to the
+  // template's org (`/api/approval-templates/directory/member-groups?orgId=`); a group outside
+  // the binding fails publish (values-free 400), never at dispatch. Dedicated array field
+  // (NOT the shared `idsText` chip carrier `static_user`/`static_role` reuse) so the sub-form can
+  // render a proper multi-select of resolved group names, never a raw-id text box.
+  groupIds: string[]
   approvalMode: ApprovalMode
   // P1-C (T2-4 N-of-M / 门槛会签): meaningful ONLY when `approvalMode === 'threshold'`. Carried for
   // every step (mirrors `levels`/`level`'s always-present-but-conditionally-meaningful posture) so
@@ -419,6 +426,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     requesterChoiceMode: 'single',
     requesterChoiceScopeType: 'company',
     priorStepLocalId: '',
+    groupIds: [],
     approvalMode: 'single',
     approvalThreshold: 1,
     emptyAssigneePolicy: 'error',
@@ -625,6 +633,7 @@ function stepDraftFromApprovalNode(
   let level = 1
   let requesterChoiceMode: 'single' | 'multi' = 'single'
   let requesterChoiceScopeType: 'company' | 'members' | 'role' = 'company'
+  let groupIds: string[] = []
   // Lock-1 §K3: hydrated as '' here (this per-node projection has no cross-step context);
   // `draftFromTemplate` resolves the stored nodeKey to the referenced EARLIER step's localId in a
   // post-pass over the ordered chain.
@@ -669,6 +678,10 @@ function stepDraftFromApprovalNode(
     // Lock-1 §K3: the stored nodeKey → step-localId resolution happens in draftFromTemplate's
     // post-pass (see priorStepLocalId's field doc for why the draft carries a localId reference).
     sourceKind = 'prior_node_approver'
+  } else if (source?.kind === 'user_group') {
+    // Lock-1 §K1: dedicated array field — a group option list, never the shared idsText carrier.
+    sourceKind = 'user_group'
+    groupIds = [...source.groupIds]
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -734,6 +747,7 @@ function stepDraftFromApprovalNode(
     requesterChoiceMode,
     requesterChoiceScopeType,
     priorStepLocalId: '',
+    groupIds,
     approvalMode,
     approvalThreshold,
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
@@ -895,6 +909,8 @@ const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   // requesterChoiceSourceHasBackendDrop below for its per-type key check — the flat 2-level
   // allowlist alone cannot see inside it).
   requester_choice: ['kind', 'mode', 'scope'],
+  // Lock-1 §K1: flat 2-level shape — a non-empty array of bound group ids.
+  user_group: ['kind', 'groupIds'],
 }
 
 // Lock-1 §K2 — the requester_choice `scope` shapes the backend accepts (normalize REJECTS any
@@ -1216,7 +1232,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver', 'user_group'].includes(source?.kind)) return true
       // Lock-1 §K2: a malformed requester_choice shape must fail-closed to read-only here too —
       // hydrate would otherwise re-derive a default mode/scope and silently flatten it on save.
       if (source?.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source as unknown as Record<string, unknown>)) return true
@@ -1564,6 +1580,10 @@ export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepD
       ? `approval_${referencedIndex + 1}`
       : ''
     return { kind: 'prior_node_approver', nodeKey }
+  }
+  if (step.sourceKind === 'user_group') {
+    // Lock-1 §K1: dedicated `groupIds` array, from the typed bound-group picker.
+    return { kind: 'user_group', groupIds: [...step.groupIds] }
   }
   return { kind: 'requester' }
 }
@@ -2092,6 +2112,12 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
       if (referencedIndex < 0 || referencedIndex >= index) {
         errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
       }
+    }
+    // Lock-1 §K1 PREVIEW (backend normalize's non-empty-array check is the final arbiter): a
+    // user_group source needs at least one bound group selected — mirrors the static_user/
+    // static_role empty check above.
+    if (step.sourceKind === 'user_group' && step.groupIds.length === 0) {
+      errors.push(`${label} 需要选择至少一个用户组`)
     }
     // P1-C (T2-4) threshold PREVIEW: integer-only shape check, matching the ONE bound the backend
     // enforces UNCONDITIONALLY at publish for the `assigneeSources` shape this editor emits

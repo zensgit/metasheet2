@@ -58,6 +58,13 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // are recorded (a) in the §4 ratification block). NOT admitted on `handler` (Lock-3 §1.5 lists
   // no forward row for this kind at all).
   prior_node_approver: '节点审批人',
+  // Lock-1 §K1 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the resolver arm +
+  // org binding + picker end to end (registry table row: 用户组 / approval; "Admitted when:
+  // OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed" — both ODs are recorded
+  // (a) in the §4 ratification block). NOT admitted on `handler` (see HANDLER_ASSIGNEE_SOURCE_KINDS
+  // below). The cc-as-recipient row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not
+  // admit it") is deferred to its own slice and is NOT added here.
+  user_group: '用户组',
 }
 
 /** Display order matches parent §10.3's listed order. Kept as an explicit array (rather than
@@ -80,6 +87,8 @@ const SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER: readonly ApprovalAssigneeSourceKind[] 
   'dept_head_at_level',
   // Lock-1 §K3: appended after K5-b (ratified-kind append order).
   'prior_node_approver',
+  // Lock-1 §K1: appended after K3 (ratified-kind append order).
+  'user_group',
 ]
 
 export interface ApprovalAssigneeSourceCapability {

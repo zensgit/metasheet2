@@ -806,6 +806,26 @@ describe('approval template authoring helpers', () => {
     )
   })
 
+  it('Lock-1 §K1: round-trips a user_group source incl. groupIds (save emits {kind, groupIds}; the array survives the real wire) — the linear editor accepted-kind list mirror site', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ug'
+    draft.name = '用户组审批'
+    draft.steps[0].sourceKind = 'user_group'
+    draft.steps[0].groupIds = ['grp-1', 'grp-2']
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'user_group', groupIds: ['grp-1', 'grp-2'] }])
+
+    // wire-vs-fixture trap: assert `groupIds` survives the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('user_group')
+    expect(rehydrated.steps[0].groupIds).toEqual(['grp-1', 'grp-2'])
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
   it('round-trips a manager_at_level source incl. level (save emits {kind, level}; level survives the real wire)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'mal'
@@ -886,6 +906,17 @@ describe('approval template authoring helpers', () => {
     const shifted = buildCreateTemplatePayload(draft)
     expect((shifted.approvalGraph.nodes[3]?.config as any).assigneeSources)
       .toEqual([{ kind: 'prior_node_approver', nodeKey: 'approval_2' }])
+  })
+
+  it('Lock-1 §K1 validation: a user_group step with zero selected groups is flagged; ≥1 selected group passes (positive control)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ug-validate'
+    draft.name = '用户组审批'
+    draft.steps[0].sourceKind = 'user_group'
+    draft.steps[0].groupIds = []
+    expect(validateTemplateApprovalFlow(draft).some((e) => e.includes('用户组'))).toBe(true)
+    draft.steps[0].groupIds = ['grp-1']
+    expect(validateTemplateApprovalFlow(draft).filter((e) => e.includes('用户组'))).toEqual([])
   })
 
   it('Lock-1 §K3 validation: a prior_node_approver step with no chosen reference — or referencing a NON-earlier step — is flagged; a valid earlier reference passes (positive control)', () => {
@@ -2257,6 +2288,20 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('dept_head_at_level') // hydrated back
     expect((container!.querySelector('[data-testid="approval-step-dept-head-level"]') as HTMLInputElement)).not.toBeNull() // the level input renders for this kind
+  })
+
+  it('Lock-1 §K1: user_group reads back editable: a saved user_group template is NOT fail-closed (sourceKind + typed group multi-select hydrated, registry-admitted)', async () => {
+    routeParams = { id: 'tpl_ug' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // in the allowlist → not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // editable
+    expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('user_group') // hydrated back
+    expect((container!.querySelector('[data-testid="approval-step-group-picker"]') as HTMLElement)).not.toBeNull() // the typed group multi-select renders for this kind
   })
 
   it('Lock-1 §K3: prior_node_approver reads back editable on a 2-step linear graph: sourceKind + the TYPED prior-step picker hydrated (registry-admitted, reference resolved to the earlier step)', async () => {

@@ -97,7 +97,7 @@ import {
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
-import { fetchCuratedApprovalRoleIds } from './approval-directory'
+import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -584,6 +584,14 @@ export type ApprovalNodeTimeoutEffectOutcome =
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
+// Lock-1 §K1 / OD-L1-2(a) — single-tenant default bucket for `approval_usable_member_groups.org_id`
+// when `PublishApprovalTemplateRequest.orgId` is omitted/blank. Mirrors the `DEFAULT_ORG_ID =
+// 'default'` idiom re-declared per-module across this codebase (directory-sync.ts,
+// admin-directory-routing-policy.ts, admin-directory-local.ts, admin-directory-department-bindings.ts)
+// rather than importing a shared symbol none of those export. NEVER `?? ''` / bare `||` here — a
+// blank string must normalize to this constant, not to an org-agnostic `WHERE org_id = ''` that
+// would match nothing (or, worse, get built without the predicate at all).
+const DEFAULT_ORG_ID = 'default'
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -768,6 +776,22 @@ function normalizeApprovalAssigneeSources(
           failValidation(context, `${sourcePath}.nodeKey is required`)
         }
         return { kind: 'prior_node_approver', nodeKey: source.nodeKey.trim() }
+      }
+      case 'user_group': {
+        // Lock-1 §K1 + G-1: exact-shape validation — `groupIds` is a non-empty string array
+        // (byte-identical to `normalizeStringArray`'s posture for static_user/static_role) and
+        // (the Lock-1 G-1 posture for NEW kinds) unknown extra keys are REJECTED. Whether every
+        // referenced id resolves to a REAL group bound to the publishing org is the PUBLISH gate's
+        // job (`assertUserGroupSourcesBoundToOrg`) — normalize stays a shape check so stored
+        // drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'groupIds'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for user_group`)
+        }
+        return {
+          kind: 'user_group',
+          groupIds: normalizeStringArray(source.groupIds, context, `${sourcePath}.groupIds`),
+        }
       }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
@@ -2085,6 +2109,12 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       // `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` 409 guard
       // (`assertNoActiveAssignmentConflicts`), which sees the actual chosen ids. Publish cannot.
       return null
+    case 'user_group':
+      // Lock-1 §K1 / §2.4 locked entry: `user_group:<sorted groupIds joined by ','>` — SORTED so
+      // [a,b] and [b,a] fingerprint identically (provably the same resolved set either order).
+      // Two branches referencing the same group set are provably identical (EAGER_EXPANSION
+      // freezes the SAME snapshot for both), so parallel-duplicate publish-blocking applies.
+      return `user_group:${[...source.groupIds].sort().join(',')}`
     default: {
       const _exhaustive: never = source
       return _exhaustive
@@ -3978,6 +4008,69 @@ export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: Runtim
 }
 
 /**
+ * Lock-1 §K1: every group id referenced by a `user_group` source, over ANY graph — typed on the
+ * plain `ApprovalGraph` shape (not `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors
+ * above: the publish HARD GATE (`assertUserGroupSourcesBoundToOrg`) must run BEFORE
+ * `buildRuntimeGraph` (on the same `approvalGraph` the other publish-time authoring gates read),
+ * while the create-time freeze runs AFTER (`asRuntimeGraph`'s published/frozen graph) —
+ * `RuntimeGraph extends ApprovalGraph`, so one function structurally serves both call sites. This
+ * is the ONE opt-in gate in the `runtimeGraphUsesManagerChain` family that is keyed to
+ * `node.type === 'approval'` (§2.3 registry: `user_group` is admitted on `approval` only this
+ * slice — cc-as-recipient, OD-L1-7, is a SEPARATE contract deferred to its own slice, so there is
+ * no cc-node group shape to scan for yet; extending this collector to `cc` nodes is that
+ * follow-up's job, not this one's — the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s own
+ * doc comment names: keep detector scope in exact lockstep with what is actually admitted).
+ */
+export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
+  const groupIds = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) continue
+      for (const groupId of source.groupIds) {
+        if (typeof groupId === 'string' && groupId.trim().length > 0) groupIds.add(groupId.trim())
+      }
+    }
+  }
+  return groupIds
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — the PUBLISH HARD GATE: every group id any `user_group` source
+ * references MUST be bound to `orgId` in `approval_usable_member_groups` (curated set, empty by
+ * default). A group with NO binding row for this org — dangling (bound nowhere) or foreign (bound
+ * to a DIFFERENT org only) — fails publish, values-free (the group id itself is template-authored,
+ * like `prior_node_approver`'s `nodeKey`, and is permitted per §2.6; the rejection never touches
+ * group MEMBERSHIP). UNCONDITIONAL like the K3 dominance gate: no policy exemption makes a
+ * foreign/dangling group reference resolvable.
+ */
+export function assertUserGroupSourcesBoundToOrg(
+  approvalGraph: ApprovalGraph,
+  curatedGroupIds: ReadonlySet<string>,
+): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+    sources.forEach((source, sourceIndex) => {
+      if (source.kind !== 'user_group') return
+      for (const groupId of source.groupIds) {
+        if (!curatedGroupIds.has(groupId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] user_group references a group not bound to this organization`,
+            400,
+            'APPROVAL_ASSIGNEE_GROUP_NOT_BOUND',
+            { nodeKey: node.key, sourceIndex, groupId, reason: 'not-bound' },
+          )
+        }
+      }
+    })
+  }
+}
+
+/**
  * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
  * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
  * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
@@ -5174,6 +5267,23 @@ export class ApprovalProductService {
       // UNCONDITIONAL (unlike the parallel-conflict gate below): no policy exemption makes an
       // undominated reference resolvable.
       assertPriorNodeApproverReferencesUpstream(approvalGraph)
+      // Lock-1 §K1 / OD-L1-2(a) — THE HARD GATE (RA-1b shape): every group id any `user_group`
+      // source references must be bound to the PUBLISHING org (`approval_usable_member_groups`,
+      // empty by default). Only when the graph actually uses `user_group` do we fetch the curated
+      // set (one read, on THIS transaction client) and reject any dangling/foreign-org reference —
+      // independent of the picker, so an author can never publish a reference to a group nobody
+      // curated for this org. `orgId` mirrors the S7 §3.3 idiom: blank/absent normalizes to
+      // `DEFAULT_ORG_ID` — NEVER an org-agnostic match, so the default path fails closed exactly
+      // like an explicit one. UNCONDITIONAL like the K3 dominance gate above: no policy exemption
+      // makes a foreign/dangling group reference resolvable.
+      const memberGroupIds = collectApprovalGraphMemberGroupIds(approvalGraph)
+      if (memberGroupIds.size > 0) {
+        const publishOrgId = typeof request.orgId === 'string' && request.orgId.trim().length > 0
+          ? request.orgId.trim()
+          : DEFAULT_ORG_ID
+        const curatedGroupIds = await fetchCuratedApprovalMemberGroupIds(publishOrgId, client.query.bind(client))
+        assertUserGroupSourcesBoundToOrg(approvalGraph, curatedGroupIds)
+      }
       // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
       // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
       // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
@@ -6262,6 +6372,23 @@ export class ApprovalProductService {
       )
     }
 
+    // Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — freeze-at-create: read the
+    // CURRENT member list of every group id the published runtime graph references, ONCE, into
+    // `groupMemberIds`. OPT-IN (same posture as includeManagerChain/needsDeptHeadChain above) — a
+    // graph without a `user_group` source does no work. No org check here: the org boundary is the
+    // PUBLISH-time hard gate (assertUserGroupSourcesBoundToOrg) — by the time a template is
+    // published its user_group sources already passed it, so create only needs the members. A
+    // group deleted/emptied after publish simply freezes `[]` for that id (§K1: never a
+    // dispatch-time failure — falls through to emptyAssigneePolicy like any other empty
+    // resolution). Best-effort is NOT appropriate here (unlike delegation below): a thrown read
+    // propagates the request failure structurally, exactly like every other snapshot-plumbing read
+    // in this method — there is no "genuine absence" reading for a DB error on a local table.
+    const memberGroupIds = collectApprovalGraphMemberGroupIds(runtimeGraph)
+    let frozenGroupMemberIds: Record<string, string[]> | undefined
+    if (memberGroupIds.size > 0) {
+      frozenGroupMemberIds = await fetchMemberGroupSnapshot(memberGroupIds, pool.query.bind(pool))
+    }
+
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
     // template + the create instant) into the snapshot BEFORE the executor resolves the
     // initial state, so the resolver's pushResolved substitution reads a frozen set and an
@@ -6304,6 +6431,10 @@ export class ApprovalProductService {
       // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.
       ...(frozenRequesterChoices && Object.keys(frozenRequesterChoices).length > 0
         ? { requesterChoices: frozenRequesterChoices }
+        : {}),
+      // Lock-1 §K1: freeze the group member snapshot baked above (opt-in, memberGroupIds).
+      ...(frozenGroupMemberIds && Object.keys(frozenGroupMemberIds).length > 0
+        ? { groupMemberIds: frozenGroupMemberIds }
         : {}),
     }
     // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no

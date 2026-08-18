@@ -112,6 +112,136 @@ export async function listFormulaConditionRoles(): Promise<DirectoryRoleOption[]
 type CuratedQueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 /**
+ * Lock-1 §K1 — the org-scoped `user_group` picker option: id + name + member COUNT only (never
+ * the member list itself — the picker is a values-free convenience surface, not the resolution
+ * source; see `fetchMemberGroupSnapshot` for the freeze-at-create read). Leaner than
+ * admin-users.ts's group-detail endpoints, which also return the full member roster.
+ */
+export interface DirectoryMemberGroupOption {
+  id: string
+  name: string
+  memberCount: number
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — org-scoped listing of groups CURATED (bound) for approval use in
+ * `orgId`, for the template-authoring `user_group` picker. Convenience only: the publish HARD GATE
+ * (`fetchCuratedApprovalMemberGroupIds` + `assertUserGroupSourcesBoundToOrg`) is the actual
+ * boundary, independent of this picker — mirroring RA-1b's picker/gate split
+ * (`listFormulaConditionRoles` vs. `fetchCuratedApprovalRoleIds`). `orgId` is REQUIRED here
+ * (unlike the publish gate, which defaults it) so a caller can never accidentally list an
+ * unscoped/every-org view through this endpoint.
+ */
+export async function listBoundMemberGroups(orgId: string): Promise<DirectoryMemberGroupOption[]> {
+  const scopedOrgId = orgId.trim()
+  if (!scopedOrgId) return []
+  const result = await query<{ id: string; name: string; member_count: string }>(
+    `SELECT g.id, g.name, COUNT(m.user_id)::text AS member_count
+     FROM approval_usable_member_groups b
+     JOIN platform_member_groups g ON g.id = b.group_id
+     LEFT JOIN platform_member_group_members m ON m.group_id = g.id
+     WHERE b.org_id = $1
+     GROUP BY g.id, g.name
+     ORDER BY g.name ASC`,
+    [scopedOrgId],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name ?? '',
+    memberCount: Number.parseInt(row.member_count, 10) || 0,
+  }))
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — the curated set of group ids bound to `orgId` for approval use
+ * (`approval_usable_member_groups`). THE source of truth for the publish HARD GATE
+ * (`assertUserGroupSourcesBoundToOrg`), independent of the picker above. Pass a
+ * transaction-scoped query fn at publish (same `CuratedQueryFn` shape `fetchCuratedApprovalRoleIds`
+ * uses); defaults to the pooled `query`.
+ */
+export async function fetchCuratedApprovalMemberGroupIds(
+  orgId: string,
+  queryFn?: CuratedQueryFn,
+): Promise<Set<string>> {
+  const run: CuratedQueryFn = queryFn ?? (query as unknown as CuratedQueryFn)
+  const result = await run<{ group_id: string }>(
+    `SELECT group_id FROM approval_usable_member_groups WHERE org_id = $1`,
+    [orgId],
+  )
+  const curated = new Set<string>()
+  for (const row of result.rows) {
+    const id = typeof row.group_id === 'string' ? row.group_id.trim() : ''
+    if (id) curated.add(id)
+  }
+  return curated
+}
+
+/**
+ * Lock-1 §K1 (RATIFIED OD-L1-1(a) EAGER_EXPANSION) — freeze-at-create read: the CURRENT member
+ * list of every group id in `groupIds`, keyed by group id, ordered by join time then user id for
+ * determinism. Called ONCE per create (opt-in, gated on the published graph actually using a
+ * `user_group` source — `collectApprovalGraphMemberGroupIds`); the resolver never reads this table
+ * again after create (no live read at dispatch/return/admin-jump/timeout — that purity is what
+ * makes the freeze real). A group id with no rows (deleted after publish, or genuinely empty)
+ * simply contributes `[]` — NOT an error; §K1 fail-closes a foreign/dangling reference only at
+ * publish, never at dispatch.
+ */
+export async function fetchMemberGroupSnapshot(
+  groupIds: Iterable<string>,
+  queryFn?: CuratedQueryFn,
+): Promise<Record<string, string[]>> {
+  const ids = Array.from(new Set(Array.from(groupIds).map((id) => id.trim()).filter((id) => id.length > 0)))
+  const snapshot: Record<string, string[]> = {}
+  if (ids.length === 0) return snapshot
+  for (const id of ids) snapshot[id] = []
+  const run: CuratedQueryFn = queryFn ?? (query as unknown as CuratedQueryFn)
+  const result = await run<{ group_id: string; user_id: string }>(
+    `SELECT group_id, user_id
+     FROM platform_member_group_members
+     WHERE group_id = ANY($1::uuid[])
+     ORDER BY group_id ASC, created_at ASC, user_id ASC`,
+    [ids],
+  )
+  for (const row of result.rows) {
+    const groupId = typeof row.group_id === 'string' ? row.group_id.trim() : ''
+    const userId = typeof row.user_id === 'string' ? row.user_id.trim() : ''
+    if (!groupId || !userId) continue
+    if (!snapshot[groupId]) snapshot[groupId] = []
+    snapshot[groupId].push(userId)
+  }
+  return snapshot
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — the CURATED PATH: the only sanctioned way to add/remove an
+ * `(org_id, group_id)` binding row. Mirrors the shipped
+ * `delegated_role_scope_template_member_groups` assign/unassign admin pattern
+ * (`routes/admin-users.ts` scope-templates member-groups action route) — idempotent (`ON CONFLICT
+ * DO NOTHING` / plain `DELETE`), no read-modify-write race. Callers (routes) are responsible for
+ * verifying `groupId` resolves to a real `platform_member_groups` row before calling `bind` (a
+ * dangling FK would otherwise surface as a raw constraint-violation 500 instead of a clean 404).
+ */
+export async function bindApprovalUsableMemberGroup(
+  orgId: string,
+  groupId: string,
+  createdBy: string | null,
+): Promise<void> {
+  await query(
+    `INSERT INTO approval_usable_member_groups (org_id, group_id, created_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (org_id, group_id) DO NOTHING`,
+    [orgId, groupId, createdBy],
+  )
+}
+
+export async function unbindApprovalUsableMemberGroup(orgId: string, groupId: string): Promise<void> {
+  await query(
+    `DELETE FROM approval_usable_member_groups WHERE org_id = $1 AND group_id = $2`,
+    [orgId, groupId],
+  )
+}
+
+/**
  * RA-1b CURATED-VOCABULARY: the curated set of role ids approved for formula `requester.role` routing —
  * `SELECT id FROM roles WHERE approval_usable = true`. This is THE source of truth for the publish + dry-run
  * HARD GATE (independent of any picker). Pass a transaction-scoped query fn at publish; defaults to the

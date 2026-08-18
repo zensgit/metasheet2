@@ -51,23 +51,39 @@ vi.mock('../src/approvals/api', () => ({
 // Mock the directory composable so the picker renders without any network.
 const searchUsersSpy = vi.fn().mockResolvedValue(undefined)
 const loadRolesSpy = vi.fn().mockResolvedValue(undefined)
+const loadFormulaRolesSpy = vi.fn().mockResolvedValue(undefined)
+// Lock-1 §K1: the mock must carry every field TemplateAuthoringView's onMounted/context object
+// reads unconditionally — a missing loadMemberGroups here throws `TypeError: ... is not a
+// function` and crashes mounting for the WHOLE file, not just a user_group-specific assertion.
+const loadMemberGroupsSpy = vi.fn().mockResolvedValue(undefined)
 const ensureUserOptionVisibleSpy = vi.fn()
 const ensureRoleOptionVisibleSpy = vi.fn()
+const ensureMemberGroupOptionVisibleSpy = vi.fn()
 const directoryUsers = ref<{ id: string; name: string; email: string }[]>([])
 const directoryRoles = ref<{ id: string; name: string }[]>([])
+const directoryFormulaRoles = ref<{ id: string; name: string }[]>([])
+const directoryMemberGroups = ref<{ id: string; name: string; memberCount: number }[]>([])
 vi.mock('../src/approvals/useApprovalDirectory', () => ({
   useApprovalDirectory: () => ({
     users: directoryUsers,
     roles: directoryRoles,
+    formulaRoles: directoryFormulaRoles,
+    memberGroups: directoryMemberGroups,
     usersLoading: ref(false),
     rolesLoading: ref(false),
+    formulaRolesLoading: ref(false),
+    memberGroupsLoading: ref(false),
     statusMessage: ref(''),
     searchUsers: searchUsersSpy,
     loadRoles: loadRolesSpy,
+    loadFormulaRoles: loadFormulaRolesSpy,
+    loadMemberGroups: loadMemberGroupsSpy,
     ensureUserOptionVisible: ensureUserOptionVisibleSpy,
     ensureRoleOptionVisible: ensureRoleOptionVisibleSpy,
+    ensureMemberGroupOptionVisible: ensureMemberGroupOptionVisibleSpy,
     formatUserLabel: (u: { id: string; name: string }) => u.name || u.id,
     formatRoleLabel: (r: { id: string; name: string }) => r.name || r.id,
+    formatMemberGroupLabel: (g: { id: string; name: string; memberCount: number }) => `${g.name || g.id}（${g.memberCount}）`,
   }),
 }))
 

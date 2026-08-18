@@ -429,6 +429,21 @@ describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
     )).toEqual([])
   })
 
+  it('Lock-1 §K1: flags identical user_group groupIds SORTED (order-independent) — the fingerprint mirror is in lockstep with the backend', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1', 'g2'] }], [{ kind: 'user_group', groupIds: ['g1', 'g2'] }]),
+    )).toHaveLength(1)
+    // SORTED: [g1,g2] and [g2,g1] fingerprint identically — provably the same resolved set
+    // regardless of authored order.
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1', 'g2'] }], [{ kind: 'user_group', groupIds: ['g2', 'g1'] }]),
+    )).toHaveLength(1)
+    // Positive control: DIFFERENT group sets are NOT flagged (parameterized, not kind-blanket).
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'user_group', groupIds: ['g1'] }], [{ kind: 'user_group', groupIds: ['g3'] }]),
+    )).toEqual([])
+  })
+
   it('Lock-1 §K2 / G-17: requester_choice × requester_choice is NOT flagged (null fingerprint DELIBERATE — same-person collision is the runtime 409 guard\'s job)', () => {
     // Two requester_choice sources on parallel branches are NOT provably identical — the
     // requester may pick different people per branch — so the publish preflight must not block
