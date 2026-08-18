@@ -523,6 +523,48 @@
             />
           </el-select>
         </el-form-item>
+        <!-- Lock-2 §L2-C (表单内联系人上级 / 表单内联系人部门负责人) authoring sub-form: the SAME
+             typed field picker as form_field_user (top-level `user` fields only — never a raw field
+             id input) PLUS a single level input. The picker only OFFERS schema fields; the
+             required / no-visibility-rule / no-multi pins are enforced by the backend publish
+             validator, and the hint DISCLOSES them at authoring time (OD-L2-4's authoring-copy
+             disclosure posture). Both controls are live and emitted on save — no inert control. -->
+        <template v-else-if="approvalSourceKind(node.key, sourceIndex) === 'form_field_user_manager' || approvalSourceKind(node.key, sourceIndex) === 'form_field_user_dept_head'">
+          <el-form-item label="表单内联系人字段">
+            <el-select
+              :model-value="approvalSourceFieldId(node.key, sourceIndex)"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-240"
+              placeholder="选择表单联系人字段"
+              data-testid="approval-node-source-contact-field"
+              @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, sourceIndex, fieldId)"
+            >
+              <el-option
+                v-for="field in userFields"
+                :key="field.id"
+                :label="field.label || '未命名字段'"
+                :value="field.id"
+              />
+            </el-select>
+            <p
+              class="template-authoring__hint"
+              data-testid="approval-node-source-contact-field-hint"
+            >所选联系人字段须为必填且不带显示条件，发布时校验</p>
+          </el-form-item>
+          <el-form-item :label="approvalSourceKind(node.key, sourceIndex) === 'form_field_user_manager' ? '指定联系人上级层级' : '指定联系人部门负责人层级'">
+            <el-input-number
+              :model-value="approvalSourceLevel(node.key, sourceIndex)"
+              :min="1"
+              :max="10"
+              :step="1"
+              size="small"
+              :disabled="readOnly"
+              data-testid="approval-node-source-contact-level"
+              @update:model-value="(value: number) => setApprovalSourceLevel(node.key, sourceIndex, value ?? 1)"
+            />
+          </el-form-item>
+        </template>
         <el-form-item
           v-else-if="approvalSourceKind(node.key, sourceIndex) === 'manager_at_level' || approvalSourceKind(node.key, sourceIndex) === 'continuous_managers' || approvalSourceKind(node.key, sourceIndex) === 'continuous_dept_heads' || approvalSourceKind(node.key, sourceIndex) === 'dept_head_at_level'"
           :label="approvalSourceKind(node.key, sourceIndex) === 'manager_at_level' ? '指定上级层级' : approvalSourceKind(node.key, sourceIndex) === 'continuous_dept_heads' ? '部门负责人层级数' : approvalSourceKind(node.key, sourceIndex) === 'dept_head_at_level' ? '指定部门负责人层级' : '上级层级数'"
@@ -1128,7 +1170,24 @@ const showFieldPermissionsSection = computed(
 
 // ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
 const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
-const assigneeSourceRosterForNode = computed(() => assigneeSourceRoster(registry.value, props.node.type))
+const assigneeSourceRosterForNode = computed(() => {
+  const roster = assigneeSourceRoster(registry.value, props.node.type)
+  // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
+  // OFFERED only when the form declares an eligible (top-level `user`) field — the affordance is
+  // schema-selected, and the backend publish validator remains the enforcement (an affordance is
+  // not a boundary). A kind ALREADY configured on this node stays offered regardless, so a
+  // persisted source never loses its checked radio when the form's last user field is removed
+  // (the unknown-value-safety posture: presentation must not orphan a stored value).
+  if (userFields.value.length > 0) return roster
+  const configuredKinds = new Set(
+    (approvalNodeEditFor(props.node.key)?.assigneeSources ?? []).map((source) => source.kind),
+  )
+  return roster.filter(
+    (capability) =>
+      (capability.kind !== 'form_field_user_manager' && capability.kind !== 'form_field_user_dept_head')
+      || configuredKinds.has(capability.kind),
+  )
+})
 const operationPoliciesForNode = computed(
   () => registry.value.operationPoliciesByNodeType[props.node.type] ?? [],
 )

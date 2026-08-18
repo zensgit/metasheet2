@@ -663,6 +663,65 @@ describe('ApprovalGraphExecutor', () => {
     ])
   })
 
+  it('Lock-2 §L2-C: a form-field contact extension whose FROZEN entry is empty resolves EMPTY through the REAL resolver, and the executor applies the node emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve fires an AUDITED auto-approval) — never a crash, never a silent assignee', () => {
+    // Frozen map: level 1 resolved a manager; level 5 ran at create and resolved NOBODY (chain
+    // shorter than the level) — frozen as an EMPTY entry, the §2.6 empty-resolution shape.
+    const requesterSnapshot = {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: {
+        'form_field_user_manager:contact:1': ['contact-mgr-1'],
+        'form_field_user_manager:contact:5': [],
+      },
+    }
+    const realResolver = ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: any }) =>
+      resolveApprovalAssignees({ nodeKey, sourceStep, config, formSnapshot: { contact: 'contact-1' }, requesterSnapshot })
+
+    const contactGraph = (level: number, emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'ffum-node',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level }],
+            emptyAssigneePolicy,
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-ffum', source: 'start', target: 'ffum-node' },
+        { key: 'edge-ffum-final', source: 'ffum-node', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Positive control FIRST: the frozen level-1 entry resolves a real assignee through the SAME
+    // real resolver + executor wiring, with the Lock-2 §2.6 audit metadata (fieldId + level).
+    const okExecutor = new ApprovalGraphExecutor(contactGraph(1, 'error'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    expect(okExecutor.resolveInitialState().assignments).toEqual([
+      { assignmentType: 'user', assigneeId: 'contact-mgr-1', nodeKey: 'ffum-node', sourceStep: 1, metadata: { resolvedFrom: { kind: 'form_field_user_manager', sourceIndex: 0, fieldId: 'contact', level: 1 } } },
+    ])
+
+    // 'error' (the absent default): the frozen-empty entry -> empty resolution -> fail-closed 400.
+    const errorExecutor = new ApprovalGraphExecutor(contactGraph(5, 'error'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve': the SAME empty resolution under the author-selected policy — an EXPLICIT,
+    // audited autoApprovalEvents entry (NEVER-NOBODY: no unassigned pending node, no silent skip).
+    const autoExecutor = new ApprovalGraphExecutor(contactGraph(5, 'auto-approve'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    const autoInitial = autoExecutor.resolveInitialState()
+    expect(autoInitial.currentNodeKey).toBe('final-review')
+    expect(autoInitial.autoApprovalEvents).toEqual([
+      { nodeKey: 'ffum-node', sourceStep: 1, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
+  })
+
   // ── Lock-1 §K6 precondition (landed by the K3 slice): normalizeApprovalMode fails CLOSED ──
   // The executor's mode normalizer previously mapped ANY unrecognized mode silently to 'single'
   // (fail-open). Contract-valid data never reached that arm (the authoring choke + the stored-graph

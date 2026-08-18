@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
 import type { ApprovalNodeConfig, FormSchema } from '../../src/types/approval-product'
 
 const userFieldSchema: FormSchema = {
@@ -218,6 +218,83 @@ describe('ApprovalAssigneeResolver', () => {
     expect(resolveDeptHeadAtLevel(2, { id: 'requester-1', deptHeadChainIds: ['h1', null as never, 'h3'] })).toEqual([])
     expect(resolveDeptHeadAtLevel(1, { id: 'requester-1', deptHeadChainIds: ['h1', null as never, 'h3'] })).toEqual([dhalEntry('h1')])
     expect(resolveDeptHeadAtLevel(3, { id: 'requester-1', deptHeadChainIds: ['h1', null as never, 'h3'] })).toEqual([dhalEntry('h3')])
+  })
+
+  // form_field_user_manager / form_field_user_dept_head (Lock-2 §L2-C) — pure map lookup over
+  // the create-frozen fieldDerivedAssigneeIds (source fingerprint → resolved local user ids).
+  function resolveFieldDerived(
+    kind: 'form_field_user_manager' | 'form_field_user_dept_head',
+    fieldId: string,
+    level: number,
+    requesterSnapshot: Record<string, unknown> | null,
+  ) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind, fieldId, level }] },
+      formSnapshot: { [fieldId]: 'contact-1' },
+      requesterSnapshot,
+    })
+  }
+
+  it('resolves the contact-extension kinds from the frozen fieldDerivedAssigneeIds entry keyed by <kind>:<fieldId>:<level> (positive control, both kinds; metadata carries fieldId + level)', () => {
+    expect(resolveFieldDerived('form_field_user_manager', 'contact', 2, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_manager:contact:2': ['mgr-2'] },
+    })).toEqual([{
+      assignmentType: 'user', assigneeId: 'mgr-2', nodeKey: 'review', sourceStep: 2,
+      metadata: { resolvedFrom: { kind: 'form_field_user_manager', sourceIndex: 0, fieldId: 'contact', level: 2 } },
+    }])
+    expect(resolveFieldDerived('form_field_user_dept_head', 'contact', 1, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_dept_head:contact:1': ['head-1'] },
+    })).toEqual([{
+      assignmentType: 'user', assigneeId: 'head-1', nodeKey: 'review', sourceStep: 2,
+      metadata: { resolvedFrom: { kind: 'form_field_user_dept_head', sourceIndex: 0, fieldId: 'contact', level: 1 } },
+    }])
+  })
+
+  it('the resolver lookup key IS fieldDerivedAssigneeSourceKey — a mismatched key (wrong level / wrong field) resolves EMPTY, proving snapshot key and fingerprint cannot drift silently', () => {
+    // Sanity-pin the exported producer itself (the create path, the fingerprint, and this arm all
+    // consume it — one producer, no drift).
+    expect(fieldDerivedAssigneeSourceKey({ kind: 'form_field_user_manager', fieldId: ' contact ', level: 2 }))
+      .toBe('form_field_user_manager:contact:2')
+    // A frozen entry at a DIFFERENT level/field is not read (empty resolution → emptyAssigneePolicy).
+    expect(resolveFieldDerived('form_field_user_manager', 'contact', 1, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_manager:contact:2': ['mgr-2'] },
+    })).toEqual([])
+    expect(resolveFieldDerived('form_field_user_manager', 'other', 2, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_manager:contact:2': ['mgr-2'] },
+    })).toEqual([])
+  })
+
+  it('contact-extension kinds apply NO requester self-exclusion (Lock-2 §L2-C deliberate posture — unlike manager_at_level/dept_head_at_level): a frozen id equal to the requester still gets the seat', () => {
+    expect(resolveFieldDerived('form_field_user_manager', 'contact', 1, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_manager:contact:1': ['requester-1'] },
+    })).toEqual([{
+      assignmentType: 'user', assigneeId: 'requester-1', nodeKey: 'review', sourceStep: 2,
+      metadata: { resolvedFrom: { kind: 'form_field_user_manager', sourceIndex: 0, fieldId: 'contact', level: 1 } },
+    }])
+    // Discriminating negative control: the SAME snapshot shape through dept_head_at_level (a
+    // requester-anchored kind) DOES self-exclude — the no-exclusion above is kind-selected.
+    expect(resolveApprovalAssignees({
+      nodeKey: 'review', sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] },
+      formSnapshot: {},
+      requesterSnapshot: { id: 'requester-1', deptHeadChainIds: ['requester-1'] },
+    })).toEqual([])
+  })
+
+  it('contact-extension kinds resolve EMPTY (never throw) when the frozen entry is an empty array, the map is absent, or the snapshot is null — falls to emptyAssigneePolicy (Lock-2 §2.6)', () => {
+    expect(resolveFieldDerived('form_field_user_manager', 'contact', 1, {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: { 'form_field_user_manager:contact:1': [] },
+    })).toEqual([])
+    expect(resolveFieldDerived('form_field_user_dept_head', 'contact', 1, { id: 'requester-1' })).toEqual([])
+    expect(resolveFieldDerived('form_field_user_manager', 'contact', 1, null)).toEqual([])
   })
 
   // prior_node_approver (Lock-1 §K3) — resolves the referenced prior node's ACTUAL deciders from

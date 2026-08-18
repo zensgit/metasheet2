@@ -54,12 +54,34 @@ function metadataFor(
       kind: source.kind,
       sourceIndex,
       ...(source.kind === 'form_field_user' ? { fieldId: source.fieldId } : {}),
+      // Lock-2 §2.6 audit (form-field contact extensions): the referenced field id AND the
+      // configured chain level on the row — both template-authored (values-free) — so "why is
+      // this person an approver" is answerable from the row alone.
+      ...(source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head'
+        ? { fieldId: source.fieldId, level: source.level }
+        : {}),
       // Lock-1 §K3 audit: the referenced prior node's key on the row (§2.6 — a template-authored
       // node key, values-free), so "why is this person an approver" is answerable from the row.
       ...(source.kind === 'prior_node_approver' ? { priorNodeKey: source.nodeKey } : {}),
       ...(source.kind === 'user_group' && resolvedGroupId ? { groupId: resolvedGroupId } : {}),
     },
   }
+}
+
+/**
+ * Lock-2 §2.5 — the ONE key under which a form-field contact-extension source is frozen into
+ * `ApprovalRequesterSnapshot.fieldDerivedAssigneeIds` AND fingerprinted by the parallel-conflict
+ * publish gate: `<kind>:<fieldId>:<level>`. A single exported producer (consumed by BOTH the
+ * create-time freeze in ApprovalProductService and the resolver arms below, and by the backend
+ * `dynamicAssigneeSourceFingerprint`) so the snapshot key and the fingerprint provably cannot
+ * drift. `fieldId` is trimmed defensively (the authoring choke already trims it at normalize).
+ * FE mirror: apps/web/src/approvals/parallelEdit.ts `dynamicAssigneeSourceFingerprint` — keep in
+ * lockstep.
+ */
+export function fieldDerivedAssigneeSourceKey(
+  source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user_manager' | 'form_field_user_dept_head' }>,
+): string {
+  return `${source.kind}:${source.fieldId.trim()}:${source.level}`
 }
 
 /**
@@ -74,7 +96,14 @@ function isSystemSentinelActor(actorId: string): boolean {
   return actorId.startsWith('system:')
 }
 
-function resolveFormUserValue(value: unknown): string | null {
+/**
+ * Single-valued `user` form value → local user id (string id or `{ id }`; arrays yield `null` —
+ * the L2-B×L2-C latent drop Lock-2 documents, unreachable while `validateApprovalFormData`
+ * rejects arrays for `user` fields). EXPORTED (Lock-2 §L2-C) so the create-time field-derived
+ * freeze reads the chosen contact through the EXACT same reader the shipped `form_field_user`
+ * resolution uses — a second reader could drift.
+ */
+export function resolveFormUserValue(value: unknown): string | null {
   const stringId = normalizeId(value)
   if (stringId) return stringId
   if (isRecord(value)) {
@@ -385,6 +414,37 @@ export function resolveApprovalAssignees(
             const memberId = normalizeId(entry)
             if (memberId) pushResolved('user', memberId, source, sourceIndex, groupId)
           })
+        })
+        break
+      }
+      case 'form_field_user_manager':
+      case 'form_field_user_dept_head': {
+        // Lock-2 §L2-C (form-field contact extensions): resolve to the FROZEN create-time
+        // extension of the person chosen in the referenced `user` field — a pure map lookup over
+        // `fieldDerivedAssigneeIds` (source fingerprint → resolved local user ids), frozen by the
+        // create path from the frozen directory read (submit IS create, §0 Correction 2). NO live
+        // directory read happens here on ANY path — dispatch, return, admin-jump, timeout-jump
+        // all re-resolve the SAME frozen list (§2.1 resolver purity; the freeze is temporal, not
+        // a dead read — a directory change after create alters only NEWLY created approvals).
+        // An empty/absent entry (contact without a directory account, chain shorter than the
+        // configured level, or a snapshot that never baked the map because the graph carries no
+        // such source) is EMPTY resolution falling to the node's `emptyAssigneePolicy` (§2.6) —
+        // under the default 'error' that is a fail-closed APPROVAL_ASSIGNEE_EMPTY, and under an
+        // explicit 'auto-approve' an AUDITED auto-approval event, never a silent nobody. A FAILED
+        // create-time read never reaches this arm at all: the create wedge fails closed 422/503
+        // before any instance/assignment insert (§2.3), so "read failed" cannot masquerade as
+        // "resolved to nobody".
+        // NO requester self-exclusion (deliberate — Lock-2 §L2-C: shipped `dept_head`'s inline
+        // requester-exclusion is a requester-anchored artifact; a chosen contact's manager who
+        // happens to BE the requester still gets the seat, and same-person semantics compose
+        // through autoApprovalPolicy.mergeWithRequester). Anchor self-exclusion — the CONTACT is
+        // never their own manager/head — already happened inside the chain walk at create.
+        const rawMap = options.requesterSnapshot?.fieldDerivedAssigneeIds
+        const rawList = isRecord(rawMap) ? rawMap[fieldDerivedAssigneeSourceKey(source)] : undefined
+        const frozen = Array.isArray(rawList) ? rawList : []
+        frozen.forEach((entry) => {
+          const resolvedId = normalizeId(entry)
+          if (resolvedId) pushResolved('user', resolvedId, source, sourceIndex)
         })
         break
       }

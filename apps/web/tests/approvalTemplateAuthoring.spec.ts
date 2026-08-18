@@ -862,6 +862,55 @@ describe('approval template authoring helpers', () => {
     )
   })
 
+  it('Lock-2 §L2-C: round-trips a form_field_user_manager source incl. fieldId + level (save emits {kind, fieldId, level}; both survive the real wire) — the linear editor accepted-kind list mirror site', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ffum'
+    draft.name = '表单内联系人上级审批'
+    draft.fields[0].id = 'contact'
+    draft.fields[0].type = 'user'
+    draft.fields[0].label = '联系人'
+    draft.fields[0].required = true
+    draft.steps[0].sourceKind = 'form_field_user_manager'
+    draft.steps[0].fieldId = 'contact'
+    draft.steps[0].level = 2
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'form_field_user_manager', fieldId: 'contact', level: 2 }])
+
+    // wire-vs-fixture trap: assert fieldId AND level survive the real serialize→parse.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('form_field_user_manager')
+    expect(rehydrated.steps[0].fieldId).toBe('contact')
+    expect(rehydrated.steps[0].level).toBe(2)
+    // And the rebuilt graph is byte-identical to the first emit (no hydrate flatten).
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
+  it('Lock-2 §L2-C: round-trips a form_field_user_dept_head source incl. fieldId + level (pointer-distinct kind, same draft shape)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'ffudh'
+    draft.name = '表单内联系人部门负责人审批'
+    draft.fields[0].id = 'contact'
+    draft.fields[0].type = 'user'
+    draft.fields[0].label = '联系人'
+    draft.fields[0].required = true
+    draft.steps[0].sourceKind = 'form_field_user_dept_head'
+    draft.steps[0].fieldId = 'contact'
+    draft.steps[0].level = 1
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'form_field_user_dept_head', fieldId: 'contact', level: 1 }])
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('form_field_user_dept_head')
+    expect(rehydrated.steps[0].fieldId).toBe('contact')
+    expect(rehydrated.steps[0].level).toBe(1)
+    expect(buildCreateTemplatePayload(rehydrated).approvalGraph.nodes[1]?.config).toEqual(
+      payload.approvalGraph.nodes[1]?.config,
+    )
+  })
+
   it('Lock-1 §K3: round-trips a prior_node_approver source (localId reference → the referenced step CURRENT positional key on save; the stored key re-resolves to the SAME step) — the linear editor accepted-kind list mirror site', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'k3'

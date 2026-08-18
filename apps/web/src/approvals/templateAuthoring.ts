@@ -682,6 +682,12 @@ function stepDraftFromApprovalNode(
     // Lock-1 §K1: dedicated array field — a group option list, never the shared idsText carrier.
     sourceKind = 'user_group'
     groupIds = [...source.groupIds]
+  } else if (source?.kind === 'form_field_user_manager' || source?.kind === 'form_field_user_dept_head') {
+    // Lock-2 §L2-C: field picker + single level — reuses the shared `fieldId` AND `level` fields
+    // (they coexist on the draft; each is meaningful only for the kinds that read it).
+    sourceKind = source.kind
+    fieldId = source.fieldId
+    level = source.level
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -905,6 +911,9 @@ const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   // Lock-1 §K3: flat 2-level shape — the referenced prior node's key.
   prior_node_approver: ['kind', 'nodeKey'],
   form_field_user: ['kind', 'fieldId'],
+  // Lock-2 §L2-C: flat 3-key shape (field picker + single level).
+  form_field_user_manager: ['kind', 'fieldId', 'level'],
+  form_field_user_dept_head: ['kind', 'fieldId', 'level'],
   // Lock-1 §K2: `scope` is the ONE nested object in the source union (see
   // requesterChoiceSourceHasBackendDrop below for its per-type key check — the flat 2-level
   // allowlist alone cannot see inside it).
@@ -1232,7 +1241,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver', 'user_group'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver', 'user_group', 'form_field_user_manager', 'form_field_user_dept_head'].includes(source?.kind)) return true
       // Lock-1 §K2: a malformed requester_choice shape must fail-closed to read-only here too —
       // hydrate would otherwise re-derive a default mode/scope and silently flatten it on save.
       if (source?.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source as unknown as Record<string, unknown>)) return true
@@ -1558,6 +1567,10 @@ export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepD
   if (step.sourceKind === 'dept_head_at_level') {
     // Lock-1 §K5-b: reuses the shared `level` field (same shape as manager_at_level).
     return { kind: 'dept_head_at_level', level: step.level }
+  }
+  if (step.sourceKind === 'form_field_user_manager' || step.sourceKind === 'form_field_user_dept_head') {
+    // Lock-2 §L2-C: reuses the shared `fieldId` + `level` fields (field picker + single level).
+    return { kind: step.sourceKind, fieldId: step.fieldId, level: step.level }
   }
   if (step.sourceKind === 'requester_choice') {
     // Lock-1 §K2: re-shape the shared idsText carrier into the per-scope id list.

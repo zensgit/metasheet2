@@ -65,6 +65,14 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // below). The cc-as-recipient row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not
   // admit it") is deferred to its own slice and is NOT added here.
   user_group: '用户组',
+  // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
+  // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
+  // fieldDerivedAssigneeIds snapshot end to end (Lock-2 §2.4 table: "Admitted when: publish pins
+  // + snapshot landed"). Node types `approval` AND `handler` — the handler admission rides
+  // HANDLER_ASSIGNEE_SOURCE_KINDS (grown 7→9 in this same slice), which Lock-2 rules is
+  // corpus-evidenced (C-6), not an M11 widening.
+  form_field_user_manager: '表单内联系人上级',
+  form_field_user_dept_head: '表单内联系人部门负责人',
 }
 
 /** Display order matches parent §10.3's listed order. Kept as an explicit array (rather than
@@ -89,6 +97,10 @@ const SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER: readonly ApprovalAssigneeSourceKind[] 
   'prior_node_approver',
   // Lock-1 §K1: appended after K3 (ratified-kind append order).
   'user_group',
+  // Lock-2 §L2-C: the contact-derived pair appends after the Lock-1 kinds (ratified-kind append
+  // order; leader-pointer kind before parent-tree kind, matching the lock's own C-3 row order).
+  'form_field_user_manager',
+  'form_field_user_dept_head',
 ]
 
 export interface ApprovalAssigneeSourceCapability {
