@@ -1,6 +1,7 @@
 # 审批对标程序 — 验证报告（FINAL，2026-08-18）
 
-**Status:** FINAL — 实现尾部已全部落地（唯一在飞行的实现切片 = K6 `#4993`，Lock-2 §L2-C）。
+**Status:** FINAL — 实现尾部已全部落地（唯一在飞行的实现切片 = K6 `#4993`，Lock-2 §L2-C；已 rebase、CI 运行中、闸门 MERGE-CLEAN 0 P1）。
+**P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 带一个具名 carried-forward 残留）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
 本文件**不是完成声明**，不 ratify 任何东西，不授权任何 flag、部署或 UAT。
 
 | 锚点 | 值 |
@@ -62,6 +63,7 @@ master §5：「Drag-and-drop editor：mounted test plus **real Chromium** …�
 Phase-A 台账用六级（`PASS` / `PASS-POSITIVE-ONLY` / `FAIL` / `NOT-YET-LANDED(slice)` / `OWNER-ONLY` / `BLOCKED-ENV(reason)`）。
 `PASS-POSITIVE-ONLY`：套件跑绿但**该行的判别性反例未在本次构造**，所欠反例逐行点名。**这是本程序验证诚实性的承重点**：63 行绿测试没有被写成 PASS。
 本 FINAL 追加 **`LANDED-VERIFY`**（承载切片已在 merged main、矩阵行未在当前 head 重跑）——它替代了 DRAFT 里 `SUPERSEDED-BY-LANDING` 的大多数行，**仍不是 PASS**。
+**P7 phase-B**（§2.5，`scratchpad/p7-phaseB-evidence-20260818.md`）在 fresh `origin/main` 对**一个子集**（8 个 phase-A FAIL + 15 个已落地特性判别检查 + 6 项优越性）做了真复核，把这些 `LANDED-VERIFY` / `FAIL` 行升为带证据的 **FIXED / PASS**（`FAIL-0` 例外，见下）。**但这是子集复核，不是全 127 行矩阵重跑**——其余行（含 63 个 PASS-POSITIVE-ONLY 所欠反例）仍是 `LANDED-VERIFY` / `PASS-POSITIVE-ONLY`（V-1）。
 
 ---
 
@@ -78,10 +80,10 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | `6a67eccea1` | #4979 D-1 | 「D-1 STILL PRESENT」行 | **翻转**：read 轴现 400（§2.4 复核） |
 | `3335ccc435` | #4972 P1-C | I4/I5/I6/I12/I13、I9 timeout 半边、§10「ApprovalMode BE 4 vs FE 3」 | LANDED-VERIFY |
 | `d034b1f710` | #4980 P5 L5-A | **R7（操作策略）** | LANDED-VERIFY |
-| `6488353bf8` | #4981 P7-R2 | FAIL-2/5/6 | LANDED-VERIFY（§2.4） |
-| `512f0df608` | #4984 P7-R1 | FAIL-0/1/3/4/7 | LANDED-VERIFY（§2.4） |
-| `345a1f1c0e` | #4994 F4 | §3 gate 5 mount canary、F10 | **翻转**：mount 已达（§2.3 gate 5） |
-| `6abd241925` | #4995 K1 | 派单人 union、I 族 roster 行 | LANDED-VERIFY |
+| `6488353bf8` | #4981 P7-R2 | FAIL-2/5/6 | **FIXED**（phase-B §2.5） |
+| `512f0df608` | #4984 P7-R1 | FAIL-0/1/3/4/7 | **FIXED**（FAIL-0 = FIXED-with-named-residual，phase-B §2.5） |
+| `345a1f1c0e` | #4994 F4 | §3 gate 5 mount canary、F10 | **翻转**：mount 已达（§2.3 gate 5；phase-B 两侧闸复核 PASS） |
+| `6abd241925` | #4995 K1 | 派单人 union、I 族 roster 行 | **PASS**（phase-B §2.5 Part 2） |
 
 已用当前 head 源码机械复核的取代事实（这是取代/翻转，不是重跑矩阵）：
 
@@ -93,7 +95,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | 表单字段类型联合 | BE / FE | **13 种，前后端逐字一致** |
 | `nodeOperationPolicy` | `approvalCapabilityRegistry.ts`（`operationPoliciesByNodeType` 对 `approval`/`handler` populate） | **操作策略轴已落地**（P5 L5-A #4980，解除 R7） |
 | D-1 read axis | `ApprovalProductService.ts`（#4979） | 由「静默丢弃」改为对 `readonly`/`hidden`/非数组形状**返回 400**（可逆收窄，§6.2） |
-| F10 生产挂载 | `TemplateAuthoringView.vue:333/338`（`showFormBuilderV2` 后）；`approval-form-builder-slots.spec.ts:1118` FLIPPED PIN | **挂载已达**；行为级 mount 证明在必需 `approvalTemplateAuthoring.spec.ts`，F4 闸门 M1/M2 变异恰红 |
+| F10 生产挂载 | `TemplateAuthoringView.vue:333/338`（`showFormBuilderV2` 后）；`approval-form-builder-slots.spec.ts:1118` FLIPPED PIN | **挂载已达**；行为级 mount 证明在必需 `approvalTemplateAuthoring.spec.ts`，F4 闸门 M1/M2 变异各打红 8/9 项；phase-B 两侧闸复核 PASS，F10 pin inverted-not-deleted |
 
 **TAIL-PENDING V-1（仍未解除）：Phase-A 127 行矩阵未在当前 head 重跑。** 只有重跑才能把这些 `LANDED-VERIFY` 行转成带证据的判定。这是本 FINAL 剩下的**最大一块验证债之一**，属 owner/后续版本工作（代码代理已把承载切片全部落地，但全矩阵重跑需要精确部署的 merged-main SHA + 真库 + 组装应用）。
 
@@ -109,7 +111,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | BLOCKED-ENV | 13 | §3×2, §2×1, §7-grid×7, §7-checklist×2, V5 |
 | **Total** | **127** | |
 
-**⚠️ 尾部落地后的位移（当前 head 视角，非重跑）**：8 个 `NOT-YET-LANDED` 的承载切片现在**全部在 main**——F10（F4 #4994）、I4/I5/I6/I12/I13（P1-C #4972）、R7（P5 L5-A #4980）、mount canary（F4 #4994）⇒ 全部升为 `LANDED-VERIFY`（或 F10/mount 的「翻转」）。**行数 ≠ 发现数**：6 行 FAIL 只引用两个发现；§2 里有 **8 个不同发现**（父发现 FAIL-0 + FAIL-1..7），FAIL-1/4/5/6/7 **不对应任何矩阵行**——它们是执行矩阵时在**验证器具本身**发现的缺陷。
+**⚠️ 尾部落地后的位移**：8 个 `NOT-YET-LANDED` 的承载切片现在**全部在 main**——F10（F4 #4994）、I4/I5/I6/I12/I13（P1-C #4972）、R7（P5 L5-A #4980）、mount canary（F4 #4994）。**P7 phase-B（§2.5）已对其中多数 + 8 个 FAIL + 6 项优越性做真复核**（fresh `origin/main`、real Chromium、全新 DB），把它们从 `LANDED-VERIFY` 升为带证据的 `FIXED` / `PASS`；未被 phase-B 覆盖的行仍是 `LANDED-VERIFY`。**行数 ≠ 发现数**：6 行 FAIL 只引用两个发现；§2 里有 **8 个不同发现**（父发现 FAIL-0 + FAIL-1..7），FAIL-1/4/5/6/7 **不对应任何矩阵行**——它们是执行矩阵时在**验证器具本身**发现的缺陷。
 
 ### 2.2 各族分解（`680e93c018` 作用域）
 
@@ -138,32 +140,31 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | 2 | Web build | **rc=0** | PASS |
 | 3 | Required web tests | **rc=0** — 368 files / 4628 tests（Phase-A）；F4 head 上 **370 files / 4727 tests**（F4 闸门复核） | PASS |
 | 4 | Approval guard canaries | **rc=0**（Canvas-V2 + FWB + targeted 三列表，均在 required-web 内） | PASS |
-| 5 | **Production-command mount canary** | **翻转 → LANDED**：F4 #4994 落地生产挂载；行为级 mounted-iff-flag 证明在必需 `approvalTemplateAuthoring.spec.ts`，M1/M2 变异恰红（8/9 failures） | LANDED-VERIFY（原 NOT-YET-LANDED (F4)） |
+| 5 | **Production-command mount canary** | **翻转 → LANDED**：F4 #4994 落地生产挂载；行为级 mounted-iff-flag 证明在必需 `approvalTemplateAuthoring.spec.ts`，M1/M2 变异各打红 8/9 项（含 flag-OFF pin）；phase-B 两侧闸复核 PASS | **PASS**（phase-B §2.5，原 NOT-YET-LANDED (F4)） |
 | 6 | Backend type check | **rc=0**（CI-exact） | PASS |
 | 7 | Backend unit | **650 files passed / 185 skipped；9422 tests passed / 1622 skipped，333.35s** | PASS |
-| 8 | Approval real DB | 16/18 绿；2 车道带 FAIL-3 / FAIL-4（Phase-A）；**修复已随 #4984 落地** | PASS-POSITIVE-ONLY → LANDED-VERIFY |
+| 8 | Approval real DB | 16/18 绿；2 车道带 FAIL-3 / FAIL-4（Phase-A）；**phase-B 在全新专用 DB 复核 FAIL-3 = 5 passed、FAIL-4 = 1 passed** | PASS-POSITIVE-ONLY → **FIXED**（phase-B §2.5） |
 | 9 | Migration replay | replay 绿；upgrade 半边不可执行 | BLOCKED-ENV-4 |
 | 10 | Root required checks | **本 FINAL 撰写时实测**：9 条 + `strict=true` + `enforce_admins=true`（§4.1） | 离散关闭 BLOCKED-ENV-5（当前 head 读，不改写 Phase-A 那行） |
 
-### 2.4 八个 FAIL 及其修复 PR —— **修复全部在 main（LANDED-VERIFY）**
+### 2.4 八个 FAIL 及其修复 PR —— **P7 phase-B 复核 = 8/8 FIXED**
 
 > 台账承重句逐字保留：「All seven are **evidence-integrity / a11y** defects. **None is a product-logic regression.** That distinction is load-bearing and is proven per finding, not asserted.」
 
-| # | 严重度 | 一句话 | 修复 PR（合并 SHA） | 当前状态 |
-|---|---|---|---|---|
-| **FAIL-0** | 父发现 | 四个审批面测试制品在零 CI workflow 执行 | #4984 `512f0df608` | **LANDED**；含 249 文件有界扫描。**残留 P2-1**（下）⇒ 记 **LANDED-VERIFY**，非「已关闭」 |
-| FAIL-1 | P1 | `approval-inspector-keyboard.spec.ts` 在 main 红——harness 挂载抛异常 | #4984 | **编译半边 LANDED**（当前 head harness 已含 5 成员 + `user_group` 分支）；该 spec 另有一个 **#4944-源起的运行时红（roster 渲染零选项 → `data-testid` 缺失）**，F4 闸门在 post-#4984 base `65a5bb4c9b` 记为**仍活**且明确超出 F4 范围；当前 head 未重跑 ⇒ **LANDED-VERIFY** |
-| FAIL-2 | P2 | V-6 焦点环对比度 13/19 低于 ≥3:1 | #4981 `6488353bf8` | **LANDED**（换 `--el-color-primary`，实测 4.49/4.95/5.17 全 ≥3:1） |
-| FAIL-3 | P2 | `approval-node-entry-epoch.test.ts` 在 main 100% 红 | #4984 | **LANDED**（补 grant helper）；全矩阵重跑待办 |
-| FAIL-4 | P2 | `approval-wp1-any-mode.api.test.ts` 同因 | #4984 | **LANDED**；同上 |
-| FAIL-5 | P2 | 浏览器 harness 不加载生产样式表 | #4981 | **LANDED**（两 harness 补样式表） |
-| FAIL-6 | P3 | `handler` 无 per-type 强调色 | #4981 | **LANDED**（owner 仍可另裁，开发报告 §7.8） |
-| FAIL-7 | P3 | `useApprovalBatchActions.spec.ts` 在零 workflow 执行 | #4984 | **LANDED**（进 run-list + guard；UNION 存活已核，§4.5） |
+**P7 phase-B**（§2.5）在 fresh `origin/main` = `6abd241925`（隔离 worktree + 全新专用 DB + real Chromium + Node 20.20.2）逐行复核这八个 FAIL：**8/8 FIXED，re-verified 子集内零个新 FAIL**。
 
-**⚠️ TAIL-PENDING V-2（收窄，未完全解除）：八个 FAIL 的修复已全部合并进 main，但没有在合并后 head 重跑这八行。** 两点残留：
-- **#4984 P2-1**（闸门条件，未见闭合）：9 个新接线真库套件里 6 个缺自身 anti-skip-green 哨兵——闸门原话「should not be recorded as closing FAIL-0 for all nine suites until P2-1 lands」。
-- **FAIL-1 运行时红**：`approval-inspector-keyboard.spec.ts` 的编译半边已修，但 roster-renders-no-options 运行时红（#4944 源起）在 post-#4984 base 仍活且超出 F4 范围，当前 head 未重跑；#4995 无 round-3 requalification MD。
-「修复已合并」≠「合并后 head 已重判为绿」。这八行的最终判定属 V-1 全矩阵重跑（owner/后续版本）。
+| # | 严重度 | 一句话 | 修复 PR（合并 SHA） | phase-B 复核状态（fresh `origin/main`） |
+|---|---|---|---|---|
+| **FAIL-0** | 父发现 | 四个审批面测试制品在零 CI workflow 执行 | #4984 `512f0df608` | **FIXED-with-named-residual**：四个具名实例全接线 + 6 个此前未门控套件双点接线；**残留 = 无机械枚举守卫**（排除清单手工维护，下一个未接线 spec 会复发）——carried-forward 硬化项，**非活缺陷（无一复现）**；与 #4984 闸门 P2-1 同一面 |
+| FAIL-1 | P1 | `approval-inspector-keyboard.spec.ts` 在 main 红——harness 挂载抛异常 | #4984 | **FIXED**：real Chromium **1 passed (810ms)**；harness 导入当前 `ApprovalNodeConfigEditorApi` + 生产 CSS；path filter 加宽 4 个 `apps/web/src/approvals/**`。**DRAFT 曾提的「#4944-源起运行时红」在 phase-B 复核为已修** |
+| FAIL-2 | P2 | V-6 焦点环对比度 13/19 低于 ≥3:1 | #4981 `6488353bf8` | **FIXED**：real Chromium 重测三视口 **19 PASS / 0 FAIL / 0 NO-RING**（viewport 4.95、toolbar 族 5.17） |
+| FAIL-3 | P2 | `approval-node-entry-epoch.test.ts` 在 main 100% 红 | #4984 | **FIXED**：全新 `metasheet_p7b_epoch` DB **5 passed / 1 skipped** |
+| FAIL-4 | P2 | `approval-wp1-any-mode.api.test.ts` 同因 | #4984 | **FIXED**：全新 `metasheet_p7b_anymode` DB **1 passed / 1 skipped** |
+| FAIL-5 | P2 | 浏览器 harness 不加载生产样式表 | #4981 | **FIXED**：两 harness 均 `import` 生产样式表；non-vacuous 重测 form-builder 29 ring-PASS（5.17）、inspector 25 ring-PASS（16.55） |
+| FAIL-6 | P3 | `handler` 无 per-type 强调色 | #4981 | **FIXED（fix 选了一个 shape）**：`handler` 用 `--el-color-info`，4/7 类型共享 info 强调色——**owner shape 裁定项**（§6.3 / 开发报告 §7.8） |
+| FAIL-7 | P3 | `useApprovalBatchActions.spec.ts` 在零 workflow 执行 | #4984 | **FIXED**：进 run-list + guard；本地 4 passed；UNION 存活已核（§4.5） |
+
+**✅ TAIL-PENDING V-2 —— DISCHARGED（8/8 FIXED），带一个具名 carried-forward 残留：** 八个 FAIL 的修复不仅合并进 main，且在 fresh `origin/main` 被 phase-B 逐行真复核为 FIXED（real Chromium / 全新 DB，defeat grant 残留 false-green）。**唯一残留** = FAIL-0 的机械枚举守卫（#4984 闸门 P2-1 的另一面）：现无一复现，但复发通道未被机械封死——记为 carried-forward 硬化项（owner/后续版本），**不是活缺陷**。边界：phase-B 是**子集**复核（8 FAIL + 15 特性 + 6 优越性），非全 127 行矩阵重跑（V-1）；且跑在本地 PG 15.17（V-14）。
 
 #### FAIL-0 的机制（本次验证最有价值的发现，保留）
 四个制品，一个缺陷类：真库套件没从无库 vitest 配置排除 ⇒ 被必需无库 `test (20.x)` 收集并 `describeIfDatabase`-**skip-green**，且不在任何真库车道；浏览器/单测制品被 workflow 的 **path filter** 漏掉（打破它的 PR 改 `apps/web/src/approvals/**`，守卫车道只过滤 `apps/web/verification/**`）。skip-green 群体实测规模 **9422 passed / 1622 skipped**，跨 **650 / 185** 文件——**CI 里没有任何东西区分「会在具名真库车道被重跑」和「哪里都不跑」这两种 skipped**。台账自陈这四个**不是穷举**；#4984 做了一次有界机械扫描（`approval*` 命名的 111 web + 138 backend = **249 文件**），该扫描**已随 #4984 落地**——但因 P2-1，**类别记 LANDED-VERIFY 而非关闭**。
@@ -172,7 +173,23 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 判据 `approval-canvas-v2-interaction-design-lock-20260721.md:412`（V-6）：「visible 2px focus ring at ≥ 3:1 contrast」。修复前 token `--el-color-primary-light-5: #92b1f5` ⇒ canvas viewport 2.05 / node cards 2.14 / toolbar 2.14 全部 FAIL（13 FAIL / 6 PASS，三视口一致）；三种候选相邻面（2.14 / 1.99 / 1.84）全部不过 ≥3:1，表里报最有利者。**#4981 修复后换到 `--el-color-primary`（4.49/4.95/5.17），全 ≥3:1。**
 
 #### FAIL-3 / FAIL-4 的产品状态：**未坏**（证明的不是断言的）
-两套件都是 fixture 腐烂而非产品回归：`POST /api/approvals` 从 DB 侧 `approvals:write` 授权，26 个集成套件通过 `grantApprovalWriteForIntegrationActor()` 播种，这两套件调用它 0 次；诊断变异加上 grant 后 FAIL-3 **5/5 全绿**、FAIL-4 **1 passed**。所以 epoch 轮次作用域、transfer/reassign epoch 保持、双 epoch fail-closed、NULL-epoch 双读——产品行为完好。
+两套件都是 fixture 腐烂而非产品回归：`POST /api/approvals` 从 DB 侧 `approvals:write` 授权，26 个集成套件通过 `grantApprovalWriteForIntegrationActor()` 播种，这两套件调用它 0 次；诊断变异加上 grant 后 FAIL-3 **5/5 全绿**、FAIL-4 **1 passed**。所以 epoch 轮次作用域、transfer/reassign epoch 保持、双 epoch fail-closed、NULL-epoch 双读——产品行为完好。**phase-B 在全新专用 DB（无 grant 残留）复现：FAIL-3 5 passed / 1 skipped、FAIL-4 1 passed / 1 skipped。**
+
+### 2.5 P7 phase-B 增量复核（fresh `origin/main`，子集）
+
+Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-YET-LANDED` / `SUPERSEDED-BY-LANDING` / `FAIL` 那一子集的增量真复核，**不是全 127 行矩阵重跑**。环境：verified SHA `6abd241925`（#4995 K1）；隔离 worktree、全新专用 DB（`metasheet_p7b_epoch/_anymode/_d1`，刻意不复用 phase-A DB 以 defeat grant 残留 false-green）；real Chromium（Playwright 1.57.0）；Node 20.20.2。**边界 delta（如实记录）**：本地 PG **15.17** vs CI `postgres:16`（V-14）；pnpm 10.33 vs CI 10.16.1。
+
+| 组 | 行数 | PASS/FIXED | FAIL | carried-fwd | 说明 |
+|---|---|---|---|---|---|
+| Part 1 — 8 个 phase-A FAIL | 8 | **8 FIXED**（7 完全；FAIL-0 = FIXED-with-named-residual） | **0** | 1（FAIL-0 枚举守卫） | §2.4 |
+| Part 2 — 已落地特性判别检查 | 15 | **15 PASS** | **0** | 0 | P1-C×7（含 I12 coercion 分支**已删**、BE/FE `ApprovalMode` divergence CLOSED）+ K3 + L8-A + D-1（真库 values-free 400，read 轴 CLOSED）+ K1（union 13/13）+ Lock-5 操作策略 choke + L6-A/P3-B + F4 两侧闸 |
+| Part 3 — 六项优越性 re-smoke | 6 | **6 PASS** | **0** | 0 | 全部仍可用；FWB 仅 code 半边（功能半边 owner-only） |
+| Part 4 — carried-forward（owner/env） | — | — | — | ~14 | 按设计未执行（§6.3/§6.4） |
+| **phase-B 内新 FAIL** | | | **0** | | 仅限 re-verified 子集，非全面无回归声明 |
+
+几处判别证据（逐字/锚点）：**I12** 的无守卫 coercion 分支在 `templateAuthoring.ts:707-715` **被删**（out-of-union `approvalMode` 强制 read-only，不再静默塌缩 `single`）；**§10** BE=FE `ApprovalMode` 均 4 成员（phase-A 点名的唯一 FE/BE divergence CLOSED）；**D-1** 真库「every access value on every non-write-capable node type is REJECTED with a typed values-free 400」，read 轴 CLOSED（`ApprovalProductService.ts:2582-2587`）；**F4** 两侧行为闸（`approvalTemplateAuthoring.spec.ts:3453` flag OFF 仅 legacy、Designer 2.0 完全缺席；`:3478` flag ON+hydrated 挂载、legacy 缺席），F10 pin **inverted-not-deleted**（`slots.spec.ts:1146-1155`）。**I10/R12 absence-list 已刷新**：FE 与 BE `ApprovalAssigneeSourceKind` 是**同一 13 成员 union**（resolver case-arm 奇偶未机械再确认——裸串 regex 不可靠，该行只落在实测到的两个事实上）；`sequential`（K6）+ Lock-6 B–F 标识符仍缺。
+
+**这不推翻 §6.5 的 PASS-POSITIVE-ONLY 债**：phase-B 是子集复核，那 63 行绿测试所欠的判别性反例（33 显式点名子集）**没有**在 phase-B 构造——V-1 / V-12 仍 OPEN。
 
 ---
 
@@ -191,7 +208,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | F3 类型化 retype + 选中字段检查器 | #4954 | `deaaeea983…` — FIX-ROUND → requalified `c7970b396d…` = **CLEAR** | 0/3/4/2 | 是 | `0766eb35e5` | 是（绑 requalified head） |
 | **F4 生产挂载（canvasV2 后）** | **#4994** | **`8a82978021` — MERGE-CLEAN — 0 P1, 0 P2**（`/tmp/pr4994-f4-gate-20260818.md`） | 0/0/4/4 | 不适用（无阻断） | `345a1f1c0e` | — |
 
-**P0 硬边界 —— DISCHARGED**（F4 落地）：F10 挂载现存（`TemplateAuthoringView.vue:333/338`，`showFormBuilderV2` 后），旧「缺席钉」`slots.spec.ts:1115` 已翻为 `:1118` FLIPPED PIN，行为级 mounted-iff-flag 证明在**必需** `approvalTemplateAuthoring.spec.ts`（M1/M2 变异恰红）。**但 CORE-PARITY 仍 NO**：分支保护 owner 步（delta §7.1 item 8，`approval-browser-verify` 仍非必需）、四视口窄化（F4 P3-2）、检查器 number/date_range 缺口（P3 containment upheld，fail-closed 非静默默认）、Canvas 租户 UAT + owner 签署——均 owner-only（开发报告 §3.2 / §7）。
+**P0 硬边界 —— DISCHARGED**（F4 落地）：F10 挂载现存（`TemplateAuthoringView.vue:333/338`，`showFormBuilderV2` 后），旧「缺席钉」`slots.spec.ts:1115` 已翻为 `:1118` FLIPPED PIN，行为级 mounted-iff-flag 证明在**必需** `approvalTemplateAuthoring.spec.ts`（M1/M2 变异各打红 8/9 项；phase-B 两侧闸复核 PASS）。**但 CORE-PARITY 仍 NO**：分支保护 owner 步（delta §7.1 item 8，`approval-browser-verify` 仍非必需）、四视口窄化（F4 P3-2）、检查器 number/date_range 缺口（P3 containment upheld，fail-closed 非静默默认）、Canvas 租户 UAT + owner 签署——均 owner-only（开发报告 §3.2 / §7）。
 
 ### 3.3 P1 检查器与已发布能力对标
 
@@ -331,20 +348,20 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 
 | # | TAIL-PENDING 行 | 现状 |
 |---|---|---|
-| **V-1** | Phase-A 127 行矩阵未在当前 head 重跑；多行为 LANDED-VERIFY | **OPEN（owner / 后续版本）**——需精确部署 merged-main SHA + 真库 + 组装应用 |
-| **V-2** | 八个 FAIL 修复合并后未在合并后 head 重判 | **收窄**：修复全在 main（LANDED-VERIFY）；残留 = #4984 P2-1 + FAIL-1 运行时红（§2.4） |
+| **V-1** | Phase-A 127 行**完整**矩阵未在当前 head 重跑 | **收窄，未全解**：phase-B（§2.5）已在 fresh `origin/main` 真复核**子集**（8 FAIL + 15 特性 + 6 优越性）；**其余行（含 63 个 PASS-POSITIVE-ONLY）仍 LANDED-VERIFY / PPO**，全 127 行重跑需精确部署 merged-main SHA + PG16 真库 + 组装应用（owner/后续版本） |
+| **V-2** | 八个 FAIL 在 main 上仍活 | ✅ **DISCHARGED（8/8 FIXED，phase-B §2.4）**，带一个 carried-forward 残留 = FAIL-0 机械枚举守卫（#4984 P2-1 的另一面，非活缺陷）。**DRAFT 的 FAIL-1 运行时红在 phase-B 复核为已修（real Chromium 1 passed）** |
 | **V-3** | #4965 requalify NOT-CLEAR，合并后闭合无记录 | ✅ **DISCHARGED**（§3.5，两 floor 臂 mutation-proven at merged main） |
 | **V-4** | #4974 带 2 个未闭合 P2 合并 | **OPEN**（= D-2，合并时闸门项未记录闭合） |
 | **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | **OPEN**（= D-3，同上） |
 | **V-6** | `approval-web-guard` 无效窗口未定 | **OPEN**（§4.4） |
 | **V-7** | PPO 计数不自洽：§1 汇总 **63**，§15 第 4 条写「the discriminating-negative half of **33**」 | **OPEN**：**63 = 绿测试总行数**；**33 = 显式点名了所欠反例的子集**。本 FINAL 保留两个数并保留 V-7 为**未解决**（不静默塌缩成 33）；owner/后续版本机械重算 |
 | **V-8 / F10** | F10 / P0 完成度 | ✅ **DISCHARGED（挂载半边）**：F4 #4994 落地，F10 由必需 job 收集（§2.3 gate 5）；CORE-PARITY 仍 NO（owner UAT/签署/分支保护步） |
-| **V-9** | K1（`user_group`）、K6（`sequential`）未落地 | **K1 ✅ LANDED（#4995）**；**K6 `sequential`（Lock-1 §K6）仍 OPEN**（母锁 §8 非目标）；**K6 slice #4993（Lock-2 §L2-C）在飞行** |
+| **V-9** | K1（`user_group`）、K6（`sequential`）未落地 | **K1 ✅ LANDED（#4995）**；**K6 `sequential`（Lock-1 §K6）仍 OPEN**（母锁 §8 非目标）；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）唯一在飞行**——已 rebase 到当前 main、CI 运行中、闸门 MERGE-CLEAN 0 P1 @ `093830c4bc`；落地后 union 13→15 |
 | **V-10** | P5 #4980 + 堆叠 #4983 均 OPEN；R7 NOT-YET-LANDED；#4983 base 非 main | ✅ **DISCHARGED**：两 PR 合并（`d034b1f710` / `327ac6427b`）；R7 LANDED；#4983 retarget 到 main（§3.7） |
 | **V-11** | Lock-6 B–F 零命中 | **OPEN**（各自切片；L6-F1 v1 REJECTED 为惰性） |
 | **V-12** | 33 个 PASS-POSITIVE-ONLY 行所欠判别性反例（每行点名） | **OPEN**——本程序公开的最大一块验证债，主动标注非被发现（§6.5） |
 | **V-13** | `approval-realdb-*` / `approval-browser-verify` 均非必需检查 | **OPEN（owner 动作）**：分支保护里加入（delta §7.1 item 8 = F4 合并前 owner 步，已合并但步仍未执行） |
-| **V-14** | PG 大版本差：Phase-A 127 行跑在本地 PG **15.17**，CI 用 `postgres:16` | **OPEN**（对照：#4983 闸门跑在本地 PG16，但只覆盖 P5-B 一个切片，不回溯覆盖 Phase-A 矩阵；V-3 闭合亦在本地 PG） |
+| **V-14** | PG 大版本差：Phase-A 127 行 + **phase-B 子集**均跑在本地 PG **15.17**，CI 用 `postgres:16` | **OPEN**（phase-B 亦记录本地 PG15；对照：#4983 闸门跑在本地 PG16 但只覆盖 P5-B；PG16 上重跑真库车道待办） |
 | **V-15** | #4984 尚未过独立对抗闸门 | ✅ **DISCHARGED**：#4984 现有独立闸门 MD（`/tmp/pr4984-p7r1-gate-20260818.md`，APPROVE-with-hardening (MERGE-CLEAN after P2-1)）；残留 = P2-1 本身（§2.4） |
 | **V-16** | #4983 A-2 下调 PARTIAL；FE 镜像对 role 席位不下发（服务端仍拒 ⇒ 显示缺口非权限放大） | **保留形状**（§3.7）：合并后仍是 PARTIAL；owner/后续切片补 role 席位镜像 |
 
@@ -387,7 +404,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 
 ## 7. 本报告自身的边界
 
-- 本报告是 FINAL 而非完成声明。它**没有**在当前 head 重跑 Phase-A 矩阵；§2 一切判定绑 `680e93c018`，§2.0 已逐条标出落地取代/翻转的行（现为 `LANDED-VERIFY` 或翻转）。
-- 本 FINAL **新做**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、派单人 13、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）。
+- 本报告是 FINAL 而非完成声明。它**没有**重跑 phase-A 的**完整** 127 行矩阵；§2.1–2.3 的判定绑 `680e93c018`，§2.0 逐条标出落地取代/翻转的行。**P7 phase-B（§2.5）在 fresh `origin/main` 真复核了一个子集**（8 FAIL + 15 特性 + 6 优越性），把这些行升为带证据的 FIXED/PASS；其余行仍 `LANDED-VERIFY` / `PASS-POSITIVE-ONLY`。
+- 本 FINAL **新做/纳入**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、派单人 13、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）；⑦ **P7 phase-B 子集复核（8/8 FAIL FIXED + 15/15 特性 + 6/6 优越性，§2.5）**。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。
 - 本报告**不 ratify、不授权、不启用**任何东西。所有 owner 事项集中在开发报告 §7。
