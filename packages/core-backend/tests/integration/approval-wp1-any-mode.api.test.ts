@@ -99,7 +99,8 @@ function buildAnyModeGraph() {
 }
 
 // P7-R1 (FAIL-4 closure) — Anti-skip-green sentinel (mirrors approval-realdb-handler /
-// approval-field-edit-enforcement.db.test.ts): the approval-realdb-parallel lane sets
+// approval-field-edit-enforcement.db.test.ts): the approval-realdb-wp1-any-mode job (in
+// .github/workflows/approval-realdb-p7r1-coverage-repair.yml) sets
 // EXPECT_DB=1, so a broken/missing DATABASE_URL there REDS the run instead of the whole file
 // silently reporting skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test
 // cleanly — it never runs in the required no-DB `test (20.x)` job.
