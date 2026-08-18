@@ -224,13 +224,16 @@ export interface RuntimePolicy {
   allowRevoke: boolean
   revokeBeforeNodeKeys?: string[]
   /**
-   * L6-P1 carrier fix — opaque pass-through for a template-level policy field the authoring
-   * editor does not render (e.g. a future auto-approval dedup tier, settable only through the
-   * publish API today). `unknown`, never interpreted here: the editor's job is to round-trip it
-   * unchanged via `buildPublishPolicy`, not to understand its shape. Adding a new typed field
-   * belongs to whichever slice authors that control.
+   * L6-P1 carrier fix landed this as an opaque pass-through (`unknown`) — the authoring editor did
+   * not yet render a template-level control. P3-B / Lock-6 L6-A (docs/development/approval-lock6-
+   * requester-global-policy-20260817.md §1) is that slice: the template-level dedup tier projects
+   * onto the SAME `AutoApprovalPolicy` shape node-level `autoApprovalPolicy` already uses (byte-
+   * mirrors backend `RuntimePolicy.autoApproval?: AutoApprovalPolicy`), so it is typed here rather
+   * than left opaque. Any FIELD this editor does not author (e.g. a future `actorMode`) still
+   * survives round-trip verbatim — `buildTemplateAutoApprovalPolicy` (templateAuthoring.ts) merges
+   * onto the hydrated object rather than reconstructing it from scratch.
    */
-  autoApproval?: unknown
+  autoApproval?: AutoApprovalPolicy
 }
 
 export interface RuntimeGraph extends ApprovalGraph {
