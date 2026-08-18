@@ -210,17 +210,12 @@ export const ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1: readonly Attendance
  * single `write_probe_v1` entry, never a floating literal, so the write
  * predicate cannot drift from the entry it executes.
  */
-export const ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1: AttendanceW4ShadowDiffCodeV1 = (() => {
-  // #4969 gate P2-2: the roster assert runs INSIDE this derivation — the presented code
-  // cannot exist without the module-load invariants having held, so deleting a floating
-  // assert call can never silently disarm them.
+export const ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1: AttendanceW4ShadowDiffCodeV1 =
+  // #4969 gate P2-2 (returns-the-code shape, its own round-1 recommendation): the assert IS
+  // the derivation — it validates the roster and RETURNS the single write entry's code, so
+  // the presented code cannot exist without the invariants having held, and deleting the
+  // call breaks the constant (reds three legs) instead of silently disarming anything.
   assertAttendanceW4C2RosterV1(ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1)
-  const writeEntries = ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1.filter(
-    (entry) => entry.evaluator === 'write_probe_v1',
-  )
-  if (writeEntries.length !== 1) fail('W4C2_ROSTER_INVALID')
-  return writeEntries[0].shadowDiffCode
-})()
 
 export interface AttendanceW4ShadowStatusDifferenceProbeV1 {
   readonly shadowDiffCode: AttendanceW4ShadowDiffCodeV1
@@ -402,7 +397,7 @@ export function isExpectedAttendanceW4C2ReadSideDifferenceV1(
  */
 export function assertAttendanceW4C2RosterV1(
   roster: readonly AttendanceW4ExpectedShadowDifferenceEntryV1[],
-): void {
+): AttendanceW4ShadowDiffCodeV1 {
   const code = 'W4C2_ROSTER_INVALID'
   const ids = new Set<string>()
   let writeEntries = 0
@@ -429,5 +424,6 @@ export function assertAttendanceW4C2RosterV1(
     }
   }
   if (writeEntries !== 1) fail(code)
+  return roster.find((entry) => entry.evaluator === 'write_probe_v1')!.shadowDiffCode
 }
 

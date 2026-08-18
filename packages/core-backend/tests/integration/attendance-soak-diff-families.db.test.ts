@@ -406,6 +406,9 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
     const shadowV3equal = { ...base, version: 3, mode: 'shadow', shadow_diff_code: 'equal' }
     // authoritative 'equal' alone must NOT count as convergence...
     expect(readProbeFromRows([shadowV1, authV2equal], 0).convergedToEqual).toBe(false)
+    // ...the PRODUCTION-REAL interleaved shape (every live non-shadow row carries a NULL
+    // shadow_diff_code — 669/669 on staging) converges past the NULL row (#4969 gate R2 P3):
+    expect(readProbeFromRows([shadowV1, { ...authV2equal, shadow_diff_code: null }, shadowV3equal], 0).convergedToEqual).toBe(true)
     // ...and must not BLOCK it either: the next SHADOW row (v3) converges past it.
     expect(readProbeFromRows([shadowV1, authV2equal, shadowV3equal], 0).convergedToEqual).toBe(true)
     // plain two-row shadow lifecycle still converges (positive control).
