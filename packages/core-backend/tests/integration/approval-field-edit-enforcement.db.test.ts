@@ -440,6 +440,11 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
   // {approval, handler} in APPROVAL_NODE_TYPES) now fail publish with the SAME typed values-free 4xx,
   // instead of a silent, effect-free drop. This closes BOTH axes: the `editable` write-side hazard
   // (already closed by P4-B) AND the `readonly`/`hidden` read-side silent-loss the P7 ledger flagged.
+  // FIX-ROUND (/tmp/pr4979-d1-gate-20260818.md, independent adversarial gate on this PR's first head):
+  // P2-1 fixed — the empty-array positive control now sends `fieldPermissions: []` VERBATIM (the prior
+  // `length > 0 ? {...} : {}` helper silently omitted the key, so the control never exercised the
+  // `length > 0` conjunct; mutation-verified below). P3-1 fixed — non-array `fieldPermissions` shapes
+  // (object/string/null) are now negatives too, matching the production guard's widened predicate.
   it('G-12 (D-1 closed, both axes): fieldPermissions — EVERY access value (editable/readonly/hidden) — on EVERY non-write-capable node type is REJECTED with a typed values-free 400; an empty array and an approval-node matrix still round-trip', async () => {
     // Positive control first: hidden on an APPROVAL node round-trips through save (unchanged by this slice).
     const okGraph = handlerGraph([{ fieldId: 'memo', access: 'hidden' }])
@@ -460,9 +465,13 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
 
     // One graph-builder per non-write-capable node type, each returning { graph, nodeKey } so a SINGLE
     // loop below drives all 3 access values × all 5 types = 15 negative assertions off one table.
+    // `rawFieldPermissions` is placed under the `fieldPermissions` key VERBATIM — including `[]` and
+    // non-array shapes — so a caller controls the exact wire shape (P2-1: the earlier
+    // `length > 0 ? {...} : {}` form silently OMITTED the key for `[]`, so the "empty array is
+    // tolerated" control never actually sent an empty array).
     type NonWriteType = 'cc' | 'start' | 'end' | 'condition' | 'parallel'
-    function graphFor(type: NonWriteType, fieldPermissions: NodeFieldPermission[]): { graph: unknown; nodeKey: string } {
-      const fp = fieldPermissions.length > 0 ? { fieldPermissions } : {}
+    function graphFor(type: NonWriteType, rawFieldPermissions: unknown): { graph: unknown; nodeKey: string } {
+      const fp = { fieldPermissions: rawFieldPermissions }
       switch (type) {
         case 'cc':
           return {
@@ -570,20 +579,44 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
       }
     }
 
-    // Malformed entry (missing `fieldId`) is ALSO rejected — the check is presence-of-non-empty-array
-    // selected, not access-value selected, so it does not depend on the entry's internal shape being
-    // valid to fire.
+    // Malformed ARRAY entry (missing `fieldId`) is ALSO rejected — the check is presence-selected, not
+    // access-value-selected, so it does not depend on the entry's internal shape being valid to fire.
     const malformedRes = await createTemplate(
       `${KEYPFX}-g12-cc-malformed`,
       graphFor('cc', [{ access: 'hidden' } as unknown as NodeFieldPermission]).graph,
     )
     await assertRejected(malformedRes, 'cc/malformed', 'cc_x')
 
-    // Positive control: an EMPTY array is NOT rejected (OD-L7-9 absent/empty ≡ no permissions; the FE
-    // always initialises `fieldPermissions: []` on a step draft — rejecting emptiness would brick
-    // ordinary authoring, apps/web/src/approvals/templateAuthoring.ts).
-    const emptyRes = await createTemplate(`${KEYPFX}-g12-cc-empty`, graphFor('cc', []).graph)
+    // Non-ARRAY shapes (an object, a string, `null`) are ALSO rejected — a residual D-1 channel the
+    // `Array.isArray(...) && length > 0` form of the guard left open (a non-array value is not an
+    // array, so it fell through, and the switch below drops it just like the array case did): the
+    // guard is `rawPermissions !== undefined && !isTolerableEmptyArray`, not shape-scoped to arrays.
+    // These would ALSO 400 on an approval node (`normalizeNodeFieldPermissions` — "must be an array"),
+    // so this closes the last type-asymmetric hole between write-capable and non-write-capable nodes.
+    for (const [label, shape] of [
+      ['object', { memo: 'hidden' }],
+      ['string', 'hidden'],
+      ['null', null],
+    ] as const) {
+      const res = await createTemplate(`${KEYPFX}-g12-cc-nonarray-${label}`, graphFor('cc', shape).graph)
+      await assertRejected(res, `cc/non-array-${label}`, 'cc_x')
+    }
+
+    // Positive control: an EMPTY array — sent VERBATIM as `fieldPermissions: []`, not omitted — is NOT
+    // rejected (OD-L7-9 absent/empty ≡ no permissions; a conservative tolerance choice, not an FE-compat
+    // requirement — no live authoring surface sends this shape on any of these five node types, see the
+    // production comment at the guard site).
+    // Confirms the request payload really did carry `fieldPermissions: []` (not an omitted key) by
+    // reading the SAME graph object this test built rather than trusting the helper silently.
+    const emptyGraphSent = graphFor('cc', []).graph as { nodes: Array<{ key: string; config: Record<string, unknown> }> }
+    expect(emptyGraphSent.nodes.find((n) => n.key === 'cc_x')?.config.fieldPermissions).toEqual([])
+    const emptyRes = await createTemplate(`${KEYPFX}-g12-cc-empty`, emptyGraphSent)
     expect(emptyRes.status, await emptyRes.clone().text()).toBe(201)
+    // The cc switch case never copies `fieldPermissions` into its OUTPUT config (it only ever emits
+    // {targetType, targetIds}), so the tolerated empty array is harmlessly dropped on the round trip —
+    // that is NOT the D-1 defect class (an empty array carries no information to lose).
+    const emptyBody = (await emptyRes.json()) as { approvalGraph: { nodes: Array<{ key: string; config: Record<string, unknown> }> } }
+    expect(emptyBody.approvalGraph.nodes.find((n) => n.key === 'cc_x')?.config.fieldPermissions).toBeUndefined()
   })
 
   // ── D-1 fix — in-flight tolerance: a STORED graph carrying cc-fieldPermissions still dispatches ──

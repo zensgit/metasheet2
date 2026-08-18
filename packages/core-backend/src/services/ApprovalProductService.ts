@@ -2417,26 +2417,43 @@ function normalizeApprovalGraph(
     }
 
     // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12), WIDENED by the D-1 fix slice
-    // (docs/development/approval-lock7-field-edit-enforcement-20260817.md §2.7 D-1) — a non-empty
-    // `fieldPermissions` array on a node type with NO field-permission surface is REJECTED here, not
-    // the shipped SILENT drop. The switch below rebuilds cc/parallel/condition from a per-type
-    // whitelist and sends start/end to `default: config = {}`, so ANY `fieldPermissions` entry was
-    // previously dropped with no error and no effect — an author configuring it believed the field
-    // hidden/read-only/protected when it was not. P4-B originally closed only the `editable` arm
-    // (the load-bearing privilege-escalation half); this closes the `readonly`/`hidden` arm D-1 left
-    // open, per OD-L7-4's ratified boundary: field permissions belong to approval + handler node
-    // types ONLY — every OTHER access value on these types is equally unsupported, not just
-    // `editable`. An EMPTY array is NOT rejected (OD-L7-9 absent/empty ≡ no permissions; the FE
-    // initialises every step draft with `fieldPermissions: []`, so rejecting emptiness would brick
-    // ordinary authoring — see `apps/web/src/approvals/templateAuthoring.ts`). Gated OFF for the
-    // dispatch re-normalize (STORED_RUNTIME_CONTEXT): the normalizer has NEVER copied
-    // `fieldPermissions` into a stored cc/start/end/condition/parallel node's config (see the switch
-    // below), so no LEGITIMATELY published graph can carry one — but a defensively-constructed or
-    // hand-edited stored graph must still tolerate-and-drop rather than fail dispatch, so an in-flight
-    // instance is never made undispatchable (§2.1 widen-only rule; D-1 / OD-L7-4).
+    // (docs/development/approval-lock7-field-edit-enforcement-20260817.md §2.7 D-1) — a PRESENT
+    // `fieldPermissions` key (any shape, not just an array of entries) on a node type with NO
+    // field-permission surface is REJECTED here, not the shipped SILENT drop. The switch below
+    // rebuilds cc/parallel/condition from a per-type whitelist and sends start/end to
+    // `default: config = {}`, so ANY `fieldPermissions` value was previously dropped with no error and
+    // no effect — an author configuring it believed the field hidden/read-only/protected when it was
+    // not. P4-B originally closed only the `editable` arm (the load-bearing privilege-escalation
+    // half); this closes the `readonly`/`hidden` arm D-1 left open, per OD-L7-4's ratified boundary:
+    // field permissions belong to approval + handler node types ONLY — every OTHER access value on
+    // these types is equally unsupported, not just `editable`.
+    //
+    // The guard is `!== undefined` on the RAW key, not `Array.isArray(...) && length > 0`: a
+    // non-array shape (an object, a string, `null`) is exactly the same silent-loss class D-1 names —
+    // it is not an array, so the switch below drops it unconditionally too, and
+    // `normalizeNodeFieldPermissions` hard-400s the identical shape on an approval/handler node
+    // (`must be an array`), so tolerating it here would leave a type-asymmetric residual channel.
+    // Deliberately NOT `'fieldPermissions' in node.config`: `in` is true for a key explicitly present
+    // with value `undefined`, and `publishTemplate` re-normalizes an ALREADY-NORMALIZED graph (whose
+    // spread may carry an explicit `undefined`), so `in` would 400 a legitimate republish.
+    //
+    // An EMPTY array IS tolerated (OD-L7-9 absent/empty ≡ no permissions) — a conservative default,
+    // not an FE-compat requirement: no live authoring surface actually sends `fieldPermissions: []`
+    // on any of these five node types (the linear editor's `fieldPermissions: []` step-draft default
+    // is for APPROVAL steps only, a type this guard exempts, and `approvalNodeEdit.ts` deletes an
+    // empty array before emitting even there; the cc/condition/parallel edit models never carry the
+    // key at all). Tolerating `[]` costs nothing and matches the shipped omit-when-empty convention
+    // used throughout this file (`normalizeNodeFieldPermissions` itself returns `undefined` for `[]`).
+    //
+    // Gated OFF for the dispatch re-normalize (STORED_RUNTIME_CONTEXT): the normalizer has NEVER
+    // copied `fieldPermissions` into a stored cc/start/end/condition/parallel node's config (see the
+    // switch below), so no LEGITIMATELY published graph can carry one — but a defensively-constructed
+    // or hand-edited stored graph must still tolerate-and-drop rather than fail dispatch, so an
+    // in-flight instance is never made undispatchable (§2.1 widen-only rule; D-1 / OD-L7-4).
     if (node.type !== 'approval' && node.type !== 'handler' && context !== STORED_RUNTIME_CONTEXT) {
       const rawPermissions = (node.config as { fieldPermissions?: unknown }).fieldPermissions
-      if (Array.isArray(rawPermissions) && rawPermissions.length > 0) {
+      const isTolerableEmptyArray = Array.isArray(rawPermissions) && rawPermissions.length === 0
+      if (rawPermissions !== undefined && !isTolerableEmptyArray) {
         throw new ServiceError(
           `approvalGraph.nodes[${index}].config.fieldPermissions is not supported on a ${node.type} node; field permissions apply to approval and handler nodes only (Lock-7 D-1 / OD-L7-4)`,
           400,
