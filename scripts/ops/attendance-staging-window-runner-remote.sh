@@ -2405,7 +2405,7 @@ action_soak_status() {
   soak_status_scalar "[Q1]_clean_punch_total_cumulative" \
     "SELECT (SELECT count(DISTINCT op.operation_id) FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal')) + (SELECT count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now());" >/dev/null
   soak_status_rows "[Q2] per-org clean punches (cumulative; BOTH regimes; weakest org first)" \
-    "SELECT org_id, sum(cnt)::int AS clean_punch_count FROM ( SELECT c.org_id, count(DISTINCT op.operation_id) AS cnt FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id UNION ALL SELECT r.org_id, count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now() GROUP BY r.org_id ) both_regimes GROUP BY org_id ORDER BY clean_punch_count ASC;"
+    "SELECT target.org_id, COALESCE(sum(cnt), 0)::int AS clean_punch_count FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN ( SELECT c.org_id, count(DISTINCT op.operation_id) AS cnt FROM attendance_result_operations op JOIN attendance_record_calculations c ON c.org_id = op.org_id AND c.operation_id = op.operation_id WHERE op.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND op.entrypoint = 'live_punch' AND op.state = 'completed' AND op.created_at >= '${window_start}'::timestamptz AND op.created_at < now() AND c.calculation_kind = 'calculation' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal') GROUP BY c.org_id UNION ALL SELECT r.org_id, count(*) FROM attendance_records r WHERE r.org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND NOT EXISTS (SELECT 1 FROM attendance_calculation_rollout_state s WHERE s.org_id = r.org_id AND s.state <> 'legacy') AND EXISTS (SELECT 1 FROM users u WHERE u.id = r.user_id AND u.username LIKE '${SOAK_USER_PREFIX}%') AND r.first_in_at IS NOT NULL AND r.last_out_at IS NOT NULL AND r.created_at >= '${window_start}'::timestamptz AND r.created_at < now() GROUP BY r.org_id ) both_regimes ON both_regimes.org_id = target.org_id GROUP BY target.org_id ORDER BY clean_punch_count ASC;"
   soak_status_rows "[Q3] org/posture classification (three-posture buckets; investigate any 'unclassified')" \
     "SELECT target.org_id, COALESCE(w4.state, 'legacy') AS w4_posture, COALESCE(w7.state, 'off') AS w7_posture, CASE WHEN COALESCE(w4.state,'legacy') = 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'legacy_only' WHEN COALESCE(w4.state,'legacy') <> 'legacy' AND COALESCE(w7.state,'off') = 'off' THEN 'w4_only_legacy_arm' WHEN COALESCE(w7.state,'off') IN ('group_shadow','group_eligible','group_authoritative') THEN 'both_machines_group_arm' WHEN COALESCE(w7.state,'off') = 'suspended' THEN 'w7_suspended' ELSE 'unclassified' END AS soak_posture_bucket FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id ORDER BY soak_posture_bucket, target.org_id;"
   soak_status_scalar "[Q4a]_w4_legacy_arm_clean_punches_cumulative" \
@@ -2436,11 +2436,28 @@ action_soak_status() {
   for org in "$SOAK_ORG1" "$SOAK_ORG2" "$SOAK_ORG3"; do
     ctrl_state="$(soak_psql_ta "SELECT COALESCE((SELECT state FROM attendance_calculation_rollout_state WHERE org_id = '${org}'), 'legacy');")"
     if [[ "$ctrl_state" == "legacy" ]]; then
+      # Byte-neutrality = the W4 CALCULATION machinery never touched the org. An operation
+      # row with accepted_write_posture='legacy_projection_only' is the RULED ledger of a
+      # legacy write (boundary seals one per punch, resolved_calculation_id NULL, zero calc
+      # rows — pinned by attendance-w4c2-live-scheduled-boundary.db.test.ts) and is NOT
+      # contamination; #4975 gate P1 reproduced 60 such rows on the control org. Count calc
+      # rows plus only NON-legacy-posture ops (NULL posture is anomalous => counted).
       ctrl_rows="$(soak_status_scalar "[Q2b]_legacy_control_w4_rows_${org:0:8}" \
-        "SELECT (SELECT count(*) FROM attendance_record_calculations WHERE org_id = '${org}') + (SELECT count(*) FROM attendance_result_operations WHERE org_id = '${org}');")"
+        "SELECT (SELECT count(*) FROM attendance_record_calculations WHERE org_id = '${org}') + (SELECT count(*) FROM attendance_result_operations WHERE org_id = '${org}' AND COALESCE(accepted_write_posture, '') <> 'legacy_projection_only');")"
       [[ "$ctrl_rows" == "0" ]] || alerts+=("Q2b_legacy_control_w4_rows_${org:0:8}=${ctrl_rows}")
     fi
   done
+
+  # --- [Q3b] posture-constancy guard (#4975 gate P2-2): the dual-regime counters assume
+  # each config org's posture is CONSTANT in-window (walks are seed-time acts). A W4 row in
+  # state 'legacy' with a non-NULL prior_state is a ROLLBACK (shadow->legacy is a legal
+  # transition) — its history double-counts and Q2b false-alarms; any state outside this
+  # soak's plan (legacy|shadow) — e.g. 'suspended' — makes the org invisible to BOTH
+  # regimes. Either voids the counting assumptions => mechanical alert.
+  local pc_bad
+  pc_bad="$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') AND (state NOT IN ('legacy','shadow') OR (state = 'legacy' AND prior_state IS NOT NULL));")"
+  echo "[Q3b]_posture_constancy_violations=${pc_bad}" >> "$SOAK_STATUS_FILE"
+  [[ "$pc_bad" == "0" ]] || alerts+=("Q3b_posture_constancy_violations=${pc_bad}")
 
   # --- per-org read set ------------------------------------------------------------------
   local org8

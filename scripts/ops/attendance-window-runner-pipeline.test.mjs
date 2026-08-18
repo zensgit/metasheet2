@@ -1104,7 +1104,10 @@ function assertSoakContract({ remote, workflow }) {
     'a legacy-postured config org with ANY W4 calc/operation row must raise a mechanical alert',
   )
   const q1Idx = slices.status.indexOf('[Q1]_clean_punch_total_cumulative')
-  const q1Sql = slices.status.slice(q1Idx, slices.status.indexOf('>/dev/null', q1Idx))
+  // #4975 gate P2-3: the slice ends at the NEXT Q-label, never at a redirection token — a
+  // dropped `>/dev/null` widened the old slice across [Q2] and satisfied Q1's regexes
+  // vacuously while the suite stayed green.
+  const q1Sql = slices.status.slice(q1Idx, slices.status.indexOf('[Q2]', q1Idx))
   assert.match(
     q1Sql,
     /\+ \(SELECT count\(\*\) FROM attendance_records r WHERE r\.org_id IN/,
@@ -1121,11 +1124,51 @@ function assertSoakContract({ remote, workflow }) {
     'the legacy clean unit is the COMPLETED PAIR DAY — mirroring the W4 sideʼs converged unit',
   )
   const q2Idx = slices.status.indexOf('[Q2] per-org clean punches')
-  const q2Sql = slices.status.slice(q2Idx, slices.status.indexOf('ORDER BY clean_punch_count ASC', q2Idx))
+  const q2Sql = slices.status.slice(q2Idx, slices.status.indexOf('[Q3]', q2Idx))
   assert.match(q2Sql, /UNION ALL/, '[Q2] must union both regimes so every config org can appear')
+  // #4975 gate P2-1: [Q2] must be closed-set LEFT JOINed so a zero-count config org still
+  // appears as a row (omit-on-zero hid exactly the org the criteria need to see).
+  assert.match(
+    q2Sql,
+    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\) LEFT JOIN/,
+    '[Q2] must LEFT JOIN the config closed set — every config org appears even at zero',
+  )
+  assert.match(
+    q2Sql,
+    /UNION ALL SELECT r\.org_id, count\(\*\) FROM attendance_records r/,
+    '[Q2]ʼs legacy branch must COUNT real rows, never a constant',
+  )
+  // #4975 gate P2-4: the legacy addendʼs WINDOW scope is load-bearing (an unscoped count
+  // would import pre-window history into C1/C2).
+  assert.match(
+    q1Sql,
+    /r\.created_at >= '\$\{window_start\}'::timestamptz AND r\.created_at < now\(\)/,
+    'the legacy addend must be window-scoped',
+  )
+  // #4975 gate P1: Q2b must count calc rows plus only NON-legacy-posture operations — a
+  // legacy_projection_only op row is the RULED ledger of a legacy write, not contamination
+  // (the gate reproduced 60 such rows on the control org; the naive form would hard-fail
+  // every future soak-status on correct behavior).
+  assert.ok(
+    slices.status.includes("COALESCE(accepted_write_posture, '') <> 'legacy_projection_only'"),
+    'Q2b must exclude the ruled legacy_projection_only operation ledger from the contamination count',
+  )
+  assert.ok(
+    slices.status.includes('[Q3b]_posture_constancy_violations'),
+    'the posture-constancy guard must exist (a rollback or out-of-plan posture voids the dual-regime counters)',
+  )
   assert.match(
     slices.status,
-    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\)/,
+    /state NOT IN \('legacy','shadow'\) OR \(state = 'legacy' AND prior_state IS NOT NULL\)/,
+    'Q3b must catch BOTH the rolled-back shape and out-of-plan states',
+  )
+  assert.ok(
+    slices.status.includes('alerts+=("Q3b_posture_constancy_violations'),
+    'a posture-constancy violation must raise a mechanical alert',
+  )
+  assert.match(
+    slices.status,
+    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\) LEFT JOIN attendance_calculation_rollout_state w4/,
     '[Q3] universe must be the config closed set — a posture-derived universe structurally omits the legacy control org',
   )
   assert.ok(slices.status.includes("'group_effective'"), 'W7-2 counters must scope on the selector discriminator')
@@ -1274,11 +1317,12 @@ test('MUTATION (legacy control): dropping the legacy-regime addend from [Q1] tur
 
 test('MUTATION (legacy control): reverting [Q3] to the posture-derived universe turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
-  const anchor = "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id)"
-  assert.ok(original.includes(anchor), 'mutation anchor must hit the closed-set universe')
+  // Anchor includes Q3's own LEFT JOIN target so it cannot hit [Q2]'s closed-set join.
+  const anchor = "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4"
+  assert.ok(original.includes(anchor), 'mutation anchor must hit the Q3 closed-set universe')
   const mutated = original.replace(
     anchor,
-    'FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target',
+    'FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4',
   )
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
