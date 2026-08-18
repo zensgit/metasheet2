@@ -600,6 +600,7 @@
                 <el-option label="连续多级部门负责人" value="continuous_dept_heads" />
                 <el-option label="指定层级部门负责人" value="dept_head_at_level" />
                 <el-option label="节点审批人" value="prior_node_approver" />
+                <el-option label="用户组" value="user_group" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -668,6 +669,33 @@
                   :value="option.localId"
                 />
               </el-select>
+            </el-form-item>
+            <!-- Lock-1 §K1 (用户组) linear authoring: a TYPED multi-select restricted to groups
+                 BOUND to the template's org (never a free-text/raw-id input). Same picker source
+                 as the canvas sub-form (directory.memberGroups). -->
+            <el-form-item v-if="step.sourceKind === 'user_group'" label="选择用户组">
+              <el-select
+                v-model="step.groupIds"
+                multiple
+                filterable
+                :disabled="readOnly"
+                :loading="directory.memberGroupsLoading.value"
+                class="ms-w-100pct"
+                placeholder="选择已绑定的用户组"
+                data-testid="approval-step-group-picker"
+              >
+                <el-option
+                  v-for="group in directory.memberGroups.value"
+                  :key="group.id"
+                  :label="directory.formatMemberGroupLabel(group)"
+                  :value="group.id"
+                />
+              </el-select>
+              <p
+                v-if="!readOnly && directory.memberGroups.value.length === 0 && !directory.memberGroupsLoading.value"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-group-empty"
+              >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
               <el-select
@@ -2409,7 +2437,10 @@ function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): Approva
                   // Lock-1 §K3: '' = not yet chosen — invalid to save until the typed picker
                   // selects a legal upstream node (never silently defaulted to one).
                   : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
-                    : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+                    // Lock-1 §K1: '' = no group selected yet — invalid to save until the typed
+                    // bound-group picker selects ≥1 (never silently defaulted to one).
+                    : kind === 'user_group' ? { kind, groupIds: [] }
+                      : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 function setApprovalSourceKind(nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind): void {
   const cacheKey = approvalSourceKindCacheKey(nodeKey, sourceIndex)
@@ -2428,6 +2459,17 @@ function approvalSourceIds(nodeKey: string, sourceIndex: number): string[] {
   if (source?.kind === 'static_user') return source.userIds
   if (source?.kind === 'static_role') return source.roleIds
   return []
+}
+// Lock-1 §K1 — the user_group source's DEDICATED id carrier (separate from approvalSourceIds
+// above, which is hardcoded to static_user/static_role's userIds/roleIds shape).
+function approvalSourceGroupIds(nodeKey: string, sourceIndex: number): string[] {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  return source?.kind === 'user_group' ? source.groupIds : []
+}
+function setApprovalSourceGroupIds(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  if (source?.kind !== 'user_group') return
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'user_group', groupIds: [...ids] })
 }
 // G-5 sentinel hint: true when THIS card is a static_role still carrying the starter-preset
 // placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
@@ -3180,6 +3222,9 @@ function syncStepOptions(step: ApprovalStepDraft): void {
     } else if (step.requesterChoiceScopeType === 'role') {
       for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
     }
+  } else if (step.sourceKind === 'user_group') {
+    // Lock-1 §K1: keep an authored group id visible even if it fell off the CURRENT bound page.
+    for (const id of step.groupIds) directory.ensureMemberGroupOptionVisible(id)
   }
 }
 
@@ -3206,6 +3251,10 @@ function syncApprovalNodeOptions(nodeKey: string): void {
       } else if (source.scope.type === 'role') {
         for (const id of source.scope.roleIds) directory.ensureRoleOptionVisible(id)
       }
+    } else if (kind === 'user_group') {
+      // Lock-1 §K1: keep an authored group id visible even if it fell off the CURRENT bound
+      // page (e.g. a stale unbind mid-edit) — same placeholder-synthesis posture as above.
+      for (const id of approvalSourceGroupIds(nodeKey, sourceIndex)) directory.ensureMemberGroupOptionVisible(id)
     }
   })
 }
@@ -3272,6 +3321,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   syncApprovalNodeOptions,
   approvalSourceIds,
   setApprovalSourceIdsFromPicker,
+  // Lock-1 §K1: the user_group source's dedicated id carrier.
+  approvalSourceGroupIds,
+  setApprovalSourceGroupIds,
   setCcTargetIds,
   syncCcOptions,
   approvalSourceFieldId,
@@ -3315,6 +3367,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   directoryUsersLoading: directory.usersLoading,
   directoryRoles: directory.roles,
   formulaRoles: directory.formulaRoles,
+  // Lock-1 §K1: org-scoped bound-group picker options + loading flag + label formatter.
+  memberGroupOptions: directory.memberGroups,
+  memberGroupOptionsLoading: directory.memberGroupsLoading,
+  formatMemberGroupLabel: directory.formatMemberGroupLabel,
   formatUserLabel: directoryUserDisplayLabel,
   formatRoleLabel: directoryRoleDisplayLabel,
 }
@@ -3922,6 +3978,8 @@ onMounted(() => {
   if (!canManageTemplates.value) return
   void directory.loadRoles()
   void directory.loadFormulaRoles()
+  // Lock-1 §K1: org-scoped bound-group picker options.
+  void directory.loadMemberGroups()
   void loadTemplateForEdit()
   window.addEventListener('resize', syncCanvasViewportState)
 })

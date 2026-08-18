@@ -70,6 +70,11 @@ describe('assigneeSourceSummary (single source)', () => {
       .toBe('节点审批人（引用节点 approval_1）')
   })
 
+  it('user_group: joins groupIds with 、, falls back to （无） when empty (Lock-1 §K1)', () => {
+    expect(assigneeSourceSummary({ kind: 'user_group', groupIds: ['grp-1', 'grp-2'] })).toBe('用户组：grp-1、grp-2')
+    expect(assigneeSourceSummary({ kind: 'user_group', groupIds: [] })).toBe('用户组：（无）')
+  })
+
   // Lock-1 §2.5 item 5: the old `JSON.stringify(source)` default leaked raw config (raw IDs
   // included) into an ordinary-user surface — a defect, not a precedent. The default is now a
   // VALUES-FREE fixed label. G-16's "no JSON.stringify fallback reaches any surface" half.

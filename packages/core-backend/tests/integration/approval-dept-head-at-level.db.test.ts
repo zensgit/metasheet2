@@ -25,7 +25,7 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  * Proves:
  *  G-1      level validated byte-identically to manager_at_level: out-of-range / non-integer /
  *           missing 400s; a valid shape saves in the same fixture (positive control);
- *  G-2      a contract-unimplemented kind (user_group) is rejected at authoring, never persisted;
+ *  G-2      a contract-unimplemented kind is rejected at authoring, never persisted;
  *  core     dept_head_at_level level=2 resolves EXACTLY HEAD3 — the SAME entry
  *           continuous_dept_heads levels=2 slices to at position [1] — proving the read is
  *           POSITIONAL over the dense chain (level 2 = the second RESOLVED head, walking through
@@ -275,9 +275,12 @@ describeIfDatabase('Lock-1 §K5-b dept_head_at_level — real-DB create/freeze/d
   })
 
   // ── G-2 — not-yet-implemented is not inert ───────────────────────────────────────────────────
-  it('G-2: a contract-unimplemented kind (user_group / K1, not landed at this baseline) is rejected at authoring, never persisted', async () => {
+  // `user_group` (Lock-1 §K1) landed since (its own approval-realdb-k1 job) — swapped to a kind
+  // genuinely undeclared anywhere in the union so this arm keeps exercising the SAME default-arm
+  // rejection mechanism rather than the (now-implemented) K1 create path.
+  it('G-2: a contract-unimplemented kind is rejected at authoring, never persisted', async () => {
     const graph = headGraph(1) as { nodes: Array<{ config: { assigneeSources?: unknown[] } }> }
-    graph.nodes[2].config.assigneeSources = [{ kind: 'user_group', groupIds: ['g1'] }]
+    graph.nodes[2].config.assigneeSources = [{ kind: 'not_a_real_kind', groupIds: ['g1'] }]
     const key = `dhal-${TS}-g2-unimplemented`
     const res = await req(base, '/api/approval-templates', reqTok, {
       method: 'POST',

@@ -35,6 +35,9 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
     // runtime, so the summary names the referenced node key (a template-authored identifier,
     // §2.6-permitted — never a person id).
     case 'prior_node_approver': return `节点审批人（引用节点 ${source.nodeKey}）`
+    // Lock-1 §K1: same raw-id-join posture as static_user/static_role above (group ids are
+    // template-authored config, not group MEMBERSHIP — §2.6 permits the reference itself).
+    case 'user_group': return `用户组：${source.groupIds.join('、') || '（无）'}`
     // Lock-1 §2.5 item 5: values-free fallback. The previous `JSON.stringify(source)` default
     // leaked raw config (including raw IDs) into an ordinary-user surface for any kind this
     // switch does not know — a defect, not a precedent, per the ratified lock. An unknown kind

@@ -297,6 +297,13 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
     case 'direct_manager':
     case 'dept_head':
       return true
+    // Lock-1 §K1 PREVIEW (backend normalizeApprovalAssigneeSources stays the arbiter): a
+    // non-empty groupIds array. Whether each referenced id is a REAL group bound to the
+    // publishing org is the backend PUBLISH gate's job (`assertUserGroupSourcesBoundToOrg`); the
+    // FE picker only OFFERS bound candidates, so this shape check plus the picker keep authoring
+    // honest without relaxing the backend arbiter (same posture as prior_node_approver above).
+    case 'user_group':
+      return source.groupIds.some((id) => id.trim().length > 0)
     default:
       return false
   }

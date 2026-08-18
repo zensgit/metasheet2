@@ -664,6 +664,40 @@
             data-testid="approval-node-source-prior-node-empty"
           >当前节点上游没有可引用的审批节点（引用目标必须位于每条可达路径的上游）</p>
         </el-form-item>
+        <!-- Lock-1 §K1 (用户组) authoring sub-form: a TYPED multi-select restricted to groups
+             BOUND to the template's org (D0 §10.2 — never a free-text/raw-id input). A group
+             outside the binding fails publish (values-free 400), never at dispatch; the picker
+             only OFFERS bound candidates so authoring stays honest without relaxing the backend
+             arbiter (`assertUserGroupSourcesBoundToOrg`). -->
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'user_group'"
+          label="选择用户组"
+        >
+          <el-select
+            :model-value="approvalSourceGroupIds(node.key, sourceIndex)"
+            multiple
+            filterable
+            size="small"
+            :disabled="readOnly"
+            :loading="memberGroupOptionsLoading"
+            class="ms-w-360"
+            placeholder="选择已绑定的用户组"
+            data-testid="approval-node-source-group-picker"
+            @update:model-value="(ids: string[]) => setApprovalSourceGroupIds(node.key, sourceIndex, ids)"
+          >
+            <el-option
+              v-for="group in memberGroupOptions"
+              :key="group.id"
+              :label="formatMemberGroupLabel(group)"
+              :value="group.id"
+            />
+          </el-select>
+          <p
+            v-if="!readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-source-group-empty"
+          >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
+        </el-form-item>
         <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
              so the admin replaces it before publish (rather than hitting the publish-time 400).
              P1-B: scoped to THIS card's own source, not the node-wide aggregate — a node with N
@@ -1144,6 +1178,9 @@ const directoryUsers = computed(() => unwrap(api.directoryUsers))
 const directoryUsersLoading = computed(() => Boolean(unwrap(api.directoryUsersLoading)))
 const directoryRoles = computed(() => unwrap(api.directoryRoles))
 const formulaRoles = computed(() => unwrap(api.formulaRoles))
+// Lock-1 §K1: org-scoped bound-group picker options + loading flag.
+const memberGroupOptions = computed(() => unwrap(api.memberGroupOptions))
+const memberGroupOptionsLoading = computed(() => Boolean(unwrap(api.memberGroupOptionsLoading)))
 
 const conditionEditFor = api.conditionEditFor
 const parallelEditFor = api.parallelEditFor
@@ -1175,6 +1212,9 @@ const setApprovalSourceKind = api.setApprovalSourceKind
 const syncApprovalNodeOptions = api.syncApprovalNodeOptions
 const approvalSourceIds = api.approvalSourceIds
 const setApprovalSourceIdsFromPicker = api.setApprovalSourceIdsFromPicker
+// Lock-1 §K1: the user_group source's dedicated id carrier.
+const approvalSourceGroupIds = api.approvalSourceGroupIds
+const setApprovalSourceGroupIds = api.setApprovalSourceGroupIds
 const approvalSourceFieldId = api.approvalSourceFieldId
 const setApprovalSourceFieldId = api.setApprovalSourceFieldId
 const approvalSourceLevel = api.approvalSourceLevel
@@ -1223,6 +1263,7 @@ const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel
 const formatRoleLabel = api.formatRoleLabel
+const formatMemberGroupLabel = api.formatMemberGroupLabel
 // L0-6/D5 — wired: `TemplateAuthoringView.vue` provides its graph-wide `routingDriverFieldIds`
 // computed here (see nodeConfigEditorContext.ts's doc comment for why it must union the linear
 // `draft.steps` model with the graph `draft.approvalNodeEdits` model). Falls back to an empty set

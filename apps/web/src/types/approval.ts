@@ -18,7 +18,7 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group'
 // P1-C (approval-parity-master-design-lock-20260817.md §P1-C / M6): 'threshold' is the shipped
 // ENGINE 4th mode (N-of-M / 门槛会签, ApprovalGraphExecutor.ts `normalizeApprovalMode`) — this type
 // was FE-unexposed until this slice. Byte-mirrors backend packages/core-backend/src/types/
@@ -292,6 +292,16 @@ export type ApprovalAssigneeSource =
    * (`legalPriorApproverNodeKeys`), never a free-text key input.
    */
   | { kind: 'prior_node_approver'; nodeKey: string }
+  /**
+   * Lock-1 §K1 — 用户组 (user group). Byte-mirrors the backend union member: `groupIds` is a
+   * non-empty array of `platform_member_groups` ids, EAGER_EXPANSION-frozen into the requester
+   * snapshot at create (membership changes after create do NOT reach an in-flight instance). The
+   * authoring picker is a TYPED multi-select restricted to groups bound to the template's org
+   * (`/api/approval-templates/directory/member-groups?orgId=`) — never a free-text/raw-id input; a
+   * group outside the binding fails publish (values-free 400), never at dispatch. Cc-as-recipient
+   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
+   */
+  | { kind: 'user_group'; groupIds: string[] }
 
 export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 

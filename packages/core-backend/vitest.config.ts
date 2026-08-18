@@ -356,6 +356,14 @@ export default defineConfig({
       // sentinel) — plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both
       // points land in the SAME commit.
       'tests/integration/approval-prior-node-approver.db.test.ts',
+      // Lock-1 §K1 user_group real-DB acceptance (G-1/G-5/G-6/G-7/G-17/G-18, curated bind/unbind
+      // path, picker org-scoping, empty-group fail-closed/auto-approve). DATABASE_URL-gated;
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by
+      // the SAME dedicated .github/workflows/approval-realdb-acceptance.yml workflow (sibling job
+      // approval-realdb-k1, EXPECT_DB=1 arming the top-level anti-skip sentinel) —
+      // plugin-tests.yml stays byte-identical (s6a pin). Two-point wiring — both points land in
+      // the SAME commit.
+      'tests/integration/approval-user-group.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',

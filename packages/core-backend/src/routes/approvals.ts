@@ -10,9 +10,13 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
-import { pool } from '../db/pg'
+import { pool, query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+// Lock-1 §K1 fix-round P1 — the curated bind/unbind path is gated STRICTER than the rest of this
+// picker seam (see the route's own doc comment). Reuses the SAME `ensurePlatformAdmin` the
+// mirrored `scope-templates/:templateId/member-groups/:action` route uses.
+import { ensurePlatformAdmin } from './admin-users'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
@@ -45,6 +49,9 @@ import {
   listDirectoryRoles,
   listFormulaConditionRoles,
   fetchCuratedApprovalRoleIds,
+  listBoundMemberGroups,
+  bindApprovalUsableMemberGroup,
+  unbindApprovalUsableMemberGroup,
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
@@ -426,6 +433,75 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Lock-1 §K1 / OD-L1-2(a) — the `user_group` authoring PICKER: `orgId`-partitioned listing of
+  // groups CURATED (bound) for approval use — id + name + member COUNT only, never the member
+  // list itself (values-free re: member identity). Convenience only, same split as
+  // /directory/formula-roles vs. the publish hard gate: the actual curation boundary is
+  // `assertUserGroupSourcesBoundToOrg` + `ensurePlatformAdmin`-gated bind, independent of this
+  // route. `orgId` is REQUIRED (never an accidental unscoped view) but is a CALLER-SUPPLIED
+  // partition key, not an identity check — same guard as the shipped user/role lookups (§2.5), NOT
+  // a per-namespace authorization boundary (this codebase has no org-identity resolution to build
+  // one on; see the fix-round G-6 erratum).
+  r.get('/api/approval-templates/directory/member-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_ORG_ID_REQUIRED', 'orgId is required'))
+      }
+      const groups = await listBoundMemberGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_MEMBER_GROUPS_FAILED', 'Failed to list bound member groups')
+    }
+  })
+
+  // Lock-1 §K1 / OD-L1-2(a) — THE CURATED PATH: the only sanctioned way to add/remove an
+  // `(org_id, group_id)` binding row. Gated by `ensurePlatformAdmin` — DELIBERATELY STRONGER than
+  // the picker GET above and every other `/directory/*` route on this seam. Curation is the
+  // control OD-L1-2(a) names ("curated per-org binding table"): the whole point of a curated
+  // vocabulary is that the constrained principal (a template author, `approval-templates:manage`)
+  // cannot self-expand their own routing reach to a member set they cannot even enumerate — the
+  // picker returns id/name/memberCount only, never the roster. `approvalTemplateAdminGuard` is the
+  // SAME permission `/publish` requires and this repo deliberately admits non-admin authors under
+  // it, so gating bind/unbind there would make curation self-service for the exact principal it
+  // exists to constrain (mirrors the shipped `scope-templates/:templateId/member-groups/
+  // :action(assign|unassign)` admin pattern at routes/admin-users.ts:2383, whose first statement is
+  // `ensurePlatformAdmin` — as is EVERY other `platform_member_groups` write/list surface in this
+  // codebase; RA-1b's own named precedent, `roles.approval_usable`, has NO API write path at all).
+  // `groupId` existence is verified BEFORE bind so a dangling reference surfaces as a clean 404,
+  // never a raw FK-violation 500.
+  r.post('/api/approval-templates/directory/member-groups/:action(bind|unbind)', authenticate, async (req: Request, res: Response) => {
+    try {
+      const adminUserId = await ensurePlatformAdmin(req, res)
+      if (!adminUserId) return
+      const action = req.params.action
+      const orgId = String(req.body?.orgId || '').trim()
+      const groupId = String(req.body?.groupId || '').trim()
+      if (!orgId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_ORG_ID_REQUIRED', 'orgId is required'))
+      }
+      if (!groupId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      const groupExists = await query<{ id: string }>(
+        'SELECT id FROM platform_member_groups WHERE id = $1 LIMIT 1',
+        [groupId],
+      )
+      if (!groupExists.rows.length) {
+        return res.status(404).json(approvalErrorResponse('PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found'))
+      }
+      if (action === 'bind') {
+        await bindApprovalUsableMemberGroup(orgId, groupId, adminUserId)
+      } else {
+        await unbindApprovalUsableMemberGroup(orgId, groupId)
+      }
+      const groups = await listBoundMemberGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_MEMBER_GROUP_BIND_FAILED', 'Failed to update member group binding')
+    }
+  })
+
   // FC-4 — approval-specific formula-condition dry-run. This intentionally uses the
   // exact approval evaluator from publish/execution and stays separate from the
   // sheet-scoped multitable formula dry-run API.
@@ -675,6 +751,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         note: req.body?.note,
         // FWB-0 Layer 2: publisher identity for record-link target sheet read authorization.
         actorUserId: actorUserId ?? null,
+        // Lock-1 §K1 / OD-L1-2(a) — optional; the service normalizes blank/absent to DEFAULT_ORG_ID.
+        orgId: typeof req.body?.orgId === 'string' ? req.body.orgId : null,
       })
       res.json(version)
     } catch (error) {

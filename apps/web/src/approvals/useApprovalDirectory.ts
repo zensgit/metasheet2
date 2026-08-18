@@ -32,6 +32,14 @@ export interface DirectoryRoleOption {
   name: string
 }
 
+/** Lock-1 §K1 — the `user_group` authoring picker option: id + name + member COUNT only, never
+ *  the member list itself (values-free — mirrors DirectoryMemberGroupOption on the backend seam). */
+export interface DirectoryMemberGroupOption {
+  id: string
+  name: string
+  memberCount: number
+}
+
 export interface UseApprovalDirectoryOptions {
   apiFetch?: ApiFetchFn
 }
@@ -40,6 +48,13 @@ const FORBIDDEN_MESSAGE = '需要 approval-templates:manage 权限'
 const USERS_FAILED_MESSAGE = '加载用户目录失败'
 const ROLES_FAILED_MESSAGE = '加载角色目录失败'
 const FORMULA_ROLES_FAILED_MESSAGE = '加载审批可用角色失败'
+const MEMBER_GROUPS_FAILED_MESSAGE = '加载已绑定用户组失败'
+// Lock-1 §K1 / OD-L1-2(a) — single-tenant default org bucket, byte-mirroring the backend's
+// `DEFAULT_ORG_ID = 'default'` (ApprovalProductService.ts). This authoring surface has no
+// per-template org selector (no `orgs` table exists anywhere in this codebase — see the design
+// lock's org-boundary analysis), so the picker and the publish request both default to the SAME
+// bucket; a future per-template org selector would thread a real value through both call sites.
+const DEFAULT_ORG_ID = 'default'
 
 async function readJson(response: Response): Promise<Record<string, unknown> | null> {
   try {
@@ -79,6 +94,23 @@ function asRoleOptions(value: unknown): DirectoryRoleOption[] {
   return options
 }
 
+function asMemberGroupOptions(value: unknown): DirectoryMemberGroupOption[] {
+  if (!Array.isArray(value)) return []
+  const options: DirectoryMemberGroupOption[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id : ''
+    if (!id) continue
+    options.push({
+      id,
+      name: typeof record.name === 'string' ? record.name : '',
+      memberCount: typeof record.memberCount === 'number' ? record.memberCount : 0,
+    })
+  }
+  return options
+}
+
 export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApprovalDirectoryOptions = {}) {
   const users = ref<DirectoryUserOption[]>([])
   const roles = ref<DirectoryRoleOption[]>([])
@@ -86,9 +118,13 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
   // condition — i.e. `approval_usable = true`. SEPARATE from `roles` (the static_role approver picker,
   // which intentionally lists ALL roles). Never merge the two — that boundary is the ratified scope.
   const formulaRoles = ref<DirectoryRoleOption[]>([])
+  // Lock-1 §K1 — groups CURATED (bound) for approval use in DEFAULT_ORG_ID. Separate from `roles`/
+  // `formulaRoles` (a different picker seam entirely: platform_member_groups, not roles).
+  const memberGroups = ref<DirectoryMemberGroupOption[]>([])
   const usersLoading = ref(false)
   const rolesLoading = ref(false)
   const formulaRolesLoading = ref(false)
+  const memberGroupsLoading = ref(false)
   const statusMessage = ref('')
 
   async function searchUsers(q: string): Promise<void> {
@@ -170,6 +206,30 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
     }
   }
 
+  // Lock-1 §K1 — org-scoped listing of groups bound to DEFAULT_ORG_ID (picker convenience; the
+  // publish HARD GATE, not this call, is the actual boundary). Mirrors loadFormulaRoles exactly.
+  async function loadMemberGroups(): Promise<void> {
+    memberGroupsLoading.value = true
+    statusMessage.value = ''
+    try {
+      const response = await apiFetch(`/api/approval-templates/directory/member-groups?orgId=${encodeURIComponent(DEFAULT_ORG_ID)}`)
+      if (response.status === 403) {
+        memberGroups.value = []
+        statusMessage.value = FORBIDDEN_MESSAGE
+        return
+      }
+      const data = await readJson(response)
+      if (!response.ok || !data) {
+        throw new Error(MEMBER_GROUPS_FAILED_MESSAGE)
+      }
+      memberGroups.value = asMemberGroupOptions(data.groups)
+    } catch (error: unknown) {
+      statusMessage.value = error instanceof Error && error.message ? error.message : MEMBER_GROUPS_FAILED_MESSAGE
+    } finally {
+      memberGroupsLoading.value = false
+    }
+  }
+
   // Synthesize a placeholder option so an id present in idsText but absent from the fetched
   // page still renders as a selectable chip (no silent drop of pre-existing / free-text ids).
   function ensureUserOptionVisible(id: string): void {
@@ -186,6 +246,16 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
     roles.value = [{ id: normalized, name: '' }, ...roles.value]
   }
 
+  // Lock-1 §K1 — same placeholder-synthesis posture as ensureRoleOptionVisible; a bound group id
+  // authored before the CURRENT picker page loaded it (or a stale/mid-mutation UI) still renders
+  // as a selectable chip. memberCount unknown for a synthesized entry (0, not fabricated).
+  function ensureMemberGroupOptionVisible(id: string): void {
+    const normalized = id.trim()
+    if (!normalized) return
+    if (memberGroups.value.some((option) => option.id === normalized)) return
+    memberGroups.value = [{ id: normalized, name: '', memberCount: 0 }, ...memberGroups.value]
+  }
+
   function formatUserLabel(user: DirectoryUserOption): string {
     const primary = user.name.trim() || user.id
     const email = user.email.trim()
@@ -196,20 +266,30 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
     return role.name.trim() || role.id
   }
 
+  function formatMemberGroupLabel(group: DirectoryMemberGroupOption): string {
+    const primary = group.name.trim() || group.id
+    return `${primary}（${group.memberCount} 人）`
+  }
+
   return {
     users,
     roles,
     formulaRoles,
+    memberGroups,
     usersLoading,
     rolesLoading,
     formulaRolesLoading,
+    memberGroupsLoading,
     statusMessage,
     searchUsers,
     loadRoles,
     loadFormulaRoles,
+    loadMemberGroups,
     ensureUserOptionVisible,
     ensureRoleOptionVisible,
+    ensureMemberGroupOptionVisible,
     formatUserLabel,
     formatRoleLabel,
+    formatMemberGroupLabel,
   }
 }

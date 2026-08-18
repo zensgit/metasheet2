@@ -97,7 +97,9 @@ function defaultForKind(kind: ApprovalAssigneeSourceKind): ApprovalAssigneeSourc
                   // Lock-1 §K3: '' = not yet chosen — mirrors production's own comment: invalid
                   // to save until the typed picker selects a legal upstream node.
                   : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
-                    : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+                    // Lock-1 §K1: [] = no group selected yet — mirrors production's own comment.
+                    : kind === 'user_group' ? { kind, groupIds: [] }
+                      : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
 }
 
 const changeEventLog = ref<string[]>([])
@@ -162,6 +164,17 @@ const api: ApprovalNodeConfigEditorApi = {
     const source = sourceAt(key, sourceIndex)
     if (source?.kind === 'static_user') setSourceAt(key, sourceIndex, { ...source, userIds: ids })
     else if (source?.kind === 'static_role') setSourceAt(key, sourceIndex, { ...source, roleIds: ids })
+  },
+  // Lock-1 §K1 — the user_group source's dedicated id carrier (this harness has no user_group
+  // keyboard scenario, so a no-op setter + empty options is the honest fixture, same posture as
+  // the K3 upstream-node picker below).
+  approvalSourceGroupIds: (key, sourceIndex) => {
+    const source = sourceAt(key, sourceIndex)
+    return source?.kind === 'user_group' ? source.groupIds : []
+  },
+  setApprovalSourceGroupIds: (key, sourceIndex, ids) => {
+    const source = sourceAt(key, sourceIndex)
+    if (source?.kind === 'user_group') setSourceAt(key, sourceIndex, { ...source, groupIds: ids })
   },
   approvalSourceFieldId: (key, sourceIndex) => {
     const source = sourceAt(key, sourceIndex)
@@ -236,8 +249,13 @@ const api: ApprovalNodeConfigEditorApi = {
   directoryUsersLoading: false,
   directoryRoles: [{ id: 'legal' }],
   formulaRoles: [],
+  // Lock-1 §K1 — this harness has no user_group keyboard scenario; an empty options list + the
+  // same honest "not loading" posture as directoryUsersLoading above.
+  memberGroupOptions: [],
+  memberGroupOptionsLoading: false,
   formatUserLabel: (u) => u.name ?? u.id,
   formatRoleLabel: (r) => r.name ?? r.id,
+  formatMemberGroupLabel: (g) => g.name ?? g.id,
 }
 
 // Minimal native-element stand-ins for Element Plus (see file header) — same idiom as the jsdom
