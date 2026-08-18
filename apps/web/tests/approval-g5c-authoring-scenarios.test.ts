@@ -10,7 +10,6 @@ import {
   addFormField,
   applyFormCommands,
   moveFormFieldByOffset,
-  type CompleteFormIdentityHistory,
   type FormFieldIdentity,
 } from '../src/approvals/approvalFormCommands'
 import {
@@ -41,10 +40,6 @@ import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/appr
 
 const VIEW_PATH = join(__dirname, '../src/views/approval/TemplateAuthoringView.vue')
 
-function completeHistory(ids: string[]): CompleteFormIdentityHistory {
-  return { complete: true, persistentIds: ids, localIds: ids.map((id) => `local-${id}`) }
-}
-
 function identityFor(type: AuthorableFieldType, n: number): FormFieldIdentity {
   const base = {
     persistentId: `f_${type}_${n}`,
@@ -67,12 +62,12 @@ describe('G5-C S1 form authoring (real form commands)', () => {
     let draft = createEmptyTemplateDraft()
     // Start from empty field list for a clean matrix.
     draft = { ...draft, fields: [] }
-    // Identity history is complete but empty: allocator-owned ids must not pre-exist.
-    const emptyHistory = completeHistory([])
 
     for (const [index, type] of AUTHORABLE_FIELD_TYPES.entries()) {
       const identity = identityFor(type, index)
-      const added = addFormField(draft, type, identity, emptyHistory)
+      // FB-D5 RATIFIED: identity is opaque-allocator-owned; the command checks
+      // candidates against the complete current draft (no history parameter).
+      const added = addFormField(draft, type, identity)
       expect(added.ok, `add ${type}`).toBe(true)
       if (!added.ok) return
       draft = added.draft
@@ -322,6 +317,12 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
       join(__dirname, '../src/approvals/components/ApprovalCanvasNodeInspector.vue'),
       'utf8',
     )
+    // F0 extraction (delta §5 F0): the field palette markup moved verbatim onto
+    // ApprovalFormInlineEditor.vue, same pattern as the PR4 canvas/inspector shells above.
+    const formEditorShell = readFileSync(
+      join(__dirname, '../src/approvals/components/ApprovalFormInlineEditor.vue'),
+      'utf8',
+    )
     expect(src).toMatch(/data-testid="approval-view-list"/)
     expect(src).toMatch(/辅助编辑模式/)
     // Undo/redo + edge insert live on extracted ApprovalFlowCanvas (PR4).
@@ -334,8 +335,8 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
     expect(inspectorShell).toMatch(/data-testid="approval-canvas-inspector-topology"/)
     expect(src).not.toMatch(/class="template-authoring__canvas-node-actions"/)
     expect(canvasShell).not.toMatch(/class="template-authoring__canvas-node-actions"/)
-    // D6-f2 palette.
-    expect(src).toMatch(/data-testid="approval-field-palette"/)
+    // D6-f2 palette (F0: markup lives on the extracted ApprovalFormInlineEditor.vue).
+    expect(formEditorShell).toMatch(/data-testid="approval-field-palette"/)
     expect(src).toMatch(/addFieldOfType/)
     // PR4 extract: shell components owned under approvals/components
     expect(src).toMatch(/ApprovalFlowCanvas/)

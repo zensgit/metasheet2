@@ -640,6 +640,56 @@ export function assertParentNotRetiredForOrdinaryWriterV1(row: {
   throw error
 }
 
+/**
+ * Gate D2 (#4556 / #4844) — the AUTHORITATIVE live-punch writer's parent retirement guard.
+ *
+ * WHY A THIRD GUARD RATHER THAN REUSING EITHER SIBLING ABOVE:
+ *  - `assertParentNotRetiredForOrdinaryWriterV1` refuses EVERY retired reason, including
+ *    `review_placeholder`. The D2 authoritative punch MUST be able to proceed over a
+ *    `review_placeholder` parent — that state is the F6 review-path steady state the D2
+ *    boundary itself installs (create-if-absent) and the one a completed outcome promotes to
+ *    `w4/active/active` via the core's own pointer UPDATE. Reusing it would break F6.
+ *  - `assertParentNotOperatorRetiredV1` refuses ONLY `operator_retirement`, letting
+ *    `import_rollback` (and any future/unlisted retired reason) fall through to the core, whose
+ *    `lockParent` SELECT is reason-blind and whose completed-path pointer UPDATE reactivates the
+ *    parent to `w4/active/active` UNCONDITIONALLY. Reusing it alone would be fail-OPEN.
+ *
+ * SHAPE — this is a DEFAULT-REFUSE structure with exactly ONE named carve-out
+ * (`review_placeholder`) and ONE distinctly-coded terminal exception (`operator_retirement`).
+ * It is deliberately NOT an enumerate-the-known-reasons-with-implicit-proceed structure:
+ * enumeration does not converge, and a future/unlisted retired reason must default to REFUSE,
+ * never fall through to the core's unconditional reactivation.
+ *
+ * Dispositions:
+ *  - not retired                  → proceed (active/normal parents supersede normally);
+ *  - retired/review_placeholder   → proceed (F6 carve-out; completed promotes, review preserves);
+ *  - retired/operator_retirement  → ATTENDANCE_RECORD_OPERATOR_RETIRED (409, terminal), delegated
+ *                                   to the existing exported sibling so the two paths can never
+ *                                   drift on the required code;
+ *  - retired/ANY OTHER reason     → ATTENDANCE_RECORD_RETIRED (409). Covers `import_rollback`
+ *                                   today AND every reason a later migration may add.
+ *
+ * The guard restores, at the boundary layer, exactly the retirement refusal that the D2 legacy-
+ * adapter split removes from the authoritative path (the legacy punch's own operator-retirement
+ * guard lives inside the `attendance_records` upsert that the split drops). The hole is created
+ * at the boundary, so it is plugged at the boundary.
+ */
+export function assertParentNotRetiredForAuthoritativePunchV1(row: {
+  visibility_state?: unknown
+  visibility_reason?: unknown
+  visibilityState?: unknown
+  visibilityReason?: unknown
+}): void {
+  const state = String(row.visibility_state ?? row.visibilityState ?? '')
+  const reason = String(row.visibility_reason ?? row.visibilityReason ?? '')
+  if (state !== 'retired') return
+  if (reason === 'review_placeholder') return
+  if (reason === 'operator_retirement') {
+    assertParentNotOperatorRetiredV1(row)
+  }
+  fail('ATTENDANCE_RECORD_RETIRED', 409)
+}
+
 export interface ToolingOnlyNonW4FixtureTeardownGuardInputV1 {
   readonly purpose: 'tooling_only_non_w4_fixture_teardown'
   readonly orgId: string

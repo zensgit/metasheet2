@@ -106,3 +106,55 @@ describe('ApprovalCanvasNodeInspector topology a11y (structural)', () => {
     expect(INSPECTOR_SRC).toMatch(/remove: \[nodeKey: string\]/)
   })
 })
+
+// ── Lock-0 P1-A — L0-1 tab strip a11y (structural source scan) ─────────────────────────────────
+// docs/development/approval-lock0-d0-interaction-delta-20260817.md §3 A-11/A-12. Mounted keyboard
+// behavior (roving tabindex actually moving focus, arrow-key containment at both widget
+// boundaries) is proven with real DOM/keyboard interaction in
+// approval-template-authoring-canvas-inspector.spec.ts's A-11/A-12 tests; this file pins the
+// static SOURCE contract those behaviors depend on, matching this file's existing convention.
+describe('ApprovalCanvasNodeInspector L0-1 tab strip a11y (structural)', () => {
+  it('renders a tablist with roving tabindex and per-tab ARIA wiring', () => {
+    expect(INSPECTOR_SRC).toMatch(/role="tablist"/)
+    expect(INSPECTOR_SRC).toMatch(/role="tab"/)
+    expect(INSPECTOR_SRC).toMatch(/role="tabpanel"/)
+    // Roving tabindex: only the active tab is in the Tab sequence.
+    expect(INSPECTOR_SRC).toMatch(/:tabindex="activeTab === tab\.id \? 0 : -1"/)
+    expect(INSPECTOR_SRC).toMatch(/:aria-selected="activeTab === tab\.id \? 'true' : 'false'"/)
+    expect(INSPECTOR_SRC).toMatch(/:aria-controls="`approval-canvas-inspector-tabpanel-\$\{tab\.id\}`"/)
+    expect(INSPECTOR_SRC).toMatch(/:aria-labelledby="`approval-canvas-inspector-tab-\$\{activeTab\}`"/)
+  })
+
+  it('the tablist aria-label is a static string, not a raw-node-key template literal (keeps the ≥9 dynamic-aria-label floor above meaningful)', () => {
+    // A plain `aria-label="..."` (no leading colon) is a static attribute — it does not enter the
+    // `:aria-label="`...`"` dynamic-template-literal set the earlier test in this file scans, so
+    // adding it does not require routing it through graphNodeLabel.
+    expect(INSPECTOR_SRC).toMatch(/aria-label="节点设置"/)
+    expect(INSPECTOR_SRC).not.toMatch(/:aria-label="`节点设置`"/)
+  })
+
+  it('keydown handling is bound to the tablist element only, not to a panel-wide listener shared with the toolbar', () => {
+    // The topology toolbar (role="toolbar") and the tablist are two independent DOM subtrees with
+    // independent (or absent) keydown wiring — A-12's "one arrow keypress never crosses the two"
+    // holds by construction, not by a shared dispatcher that routes between them.
+    expect(INSPECTOR_SRC).toMatch(/role="tablist"[\s\S]*?@keydown="onTabsKeydown"/)
+    const toolbarBlock = INSPECTOR_SRC.slice(
+      INSPECTOR_SRC.indexOf('role="toolbar"'),
+      INSPECTOR_SRC.indexOf('role="tablist"'),
+    )
+    expect(toolbarBlock).not.toMatch(/@keydown/)
+  })
+
+  it('a visible focus ring is defined for the tab control (parent §6.2, §14 V-6)', () => {
+    expect(INSPECTOR_SRC).toMatch(
+      /\.template-authoring__canvas-inspector-tab:focus-visible\s*\{[\s\S]*?outline:\s*2px/,
+    )
+  })
+
+  it('tab membership is derived from the L0-2 registry, not a hand-written boolean', () => {
+    // The 操作权限 entry is pushed ONLY inside the registry-gate `if`, not unconditionally.
+    expect(INSPECTOR_SRC).toMatch(
+      /if \(hasRatifiedOperationPolicy\(registry, props\.node\.type\)\) \{\s*\n\s*list\.push\(\{ id: 'operations', label: '操作权限' \}\)/,
+    )
+  })
+})

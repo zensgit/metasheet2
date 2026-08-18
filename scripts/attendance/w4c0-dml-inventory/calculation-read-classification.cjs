@@ -18,6 +18,16 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'nextCalculationVersion', 'attendance_record_calculations', 1, 'history', 'version_allocation'),
+  // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-result-write CORE. All four reads are
+  // internal write-path preconditions over the immutable calculation lineage (version allocation,
+  // strictly-lower lineage check, at-most-one-baseline existence read, and the (org,entrypoint,
+  // operation_id) idempotency/replay lookup) — none is the "current" active projection. No
+  // production caller yet (D2 wires live_punch, D3 wires scheduled); the reads are exercised only by
+  // the core's real-PG suite.
+  entry('packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', 'nextCalculationVersion', 'attendance_record_calculations', 1, 'history', 'version_allocation'),
+  entry('packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', 'assertLineageStrictlyLower', 'attendance_record_calculations', 1, 'history', 'lineage_precondition'),
+  entry('packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', 'appendAuthoritativeLegacyBaselineV1', 'attendance_record_calculations', 1, 'history', 'legacy_baseline_precondition'),
+  entry('packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', 'retryReplayLookup', 'attendance_record_calculations', 1, 'history', 'idempotency_replay_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', 'nextCalculationVersion', 'attendance_record_calculations', 1, 'history', 'version_allocation'),
   entry('packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', 'appendLegacyBaselineIfRequired', 'attendance_record_calculations', 1, 'history', 'legacy_baseline_precondition'),
   entry('packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts', 'legacyDeleteEligible', 'attendance_record_calculations', 1, 'history', 'rollback_precondition'),
@@ -38,6 +48,12 @@ const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceCalculationDetail', 'attendance_record_calculations', 2, 'history', 'authorized_current_or_history_detail'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceCalculationDetail', 'attendance_record_segments', 1, 'history', 'authorized_current_or_history_detail'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAttendanceW4ShadowBacklog', 'attendance_record_calculations', 1, 'history', 'values_free_shadow_backlog'),
+  // #4556 W7-2: the compare-window exit-criteria counters. FIVE reads, all over
+  // the mode='shadow' comparison partition (selector-totality gate, critical
+  // count, off-roster candidate fetch, coverage count, fail-close count) —
+  // never the "current" active projection; the served pointer is untouched by
+  // the whole module (read-only command, W4C-5 predicate style).
+  entry('packages/core-backend/src/attendance/w7-compare-window-status.ts', 'readAttendanceW7CompareWindowStatusV1', 'attendance_record_calculations', 5, 'history', 'w7_compare_window_counters'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readAuthoritativeTraceCalculation', 'attendance_record_calculations', 1, 'current', 'immutable_current_trace', 'visibility_state=active'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 'attendance_record_calculations', 1, 'history', 'immutable_shadow_trace', 'visibility_state=active'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readTraceSegments', 'attendance_record_segments', 1, 'history', 'immutable_authorized_trace_segments'),

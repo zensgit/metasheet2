@@ -452,6 +452,9 @@ describe('StockPreparationWorkspace shell', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
     h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
+    localStorage.removeItem('tenantId')
+    localStorage.removeItem('workspaceId')
+    h.apiFetch.mockReset()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -461,6 +464,9 @@ describe('StockPreparationWorkspace shell', () => {
     if (container) container.remove()
     app = null
     container = null
+    localStorage.removeItem('tenantId')
+    localStorage.removeItem('workspaceId')
+    h.apiFetch.mockReset()
     vi.clearAllMocks()
   })
 
@@ -514,6 +520,25 @@ describe('StockPreparationWorkspace shell', () => {
     // to badge, so that line is skipped for it only (see StockPreparationViewTab.noEndpointBadge).
     expect(root.querySelector('[data-testid="stock-prep-panel-endpoint"]')).toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-dashboard"]')).not.toBeNull()
+  })
+
+  it('passes the default integration scope to the dashboard readonly request', async () => {
+    localStorage.setItem('tenantId', 'tenant-from-integration-scope')
+    localStorage.setItem('workspaceId', 'workspace-from-integration-scope')
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { projectCount: 0, statusCounts: {}, projects: [] },
+    }), { status: 200 }))
+
+    await mountShell()
+    await waitForSelector(container!, '[data-testid="stock-prep-dashboard-empty"]')
+
+    const call = h.apiFetch.mock.calls.find(([value]) => String(value).includes('/stock-preparation/projects'))
+    expect(call).toBeDefined()
+    const [url, options] = call as [string, unknown]
+    expect(url).toContain('tenantId=tenant-from-integration-scope')
+    expect(url).toContain('workspaceId=workspace-from-integration-scope')
+    expect(options).toBeUndefined()
   })
 
   it('shows a concrete view panel as a readonly GET placeholder and switches on tab click', async () => {

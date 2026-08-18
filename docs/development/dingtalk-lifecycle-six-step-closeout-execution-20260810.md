@@ -1,0 +1,217 @@
+# DingTalk lifecycle six-step closeout execution
+
+- Date: 2026-08-10
+- Updated: 2026-08-17
+- Status: **CODE + ALIAS + PENDING + DEPROVISION APPLY-RESTORE + OWNED-SUBJECT POST-RESTORE OAUTH (ACTIVATED STATE) + STREAM START/STOP + U1 DELIVERY + U4 CALLBACK PROVEN / APPLY-TIME BROWSER DENIAL + DISTINCT PRE-DEPROVISION POST-ACTIVATION BROWSER CHECKPOINT + U2-U3 + U5-U13 + U11-A CORP-ANCHOR + PRODUCTION GATES INCOMPLETE**
+- Implementation baseline: `origin/main @ 51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`
+- Repository evidence base: `origin/main @ cc4409b3a1bb1c2f2533bb0724ae9036d15500a4`
+- Scope: close the OPS-01 superseded creation-effect residue without enabling lifecycle traffic
+- Operator lane (staging only, default-off): `.github/workflows/dingtalk-lifecycle-staging-canary.yml` + `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` — `status`, transient `alias -> off`, pending admit, SSO-activate intent, pre-ledger recoveries, destructive deprovision apply/restore, and the owned subject's post-restore OAuth positive executed; terminal OFF re-proved
+
+## 1. OPS-01 explicit compensation
+
+Owner decision: do not delete deny rows automatically when evidence is superseded. A platform administrator uses a dedicated endpoint with `confirm=true` and a reason of at least eight characters.
+
+The write transaction:
+
+1. Resolves the event owner, then takes the canonical per-user access-graph mutex.
+2. Locks the event and all effects.
+3. Accepts exactly one superseded `grant_changed` creation effect.
+4. Rechecks active/activated user, the exact active integration/account/linked source, active event-org membership, and absence of any live applied deprovision evidence. Source rows use `NOWAIT`: sync owns account rows before it reaches the user mutex, so compensation returns a values-free 409 busy response instead of waiting in the reverse lock order.
+5. Deletes only a disabled DingTalk grant whose provenance is exactly `system:directory-deprovision`.
+6. Marks the effect `compensated`, records actor/time/immutable compensation note, and advances `access_generation` by CAS in the same transaction.
+
+The event remains `superseded`; this operation is not a full restore. Missing, enabled, differently attributed, or concurrently changed state returns 409 and rolls back. A retry after committed compensation is idempotent only while the grant remains absent.
+
+API:
+
+```text
+POST /api/admin/directory/deprovision-events/:eventId/compensate-orphan-deny
+```
+
+The route is platform-admin-only. Unexpected backend failures return a fixed message rather than PostgreSQL details. The general audit record is values-free; durable evidence lives on the compensated effect.
+
+## 2. Verification ledger
+
+| Gate | Current evidence |
+|---|---|
+| Fresh DB migration | PASS on isolated `codex_ops01_comp2_20260810` |
+| Migration replay | PASS; second migrate is a no-op |
+| Down safety | PASS; refuses downgrade while compensated evidence exists |
+| Real DB lifecycle | PASS: deprovision → supersede → compensate → OAuth ensureGrant |
+| Drift matrix | PASS: enabled grant, wrong provenance, inactive source, busy source, inactive membership, and live evidence all reject without partial write |
+| Concurrency | PASS: two callers queue behind the user-row holder with one transition/increment; a separately locked source row yields fail-fast 409 rather than a user/source deadlock |
+| Regression | PASS: 66/66 across seven neighboring real-DB files |
+| Backend route | PASS: 110/110, including malformed-ID preflight, source-busy 409, SQLSTATE-safe fixed 500, and values-free audit |
+| D7 UI | PASS: 5/5 |
+| TypeScript | PASS: core-backend `tsc --noEmit` |
+| CI wiring | PASS: suite excluded from no-DB Vitest and run as a whole file in approval real-DB step |
+| Independent review | APPROVE after delta re-review; no remaining P1/P2 |
+| Exact-head required CI | PASS at `9d84c3f70130f5fa38d26247d45fa922e0f830db` |
+
+Landed as [#4850](https://github.com/zensgit/metasheet2/pull/4850), merge commit `b55c682748e3010cb70837770c298843a96e1019`.
+
+Load-bearing mutations reproduced before restoration:
+
+- remove grant provenance predicate → wrong-provenance test fails;
+- remove live event/effect veto → live-evidence test fails;
+- remove exact source gate → inactive-source test fails;
+- remove active membership gate → membership test fails;
+- remove canonical `FOR UPDATE` mutex → two-waiter barrier times out;
+- remove source `NOWAIT` → the holder test waits, mutates after release, and fails instead of returning busy;
+- remove compensated-evidence immutability → raw note tampering succeeds and the schema test fails;
+- pass an unknown PostgreSQL SQLSTATE through as the response code → the HTTP error-surface test fails;
+- remove the `COALESCE` fail-closed terms from compensation evidence checks → raw NULL actor/note inserts succeed.
+
+## 3. Lifecycle flags and canary (minimal safe lane)
+
+The repository defaults and closeout contract continue to require all three flags OFF:
+
+```text
+AUTH_LOGIN_USE_ALIASES=false
+DIRECTORY_PENDING_ACTIVATION_ENABLED=false
+DIRECTORY_DEPROVISION_ENABLED=false
+```
+
+Merge is not an enablement instruction. The staging alias, pending, and destructive deprovision
+apply/restore canaries were executed and returned to OFF. The owned subject's post-restore OAuth
+positive proves the restored user is currently activated and OAuth-capable; it is one observation,
+not a distinct pre-deprovision post-activation browser checkpoint. The deprovision apply-time
+browser denial also remains **NOT EXECUTED**. See
+`dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
+
+### 3.1 Staging operator lane (what is actually executable)
+
+| Piece | Path |
+|---|---|
+| Workflow | `.github/workflows/dingtalk-lifecycle-staging-canary.yml` (manual only; default `status`) |
+| Remote | `scripts/ops/dingtalk-lifecycle-staging-canary-remote.sh` |
+| Contract | `scripts/ops/dingtalk-lifecycle-staging-canary-contract.test.mjs` |
+
+| Action | Executable? | Notes |
+|---|---|---|
+| `status` | yes | values-free snapshot; multi-on reports then fail-closed |
+| `preflight` | yes | readiness only; `migrations_pending_zero` must be **exactly `true`** (`unknown` fails — never treated as success) |
+| `off` | yes | **sole env write**: emergency clear of the three gates; previous-override backup + restore on restart/health/mode failure; backend health must be true after restart; exact mode `off` proven |
+| `alias` | yes (transient) | secret-backed password login before ON, during alias-only, and after required OFF rollback |
+| `pending` | yes (transient, **SERVER-SIDE PASS**) | explicit owned directory-account subject; admit + SSO activate intent executed; a later post-restore login proves current activated-state OAuth capability, not a distinct pre-deprovision browser checkpoint; flags returned to OFF |
+| `deprovision` | yes (two-phase, **SERVER-SIDE + POST-RESTORE OAUTH PASS**) | exact target+sentinel apply/restore completed; post-restore OAuth positive passed; apply-time browser denial remains `NOT EXECUTED` |
+
+`action=off` is an **emergency operational rollback of the env gate only**. Design lock Rev 4.2 §4.2 / §4.4 permanently forbids reintroducing OR-column fallback on `users.email` / `username` / `mobile` as a long-term design after T2b. OFF is not “canary stage 1 complete.”
+
+### 3.2 Staging preparation and alias result (2026-08-11)
+
+The safe OFF baseline and transient alias canary are proven:
+
+1. [Attendance staging runner 31407444155](https://github.com/zensgit/metasheet2/actions/runs/31407444155) completed host backup, clone rehearsal, isolation check, real migration, and auth round-trip. Migration state moved from `296 applied / 18 pending` to `314 applied / 0 pending`. The backup is retained on the deploy host; only its values-free metadata and SHA-256 entered the artifact.
+2. [#4853](https://github.com/zensgit/metasheet2/pull/4853), merge commit `ddec28b12ebff97fae33af45553d77c149d816e1`, made the staging runner install and validate the checked-out staging Compose file before deploy. It also pins Compose project-directory and exact `IMAGE_TAG` metadata. Exact-head CI passed 15/15.
+3. [Attendance staging deploy 31418871030](https://github.com/zensgit/metasheet2/actions/runs/31418871030) force-recreated only backend/web from exact SHA `ddec28b12ebff97fae33af45553d77c149d816e1`, with `set_window_env=none`. Backend and web health both reported that exact commit and image tag; migrations were `314/0`; auth and settings returned HTTP 200; Postgres and Redis container IDs were unchanged.
+4. [Lifecycle status 31418997337](https://github.com/zensgit/metasheet2/actions/runs/31418997337) reported `mode=off`, all three lifecycle flags `false`, exact build SHA, zero pending migrations, healthy backend, and `transition_applied=false`.
+5. [Lifecycle preflight 31419066036](https://github.com/zensgit/metasheet2/actions/runs/31419066036) reported `preflight_target_mode=off`, `preflight_ok=true`, all flags still OFF, and `transition_applied=false`.
+6. The existing `DEPLOY_KNOWN_HOSTS` secret supplies the independently verified host key. SSH and SCP require `StrictHostKeyChecking=yes`; this evidence lane does not accept first-use trust.
+7. [Lifecycle status 31504862038](https://github.com/zensgit/metasheet2/actions/runs/31504862038) re-proved the exact staging SHA, healthy backend, zero pending migrations, mode `off`, and all three flags `false`.
+8. [Lifecycle alias 31504979575](https://github.com/zensgit/metasheet2/actions/runs/31504979575) proved real password login before ON, while alias-only was live, and after rollback. It reported zero collisions and finished in exact mode `off` with all three flags `false`.
+9. [#4873](https://github.com/zensgit/metasheet2/pull/4873), merge commit `24794811b1c800402006b30d6e4fa9df670e124e`, hardened deprovision execution with a caller-reserved exact run id, recovery journal, exact ledger binding, and dedicated one-account/exclusive-window gates.
+10. [Attendance staging deploy 31528635839](https://github.com/zensgit/metasheet2/actions/runs/31528635839), [lifecycle status 31528753683](https://github.com/zensgit/metasheet2/actions/runs/31528753683), and [OFF preflight 31528911914](https://github.com/zensgit/metasheet2/actions/runs/31528911914) jointly proved the exact hardened deploy, healthy backend, zero pending migrations, and all three lifecycle flags OFF.
+11. [Lifecycle alias 31529335625](https://github.com/zensgit/metasheet2/actions/runs/31529335625) re-ran the three password-login legs against the hardened deploy, reported zero collisions, and finished in exact mode `off`. This supersedes the older deploy as the current alias proof.
+12. [Pending admit 31551343313](https://github.com/zensgit/metasheet2/actions/runs/31551343313) used an explicit owned subject, proved pending state, and rolled back to OFF. [SSO activate-intent 31551426867](https://github.com/zensgit/metasheet2/actions/runs/31551426867) activated it with lifecycle flags OFF. The later 2026-08-15 post-restore OAuth observation proves that exact subject is currently activated and OAuth-capable; it is not a distinct pre-deprovision post-activation browser observation.
+13. [#4875](https://github.com/zensgit/metasheet2/pull/4875) added exact empty-fetch recovery. [Run 31555162698](https://github.com/zensgit/metasheet2/actions/runs/31555162698) proved zero ledger, unchanged access graph, active source, flags OFF, and cleared the safe-abort journal.
+14. [#4877](https://github.com/zensgit/metasheet2/pull/4877), merge `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f`, added exact pre-deprovision sync-failure recovery. Staging [deploy 31559288370](https://github.com/zensgit/metasheet2/actions/runs/31559288370), recovery [31559371562](https://github.com/zensgit/metasheet2/actions/runs/31559371562), and read-only status [31559480395](https://github.com/zensgit/metasheet2/actions/runs/31559480395) prove the exact deployed SHA, zero ledger before and after recovery sync, unchanged access graph, cleared journal, zero pending migrations, and all lifecycle flags OFF. The recovery does not claim deprovision restore.
+
+The former image-tag/health-commit conflict is resolved. Alias and pending production enablement remain separate owner decisions. The dedicated canary application, subject, sentinel, and manual integration now exist. The later exact target+sentinel destructive apply/restore cycle is recorded in `dingtalk-staging-lifecycle-canary-and-uat-execution-20260811.md`.
+
+### 3.3 Canary stages
+
+| Stage | Result | Required real proof |
+|---|---|---|
+| 1 | alias-only **PASS, rolled back** | password-login success against aliases + required `off` proof without OR-column fallback |
+| 2 | pending admission **SERVER-SIDE PASS; CURRENT ACTIVATED-STATE OAUTH CAPABILITY OBSERVED AFTER RESTORE; DISTINCT PRE-DEPROVISION BROWSER CHECKPOINT NOT EXECUTED** | explicit subject admit + SSO activate intent completed; the later post-restore login proves current activated-state capability without double-counting a separate earlier browser event |
+| 3 | deprovision **SERVER-SIDE + POST-RESTORE OAUTH PASS; APPLY-TIME BROWSER DENIAL NOT EXECUTED** | exact target+sentinel sync→ledger→restore completed and restored-subject OAuth succeeded |
+
+## 4. Owner and ops acceptance
+
+Controlled staging Stream windows ran, and `AP-100012` produced a real interactive-card delivery
+whose receipt the assignee confirmed. The assignee subsequently clicked approve and the MetaSheet
+approval reached its terminal approved state. The DingTalk card did not visibly refresh, and the
+required values-free corp-anchor log has not yet been captured. Therefore the full matrix remains
+partial rather than simulated PASS:
+
+- U1 delivery and U4 real approve callback are PASS; U2-U3 and U5-U13 remain incomplete;
+- U9 terminal card display is not PASS, and U11-a real callback corp-anchor log remains pending;
+- named owners and final production switch decisions;
+- deprovision apply-time browser denial and distinct pre-deprovision post-activation browser checkpoint (the post-restore OAuth positive proves the subject is currently activated and OAuth-capable; production flags remain separate decisions);
+
+Staging `status`, alias `off -> alias -> off`, pending admit, SSO activate intent, pre-ledger recovery paths, destructive apply/restore, the exact-subject post-restore OAuth positive (also proving current activated-state capability), and Stream `status -> prepare -> status -> on -> off -> status` are complete per §3.2 and the companion execution record. After the link secret and `Card.Instance.Write` blockers were closed, the fourth window created `AP-100012` and returned `deliveryKind=interactive_card`; the assignee confirmed receipt (U1) and a later bounded window processed the real approve callback to a terminal MetaSheet approval (U4). The card's terminal presentation did not visibly refresh, and the U11-a values-free corp-anchor log plus the broader matrix remain incomplete. The later terminal run `31867392575` independently proves the lifecycle flags and Stream returned to OFF after the final diagnostic window.
+
+The interactive-card procedure of record remains `dingtalk-hardening-real-uat-evidence-pack-20260713.md`.
+
+## 5. Transfer post-fix two-corp gate
+
+Transfer T3-T5 remains **FROZEN**. The real two-corp T2-Gate has not run in this lane:
+
+A values-free staging inventory on 2026-08-15 found two distinct active corp anchors, but only one
+corp with active directory accounts and zero cross-corp overlap groups. Automatic sync and
+schedules were both zero. The executable UAT therefore still lacks a real second-enterprise
+member set and overlap person; those inputs must not be fabricated in the local database.
+
+The historical `CONFIRMED -> T2.5 / DISPROVED -> T3` matrix is no longer executable. Historical
+Phase A [#4602](https://github.com/zensgit/metasheet2/pull/4602) head
+`ac05efa25fd0dfdae0779e7ae14a3a942a0c374e` and Phase B
+[#4605](https://github.com/zensgit/metasheet2/pull/4605) head
+`e4509ab71e6061e7d1188d24f9b30f09fb71c435` are provenance commits from the pre-rewrite history;
+they are deliberately **not** claimed as ancestors of current main or staging SHA
+`d201aff394867d1e776d4e393a7ae71d3df45e44`. Current-tree evidence is load-bearing instead: that
+deployed SHA contains the Phase B migration blob `9e2294b3e97a8802dcd819698b061cdb229d27cc`
+and preflight blob `3ff497ddc4af934f4dd4d9d6ad8dea0206baa5d4`, byte-identical to the #4605 tree, while read-only
+status run `31937073799` reports zero pending migrations. Current main first carries those paths at
+[#4875](https://github.com/zensgit/metasheet2/pull/4875) merge
+`979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c`. Phase B therefore replaced global provider-key
+uniqueness with deployed corp-scoped account and identity uniqueness; it is the current-tree
+successor to the old conditional T2.5 concept, not a future branch still awaiting selection.
+
+| Current gate | Consequence |
+|---|---|
+| Post-fix two-corp UAT PASS | owner may authorize T3 implementation; T4/T5 remain serial successors |
+| UAT FAIL | return to code/schema review; do not start T3 |
+| INCONCLUSIVE / NOT EXECUTED | keep T3-T5 frozen |
+
+**Procedure of record (post-fix):** `dingtalk-directory-corp-scope-staging-uat-20260725.md` (and closeout ledger `dingtalk-directory-corp-scope-closeout-verification-20260725.md`). Use that UAT after Phase A + Phase B deployment gates pass.
+
+**Historical provenance only (not the current executable procedure):** `canonical-org-t2-gate-two-corp-staging-runbook-20260717.md` is the pre-fix evidence runbook. It is self-superseded for acceptance after corp-scope Phase B. Steps that described legacy global-key collision preflight against the pre-Phase-B schema **cannot be re-run as executable current steps after Phase B** — they remain **provenance requirements** (what was proven / what SHA and gate outputs must already be on file), not a procedure to re-execute on a post-Phase-B database. Do not point operators at the 20260717 runbook as the live T2-Gate gate.
+
+Even after a post-fix UAT PASS, T3-T5 are not present today: current production code defines the
+`OrgTransferBindingAdapter` seam but registers no provider adapter. Scan/apply therefore fail
+closed with `ORG_TRANSFER_ADAPTER_UNAVAILABLE`; only tests register adapters, while production
+registers none. Do not
+describe the Transfer line as runtime-complete until a reviewed DingTalk adapter implements and
+registers the T3/T4 behavior and T5 closeout is complete.
+Durable tracker: [#4926](https://github.com/zensgit/metasheet2/issues/4926).
+
+## 6. Test infrastructure lane
+
+[#4852](https://github.com/zensgit/metasheet2/pull/4852), merge commit `f0745831fe5385ccacf8fe6d6e5fd51174c02117`, added per-lane scratch DB provisioning and cleanup for the affected startup fail-closed real-DB suite. After 20 consecutive successful main `plugin-tests` runs and five explicit independent `test (18.x)=success` job checks with no recurrence, issue [#4820](https://github.com/zensgit/metasheet2/issues/4820) was closed on 2026-08-15.
+
+A later exact-head Node 20 run for #4890 reproduced the same post-suite `57P01` class in the W4C-3a canonical-import real-DB suite, whose two pools were not yet using the shared drain/drop discipline. Issue #4820 was therefore reopened. [#4928](https://github.com/zensgit/metasheet2/pull/4928), final reviewed head `1f5169ff8170d2de34c70689841998815d2116d6`, closed that additional cleanup path and merged as `aefd8ea713ddab4c7bd457175f464eef38fc8eed`; its true-PostgreSQL battery is 25/25, the cleanup mutation fails as intended, and fresh-main exact-head required CI passed. Issue #4820 remains **OPEN** for post-merge recurrence observation; merge alone does not prove repository-wide scratch-DB isolation. Future runtime evidence must use lane-owned databases and every scratch suite must drain all pools before dropping its database.
+
+## 7. Closure rule
+
+The code and safe staging OFF-preflight portions of this six-step closeout are complete:
+
+| Delivery | Merge commit |
+|---|---|
+| OPS-01 explicit compensation, #4850 | `b55c682748e3010cb70837770c298843a96e1019` |
+| Staging operator lane, #4851 | `0083621f5dd1fd6dbeb0a5b71815156804e20a3b` |
+| Per-lane scratch DB mitigation, #4852 | `f0745831fe5385ccacf8fe6d6e5fd51174c02117` |
+| Exact staging Compose/provenance sync, #4853 | `ddec28b12ebff97fae33af45553d77c149d816e1` |
+| Canary exact-run recovery and dedicated-integration hardening, #4873 | `24794811b1c800402006b30d6e4fa9df670e124e` |
+| Empty-fetch recovery, #4875 | `979c619ebf0ca1dfadedff2dc9b8db69b4f6b74c` |
+| Pre-deprovision sync-failure recovery, #4877 | `51f23ec7255c3fb0d9abc21bfbe4c3bce8e1c48f` |
+| Deprovision restore evidence hardening, #4871 | `5e5003b548fa78d963e9e0555e12aba7c7d8dfb6` |
+| W4C-3a scratch-database drain, #4928 | `aefd8ea713ddab4c7bd457175f464eef38fc8eed` |
+| Reversible staging HTTPS gateway, #4890 | `285c6a7c388a0d0f80244c88ee7fbc365c4066c3` |
+| Values-free Stream callback observer, #4913 | `f8497b261e69ec83ba457e746ce0a0309a2e4938` |
+| Terminal-card template runbook, #4920 | `881e8efd8a97ddefcbb9f2574ed071e7cda91b69` |
+
+The staging alias, pending, destructive deprovision/restore, and exact owned-subject post-restore OAuth positive are complete and rolled back to OFF. That one OAuth observation also proves the restored subject is currently activated and OAuth-capable; it is not counted as a separate pre-deprovision browser event. Stream startup and shutdown are also proven, with terminal runs `31856520796`/`31856563224`, `31861138171`/`31861174400`, `31863021812`/`31863057131`, `31864532416`/`31864575172`, `31865647626`/`31865699179`, `31866293827`/`31866437330`, and `31867339380`/`31867392575`. The owner-authorized per-integration link secret was generated without exposing its value, and `Card.Instance.Write` was published. Approval `AP-100012` completed automation with `deliveryKind=interactive_card`; the assignee confirmed receipt (U1), and a later real card click advanced MetaSheet to terminal approved (U4). The historical template did not retire its terminal buttons. Current replacement template `MetaSheetCanaryUAT3` has since been published and prepared values-free; runs `31931478708 -> 31931539040 -> 31931575188` prove exact deployed SHA at prepare, backend health, Stream OFF, disabled worker, and all lifecycle flags OFF. No UAT3 card/callback has run, so terminal-button retirement remains `NOT EXECUTED`; the runbook and screenshots landed in #4920 as `881e8efd8a97ddefcbb9f2574ed071e7cda91b69`. The U11-a values-free corp-anchor log and remaining U1-U13 matrix are incomplete, so this remains partial, not PASS. Read-only run `31865023926` also proves the HTTPS gateway later landed by #4890 as `285c6a7c388a0d0f80244c88ee7fbc365c4066c3` remained healthy and active with its pre-HTTPS backup retained; `https-off` remains an explicit owner-gated deployment action. The deprovision apply-time browser denial, distinct pre-deprovision post-activation browser checkpoint, named production decisions, and post-fix real two-corp UAT are deliberately **NOT EXECUTED**. Transfer T3-T5 remains frozen and has no production adapter registration. Test-infra observation issue #4820 is reopened; its recurrence fix landed in #4928 as `aefd8ea713ddab4c7bd457175f464eef38fc8eed`, while post-merge recurrence observation remains pending. None of the remaining gates is represented as PASS by this closeout.
+
+Fresh read-only inventories on 2026-08-16 preserve that boundary: lifecycle status run `31931755900` reports staging SHA `d201aff394867d1e776d4e393a7ae71d3df45e44`, healthy backend, zero pending migrations and all lifecycle flags OFF; OAuth status run `31931817158` reports the same staging SHA, healthy backend, and matching client/corp/redirect/public/CORS configuration; Stream status run `31937073799` reports the same exact staging SHA, healthy backend, all four Stream inputs present, one eligible anchor with two linked local users, Stream OFF, worker disabled, all lifecycle flags OFF, and `stream_connected=unknown`; production-readiness run `31931759414` reports production SHA `eadd2dd88bf084bf20318fd4b4513c721654f4b9`, one active corp-anchored integration, two active linked users, all flags OFF, and absent production Stream credentials. These are configuration/runtime snapshots only; none substitutes for UAT3 callback or a production GO.

@@ -60,15 +60,17 @@ Agents may implement, test, push, open draft PRs, arm auto-merge when green. Mus
 - Existing Canvas V2 canaries remain required always-on:
   `approval-canvas-commands`, `approval-form-commands`, `approval-authoring-history`,
   `approval-g5c-authoring-scenarios`, `approval-version-read-summary`.
-- Residual canaries (promoted always-on in wave-3 after files landed):
+- Residual canaries (promoted always-on in wave-3 after files landed; palette-focus added in residual closeout):
   - `approval-form-authoring-history` (#4815)
   - `approval-version-dual-canvas` (#4816)
   - `approval-flow-canvas-a11y` (#4818)
   - `approval-canvas-inspector-a11y` (#4819)
+  - `approval-form-palette-focus` (#4825)
 - Owner smoke: `SKIP_TESTS=1 scripts/ops/approval-canvas-owner-uat-smoke.sh` for values-free checks;
   omit `SKIP_TESTS` to also run focused history + G5-C + residual vitest when `pnpm` is available.
 
 ## Follow-on
 
 - Wave-2 a11y polish: see `approval-canvas-residual-parallel-wave2-design-20260808.md` (DONE #4818–#4819).
-- Wave-3 canaries/smoke + remaining polish: see `approval-canvas-residual-parallel-wave3-design-20260808.md` (`6fa2fbf6-w3`).
+- Wave-3 canaries/smoke + remaining polish: see `approval-canvas-residual-parallel-wave3-design-20260808.md` (DONE #4823–#4826).
+- Residual as-built closeout (no UAT / flag ON / product FINAL): `approval-canvas-residual-parallel-closeout-verification-20260815.md`.

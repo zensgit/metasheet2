@@ -123,7 +123,7 @@ function jsonResponse(status, body) {
 
 // Mock K3: login, GetDetail (existing row for MAT-C6-EXIST, business-fail for everything
 // else — K3's real "not found" shape), Save success. Counts every path.
-function mockK3({ existing = {} } = {}) {
+function mockK3({ existing = {}, fallbackDetail = null, echoOnly = false, innerIdOnly = false, outerIdentity = false, placeholderId = null } = {}) {
   const calls = []
   const impl = async (url, init) => {
     const parsed = new URL(url)
@@ -141,6 +141,41 @@ function mockK3({ existing = {} } = {}) {
           StatusCode: 200,
           Message: 'Successful',
           Data: [{ FStatus: true, FItemID: row.FItemID, Data: row }],
+        })
+      }
+      if (echoOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number } }],
+        })
+      }
+      if (innerIdOnly) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number, FItemID: 7006 } }],
+        })
+      }
+      if (outerIdentity) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, FNumber: number, FItemID: 7003, Data: {} }],
+        })
+      }
+      if (placeholderId !== null) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, Data: { FNumber: number, FItemID: placeholderId } }],
+        })
+      }
+      if (fallbackDetail) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, FItemID: fallbackDetail.FItemID, Data: fallbackDetail }],
         })
       }
       // K3's business-level miss: FStatus false — businessSuccess() is false for this shape.
@@ -191,6 +226,7 @@ function pipelineFixture() {
     targetSystemId: 'k3-target-1',
     targetObject: 'material',
     createdBy: 'owner-7',
+    options: { source: { filters: { fixtureScope: 'approved' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
       { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
@@ -244,6 +280,16 @@ test('the flat planner config derives from the customer profile: key + schema-kn
   assert.deepEqual(cfg.keyFields, ['FNumber'])
   assert.deepEqual(cfg.writableFields, ['FName', 'FModel'])
   assert.equal(cfg.object, 'material')
+})
+
+test('the private K3 acceptance policy is carried into the flat planner config', () => {
+  const policy = { profile: 'k3-test-only-exact-two-add-v1' }
+  const cfg = deriveK3WiseC6PlannerTargetConfig({
+    system: k3TargetSystem({ config: { c6AcceptancePolicy: policy } }),
+    object: 'material',
+    fieldMappings: pipelineFixture().fieldMappings,
+  })
+  assert.deepEqual(cfg.acceptancePolicy, policy)
 })
 
 test('REVIEW P2: a mapped target the write cannot carry is REFUSED, never silently dropped', () => {
@@ -365,6 +411,214 @@ test('roundtrip: dry-run plans add+update, mints a token; apply consumes it and 
     'save-only must survive the entire C6 lifecycle')
 })
 
+test('lookup ignores a successful GetDetail record whose normalized key does not exactly match', async () => {
+  const fetchPair = mockK3({
+    // Reproduces the onsite failure shape: an unknown requested key receives a successful
+    // default/template detail record for a different material. That record is not existence
+    // evidence for the requested key and must therefore plan as add.
+    fallbackDetail: { FNumber: '  TEMPLATE-MATERIAL  ', FItemID: 7001, FName: 'Template' },
+  })
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'NEW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an echo-only successful GetDetail envelope with no independent material identity', async () => {
+  const fetchPair = mockK3({
+    // Live-shape regression: the endpoint accepts the request and echoes FNumber, but neither
+    // a stable material id nor FName was independently returned.
+    echoOnly: true,
+  })
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'ECHO-ONLY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup ignores an empty successful GetDetail detail even when the adapter correlates its request key', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'SYNTHETIC-KEY-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ fallbackDetail: {} }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup accepts the supported outer-key and outer-id GetDetail shape as existing', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'OUTER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ outerIdentity: true }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup accepts an inner-key and inner-id GetDetail shape without a name as existing', async () => {
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'INNER-IDENTITY-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3({ innerIdOnly: true }),
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+for (const placeholderId of ['null', 'UNDEFINED', 'None']) {
+  test(`lookup rejects placeholder material identifier ${placeholderId} as independent identity`, async () => {
+    const dryRun = await dryRunExternalWrite(c6Inputs({
+      rows: [{ code: 'PLACEHOLDER-ID-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+      fetchPair: mockK3({ placeholderId }),
+      tokenStore: memoryStore(),
+    }))
+
+    assert.equal(dryRun.counts.add, 1)
+    assert.equal(dryRun.counts.update, 0)
+    assert.equal(dryRun.counts.held, 0)
+  })
+}
+
+for (const { label, value } of [
+  { label: 'boolean', value: true },
+  { label: 'object', value: {} },
+  { label: 'array', value: [] },
+]) {
+  test(`lookup rejects a non-scalar ${label} material identifier as independent identity`, async () => {
+    const dryRun = await dryRunExternalWrite(c6Inputs({
+      rows: [{ code: 'NON-SCALAR-ID-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+      fetchPair: mockK3({ placeholderId: value }),
+      tokenStore: memoryStore(),
+    }))
+
+    assert.equal(dryRun.counts.add, 1)
+    assert.equal(dryRun.counts.update, 0)
+    assert.equal(dryRun.counts.held, 0)
+  })
+}
+
+test('lookup never treats the request-key correlation fallback as raw material identity', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'REQUEST-KEY-ONLY', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          // The normalized read record is correlated with the request, but neither raw
+          // response layer independently returned the key. A raw ID alone is insufficient.
+          records: [{ FNumber: 'REQUEST-KEY-ONLY', FItemID: 7005 }],
+          raw: { Data: [{ FStatus: true, FItemID: 7005, Data: {} }] },
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup rejects a malformed raw Data container even when a normalized record is present', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'MALFORMED-RAW-MATERIAL', name: 'New material', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          records: [{ FNumber: 'MALFORMED-RAW-MATERIAL', FItemID: 7004, FName: 'Old name' }],
+          raw: { Data: 'malformed' },
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup keeps a returned record whose normalized key exactly matches the request', async () => {
+  const fetchPair = mockK3({
+    existing: {
+      'MATCHED-MATERIAL': {
+        FNumber: '  MATCHED-MATERIAL  ',
+        FItemID: 7002,
+        FName: 'Old name',
+        FModel: 'SPEC-OLD',
+      },
+    },
+  })
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'MATCHED-MATERIAL', name: 'New name', spec: 'SPEC-OLD' }],
+    fetchPair,
+    tokenStore: memoryStore(),
+  }))
+
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 1)
+  assert.equal(dryRun.counts.held, 0)
+})
+
+test('lookup preserves multiple exact key matches so the planner holds the ambiguous row', async () => {
+  const input = c6Inputs({
+    rows: [{ code: 'AMBIGUOUS-MATERIAL', name: 'New name', spec: 'SPEC-N' }],
+    fetchPair: mockK3(),
+    tokenStore: memoryStore(),
+  })
+  const targetSystem = k3TargetSystem()
+  input.dataSourceWrites = createK3WiseC6WriteSource({
+    system: targetSystem,
+    createAdapter: () => ({
+      async read() {
+        return {
+          records: [
+            { FNumber: 'AMBIGUOUS-MATERIAL', FName: 'First' },
+            { FNumber: '  AMBIGUOUS-MATERIAL  ', FName: 'Second' },
+          ],
+        }
+      },
+    }),
+    b4: b4Of([APPROVED_B4_ROW]),
+  })
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.counts.add, 0)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.held, 1)
+  assert.equal(dryRun.canApply, false)
+})
+
 test('CONTENT BINDING: source rows changed between dry-run and apply -> 409, nothing written', async () => {
   const tokenStore = memoryStore()
   const fetchPair = mockK3()
@@ -437,6 +691,83 @@ test('fail-closed capability: profile deselected between derive and plan -> unsa
     (error) => /customer-profile locked/.test(String(error && error.message)),
   )
   assert.equal(fetchPair.calls.length, 0, 'capability refusal must precede ALL network activity')
+})
+
+test('exact-two add-only: a generic K3 business-read error is not absence, so no token or Save', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const rows = [
+    { code: 'MAT-C6-A', name: 'One', spec: 'S1' },
+    { code: 'MAT-C6-B', name: 'Two', spec: 'S2' },
+  ]
+  await assert.rejects(
+    dryRunExternalWrite(c6Inputs({
+      rows,
+      fetchPair,
+      tokenStore,
+      targetOverrides: { config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } } },
+    })),
+    (error) => error && error.details && error.details.code === 'K3_WISE_READ_BUSINESS_ERROR',
+  )
+  assert.equal(
+    fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length,
+    0,
+    'strict absence never reaches Save',
+  )
+})
+
+test('without exact-two policy a generic K3 business-read error still classifies as add', async () => {
+  const tokenStore = memoryStore()
+  const fetchPair = mockK3()
+  const dryRun = await dryRunExternalWrite(c6Inputs({
+    rows: [{ code: 'MAT-C6-NEW', name: 'Brand new', spec: 'SPEC-N' }],
+    fetchPair,
+    tokenStore,
+  }))
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.update, 0)
+  assert.ok(dryRun.dryRunToken)
+  assert.equal(fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length, 0)
+})
+
+test('exact-two apply preflight refuses the batch when GetDetail changes after planner lookup', async () => {
+  const tokenStore = memoryStore()
+  const existing = {}
+  let getDetail = 0
+  const fetchPair = mockK3({ existing, echoOnly: true })
+  const originalImpl = fetchPair.impl
+  fetchPair.impl = async (url, init) => {
+    const parsed = new URL(url)
+    if (parsed.pathname.endsWith('/Material/GetDetail')) {
+      getDetail += 1
+      if (getDetail === 5) {
+        existing['MAT-C6-A'] = { FNumber: 'MAT-C6-A', FItemID: 8001, FName: 'One', FModel: 'S1' }
+      }
+    }
+    return originalImpl(url, init)
+  }
+  const rows = [
+    { code: 'MAT-C6-A', name: 'One', spec: 'S1' },
+    { code: 'MAT-C6-B', name: 'Two', spec: 'S2' },
+  ]
+  const targetOverrides = { config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } } }
+  const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }))
+  assert.equal(dryRun.status, 'ready')
+  assert.ok(dryRun.dryRunToken)
+  await assert.rejects(
+    applyExternalWrite({
+      ...c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }),
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'operator-1',
+    }),
+    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED',
+  )
+  assert.equal(
+    fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length,
+    0,
+    'preflight refuse performs zero Save',
+  )
 })
 
 test('lookup transport failure fails the dry-run closed (only the business-level miss maps to add)', async () => {

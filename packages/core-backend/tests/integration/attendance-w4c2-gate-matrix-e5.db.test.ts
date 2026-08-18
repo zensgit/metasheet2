@@ -50,13 +50,15 @@
  *     punch is a values-free 403 with zero source DML, and re-activating the
  *     membership makes the identical punch write (positive control).
  *  6. "fresh authoritative calculator review creates only a retired
- *     review_placeholder ..." — NOT reachable in W4C-2: authoritative write
- *     execution is not delivered by this slice (the boundary fails closed with
- *     `W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED` BEFORE source DML, and no read
- *     route filters `visibility_state` yet). This file pins that fail-closed
- *     substitute on BOTH entrypoints with zero-DML assertions; the
- *     review_placeholder read-side gate transfers to the slice that delivers
- *     authoritative execution (recorded in HANDOFF-W4C2.md + PR body).
+ *     review_placeholder ..." — SPLIT by Gate D2 (#4844), which delivered the
+ *     `live_punch` authoritative writer. Leg 6a is now the real thing at route
+ *     level: an authoritative punch whose freeze step cannot resolve a shift
+ *     yields `review_required`, the boundary's create-if-absent placeholder is
+ *     installed `legacy_untracked/NULL/retired/review_placeholder`, and the
+ *     core's review write leaves the pointer NULL. Leg 6b keeps the fail-closed
+ *     assertion for `scheduled`, which is STILL undelivered (two refusal sites
+ *     remain; D3 delivers it). No read route filters `visibility_state` yet, so
+ *     the read-side half of this obligation still transfers forward.
  *  7. "`accepted_write_posture` is immutable and cannot be silently rebased" —
  *     storage: direct UPDATE is trigger-denied (W4C0_OPERATION_STATE);
  *     behavior: after a legal legacy->shadow rollout promotion, replaying an
@@ -417,6 +419,9 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
+      deriveLivePunchWorkDateResolution: unreached('deriveLivePunchWorkDateResolution') as never,
       applyScheduledAbsenceLegacy: async (trx, args) => {
         n += 1
         seenUserIds.push(...args.userIds)
@@ -439,6 +444,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+      // W7-1b: required adapter. Kept `unreached` on purpose — these legs assert
+      // the boundary REFUSES before any freeze, so a reachable stub here would
+      // weaken the very control-flow pin the leg exists for.
+      issueFrozenContext: unreached('issueFrozenContext') as never,
     }
     return { adapters, absenceCallCount: () => n, absenceCallUserIds: () => seenUserIds.slice() }
   }
@@ -1066,8 +1075,19 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     expect((await operationRows(authzOrg)).length).toBe(1)
   })
 
-  it('leg 6 — authoritative posture fails closed BEFORE source DML on both entrypoints (review_placeholder read-side gate transfers with authoritative delivery)', async () => {
-    // Live: the claim is discarded by the rollback; nothing persists.
+  // Gate D2 (#4844) SPLIT this leg. It previously asserted "fails closed BEFORE source DML on
+  // BOTH entrypoints" — true of `scheduled` still, but no longer true of `live_punch`, whose
+  // authoritative writer now ships. Splitting rather than deleting keeps the scheduled half's
+  // refusal an independently red-able assertion (it is the behavioural sibling of the delivery
+  // declaration's `scheduled: false`), and turns the live half into a positive proof that the
+  // route-level production path reaches the new writer.
+  //
+  // `authoritativeUser` has NO shift assignment in this suite's fixtures, so the freeze step's
+  // attribution resolves `unsupported` and the outcome is `review_required` — which makes this
+  // leg the ROUTE-LEVEL instance of the F6 "fresh review, parent absent" case: the boundary
+  // create-if-absent placeholder must be installed, and it must stay retired/review_placeholder
+  // with a NULL pointer after the core's review write (which never touches the parent).
+  it('leg 6a — authoritative live_punch now WRITES through the canonical authoritative path: review outcome installs the retired/review_placeholder parent and leaves the pointer NULL', async () => {
     const token = await mintToken(authoritativeUser)
     const res = await punch(token, {
       eventType: 'check_in',
@@ -1075,22 +1095,80 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       orgId: authoritativeOrg,
       operationId: randomUUID(),
     })
-    expect(res.status).toBe(503)
-    expect(res.body?.error?.code).toBe('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED')
-    expect(res.body?.error?.message).toBe('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED')
-    expect(await eventCount(authoritativeUser)).toBe(0)
-    expect(await recordCount(authoritativeUser)).toBe(0)
-    expect((await operationRows(authoritativeOrg)).length).toBe(0)
-    expect((await outboxRows(authoritativeOrg)).length).toBe(0)
-    expect((await calculationRowsForUser(authoritativeUser)).length).toBe(0)
+    expect(res.status).toBe(200)
+    // The synthesized wire response carries all three members of the legacy contract's shape.
+    expect(res.body?.data?.event ?? res.body?.event).toBeTruthy()
 
-    // Scheduled: the administrator run fails closed the same way, zero rows.
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    // The split adapter's event INSERT ran (durable punch evidence), exactly once.
+    expect(await eventCount(authoritativeUser)).toBe(1)
+
+    // The create-if-absent placeholder exists in exactly the F6 review-path state. It is NOT
+    // outcome-conditional `active`: the core's baseline predicate would otherwise fire and demand
+    // a compatibility fingerprint for a projection that does not exist.
+    const parents = await recordRow(authoritativeUser)
+    expect(parents.length).toBe(1)
+    expect(parents[0].projection_owner).toBe('legacy_untracked')
+    expect(parents[0].current_calculation_id).toBeNull()
+    expect(parents[0].visibility_state).toBe('retired')
+    expect(parents[0].visibility_reason).toBe('review_placeholder')
+
+    // Exactly one AUTHORITATIVE review calculation, zero segment children, no pointer effect.
+    const calcs = await calculationRowsForUser(authoritativeUser)
+    expect(calcs.length).toBe(1)
+    expect(calcs[0].mode).toBe('authoritative')
+    expect(calcs[0].entrypoint).toBe('live')
+    expect(calcs[0].outcome).toBe('review_required')
+    expect(calcs[0].projection_effect).toBe('none')
+    expect(calcs[0].expected_segment_count).toBe(0)
+    expect(await segmentCountForCalculation(String(calcs[0].id))).toBe(0)
+
+    // The operation sealed against the real record + calculation, and the outbox row still fires
+    // unconditionally (unchanged from the shadow path's own behaviour for a review outcome).
+    // No entrypoint filter: the operation-registry entrypoint is the COMMAND KIND
+    // (`live_punch`), not the calculation-row entrypoint (`live`) asserted above.
+    const ops = await operationRows(authoritativeOrg)
+    expect(ops.length).toBe(1)
+    expect(ops[0].state).toBe('completed')
+    expect(ops[0].resolved_record_id).toBe(parents[0].id)
+    expect(ops[0].resolved_calculation_id).toBe(calcs[0].id)
+    const outbox = await outboxRows(authoritativeOrg)
+    expect(outbox.length).toBe(1)
+    expect(outbox[0].event_kind).toBe('attendance.punched')
+  })
+
+  it('leg 6b — authoritative SCHEDULED now WRITES through the canonical authoritative path (Gate D3, #4844): the fail-closed sentinel is gone, the durable run executes, and NO legacy-ACTIVE absent row is fabricated', async () => {
+    // RE-FORMED BY GATE D3. This leg asserted a 503 `not delivered` refusal, which was true only
+    // while the scheduled entrypoint was undelivered. D3 removed BOTH of that entrypoint's refusal
+    // sites, so the assertion is re-pointed at what the route does NOW — end to end through the
+    // real HTTP surface, which is the half this file owns (the writer's internals are the D3
+    // real-DB suite's).
+    //
+    // `schedAdminUser` is a REAL active `users` row (the P1-4 in-transaction actor recheck rejects
+    // anything else with 403). Using a random uuid here would produce a 403 that merely proves the
+    // recheck works, not that the writer is wired — measured, then fixed.
+    const before = await recordCount(authoritativeUser)
+    const adminToken = await mintToken(schedAdminUser, 'attendance:read,attendance:write,attendance:admin')
     const run = await autoAbsenceRun(adminToken, { orgId: authoritativeOrg, workDate: '2026-07-22' })
-    expect(run.status).toBe(503)
-    expect(run.body?.error?.code).toBe('W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED')
-    expect(await recordCount(authoritativeUser)).toBe(0)
-    expect((await operationRows(authoritativeOrg)).length).toBe(0)
+    expect(run.status).toBe(200)
+    // The sentinel is GONE: no code, and nothing that looks like it, comes back.
+    expect(JSON.stringify(run.body ?? {})).not.toContain('AUTHORITATIVE_MODE_NOT_DELIVERED')
+    // A durable run row exists for that (org, workDate) — the run-registry routing Site A now
+    // performs instead of refusing.
+    const runs = await pool.query(
+      `SELECT state FROM attendance_scheduled_runs WHERE org_id = $1 AND work_date = '2026-07-22'::date`,
+      [authoritativeOrg],
+    )
+    expect(runs.rows.length).toBeGreaterThan(0)
+    // §7.5: whatever the per-target outcome was, the authoritative path never fabricates a
+    // legacy-ACTIVE `'absent'` row for an ordinary reader.
+    const fabricated = await pool.query(
+      `SELECT count(*)::int AS n FROM attendance_records
+        WHERE org_id = $1 AND work_date = '2026-07-22'::date
+          AND status = 'absent' AND visibility_state = 'active' AND projection_owner = 'legacy_untracked'`,
+      [authoritativeOrg],
+    )
+    expect(fabricated.rows[0].n).toBe(0)
+    void before
   })
 
   it('leg 7 — accepted_write_posture cannot be silently rebased: replay after legacy->shadow promotion returns the stored legacy response unchanged; a fresh key takes the shadow path; direct UPDATE is trigger-denied', async () => {
@@ -1733,9 +1811,14 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     let absenceCalls = 0
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: async () => { throw new Error('unreached') },
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: async () => { throw new Error('unreached') },
+      deriveLivePunchWorkDateResolution: async () => { throw new Error('unreached') },
       resolveLiveCandidate: async () => { throw new Error('unreached') },
       resolveScheduledCandidate: async () => ({ kind: 'unresolved' }),
       buildShadowFrozenContext: async () => { throw new Error('unreached') },
+      // W7-1b: required adapter; same `unreached` discipline as above.
+      issueFrozenContext: async () => { throw new Error('unreached') },
       applyScheduledAbsenceLegacy: async (trx, args) => {
         absenceCalls += 1
         const result = await trx.query(
@@ -2186,6 +2269,9 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const adapters: AttendanceW4LiveScheduledLegacyAdaptersV1 = {
       applyLivePunchLegacy: unreached('applyLivePunchLegacy') as never,
+      // Gate D2 (#4844): required on the adapter bag; unreached on every scheduled leg.
+      insertLivePunchEvent: unreached('insertLivePunchEvent') as never,
+      deriveLivePunchWorkDateResolution: unreached('deriveLivePunchWorkDateResolution') as never,
       // Zero-effect ("nobody absent") but the CALL ITSELF is the signal a
       // rejection leg must never produce — counted, never a real INSERT.
       applyScheduledAbsenceLegacy: async () => {
@@ -2195,6 +2281,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       resolveLiveCandidate: unreached('resolveLiveCandidate') as never,
       resolveScheduledCandidate: unreached('resolveScheduledCandidate') as never,
       buildShadowFrozenContext: unreached('buildShadowFrozenContext') as never,
+      // W7-1b: required adapter. Kept `unreached` on purpose — these legs assert
+      // the boundary REFUSES before any freeze, so a reachable stub here would
+      // weaken the very control-flow pin the leg exists for.
+      issueFrozenContext: unreached('issueFrozenContext') as never,
     }
     return { adapters, absenceCallCount: () => n }
   }

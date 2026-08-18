@@ -617,6 +617,13 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
   assert.deepEqual(
     bucketMembers,
     [
+      // W7-3 (#4556): the OD-W7-3(a) context-source posture machine — a SECOND,
+      // independent org-keyed control-plane state table plus its append-only
+      // event log, structurally the same kind of object as the W4 rollout pair
+      // below and written only by the single transition boundary named in
+      // W4_CANONICAL_PATH_PREFIXES.
+      'attendance_calculation_context_source_events',
+      'attendance_calculation_context_source_state',
       'attendance_calculation_rollout_events',
       'attendance_calculation_rollout_state',
       'attendance_group_effect_revisions',
@@ -948,7 +955,8 @@ test('W4C-3b P26 generates the action/fixture matrix and classifies every assign
   )
   assert.deepEqual(contract.fixtureKinds, ['normal', 'adversary'])
   assert.deepEqual(contract.timeoutEffects, ['transfer', 'jump'])
-  assert.equal(contract.actions.length, 8)
+  // Lock-3 §2.1 (P4-A): APPROVAL_ACTION_TYPES gained `handle` — the union is now nine members.
+  assert.equal(contract.actions.length, 9)
 })
 
 test('W4C-3b P26 mutations kill action, fixture, and assignment-DML omissions or additions', () => {

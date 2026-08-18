@@ -13,12 +13,33 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by the preset publish test).
 export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
+// Lock-3 R-1 (FE mirror site 2 of 3): `handler` (办理节点) — mirrors backend
+// packages/core-backend/src/types/approval-product.ts. Keep in sync with that union and the runtime
+// `APPROVAL_NODE_TYPES` admission set.
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
+// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
+// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
+// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
+  'static_user',
+  'static_role',
+  'requester',
+  'form_field_user',
+  'direct_manager',
+  'dept_head',
+  'manager_at_level',
+] as const
+export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
+// Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
+export type HandlerMode = 'all' | 'any'
+
 export type ApprovalActionType =
   | 'approve'
   | 'reject'
@@ -28,6 +49,8 @@ export type ApprovalActionType =
   | 'return'
   | 'add_sign'
   | 'reduce_sign'
+  // Lock-3 §2.1 — handler-node submit verb.
+  | 'handle'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
@@ -45,6 +68,25 @@ export type FormFieldType =
   | 'detail'
   /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
   | 'record-link'
+  /**
+   * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): a
+   * start+end date pair. Value is `{ start: string; end: string }`; props carry a REQUIRED
+   * `dateType` granularity (no absent-default) plus `startLabel`/`endLabel` and an optional
+   * `durationLabel`. Excluded from detail columns (OD-L8-4) and never selectable as a whole-value
+   * visibility/condition dependency (OD-L8-5) — only its `${fieldId}.start`/`${fieldId}.end`
+   * endpoints are.
+   */
+  | 'date_range'
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3): a
+   * DISPLAY-ONLY field (说明) — renders authored `props.text` to the requester/approver. No
+   * submitted value: `required`/`defaultValue`/`options`/`placeholder` are all refused at
+   * publish (A-1), the field never enters `formSnapshot` or FWB source candidates, is excluded
+   * from detail columns (MS-4/MS-5), and is never a whole-value visibility/condition dependency
+   * (MS-8/MS-9/MS-10) — it has no value to compare. `label` stays authoring-list-only (BE
+   * requires a non-blank label for every field, `:786`); the rendered body is `props.text`.
+   */
+  | 'explanation'
 
 export interface ApprovalNode {
   key: string
@@ -55,14 +97,24 @@ export interface ApprovalNode {
     | ConditionNodeConfig
     | CcNodeConfig
     | ParallelNodeConfig
+    | HandlerNodeConfig
     | Record<string, never>
 }
 
-// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:51-56 (P1-C node-level
-// field permissions). `editable` (the absent default) === current behavior. Only `hidden` is
-// enforced at runtime (server-side echo-redaction — already shipped in #2799); `readonly`/`editable`
-// are contract-stable but runtime-inert (readonly enforcement is deferred to T1-4b). The authoring
-// editor may set `hidden`/`readonly`; both round-trip, `readonly` carries a "not-yet-enforced" hint.
+// Lock-3 §1.1 — handler / 办理节点 config (mirrors backend HandlerNodeConfig). `assigneeSources` is the
+// ONLY assignee carrier; NO empty/fallback key exists (§1.2). `fieldPermissions` ENFORCEMENT is Lock-7.
+export interface HandlerNodeConfig {
+  assigneeSources: ApprovalAssigneeSource[]
+  handlerMode?: HandlerMode
+  opinionRequired?: boolean
+  fieldPermissions?: NodeFieldPermission[]
+}
+
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts NodeFieldAccess (P1-C
+// node-level field permissions). `editable` (the absent default) === current behavior. `hidden` and
+// `readonly` are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a
+// write; `readonly` refuses a write at that node. The authoring editor sets `hidden`/`readonly`; both
+// round-trip and are enforced.
 export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
 export interface NodeFieldPermission {
   fieldId: string
@@ -102,6 +154,47 @@ export type ApprovalAssigneeSource =
   | { kind: 'dept_head' }
   | { kind: 'continuous_managers'; levels: number }
   | { kind: 'manager_at_level'; level: number }
+  /**
+   * Lock-1 §K2 — 提交人自选. Byte-mirrors the backend union member: the requester picks the
+   * approver(s) at SUBMIT time (chooser in ApprovalNewView); choices travel in the create
+   * payload keyed by node key, are scope-validated server-side, and freeze at create.
+   */
+  | {
+      kind: 'requester_choice'
+      mode: 'single' | 'multi'
+      scope:
+        | { type: 'company' }
+        | { type: 'members'; userIds: string[] }
+        | { type: 'role'; roleIds: string[] }
+    }
+  /**
+   * Lock-1 §K4 — 连续多级部门负责人. Byte-mirrors the backend union member: levels 1..`levels`
+   * (level 1 = the requester's own department head), resolved from the baked `deptHeadChainIds`
+   * snapshot — a DIFFERENT pointer from `continuous_managers` (leader_in_dept vs the department
+   * parent tree). No authoring shape beyond `levels`; the picker is a plain level-count input,
+   * same as `continuous_managers`.
+   */
+  | { kind: 'continuous_dept_heads'; levels: number }
+  /**
+   * Lock-1 §K5-b — 指定层级部门负责人. Byte-mirrors the backend union member: `deptHeadChainIds[level-1]`,
+   * positionally identical to `manager_at_level` but over the K4 department-head chain instead of
+   * `managerChainIds`. Level 1 = the requester's own department head. No authoring shape beyond
+   * `level`; the picker is the SAME plain level input as `manager_at_level` (single level, not a
+   * level count).
+   */
+  | { kind: 'dept_head_at_level'; level: number }
+  /**
+   * Lock-1 §K3 — 节点审批人 (prior-node approver). Byte-mirrors the backend union member:
+   * `nodeKey` references an `approval` node strictly upstream on EVERY runtime-reachable path
+   * (a publish-time dominance check — dangling / downstream / self / branch-only references fail
+   * publish). Resolution happens at dispatch from the INSTANCE's own audit rows (the referenced
+   * node's actual deciders, latest round, system sentinels dropped) — never a directory read.
+   * The authoring picker is a TYPED node select restricted to the legal upstream set
+   * (`legalPriorApproverNodeKeys`), never a free-text key input.
+   */
+  | { kind: 'prior_node_approver'; nodeKey: string }
+
+export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
 export interface ConditionNodeConfig {
   branches: ConditionBranch[]
@@ -150,6 +243,17 @@ export interface ApprovalGraph {
 export interface RuntimePolicy {
   allowRevoke: boolean
   revokeBeforeNodeKeys?: string[]
+  /**
+   * L6-P1 carrier fix landed this as an opaque pass-through (`unknown`) — the authoring editor did
+   * not yet render a template-level control. P3-B / Lock-6 L6-A (docs/development/approval-lock6-
+   * requester-global-policy-20260817.md §1) is that slice: the template-level dedup tier projects
+   * onto the SAME `AutoApprovalPolicy` shape node-level `autoApprovalPolicy` already uses (byte-
+   * mirrors backend `RuntimePolicy.autoApproval?: AutoApprovalPolicy`), so it is typed here rather
+   * than left opaque. Any FIELD this editor does not author (e.g. a future `actorMode`) still
+   * survives round-trip verbatim — `buildTemplateAutoApprovalPolicy` (templateAuthoring.ts) merges
+   * onto the hydrated object rather than reconstructing it from scratch.
+   */
+  autoApproval?: AutoApprovalPolicy
 }
 
 export interface RuntimeGraph extends ApprovalGraph {
@@ -251,6 +355,12 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the current node's TYPE (mirrors backend). The member 待办 center reads this to
+   * withhold the approve/reject action surface on a 办理 (handler) task (it is not an approval task;
+   * the member 办理 UI is P5). Absent ≡ not-a-handler (safe default keeps ordinary tasks actionable).
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
    * Parallel gateway (并行分支) — surfaced only when the instance is inside
    * a parallel region (length ≥ 2). Absent on linear state.
    */
@@ -281,6 +391,12 @@ export interface UnifiedApprovalHistoryDTO {
 export interface CreateApprovalRequest {
   templateId: string
   formData: Record<string, unknown>
+  /**
+   * Lock-1 §K2 — submit-time approver choices, keyed by the published requester_choice
+   * node's key. Required per node when the route carries a requester_choice source (the
+   * server 422s values-free on a missing entry); validated + frozen server-side at create.
+   */
+  requesterChoices?: Record<string, string[]>
 }
 
 export interface ApprovalActionRequest {
@@ -321,6 +437,14 @@ export interface ApprovalTemplateListItemDTO {
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+  /**
+   * L6-P1 carrier fix — the active published definition's runtime policy, or `null`/absent
+   * pre-publish. Optional here (unlike the backend DTO, where it's required) so existing test
+   * fixtures that predate this field keep compiling; the backend always sends the key. Hydrated
+   * into the draft verbatim by `draftFromTemplate` / `originalPolicy` and merged back onto the
+   * publish payload by `buildPublishPolicy` — never read directly for rendering.
+   */
+  policy?: RuntimePolicy | null
 }
 
 export interface ApprovalTemplateVisibilityScope {

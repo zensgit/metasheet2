@@ -49,7 +49,7 @@ describe('approval admin jump migration and bootstrap sync', () => {
 
     // Later schema additions may advance the bootstrap marker; keep this pin synchronized so the
     // reassign CHECK and the latest idempotent DDL are both replayed on reused test databases.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260722-template-version-restore-current-round'")
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260817-field-edit-enforcement-revisions'")
     expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'")
     expect(source).toContain('ADD COLUMN IF NOT EXISTS publish_note TEXT')
     expect(source).toContain('ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0')

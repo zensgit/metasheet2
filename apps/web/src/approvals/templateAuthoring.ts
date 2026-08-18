@@ -18,6 +18,7 @@ import type {
   NodeFieldPermission,
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
+  RuntimePolicy,
 } from '../types/approval'
 import {
   buildDetailColumns,
@@ -67,7 +68,7 @@ export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './paralle
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
-export { placeholderRoleNodeKeys } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -89,6 +90,12 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'user',
   'detail',
   'record-link',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): start+end date pair.
+  'date_range',
+  // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1): display-only 说明. Top-level
+  // only — excluded from `DETAIL_LEAF_FIELD_TYPES` (detailField.ts), never a whole-value
+  // visibility/condition dependency (MS-8/MS-9/MS-10).
+  'explanation',
 ]
 
 /**
@@ -123,6 +130,38 @@ export interface FieldAuthoringDraft {
    */
   recordLinkBaseId: string
   recordLinkSheetId: string
+  /**
+   * L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display
+   * props. Meaningful only when `type === 'number'`. Props on the EXISTING `number` type — NOT a
+   * new field type (M10). `numberCurrencySymbol === ''` means "no currency prefix" (props key
+   * omitted at build); the two booleans default `false` (also omitted). Editor is authoritative
+   * for these three keys once touched — buildFormSchema does not resurrect them from `original`
+   * when cleared. min/max/step/precision/derivedFrom stay unauthorable (pass through `original`
+   * verbatim, §0.4), unchanged by this slice.
+   */
+  numberCurrencySymbol: string
+  numberThousandsSeparator: boolean
+  numberUppercaseCny: boolean
+  /**
+   * L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-8): date_range draft
+   * carrier. Meaningful only when `type === 'date_range'`. `dateRangeDateType` mirrors C-7/C-6's
+   * required 3-way granularity enum and has NO absent-default — `''` is the "not yet chosen" draft
+   * state (publish rejects it, §1.2), never silently coerced to a default arm. `dateRangeStartLabel`
+   * / `dateRangeEndLabel` are the required C-7 控件名称 1/2; `dateRangeDurationLabel` is an OPTIONAL
+   * custom label for the ALWAYS-rendered derived duration (OD-L8-8) — its absence does not turn the
+   * duration display off, only its label falls back to a default.
+   */
+  dateRangeDateType: '' | 'date' | 'date_half_day' | 'date_minute'
+  dateRangeStartLabel: string
+  dateRangeEndLabel: string
+  dateRangeDurationLabel: string
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-3(a)): the authored body
+   * (`props.text`) shown to the requester/approver. Meaningful only when `type === 'explanation'`.
+   * `''` is the "not yet written" draft state — publish rejects a blank/missing `props.text`, never
+   * silently defaults it.
+   */
+  explanationText: string
   original?: FormField
 }
 
@@ -143,6 +182,20 @@ export interface ApprovalStepDraft {
   // Single 1-based management level the `manager_at_level` source resolves;
   // meaningful only when `sourceKind === 'manager_at_level'`. Same backend cap as `levels`.
   level: number
+  // Lock-1 §K2 (提交人自选) — meaningful only when `sourceKind === 'requester_choice'`.
+  // `single` = the requester picks exactly one approver at submit; `multi` = one or more.
+  requesterChoiceMode: 'single' | 'multi'
+  // §K2 scope discriminator. `company` = any active user; `members` / `role` narrow the
+  // chooser to a configured list, carried in the SAME `idsText` chip carrier the static
+  // pickers use (userIds for members, roleIds for role) — sourceFromStep re-shapes it.
+  requesterChoiceScopeType: 'company' | 'members' | 'role'
+  // Lock-1 §K3 (节点审批人) — meaningful only when `sourceKind === 'prior_node_approver'`: the
+  // `localId` of the EARLIER step whose actual decider(s) this step re-asks. Deliberately a
+  // step-localId reference, NOT a raw node key: the linear builder regenerates node keys
+  // positionally (`approval_${index+1}`), so a stored key would silently RETARGET when steps are
+  // inserted/reordered — the localId reference follows the intended step and `sourceFromStep`
+  // emits that step's CURRENT key at build time. `''` = not yet chosen (invalid to save).
+  priorStepLocalId: string
   approvalMode: ApprovalMode
   emptyAssigneePolicy: EmptyAssigneePolicy
   // Self-approver authoring: the editable toggle (merge the requester in as an
@@ -155,9 +208,9 @@ export interface ApprovalStepDraft {
   // T1-4 node-level field permissions (linear editor). One entry per NON-editable form field
   // (`editable` is the absent default, so a field left editable carries no entry). Hydrated from
   // `config.fieldPermissions` and re-emitted by `buildStepConfig`, which prunes entries whose field
-  // was deleted (backend cross-ref safety) and drops any `editable` entry. `hidden` is enforced at
-  // runtime (server echo-redaction, shipped #2799); `readonly` round-trips but is runtime-inert
-  // (enforcement deferred to T1-4b).
+  // was deleted (backend cross-ref safety) and drops any `editable` entry. `hidden` and `readonly`
+  // are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a write;
+  // `readonly` refuses a write at that node.
   fieldPermissions: NodeFieldPermission[]
 }
 
@@ -171,6 +224,24 @@ export interface TemplateAuthoringDraft {
   visibilityIdsText: string
   slaHoursText: string
   allowRevoke: boolean
+  // L6-P1 carrier fix — the full persisted `policy` object as of hydrate (or `null`/undefined for
+  // a never-published template), captured VERBATIM. The editor only authors `allowRevoke` above;
+  // every other key (e.g. `autoApproval`, settable only through the publish API) must survive an
+  // editor republish untouched. `buildPublishPolicy` spreads this and overlays `allowRevoke` —
+  // mirrors the `originalAutoApprovalPolicy` / `amountConsistencyCheck` preserve-verbatim pattern
+  // already used in this file.
+  originalPolicy?: RuntimePolicy | null
+  /**
+   * P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1) —
+   * the editable projection of the TEMPLATE-level dedup tier. Mirrors the node-level
+   * `mergeWithRequester` / `originalAutoApprovalPolicy` pattern immediately below: this is the ONE
+   * sub-field of `originalPolicy.autoApproval` the editor authors; every other key (and the
+   * both-flags-true combination this tier cannot express) survives verbatim via
+   * `buildTemplateAutoApprovalPolicy`, which reads `originalPolicy.autoApproval` directly rather
+   * than reconstructing it from this field alone. See `templateDedupTierFromPolicy` /
+   * `isTemplateDedupTierLocked` for the hydrate-time projection and lock detection.
+   */
+  autoApprovalDedupTier: TemplateDedupTier
   fields: FieldAuthoringDraft[]
   steps: ApprovalStepDraft[]
   // G-1 anti-flatten keystone: a COMPLEX graph (any cc/condition/parallel node, or any
@@ -204,7 +275,9 @@ export interface TemplateAuthoringDraft {
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
 // graph containing them is load-preserved verbatim (read-only graph view), never flattened.
-const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+// Lock-3 R-22 (CONFIRM-EXCLUDE): a graph containing a `handler` is COMPLEX (canvas-only); the linear
+// steps editor is deliberately NOT taught the node type, so a handler graph is preserved verbatim.
+const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel', 'handler'])
 
 /**
  * True when a graph can't be edited through the linear `steps` model and so must be
@@ -237,6 +310,14 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
+    numberCurrencySymbol: '',
+    numberThousandsSeparator: false,
+    numberUppercaseCny: false,
+    dateRangeDateType: '',
+    dateRangeStartLabel: '',
+    dateRangeEndLabel: '',
+    dateRangeDurationLabel: '',
+    explanationText: '',
   }
 }
 
@@ -280,6 +361,9 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     fieldId: '',
     levels: 2,
     level: 1,
+    requesterChoiceMode: 'single',
+    requesterChoiceScopeType: 'company',
+    priorStepLocalId: '',
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
@@ -324,7 +408,14 @@ export function createEmptyTemplateDraft(): TemplateAuthoringDraft {
     visibilityType: 'all',
     visibilityIdsText: '',
     slaHoursText: '',
+    // A brand-new template has never been published, so there is no persisted policy to reflect
+    // (L6-P1 §2.2: `allowRevoke` is the one RuntimePolicy field with no server default). `true`
+    // stays the client-chosen create-time default, unchanged by the carrier fix below —
+    // `originalPolicy` is correctly left absent (nothing to preserve yet).
     allowRevoke: true,
+    // §2.2 "no shipped default may change": absent `autoApproval` === 不去重 for a brand-new
+    // template, exactly like every pre-P3-B published template.
+    autoApprovalDedupTier: 'none',
     fields: [createEmptyFieldDraft(1)],
     steps: [createEmptyStepDraft(1)],
   }
@@ -422,6 +513,31 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
     recordLinkBaseId: field.type === 'record-link' && typeof props.baseId === 'string' ? props.baseId : '',
     recordLinkSheetId: field.type === 'record-link' && typeof props.sheetId === 'string' ? props.sheetId : '',
+    // L8-C: typeof-guarded per key — a malformed stored value (wrong type) hydrates to the "unset"
+    // default rather than throwing or coercing (mirrors numberFieldProps.ts's per-key discipline).
+    // The backend now type-validates these three keys at publish (ApprovalProductService.ts), so a
+    // freshly-saved template can never reach this hydration path with a malformed value; this stays
+    // defensive for pre-existing/out-of-band data.
+    numberCurrencySymbol: field.type === 'number' && typeof props.currencySymbol === 'string' ? props.currencySymbol : '',
+    numberThousandsSeparator: field.type === 'number' && props.thousandsSeparator === true,
+    numberUppercaseCny: field.type === 'number' && props.uppercaseCny === true,
+    // L8-B: typeof/enum-guarded per key, mirroring L8-C's discipline — a malformed stored value
+    // hydrates to the "unset" default rather than throwing or coercing. The backend type/enum
+    // validates these at publish (ApprovalProductService.ts), so a freshly-saved template can never
+    // reach this hydration path with a malformed value; this stays defensive for out-of-band data.
+    dateRangeDateType:
+      field.type === 'date_range' &&
+      (props.dateType === 'date' || props.dateType === 'date_half_day' || props.dateType === 'date_minute')
+        ? props.dateType
+        : '',
+    dateRangeStartLabel: field.type === 'date_range' && typeof props.startLabel === 'string' ? props.startLabel : '',
+    dateRangeEndLabel: field.type === 'date_range' && typeof props.endLabel === 'string' ? props.endLabel : '',
+    dateRangeDurationLabel: field.type === 'date_range' && typeof props.durationLabel === 'string' ? props.durationLabel : '',
+    // L8-A: typeof-guarded, same discipline as the L8-B/L8-C keys above — a malformed stored value
+    // hydrates to the "unset" draft state rather than throwing or coercing. The backend requires a
+    // non-blank `props.text` at publish, so a freshly-saved template can never reach this hydration
+    // path with a malformed value; this stays defensive for out-of-band data.
+    explanationText: field.type === 'explanation' && typeof props.text === 'string' ? props.text : '',
     original: field,
   }
 }
@@ -445,6 +561,11 @@ function stepDraftFromApprovalNode(
   let fieldId = ''
   let levels = 2
   let level = 1
+  let requesterChoiceMode: 'single' | 'multi' = 'single'
+  let requesterChoiceScopeType: 'company' | 'members' | 'role' = 'company'
+  // Lock-1 §K3: hydrated as '' here (this per-node projection has no cross-step context);
+  // `draftFromTemplate` resolves the stored nodeKey to the referenced EARLIER step's localId in a
+  // post-pass over the ordered chain.
   if (source?.kind === 'static_user') {
     sourceKind = 'static_user'
     idsText = formatIds(source.userIds)
@@ -466,6 +587,26 @@ function stepDraftFromApprovalNode(
   } else if (source?.kind === 'manager_at_level') {
     sourceKind = 'manager_at_level'
     level = source.level
+  } else if (source?.kind === 'continuous_dept_heads') {
+    // Lock-1 §K4: same shape as continuous_managers — reuses the shared `levels` field.
+    sourceKind = 'continuous_dept_heads'
+    levels = source.levels
+  } else if (source?.kind === 'dept_head_at_level') {
+    // Lock-1 §K5-b: same shape as manager_at_level — reuses the shared `level` field.
+    sourceKind = 'dept_head_at_level'
+    level = source.level
+  } else if (source?.kind === 'requester_choice') {
+    // Lock-1 §K2: hydrate mode + scope; a members/role scope's id list rides the shared
+    // idsText chip carrier (sourceFromStep re-shapes it back per scope type).
+    sourceKind = 'requester_choice'
+    requesterChoiceMode = source.mode
+    requesterChoiceScopeType = source.scope.type
+    if (source.scope.type === 'members') idsText = formatIds(source.scope.userIds)
+    else if (source.scope.type === 'role') idsText = formatIds(source.scope.roleIds)
+  } else if (source?.kind === 'prior_node_approver') {
+    // Lock-1 §K3: the stored nodeKey → step-localId resolution happens in draftFromTemplate's
+    // post-pass (see priorStepLocalId's field doc for why the draft carries a localId reference).
+    sourceKind = 'prior_node_approver'
   } else if (legacyType === 'user') {
     sourceKind = 'static_user'
     idsText = formatIds(legacyIds)
@@ -496,6 +637,9 @@ function stepDraftFromApprovalNode(
     fieldId,
     levels,
     level,
+    requesterChoiceMode,
+    requesterChoiceScopeType,
+    priorStepLocalId: '',
     approvalMode: config.approvalMode === 'all' || config.approvalMode === 'any' ? config.approvalMode : 'single',
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
@@ -566,6 +710,9 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
   'condition',
   'parallel',
   'end',
+  // Lock-3 R-20: `handler` is recognised + load-preserved. WITHOUT this row a handler graph would
+  // (correctly) force the whole template read-only with save blocked — the fail-closed positive control.
+  'handler',
 ])
 
 /**
@@ -599,7 +746,9 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
 //   - assigneeSources[] per kind (ApprovalProductService.ts:408-453)
 //   - autoApprovalPolicy (:371-376) — 4 fields
 //   - fieldPermissions[] (:786-799) — { fieldId, access }
-// All three bottom out in primitives / string-arrays (no deeper objects), so this 2-level check is complete.
+// autoApprovalPolicy / fieldPermissions bottom out in primitives / string-arrays; assigneeSources
+// does too EXCEPT the Lock-1 §K2 `requester_choice` source, whose `scope` is a nested object —
+// `requesterChoiceSourceHasBackendDrop` below carries that third level, so the check stays complete.
 const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   static_user: ['kind', 'userIds'],
   static_role: ['kind', 'roleIds'],
@@ -608,7 +757,37 @@ const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
   dept_head: ['kind'],
   continuous_managers: ['kind', 'levels'],
   manager_at_level: ['kind', 'level'],
+  // Lock-1 §K4: same flat 2-level shape as continuous_managers.
+  continuous_dept_heads: ['kind', 'levels'],
+  // Lock-1 §K5-b: same flat 2-level shape as manager_at_level.
+  dept_head_at_level: ['kind', 'level'],
+  // Lock-1 §K3: flat 2-level shape — the referenced prior node's key.
+  prior_node_approver: ['kind', 'nodeKey'],
   form_field_user: ['kind', 'fieldId'],
+  // Lock-1 §K2: `scope` is the ONE nested object in the source union (see
+  // requesterChoiceSourceHasBackendDrop below for its per-type key check — the flat 2-level
+  // allowlist alone cannot see inside it).
+  requester_choice: ['kind', 'mode', 'scope'],
+}
+
+// Lock-1 §K2 — the requester_choice `scope` shapes the backend accepts (normalize REJECTS any
+// other key/type rather than dropping it, but the FE posture is the same either way: a shape the
+// backend won't re-emit verbatim must force read-only, never silently flatten on save).
+const BACKEND_REQUESTER_CHOICE_SCOPE_KEYS_BY_TYPE: Record<string, string[]> = {
+  company: ['type'],
+  members: ['type', 'userIds'],
+  role: ['type', 'roleIds'],
+}
+
+function requesterChoiceSourceHasBackendDrop(source: Record<string, unknown>): boolean {
+  if (source.mode !== 'single' && source.mode !== 'multi') return true
+  const scope = source.scope
+  if (!isPlainRecord(scope)) return true
+  const allowedScopeKeys = BACKEND_REQUESTER_CHOICE_SCOPE_KEYS_BY_TYPE[scope.type as string]
+  if (!allowedScopeKeys || hasKeyOutside(scope, allowedScopeKeys)) return true
+  if (scope.type === 'members' && !Array.isArray(scope.userIds)) return true
+  if (scope.type === 'role' && !Array.isArray(scope.roleIds)) return true
+  return false
 }
 const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
 const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
@@ -647,6 +826,8 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
       if (!isPlainRecord(source)) return true
       const allowed = BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND[source.kind as string]
       if (!allowed || hasKeyOutside(source, allowed)) return true
+      // Lock-1 §K2: the nested `scope` object needs its own per-type key/shape check.
+      if (source.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source)) return true
     }
   }
   if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
@@ -666,6 +847,9 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
 // start/end → {}. Formula branches are FC-2 authorable and round-trip through `conditionEdit.ts`.
 const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
 const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
+// Lock-3 R-21 — the handler config keys the backend `normalizeApprovalGraph` (case 'handler') re-emits.
+// Any other key is silently dropped on save, so it must trip the backend-drop check (fail-closed).
+const BACKEND_HANDLER_CONFIG_KEYS = ['assigneeSources', 'handlerMode', 'opinionRequired', 'fieldPermissions']
 const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
 const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules', 'formula']
 const BACKEND_CONDITION_FORMULA_KEYS = ['expression']
@@ -685,6 +869,9 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
       return complexApprovalConfigHasBackendDrop(config)
     case 'cc':
       return hasKeyOutside(config, BACKEND_CC_CONFIG_KEYS)
+    case 'handler':
+      // Lock-3 R-21: a handler key outside the backend allowlist is a silent backend-drop.
+      return hasKeyOutside(config, BACKEND_HANDLER_CONFIG_KEYS)
     case 'parallel':
       return hasKeyOutside(config, BACKEND_PARALLEL_CONFIG_KEYS)
     case 'condition': {
@@ -772,7 +959,23 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
-      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level'].includes(source?.kind)) return true
+      if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level', 'prior_node_approver'].includes(source?.kind)) return true
+      // Lock-1 §K2: a malformed requester_choice shape must fail-closed to read-only here too —
+      // hydrate would otherwise re-derive a default mode/scope and silently flatten it on save.
+      if (source?.kind === 'requester_choice' && requesterChoiceSourceHasBackendDrop(source as unknown as Record<string, unknown>)) return true
+      // Lock-1 §K3: a prior_node_approver whose nodeKey is NOT an earlier approval node of this
+      // ordered linear chain (dangling / self / downstream) must fail-closed to read-only —
+      // hydrate's post-pass could not resolve it to a step-localId, so a re-save through the
+      // linear builder would silently emit an empty/retargeted reference. (The backend publish
+      // dominance gate is the arbiter; this only refuses to EDIT what the linear model cannot
+      // faithfully carry.)
+      if (source?.kind === 'prior_node_approver') {
+        const priorApprovalKeys = ordered
+          .slice(0, ordered.indexOf(node))
+          .filter((candidate) => candidate.type === 'approval')
+          .map((candidate) => candidate.key)
+        if (!priorApprovalKeys.includes(source.nodeKey)) return true
+      }
     }
     // T1-4: `buildStepConfig` re-emits only { fieldId, access } per entry (the backend allowlist),
     // so a linear node carrying an ARRAY-shaped fieldPermissions with an extra key or non-object
@@ -822,6 +1025,30 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
         .map(stepDraftFromApprovalNode)
         .filter((step): step is ApprovalStepDraft => step !== null)
 
+  // Lock-1 §K3 post-pass: resolve each stored `prior_node_approver` nodeKey into the referenced
+  // EARLIER step's localId (steps[i] ↔ the i-th approval node of the ordered linear chain). The
+  // localId reference — not the raw key — is what the draft carries, so inserting/reordering
+  // steps can never silently retarget the reference (the builder re-emits the referenced step's
+  // CURRENT positional key). A reference that does not resolve to an earlier approval node stays
+  // '' — `unsupportedTemplateAuthoringReason` already forces such a template read-only (save
+  // disabled), so the '' default is unreachable on an editable draft.
+  if (!complex) {
+    const orderedApprovalNodes = ordered.filter((node) => node.type === 'approval')
+    orderedApprovalNodes.forEach((node, index) => {
+      const step = steps[index]
+      if (!step || step.sourceKind !== 'prior_node_approver') return
+      const config = node.config as Record<string, unknown>
+      const source = Array.isArray(config.assigneeSources)
+        ? config.assigneeSources[0] as ApprovalAssigneeSource | undefined
+        : undefined
+      if (source?.kind !== 'prior_node_approver') return
+      const referencedIndex = orderedApprovalNodes.findIndex((candidate) => candidate.key === source.nodeKey)
+      if (referencedIndex >= 0 && referencedIndex < index) {
+        step.priorStepLocalId = steps[referencedIndex].localId
+      }
+    })
+  }
+
   return {
     templateId: template.id,
     key: template.key,
@@ -831,7 +1058,17 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityType: template.visibilityScope?.type ?? 'all',
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
-    allowRevoke: true,
+    // L6-P1 carrier fix — was hardcoded `true` regardless of the persisted value, so a template
+    // published with `allowRevoke:false` reverted to `true` on every editor load. `??` (not `||`)
+    // is required: a persisted `false` must stay `false`, not fall through to the default. `null`/
+    // absent `policy` (never-published template) keeps the create-time default of `true`.
+    allowRevoke: template.policy?.allowRevoke ?? true,
+    originalPolicy: template.policy ?? null,
+    // P3-B / Lock-6 L6-A — projects the hydrated `policy.autoApproval` onto the 3-way tier. Reads
+    // `template.policy?.autoApproval` (not `originalPolicy` above, though they are the same value)
+    // for clarity that this is a pure function of the persisted definition, matching
+    // `templateDedupTierFromPolicy`'s own signature.
+    autoApprovalDedupTier: templateDedupTierFromPolicy(template.policy?.autoApproval),
     // Hydrate side of the #3161 §1 preserve: carry the amount total-check mapping through verbatim
     // (shallow clone, never alias the source schema). Absent → no key (no phantom on round-trip).
     ...(template.formSchema.amountConsistencyCheck
@@ -872,6 +1109,18 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       if (!field.placeholder.trim()) {
         delete next.placeholder
       }
+      // Lock-8 L8-A (§1.1, OD-L8-2, A-1): explanation is DISPLAY-ONLY — force `required: false` and
+      // strip `placeholder`/`defaultValue` regardless of what the draft or `original` spread carries.
+      // `required`/`placeholder` are set UNCONDITIONALLY above from the draft (an author who toggled
+      // 必填 before retyping AWAY... into explanation would otherwise still emit `required: true`);
+      // `defaultValue` is never deleted anywhere else in this function — it only ever survives via
+      // the `original` spread (a field retyped FROM a type that had one). None of the three may leak
+      // through a retype. `options` is already handled by the non-select/multi-select delete below.
+      if (field.type === 'explanation') {
+        next.required = false
+        delete next.placeholder
+        delete next.defaultValue
+      }
       if (field.type === 'select' || field.type === 'multi-select') {
         next.options = parseOptionsText(field.optionsText)
       } else {
@@ -903,12 +1152,65 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
           baseId: field.recordLinkBaseId.trim(),
           sheetId: field.recordLinkSheetId.trim(),
         }
+      } else if (field.type === 'number') {
+        // L8-C (§1.3): editor is authoritative for the three NEW display keys only — preserve
+        // min/max/step/precision/derivedFrom verbatim from `original` (unauthorable, §0.4) via the
+        // starting spread, then overlay/delete the three authored keys so unchecking a toggle (or
+        // clearing the currency select) does not resurrect a stale value from `original` (mirrors
+        // the visibilityRule/options omit discipline above). The backend re-canonicalizes on save
+        // regardless (OD-L8-7); this keeps the client-authored payload already clean.
+        const props = next.props && typeof next.props === 'object'
+          ? { ...next.props } as Record<string, unknown>
+          : {}
+        delete props.baseId
+        delete props.sheetId
+        delete props.currencySymbol
+        delete props.thousandsSeparator
+        delete props.uppercaseCny
+        const currencySymbol = field.numberCurrencySymbol.trim()
+        if (currencySymbol) props.currencySymbol = currencySymbol
+        if (field.numberThousandsSeparator) props.thousandsSeparator = true
+        if (field.numberUppercaseCny) props.uppercaseCny = true
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
+      } else if (field.type === 'date_range') {
+        // L8-B (§1.2): a BRAND NEW type — unlike number, no pre-existing template could carry
+        // unrelated date_range props, so props are built fresh (mirrors record-link's discipline,
+        // never spreading `next.props`/`original`, not L8-C's preserve-then-overlay one — there is
+        // nothing legacy here to preserve). `dateType` has NO absent-default (§1.2): an unset draft
+        // emits no `dateType` key at all, so publish's required-key check rejects it rather than
+        // the client silently picking an arm.
+        const props: Record<string, unknown> = {}
+        if (field.dateRangeDateType) props.dateType = field.dateRangeDateType
+        const startLabel = field.dateRangeStartLabel.trim()
+        if (startLabel) props.startLabel = startLabel
+        const endLabel = field.dateRangeEndLabel.trim()
+        if (endLabel) props.endLabel = endLabel
+        const durationLabel = field.dateRangeDurationLabel.trim()
+        if (durationLabel) props.durationLabel = durationLabel
+        next.props = props
+      } else if (field.type === 'explanation') {
+        // L8-A (§1.1, OD-L8-3(a)): a BRAND NEW type — same discipline as date_range, props built
+        // fresh (never spreading `next.props`/`original`). `text` has no absent-default: an
+        // unwritten draft emits an empty string, and publish's non-blank check rejects it rather
+        // than the client silently picking a placeholder body.
+        next.props = { text: field.explanationText.trim() }
       } else if (next.props && typeof next.props === 'object') {
-        // Drop record-link pins when type changes away; keep other type-specific props only
-        // if still meaningful (do not leave baseId/sheetId on a text field).
+        // Drop record-link pins + L8-C display keys + L8-B date_range keys + L8-A explanation
+        // text when type changes away; keep other type-specific props only if still meaningful (do
+        // not leave baseId/sheetId, a formatted-number display flag, a date_range prop, or a stale
+        // explanation body on a field retyped to something else).
         const props = { ...next.props } as Record<string, unknown>
         delete props.baseId
         delete props.sheetId
+        delete props.currencySymbol
+        delete props.thousandsSeparator
+        delete props.uppercaseCny
+        delete props.dateType
+        delete props.startLabel
+        delete props.endLabel
+        delete props.durationLabel
+        delete props.text
         if (Object.keys(props).length === 0) delete next.props
         else next.props = props
       }
@@ -930,8 +1232,15 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
 
 /** Exported (G-B2-06) so `linearStepSpine.ts` can derive the same `ApprovalAssigneeSource` the
  * saved graph would carry and feed it to the shared `assigneeSourceSummary` humanizer, instead of
- * re-deriving a second sourceKind→text switch that could drift from this one. */
-export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
+ * re-deriving a second sourceKind→text switch that could drift from this one.
+ *
+ * Lock-1 §K3: `allSteps` (the draft's full ordered step list) is needed ONLY by
+ * `prior_node_approver` — the emitted `nodeKey` is the referenced step's CURRENT positional key
+ * (`approval_${index+1}`, the linear builder's own key scheme), derived from the step-localId
+ * reference at build time so insert/reorder can never silently retarget it. Callers without the
+ * list (none in-repo) would emit an empty `nodeKey`, which both the FE validation and the backend
+ * normalize choke reject — fail-closed, never a silently-wrong reference. */
+export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepDraft[]): ApprovalAssigneeSource {
   if (step.sourceKind === 'static_user') {
     return { kind: 'static_user', userIds: parseIdsText(step.idsText) }
   }
@@ -953,6 +1262,36 @@ export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource 
   if (step.sourceKind === 'manager_at_level') {
     return { kind: 'manager_at_level', level: step.level }
   }
+  if (step.sourceKind === 'continuous_dept_heads') {
+    // Lock-1 §K4: reuses the shared `levels` field (same shape as continuous_managers).
+    return { kind: 'continuous_dept_heads', levels: step.levels }
+  }
+  if (step.sourceKind === 'dept_head_at_level') {
+    // Lock-1 §K5-b: reuses the shared `level` field (same shape as manager_at_level).
+    return { kind: 'dept_head_at_level', level: step.level }
+  }
+  if (step.sourceKind === 'requester_choice') {
+    // Lock-1 §K2: re-shape the shared idsText carrier into the per-scope id list.
+    const scope =
+      step.requesterChoiceScopeType === 'members'
+        ? { type: 'members' as const, userIds: parseIdsText(step.idsText) }
+        : step.requesterChoiceScopeType === 'role'
+          ? { type: 'role' as const, roleIds: parseIdsText(step.idsText) }
+          : { type: 'company' as const }
+    return { kind: 'requester_choice', mode: step.requesterChoiceMode, scope }
+  }
+  if (step.sourceKind === 'prior_node_approver') {
+    // Lock-1 §K3: emit the referenced step's CURRENT positional key (see the docstring). An
+    // unresolved reference (missing localId / referenced step deleted or not EARLIER than this
+    // one) emits '' — rejected by validateTemplateApprovalFlow and by the backend normalize
+    // choke, never silently pointed elsewhere.
+    const stepIndex = allSteps?.findIndex((candidate) => candidate.localId === step.localId) ?? -1
+    const referencedIndex = allSteps?.findIndex((candidate) => candidate.localId === step.priorStepLocalId) ?? -1
+    const nodeKey = referencedIndex >= 0 && stepIndex >= 0 && referencedIndex < stepIndex
+      ? `approval_${referencedIndex + 1}`
+      : ''
+    return { kind: 'prior_node_approver', nodeKey }
+  }
   return { kind: 'requester' }
 }
 
@@ -964,7 +1303,7 @@ export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource 
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
  * bare `{}` is never persisted.
  */
-function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): ApprovalNodeConfig {
+function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>, allSteps: ApprovalStepDraft[]): ApprovalNodeConfig {
   const autoApprovalPolicy: AutoApprovalPolicy = {
     ...step.originalAutoApprovalPolicy,
     ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
@@ -983,7 +1322,7 @@ function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): Approv
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
   return {
-    assigneeSources: [sourceFromStep(step)],
+    assigneeSources: [sourceFromStep(step, allSteps)],
     approvalMode: step.approvalMode,
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
@@ -1015,7 +1354,9 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
     key: `approval_${index + 1}`,
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
-    config: buildStepConfig(step, fieldIds),
+    // Lock-1 §K3: the full step list rides along so a prior_node_approver step can emit its
+    // referenced step's CURRENT positional key (localId reference → key at build time).
+    config: buildStepConfig(step, fieldIds, draft.steps),
   }))
   const nodes: ApprovalGraph['nodes'] = [
     { key: 'start', type: 'start', name: '发起', config: {} },
@@ -1108,21 +1449,111 @@ export type RecordLinkCatalogValidationContext = {
   sheets: ReadonlyArray<{ id: string; baseId?: string | null }>
 }
 
+// P1-A0 (master §4 UI-0 "live validation count"; Lock-0 L0-3 typed-issue-record delta) — typed
+// issue shape for the authoring validators. `target` reuses L0-3's exact `{ kind, key }` contract
+// (`approval-lock0-d0-interaction-delta-20260817.md` L0-3) so a later slice adopting the header
+// count can consume this same record instead of migrating a second shape.
+//
+// `severity` is a SUPERSET field L0-3 does not define. Every basic-info check today is a hard
+// "must fix", so `severity` is currently ALWAYS `'error'` — it is declared for the future header
+// count (which may eventually need to distinguish a soft warning) but has exactly one live value
+// right now; do not read its presence as evidence a warning tier already exists.
+//
+// This is a typed SIBLING of the existing `string[]` validators, not a replacement — but not fully
+// independent of them either: `validateTemplateFormFields` below now COMPOSES
+// `validateTemplateBasicInfo`'s `.message`s for its first five entries (previously inlined). Both
+// `validationErrors` (the save-blocking surface) and `publishChecklist` (the publish pre-flight,
+// `TemplateAuthoringView.vue`) therefore transitively call through this new function, but their
+// composition, values, and rendered strings are byte-identical to before this extraction (pinned
+// by the regression tests below) — "sibling, not replacement" describes the OUTPUT contract, not
+// the call graph. Only the NEW basic-info step-nav issue badge derives its displayed count from
+// the typed shape directly (`AuthoringValidationIssue[].length`, never hand-counted).
+export type AuthoringValidationSeverity = 'error' | 'warning'
+
+export interface AuthoringValidationIssueTarget {
+  kind: 'node' | 'field' | 'section'
+  key: string
+}
+
+export interface AuthoringValidationIssue {
+  /** Stable rule identifier (was informally "field" — renamed to avoid colliding with the
+   * `target.kind === 'field'` case, since a basic-info issue like `visibility` targets the whole
+   * 基础信息 section, not a `FieldAuthoringDraft`). */
+  code: string
+  message: string
+  severity: AuthoringValidationSeverity
+  target?: AuthoringValidationIssueTarget
+}
+
+/**
+ * Typed basic-info issues — the SAME five checks `validateTemplateFormFields` has always run
+ * first (`unsupportedReason` / key / name / visibility scope / SLA hours), extracted verbatim so
+ * the 基础信息 step-nav badge can derive its count from a typed array instead of a hand-maintained
+ * counter. `validateTemplateFormFields` below calls this and flattens `.message` into its existing
+ * `string[]`, in the SAME order, so the combined validation set, order, and exact copy are
+ * unchanged from before this extraction — this function adds a typed VIEW onto existing rules, it
+ * does not add, remove, or reword any of them.
+ *
+ * `unsupportedReason` (an attachment-field/unknown-node structural block, not something an author
+ * fixes by editing 基础信息 text) is included deliberately: `firstInvalidAuthoringSection` already
+ * routes a validate() failure carrying it to the `'basic'` step (this file, `hasBasicSettingsError`
+ * in `TemplateAuthoringView.vue`), so counting it here mirrors an existing attribution rather than
+ * inventing a new one — it does not introduce a second, disagreeing classification.
+ */
+export function validateTemplateBasicInfo(
+  draft: TemplateAuthoringDraft,
+  unsupportedReason?: string | null,
+): AuthoringValidationIssue[] {
+  const issues: AuthoringValidationIssue[] = []
+  if (unsupportedReason) {
+    issues.push({
+      code: 'unsupported',
+      message: unsupportedReason,
+      severity: 'error',
+      target: { kind: 'section', key: 'basic' },
+    })
+  }
+  if (!draft.key.trim()) {
+    issues.push({
+      code: 'key',
+      message: '模板 Key 必填',
+      severity: 'error',
+      target: { kind: 'field', key: 'key' },
+    })
+  }
+  if (!draft.name.trim()) {
+    issues.push({
+      code: 'name',
+      message: '模板名称必填',
+      severity: 'error',
+      target: { kind: 'field', key: 'name' },
+    })
+  }
+  if (draft.visibilityType !== 'all' && parseIdsText(draft.visibilityIdsText).length === 0) {
+    issues.push({
+      code: 'visibility',
+      message: '非全员可见范围至少需要一个 id',
+      severity: 'error',
+      target: { kind: 'field', key: 'visibilityIdsText' },
+    })
+  }
+  if (Number.isNaN(buildSlaHours(draft))) {
+    issues.push({
+      code: 'slaHours',
+      message: 'SLA 必须是正整数小时或留空',
+      severity: 'error',
+      target: { kind: 'field', key: 'slaHoursText' },
+    })
+  }
+  return issues
+}
+
 export function validateTemplateFormFields(
   draft: TemplateAuthoringDraft,
   unsupportedReason?: string | null,
   recordLinkCatalog?: RecordLinkCatalogValidationContext | null,
 ): string[] {
-  const errors: string[] = []
-  if (unsupportedReason) errors.push(unsupportedReason)
-  if (!draft.key.trim()) errors.push('模板 Key 必填')
-  if (!draft.name.trim()) errors.push('模板名称必填')
-  if (draft.visibilityType !== 'all' && parseIdsText(draft.visibilityIdsText).length === 0) {
-    errors.push('非全员可见范围至少需要一个 id')
-  }
-  if (Number.isNaN(buildSlaHours(draft))) {
-    errors.push('SLA 必须是正整数小时或留空')
-  }
+  const errors: string[] = validateTemplateBasicInfo(draft, unsupportedReason).map((issue) => issue.message)
   const fields = draft.fields.map((field) => field.id.trim()).filter(Boolean)
   if (fields.length !== draft.fields.length) errors.push('字段 id 必填')
   if (new Set(fields).size !== fields.length) errors.push('字段 id 不能重复')
@@ -1165,9 +1596,20 @@ export function validateTemplateFormFields(
   // validateFormFieldVisibilityRules): dependency must reference an existing field,
   // not itself; `in` needs >=1 value; and the dependency graph must be acyclic.
   // FWB-0 Layer 2 P1-2: record-link is v1-excluded as a visibility dependency (object values).
+  // Lock-8 L8-B OD-L8-5(a): `dependsOn` may also be a dotted date_range endpoint address
+  // (`${id}.start`/`${id}.end`) — mirrors the runtime resolver (fieldVisibility.ts
+  // `resolveVisibilityFieldReference`) without importing it, since this validator works over
+  // `FieldAuthoringDraft` (not `FormField`) and only needs id/type, which the draft already
+  // carries. A bare reference straight at a date_range field is refused (its `{start,end}` value
+  // is non-scalar, same reason as record-link); a dotted reference is accepted ONLY when its base
+  // resolves to an actual date_range field — an unresolvable dotted address is "does not exist",
+  // same as a bare id that isn't in `fieldIdSet`.
   const fieldIdSet = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
   const recordLinkFieldIds = new Set(
     draft.fields.filter((field) => field.type === 'record-link').map((field) => field.id.trim()).filter(Boolean),
+  )
+  const dateRangeFieldIds = new Set(
+    draft.fields.filter((field) => field.type === 'date_range').map((field) => field.id.trim()).filter(Boolean),
   )
   const visibilityDeps = new Map<string, string>()
   draft.fields.forEach((field) => {
@@ -1175,15 +1617,27 @@ export function validateTemplateFormFields(
     if (!dependsOn) return
     const fieldId = field.id.trim()
     const label = field.label.trim() || fieldId || '(未命名)'
-    if (!fieldIdSet.has(dependsOn)) {
+    const dotIndex = dependsOn.lastIndexOf('.')
+    const dottedSuffix = dotIndex > 0 && dotIndex < dependsOn.length - 1 ? dependsOn.slice(dotIndex + 1) : ''
+    const isDottedEndpoint = dottedSuffix === 'start' || dottedSuffix === 'end'
+    const dependencyBaseId = isDottedEndpoint ? dependsOn.slice(0, dotIndex) : dependsOn
+    if (isDottedEndpoint) {
+      if (!dateRangeFieldIds.has(dependencyBaseId)) {
+        errors.push(`字段 ${label} 的显隐依赖字段不存在`)
+        return
+      }
+    } else if (!fieldIdSet.has(dependsOn)) {
       errors.push(`字段 ${label} 的显隐依赖字段不存在`)
       return
+    } else if (dateRangeFieldIds.has(dependsOn)) {
+      errors.push(`字段 ${label} 的显隐规则不能依赖日期区间字段的整体值（请选择起始或结束）`)
+      return
     }
-    if (dependsOn === fieldId) {
+    if (dependencyBaseId === fieldId) {
       errors.push(`字段 ${label} 的显隐规则不能依赖自身`)
       return
     }
-    if (recordLinkFieldIds.has(dependsOn)) {
+    if (recordLinkFieldIds.has(dependencyBaseId)) {
       errors.push(`字段 ${label} 的显隐规则不能依赖关联记录字段（v1）`)
       return
     }
@@ -1191,7 +1645,7 @@ export function validateTemplateFormFields(
       && field.visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean).length === 0) {
       errors.push(`字段 ${label} 的显隐"包含"规则需要至少一个值`)
     }
-    if (fieldId) visibilityDeps.set(fieldId, dependsOn)
+    if (fieldId) visibilityDeps.set(fieldId, dependencyBaseId)
   })
   const cycleState = new Map<string, 0 | 1 | 2>()
   let cycleReported = false
@@ -1248,6 +1702,25 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
     if (step.sourceKind === 'form_field_user' && !userFieldIds.has(step.fieldId.trim())) {
       errors.push(`${label} 的表单用户字段无效`)
     }
+    // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
+    // at least one configured id — the backend rejects an empty scope list the same way.
+    if (
+      step.sourceKind === 'requester_choice'
+      && (step.requesterChoiceScopeType === 'members' || step.requesterChoiceScopeType === 'role')
+      && parseIdsText(step.idsText).length === 0
+    ) {
+      errors.push(`${label} 的提交人自选范围需要选择成员/角色`)
+    }
+    // Lock-1 §K3 PREVIEW (the backend publish dominance gate is the final arbiter): the
+    // referenced step must exist and be STRICTLY EARLIER than this one — a missing choice, a
+    // deleted referenced step, a self-reference, or a reference that ended up at/after this step
+    // via reorder all fail here (matching what `sourceFromStep` would emit as an empty nodeKey).
+    if (step.sourceKind === 'prior_node_approver') {
+      const referencedIndex = draft.steps.findIndex((candidate) => candidate.localId === step.priorStepLocalId)
+      if (referencedIndex < 0 || referencedIndex >= index) {
+        errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
+      }
+    }
   })
   return errors
 }
@@ -1278,4 +1751,95 @@ export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): Creat
 
 export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): UpdateApprovalTemplateRequest {
   return buildCreateTemplatePayload(draft)
+}
+
+/**
+ * P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1) —
+ * the template-level 审批人去重 tier. A 3-way projection over the SAME two booleans the backend
+ * already server-enforces on `runtimeGraph.policy.autoApproval` (Lock-4 §2.6 /
+ * `evaluateAutoApprovalAssignment`): `dedupeHistoricalApprover` (仅一次全自动同意) and
+ * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` is deliberately NOT part of this
+ * tier — it stays a NODE-level-only field authored via the existing per-step
+ * `mergeWithRequester` / `originalAutoApprovalPolicy` pair, never through this template control.
+ */
+export type TemplateDedupTier = 'none' | 'dedupe_historical' | 'merge_adjacent'
+
+/**
+ * Lock-6 §2.6 / gate X-1 (M4 unknown-persisted-values-stay-round-trip-safe) — a persisted policy
+ * with BOTH booleans true is a combination this 3-way tier cannot express (the tier is a strict
+ * partition: 不去重 / 仅一次全自动同意 / 仅连续节点自动同意, never "both"). `buildTemplateAutoApprovalPolicy`
+ * must preserve that combination byte-unchanged rather than collapsing it onto any single tier.
+ */
+export function isTemplateDedupTierLocked(autoApproval?: AutoApprovalPolicy | null): boolean {
+  return Boolean(autoApproval?.dedupeHistoricalApprover === true && autoApproval?.mergeAdjacentApprover === true)
+}
+
+/**
+ * Hydrate-time projection: absent `autoApproval`, or absent/false on both flags, is 不去重 (§2.2 "no
+ * shipped default may change" — byte-stable for every existing template). The locked (both-true)
+ * combination also projects to `'none'` here PURELY for a deterministic radio value; the component
+ * gates on `isTemplateDedupTierLocked` to render that state read-only, and
+ * `buildTemplateAutoApprovalPolicy` independently re-checks the SAME predicate against
+ * `originalPolicy` (not this projected tier) before ever touching the publish payload — so a
+ * locked template can never be saved as if the author had picked 不去重.
+ */
+export function templateDedupTierFromPolicy(autoApproval?: AutoApprovalPolicy | null): TemplateDedupTier {
+  if (!autoApproval || isTemplateDedupTierLocked(autoApproval)) return 'none'
+  if (autoApproval.dedupeHistoricalApprover === true) return 'dedupe_historical'
+  if (autoApproval.mergeAdjacentApprover === true) return 'merge_adjacent'
+  return 'none'
+}
+
+/**
+ * Builds the template-level `autoApproval` object `buildPublishPolicy` carries onto the publish
+ * payload. Two disjoint paths, chosen by re-reading `draft.originalPolicy.autoApproval` (NOT the
+ * projected `draft.autoApprovalDedupTier`) for the lock check every time, so a stale in-memory tier
+ * value can never accidentally unlock a save:
+ *
+ *   - LOCKED (§2.6/X-1, both flags true in the hydrated original): return the original object
+ *     VERBATIM. The tier control never touched it — this is preservation, not a no-op default.
+ *   - editable: project `draft.autoApprovalDedupTier` onto the two tier-owned keys, but PRESERVE
+ *     every OTHER key already present on the hydrated `autoApproval` (e.g. a `mergeWithRequester`
+ *     or `actorMode` some other API caller set directly on the template-level object — extremely
+ *     unlikely in practice, but this control must never be the mechanism that destroys it).
+ *
+ * Omits the whole `autoApproval` key when the result is empty, matching the node-level
+ * `autoApprovalPolicy`-omit-when-empty convention elsewhere in this file (and §2.2: absent ===
+ * 不去重 === today's behavior).
+ */
+export function buildTemplateAutoApprovalPolicy(draft: TemplateAuthoringDraft): AutoApprovalPolicy | undefined {
+  const original = draft.originalPolicy?.autoApproval
+  if (isTemplateDedupTierLocked(original)) return original
+
+  const preserved: AutoApprovalPolicy = { ...(original ?? {}) }
+  delete preserved.dedupeHistoricalApprover
+  delete preserved.mergeAdjacentApprover
+  if (draft.autoApprovalDedupTier === 'dedupe_historical') preserved.dedupeHistoricalApprover = true
+  else if (draft.autoApprovalDedupTier === 'merge_adjacent') preserved.mergeAdjacentApprover = true
+
+  return Object.keys(preserved).length > 0 ? preserved : undefined
+}
+
+/**
+ * L6-P1 carrier fix — the publish-time policy payload. MERGES onto `draft.originalPolicy`
+ * (the persisted object hydrated verbatim by `draftFromTemplate`) and overlays only the fields the
+ * editor actually owns (`allowRevoke`, and now the P3-B dedup tier's projection of `autoApproval`).
+ * Was previously built inline at the call site as `{ allowRevoke: draft.allowRevoke }` — a REPLACE,
+ * not a merge — which silently destroyed any sibling policy field (e.g. `autoApproval`,
+ * `revokeBeforeNodeKeys`) set only through the publish API on every editor republish.
+ * `draft.originalPolicy` is absent for a template that has never been published, so a brand-new
+ * template still publishes exactly `{ allowRevoke }` (no field is invented — a fresh draft's
+ * `autoApprovalDedupTier` defaults to `'none'`, which `buildTemplateAutoApprovalPolicy` projects to
+ * `undefined`/omitted, not an empty object). The backend's `assertRuntimePolicy` re-validates every
+ * carried-through key, so publishing a stale/foreign shape here fails closed there rather than
+ * persisting silently.
+ */
+export function buildPublishPolicy(draft: TemplateAuthoringDraft): RuntimePolicy {
+  const { autoApproval: _originalAutoApproval, ...restOriginalPolicy } = draft.originalPolicy ?? {}
+  const autoApproval = buildTemplateAutoApprovalPolicy(draft)
+  return {
+    ...restOriginalPolicy,
+    allowRevoke: draft.allowRevoke,
+    ...(autoApproval ? { autoApproval } : {}),
+  }
 }

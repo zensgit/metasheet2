@@ -742,6 +742,7 @@ import {
   Message,
   QuestionFilled,
   CircleCheckFilled,
+  Tickets,
   View,
   RefreshLeft,
   Close,
@@ -968,6 +969,8 @@ function fieldTypeLabel(type: FormFieldType) {
     attachment: '附件',
     detail: '明细',
     'record-link': '关联记录',
+    date_range: '日期区间',
+    explanation: '说明',
   }
   return map[type] ?? type
 }
@@ -979,6 +982,8 @@ function nodeTypeLabel(type: ApprovalNodeType) {
     cc: '抄送',
     condition: '条件',
     parallel: '并行',
+    // Lock-3 §1.5 — 办理 (handler) node.
+    handler: '办理',
     end: '结束',
   }
   return map[type] ?? type
@@ -991,6 +996,7 @@ function nodeTimelineType(type: ApprovalNodeType): string {
     cc: 'success',
     condition: 'danger',
     parallel: 'warning',
+    handler: 'primary',
     end: 'info',
   }
   return map[type] ?? 'info'
@@ -1003,6 +1009,7 @@ function nodeTimelineIcon(type: ApprovalNodeType) {
     cc: Message,
     condition: QuestionFilled,
     parallel: QuestionFilled,
+    handler: Tickets,
     end: CircleCheckFilled,
   }
   return map[type] ?? undefined
@@ -1015,6 +1022,7 @@ function nodeTagType(type: ApprovalNodeType): string {
     cc: 'success',
     condition: 'danger',
     parallel: 'warning',
+    handler: 'primary',
     end: 'info',
   }
   return map[type] ?? ''

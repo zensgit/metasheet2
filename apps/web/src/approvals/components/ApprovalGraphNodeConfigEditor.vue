@@ -14,13 +14,35 @@
       data-testid="approval-condition-editor"
       :data-condition-node="node.key"
     >
+      <!-- D0 §4.1: the evaluation-order hint lives once, in the condition inspector header —
+           verbatim string, do not duplicate elsewhere in this component.
+           M8 honesty (P1-2 same class): "全部不满足时走默认分支" is only true when a default IS
+           configured — with no defaultEdgeKey the runtime falls through to the FIRST outgoing
+           edge instead (see the default card's gated copy below, same predicate). Gating
+           VISIBILITY (not the string, which stays verbatim) keeps "lives once" satisfied (count
+           is 0 or 1, never 2+) without asserting a routing fact this node doesn't have. -->
+      <p
+        v-if="conditionEditFor(node.key)!.defaultEdgeKey"
+        class="template-authoring__condition-order-hint"
+        data-testid="approval-condition-order-hint"
+      >
+        分支按优先级从上到下依次判断，全部不满足时走默认分支。
+      </p>
       <div
-        v-for="branch in conditionEditFor(node.key)!.branches"
+        v-for="(branch, branchIndex) in conditionEditFor(node.key)!.branches"
         :key="branch.edgeKey"
         class="template-authoring__condition-branch"
         data-testid="approval-condition-branch"
       >
         <div class="template-authoring__condition-branch-head">
+          <!-- D0 §4.1 / P1-D: branch order IS priority — never expose the array-index mechanic as
+               such, only the ordinary-user "优先级 N" copy. Priority 1 carries the explicit
+               direction cue ("最高") D0 §4.1 mandates so the chips alone communicate evaluation
+               order, not just the header hint above. -->
+          <span
+            class="template-authoring__condition-branch-priority"
+            data-testid="approval-condition-branch-priority"
+          >优先级 {{ branchIndex + 1 }}{{ branchIndex === 0 ? ' 最高' : '' }}</span>
           <span>分支「{{ liveBranchSummary(branch) }}」</span>
           <el-select
             :model-value="branch.predicateMode"
@@ -200,24 +222,56 @@
           </div>
         </div>
       </div>
-      <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
-        <el-select
-          v-model="conditionEditFor(node.key)!.defaultEdgeKey"
-          size="small"
-          clearable
-          :disabled="readOnly"
-          class="ms-w-220"
-          placeholder="（无默认分支）"
-          data-testid="approval-condition-default-edge"
+      <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
+           visually de-emphasized from the ordered branch cards above, and excluded from rule
+           editing. It is not a mutable topology affordance in this slice — no delete/duplicate is
+           mounted here (a future slice may add branch delete with its own authorization).
+           M8 honesty: the explanatory copy is gated on a real `defaultEdgeKey` — when none is
+           designated, the runtime falls through to the FIRST outgoing edge
+           (ApprovalGraphExecutor.resolveConditionTarget), never an undefined "default flow", so
+           the empty state must say that plainly instead of asserting a default path exists. -->
+      <div
+        class="template-authoring__condition-branch template-authoring__condition-default-card"
+        data-testid="approval-condition-default-branch"
+      >
+        <div class="template-authoring__condition-branch-head">
+          <span class="template-authoring__condition-branch-priority template-authoring__condition-branch-priority--default">
+            默认分支（其他情况）
+          </span>
+        </div>
+        <p
+          v-if="conditionEditFor(node.key)!.defaultEdgeKey"
+          class="template-authoring__condition-default-copy"
+          data-testid="approval-condition-default-copy"
         >
-          <el-option
-            v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
-            :key="edgeKey"
-            :label="conditionEdgeLabel(node.key, edgeKey)"
-            :value="edgeKey"
-          />
-        </el-select>
-      </el-form-item>
+          未满足其他条件时进入默认流程
+        </p>
+        <p
+          v-else
+          class="template-authoring__condition-default-copy template-authoring__condition-default-copy--empty"
+          data-testid="approval-condition-default-copy-empty"
+        >
+          未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。
+        </p>
+        <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+          <el-select
+            v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            clearable
+            :disabled="readOnly"
+            class="ms-w-220"
+            placeholder="（无默认分支）"
+            data-testid="approval-condition-default-edge"
+          >
+            <el-option
+              v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
+              :key="edgeKey"
+              :label="conditionEdgeLabel(node.key, edgeKey)"
+              :value="edgeKey"
+            />
+          </el-select>
+        </el-form-item>
+      </div>
     </div>
 
     <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
@@ -324,128 +378,340 @@
       </el-form-item>
     </div>
 
-    <!-- G-5: editable approval node — approver SOURCE only (assigneeSources[0]). The node's
+    <!-- G-5 / P1-B: editable approval node — ALL assignee-source cards (assigneeSources[]), one
+         card per array entry, each an independent roster + per-kind picker. The node's
          approvalMode / emptyAssigneePolicy / autoApprovalPolicy + edges are preserved. Legacy
-         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. -->
+         nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. Master
+         §P1-B / M5: array order is display order; the runtime resolver owns the union + identity
+         dedup — this editor only appends/removes/edits cards, never reorders or merges them.
+         Lock-3 §1.5: the SAME section renders a `handler` node (办理节点) — it reuses the exact roster
+         radio-grid + per-kind typed pickers (registry-driven per node TYPE), swapping only the
+         type-specific labels + the mode/opinion controls (handler has NO empty-policy / self-approval /
+         fallback — M7 no inert controls). -->
     <div
-      v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
+      v-else-if="(node.type === 'approval' || node.type === 'handler') && approvalNodeEditFor(node.key)"
       class="template-authoring__approval-node"
-      data-testid="approval-node-editor"
+      :data-testid="node.type === 'handler' ? 'handler-node-editor' : 'approval-node-editor'"
       :data-approval-node="node.key"
     >
-      <el-form-item label="审批人来源">
-        <el-select
-          :model-value="approvalSourceKind(node.key)"
-          size="small"
-          :disabled="readOnly"
-          class="ms-w-240"
-          data-testid="approval-node-source-kind"
-          @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
+    <!-- Lock-0 L0-1: this section renders alone when inside the canvas inspector's tabbed
+         presentation (activeTabId === 'assignee'); it renders alongside the field-permissions
+         section, unchanged, in the flat/list presentation (no tabs context injected). -->
+    <section
+      v-show="showAssigneeSection"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-assignee"
+    >
+      <!-- P1-B: one card per assigneeSources[] entry, keyed by its (stable, positional) index — the
+           array IS the identity model here (no separate id field), and add/remove/edit only ever
+           append/splice/replace by index, so index-as-key is safe. Each card is byte-identical to
+           the old single-source markup (every inner data-testid is UNCHANGED — only the radio
+           `name` gains a per-card suffix, which native radiogroups require) so a single-source node
+           renders the exact same DOM as before this slice (positive control). -->
+      <div
+        v-for="(source, sourceIndex) in (approvalNodeEditFor(node.key)?.assigneeSources ?? [])"
+        :key="sourceIndex"
+        class="approval-node-source-card"
+        data-testid="approval-node-source-card"
+        :data-source-index="sourceIndex"
+      >
+        <!-- Lock-0 L0-2: registry-driven radio-grid roster (replaces the single el-select). §10.3
+             constrains the picker to be ONE component with plain labels + a configured summary
+             echo, not a specific control shape — a radio grid needs no further delta. -->
+        <el-form-item :label="(node.type === 'handler' ? '办理人来源' : '审批人来源') + (approvalSourceCount(node.key) > 1 ? ` ${sourceIndex + 1}` : '')">
+          <div
+            class="approval-node-source-roster"
+            role="radiogroup"
+            :aria-label="node.type === 'handler' ? '办理人来源' : '审批人来源'"
+            data-testid="approval-node-source-roster"
+          >
+            <label
+              v-for="opt in assigneeSourceRosterForNode"
+              :key="opt.kind"
+              class="approval-node-source-roster-option"
+            >
+              <input
+                type="radio"
+                :name="`approval-node-source-kind-${node.key}-${sourceIndex}`"
+                :checked="approvalSourceKind(node.key, sourceIndex) === opt.kind"
+                :disabled="readOnly"
+                :data-testid="`approval-node-source-kind-${opt.kind}`"
+                @change="() => { setApprovalSourceKind(node.key, sourceIndex, opt.kind); syncApprovalNodeOptions(node.key) }"
+              />
+              <span>{{ opt.label }}</span>
+            </label>
+          </div>
+          <!-- L0-2 / A-4: a persisted source kind outside the registry stays read-only and
+               round-trips unchanged — never flattened to a registry default. -->
+          <p
+            v-if="!isKnownAssigneeSourceKind(node.key, sourceIndex)"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-source-kind-unknown"
+          >当前来源「{{ approvalSourceKind(node.key, sourceIndex) }}」不在能力清单中，保留为只读，保存时不会被覆盖或清空</p>
+          <!-- D2: configured summary echo (parent §10.3), reusing the existing shared wording. -->
+          <p
+            v-if="configuredSourceSummaryLine(node.key, sourceIndex)"
+            class="template-authoring__hint"
+            data-testid="approval-node-source-configured-summary"
+          >{{ configuredSourceSummaryLine(node.key, sourceIndex) }}</p>
+        </el-form-item>
+        <!-- G-B2-18 + D1: typed directory pickers only; no ordinary raw-ID authoring path. -->
+        <template v-if="approvalSourceKind(node.key, sourceIndex) === 'static_user' || approvalSourceKind(node.key, sourceIndex) === 'static_role'">
+          <el-form-item v-if="approvalSourceKind(node.key, sourceIndex) === 'static_user'" label="选择用户">
+            <el-select
+              :model-value="approvalSourceIds(node.key, sourceIndex)"
+              multiple
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-source-user-picker"
+              @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, sourceIndex, ids)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-else label="选择角色">
+            <el-select
+              :model-value="approvalSourceIds(node.key, sourceIndex)"
+              multiple
+              filterable
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="选择角色"
+              data-testid="approval-node-source-role-picker"
+              @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, sourceIndex, ids)"
+            >
+              <el-option
+                v-for="role in directoryRoles"
+                :key="role.id"
+                :label="formatRoleLabel(role)"
+                :value="role.id"
+              />
+            </el-select>
+          </el-form-item>
+        </template>
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'form_field_user'"
+          label="表单用户字段"
         >
-          <el-option
-            v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
-      </el-form-item>
-      <!-- G-B2-18 + D1: typed directory pickers only; no ordinary raw-ID authoring path. -->
-      <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
-        <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
           <el-select
-            :model-value="approvalSourceIds(node.key)"
-            multiple
-            filterable
-            remote
-            :remote-method="onUserSearch"
-            :loading="directoryUsersLoading"
+            :model-value="approvalSourceFieldId(node.key, sourceIndex)"
             size="small"
             :disabled="readOnly"
-            class="ms-w-360"
-            placeholder="搜索用户名 / 邮箱"
-            data-testid="approval-node-source-user-picker"
-            @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
-            @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            class="ms-w-240"
+            placeholder="选择表单用户字段"
+            data-testid="approval-node-source-field"
+            @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, sourceIndex, fieldId)"
           >
             <el-option
-              v-for="user in directoryUsers"
-              :key="user.id"
-              :label="formatUserLabel(user)"
-              :value="user.id"
+              v-for="field in userFields"
+              :key="field.id"
+              :label="field.label || '未命名字段'"
+              :value="field.id"
             />
           </el-select>
         </el-form-item>
-        <el-form-item v-else label="选择角色">
-          <el-select
-            :model-value="approvalSourceIds(node.key)"
-            multiple
-            filterable
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'manager_at_level' || approvalSourceKind(node.key, sourceIndex) === 'continuous_managers' || approvalSourceKind(node.key, sourceIndex) === 'continuous_dept_heads' || approvalSourceKind(node.key, sourceIndex) === 'dept_head_at_level'"
+          :label="approvalSourceKind(node.key, sourceIndex) === 'manager_at_level' ? '指定上级层级' : approvalSourceKind(node.key, sourceIndex) === 'continuous_dept_heads' ? '部门负责人层级数' : approvalSourceKind(node.key, sourceIndex) === 'dept_head_at_level' ? '指定部门负责人层级' : '上级层级数'"
+        >
+          <el-input-number
+            :model-value="approvalSourceLevel(node.key, sourceIndex)"
+            :min="1"
+            :max="10"
+            :step="1"
             size="small"
             :disabled="readOnly"
-            class="ms-w-360"
-            placeholder="选择角色"
-            data-testid="approval-node-source-role-picker"
-            @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+            data-testid="approval-node-source-level"
+            @update:model-value="(value: number) => setApprovalSourceLevel(node.key, sourceIndex, value ?? 1)"
+          />
+        </el-form-item>
+        <!-- Lock-1 §K2 (提交人自选) authoring sub-form: mode radio (单选/多选) + scope select
+             (全公司/指定成员/指定角色) with TYPED pickers only (D0 §10.2 — no raw-ID input).
+             The submit-time chooser itself lives in ApprovalNewView; this only authors the
+             mode + scope the server validates the requester's choice against. -->
+        <template v-else-if="approvalSourceKind(node.key, sourceIndex) === 'requester_choice'">
+          <el-form-item label="选择方式">
+            <div
+              class="approval-node-source-roster"
+              role="radiogroup"
+              aria-label="选择方式"
+              data-testid="approval-node-requester-choice-mode"
+            >
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  :name="`approval-node-requester-choice-mode-${node.key}-${sourceIndex}`"
+                  :checked="requesterChoiceMode(node.key, sourceIndex) === 'single'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-requester-choice-mode-single"
+                  @change="() => setRequesterChoiceMode(node.key, sourceIndex, 'single')"
+                />
+                <span>单选（提交时选一人）</span>
+              </label>
+              <label class="approval-node-source-roster-option">
+                <input
+                  type="radio"
+                  :name="`approval-node-requester-choice-mode-${node.key}-${sourceIndex}`"
+                  :checked="requesterChoiceMode(node.key, sourceIndex) === 'multi'"
+                  :disabled="readOnly"
+                  data-testid="approval-node-requester-choice-mode-multi"
+                  @change="() => setRequesterChoiceMode(node.key, sourceIndex, 'multi')"
+                />
+                <span>多选（提交时可选多人）</span>
+              </label>
+            </div>
+          </el-form-item>
+          <el-form-item label="可选范围">
+            <el-select
+              :model-value="requesterChoiceScopeType(node.key, sourceIndex)"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-240"
+              data-testid="approval-node-requester-choice-scope"
+              @update:model-value="(type: 'company' | 'members' | 'role') => setRequesterChoiceScopeType(node.key, sourceIndex, type)"
+            >
+              <el-option label="全公司（任意成员）" value="company" />
+              <el-option label="指定成员" value="members" />
+              <el-option label="指定角色的成员" value="role" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="requesterChoiceScopeType(node.key, sourceIndex) === 'members'" label="可选成员">
+            <el-select
+              :model-value="requesterChoiceScopeIds(node.key, sourceIndex)"
+              multiple
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-requester-choice-user-picker"
+              @update:model-value="(ids: string[] | string) => setRequesterChoiceScopeIds(node.key, sourceIndex, ids)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-else-if="requesterChoiceScopeType(node.key, sourceIndex) === 'role'" label="可选角色">
+            <el-select
+              :model-value="requesterChoiceScopeIds(node.key, sourceIndex)"
+              multiple
+              filterable
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="选择角色"
+              data-testid="approval-node-requester-choice-role-picker"
+              @update:model-value="(ids: string[] | string) => setRequesterChoiceScopeIds(node.key, sourceIndex, ids)"
+            >
+              <el-option
+                v-for="role in directoryRoles"
+                :key="role.id"
+                :label="formatRoleLabel(role)"
+                :value="role.id"
+              />
+            </el-select>
+          </el-form-item>
+        </template>
+        <!-- Lock-1 §K3 (节点审批人) authoring sub-form: a TYPED node picker restricted to the
+             publish-time-legal upstream approval nodes (D0 §10.2 — never a free-text node-key
+             input). Candidates come from the api's `priorApproverNodeOptions` (the shipped app
+             derives them via `legalPriorApproverNodeKeys` — the FE mirror of the backend publish
+             dominance gate, which stays the sole arbiter). -->
+        <el-form-item
+          v-else-if="approvalSourceKind(node.key, sourceIndex) === 'prior_node_approver'"
+          label="引用审批节点"
+        >
+          <el-select
+            :model-value="priorNodeApproverKey(node.key, sourceIndex)"
+            size="small"
+            :disabled="readOnly"
+            class="ms-w-240"
+            placeholder="选择上游审批节点"
+            data-testid="approval-node-source-prior-node"
+            @update:model-value="(key: string) => setPriorNodeApproverKey(node.key, sourceIndex, key)"
           >
             <el-option
-              v-for="role in directoryRoles"
-              :key="role.id"
-              :label="formatRoleLabel(role)"
-              :value="role.id"
+              v-for="option in priorApproverNodeOptionsFor(node.key)"
+              :key="option.key"
+              :label="option.label"
+              :value="option.key"
             />
           </el-select>
+          <p
+            v-if="priorApproverNodeOptionsFor(node.key).length === 0"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-source-prior-node-empty"
+          >当前节点上游没有可引用的审批节点（引用目标必须位于每条可达路径的上游）</p>
         </el-form-item>
-      </template>
-      <el-form-item
-        v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
-        label="表单用户字段"
-      >
-        <el-select
-          :model-value="approvalSourceFieldId(node.key)"
-          size="small"
-          :disabled="readOnly"
-          class="ms-w-240"
-          placeholder="选择表单用户字段"
-          data-testid="approval-node-source-field"
-          @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
-        >
-          <el-option
-            v-for="field in userFields"
-            :key="field.id"
-            :label="field.label || '未命名字段'"
-            :value="field.id"
-          />
-        </el-select>
-      </el-form-item>
-      <el-form-item
-        v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
-        :label="approvalSourceKind(node.key) === 'manager_at_level' ? '指定上级层级' : '上级层级数'"
-      >
-        <el-input-number
-          :model-value="approvalSourceLevel(node.key)"
-          :min="1"
-          :max="10"
-          :step="1"
-          size="small"
-          :disabled="readOnly"
-          data-testid="approval-node-source-level"
-          @update:model-value="(value: number) => setApprovalSourceLevel(node.key, value ?? 1)"
+        <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
+             so the admin replaces it before publish (rather than hitting the publish-time 400).
+             P1-B: scoped to THIS card's own source, not the node-wide aggregate — a node with N
+             cards points the hint at the exact offending card. -->
+        <el-alert
+          v-if="approvalSourceIsPlaceholder(node.key, sourceIndex)"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="template-authoring__placeholder-hint"
+          data-testid="approval-node-placeholder-hint"
+          title="此为占位审批角色，发布前请替换为真实角色 ID"
+          description="占位角色无人可认领，未替换将无法发布该模板。"
         />
-      </el-form-item>
-      <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
-           so the admin replaces it before publish (rather than hitting the publish-time 400). -->
-      <el-alert
-        v-if="approvalSourceIsPlaceholder(node.key)"
-        type="warning"
-        :closable="false"
-        show-icon
-        class="template-authoring__placeholder-hint"
-        data-testid="approval-node-placeholder-hint"
-        title="此为占位审批角色，发布前请替换为真实角色 ID"
-        description="占位角色无人可认领，未替换将无法发布该模板。"
-      />
-      <div class="template-authoring__grid template-authoring__approval-node-policy">
+        <!-- P1-B remove affordance: fail-closed — a node must always keep ≥1 source. `disabled` here
+             is the UX signal; the actual guard lives in `removeApprovalSourceCard` itself (refuses
+             at length<=1 regardless of this attribute — M7: this is a real, working control, not
+             theater, and it stays correct even if a caller bypasses the disabled state). -->
+        <div class="approval-node-source-card-actions">
+          <el-button
+            size="small"
+            :disabled="readOnly || approvalSourceCount(node.key) <= 1"
+            data-testid="approval-node-source-remove"
+            @click="removeApprovalSourceCard(node.key, sourceIndex)"
+          >移除此{{ node.type === 'handler' ? '办理人' : '审批人' }}来源</el-button>
+        </div>
+      </div>
+      <!-- P1-B "＋添加审批人": appends one more source card, defaulted from the registry roster (never
+           a hand-picked kind — see defaultNewSourceKind). Sources form a UNION at runtime; the
+           resolver dedups overlapping people across cards (M8 — this editor never dedups, sorts, or
+           reorders; master §P1-B item 4 / M5). -->
+      <div class="approval-node-source-add">
+        <el-button
+          size="small"
+          :disabled="readOnly"
+          data-testid="approval-node-source-add"
+          @click="addApprovalSourceCard(node.key, defaultNewSourceKind())"
+        ><el-icon><Plus /></el-icon>{{ node.type === 'handler' ? '＋添加办理人' : '＋添加审批人' }}</el-button>
+        <p
+          v-if="approvalSourceCount(node.key) > 1"
+          class="template-authoring__hint"
+          data-testid="approval-node-source-union-hint"
+        >已配置 {{ approvalSourceCount(node.key) }} 个来源，取其并集；同一人出现在多个来源时，系统运行时自动去重（此编辑器本身不做去重或排序）</p>
+      </div>
+      <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
+           these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
+           self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
+      <div v-if="node.type === 'approval'" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -480,6 +746,39 @@
           >发起人自动通过（自审合并）</el-checkbox>
         </el-form-item>
       </div>
+      <!-- Lock-3 §1.1 — handler-node controls: 办理模式 (会签/或签) + 办理意见 (opt-in). NO empty policy,
+           NO self-approval, NO fallback control renders here (M7). -->
+      <div v-else-if="node.type === 'handler'" class="template-authoring__grid template-authoring__approval-node-policy">
+        <el-form-item label="办理模式">
+          <el-select
+            :model-value="handlerNodeMode(node.key)"
+            :disabled="readOnly"
+            class="ms-w-100pct"
+            data-testid="handler-node-mode"
+            @update:model-value="(mode: HandlerMode) => setHandlerNodeMode(node.key, mode)"
+          >
+            <el-option label="会签（全部提交）" value="all" />
+            <el-option label="或签（任一提交）" value="any" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="办理意见">
+          <el-checkbox
+            :model-value="handlerNodeOpinionRequired(node.key)"
+            :disabled="readOnly"
+            data-testid="handler-node-opinion-required"
+            @update:model-value="(required: boolean) => setHandlerNodeOpinionRequired(node.key, required)"
+          >提交时必须填写办理意见</el-checkbox>
+        </el-form-item>
+      </div>
+    </section>
+
+    <!-- Lock-0 L0-1/L0-6: 表单权限 tab content. Renders alone when tabbed (activeTabId ===
+         'fieldPermissions'); alongside the assignee section, unchanged, in flat/list mode. -->
+    <section
+      v-show="showFieldPermissionsSection"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-field-permissions"
+    >
       <div class="template-authoring__field-perms" data-testid="approval-node-field-permissions">
         <div class="template-authoring__field-perms-head"><strong>字段权限</strong></div>
         <div
@@ -501,8 +800,36 @@
             <el-option label="只读" value="readonly" />
             <el-option label="隐藏" value="hidden" />
           </el-select>
+          <!-- Lock-7 G-13: the readonly honesty copy is retired here in the SAME change as the linear
+               editor (L0-6 one-change rule) — `只读`/`隐藏` are now enforced server-side. -->
+          <!-- D5: same render condition as the linear editor — WIRED: renders whenever a hidden field
+               is a routing driver (graph-wide routingDriverFieldIds is provided via the api). Accurate
+               under OD-L7-8(a): a driver can never be editable, so hiding only affects the echo. -->
+          <span
+            v-if="approvalNodeFieldAccess(node.key, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+            class="template-authoring__hint template-authoring__hint--warn"
+            data-testid="approval-node-field-routing-hint"
+          >{{ FIELD_PERMISSION_ROUTING_HINT }}</span>
         </div>
       </div>
+    </section>
+
+    <!-- Lock-0 L0-1: 操作权限 tab content. Only reachable when the tabs context is active AND the
+         registry declared ≥1 ratified operation policy for this node type — never true at the
+         shipped baseline (operationPoliciesByNodeType is empty everywhere), so this renders
+         nothing in production. Content, when it exists, echoes the registry's OWN data rather than
+         fabricating UI ("empty tab theater" — Lock-0 delta §1 L0-1). -->
+    <section
+      v-if="isTabbed && activeTabId === 'operations'"
+      class="template-authoring__approval-node-section"
+      data-testid="approval-node-section-operations"
+    >
+      <p
+        v-for="policy in operationPoliciesForNode"
+        :key="policy.id"
+        class="template-authoring__hint"
+      >{{ policy.label }}</p>
+    </section>
     </div>
 
     <!-- approval (legacy / no edit) / other — read-only summary. -->
@@ -519,12 +846,15 @@
 import { computed, inject, toRefs, unref, type ComputedRef, type Ref } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import type {
+  ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
   EmptyAssigneePolicy,
+  HandlerMode,
   NodeFieldAccess,
   ParallelNodeConfig,
+  RequesterChoiceAssigneeSource,
 } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
@@ -534,15 +864,43 @@ import {
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
 } from '../templateAuthoring'
+import {
+  APPROVAL_ASSIGNEE_SOURCE_LABELS,
+  DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+  assigneeSourceRoster,
+  isRegisteredAssigneeSourceKind,
+  type ApprovalCapabilityRegistry,
+} from '../approvalCapabilityRegistry'
+import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
+import { FIELD_PERMISSION_ROUTING_HINT } from '../fieldPermissionHonestyCopy'
 
 const props = defineProps<{
   node: ApprovalNode
+  /** Lock-0 L0-2 capability registry. Optional — defaults to the shipped registry; tests override
+   *  it for the A-3 exact-set / A-4 unknown-kind fixtures. */
+  registry?: ApprovalCapabilityRegistry
 }>()
 
 const api = inject(APPROVAL_NODE_CONFIG_EDITOR_KEY)
 if (!api) {
   throw new Error('ApprovalGraphNodeConfigEditor requires APPROVAL_NODE_CONFIG_EDITOR_KEY')
 }
+
+// ── Lock-0 L0-1 tab presentation (optional — absent in the flat/list "辅助编辑模式" surface) ──
+const tabsCtx = inject(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, undefined)
+const isTabbed = computed(() => Boolean(tabsCtx?.active.value))
+const activeTabId = computed(() => (isTabbed.value ? tabsCtx!.activeTab.value : null))
+const showAssigneeSection = computed(() => activeTabId.value === null || activeTabId.value === 'assignee')
+const showFieldPermissionsSection = computed(
+  () => activeTabId.value === null || activeTabId.value === 'fieldPermissions',
+)
+
+// ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
+const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
+const assigneeSourceRosterForNode = computed(() => assigneeSourceRoster(registry.value, props.node.type))
+const operationPoliciesForNode = computed(
+  () => registry.value.operationPoliciesByNodeType[props.node.type] ?? [],
+)
 
 function unwrap<T>(value: ComputedRef<T> | Ref<T> | T): T {
   return unref(value as ComputedRef<T> | Ref<T> | T)
@@ -593,29 +951,198 @@ const setApprovalSourceFieldId = api.setApprovalSourceFieldId
 const approvalSourceLevel = api.approvalSourceLevel
 const setApprovalSourceLevel = api.setApprovalSourceLevel
 const approvalSourceIsPlaceholder = api.approvalSourceIsPlaceholder
+// P1-B: multi-source card list — count drives the v-for, add/remove mutate the array. remove is
+// fail-closed in the mutator itself (api.removeApprovalSourceCard refuses at length<=1); the
+// `:disabled` binding below is UX only, never the sole guard.
+const approvalSourceCount = api.approvalSourceCount
+const addApprovalSourceCard = api.addApprovalSourceCard
+const removeApprovalSourceCard = api.removeApprovalSourceCard
 const approvalNodeMode = api.approvalNodeMode
 const setApprovalNodeMode = api.setApprovalNodeMode
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
 const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
 const setApprovalNodeMergeWithRequester = api.setApprovalNodeMergeWithRequester
+// Lock-3 §1.1 — handler-only controls (办理模式 / 办理意见).
+const handlerNodeMode = api.handlerNodeMode
+const setHandlerNodeMode = api.setHandlerNodeMode
+const handlerNodeOpinionRequired = api.handlerNodeOpinionRequired
+const setHandlerNodeOpinionRequired = api.setHandlerNodeOpinionRequired
 const approvalNodeFieldAccess = api.approvalNodeFieldAccess
 const setApprovalNodeFieldAccess = api.setApprovalNodeFieldAccess
 const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel
 const formatRoleLabel = api.formatRoleLabel
+// L0-6/D5 — wired: `TemplateAuthoringView.vue` provides its graph-wide `routingDriverFieldIds`
+// computed here (see nodeConfigEditorContext.ts's doc comment for why it must union the linear
+// `draft.steps` model with the graph `draft.approvalNodeEdits` model). Falls back to an empty set
+// only for component-level tests that inject an api object without this optional field.
+const routingDriverFieldIds = computed(() => unwrap(api.routingDriverFieldIds ?? new Set<string>()))
 
-const APPROVAL_NODE_SOURCE_KINDS: { value: import('../../types/approval').ApprovalAssigneeSourceKind; label: string }[] = [
-  { value: 'static_user', label: '指定用户' },
-  { value: 'static_role', label: '指定角色' },
-  { value: 'requester', label: '发起人' },
-  { value: 'direct_manager', label: '直属上级' },
-  { value: 'dept_head', label: '部门主管' },
-  { value: 'continuous_managers', label: '连续多级上级' },
-  { value: 'manager_at_level', label: '指定层级上级' },
-  { value: 'form_field_user', label: '表单用户字段' },
-]
+// D1: the incidental shipped el-select strings ("指定用户"/"发起人"/"部门主管"/"表单用户字段" — an
+// independent hand-written array) are SUPERSEDED by the L0-2 capability registry
+// (assigneeSourceRosterForNode above), which carries the ratified parent §10.3 wording. No
+// hand-written roster is kept here anymore — the registry is the only source.
+
+/** L0-2 / A-4: the currently configured source kind may be a persisted value the registry does
+ *  not know about (legacy/unratified). Read-only in that case — never mutated, never flattened.
+ *  P1-B: per-CARD now — a node with N sources can have an unknown kind on any one of them, and only
+ *  THAT card must warn/read-only, not the whole node. */
+function isKnownAssigneeSourceKind(nodeKey: string, sourceIndex: number): boolean {
+  return isRegisteredAssigneeSourceKind(registry.value, props.node.type, approvalSourceKind(nodeKey, sourceIndex))
+}
+/** Registry-driven default kind for a brand-new card. Prefers `requester` — the SAME default
+ *  `appendApprovalNode` seeds a brand-new node with (`graphTopologyEdit.ts`) — because it is valid
+ *  with ZERO further configuration (`isAssigneeSourceValid` returns true for `{ kind: 'requester' }`
+ *  unconditionally). The roster's raw first entry (`static_user`) is NOT a safe default: its shape
+ *  is `{ kind: 'static_user', userIds: [] }`, which `isAssigneeSourceValid` REJECTS (empty
+ *  `userIds`) — defaulting to it would make "＋添加审批人" immediately disable Save on every click
+ *  until the author manually picks users, on a template that validated fine before the click. Falls
+ *  back to the roster's first entry only if `requester` is somehow absent from this node type's
+ *  roster (never true at the shipped baseline: both `approval` and `handler` include it — defensive
+ *  only, never hand-picked outside the registry per master M4). */
+function defaultNewSourceKind(): ApprovalAssigneeSourceKind {
+  const roster = assigneeSourceRosterForNode.value
+  if (roster.some((opt) => opt.kind === 'requester')) return 'requester'
+  return roster[0]?.kind ?? 'requester'
+}
+
+// ── Lock-1 §K2 requester_choice sub-form ────────────────────────────────────────────────────
+// Reads/writes the CARD AT sourceIndex of the SHARED approvalNodeEditFor edit model directly (the
+// same live model the roster's kind switch mutates), so no new context-api surface is needed
+// and both presentations (canvas inspector tabs / flat structured list) stay one source. P1-B:
+// parameterized by sourceIndex — a node may carry more than one requester_choice card.
+function requesterChoiceSourceFor(nodeKey: string, sourceIndex: number): RequesterChoiceAssigneeSource | null {
+  const source = approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
+  return source?.kind === 'requester_choice' ? source : null
+}
+function replaceRequesterChoiceSource(nodeKey: string, sourceIndex: number, next: RequesterChoiceAssigneeSource): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  const nextSources = edit.assigneeSources.slice()
+  nextSources[sourceIndex] = next
+  edit.assigneeSources = nextSources
+}
+function requesterChoiceMode(nodeKey: string, sourceIndex: number): 'single' | 'multi' {
+  return requesterChoiceSourceFor(nodeKey, sourceIndex)?.mode ?? 'single'
+}
+function setRequesterChoiceMode(nodeKey: string, sourceIndex: number, mode: 'single' | 'multi'): void {
+  const source = requesterChoiceSourceFor(nodeKey, sourceIndex)
+  if (!source || source.mode === mode) return
+  replaceRequesterChoiceSource(nodeKey, sourceIndex, { ...source, mode })
+}
+function requesterChoiceScopeType(nodeKey: string, sourceIndex: number): 'company' | 'members' | 'role' {
+  return requesterChoiceSourceFor(nodeKey, sourceIndex)?.scope.type ?? 'company'
+}
+function setRequesterChoiceScopeType(nodeKey: string, sourceIndex: number, type: 'company' | 'members' | 'role'): void {
+  const source = requesterChoiceSourceFor(nodeKey, sourceIndex)
+  if (!source || source.scope.type === type) return
+  // A scope switch starts with an EMPTY id list deliberately: userIds and roleIds are different
+  // id domains, so carrying one list into the other scope would author wrong config.
+  const scope: RequesterChoiceAssigneeSource['scope'] =
+    type === 'members' ? { type: 'members', userIds: [] }
+      : type === 'role' ? { type: 'role', roleIds: [] }
+        : { type: 'company' }
+  replaceRequesterChoiceSource(nodeKey, sourceIndex, { ...source, scope })
+}
+function requesterChoiceScopeIds(nodeKey: string, sourceIndex: number): string[] {
+  const source = requesterChoiceSourceFor(nodeKey, sourceIndex)
+  if (source?.scope.type === 'members') return source.scope.userIds
+  if (source?.scope.type === 'role') return source.scope.roleIds
+  return []
+}
+function setRequesterChoiceScopeIds(nodeKey: string, sourceIndex: number, ids: string[] | string): void {
+  const source = requesterChoiceSourceFor(nodeKey, sourceIndex)
+  if (!source) return
+  const list = Array.isArray(ids) ? ids : ids ? [ids] : []
+  if (source.scope.type === 'members') {
+    replaceRequesterChoiceSource(nodeKey, sourceIndex, { ...source, scope: { type: 'members', userIds: list } })
+  } else if (source.scope.type === 'role') {
+    replaceRequesterChoiceSource(nodeKey, sourceIndex, { ...source, scope: { type: 'role', roleIds: list } })
+  }
+}
+
+// ── Lock-1 §K3 prior_node_approver sub-form ─────────────────────────────────────────────────
+// Same pattern as the §K2 sub-form above: reads/writes the card AT sourceIndex of the SHARED
+// approvalNodeEditFor edit model directly. Candidates come from the api's OPTIONAL
+// `priorApproverNodeOptions` (always present on the shipped app's api object; component tests
+// that don't exercise K3 omit it — the picker then offers nothing, mutating nothing).
+function priorNodeApproverSourceFor(nodeKey: string, sourceIndex: number): Extract<ApprovalAssigneeSource, { kind: 'prior_node_approver' }> | null {
+  const source = approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
+  return source?.kind === 'prior_node_approver' ? source : null
+}
+function priorNodeApproverKey(nodeKey: string, sourceIndex: number): string {
+  return priorNodeApproverSourceFor(nodeKey, sourceIndex)?.nodeKey ?? ''
+}
+function setPriorNodeApproverKey(nodeKey: string, sourceIndex: number, referencedNodeKey: string): void {
+  const source = priorNodeApproverSourceFor(nodeKey, sourceIndex)
+  if (!source || source.nodeKey === referencedNodeKey) return
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  const nextSources = edit.assigneeSources.slice()
+  nextSources[sourceIndex] = { ...source, nodeKey: referencedNodeKey }
+  edit.assigneeSources = nextSources
+}
+const priorApproverNodeOptionsApi = api.priorApproverNodeOptions
+function priorApproverNodeOptionsFor(nodeKey: string): Array<{ key: string; label: string }> {
+  return priorApproverNodeOptionsApi?.(nodeKey) ?? []
+}
+
+/** D2: configured summary echo. Reads the LIVE edit model (not `node.config`, which is the stale
+ *  pre-edit snapshot in list mode — `TemplateAuthoringView.vue`'s `graphPreviewNodes` is sourced
+ *  from `draft.preservedGraph`, not the live effective graph) so it stays correct in both
+ *  presentations.
+ *
+ *  Labels come from `APPROVAL_ASSIGNEE_SOURCE_LABELS` (the SAME D1-ratified §10.3 wording the
+ *  roster uses) — NOT from `assigneeSourceSummary` (`../assigneeSource.ts`), which is shipped copy
+ *  for a different, requester-facing audience (`nodeAssigneeSourceSummary`'s docstring) and still
+ *  carries the incidental pre-D1 strings ("发起人", "部门主管") that this echo would otherwise
+ *  contradict one line below the D1-labelled roster it belongs to. `static_user`/`static_role`/
+ *  `form_field_user` also avoid raw ids/field-ids — the same no-raw-id rule the existing read-only
+ *  `nodeConfigSummary` already applies to those three kinds (count/label only).
+ *  P1-B: per-card now — each source card echoes its OWN configured summary. */
+function configuredSourceSummaryLine(nodeKey: string, sourceIndex: number): string {
+  if (!isKnownAssigneeSourceKind(nodeKey, sourceIndex)) return ''
+  const source = approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
+  if (!source) return ''
+  const label = APPROVAL_ASSIGNEE_SOURCE_LABELS[source.kind]
+  if (source.kind === 'static_user') {
+    const count = source.userIds?.length ?? 0
+    return `已配置：${label}${count ? `（${count} 人）` : '（未选择）'}`
+  }
+  if (source.kind === 'static_role') {
+    const count = source.roleIds?.length ?? 0
+    return `已配置：${label}${count ? `（${count} 个）` : '（未选择）'}`
+  }
+  if (source.kind === 'form_field_user') {
+    const field = userFields.value.find((entry) => entry.id === source.fieldId)
+    return `已配置：${label}：${field ? (field.label || '未命名字段') : '（未选择）'}`
+  }
+  if (source.kind === 'continuous_managers') {
+    return `已配置：${label}（${source.levels} 级）`
+  }
+  if (source.kind === 'manager_at_level') {
+    return `已配置：${label}（第 ${source.level} 级）`
+  }
+  if (source.kind === 'requester_choice') {
+    // §K2 echo — mode + scope, count-only (same no-raw-id rule as static_user/static_role).
+    const mode = source.mode === 'multi' ? '多选' : '单选'
+    const scope = source.scope.type === 'members'
+      ? `指定成员${source.scope.userIds.length ? `（${source.scope.userIds.length} 人）` : '（未选择）'}`
+      : source.scope.type === 'role'
+        ? `指定角色${source.scope.roleIds.length ? `（${source.scope.roleIds.length} 个）` : '（未选择）'}`
+        : '全公司'
+    return `已配置：${label}（${mode} · ${scope}）`
+  }
+  if (source.kind === 'prior_node_approver') {
+    // §K3 echo — the referenced node's display label (a template-authored name/key, no person id).
+    return `已配置：${label}${source.nodeKey ? `（${graphNodeLabel(source.nodeKey)}）` : '（未选择）'}`
+  }
+  return `已配置：${label}`
+}
 
 const { node } = toRefs(props)
 </script>
@@ -735,6 +1262,41 @@ const { node } = toRefs(props)
   margin: 4px 0 0;
 }
 
+/* P1-D — priority chip (condition branches) / de-emphasized default-branch label. Text-only
+   information carrier (branch order + "default" are both spelled out in words); the token colors
+   below are a supplementary accent, never the sole carrier (V-6/V-8). */
+.template-authoring__condition-branch-priority {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.template-authoring__condition-branch-priority--default {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+}
+
+/* De-emphasized relative to the ordered branch cards above via a muted fill — the dashed border is
+   already inherited from `.template-authoring__condition-branch` above (both classes are always
+   applied together on this card), so it is not repeated here. Same card shape; no delete/duplicate
+   affordance is mounted on this card. */
+.template-authoring__condition-default-card {
+  background: var(--el-fill-color-lighter);
+}
+
+.template-authoring__condition-default-copy {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+
 /* G-3 / G-4 shells (compact; no nested cards) */
 .template-authoring__parallel,
 .template-authoring__cc,
@@ -746,8 +1308,52 @@ const { node } = toRefs(props)
   margin-top: 8px;
 }
 
+/* Lock-0 L0-1: transparent section wrappers — no border/shadow of their own (parent §3.2). */
+.template-authoring__approval-node-section {
+  min-width: 0;
+}
+
+/* Lock-0 L0-2: radio-grid roster replacing the single el-select. Flat, no card-in-card. */
+.approval-node-source-roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  min-width: 0;
+}
+
+.approval-node-source-roster-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+}
+
 .template-authoring__placeholder-hint {
   margin: 8px 0;
+}
+
+/* P1-B: cards stay flat (no nested box) — a thin top divider separates card N+1 from card N, same
+   "flat, no card-in-card" posture as the roster above. First card gets no divider. */
+.approval-node-source-card + .approval-node-source-card {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--el-border-color);
+}
+
+.approval-node-source-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.approval-node-source-add {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
 }
 
 .template-authoring__field-perms {

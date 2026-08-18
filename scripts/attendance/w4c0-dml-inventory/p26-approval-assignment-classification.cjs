@@ -9,6 +9,12 @@ const P26_GENERIC_ACTIONS = Object.freeze([
   'return',
   'add_sign',
   'reduce_sign',
+  // Lock-3 §2.1 — the handler-node submit verb `handle`, added to APPROVAL_ACTION_TYPES (P4-A). This
+  // pinned copy MUST equal that union in ORDER (append after reduce_sign) or
+  // assertP26ActionAndFixtureContract throws ATTENDANCE_P26_ACTION_UNION_DRIFT. The attendance P26
+  // behaviour matrix loops every action (incl. `handle`) and expects the central-mutation guard to
+  // reject it — see attendance-w4c3b-central-approval.db.test.ts.
+  'handle',
 ])
 
 const P26_ATTENDANCE_FIXTURE_KINDS = Object.freeze(['normal', 'adversary'])
@@ -27,7 +33,7 @@ const P26_APPROVAL_ASSIGNMENT_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/ApprovalBridgeService.ts', 'queryFn', 'insert', 1, 'central_bridge_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'skip', 'update', 1, 'bulk_reassign_contract'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'consumeAndSkip', 'update', 1, 'timeout_transfer_jump_fail_closed'),
-  entry('packages/core-backend/src/services/ApprovalProductService.ts', 'targetUserIds', 'update', 5, 'generic_action_fail_closed'),
+  entry('packages/core-backend/src/services/ApprovalProductService.ts', 'targetUserIds', 'update', 6, 'generic_action_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'queryFn', 'update', 2, 'generic_action_helpers'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'queryFn', 'insert', 1, 'generic_action_helpers'),
   entry('plugins/plugin-attendance/index.cjs', 'replaceAttendanceApprovalAssignments', 'update', 1, 'attendance_request_boundary'),

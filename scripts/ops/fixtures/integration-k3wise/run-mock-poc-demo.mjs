@@ -319,6 +319,7 @@ async function main() {
         targetSystemId: chainTarget.id,
         targetObject: 'material',
         createdBy: 'demo-operator',
+        options: { source: { filters: { fixtureScope: 'approved' } } },
         fieldMappings: [
           { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
           { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },

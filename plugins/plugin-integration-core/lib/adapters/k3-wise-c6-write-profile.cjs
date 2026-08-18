@@ -23,7 +23,10 @@
 
 const { AdapterValidationError } = require('../contracts.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
-const { resolveEffectiveK3WiseObjects } = require('./k3-wise-webapi-adapter.cjs')
+const {
+  isMeaningfulK3Identifier,
+  resolveEffectiveK3WiseObjects,
+} = require('./k3-wise-webapi-adapter.cjs')
 const {
   K3WISE_MATERIAL_LIST_ACTION_PROFILE_VERSION,
   K3WISE_MATERIAL_LIST_B4_TEMPLATE,
@@ -190,6 +193,11 @@ function deriveK3WiseC6PlannerTargetConfig({ system, object, fieldMappings = [] 
     object: objectId,
     keyFields: [keyField],
     writableFields,
+    // Private trusted-admin policy. The generic planner validates the exact closed shape and
+    // binds its normalized form into the dry-run revision; requests cannot supply this field.
+    ...(system && system.config && system.config.c6AcceptancePolicy !== undefined
+      ? { acceptancePolicy: system.config.c6AcceptancePolicy }
+      : {}),
   }
 }
 
@@ -301,6 +309,56 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
       }
     }
     return out
+  }
+
+  function normalizeLookupKey(value) {
+    if (value === undefined || value === null) return null
+    const normalized = String(value).trim()
+    return normalized.length > 0 ? normalized : null
+  }
+
+  function hasMeaningfulMaterialIdentifier(record) {
+    if (!record || typeof record !== 'object') return false
+    return ['FItemID', 'FItemId', 'FID', 'FId', 'Id', 'id']
+      .some((field) => {
+        const value = record[field]
+        // The adapter predicate also supports structured identifiers in generic response
+        // extraction. Material existence proof is narrower: a stable ID must be scalar.
+        if (typeof value !== 'number' && typeof value !== 'string') return false
+        return isMeaningfulK3Identifier(value)
+      })
+  }
+
+  // Some live K3 GetDetail endpoints return HTTP/business success for an unknown material while
+  // echoing only the requested FNumber. The WebAPI adapter deliberately fills a missing FNumber
+  // from that request so ordinary read callers retain correlation, but that synthesized field is
+  // not existence evidence for C6. When the raw envelope is available, require the raw key plus
+  // one independently returned material fact. Test doubles without raw envelopes follow the same
+  // identity rule on their record instead of receiving a production-only bypass.
+  function hasIndependentMaterialIdentity(read, record, keyField, requestedKey) {
+    let candidate = record
+    let wrapper = null
+    if (read && read.raw && typeof read.raw === 'object') {
+      const data = read.raw.Data
+      wrapper = Array.isArray(data)
+        ? data.find((item) => item && typeof item === 'object' && !Array.isArray(item))
+        : (data && typeof data === 'object' && !Array.isArray(data) ? data : null)
+      if (!wrapper) return false
+      candidate = wrapper.Data && typeof wrapper.Data === 'object' && !Array.isArray(wrapper.Data)
+        ? wrapper.Data
+        : wrapper
+    }
+    if (!candidate || typeof candidate !== 'object') return false
+    // Mirror extractMaterialDetailRecord's supported response shapes without its final
+    // request-key correlation fallback: an independently returned inner key wins; otherwise
+    // use an independently returned outer-wrapper key. Never use record[keyField] here because
+    // the adapter may have synthesized it from the request.
+    const rawKey = normalizeLookupKey(candidate[keyField])
+      ?? normalizeLookupKey(wrapper && wrapper[keyField])
+    if (rawKey !== requestedKey) return false
+    return hasMeaningfulMaterialIdentifier(candidate)
+      || hasMeaningfulMaterialIdentifier(wrapper)
+      || normalizeLookupKey(candidate.FName) !== null
   }
 
   function saveFailure() {
@@ -430,21 +488,44 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
 
     async lookupByKey(dataSourceId, object, key, policy) {
       const keyField = policy.keyFields[0]
+      const requestedKey = normalizeLookupKey(key[keyField])
       try {
         const read = await targetAdapter().read({
           object,
           filters: { [keyField]: key[keyField] },
         })
         const records = Array.isArray(read && read.records) ? read.records : []
-        return { data: records.map(unwrapReferenceShapes) }
+        // GetDetail is only evidence that a material exists when the returned material key
+        // identifies the material we asked for. Some K3 deployments return a successful
+        // default/template detail record for an unknown key; passing that unrelated record to
+        // classifyExisting turns a genuinely new material into `update`. Normalize only the
+        // outer string representation (trim, case-sensitive) and keep every exact match so the
+        // planner can still fail closed as `held` if an adapter ever reports duplicates.
+        const matching = records
+          .map(unwrapReferenceShapes)
+          .filter((record) => requestedKey !== null
+            && record && typeof record === 'object'
+            && normalizeLookupKey(record[keyField]) === requestedKey
+            && hasIndependentMaterialIdentity(read, record, keyField, requestedKey))
+        return { data: matching }
       } catch (error) {
         const code = error && error.details && error.details.code
         if (code === 'K3_WISE_READ_BUSINESS_ERROR') {
+          // Trusted planner flag only. Requests cannot set `policy.strictAbsence`. Exact-two
+          // add-only acceptance requires a true absence signal; the generic K3 business-error
+          // class also covers permission, acct/org, and locked-record refusals, so it must
+          // never mint an add / token / Save under that policy.
+          if (policy && policy.strictAbsence === true) {
+            throw new AdapterValidationError('K3 C6 strict-absence lookup cannot treat a business read error as missing', {
+              code: 'K3_WISE_READ_BUSINESS_ERROR',
+            })
+          }
           // DESIGN NOTE (first version, 1-3 rows, human-approved): K3 GetDetail reports a
           // NONEXISTENT material as a business-level failure — indistinguishable at the
-          // adapter from other business refusals. We treat it as "absent" so planning a NEW
-          // material (the primary use case) classifies as `add`. The Save at apply remains
-          // the authority: if K3 was actually unhappy, the Save fails and is dead-lettered.
+          // adapter from other business refusals. Without the strict-absence flag we treat it
+          // as "absent" so planning a NEW material (the primary use case) classifies as `add`.
+          // The Save at apply remains the authority: if K3 was actually unhappy, the Save
+          // fails and is dead-lettered.
           // KNOWN BOUND (review #4761 P2): the same business-error class also covers a
           // material that EXISTS but whose GetDetail fails for another reason (permission,
           // wrong acctId/sub-org, locked record) — such a row previews as `add` though the

@@ -68,6 +68,12 @@ const ADMIN_USER = {
   permissions: ['integration:admin'],
 }
 
+const TENANTLESS_ADMIN = {
+  id: 'user_platform_admin',
+  roles: ['admin'],
+  permissions: ['integration:admin'],
+}
+
 function createMemoryStorage() {
   const map = new Map()
   return {
@@ -622,6 +628,44 @@ async function testUnauthenticatedWriteRequestIsRejected() {
   assert.equal(calls.length, 0, 'unauthenticated write did not reach services')
 }
 
+async function testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree() {
+  const { services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  const routePath = '/api/integration/internal/k3-wise/call-audit'
+  assert.ok(registered.includes(`GET ${routePath}`), 'K3 values-free call-audit route registered')
+
+  for (const user of [undefined, READ_USER, WRITE_USER]) {
+    const denied = await invoke(routes, 'GET', routePath, { user })
+    assertErrorResponse(denied, user ? [403] : [401])
+  }
+
+  const allowed = await invoke(routes, 'GET', routePath, { user: ADMIN_USER })
+  assertOkResponse(allowed, 200)
+  assert.equal(allowed.body.data.version, '2026.08.v2')
+  assert.equal(allowed.body.data.scope, 'process')
+  assert.match(allowed.body.data.processEpoch, /^[0-9a-f]{32}$/)
+  assert.deepEqual(Object.keys(allowed.body.data.counts), [
+    'materialGetDetail',
+    'materialGetList',
+    'materialSave',
+    'materialSubmit',
+    'materialAudit',
+    'otherRead',
+    'otherLifecycleWrite',
+  ])
+  assert.ok(Object.values(allowed.body.data.counts).every(Number.isSafeInteger))
+  const serialized = JSON.stringify(allowed.body.data)
+  for (const forbidden of ['url', 'path', 'query', 'credential', 'request', 'response', 'tenant']) {
+    assert.equal(serialized.toLowerCase().includes(forbidden), false, `audit response excludes ${forbidden}`)
+  }
+
+  const crossTenant = await invoke(routes, 'GET', routePath, {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenant, [403])
+}
+
 async function testExternalSystemRoutes() {
   const { calls, services } = createMockServices()
   const { routes, registered } = mountRoutes(services)
@@ -634,6 +678,94 @@ async function testExternalSystemRoutes() {
     registered.includes('DELETE /api/integration/external-systems/:id'),
     'external systems delete route registered',
   )
+
+  const privateConfigFixture = createMockServices()
+  const { routes: privateConfigRoutes } = mountRoutes(privateConfigFixture.services)
+  const privateConfigBodies = [
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } },
+    },
+    {
+      id: 'sys_k3_private',
+      name: 'K3 private policy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+    {
+      id: 'sys_sql_private',
+      name: 'SQL private projection',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { lookupProjection: {} },
+    },
+    {
+      id: 'sys_k3_private_padded_kind',
+      name: 'K3 padded kind private policy',
+      kind: ' erp:k3-wise-webapi ',
+      role: 'target',
+      config: { c6AcceptancePolicy: null },
+    },
+  ]
+  for (const body of privateConfigBodies) {
+    const blocked = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+      user: WRITE_USER,
+      body,
+    })
+    assertErrorResponse(blocked, [403])
+  }
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    0,
+    'integration:write cannot set or clear any private external-system config',
+  )
+  const adminPrivateUpdate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: privateConfigBodies[0],
+  })
+  assertOkResponse(adminPrivateUpdate, 201)
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    1,
+    'integration:admin can persist the trusted private config',
+  )
+  const privateCallsAfterAdmin = findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length
+  const tenantlessPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: TENANTLESS_ADMIN,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(tenantlessPrivate, [400, 403])
+  assert.equal(tenantlessPrivate.body.error.code, 'TENANT_REQUIRED')
+  const mismatchedPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(mismatchedPrivate, [403])
+  assert.equal(mismatchedPrivate.body.error.code, 'TENANT_MISMATCH')
+  const queryMismatchPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    query: { tenantId: 'tenant_other' },
+    body: privateConfigBodies[0],
+  })
+  assertErrorResponse(queryMismatchPrivate, [403])
+  assert.equal(queryMismatchPrivate.body.error.code, 'TENANT_MISMATCH')
+  assert.equal(
+    findCalls(privateConfigFixture.calls, 'upsertExternalSystem').length,
+    privateCallsAfterAdmin,
+    'tenantless or mismatched private-policy mutation never reaches the registry',
+  )
+  const sameTenantPrivate = await invoke(privateConfigRoutes, 'POST', '/api/integration/external-systems', {
+    user: ADMIN_USER,
+    body: { ...privateConfigBodies[0], tenantId: 'tenant_1' },
+  })
+  assertOkResponse(sameTenantPrivate, 201)
+  const sameTenantCalls = findCalls(privateConfigFixture.calls, 'upsertExternalSystem')
+  const sameTenantCall = sameTenantCalls[sameTenantCalls.length - 1]
+  assert.equal(sameTenantCall[1].tenantId, 'tenant_1', 'explicit same-tenant carrier is compatibility-only')
 
   let res = await invoke(routes, 'GET', '/api/integration/external-systems', {
     user: READ_USER,
@@ -1640,6 +1772,7 @@ async function testPipelineExternalWriteDryRunRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'PRIVATE-ROUTE-FILTER' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -1723,7 +1856,7 @@ async function testPipelineExternalWriteDryRunRoute() {
   assert.equal(res.body.data.counts.add, 1)
   assert.equal(res.body.data.evidence.dryRunTokenPresent, true)
   assert.equal(storage.map.size, 1, 'route persists the dry-run token through plugin storage')
-  assert.deepEqual(sourceReadCalls, [{ object: 'public.source_items', limit: 100, cursor: null }])
+  assert.deepEqual(sourceReadCalls, [{ object: 'public.source_items', filters: { approvedSlice: 'PRIVATE-ROUTE-FILTER' }, limit: 100, cursor: null }])
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 1, 'only the source system uses adapter-ready credential loading')
   assert.equal(findCalls(calls, 'getExternalSystemForAdapter')[0][1].id, sourceSystem.id)
   assert.equal(findCalls(calls, 'getExternalSystem').length, 1, 'target system is loaded as config only')
@@ -1770,6 +1903,21 @@ async function testPipelineExternalWriteDryRunRoute() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
   assert.equal(calls.length, callsBeforeClientInjection, 'client-supplied dry-run injection control is rejected before loading the pipeline')
+
+  const callsBeforeFilterSteering = calls.length
+  res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/dry-run', {
+    user: READ_USER,
+    params: { id: pipeline.id },
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      filters: { approvedSlice: 'REQUEST-STEERING-SENTINEL' },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'C6_WRITE_DRY_RUN_REQUEST_INVALID')
+  assert.equal(calls.length, callsBeforeFilterSteering, 'request-supplied filter steering is rejected before loading the pipeline')
+  assert.equal(JSON.stringify(res.body).includes('REQUEST-STEERING-SENTINEL'), false, 'rejected request values stay out of errors')
 }
 
 async function testPipelineExternalWriteApplyRoute() {
@@ -1811,6 +1959,7 @@ async function testPipelineExternalWriteApplyRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -1890,7 +2039,24 @@ async function testPipelineExternalWriteApplyRoute() {
     'external-write apply route registered',
   )
 
-  let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = ' true '
+  try {
+    const disabled = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
+      user: WRITE_USER,
+      params: { id: pipeline.id },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: { dryRunToken: 'must-not-be-consumed' } },
+    })
+    assert.equal(disabled.statusCode, 403)
+    assert.equal(disabled.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'deployment read-only gate refuses before loading pipeline/systems/adapters')
+    assert.equal(storage.map.size, 0, 'deployment read-only gate cannot consume a token')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  try {
+    let res = await invoke(routes, 'POST', '/api/integration/pipelines/:id/external-write/apply', {
     user: WRITE_USER,
     params: { id: pipeline.id },
     body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', confirm: {} },
@@ -1991,7 +2157,56 @@ async function testPipelineExternalWriteApplyRoute() {
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'C6_WRITE_APPLY_REQUEST_INVALID')
-  assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+    assert.equal(calls.length, callsBeforeNestedInject, 'client-supplied injection control is rejected before loading the pipeline')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
+}
+
+async function testPipelineExternalWriteApplyDerivesTenantFromAuthenticatedPrincipal() {
+  const { calls, services } = createMockServices()
+  const { routes } = mountRoutes(services)
+  const applyPath = '/api/integration/pipelines/:id/external-write/apply'
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+
+  process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = 'true'
+  try {
+    const disabledTenantless = await invoke(routes, 'POST', applyPath, {
+      user: TENANTLESS_ADMIN,
+      params: { id: 'pipe_1' },
+      body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'must-not-parse-as-success' } },
+    })
+    assert.equal(disabledTenantless.statusCode, 403)
+    assert.equal(disabledTenantless.body.error.code, 'C6_WRITE_APPLY_DISABLED')
+    assert.equal(calls.length, 0, 'Apply-disable remains before tenant or body-driven I/O')
+  } finally {
+    delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  }
+
+  const tenantless = await invoke(routes, 'POST', applyPath, {
+    user: TENANTLESS_ADMIN,
+    params: { id: 'pipe_1' },
+    body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'must-not-reach-token-store' } },
+  })
+  assert.equal(tenantless.statusCode, 400)
+  assert.equal(tenantless.body.error.code, 'TENANT_REQUIRED')
+  assert.equal(calls.length, 0, 'tenantless role:admin Apply fails before registry/token/adapter I/O')
+
+  for (const req of [
+    { user: WRITE_USER, params: { id: 'pipe_1' }, body: { tenantId: 'tenant_other', confirm: { dryRunToken: 'ignored' } } },
+    { user: WRITE_USER, params: { id: 'pipe_1' }, query: { tenantId: 'tenant_other' }, body: { confirm: { dryRunToken: 'ignored' } } },
+    { user: WRITE_USER, params: { id: 'pipe_1', tenantId: 'tenant_other' }, body: { confirm: { dryRunToken: 'ignored' } } },
+  ]) {
+    const callsBefore = calls.length
+    const mismatched = await invoke(routes, 'POST', applyPath, req)
+    assert.equal(mismatched.statusCode, 403)
+    assert.equal(mismatched.body.error.code, 'TENANT_MISMATCH')
+    assert.equal(calls.length, callsBefore, 'mismatched tenant carrier fails before registry/token/adapter I/O')
+  }
+
+  if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
 }
 
 async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
@@ -2032,6 +2247,7 @@ async function testPipelineExternalWriteApplyTestFailureInjectionRoute() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2256,6 +2472,7 @@ async function testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance() {
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2448,6 +2665,7 @@ async function testPipelineExternalWriteApplyDoesNotOverstateProvenancePersisten
     targetSystemId: targetSystem.id,
     targetObject: 'public.target_items',
     createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'code', targetField: 'externalId' },
       { sourceField: 'name', targetField: 'name' },
@@ -2562,6 +2780,7 @@ async function testPipelineExternalWriteDryRunPreflightFailsClosed() {
           targetSystemId: 'target_c6',
           targetObject: 'public.target_items',
           createdBy: 'owner-7',
+          options: { source: { filters: { approvedSlice: 'fixture' } } },
           fieldMappings: [],
           ...pipelineOverride,
         }
@@ -4640,6 +4859,259 @@ async function testTableActionRoutes() {
   )
 }
 
+async function testTableActionMvpPersistRoute() {
+  const previousGate = process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+  delete process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+  try {
+  const store = createInMemoryMvpPersistStore()
+  const adapterCalls = []
+  const sourceCalls = []
+  let sourceStatus = 'active'
+  let sourceData = tableActionPlmData()
+  let sourceReadError = null
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: sourceStatus,
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        const adapter = createTableActionSourceAdapter(sourceData, sourceCalls)
+        return {
+          async read(input) {
+            if (sourceReadError) throw sourceReadError
+            return adapter.read(input)
+          },
+        }
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(services, {
+    recordsApi: store.recordsApi,
+    provisioningApi: store.provisioningApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] },
+  })
+
+  assert.ok(
+    registered.includes('POST /api/integration/table-actions/:actionId/mvp-persist'),
+    'MVP persist route is registered',
+  )
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 403, 'MVP persist stays fail-closed while its dedicated gate is absent')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED')
+  assert.equal(adapterCalls.length, 0, 'disabled gate creates no source adapter')
+  assert.equal(sourceCalls.length, 0, 'disabled gate performs no source read')
+  assert.equal(store.writes.length, 0, 'disabled gate performs no internal write')
+
+  process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED = 'true'
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 403, 'read-only user cannot persist an internal MVP snapshot')
+  assert.equal(adapterCalls.length, 0, 'authorization fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'authorization failure writes nothing')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, projectId: 'tenant_evil:integration-core' },
+  })
+  assert.equal(res.statusCode, 400, 'client-supplied target steering is rejected')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+  assert.equal(adapterCalls.length, 0, 'invalid input fails before the source adapter is created')
+  assert.equal(store.writes.length, 0, 'invalid input writes nothing')
+
+  const sourceLookupsBeforeSteering = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: { id: 'platform_admin', roles: ['admin'], permissions: ['integration:admin'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    query: { tenantId: 'tenant_steered' },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 400, 'tenant steering is rejected before tenant or source resolution')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+  assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeSteering, 'steering performs zero source-system I/O')
+  assert.equal(adapterCalls.length, 0, 'steering creates no adapter')
+  assert.equal(sourceCalls.length, 0, 'steering performs no source read')
+  assert.equal(store.writes.length, 0, 'steering performs no internal write')
+
+  for (const [label, request] of [
+    ['query carrier', { query: { ignored: 'not-allowed' } }],
+    ['params carrier', { params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, workspaceId: 'workspace_steered' } }],
+    ['body carrier', { body: { parameters: { projectNo: 'P-001' }, snapshotVersion: 99 } }],
+  ]) {
+    const sourceLookupsBeforeCarrier = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+    const carrierRes = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+      ...request,
+    })
+    assert.equal(carrierRes.statusCode, 400, `${label} steering fails closed`)
+    assert.equal(carrierRes.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED')
+    assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeCarrier, `${label} performs zero source-system I/O`)
+    assert.equal(sourceCalls.length, 0, `${label} performs zero source reads`)
+    assert.equal(store.writes.length, 0, `${label} performs zero internal writes`)
+  }
+
+  const sourceLookupsBeforeNestedInput = calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001', tenantId: 'nested_steering' } },
+  })
+  assert.equal(res.statusCode, 400, 'unsupported nested parameters fail before source lookup')
+  assert.equal(res.body.error.code, 'TABLE_ACTION_PARAMETERS_INVALID')
+  assert.equal(calls.filter((call) => call[0] === 'getExternalSystemForAdapter').length, sourceLookupsBeforeNestedInput, 'unsupported nested parameters perform zero source-system I/O')
+  assert.equal(sourceCalls.length, 0, 'unsupported nested parameters perform zero source reads')
+  assert.equal(store.writes.length, 0, 'unsupported nested parameters perform zero internal writes')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: { id: 'platform_admin', roles: ['admin'], permissions: ['integration:admin'] },
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 400, 'tenantless admin is rejected before source resolution')
+  assert.equal(res.body.error.code, 'TENANT_REQUIRED')
+  assert.equal(adapterCalls.length, 0, 'tenantless admin creates no adapter')
+  assert.equal(sourceCalls.length, 0, 'tenantless admin performs no source read')
+  assert.equal(store.writes.length, 0, 'tenantless admin performs no internal write')
+
+  sourceStatus = 'inactive'
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 409, 'inactive source is not approved for the internal persist path')
+  assert.equal(res.body.error.code, 'TABLE_ACTION_SOURCE_NOT_ACTIVE')
+  assert.equal(adapterCalls.length, 0, 'inactive source fails before adapter creation')
+  assert.equal(sourceCalls.length, 0, 'inactive source performs no source read')
+  assert.equal(store.writes.length, 0, 'inactive source performs no internal write')
+  sourceStatus = 'active'
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.status, 'created')
+  assert.equal(res.body.data.persisted, true)
+  assert.ok(store.writes.length > 0, 'the approved expansion reaches the internal MVP write sink')
+  assert.ok(sourceCalls.length > 0, 'the source is re-read immediately before persistence')
+  assert.ok(store.findObjectSheetCalls.length > 0, 'the route resolves internal MVP target sheets')
+  for (const call of store.findObjectSheetCalls) {
+    assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'physical target derives from the authenticated tenant')
+  }
+  assert.equal(deepStringIncludes(store.writes, 'P-001'), true, 'positive control: the project value reaches the internal sink')
+  for (const forbidden of ['P-001', 'A-001', 'Assembly']) {
+    assert.equal(deepStringIncludes(res.body, forbidden), false, `values-free response hides ${forbidden}`)
+  }
+
+  const writesBeforeReplay = store.writes.length
+  const readsBeforeReplay = sourceCalls.length
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'skipped_existing')
+  assert.equal(res.body.data.persisted, false)
+  assert.ok(sourceCalls.length > readsBeforeReplay, 'an exact replay re-reads the source')
+  assert.equal(store.writes.length, writesBeforeReplay, 'an exact replay creates or patches no internal rows')
+
+  sourceData = tableActionPlmData()
+  sourceData.DN_PDM_PartLibraryInfo[0].SysVer = 'V2'
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.status, 'created', 'a changed source revision creates a new immutable batch')
+  const batchVersionsAfterV2 = store.writes
+    .filter((write) => write.op === 'create' && Object.prototype.hasOwnProperty.call(write.data, 'snapshotVersion'))
+    .map((write) => write.data.snapshotVersion)
+  assert.deepEqual(batchVersionsAfterV2, [1, 2], 'changed revision receives the next project-scoped snapshot version')
+
+  sourceData = tableActionPlmData()
+  sourceData.DN_PDM_PartLibraryInfo[0].SysVer = 'V3'
+  const concurrent = await Promise.all([
+    invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+    }),
+    invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+      user: ADMIN_USER,
+      params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+      body: { parameters: { projectNo: 'P-001' } },
+    }),
+  ])
+  assert.deepEqual(concurrent.map((entry) => entry.statusCode).sort(), [200, 201], 'concurrent identical revision creates once and exact-replays once')
+  const finalBatchVersions = store.writes
+    .filter((write) => write.op === 'create' && Object.prototype.hasOwnProperty.call(write.data, 'snapshotVersion'))
+    .map((write) => write.data.snapshotVersion)
+  assert.deepEqual(finalBatchVersions, [1, 2, 3], 'concurrent persistence preserves unique monotonic snapshot versions')
+
+  const writesBeforeNotFound = store.writes.length
+  sourceData = {
+    DN_PDM_PathExAttrInfo: [],
+    DN_PDM_PathInfo: [],
+    DN_PDM_OrderHeadInfo: [],
+    DN_PDM_OrderDetailInfo: [],
+    DN_PDM_PartLibraryInfo: [],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  }
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 404, 'source not-found fails closed')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND')
+  assert.equal(store.writes.length, writesBeforeNotFound, 'source not-found performs no internal write')
+
+  const privateSourceFailure = 'PRIVATE_SOURCE_FAILURE_MUST_NOT_ESCAPE'
+  sourceReadError = new Error(privateSourceFailure)
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assert.equal(res.statusCode, 409, 'source driver failure is coarse')
+  assert.equal(JSON.stringify(res.body).includes(privateSourceFailure), false, 'source driver failure hides private detail')
+  assert.equal(store.writes.length, writesBeforeNotFound, 'source driver failure performs no internal write')
+  } finally {
+    if (previousGate === undefined) delete process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED
+    else process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED = previousGate
+  }
+}
+
 async function testLargeBomBackgroundExpansionJobRoutes() {
   const records = createTableActionRecordsApi()
   const calls = []
@@ -5596,6 +6068,7 @@ async function testPipelineExternalWriteMultitableRoute() {
     id: 'pipe_mt', tenantId: 'tenant_1', workspaceId: 'workspace_1', name: 'C6 multitable', status: 'active',
     sourceSystemId: sourceSystem.id, sourceObject: 'src_items',
     targetSystemId: targetSystem.id, targetObject: 'approved_materials', createdBy: 'owner-7',
+    options: { source: { filters: { approvedSlice: 'fixture' } } },
     fieldMappings: [
       { sourceField: 'c', targetField: 'code' },
       { sourceField: 'n', targetField: 'name' },
@@ -7614,6 +8087,7 @@ function createInMemoryMvpPersistStore() {
   const writes = []
   const findObjectSheetCalls = []
   let seq = 0
+  let unitOfWorkTail = Promise.resolve()
   const sheetFor = (sheetId) => {
     if (!sheets.has(sheetId)) sheets.set(sheetId, new Map())
     return sheets.get(sheetId)
@@ -7646,7 +8120,15 @@ function createInMemoryMvpPersistStore() {
       return { id: recordId, sheetId, data: { ...data } }
     },
     async runStockPreparationPersistUnitOfWork(_input, operation) {
-      return operation(recordsApi)
+      const previous = unitOfWorkTail
+      let release
+      unitOfWorkTail = new Promise((resolve) => { release = resolve })
+      await previous
+      try {
+        return await operation(recordsApi)
+      } finally {
+        release()
+      }
     },
   }
   const provisioningApi = {
@@ -8518,15 +9000,20 @@ async function testC6AdapterBackedTargetLoadsWithCredentials() {
 }
 
 async function main() {
+  const priorApplyDisabled = process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+  try {
   await testC6AdapterBackedTargetLoadsWithCredentials()
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
+  await testK3WiseCallAuditRouteIsAdminOnlyAndValuesFree()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testStockPreparationErpMaterialSyncRoute()
   await testFieldOptionsSyncRoute()
   await testFieldOptionsSyncDisableMissing()
   await testTableActionRoutes()
+  await testTableActionMvpPersistRoute()
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
@@ -8573,6 +9060,7 @@ async function main() {
   await testPipelineRoutes()
   await testPipelineExternalWriteDryRunRoute()
   await testPipelineExternalWriteApplyRoute()
+  await testPipelineExternalWriteApplyDerivesTenantFromAuthenticatedPrincipal()
   await testPipelineExternalWriteMultitableRoute()
   await testPipelineExternalWriteApplyTestFailureInjectionRoute()
   await testPipelineExternalWriteApplyPersistsDeadLetterAndProvenance()
@@ -8596,6 +9084,10 @@ async function main() {
   await testStagingInstallSteeringHasNoEffect()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+  } finally {
+    if (priorApplyDisabled === undefined) delete process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED
+    else process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED = priorApplyDisabled
+  }
 }
 
 // W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write

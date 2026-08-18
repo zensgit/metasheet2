@@ -64,6 +64,8 @@ export type ActivateUserResult = {
   isActive: true
   temporaryPassword?: string
   localPasswordSet: boolean
+  /** The org the membership was actually written to — derived from the directory source (#4833 audit surface). */
+  membershipOrgId: string | null
 }
 
 /**
@@ -90,10 +92,15 @@ export type ActivateErrorCode =
   | 'ACTIVATE_SOURCE_INACTIVE'
   | 'ACTIVATE_INTEGRATION_INACTIVE'
   | 'ACTIVATE_LINK_MISMATCH'
-  /** SSO-only: account/integration provider is not DingTalk, or corp_id is inconsistent. */
+  /**
+   * SSO: provider is not DingTalk or corp_id is inconsistent. Any mode: every active eligible
+   * source carries an empty integration org_id (nothing can anchor a membership write).
+   */
   | 'ACTIVATE_SOURCE_INELIGIBLE'
   /** Caller-supplied orgId disagrees with the org derived from the directory-source integration. */
   | 'ACTIVATE_ORG_MISMATCH'
+  /** Multiple ACTIVE directory sources in different orgs; the caller must name one (#4833). */
+  | 'ACTIVATE_ORG_AMBIGUOUS'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -112,7 +119,9 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   let passwordHash: string | null = null
   let localPasswordSet = false
   let mustChangePassword = false
-  let membershipOrgId = input.orgId ?? null
+  // Derived-only: seeded null so no refactor can ever revive the client-orgId-as-membership
+  // shape by skipping the source resolution — the ONLY assignment is from the helper's return.
+  let membershipOrgId: string | null = null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -152,18 +161,17 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     // The membership org DERIVES from the source integration in every mode; a client-supplied
     // orgId may only CONFIRM it. The gated form discarded the DB's org for non-SSO modes and
     // trusted the client's — "org A 的目录账号 + org B 的 orgId" wrote a cross-org membership.
+    // #4833: when the person has ACTIVE sources in more than one org, "derive" has no unique
+    // answer — the helper validates a caller-supplied orgId against the SET of active eligible
+    // sources (mismatch → ACTIVATE_ORG_MISMATCH) and refuses a caller who names none
+    // (ACTIVATE_ORG_AMBIGUOUS) instead of silently picking the lowest account id.
     const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
       userId,
       directoryAccountId: input.directoryAccountId ?? null,
       requireDingTalkSso: input.mode === 'sso',
       expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
+      requestedOrgId: input.orgId?.trim() || null,
     })
-    if (input.orgId && input.orgId !== sourceOrgId) {
-      throwCoded(
-        'orgId does not match the directory source integration for this user',
-        'ACTIVATE_ORG_MISMATCH',
-      )
-    }
     membershipOrgId = sourceOrgId
 
     const updated = await client.query(
@@ -281,6 +289,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     isActive: true,
     temporaryPassword,
     localPasswordSet,
+    membershipOrgId,
   }
 }
 
@@ -305,12 +314,47 @@ async function assertDirectorySourceActiveForActivate(
     directoryAccountId: string | null
     requireDingTalkSso: boolean
     expectedDingTalkIdentity: ActivateUserInput['expectedDingTalkIdentity']
+    requestedOrgId: string | null
   },
 ): Promise<string> {
   // Closed set: linked directory account must be active; integration active.
   // Explicit id: account row + link fail-closed (INNER semantics enforced in TS after LEFT JOIN
   // so we can distinguish SOURCE_MISSING account-not-found from LINK_MISMATCH).
   // Implicit: start from links with exact link_status='linked' (no COALESCE default).
+  //
+  // FOR SHARE OF di (post-merge review P1, 2026-08-10): the activation transaction locks
+  // `users` but read this source unlocked, so under READ COMMITTED an admin could deactivate the
+  // integration on another connection and COMMIT between this read and the activation's own
+  // commit — activating a user against a now-inactive source ("admin 激活不得对 inactive 目录源
+  // 静默开通"). FOR SHARE on the integration row serialises against that deactivation: it either
+  // blocks the admin's UPDATE until activation commits, or — if the deactivation already
+  // committed — the shared-lock EPQ recheck refetches the latest row so the status test below
+  // sees the fresh 'inactive'.
+  //
+  // ONLY `di` is locked, deliberately. The account/link rows (`da.is_active`, `l.link_status`)
+  // need no lock HERE: every production writer of those columns on a linked row first takes
+  // `lockUsersForAccessGraphWrite` on this same user, which the activation already holds across
+  // read→commit — so those races are already serialised. The writers, audited 2026-08-10:
+  //   - directory sync sweep — backstopped by the link-table-driven recheck-throw at
+  //     directory-sync.ts:3341-3358 (aborts if the link changed under it);
+  //   - manual (un)bind — directory-sync.ts:6688 locks both the target and the prior holder;
+  //   - local provider create/archive — local-directory-org.ts:477 / :635.
+  // (Deprovision and OAuth bind do NOT write these columns — they were named in error in an
+  // earlier draft of this comment.) Integration `status` is the sole field with no per-user
+  // cover — an admin deactivating an integration takes no user lock — which is exactly what this
+  // FOR SHARE closes. A positive control pins the account-path mitigation:
+  // directory-activation-source-lock.db.test.ts asserts a users-lock-holding account
+  // deactivation makes this activation block on the users lock and refuse.
+  //
+  // LOCK ORDER: users FIRST (above), THEN this integration FOR SHARE. Every writer that touches
+  // both must keep that order; no production writer takes them in reverse (verified 2026-08-10).
+  //
+  // LOAD-BEARING INVARIANT: integration `status` is checked in TypeScript below, NOT in this
+  // WHERE. That placement is what makes the FOR SHARE recheck useful — under READ COMMITTED,
+  // EPQ refetches the concurrently-updated row and the TS check sees the new status and
+  // refuses. Pushing `AND di.status = 'active'` into the SQL would make EPQ DROP the row
+  // instead, turning ACTIVATE_INTEGRATION_INACTIVE into ACTIVATE_SOURCE_MISSING (or worse).
+  // Do not move the status predicate into the WHERE clause.
   const sql = options.directoryAccountId
     ? `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
               l.local_user_id, l.link_status,
@@ -321,7 +365,8 @@ async function assertDirectorySourceActiveForActivate(
          FROM directory_accounts da
          JOIN directory_integrations di ON di.id = da.integration_id
          LEFT JOIN directory_account_links l ON l.directory_account_id = da.id
-        WHERE da.id = $1`
+        WHERE da.id = $1
+          FOR SHARE OF di`
     : `SELECT da.id, da.is_active AS account_active, di.status AS integration_status,
               l.local_user_id, l.link_status,
               da.provider AS account_provider, di.provider AS integration_provider,
@@ -333,7 +378,8 @@ async function assertDirectorySourceActiveForActivate(
          JOIN directory_integrations di ON di.id = da.integration_id
         WHERE l.local_user_id = $1
           AND l.link_status = 'linked'
-        ORDER BY da.id`
+        ORDER BY da.id
+          FOR SHARE OF di`
 
   const params = options.directoryAccountId
     ? [options.directoryAccountId]
@@ -411,17 +457,44 @@ async function assertDirectorySourceActiveForActivate(
       'ACTIVATE_SOURCE_INELIGIBLE',
     )
   }
-  const activeEligible = eligibleRows.find(
+  const activeEligibleRows = eligibleRows.filter(
     (candidate) =>
       candidate.account_active === true
       && String(candidate.integration_status || '').toLowerCase() === 'active',
   )
-  if (activeEligible) {
-    const sourceOrgId = String(activeEligible.integration_org_id || '').trim()
-    if (sourceOrgId) return sourceOrgId
+  if (activeEligibleRows.length > 0) {
+    // #4833: derive against the SET of active eligible sources, not the first row. An active
+    // source whose integration carries no org is misconfigured — it cannot anchor a membership
+    // write, so it never joins the candidate set.
+    const candidateOrgIds = [...new Set(
+      activeEligibleRows
+        .map((candidate) => String(candidate.integration_org_id || '').trim())
+        .filter((orgId) => orgId.length > 0),
+    )]
+    if (candidateOrgIds.length === 0) {
+      throwCoded(
+        'Directory source is not a DingTalk account eligible for SSO activation',
+        'ACTIVATE_SOURCE_INELIGIBLE',
+      )
+    }
+    if (options.requestedOrgId) {
+      if (candidateOrgIds.includes(options.requestedOrgId)) {
+        return options.requestedOrgId
+      }
+      // The caller named an org none of the person's ACTIVE sources belongs to — steering.
+      throwCoded(
+        'orgId does not match the directory source integration for this user',
+        'ACTIVATE_ORG_MISMATCH',
+      )
+    }
+    if (candidateOrgIds.length === 1) {
+      return candidateOrgIds[0]
+    }
+    // No orgId and more than one legitimate answer: refusing beats silently picking one —
+    // activation would otherwise write an arbitrary org's membership (#4833).
     throwCoded(
-      'Directory source is not a DingTalk account eligible for SSO activation',
-      'ACTIVATE_SOURCE_INELIGIBLE',
+      'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+      'ACTIVATE_ORG_AMBIGUOUS',
     )
   }
   if (eligibleRows.some(

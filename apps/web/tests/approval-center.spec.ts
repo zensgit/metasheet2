@@ -1035,6 +1035,35 @@ describe('ApprovalCenterView', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // Lock-3 §2.2 — a 办理 (handler) pending task must NOT render the approve/reject action surface
+  // (M7: no inert control). The DTO carries `currentNodeType`; `isRowBatchSelectable` gates the
+  // checkbox, the inline 通过/驳回, and the batch selection off it.
+  // ---------------------------------------------------------------------------
+  it('Lock-3 §2.2: a handler pending task renders NO inline/batch approve and is not batch-selectable; an approval task still is (positive control)', async () => {
+    mockPendingApprovals.value = [
+      pendingRow({ id: 'apv_1', title: '出差报销' }),
+      pendingRow({ id: 'hdl_1', title: '打款办理', currentNodeType: 'handler' }),
+    ]
+    await mountView()
+
+    // Inline surface: the approval row offers 通过; the handler row does NOT.
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_1"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-row-approve-hdl_1"]')).toBeNull()
+
+    // Batch surface: select-all picks ONLY the approval row (handler excluded by isRowBatchSelectable),
+    // so a batch approve dispatches for apv_1 exactly once and NEVER for the handler row.
+    selectAllPendingRows()
+    await flushUi()
+    const approveBtn = container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement
+    expect(approveBtn.disabled).toBe(false)
+    approveBtn.click()
+    await flushUi(6)
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'approve' })
+    expect(dispatchActionSpy).not.toHaveBeenCalledWith('hdl_1', expect.anything())
+  })
+
+  // ---------------------------------------------------------------------------
   // B2-01 (待办列表关键字段摘要) — list row key-field summary line. The list DTO never carries
   // the frozen per-instance formSchema (only the detail endpoint does), so the summary is built
   // from the LIVE template schema fetched via `getTemplate` and cached per templateId.

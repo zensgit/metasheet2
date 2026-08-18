@@ -30,24 +30,55 @@ function clampLimit(limit: number): number {
   return Math.min(Math.max(Math.trunc(limit), 1), MAX_LIMIT)
 }
 
+/**
+ * Lock-1 §K2 — optional scope narrowing for the submit-time requester-choice picker. Both
+ * constraints AND onto the base active-user search: `userIds` restricts candidates to an
+ * explicit id list (the `members` scope, template-authored config); `roleIds` restricts to
+ * users holding at least one of the roles via PLAIN `user_roles` membership (the `role`
+ * scope) — deliberately NOT joined on `roles.approval_usable`, which curates the
+ * `requester.role` ROUTING predicate, not approver selection (§K1 honesty note). The picker
+ * is candidate convenience only; `validateAndFreezeRequesterChoices` re-validates the actual
+ * submitted choice server-side at create.
+ */
+export interface DirectoryUserSearchScope {
+  userIds?: string[]
+  roleIds?: string[]
+}
+
 /** Search active users by id/name/email/username. Returns id/name/email only. */
-export async function searchDirectoryUsers(q: string, limit: number): Promise<DirectoryUserOption[]> {
+export async function searchDirectoryUsers(
+  q: string,
+  limit: number,
+  scope: DirectoryUserSearchScope = {},
+): Promise<DirectoryUserOption[]> {
   const safeLimit = clampLimit(limit)
   const term = q ? `%${q}%` : null
-  const where = term
-    ? `WHERE is_active = TRUE AND (COALESCE(email, '') ILIKE $1 OR COALESCE(username, '') ILIKE $1 OR name ILIKE $1 OR id ILIKE $1)`
-    : `WHERE is_active = TRUE`
+  const params: unknown[] = []
+  const conditions: string[] = ['is_active = TRUE']
+  if (term) {
+    params.push(term)
+    const p = `$${params.length}`
+    conditions.push(`(COALESCE(email, '') ILIKE ${p} OR COALESCE(username, '') ILIKE ${p} OR name ILIKE ${p} OR id ILIKE ${p})`)
+  }
+  const scopeUserIds = (scope.userIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0)
+  if (scopeUserIds.length > 0) {
+    params.push(scopeUserIds)
+    conditions.push(`id = ANY($${params.length}::varchar[])`)
+  }
+  const scopeRoleIds = (scope.roleIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0)
+  if (scopeRoleIds.length > 0) {
+    params.push(scopeRoleIds)
+    conditions.push(`EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = ANY($${params.length}::varchar[]))`)
+  }
+  params.push(safeLimit)
   const sql = `
     SELECT id, name, COALESCE(email, '') AS email
     FROM users
-    ${where}
+    WHERE ${conditions.join(' AND ')}
     ORDER BY name ASC
-    LIMIT ${term ? '$2' : '$1'}
+    LIMIT $${params.length}
   `
-  const result = await query<{ id: string; name: string; email: string }>(
-    sql,
-    term ? [term, safeLimit] : [safeLimit],
-  )
+  const result = await query<{ id: string; name: string; email: string }>(sql, params)
   return result.rows.map((row) => ({ id: row.id, name: row.name ?? '', email: row.email ?? '' }))
 }
 

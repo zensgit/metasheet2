@@ -16,7 +16,9 @@ import type {
   ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalNodeType,
   ApprovalRequesterSnapshot,
+  ConditionBranch,
   ConditionFormulaPredicate,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
@@ -26,18 +28,21 @@ import type {
   FormSchema,
   FormFieldVisibilityOperator,
   FormFieldVisibilityRule,
+  HandlerMode,
+  HandlerNodeConfig,
   NodeFieldAccess,
   NodeFieldPermission,
   SignaturePolicy,
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
+  RequesterChoiceAssigneeSource,
   RestoreApprovalTemplateVersionRequest,
   RuntimeGraph,
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
+import { APPROVAL_TERMINAL_STATUSES, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -48,7 +53,13 @@ import {
   canonicalizeRecordLinkFormData,
   pruneHiddenFormData,
   validateApprovalFormData,
+  validateFieldType,
+  validateFieldConstraints,
+  validateDetailFieldValue,
+  DATE_RANGE_DATE_TYPES,
+  resolveVisibilityFieldReference,
 } from './ApprovalGraphExecutor'
+import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
@@ -66,6 +77,7 @@ import {
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
+  extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
@@ -428,7 +440,9 @@ const STORED_RUNTIME_CONTEXT: ValidationContext = {
   code: 'APPROVAL_RUNTIME_GRAPH_INVALID',
 }
 
-const FORM_FIELD_TYPES = new Set([
+// EXPORTED (Lock-8 L8-A §2.1 N-1: the census import-anchor, not a re-declared list) so a census
+// test can assert exact-set equality against the canonical type set and mutation-prove membership.
+export const FORM_FIELD_TYPES = new Set([
   'text',
   'textarea',
   'number',
@@ -441,17 +455,89 @@ const FORM_FIELD_TYPES = new Set([
   'detail',
   // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
   'record-link',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4): a start+end date pair.
+  // Top-level only — explicitly excluded from DETAIL_LEAF below (OD-L8-4: two-to-three sub-values
+  // in a single-leaf column structure ripples into lineDerivation/FWB-per-column/diff-granularity).
+  'date_range',
+  // Lock-8 L8-A (§1.1, OD-L8-2): display-only 说明. Top-level only — excluded from DETAIL_LEAF
+  // below (a valueless control inside a repeating row has no per-row meaning).
+  'explanation',
 ])
+
+// L8-C (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7): the
+// allowlist of props keys permitted on the EXISTING `number` type (top-level fields AND detail
+// columns — this function runs for both). NOT a new FormFieldType member: M10 forecloses that
+// ("may enhance an existing number field only when labeled 'formatted number'") and §0.3 gives the
+// mechanical reason (thirteen site families, only presentation maps compile-forced). Sized by a
+// repo-source sweep (OD-L8-7(a)), not memory: `min`/`max`/`step`/`precision` are the shipped
+// `el-input-number` keys (numberFieldProps.ts), `derivedFrom` is the shipped line-derivation
+// declaration (lineDerivation.ts, commonTemplatePresets.ts:201) — both already ride through props
+// verbatim today — plus the three NEW L8-C display keys. EXPORTED so a census test can assert exact-
+// set equality and mutation-prove membership (gate C-2 / N-1 pattern).
+export const NUMBER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'min',
+  'max',
+  'step',
+  'precision',
+  'derivedFrom',
+  'currencySymbol',
+  'thousandsSeparator',
+  'uppercaseCny',
+])
+
+// Lock-8 L8-B (§1.2): the allowlist of props keys permitted on `date_range`. `dateType` is
+// REQUIRED with no absent-default (a range whose granularity is implicit cannot be compared or
+// diffed unambiguously); `startLabel`/`endLabel` are required (C-7's 控件名称 1/2); `durationLabel`
+// is optional (a custom override for the always-rendered derived duration, OD-L8-8 — its ABSENCE
+// does not turn the duration display off, only its label falls back to a default).
+export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'dateType',
+  'startLabel',
+  'endLabel',
+  'durationLabel',
+])
+
+// Lock-8 L8-A (§1.1, OD-L8-3(a)): the allowlist of props keys permitted on `explanation`. `text`
+// is the ONLY key — the rendered body shown to the requester/approver. Mirrors record-link's
+// fail-closed shape (§0.4): unknown keys fail publish, canonicalized props never spread residually.
+export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
 
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
-// nested link semantics are undefined — top-level only).
-const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail' && type !== 'record-link'),
+// nested link semantics are undefined — top-level only). `date_range` is v1-excluded from detail
+// (Lock-8 OD-L8-4, a POSITIVE edit) — belt-and-suspenders with the explicit `nested` guard inside
+// `normalizeFormField`'s date_range block below (`if (nested) failValidation(...)`). CORRECTION
+// (PR #4964 gate F3): that explicit guard fires FIRST for a nested date_range column — it throws
+// before `normalizeDetailFieldParts` ever reaches this set's `.has()` check below — so removing
+// ONLY this filter's date_range exclusion is NOT observable through the public create/update API
+// (the earlier guard pre-empts it) and B-4's test (`.rejects.toThrow(/date_range cannot nest.../)`)
+// pins THAT guard's message, not this one. This filter's own date_range exclusion is confirmed
+// independently load-bearing only in combination — removing BOTH guards together genuinely admits
+// date_range as a detail column (mutation-verified); removing only the explicit guard makes THIS
+// filter the one that rejects (with its own, different message) — see approval-lock8-date-range
+// .test.ts's OD-L8-4 describe block for the full mutation log. Earlier PR-body language claiming
+// this filter alone is "what B-4's mutation removes to prove load-bearing" was imprecise and has
+// been corrected.
+//
+// Lock-8 L8-A (§1.1, MS-4): `explanation` is excluded too — UNLIKE record-link/date_range it has
+// NO separate explicit `nested` guard in `normalizeFormField` (its props block below runs
+// regardless of nesting; the shared column-shape checks harmlessly canonicalize `props.text`
+// either way), so THIS filter is the sole, independently mutation-provable rejection site for a
+// nested explanation column — no pre-emption ambiguity to correct later.
+//
+// EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation} rather than re-declaring it.
+export const DETAIL_LEAF_FIELD_TYPES = new Set(
+  [...FORM_FIELD_TYPES].filter(
+    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation',
+  ),
 )
 
-const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
+// Lock-3 §1.1 R-1 (mirror site 3 of 3): `handler` joins the runtime admission set. Enumerated, not
+// permissive — an unknown type like `handlerx` is still rejected (G-6). Keep in sync with the
+// `ApprovalNodeType` union and the FE `apps/web/src/types/approval.ts` node-type list.
+const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end', 'handler'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
 const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
@@ -631,6 +717,42 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'manager_at_level', level }
       }
+      case 'continuous_dept_heads': {
+        // Lock-1 §K4: `levels` validated byte-identically to `continuous_managers` — an
+        // out-of-range / non-integer / missing `levels` is rejected, never silently
+        // defaulted (enum-strictness).
+        const levels = source.levels
+        if (typeof levels !== 'number' || !Number.isInteger(levels) || levels < 1 || levels > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.levels must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'continuous_dept_heads', levels }
+      }
+      case 'dept_head_at_level': {
+        // Lock-1 §K5-b: `level` validated byte-identically to `manager_at_level` — an
+        // out-of-range / non-integer / missing `level` is rejected, never silently
+        // defaulted (enum-strictness).
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'dept_head_at_level', level }
+      }
+      case 'prior_node_approver': {
+        // Lock-1 §K3 + G-1: exact-shape validation — `nodeKey` is a required non-empty string,
+        // and (the Lock-1 G-1 posture for NEW kinds, stricter than the shipped kinds) unknown
+        // extra keys are REJECTED, never silently dropped. Whether the referenced node exists,
+        // is an approval node, and is strictly upstream on every runtime-reachable path is the
+        // PUBLISH gate's job (`assertPriorNodeApproverReferencesUpstream`) — normalize stays a
+        // shape check so stored drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'nodeKey'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for prior_node_approver`)
+        }
+        if (!isNonEmptyString(source.nodeKey)) {
+          failValidation(context, `${sourcePath}.nodeKey is required`)
+        }
+        return { kind: 'prior_node_approver', nodeKey: source.nodeKey.trim() }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)
@@ -639,6 +761,52 @@ function normalizeApprovalAssigneeSources(
           kind: 'form_field_user',
           fieldId: source.fieldId.trim(),
         }
+      case 'requester_choice': {
+        // Lock-1 §K2 + G-1: exact-shape validation — mode enum, scope discriminated by type,
+        // and (stricter than the shipped kinds, per the Lock-1 G-1 gate for NEW kinds) unknown
+        // extra keys on the source or its scope are REJECTED, never silently dropped.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'mode', 'scope'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for requester_choice`)
+        }
+        const mode = source.mode
+        if (mode !== 'single' && mode !== 'multi') {
+          failValidation(context, `${sourcePath}.mode must be single or multi`)
+        }
+        const scope = source.scope
+        if (!isRecord(scope) || !isNonEmptyString(scope.type)) {
+          failValidation(context, `${sourcePath}.scope.type is required`)
+        }
+        switch (scope.type) {
+          case 'company':
+            if (Object.keys(scope).some((key) => key !== 'type')) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the company scope`)
+            }
+            return { kind: 'requester_choice', mode, scope: { type: 'company' } }
+          case 'members':
+            if (Object.keys(scope).some((key) => !['type', 'userIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the members scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'members', userIds: normalizeStringArray(scope.userIds, context, `${sourcePath}.scope.userIds`) },
+            }
+          case 'role':
+            if (Object.keys(scope).some((key) => !['type', 'roleIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the role scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'role', roleIds: normalizeStringArray(scope.roleIds, context, `${sourcePath}.scope.roleIds`) },
+            }
+          default:
+            // `return` of the never-returning failValidation makes the exhaustiveness explicit
+            // for both TS and eslint's no-fallthrough (every scope branch returns or throws).
+            return failValidation(context, `${sourcePath}.scope.type must be company, members, or role`)
+        }
+      }
       default:
         failValidation(context, `${sourcePath}.kind is invalid`)
     }
@@ -655,7 +823,10 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
   // would be ambiguous as a single approver). See approval-detail-subform-design-lock §1.
   const fieldById = new Map(formSchema.fields.map((field) => [field.id, field]))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-10: handler nodes ALSO carry `assigneeSources` (incl. form_field_user), so a handler's
+    // sources must be schema-checked too — WITHOUT this, a handler's form_field_user would never be
+    // validated (silent skip). Both approval and handler share this guard.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
       if (source.kind !== 'form_field_user') continue
@@ -731,12 +902,16 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
 function assertNoUnconfiguredPlaceholderRoles(approvalGraph: ApprovalGraph): void {
   for (const node of approvalGraph.nodes) {
-    if (node.type !== 'approval') continue
+    // Lock-3 R-11: a handler ALSO carries static_role sources, so an untouched-preset SENTINEL role on a
+    // handler must fail-fast at publish too — otherwise a handler could publish carrying an unclaimable
+    // placeholder role (silent skip). The 节点 label branches so the message names the right node type.
+    if (node.type !== 'approval' && node.type !== 'handler') continue
+    const nodeLabel = node.type === 'handler' ? '办理节点' : '审批节点'
     const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
     for (const source of sources) {
       if (source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)) {
         throw new ServiceError(
-          `审批节点「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
+          `${nodeLabel}「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
           400,
           'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
           { nodeKey: node.key },
@@ -836,6 +1011,146 @@ function normalizeFormField(
     pinnedProps = { baseId, sheetId }
   }
 
+  // L8-C (§1.3, OD-L8-6/OD-L8-7): allowlist + canonicalize `number` props. Runs for BOTH top-level
+  // fields and detail columns (this function handles both; `nested` only gates record-link above).
+  // Unlike record-link this is NOT a fixed 2-key reconstruction — pre-existing shipped keys
+  // (min/max/step/precision/derivedFrom) must keep riding through untouched (gate C-2 / X-1's
+  // byte-for-byte round-trip), so canonicalization here is a KEY FILTER over the ORIGINAL key
+  // order (`Object.keys(props).filter(...)`), never a rebuild in the allowlist's own order —
+  // reordering would make `templateVersionDiff.ts` (§2.5) see a spurious change on every existing
+  // number field the first time it is re-saved after this lands.
+  let numberProps: Record<string, unknown> | undefined
+  if (value.type === 'number') {
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => !NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] number props may only contain ${[...NUMBER_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+      // The three NEW L8-C display keys are type-checked at publish (fail closed on the wrong
+      // shape) so FE hydration (typeof-guarded, see templateAuthoring.ts fieldDraftFromField) is
+      // lossless by construction — a stored `uppercaseCny: "true"` can never silently round-trip
+      // to `false`. Pre-existing keys (min/max/step/precision/derivedFrom) are NOT newly
+      // type-validated here — out of this slice's scope, unchanged behavior.
+      if (props.currencySymbol !== undefined && typeof props.currencySymbol !== 'string') {
+        failValidation(context, `formSchema.fields[${index}] number props.currencySymbol must be a string`)
+      }
+      if (props.thousandsSeparator !== undefined && typeof props.thousandsSeparator !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.thousandsSeparator must be a boolean`)
+      }
+      if (props.uppercaseCny !== undefined && typeof props.uppercaseCny !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.uppercaseCny must be a boolean`)
+      }
+      const canonical: Record<string, unknown> = {}
+      for (const key of Object.keys(props)) {
+        if (NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key)) canonical[key] = props[key]
+      }
+      numberProps = canonical
+    }
+  }
+
+  // Lock-8 L8-B (§1.2, OD-L8-4/OD-L8-7-style strict allowlist): date_range is top-level only
+  // (already excluded from DETAIL_LEAF above; this direct check gives a named, field-index-scoped
+  // rejection rather than relying solely on the derived-list path in `normalizeDetailFieldParts`,
+  // mirroring record-link's own belt-and-suspenders nested guard). `dateType`/`startLabel`/
+  // `endLabel` are REQUIRED with NO absent-default — "a range whose granularity is implicit cannot
+  // be compared or diffed unambiguously" (§1.2) — `durationLabel` is optional. Unlike L8-C's
+  // props-are-already-in-the-wild allowlist, `date_range` is a BRAND NEW type: no pre-existing
+  // template can carry these keys, so canonicalizing in this function's own fixed key order (rather
+  // than filtering over `Object.keys(props)`'s original order) creates no spurious version-diff.
+  let dateRangeProps: Record<string, unknown> | undefined
+  if (value.type === 'date_range') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] date_range cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DATE_RANGE_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props may only contain ${[...DATE_RANGE_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const dateType = props?.dateType
+    if (typeof dateType !== 'string' || !DATE_RANGE_DATE_TYPES.has(dateType)) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.dateType must be one of ${[...DATE_RANGE_DATE_TYPES].join(', ')}`,
+      )
+    }
+    const startLabel = props?.startLabel
+    if (typeof startLabel !== 'string' || !startLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.startLabel is required`)
+    }
+    const endLabel = props?.endLabel
+    if (typeof endLabel !== 'string' || !endLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.endLabel is required`)
+    }
+    if (
+      props?.durationLabel !== undefined &&
+      (typeof props.durationLabel !== 'string' || !props.durationLabel.trim())
+    ) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.durationLabel must be a non-blank string when present`,
+      )
+    }
+    const canonical: Record<string, unknown> = {
+      dateType,
+      startLabel: (startLabel as string).trim(),
+      endLabel: (endLabel as string).trim(),
+    }
+    if (typeof props?.durationLabel === 'string' && props.durationLabel.trim()) {
+      canonical.durationLabel = props.durationLabel.trim()
+    }
+    dateRangeProps = canonical
+  }
+
+  // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
+  // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
+  // to require, default, choose among, or prompt for). The generic shape checks above only reject a
+  // WRONGLY-TYPED value (e.g. `required: 'yes'`); a well-typed-but-meaningless one (`required: true`,
+  // a real placeholder string) must be rejected HERE, per-type. `props.text` is the ONLY allowed
+  // key — the rendered body (OD-L8-3(a)); the strict allowlist mirrors record-link's fail-closed
+  // shape (§0.4): unknown keys fail publish, canonicalized props never spread residually. No
+  // separate `nested` guard (unlike record-link/date_range): `DETAIL_LEAF_FIELD_TYPES` above is the
+  // sole, independently mutation-provable rejection for a nested explanation column (MS-4).
+  let explanationProps: Record<string, unknown> | undefined
+  if (value.type === 'explanation') {
+    if (value.required === true) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot be required (no submitted value)`)
+    }
+    if (value.defaultValue !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a defaultValue (no submitted value)`)
+    }
+    if (value.placeholder !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a placeholder (no submitted value)`)
+    }
+    if (value.options !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry options (no submitted value)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !EXPLANATION_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] explanation props may only contain ${[...EXPLANATION_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const text = props?.text
+    if (typeof text !== 'string' || !text.trim()) {
+      failValidation(context, `formSchema.fields[${index}] explanation props.text is required`)
+    }
+    explanationProps = { text: (text as string).trim() }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -856,9 +1171,15 @@ function normalizeFormField(
       : {}),
     ...(pinnedProps
       ? { props: pinnedProps }
-      : isRecord(value.props)
-        ? { props: { ...value.props } }
-        : {}),
+      : numberProps !== undefined
+        ? { props: numberProps }
+        : dateRangeProps
+          ? { props: dateRangeProps }
+          : explanationProps
+            ? { props: explanationProps }
+            : isRecord(value.props)
+              ? { props: { ...value.props } }
+              : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -1039,29 +1360,61 @@ function validateFormFieldVisibilityRules(
     if (!rule) return
 
     const target = fieldMap.get(rule.fieldId)
-    if (!target) {
+    if (target) {
+      // Whole-field reference — the existing type-based denylist, extended by Lock-8 L8-B
+      // (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-5(a)) per-type predicate: every
+      // OTHER type keeps this plain whole-field form; `date_range` is refused HERE — "never as one
+      // comparable value" — its ONLY legal reference is the dotted `.start`/`.end` endpoint address
+      // resolved in the branch below.
+      if (rule.fieldId === field.id) {
+        failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
+      }
+      if (target.type === 'detail') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+        )
+      }
+      // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
+      // operators compare against scalar strings and would silently fail-open / never match.
+      // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
+      if (target.type === 'record-link') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
+        )
+      }
+      if (target.type === 'date_range') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a date_range field as a single value — reference its .start or .end endpoint (Lock-8 OD-L8-5)`,
+        )
+      }
+      // Lock-8 L8-A (§1.1, MS-8): explanation carries NO value at all (not merely non-scalar) —
+      // there is nothing to compare, so a dependent field can never legitimately key visibility off
+      // one. Unlike date_range there is no endpoint address to fall back to; the exclusion is total.
+      if (target.type === 'explanation') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference an explanation field (it carries no value)`,
+        )
+      }
+      return
+    }
+
+    // Lock-8 L8-B OD-L8-5(a): the ONLY other legal `fieldId` shape is a date_range endpoint
+    // address `${fieldId}.start` / `${fieldId}.end` — every other unresolvable string (unknown
+    // field, malformed address, a dotted suffix off a non-date_range base) is rejected the same
+    // way "field must reference an existing field" always was.
+    const reference = resolveVisibilityFieldReference(rule.fieldId, fields)
+    if (!reference) {
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId must reference an existing field`,
       )
     }
-    if (rule.fieldId === field.id) {
+    if (reference.field.id === field.id) {
       failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
-    }
-    if (target.type === 'detail') {
-      failValidation(
-        context,
-        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
-      )
-    }
-    // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
-    // operators compare against scalar strings and would silently fail-open / never match.
-    // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
-    if (target.type === 'record-link') {
-      failValidation(
-        context,
-        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
-      )
     }
   })
 
@@ -1075,7 +1428,12 @@ function validateFormFieldVisibilityRules(
 
     visitState.set(fieldId, 1)
     const field = fieldMap.get(fieldId)
-    const dependencyId = field?.visibilityRule?.fieldId
+    // OD-L8-5(a): a dotted endpoint address resolves to its BASE field id for cycle-walk purposes
+    // — there is no separate "endpoint field" to visit, only the date_range field that owns it.
+    const rawDependencyId = field?.visibilityRule?.fieldId
+    const dependencyId = rawDependencyId
+      ? resolveVisibilityFieldReference(rawDependencyId, fields)?.field.id
+      : undefined
     if (dependencyId) {
       visit(dependencyId, [...path, fieldId])
     }
@@ -1253,7 +1611,10 @@ function validateNodeFieldPermissionsAgainstFormSchema(
 ): void {
   const fieldIds = new Set(formSchema.fields.map((field) => field.id))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-12: a handler's `fieldPermissions` must be schema-checked too — §3 makes a handler's field
+    // permissions load-bearing (Lock-7 enforces them), so a permission referencing a deleted field must
+    // fail at authoring rather than being silently skipped.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { fieldPermissions?: NodeFieldPermission[] }
     for (const permission of config.fieldPermissions ?? []) {
       if (!fieldIds.has(permission.fieldId)) {
@@ -1264,6 +1625,132 @@ function validateNodeFieldPermissionsAgainstFormSchema(
       }
     }
   })
+  // Lock-7 L7-B (R-4) — the field-edit-enforcement publish pins land HERE, so all five authoring entry
+  // points (restore/create/update/publish/clone) raise them and the dispatch re-normalize path (which
+  // does NOT call this function) never does, keeping in-flight instances dispatchable (§2.1).
+  validateFieldEditEnforcementPins(approvalGraph, formSchema, context)
+}
+
+/**
+ * Lock-7 L7-B pins 1 & 3 — the NEW publish-time fail-closed field-edit-enforcement pins, raised at all
+ * FIVE authoring entry points beside `validateNodeFieldPermissionsAgainstFormSchema` (restore, create,
+ * update, publish, clone). NOT called on the dispatch re-normalize path (`asRuntimeGraph`), so it never
+ * makes an in-flight instance undispatchable (§2.1). Pin 2 (editable on a non-write-capable node type)
+ * lives in `normalizeApprovalGraph` — it must inspect the raw per-type config BEFORE the switch drops
+ * the key. This function reads the NORMALIZED graph: `editable` entries survive only on approval /
+ * handler nodes, and driver references survive on approval / handler / condition nodes, so it has
+ * everything it needs.
+ */
+/**
+ * Lock-7 OD-L7-8 — the set of TOP-LEVEL form field ids that DRIVE routing: any field referenced by a
+ * `form_field_user` assignee source (on an approval/handler node), by a `ConditionRule.fieldId`, or by
+ * a condition-formula operand. Editing such a field mid-flight re-routes the graph (the executor +
+ * assignment resolver are rebuilt from the instance's CURRENT form_snapshot at every dispatch,
+ * `:6059-6065` / `:6270-6276`), so an approver editing it is choosing their own downstream reviewer /
+ * branch.
+ *
+ * SHARED by BOTH the publish pin (which rejects a driver marked `editable`, an authoring-time check)
+ * AND the runtime write guard in `applyHandlerFieldWrites` (which refuses a WRITE to any driver field
+ * INDEPENDENT of the matrix — because OD-L7-9's absent≡editable otherwise leaves a driver simply
+ * OMITTED from a handler's matrix default-editable and therefore writable). Factored so the two can
+ * never drift.
+ */
+function collectRoutingDriverFieldIds(
+  nodes: ReadonlyArray<{ type: ApprovalNodeType; config: unknown }>,
+): Set<string> {
+  const driverFieldIds = new Set<string>()
+  for (const node of nodes) {
+    const config = node.config as {
+      assigneeSources?: ApprovalAssigneeSource[]
+      branches?: ConditionBranch[]
+    }
+    if (node.type === 'approval' || node.type === 'handler') {
+      for (const source of config.assigneeSources ?? []) {
+        // form_field_user is the shipped driver kind. Lock-2's field-derived kinds
+        // (manager_at_level etc.) are conditionally drivers too, but Lock-2 is not on main and
+        // OD-L7-8 cites them without re-adjudicating — deferred to when Lock-2 lands.
+        if (source.kind === 'form_field_user' && typeof source.fieldId === 'string' && source.fieldId) {
+          driverFieldIds.add(source.fieldId)
+        }
+      }
+    }
+    if (node.type === 'condition') {
+      for (const branch of config.branches ?? []) {
+        for (const rule of branch.rules ?? []) {
+          if (typeof rule.fieldId === 'string' && rule.fieldId) driverFieldIds.add(rule.fieldId)
+        }
+        if (branch.formula?.expression) {
+          for (const fieldId of extractApprovalConditionFormulaFieldIds(branch.formula.expression)) {
+            driverFieldIds.add(fieldId)
+          }
+        }
+      }
+    }
+  }
+  return driverFieldIds
+}
+
+function validateFieldEditEnforcementPins(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  // --- Pin 1 (OD-L7-8(a) / G-4): a routing driver may not be `editable` at ANY node. ---
+  // The load-bearing pin: it closes a privilege-escalation path that opens the moment writes land.
+  // Authoring-time half — reject a driver marked EXPLICITLY `editable`. The runtime write guard in
+  // applyHandlerFieldWrites closes the DEFAULT-editable (absent-matrix) case that absent≡editable
+  // (OD-L7-9) leaves open, since an authoring-time "reject absent driver" would be a §2.1 narrowing.
+  const routingDriverFieldIds = collectRoutingDriverFieldIds(approvalGraph.nodes)
+  if (routingDriverFieldIds.size > 0) {
+    for (const node of approvalGraph.nodes) {
+      if (node.type !== 'approval' && node.type !== 'handler') continue
+      const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
+      for (const permission of permissions) {
+        if (permission.access === 'editable' && routingDriverFieldIds.has(permission.fieldId)) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`,
+          )
+        }
+      }
+    }
+  }
+
+  // --- Pin 3 (G-5): an unfillable required × hidden field. ---
+  // A `required: true` field is unfillable iff it is NOT guaranteed-filled-at-create AND `hidden` at
+  // EVERY write-capable node (approval + handler). "Guaranteed-filled-at-create" = required with NO
+  // `visibilityRule`: AGE's `getVisibleFormFieldIds` no-rule-≡-visible arm (AGE:250-251, re-read at
+  // this baseline) makes such a field always visible, and `validateApprovalFormData` (AGE:649) forces
+  // a required-visible field to be filled at create. A field carrying a `visibilityRule` MAY be
+  // create-hidden, so if it is also hidden at every write node, nobody can ever fill it. We
+  // deliberately OVER-reject a `visibilityRule` that is provably always-visible (there is no shipped
+  // always-visible analyzer for `visibilityRule`, unlike formulas) — fail-closed per master M4. A node
+  // with NO entry for the field ≡ `editable` (OD-L7-9) ⇒ fillable there ⇒ not unfillable.
+  const writeCapableNodes = approvalGraph.nodes.filter((node) => node.type === 'approval' || node.type === 'handler')
+  for (const field of formSchema.fields) {
+    if (field.required !== true) continue
+    if (!field.visibilityRule) continue
+    if (writeCapableNodes.length === 0) continue
+    let firstHidingNodeKey: string | null = null
+    let hiddenEverywhere = true
+    for (const node of writeCapableNodes) {
+      const entry = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions
+        ?.find((permission) => permission.fieldId === field.id)
+      if (entry?.access === 'hidden') {
+        // Deterministic node key for the error (graph order) — the field is hidden at several.
+        if (!firstHidingNodeKey) firstHidingNodeKey = node.key
+      } else {
+        hiddenEverywhere = false
+        break
+      }
+    }
+    if (hiddenEverywhere && firstHidingNodeKey) {
+      failValidation(
+        context,
+        `formSchema field ${field.id} is required but hidden at every write-capable node (node ${firstHidingNodeKey}); it is unfillable (Lock-7 G-5)`,
+      )
+    }
+  }
 }
 
 /**
@@ -1420,6 +1907,45 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
 }
 
 /**
+ * Lock-3 §1.3 — handler topology legality (publish/author-time 400). A handler is LEGAL on the main
+ * path between start and end, and inside a `condition` branch body. It is ILLEGAL in v1 inside a
+ * parallel region and as a parallel `joinNodeKey`: `collectAllBranchAssignees` and the fingerprint
+ * gate both skip non-`approval` nodes, so a handler in one branch sharing an assignee with a sibling is
+ * invisible to every publish-time cross-branch gate and would collide only at runtime (§1.4). Checked
+ * with the SHIPPED `collectParallelRegionNodeKeys` primitive plus a `joinNodeKey` equality test — no
+ * new walker. Widening is OD-L3-1(b) and must first extend those two gates. Distinct ServiceError codes
+ * so the two illegal placements are individually testable (G-8).
+ */
+function validateHandlerNodePlacement(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  const joinNodeKeys = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const joinNodeKey = (node.config as { joinNodeKey?: unknown }).joinNodeKey
+    if (typeof joinNodeKey === 'string' && joinNodeKey.trim()) joinNodeKeys.add(joinNodeKey.trim())
+  }
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'handler') continue
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node is not supported inside a parallel region in v1`,
+        400,
+        'APPROVAL_HANDLER_IN_PARALLEL',
+        { nodeKey: node.key },
+      )
+    }
+    if (joinNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node cannot be a parallel join node in v1`,
+        400,
+        'APPROVAL_HANDLER_AS_JOIN',
+        { nodeKey: node.key },
+      )
+    }
+  }
+}
+
+/**
  * Fingerprint of a DYNAMIC assignee source: equal fingerprints ⇒ the sources PROVABLY resolve to
  * the same user(s) for every request (same kind + same parameters). Static kinds return null —
  * duplicate static assignees across parallel branches are already rejected inside
@@ -1436,11 +1962,28 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_managers:${source.levels}`
     case 'manager_at_level':
       return `manager_at_level:${source.level}`
+    case 'continuous_dept_heads':
+      return `continuous_dept_heads:${source.levels}`
+    case 'dept_head_at_level':
+      return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry: provably identical for the same referenced node — two
+      // branches asking "the deciders of node X" resolve the same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId}`
     case 'static_user':
     case 'static_role':
       // Statics are owned by collectBranchAssignees' duplicate check, not this gate.
+      return null
+    case 'requester_choice':
+      // Lock-1 §K2: `null` DELIBERATELY, not an oversight — the `_exhaustive` guard below forces
+      // this entry to exist, and this is the recorded decision. Two `requester_choice` sources on
+      // parallel branches are NOT provably identical: the requester may pick different people per
+      // branch, so per this gate's own rule (only provably-identical sources are publish-blocked)
+      // the same-person collision belongs to the RUNTIME
+      // `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` 409 guard
+      // (`assertNoActiveAssignmentConflicts`), which sees the actual chosen ids. Publish cannot.
       return null
     default: {
       const _exhaustive: never = source
@@ -1601,6 +2144,96 @@ function runtimeSuccessorTargets(
 }
 
 /**
+ * Lock-1 §K3 publish gate: every `prior_node_approver` reference must name an `approval` node
+ * STRICTLY UPSTREAM on EVERY runtime-reachable path from the start node to the carrying node —
+ * a DOMINANCE check ("every path" is load-bearing: a node reachable only through one condition
+ * branch resolves empty on the other, and a node inside a parallel region referenced from outside
+ * it may not have decided when the referencing node activates). No shipped gate performs this —
+ * `assertNoParallelDynamicAssigneeConflicts` walks FORWARD from a branch entry unioning
+ * fingerprints, a different predicate; what THIS gate reuses is its primitives
+ * (`runtimeSuccessorTargets`, the edge maps, the visited set), exactly as Lock-1 §K3 instructs.
+ *
+ * Mechanism: T strictly dominates C in the runtime-successor graph rooted at the start node ⟺
+ * removing T makes C unreachable from start (with T ≠ C). The removal-reachability test is run
+ * per reference; explicit dangling / non-approval / self checks come first so each failure names
+ * its reason. Deliberately CONSERVATIVE for parallel regions: a target inside one parallel branch
+ * never dominates a node past the join (a sibling-branch path avoids it), so such references are
+ * rejected even under joinMode 'all' — the lock's "may not have decided" posture; a reference to
+ * an upstream node WITHIN the same branch passes (no path through a sibling branch can re-enter
+ * this branch before the join).
+ *
+ * Deliberately publish-scoped (NOT create/update, NOT normalize) like
+ * `assertNoParallelDynamicAssigneeConflicts`: stored drafts stay readable and re-saveable while
+ * being fixed; instances only ever run PUBLISHED graphs, so publish is the single admission point
+ * (§2.2: an illegal reference is an authoring-time 400, never a dispatch-time surprise). Errors
+ * are values-free: node keys and source indexes only (§2.6 — template-authored identifiers).
+ */
+export function assertPriorNodeApproverReferencesUpstream(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of approvalGraph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  const startKey = approvalGraph.nodes.find((node) => node.type === 'start')?.key ?? null
+
+  // Keys reachable from start over runtime-possible successors, treating `skipKey` (the reference
+  // target under test) as removed. FIFO worklist + visited set (cycle-safe, each node once).
+  const reachableWithout = (skipKey: string): Set<string> => {
+    const visited = new Set<string>()
+    if (startKey === null || startKey === skipKey) return visited
+    const queue: string[] = [startKey]
+    for (let head = 0; head < queue.length; head += 1) {
+      const currentKey = queue[head]
+      if (currentKey === skipKey || visited.has(currentKey)) continue
+      visited.add(currentKey)
+      const current = nodeByKey.get(currentKey)
+      if (!current) continue
+      for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+        queue.push(target)
+      }
+    }
+    return visited
+  }
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+    sources.forEach((source, sourceIndex) => {
+      if (source.kind !== 'prior_node_approver') return
+      const targetNodeKey = source.nodeKey
+      const fail = (reason: string, message: string): never => {
+        throw new ServiceError(message, 400, 'APPROVAL_ASSIGNEE_PRIOR_NODE_REFERENCE_INVALID', {
+          nodeKey: node.key,
+          sourceIndex,
+          targetNodeKey,
+          reason,
+        })
+      }
+      const target = nodeByKey.get(targetNodeKey)
+      if (!target) {
+        fail('dangling', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references a node (${targetNodeKey}) that does not exist`)
+      }
+      if (target.key === node.key) {
+        fail('self', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references its own node`)
+      }
+      if (target.type !== 'approval') {
+        fail('not-approval', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver must reference an approval node (${targetNodeKey} is ${target.type})`)
+      }
+      // Strict dominance by removal-reachability: if the carrier is still reachable from start
+      // with the target removed, SOME runtime-reachable path avoids the target (downstream,
+      // sibling condition branch, or sibling parallel branch) — reject. An entirely-unreachable
+      // carrier passes vacuously (it can never activate; other gates own dead-node hygiene).
+      if (reachableWithout(targetNodeKey).has(node.key)) {
+        fail('not-upstream-on-every-path', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver target ${targetNodeKey} is not strictly upstream on every runtime-reachable path`)
+      }
+    })
+  }
+}
+
+/**
  * Reject a rules-mode condition branch whose `rules` array is EMPTY. The runtime
  * (`ApprovalGraphExecutor.resolveConditionTarget`) evaluates a rules-mode branch as
  * `branch.rules.every(...)`, which is vacuously TRUE over `[]` — an empty branch silently captures
@@ -1681,18 +2314,39 @@ function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: 
  * v1 fail-closed: reject any condition rule (or formula field ref) that targets a record-link field
  * at create/update/publish. Formula type-inference already marks record-link unsupported; this
  * guard makes the simple-rules path equally fail-closed with an explicit message.
+ *
+ * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2) extends the SAME fail-closed
+ * reasoning to `date_range`: its value is `{ start, end }`, also non-scalar, also silently
+ * never-matching under `===`/`gt`/`lt`. Graph CONDITION rules (branching) are a separate mechanism
+ * from field `visibilityRule` (OD-L8-5 governs the latter with a dotted `.start`/`.end` endpoint
+ * address); this lock does not extend endpoint addressing to condition branches — `date_range` is
+ * simply excluded from them, exactly like record-link, rather than left auto-admitted and
+ * fail-open (§0.3's governing fact: a new member auto-admits into every hand-maintained gate).
+ *
+ * Lock-8 L8-A (§1.1, MS-10) reuses the SAME mechanism for `explanation`: it carries no value at
+ * all (a stricter case than "non-scalar" — there is nothing to compare, ever), so a condition rule
+ * or formula referencing one can never legitimately match. Name kept generic (this function
+ * already covers non-scalar AND valueless types under one gate) rather than adding a parallel one.
  */
-function validateRecordLinkNotUsedInConditions(
+function validateNonScalarFieldsNotUsedInConditions(
   approvalGraph: ApprovalGraph,
   formSchema: FormSchema,
   context: ValidationContext,
 ): void {
-  const recordLinkFieldIds = new Set(
-    (formSchema.fields ?? [])
-      .filter((field) => field.type === 'record-link')
-      .map((field) => field.id),
+  const nonScalarFieldTypes: ReadonlyArray<{ type: FormField['type']; label: string }> = [
+    { type: 'record-link', label: 'record-link' },
+    { type: 'date_range', label: 'date_range' },
+    { type: 'explanation', label: 'explanation' },
+  ]
+  const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
+  const nonScalarFieldIds = new Set(
+    nonScalarFieldTypes.flatMap(({ type }) =>
+      (formSchema.fields ?? []).filter((field) => field.type === type).map((field) => field.id),
+    ),
   )
-  if (recordLinkFieldIds.size === 0) return
+  if (nonScalarFieldIds.size === 0) return
+  const labelFor = (fieldId: string): string =>
+    nonScalarFieldTypes.find((entry) => entry.type === fieldTypeById.get(fieldId))?.label ?? 'non-scalar'
 
   for (const node of approvalGraph.nodes) {
     if (node.type !== 'condition') continue
@@ -1705,24 +2359,24 @@ function validateRecordLinkNotUsedInConditions(
       const rules = Array.isArray(branch.rules) ? branch.rules : []
       for (const rule of rules) {
         const fieldId = typeof rule?.fieldId === 'string' ? rule.fieldId.trim() : ''
-        if (fieldId && recordLinkFieldIds.has(fieldId)) {
+        if (fieldId && nonScalarFieldIds.has(fieldId)) {
           failValidation(
             context,
-            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference record-link field ${fieldId} (v1)`,
+            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
           )
         }
       }
-      // Formula path: reject explicit `{fieldId}` references to record-link fields with a clear
+      // Formula path: reject explicit `{fieldId}` references to non-scalar fields with a clear
       // message (type inference would also fail; keep the error explicit for authors).
       const expression = typeof branch.formula?.expression === 'string' ? branch.formula.expression : ''
       if (expression) {
-        for (const fieldId of recordLinkFieldIds) {
+        for (const fieldId of nonScalarFieldIds) {
           // Token-aware enough for authoring: `{fieldId}` or `{ fieldId }` field refs.
           const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
           if (re.test(expression)) {
             failValidation(
               context,
-              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference record-link field ${fieldId} (v1)`,
+              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
             )
           }
         }
@@ -1759,6 +2413,29 @@ function normalizeApprovalGraph(
       type: node.type as ApprovalGraph['nodes'][number]['type'],
       ...(typeof node.name === 'string' && node.name.trim().length > 0 ? { name: node.name.trim() } : {}),
       config: {} as Record<string, unknown>,
+    }
+
+    // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12) — `editable` on a node type with NO write surface is a 400,
+    // not the shipped SILENT drop (defect D-1). The switch below rebuilds cc/parallel/condition from a
+    // whitelist and sends start/end to `default: config = {}`, dropping `fieldPermissions` with no error
+    // — an author who marks a field editable on a cc node gets no effect and no warning. Lock-7 must not
+    // inherit that for the WRITE axis, so `editable` here fails closed. ONLY `editable` is rejected;
+    // `readonly`/`hidden` on these types stay silently dropped (D-1's read axis is a SEPARATE fix slice,
+    // §2.7 — Lock-7 neither fixes nor inherits it). Gated OFF for the dispatch re-normalize
+    // (STORED_RUNTIME_CONTEXT): a stored graph already had the key dropped at publish, so re-rejecting
+    // would make an in-flight instance undispatchable (§2.1).
+    if (node.type !== 'approval' && node.type !== 'handler' && context !== STORED_RUNTIME_CONTEXT) {
+      const rawPermissions = (node.config as { fieldPermissions?: unknown }).fieldPermissions
+      if (Array.isArray(rawPermissions)) {
+        for (const permission of rawPermissions) {
+          if (isRecord(permission) && permission.access === 'editable') {
+            failValidation(
+              context,
+              `approvalGraph.nodes[${index}].config.fieldPermissions marks a field editable on a ${node.type} node, which has no write surface (Lock-7 OD-L7-4)`,
+            )
+          }
+        }
+      }
     }
 
     switch (node.type) {
@@ -1938,6 +2615,105 @@ function normalizeApprovalGraph(
           ...(isNonEmptyString(node.config.defaultEdgeKey)
             ? { defaultEdgeKey: node.config.defaultEdgeKey.trim() }
             : {}),
+        }
+        break
+      case 'handler':
+        {
+          // Lock-3 §1.2 R-2 (D-1 fix): a handler node MUST have an explicit case here. WITHOUT it a
+          // handler falls to `default: config = {}` and its whole roster/mode is SILENTLY DROPPED — the
+          // exact D-1 defect (non-approval nodes hit the empty-config default). The choke enforces §1.2's
+          // prohibitions: the criterion is "would a misconfiguration be REJECTED today", not "would we
+          // author it". Distinct ServiceError codes (not failValidation, which collapses to the shared
+          // graph-invalid code) so callers/tests branch on the cause. All checks read the RAW config.
+          const handlerPath = `approvalGraph.nodes[${index}].config`
+          const rawConfig = node.config
+          // §1.2: approval-node keys on a handler make it read as an approval node by every config-shape
+          // reader. `emptyAssigneePolicy` (any value, incl. 'auto-approve') is inadmissible — auto-skipping
+          // 财务打款/盖章 is a genuine fail-open (§1.2 / OD-L3-2a). `timeout` is CONFIRM-EXCLUDE (the scanner's
+          // single-cursor model is untested for a non-approvalNodeOrder type). Rejecting on key PRESENCE is
+          // what keeps v1 free of a second vocabulary.
+          for (const forbiddenKey of ['assigneeType', 'assigneeIds', 'approvalMode', 'approvalThreshold', 'autoApprovalPolicy', 'emptyAssigneePolicy', 'timeout', 'signaturePolicy'] as const) {
+            if (rawConfig[forbiddenKey] !== undefined) {
+              throw new ServiceError(
+                `${handlerPath}.${forbiddenKey} is not allowed on a handler node`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: `handlerMode` is a NEW key ∈ {'all','any'}; absent ≡ 'all'. `'single'`/`'threshold'`/
+          // `'sequential'` are named-rejected (corpus C-3 evidences neither) — never coerced.
+          let handlerMode: HandlerMode | undefined
+          if (rawConfig.handlerMode !== undefined) {
+            if (rawConfig.handlerMode !== 'all' && rawConfig.handlerMode !== 'any') {
+              throw new ServiceError(
+                `${handlerPath}.handlerMode must be 'all' or 'any'`,
+                400,
+                'APPROVAL_HANDLER_MODE_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            handlerMode = rawConfig.handlerMode
+          }
+          // §1.1: `assigneeSources` is the ONLY assignee carrier and is REQUIRED — a handler with nobody
+          // to handle it is a publish-time error, never a dispatch-time surprise. An empty array is
+          // rejected by normalizeApprovalAssigneeSources; `undefined` is rejected here.
+          if (rawConfig.assigneeSources === undefined) {
+            throw new ServiceError(
+              `${handlerPath}.assigneeSources is required on a handler node`,
+              400,
+              'APPROVAL_HANDLER_CONFIG_INVALID',
+              { nodeKey: normalizedNode.key },
+            )
+          }
+          const assigneeSources = normalizeApprovalAssigneeSources(
+            rawConfig.assigneeSources,
+            context,
+            `${handlerPath}.assigneeSources`,
+          )!
+          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the SEVEN kinds
+          // in HANDLER_ASSIGNEE_SOURCE_KINDS. `continuous_managers` (corpus C-2 approver-only) and every
+          // forward Lock-1 kind (requester_choice, user_group, …) are rejected until their own slice
+          // admits them (§1.5 "each row lands in the same slice as its kind"). Rejecting on the KIND, not
+          // silently dropping it, is the fail-closed gate G-13 tests.
+          for (const source of assigneeSources) {
+            if (!(HANDLER_ASSIGNEE_SOURCE_KINDS as readonly string[]).includes(source.kind)) {
+              throw new ServiceError(
+                `${handlerPath}.assigneeSources kind '${source.kind}' is not supported on a handler node`,
+                400,
+                'APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: 办理意见 opt-in; absent ≡ false (OD-L3-3a). Boolean only — never a coerced default.
+          let opinionRequired: boolean | undefined
+          if (rawConfig.opinionRequired !== undefined) {
+            if (typeof rawConfig.opinionRequired !== 'boolean') {
+              throw new ServiceError(
+                `${handlerPath}.opinionRequired must be a boolean`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            opinionRequired = rawConfig.opinionRequired
+          }
+          // §1.1/§3: fieldPermissions share the approval-node shape (ENFORCEMENT is Lock-7); normalized +
+          // round-tripped so authoring persists the intent, cross-checked against the form schema by
+          // validateNodeFieldPermissionsAgainstFormSchema (R-12).
+          const fieldPermissions = normalizeNodeFieldPermissions(
+            rawConfig.fieldPermissions,
+            context,
+            `${handlerPath}.fieldPermissions`,
+          )
+          normalizedNode.config = {
+            assigneeSources,
+            ...(handlerMode ? { handlerMode } : {}),
+            ...(opinionRequired !== undefined ? { opinionRequired } : {}),
+            ...(fieldPermissions ? { fieldPermissions } : {}),
+          }
         }
         break
       default:
@@ -2383,6 +3159,10 @@ function toApprovalTemplateDetailDTO(bundle: TemplateBundle): ApprovalTemplateDe
     ...toApprovalTemplateListItemDTO(bundle.template),
     formSchema: asFormSchema(bundle.version.form_schema),
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
+    // L6-P1 carrier fix — the active published definition's policy, or null pre-publish. Every
+    // caller of this builder passes an honest `publishedDefinition` (never a hardcoded stand-in),
+    // so this is the single point that turns "was there a publish" into the authoring-facing field.
+    policy: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph).policy : null,
   }
 }
 
@@ -2899,12 +3679,47 @@ function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | nu
  */
 export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    // Lock-3 R-13: a handler using `manager_at_level` must ALSO bake the manager chain into the snapshot,
+    // else it resolves empty at dispatch (silent skip). (`continuous_managers` is not admitted on a
+    // handler per §1.5, but keeping the shared predicate node-type-symmetric is harmless and future-proof.)
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
     return sources.some(
       (source) => isRecord(source) && (source.kind === 'continuous_managers' || source.kind === 'manager_at_level'),
+    )
+  })
+}
+
+/**
+ * Lock-1 §K4 / §K5-b: true when any approval node's assignee sources include `continuous_dept_heads`
+ * OR `dept_head_at_level`. Used at create time to decide whether to walk the (more expensive)
+ * department-head chain into the requester snapshot — a SEPARATE opt-in gate from
+ * `runtimeGraphUsesManagerChain` above, because both kinds bake the SAME `deptHeadChainIds`
+ * snapshot field (a different walk over a different pointer — see the union members' doc
+ * comments) via a DIFFERENT option (`includeDeptHeadChain`), so an unrelated template never pays
+ * for either walk. K5-b is strictly downstream of K4: it reads the identical snapshot field K4
+ * builds, so it shares this ONE gate rather than minting its own — mirroring how
+ * `runtimeGraphUsesManagerChain` above carries both `continuous_managers` AND `manager_at_level`
+ * for the manager-chain snapshot. Missing this extension would reproduce the exact "silent skip"
+ * class R-13 names: a graph using ONLY `dept_head_at_level` would never bake `deptHeadChainIds`,
+ * so the resolver's positional read would see `undefined` and resolve empty — indistinguishable
+ * from "no head at that level" and liable to silently auto-approve under
+ * `emptyAssigneePolicy:'auto-approve'`. Node-type is `approval`-only (§2.3 registry row: neither
+ * kind is admitted on a `handler` node in this slice — Lock-3 §1.5's forward ADMIT for K5-b on
+ * handler is deliberately NOT landed here; see the `dept_head_at_level` resolver arm comment).
+ * `kind` is read structurally so this works before the kind is added to the typed union (same
+ * posture as `runtimeGraphUsesManagerChain`).
+ */
+export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'approval') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some(
+      (source) => isRecord(source) && (source.kind === 'continuous_dept_heads' || source.kind === 'dept_head_at_level'),
     )
   })
 }
@@ -2918,10 +3733,22 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
  * on this detector fail-closes instead: 422 for the persistent policy config error, 503 for the
  * transient read failure — with NO instance and NO assignment created. Genuine data absence (the
  * read SUCCEEDED, the requester simply has no manager) still follows `emptyAssigneePolicy`.
+ *
+ * Lock-1 §2.1 EXTENSION (K4 + K5-b): `continuous_dept_heads` and `dept_head_at_level` are EXTENDED
+ * into this detector alongside the four shipped org-derived kinds — §2.1 names both explicitly
+ * ("That detector MUST be extended to K4 and K5-b"). Leaving either unextended would reproduce
+ * exactly the B5-b fail-open this guard closed: an org read failure plus
+ * `emptyAssigneePolicy: 'auto-approve'` would silently auto-approve instead of fail-closing at
+ * create.
  */
 export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    // Lock-3 R-14 (P1): a handler using an org-derived source (direct_manager / dept_head /
+    // manager_at_level) MUST also arm the create-time org-read fail-closed guard. Leaving it approval-only
+    // reproduces the exact B5-b fail-open — a failed/misconfigured org read yields empty `orgRelations`,
+    // which for a handler would resolve empty and (§2.2) fail APPROVAL_ASSIGNEE_EMPTY only if lucky, or
+    // worse mask a routing error. Include handler so create fails 422/503 with ZERO rows (G-3).
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
@@ -2931,9 +3758,66 @@ export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): b
         (source.kind === 'direct_manager' ||
           source.kind === 'dept_head' ||
           source.kind === 'continuous_managers' ||
-          source.kind === 'manager_at_level'),
+          source.kind === 'manager_at_level' ||
+          source.kind === 'continuous_dept_heads' ||
+          source.kind === 'dept_head_at_level'),
     )
   })
+}
+
+/**
+ * Lock-1 §K3: the set of node keys referenced by any `prior_node_approver` source in the published
+ * runtime graph. OPT-IN gate in the `runtimeGraphUsesManagerChain` posture: an empty set means the
+ * runtime paths do no K3 work at all (no audit-row read), so unrelated approvals pay nothing.
+ * `kind`/`nodeKey` are read structurally (same posture as the other detectors above).
+ *
+ * Deliberately NOT added to `runtimeGraphUsesOrgAssigneeSource`: K3 resolves from INSTANCE-INTERNAL
+ * audit rows, not the org directory — §2.1 extends that org-read fail-closed detector to K4 and
+ * K5-b only, and arming it for K3 would fail creates that need no org read at all.
+ */
+export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: RuntimeGraph): Set<string> {
+  const targets = new Set<string>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (
+        isRecord(source)
+        && source.kind === 'prior_node_approver'
+        && typeof source.nodeKey === 'string'
+        && source.nodeKey.trim().length > 0
+      ) {
+        targets.add(source.nodeKey.trim())
+      }
+    }
+  }
+  return targets
+}
+
+/**
+ * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
+ * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
+ * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
+ */
+export function collectRuntimeGraphRequesterChoiceSources(
+  runtimeGraph: RuntimeGraph,
+): Map<string, RequesterChoiceAssigneeSource[]> {
+  const byNodeKey = new Map<string, RequesterChoiceAssigneeSource[]>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'requester_choice') continue
+      const existing = byNodeKey.get(node.key)
+      if (existing) existing.push(source as unknown as RequesterChoiceAssigneeSource)
+      else byNodeKey.set(node.key, [source as unknown as RequesterChoiceAssigneeSource])
+    }
+  }
+  return byNodeKey
 }
 
 /**
@@ -3055,6 +3939,15 @@ function evaluateAutoApprovalAssignment(
 ): AutoApprovalEvaluation | null {
   if (assignment.assignmentType !== 'user') return null
 
+  // Lock-3 §2.4 — HANDLER nodes are EXEMPT from auto-approval / dedup: no handler node is ever
+  // auto-completed, and a requester who is themself a handler (提交人本人) must keep their handler
+  // seat rather than have merge-with-requester dispose of it. Return BEFORE reading the effective
+  // policy (a TEMPLATE-level policy applies to every node) and BEFORE `getApprovalMode`, which would
+  // throw for a handler key — so a handler + a template-level auto-approval policy never crashes the
+  // cascade. `getEffectiveAutoApprovalPolicy` already returns node-`source` only for `approval` nodes.
+  const node = runtimeGraph.nodes.find((entry) => entry.key === assignment.nodeKey)
+  if (node?.type === 'handler') return null
+
   const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
   if (!effectivePolicy) return null
 
@@ -3174,6 +4067,20 @@ function buildApprovalAssignmentResolver(options: {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
   requesterSnapshot: Record<string, unknown> | null
+  /**
+   * Lock-1 §K3 — LATE-BOUND provider of the prior-node decider map (referenced node key → actual
+   * decider user ids), read by the CALLER from instance-internal `approval_records` rows at node
+   * activation and threaded here so the resolver itself stays pure (§2.1: no resolver-internal
+   * database access; K3's input is caller-supplied alongside the snapshots). A PROVIDER rather
+   * than a plain map because dispatchAction constructs its executor before the actor's effective
+   * branch node — and therefore the in-flight approve merge — is known; the provider is invoked
+   * only when the executor actually resolves a node, which is always after the caller populated
+   * it. Omitted on the create/preview path (no instance rows exist yet): a `prior_node_approver`
+   * node reached by a create-time auto-approval cascade resolves EMPTY and falls to
+   * `emptyAssigneePolicy` (OD-L1-4(a)), and a route preview shows the honest EMPTY_ASSIGNEES
+   * marker (the §K2 pre-choice precedent).
+   */
+  getPriorNodeApprovers?: () => Record<string, string[]> | undefined
 }): ApprovalGraphAssignmentResolver {
   return ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
     nodeKey,
@@ -3182,6 +4089,7 @@ function buildApprovalAssignmentResolver(options: {
     formSchema: options.formSchema,
     formSnapshot: options.formSnapshot,
     requesterSnapshot: options.requesterSnapshot,
+    priorNodeApprovers: options.getPriorNodeApprovers?.(),
   })
 }
 
@@ -3192,6 +4100,9 @@ function buildApprovalAssignmentResolver(options: {
 export interface ApprovalRoutePreviewResult {
   route: Array<{
     nodeKey: string
+    // Lock-3 R-19: the row carries its node TYPE so a handler renders as 办理 (distinguishable from an
+    // approver) instead of an indistinguishable assignee row. Absent-safe for old clients (additive).
+    nodeType: ApprovalNodeType
     nodeLabel: string
     assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
     resolveError?: string
@@ -3211,6 +4122,43 @@ export class ApprovalProductService {
     client: { query: typeof pool.query },
     instanceId: string,
   ): Promise<ApprovalHistoryEntry[]> {
+    // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation for edits landed by PRIOR transactions: a
+    // handler field edit appended revision rows whose `audit_record_id` (the `handle` row's id) is the
+    // content-edit ordinal in `approval_records.id` (BIGSERIAL) space. Exclude any prior approval whose
+    // audit ordinal PRECEDES the latest content edit — those approvals predate the current form and
+    // must not seed an auto-approval skip. This is the NEW per-edit marker (NOT `nodeEntryEpoch`,
+    // which never bumps on a same-round edit). The single-call edit+complete case is handled by the
+    // caller passing `[]` (this txn's edit is not yet persisted here).
+    //
+    // Lock-4 OD-L4-10(a) / F4-D 回退 invalidation, priced into Lock-6 L6-A (gate A-7): a BACKWARD
+    // re-entry must invalidate every dedup-relevant approval that predates it, or `mergeAdjacentApprover`
+    // / `dedupeHistoricalApprover` re-merge a re-entered node against a stale pre-re-entry decision and
+    // silently nullify the send-back. OD-L4-10(a)'s boundary is corrected here (adversarial gate finding
+    // on #4965, live-reproduced): it is BACKWARD RE-ENTRY, not literally `action='return'` — a backward
+    // `timeout.jumpToNodeKey` effect (`applyNodeTimeoutEffect`) reaches an already-visited node through
+    // the SAME `resolveReturnToNode` resolver and is exactly as nullifying if left unfloored. A FORWARD
+    // jump (admin jump is structurally forward-only — `isReachableDownstream` rejects otherwise — and a
+    // forward timeout-jump is legitimate progress) must NOT re-floor; "compose after the jump" stays
+    // correct for those. The floor below therefore keys on `action = 'return'` OR a `'jump'` row this
+    // service stamped `metadata.backwardReentry: true` (computed at the jump dispatch site via the SAME
+    // "already on the static path to the current node" predicate the manual return action's own target
+    // validation uses).
+    //
+    // Scope by `to_version` rather than the literal `nodeEntryEpoch` int: `to_version` is a per-instance
+    // monotonic counter stamped on every 'approve'-and-cascade-adjacent `approval_records` row this query
+    // reads (manual approves AND `insertAutoApprovalEvents` rows alike — NOT every action; `transfer` /
+    // `comment` / `sign` rows outside a cascade are written with `toVersion` left at the CURRENT version,
+    // unbumped, and are excluded here by the `action = 'approve'` filter regardless) with no legacy-NULL
+    // case, so it needs no cutoff-fallback branch the way the T2-4 threshold tally's epoch reader does
+    // (:8000ish, "Dual-read fallback (§6)") — the SAME round-boundary idea that machinery already proves
+    // out for the threshold tally, applied here without inventing a second bookkeeping column. `>=` (not
+    // `>`): the invalidating action's OWN same-transaction cascade events (`insertAutoApprovalEvents`
+    // stamps them with the SAME `toVersion` as the return/backward-jump row, §L6-A round-scoping) must
+    // stay visible to LATER evaluations, not just future actions strictly after this version. Neither the
+    // manual-return nor the backward-jump call site depends on this predicate for its OWN evaluation — at
+    // the moment either one's cascade runs, its own audit row is not committed yet, so both pass `[]`
+    // directly (mirrors the create-cascade pattern below) rather than relying on this floor to
+    // self-exclude a not-yet-existing row.
     const result = await client.query<{
       id: string | number
       actor_id: string
@@ -3220,6 +4168,16 @@ export class ApprovalProductService {
        FROM approval_records
        WHERE instance_id = $1
          AND action = 'approve'
+         AND id > COALESCE(
+           (SELECT MAX(audit_record_id) FROM approval_form_field_revisions WHERE instance_id = $1),
+           0
+         )
+         AND to_version >= COALESCE(
+           (SELECT MAX(to_version) FROM approval_records
+             WHERE instance_id = $1
+               AND (action = 'return' OR (action = 'jump' AND (metadata->>'backwardReentry')::boolean IS TRUE))),
+           0
+         )
        ORDER BY occurred_at ASC, id ASC`,
       [instanceId],
     )
@@ -3657,6 +4615,7 @@ export class ApprovalProductService {
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
@@ -3721,8 +4680,9 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
-    validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
@@ -3885,8 +4845,9 @@ export class ApprovalProductService {
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
-        validateRecordLinkNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateNonScalarFieldsNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateHandlerNodePlacement(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
@@ -3915,6 +4876,15 @@ export class ApprovalProductService {
         version = bundle?.version ?? null
       }
 
+      // L6-P1 carrier fix — was hardcoded `publishedDefinition: null` regardless of whether the
+      // template has an active published definition. That hardcode is the second half of the
+      // shipped defect: `persistDraft()` re-hydrates the FE draft from THIS response
+      // (`draft.value = draftFromTemplate(updated)`), immediately before `confirmPublish` reads
+      // the draft back to build the next publish payload — so a wrong-null here silently dropped
+      // any policy field the editor doesn't own (e.g. `autoApproval`) one step before the
+      // republish that was supposed to carry it forward.
+      const publishedDefinition = await this.loadActivePublishedDefinition(client, template)
+
       await client.query('COMMIT')
 
       if (!version) {
@@ -3924,7 +4894,7 @@ export class ApprovalProductService {
       return toApprovalTemplateDetailDTO({
         template,
         version,
-        publishedDefinition: null,
+        publishedDefinition,
       })
     } catch (error) {
       await rollbackQuietly(client)
@@ -4009,13 +4979,20 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
-      validateRecordLinkNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
+      // Lock-1 §K3: every prior_node_approver reference must be an approval node strictly
+      // upstream on EVERY runtime-reachable path (dominance) — dangling / downstream / self /
+      // condition-branch-only / parallel-sibling references fail publish here, values-free.
+      // UNCONDITIONAL (unlike the parallel-conflict gate below): no policy exemption makes an
+      // undominated reference resolvable.
+      assertPriorNodeApproverReferencesUpstream(approvalGraph)
       // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
       // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
       // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
@@ -4283,6 +5260,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     const newName = `${source.template.name} (副本)`
@@ -4611,6 +5589,163 @@ export class ApprovalProductService {
   }
 
   /**
+   * Lock-1 §K2 — validate the submit-time requester choices against every published
+   * `requester_choice` node's configured scope, and return the FROZEN map (node key → chosen
+   * local user ids) the requester snapshot carries. Every rejection is a values-free 422
+   * (node keys and template-authored config only — never the chosen person ids) raised BEFORE
+   * any instance/assignment insert; a failed scope read is a retryable 503 (fail-closed,
+   * mirroring APPROVAL_REQUESTER_ORG_UNRESOLVED — an unverifiable choice must never freeze).
+   *
+   * Scope semantics (§K2, verbatim): `company` accepts any ACTIVE local user; `members`
+   * accepts only ids in the configured list (still active-checked — company is the widest
+   * scope and members/role only narrow it); `role` accepts only ids holding a configured
+   * role at create time, read FRESH from `user_roles`. That role read deliberately does NOT
+   * reuse `resolveApprovalRequesterRoleIds`: that helper INNER-JOINs `roles` on
+   * `approval_usable = true`, a curation flag governing the `requester.role` ROUTING
+   * predicate — importing it here would silently fail every choice scoped to a non-curated
+   * role. K2's role scope is plain role membership.
+   */
+  private async validateAndFreezeRequesterChoices(
+    payload: Record<string, string[]> | undefined,
+    sourcesByNode: Map<string, RequesterChoiceAssigneeSource[]>,
+    requireComplete: boolean,
+  ): Promise<Record<string, string[]>> {
+    if (!pool) throw new Error('Database not available')
+    // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
+    // values-free 422 (the offending VALUE is never echoed — only the node key).
+    const normalized = new Map<string, string[]>()
+    if (payload !== undefined) {
+      if (!isRecord(payload)) {
+        throw new ServiceError('requesterChoices must be an object of node key to user-id arrays', 422, 'APPROVAL_REQUESTER_CHOICE_INVALID')
+      }
+      for (const [rawNodeKey, rawList] of Object.entries(payload)) {
+        const nodeKey = rawNodeKey.trim()
+        if (!sourcesByNode.has(nodeKey)) {
+          // An entry for a node the published route does not resolve by requester choice cannot
+          // be validated against any scope — fail-closed, never silently dropped.
+          throw new ServiceError(
+            `requesterChoices references a node that has no requester_choice source`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_UNKNOWN_NODE',
+            { nodeKey },
+          )
+        }
+        if (!Array.isArray(rawList) || rawList.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+          throw new ServiceError(
+            `requesterChoices entries must be non-empty string arrays`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_INVALID',
+            { nodeKey },
+          )
+        }
+        // Trim + order-preserving dedupe; cardinality applies to the deduped list.
+        const ids: string[] = []
+        const seen = new Set<string>()
+        for (const entry of rawList) {
+          const id = entry.trim()
+          if (!seen.has(id)) {
+            seen.add(id)
+            ids.push(id)
+          }
+        }
+        normalized.set(nodeKey, ids)
+      }
+    }
+
+    const frozen: Record<string, string[]> = {}
+    // Batched activity check across every node's choices (company baseline for ALL scopes).
+    const allChosenIds = new Set<string>()
+    for (const ids of normalized.values()) for (const id of ids) allChosenIds.add(id)
+    let activeIds = new Set<string>()
+    if (allChosenIds.size > 0) {
+      try {
+        const activeResult = await pool.query<{ id: string }>(
+          `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+          [[...allChosenIds]],
+        )
+        activeIds = new Set(activeResult.rows.map((row) => row.id))
+      } catch (error) {
+        metricsLogger.warn(
+          `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
+        )
+        throw new ServiceError(
+          'Could not verify the chosen approvers for this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+        )
+      }
+    }
+
+    for (const [nodeKey, sources] of sourcesByNode) {
+      const ids = normalized.get(nodeKey)
+      if (!ids || ids.length === 0) {
+        if (requireComplete) {
+          // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
+          // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
+          throw new ServiceError(
+            `A requester choice is required for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_REQUIRED',
+            { nodeKey },
+          )
+        }
+        continue // read-only preview without choices: the node walks as EMPTY_ASSIGNEES, honestly.
+      }
+      for (const source of sources) {
+        // Mode cardinality — values-free 422 BEFORE any insert.
+        if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
+          throw new ServiceError(
+            source.mode === 'single'
+              ? `This approval node requires exactly one chosen approver`
+              : `This approval node requires at least one chosen approver`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
+            { nodeKey, mode: source.mode },
+          )
+        }
+        const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
+          throw new ServiceError(
+            `A chosen approver is outside the scope configured for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
+            { nodeKey, scopeType },
+          )
+        }
+        // Baseline for every scope: each chosen id is an ACTIVE local user.
+        if (ids.some((id) => !activeIds.has(id))) outOfScope(source.scope.type)
+        if (source.scope.type === 'members') {
+          const allowed = new Set(source.scope.userIds.map((id) => id.trim()))
+          if (ids.some((id) => !allowed.has(id))) outOfScope('members')
+        } else if (source.scope.type === 'role') {
+          // FRESH plain `user_roles` membership — see the method doc for why this must NOT go
+          // through resolveApprovalRequesterRoleIds (approval_usable is routing-predicate
+          // curation, not approver selection).
+          let holders: Set<string>
+          try {
+            const holderResult = await pool.query<{ user_id: string }>(
+              `SELECT DISTINCT user_id FROM user_roles WHERE user_id = ANY($1::varchar[]) AND role_id = ANY($2::varchar[])`,
+              [ids, source.scope.roleIds],
+            )
+            holders = new Set(holderResult.rows.map((row) => row.user_id))
+          } catch (error) {
+            metricsLogger.warn(
+              `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
+            )
+            throw new ServiceError(
+              'Could not verify the chosen approvers for this approval template. Please retry.',
+              503,
+              'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+            )
+          }
+          if (ids.some((id) => !holders.has(id))) outOfScope('role')
+        }
+      }
+      frozen[nodeKey] = ids
+    }
+    return frozen
+  }
+
+  /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
    * construction lives here so preview can NEVER drift from create (the same normalization,
@@ -4618,10 +5753,17 @@ export class ApprovalProductService {
    * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
    */
   private async assembleCreationContext(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       whitelistFormDataToSchema?: boolean
+      // Lock-1 §K2: the READ-ONLY previews (B3-05/B3-06) may walk a `requester_choice` route
+      // WITHOUT the submit-time choices — the affected node then previews honestly as
+      // EMPTY_ASSIGNEES instead of 422-blocking the preview. The CREATE path (default) keeps
+      // the fail-closed contract: a published requester_choice node with no entry in the
+      // payload is a values-free 422 BEFORE any insert. Choices that ARE supplied are
+      // scope/cardinality-validated identically on every path (preview cannot drift).
+      requesterChoicePresence?: 'require' | 'optional'
       // RP-3 (B3-06 authoring 试运行): source the runtime graph from the LATEST (possibly draft)
       // version, compiled on the fly with the SAME buildRuntimeGraph the publish path uses (no
       // parallel impl) — lets an author dry-run un-published edits. Default 'active' = the
@@ -4781,6 +5923,9 @@ export class ApprovalProductService {
       ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
+    // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
+    // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
+    const needsDeptHeadChain = runtimeGraphUsesDeptHeadChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
@@ -4793,6 +5938,7 @@ export class ApprovalProductService {
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
+        includeDeptHeadChain: needsDeptHeadChain,
       })
     } catch (error) {
       orgReadFailed = true
@@ -4920,6 +6066,21 @@ export class ApprovalProductService {
       )
     }
 
+    // Lock-1 §K2 (requester_choice) — validate the submitter's choices against each published
+    // node's configured scope and freeze them. Placed HERE, with the org/role wedge guards
+    // above and BEFORE any instance/assignment insert (mirroring the B5-b fail-closed
+    // placement): every rejection is a values-free 422 with zero rows persisted. OPT-IN — a
+    // graph without a requester_choice source (and a payload without choices) does no work.
+    const requesterChoiceSourcesByNode = collectRuntimeGraphRequesterChoiceSources(runtimeGraph)
+    let frozenRequesterChoices: Record<string, string[]> | undefined
+    if (requesterChoiceSourcesByNode.size > 0 || request.requesterChoices !== undefined) {
+      frozenRequesterChoices = await this.validateAndFreezeRequesterChoices(
+        request.requesterChoices,
+        requesterChoiceSourcesByNode,
+        options.requesterChoicePresence !== 'optional',
+      )
+    }
+
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
     // template + the create instant) into the snapshot BEFORE the executor resolves the
     // initial state, so the resolver's pushResolved substitution reads a frozen set and an
@@ -4955,8 +6116,24 @@ export class ApprovalProductService {
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
+      // Lock-1 §K4: freeze the department-head chain baked above (opt-in, needsDeptHeadChain).
+      ...(orgRelations.deptHeadChainIds ? { deptHeadChainIds: orgRelations.deptHeadChainIds } : {}),
       ...(Object.keys(delegationMap).length > 0 ? { delegations: delegationMap } : {}),
+      // Lock-1 §K2: freeze the validated submit-time choices (node key → chosen local user
+      // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.
+      ...(frozenRequesterChoices && Object.keys(frozenRequesterChoices).length > 0
+        ? { requesterChoices: frozenRequesterChoices }
+        : {}),
     }
+    // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no
+    // instance exists yet, so there are no audit rows to read. A `prior_node_approver` node can
+    // only activate here through a same-transaction auto-approval cascade (publish guarantees its
+    // target is strictly upstream, so it is never the first pending node); in that case it
+    // resolves EMPTY and falls to `emptyAssigneePolicy` (OD-L1-4(a) — the cascade's decider is
+    // the system sentinel, which is dropped by definition; under `actorMode:'original_approver'`
+    // the attributable decider is not re-materialized from an unpersisted round either — the
+    // fail-closed arm, never a silent wrong approver). Route previews show the honest
+    // EMPTY_ASSIGNEES marker for such nodes (the §K2 pre-choice precedent).
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
       assignmentResolver: buildApprovalAssignmentResolver({
         formSchema,
@@ -4992,12 +6169,15 @@ export class ApprovalProductService {
    * admin variant threads its sampleRequester through the same method under its own guard.
    */
   async previewApprovalRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
   ): Promise<ApprovalRoutePreviewResult> {
     // B3-05: the requester IS the session actor; publish gate applies (active runtime graph).
+    // §K2: choices are OPTIONAL on the read-only preview (a not-yet-chosen requester_choice
+    // node previews as EMPTY_ASSIGNEES); supplied choices are validated + resolved to names.
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
+      requesterChoicePresence: 'optional',
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
   }
@@ -5011,7 +6191,7 @@ export class ApprovalProductService {
    * (owner order ③). `actor` still authorizes template visibility inside assembleCreationContext.
    */
   async previewTemplateRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
@@ -5022,6 +6202,7 @@ export class ApprovalProductService {
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
       previewSource: 'draft',
+      requesterChoicePresence: 'optional',
       ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
@@ -5035,8 +6216,12 @@ export class ApprovalProductService {
       const node = runtimeGraph.nodes.find((entry) => entry.key === key)
       return (node?.name && String(node.name).trim()) || key
     }
+    // Lock-3 R-19: resolve a frontier node's TYPE so the preview row is distinguishable (办理 vs 审批).
+    const nodeTypeOf = (key: string): ApprovalNodeType =>
+      (runtimeGraph.nodes.find((entry) => entry.key === key)?.type ?? 'approval')
     const route: Array<{
       nodeKey: string
+      nodeType: ApprovalNodeType
       nodeLabel: string
       assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
       resolveError?: string
@@ -5066,6 +6251,7 @@ export class ApprovalProductService {
         const assignments = resolution.assignments.filter((entry) => entry.nodeKey === nodeKey)
         route.push({
           nodeKey,
+          nodeType: nodeTypeOf(nodeKey),
           nodeLabel: nodeLabel(nodeKey),
           assignees: assignments.map((entry) => ({ id: entry.assigneeId, name: entry.assigneeId, assignmentType: entry.assignmentType })),
           ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
@@ -5074,8 +6260,13 @@ export class ApprovalProductService {
       // Parallel frontier: advancing a multi-branch region node-by-node through
       // resolveAfterApprove mirrors the runtime, but the preview only promises the FIRST-PASS
       // node set — advance from the primary cursor; if the executor cannot advance, truncate.
+      // Lock-3 R-19: `resolveAfterApprove` throws for a HANDLER cursor (its config accessor rejects a
+      // handler key), so advance a handler frontier with `resolveAfterHandle` — otherwise a graph with a
+      // handler would truncate at the handler row instead of previewing past it.
       try {
-        const next = executor.resolveAfterApprove(resolution.currentNodeKey)
+        const next = nodeTypeOf(resolution.currentNodeKey) === 'handler'
+          ? executor.resolveAfterHandle(resolution.currentNodeKey)
+          : executor.resolveAfterApprove(resolution.currentNodeKey)
         if (next.currentNodeKey && visited.has(next.currentNodeKey) && next.status !== 'approved') {
           truncated = true
           break
@@ -5509,10 +6700,21 @@ export class ApprovalProductService {
       const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: the jump (re)activates a node that may carry a `prior_node_approver` source —
+      // read the referenced nodes' persisted deciders (LATEST round, sentinels dropped) before
+      // resolution. No in-flight merge: the jumping admin is not a decider. A referenced node the
+      // jump SKIPPED OVER (never decided) yields an empty entry → emptyAssigneePolicy
+      // (OD-L1-4(a): the "node was skipped" arm). OPT-IN — undefined when the graph has no such
+      // source.
+      const jumpReferencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      const jumpPriorNodeApprovers = jumpReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, jumpReferencedPriorNodeKeys)
+        : undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => jumpPriorNodeApprovers,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
@@ -6058,10 +7260,23 @@ export class ApprovalProductService {
 
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: a timeout JUMP (re)activates a node that may carry a `prior_node_approver`
+      // source — read the referenced nodes' persisted deciders (LATEST round, sentinels dropped)
+      // before resolution. No in-flight merge: the timeout scanner is a system actor, never a
+      // decider. A referenced node the jump skips over yields an empty entry →
+      // emptyAssigneePolicy (OD-L1-4(a)). OPT-IN — undefined when the graph has no such source
+      // (the transfer effect re-resolves nothing, so the read is skipped for it too).
+      const timeoutReferencedPriorNodeKeys = scannedEffect === 'jump'
+        ? collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+        : new Set<string>()
+      const timeoutPriorNodeApprovers = timeoutReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, timeoutReferencedPriorNodeKeys)
+        : undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
         }),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -6115,8 +7330,28 @@ export class ApprovalProductService {
         return await consumeAndSkip('skipped_invalid_config', 'jump_target_invalid')
       }
 
+      // Lock-4 OD-L4-10(a) / Lock-6 L6-A — direction-aware re-entry (adversarial gate finding on
+      // #4965: a BACKWARD timeout-jump nullifies a send-back the same way a manual return does).
+      // Unlike `adminJump` (`:6202` area — `isReachableDownstream` REJECTS a non-forward target, so
+      // admin jump structurally cannot go backward and needs no such check), `assertNodeTimeoutConfig`
+      // (`:1676-1694`) places NO forward-only constraint on `timeout.jumpToNodeKey` — a template author
+      // may point it at any approval node, including one already passed. `resolveReturnToNode` (the
+      // SAME resolver the manual return action uses) does not itself distinguish direction either.
+      // Determine it here, where topology is available: `targetNodeKey` is BACKWARD iff it is among
+      // the approval nodes already visited on the STATIC path to `currentNodeKey` (excluding
+      // `currentNodeKey` itself) — the identical predicate the manual return action's own validation
+      // uses (`listVisitedApprovalNodeKeysUntil(currentNodeKey).slice(0, -1)`), so "backward" here
+      // means exactly what it means there. A FORWARD jump (not in that set) is legitimate progress —
+      // it must NOT re-floor (matches the preserved "compose after the jump" behavior for admin jump).
+      const timeoutJumpVisitedApprovalNodes = executor.listVisitedApprovalNodeKeysUntil(currentNodeKey)
+      const isBackwardReentryJump = timeoutJumpVisitedApprovalNodes.slice(0, -1).includes(targetNodeKey)
+
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
+      // A backward re-entry's OWN synchronous cascade must not see history that predates it — the
+      // same reason the manual return branch seeds `[]` instead of reading `loadApprovalHistory`
+      // (that call's `action:'jump'` row has not committed yet, so the durable to_version floor
+      // below cannot yet exclude what it surfaces). A forward jump keeps composing normally.
       const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
         ? this.applyAutoApprovalCascade(
             id,
@@ -6124,7 +7359,7 @@ export class ApprovalProductService {
             executor,
             jumpResolution,
             typeof requesterId === 'string' ? requesterId : null,
-            await this.loadApprovalHistory(client, id),
+            isBackwardReentryJump ? [] : await this.loadApprovalHistory(client, id),
           )
         : jumpResolution
       if (resolution.status !== 'pending' && !nodeTimeoutTerminalEffectsEnabled()) {
@@ -6181,6 +7416,12 @@ export class ApprovalProductService {
           nextNodeKey: resolution.currentNodeKey,
           oldAssignees,
           newAssignees,
+          // Lock-4 OD-L4-10(a) — the round-scoping floor in `loadApprovalHistory` keys on this flag
+          // (in addition to `action='return'`) so a BACKWARD timeout-jump re-floors the dedup
+          // cascade's history exactly like a manual return. Omitted (not `false`) for a forward
+          // jump, matching the omit-when-absent convention `insertApprovalRecord` metadata already
+          // uses elsewhere in this file.
+          ...(isBackwardReentryJump ? { backwardReentry: true } : {}),
         },
       })
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, timeoutJumpEntryEpoch)
@@ -6269,10 +7510,17 @@ export class ApprovalProductService {
       const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3 — late-bound decider map for any `prior_node_approver` source in this graph.
+      // Populated ONCE below (after the actor's effective branch node + action authorization are
+      // resolved) and BEFORE any resolution entry point runs; the provider indirection exists
+      // because the executor is constructed here, earlier than that point. Stays undefined when
+      // the graph carries no such source (OPT-IN — zero extra reads for unrelated approvals).
+      let priorNodeApprovers: Record<string, string[]> | undefined
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
         assignmentResolver: buildApprovalAssignmentResolver({
           formSnapshot,
           requesterSnapshot,
+          getPriorNodeApprovers: () => priorNodeApprovers,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
@@ -6320,6 +7568,75 @@ export class ApprovalProductService {
 
       if (request.action !== 'revoke' && !actorCanAct) {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
+      }
+
+      // Lock-1 §K3 — populate the prior-node decider map (declared beside the executor above)
+      // when this graph references any prior node. Read ONCE per dispatch from instance-internal
+      // audit rows, BEFORE any of this transaction's own writes, and AFTER the authorization
+      // guard above (so a 403 stays a 403). For an `approve`, the acting user IS a decider of
+      // the CURRENT node's round — their own approve record is inserted only after resolution —
+      // so they are merged in scoped to the current round's epoch (resolved from the node's
+      // still-active assignments, exactly like the threshold tally's own capture). Partial-vote
+      // paths (all-mode with siblings remaining / threshold unmet) commit before any resolution,
+      // so the merge is only ever consumed when the node actually completes. A node auto-approved
+      // by THIS transaction's cascade has no persisted round yet and resolves EMPTY →
+      // emptyAssigneePolicy (OD-L1-4(a)).
+      const referencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      if (referencedPriorNodeKeys.size > 0) {
+        const inFlightApprove = request.action === 'approve' && currentNodeKey && referencedPriorNodeKeys.has(currentNodeKey)
+          ? {
+              nodeKey: currentNodeKey,
+              actorId: actor.userId,
+              epoch: await this.currentNodeEntryEpoch(client, id, currentNodeKey),
+            }
+          : undefined
+        priorNodeApprovers = await this.loadPriorNodeApproverDeciders(client, id, referencedPriorNodeKeys, inFlightApprove)
+      }
+
+      // Lock-7 L7-C / OD-L7-3(a): `fieldWrites` is meaningful ONLY on a `handle` submission at a
+      // handler node (the sole ratified write surface). On any OTHER action a present `fieldWrites`
+      // key is a values-free 400 — fail-closed, never a silent ignore. The `handle` path below
+      // applies the masked, frozen-schema-validated write inside this transaction (P4-B replaces
+      // P4-A's blanket 422 APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED). Detected by key PRESENCE.
+      if (request.action !== 'handle' && Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+        throw new ServiceError(
+          'Field writes are only permitted on a handler submission',
+          400,
+          'APPROVAL_FIELD_WRITE_ACTION_NOT_ALLOWED',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // Lock-3 §2.2 (G-10 action authorization): the ACTION VERBS legal at a handler node differ from an
+      // approval node. `handle` is meaningful ONLY at a handler; a handler has no decision to make, so
+      // approve/reject/return/add_sign/reduce_sign have no handler meaning (a blocked handler transfers,
+      // or an admin moves the instance). `transfer`/`comment`/`revoke` are node-type-agnostic and stay.
+      const currentNodeType: ApprovalNodeType | null = currentNodeKey
+        ? (runtimeGraph.nodes.find((entry) => entry.key === currentNodeKey)?.type ?? null)
+        : null
+      if (currentNodeType === 'handler') {
+        if (
+          request.action === 'approve'
+          || request.action === 'reject'
+          || request.action === 'return'
+          || request.action === 'add_sign'
+          || request.action === 'reduce_sign'
+        ) {
+          throw new ServiceError(
+            `Action ${request.action} is not permitted at a handler node`,
+            409,
+            'APPROVAL_HANDLER_ACTION_NOT_ALLOWED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+      } else if (request.action === 'handle') {
+        // `handle` was routed at a node that is not a handler — reject rather than misapply the verb.
+        throw new ServiceError(
+          'Handle is only permitted at a handler node',
+          409,
+          'APPROVAL_HANDLE_NODE_MISMATCH',
+          { nodeKey: currentNodeKey },
+        )
       }
 
       // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
@@ -6633,7 +7950,7 @@ export class ApprovalProductService {
           `SELECT COUNT(*)::text AS count
            FROM approval_records
            WHERE instance_id = $1
-             AND action IN ('approve', 'reject', 'transfer')
+             AND action IN ('approve', 'reject', 'transfer', 'handle')
              AND metadata->>'nodeKey' = $2`,
           [id, currentNodeKey],
         )
@@ -6703,6 +8020,221 @@ export class ApprovalProductService {
         throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
       }
 
+      if (request.action === 'handle') {
+        // Lock-3 §2.2 — a handler completes by SUBMITTING (submit-only, per corpus C-3/C-9; the
+        // handler-action guard above already rejected approve/reject/return/add_sign/reduce_sign). 会签
+        // 'all' completes when every resolved seat submits; 或签 'any' completes on the first. The tally
+        // is the LIVE active-seat count, which is epoch-safe by construction (§2.4): a re-entered handler
+        // node inserts a FRESH round of active seats, so prior-round (deactivated) seats never satisfy
+        // the new round's 'all' tally (G-12). Field writes are already rejected (§3 fail-closed) above.
+        const handlerConfig = executor.getHandlerNodeConfig(currentNodeKey)
+        const handlerMode = executor.getHandlerMode(currentNodeKey)
+        // §2.2: `opinionRequired: true` makes a blank 办理意见 a values-free 422.
+        if (handlerConfig.opinionRequired === true && !request.comment?.trim()) {
+          throw new ServiceError(
+            'Handler opinion is required',
+            422,
+            'APPROVAL_HANDLER_OPINION_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+        // nodeEntryEpoch (§2.4): capture the node's current round epoch NOW, while the actor's seat is
+        // still active (the read fails closed on empty/mixed), and stamp the handle record with it so a
+        // later re-entry (a fresh epoch) never re-counts this submission.
+        const handlerNodeEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        // Lock-7 L7-C step (2) "apply" — the masked field write. `applyHandlerFieldWrites` masks each
+        // write at the actor's SINGLE claimed node, validates against the FROZEN version schema, and
+        // UPDATEs form_snapshot IN PLACE (OD-L7-6(a)); any refusal throws values-free and rolls the
+        // whole transaction back (G-3/G-7/G-15). The edit is a SAME-ROUND mutation: it does NOT bump
+        // node_activation_seq (no `bumpNodeActivationSeq` here), so `handlerNodeEpoch` and the current
+        // node's quorum tally (`:6981`, Lock-3 G-12) are unchanged by the edit (G-16 companion).
+        let handlerFieldWrite: { changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> } = { changedFieldIds: [], revisions: [] }
+        if (Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+          const schemaResult = await client.query<{ form_schema: Record<string, unknown> }>(
+            `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+            [instance.template_version_id],
+          )
+          const frozenFormSchema = schemaResult.rows[0]?.form_schema as unknown as FormSchema | undefined
+          if (!frozenFormSchema) {
+            throw new ServiceError('Frozen form schema not found', 409, 'APPROVAL_FROZEN_SCHEMA_NOT_FOUND', { nodeKey: currentNodeKey })
+          }
+          handlerFieldWrite = await this.applyHandlerFieldWrites(client, id, currentNodeKey, request.fieldWrites, {
+            runtimeGraph,
+            formSchema: frozenFormSchema,
+            frozenSnapshot: formSnapshot,
+          })
+        }
+        // Deactivate the actor's own seat first (会签/或签 both consume it).
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+
+        if (handlerMode === 'all' && remainingAssignments > 0) {
+          // 会签: not every seat has submitted — record this partial handle, keep the node pending.
+          await client.query(
+            `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+            [id, nextVersion],
+          )
+          const partialAuditId = await this.insertApprovalRecord(client, id, {
+            action: 'handle',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              handlerMode,
+              aggregateComplete: false,
+              remainingAssignments,
+              ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+              // Lock-7 OD-L7-7 — values-free: the changed field IDS only, never before/after values.
+              ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
+            },
+          }, actor)
+          if (handlerFieldWrite.revisions.length > 0) {
+            await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
+          }
+          await client.query('COMMIT')
+          return (await this.getApproval(id, actor.userId))!
+        }
+
+        // Completion. 或签 'any' first-wins: cancel the remaining pending sibling seats (audit-preserved).
+        let handlerCancelledAssigneeIds: string[] = []
+        if (handlerMode === 'any') {
+          const siblingAssignments = currentNodeAssignments.filter((assignment) =>
+            !assignmentMatchesActor(assignment, actor.userId, actorRoles))
+          handlerCancelledAssigneeIds = Array.from(
+            new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+          )
+          if (siblingAssignments.length > 0) {
+            await client.query(
+              `UPDATE approval_assignments
+               SET is_active = FALSE,
+                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                     'handlerCancelledBy', $3::text,
+                     'handlerCancelledAt', now()::text,
+                     'handlerMode', 'any'
+                   ),
+                   updated_at = now()
+               WHERE instance_id = $1
+                 AND node_key = $2
+                 AND is_active = TRUE
+                 AND id = ANY($4::uuid[])`,
+              [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
+            )
+          }
+        }
+
+        // Advance PAST the handler node. A handler carries no auto-approval policy of its own, but the
+        // NEXT node it advances into may be an approval node with one — run the same cascade the approve
+        // arm does so an empty-assignee/merge on the next node resolves identically.
+        let resolution = executor.resolveAfterHandle(currentNodeKey)
+        if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+          const requesterId = requesterSnapshot?.id
+          resolution = this.applyAutoApprovalCascade(
+            id,
+            runtimeGraph,
+            executor,
+            resolution,
+            typeof requesterId === 'string' ? requesterId : null,
+            // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation. THIS transaction's edit is not yet
+            // visible in the DB (the audit + revision rows are inserted below), so a single-call
+            // edit+complete would otherwise auto-approve the next node on a PRE-edit approval. When
+            // this submit edited a field, EVERY persisted approval necessarily precedes the edit ⇒
+            // drop the whole history. Prior-transaction edits are handled inside loadApprovalHistory
+            // (it excludes approvals whose audit ordinal precedes the latest content-edit revision).
+            handlerFieldWrite.changedFieldIds.length > 0 ? [] : await this.loadApprovalHistory(client, id),
+          )
+        }
+        await client.query(
+          `UPDATE approval_instances
+           SET status = $2,
+               version = $3,
+               current_node_key = $4,
+               current_step = $5,
+               total_steps = $6,
+               updated_at = now()
+           WHERE id = $1`,
+          [
+            id,
+            resolution.status,
+            nextVersion,
+            resolution.currentNodeKey,
+            resolution.currentStep ?? instance.total_steps,
+            resolution.totalSteps,
+          ],
+        )
+        // ACTIVATION (nodeEntryEpoch §4·A): completing the handler activates the NEXT node — a new epoch.
+        const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+        const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+        const completionAuditId = await this.insertApprovalRecord(client, id, {
+          action: 'handle',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            nextNodeKey: resolution.currentNodeKey,
+            handlerMode,
+            aggregateComplete: true,
+            ...(handlerCancelledAssigneeIds.length > 0 ? { handlerCancelledAssignees: handlerCancelledAssigneeIds } : {}),
+            ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+            // Lock-7 OD-L7-7 — values-free: changed field IDs only.
+            ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
+          },
+        }, actor)
+        if (handlerFieldWrite.revisions.length > 0) {
+          await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, completionAuditId, handlerFieldWrite.revisions)
+        }
+        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, advanceEntryEpoch)
+        await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        const completionEvent = resolution.status === 'approved'
+          ? this.buildCompletionEvent(
+              instance,
+              {
+                // Terminal transition to `approved` reached via a handler submission; the instance-level
+                // completion event marks the instance approved (the audit ROW above is `action:'handle'`).
+                action: 'approve',
+                fromStatus: instance.status,
+                toStatus: 'approved',
+                fromVersion: instance.version,
+                toVersion: nextVersion,
+                nodeKey: currentNodeKey,
+              },
+              { id: actor.userId, name: actorName },
+            )
+          : null
+        if (completionEvent) {
+          await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        }
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
+        await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents)
+        // Lock-3 §2.5 / OD-L3-4(a): handler wall-clock is EXCLUDED from the per-node breakdown — NO
+        // `emitNodeDecisionMetric` for the handler node (it is not approver latency). The instance-level
+        // `duration_seconds` (emitTerminalMetric) unavoidably includes it; the SLA view states the split.
+        if (completionEvent) {
+          emitApprovalCompletionEvent(completionEvent)
+          this.emitTerminalMetric(id, 'approved')
+        }
+        if (resolution.currentNodeKey) {
+          this.emitNodeActivationMetric(
+            id,
+            resolution.currentNodeKey,
+            resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)),
+            nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey),
+          )
+        }
+        return (await this.getApproval(id, actor.userId))!
+      }
+
       if (request.action === 'return') {
         if (isInParallelRegion) {
           // Return-to-node inside a parallel region is deferred to a
@@ -6730,6 +8262,16 @@ export class ApprovalProductService {
         await this.deactivateAllActiveAssignments(client, id)
         const returnResolution = executor.resolveReturnToNode(targetNodeKey)
         const requesterId = requesterSnapshot?.id
+        // Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 — this return's own `action:'return'` row has not
+        // committed yet, so `loadApprovalHistory`'s new `to_version >=` return-floor (above) cannot see
+        // it and would still surface every PRE-return approval (e.g. an adjacent node's stale approval
+        // by the same person the target node is re-assigned to). Seed this synchronous cascade with an
+        // EMPTY history instead — the same pattern the create-cascade already uses (`:5905` — a brand
+        // new instance starts empty too) — so mergeAdjacentApprover / dedupeHistoricalApprover cannot
+        // re-merge against anything that predates this return. Auto-approval events THIS cascade itself
+        // produces are still chained correctly: `applyAutoApprovalCascade` appends each event into this
+        // same array as it evaluates, and `insertAutoApprovalEvents` below persists them with the SAME
+        // `toVersion` as the `action:'return'` row, so later evaluations see them via the floor query.
         const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
           ? this.applyAutoApprovalCascade(
               id,
@@ -6737,7 +8279,7 @@ export class ApprovalProductService {
               executor,
               returnResolution,
               typeof requesterId === 'string' ? requesterId : null,
-              await this.loadApprovalHistory(client, id),
+              [],
             )
           : returnResolution
         await client.query(
@@ -7488,6 +9030,31 @@ export class ApprovalProductService {
   }
 
   /**
+   * L6-P1 carrier fix — the template's ACTIVE published definition (keyed by
+   * `template.active_version_id`), independent of whichever version an in-flight edit is
+   * building. `updateTemplate` needs this: it may be returning a NEW (never-published) draft
+   * version, and the previously-active policy must still surface on that response so
+   * `persistDraft()` → `draftFromTemplate` does not clobber the FE draft's carried-forward
+   * policy with a hardcoded absence right before a republish reads it back off. Returns null for
+   * a template that has never been published (`active_version_id` absent).
+   */
+  private async loadActivePublishedDefinition(
+    client: { query: typeof pool.query },
+    template: TemplateRow,
+  ): Promise<PublishedDefinitionRow | null> {
+    if (!template.active_version_id) return null
+    const result = await client.query<PublishedDefinitionRow>(
+      `SELECT *
+       FROM approval_published_definitions
+       WHERE template_version_id = $1
+       ORDER BY is_active DESC, published_at DESC
+       LIMIT 1`,
+      [template.active_version_id],
+    )
+    return result.rows[0] || null
+  }
+
+  /**
    * Loads template authoring/creation bundles where choosing the active or
    * latest template version is intentional. Existing approval instances must
    * not use this helper to advance; `dispatchAction()` loads the runtime graph
@@ -7797,6 +9364,88 @@ export class ApprovalProductService {
     return only === null || only === undefined ? null : Number(only)
   }
 
+  // Lock-1 §K3 — the referenced prior nodes' ACTUAL deciders, read from instance-internal
+  // `approval_records` audit rows on the SAME transaction client (never a directory read;
+  // instance-internal reads are not directory reads — §2.1 keeps the resolver pure by having the
+  // CALLER read this at activation and pass it in alongside the snapshots).
+  //
+  // Round scoping (OD-L1-3(a), LATEST round only — matching the threshold tally's epoch-scoped
+  // posture): per referenced node, keep only the `action='approve'` rows whose
+  // `metadata.nodeEntryEpoch` equals the node's LATEST recorded epoch. Rows with NO epoch exist
+  // only on legacy pre-epoch instances — unreachable for K3 (the kind postdates epoch stamping,
+  // and an instance pins its published definition, which could not have carried the kind before
+  // this slice) — but are handled totally: they count only when NO epoched row exists.
+  //
+  // Sentinel actors (`system:auto-approval`, `system:approval-timeout` — the `system:` namespace,
+  // the repo-wide non-user actor convention) are DROPPED, never assigned (§K3); under
+  // `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's real id
+  // and is therefore kept. Deciders keep audit-row order (occurred_at, id), deduped.
+  //
+  // `inFlight` (approve path only): the acting user IS a decider of the CURRENT node's round, but
+  // their own approve record is inserted only AFTER resolution — so the caller passes them here,
+  // scoped to the current round's epoch (persisted partial votes of THIS round are kept; any
+  // PRIOR round's rows are excluded even when the current round has no rows yet).
+  private async loadPriorNodeApproverDeciders(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    referencedNodeKeys: ReadonlySet<string>,
+    inFlight?: { nodeKey: string; actorId: string; epoch: number | null },
+  ): Promise<Record<string, string[]>> {
+    const map: Record<string, string[]> = {}
+    if (referencedNodeKeys.size === 0) return map
+    const result = await client.query<{ actor_id: string; node_key: string; metadata: Record<string, unknown> | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key, metadata
+         FROM approval_records
+        WHERE instance_id = $1
+          AND action = 'approve'
+          AND metadata->>'nodeKey' = ANY($2::text[])
+        ORDER BY occurred_at ASC, id ASC`,
+      [instanceId, [...referencedNodeKeys]],
+    )
+    const rowsByNode = new Map<string, Array<{ actorId: string; epoch: number | null }>>()
+    for (const row of result.rows) {
+      const rawEpoch = toNullableRecord(row.metadata)?.nodeEntryEpoch
+      const epoch = typeof rawEpoch === 'number' && Number.isInteger(rawEpoch)
+        ? rawEpoch
+        : typeof rawEpoch === 'string' && /^\d+$/.test(rawEpoch)
+          ? Number.parseInt(rawEpoch, 10)
+          : null
+      const list = rowsByNode.get(row.node_key)
+      const entry = { actorId: row.actor_id, epoch }
+      if (list) list.push(entry)
+      else rowsByNode.set(row.node_key, [entry])
+    }
+    for (const nodeKey of referencedNodeKeys) {
+      const rows = rowsByNode.get(nodeKey) ?? []
+      let roundRows: Array<{ actorId: string; epoch: number | null }>
+      if (inFlight && inFlight.nodeKey === nodeKey) {
+        // The in-flight round is authoritative: keep only THIS round's persisted partial votes
+        // (epoch equality; a null in-flight epoch — legacy — keeps only epoch-less rows).
+        roundRows = rows.filter((row) => row.epoch === inFlight.epoch)
+      } else {
+        const epochs = rows.map((row) => row.epoch).filter((epoch): epoch is number => epoch !== null)
+        if (epochs.length > 0) {
+          const latest = Math.max(...epochs)
+          roundRows = rows.filter((row) => row.epoch === latest)
+        } else {
+          roundRows = rows
+        }
+      }
+      const deciders: string[] = []
+      const seen = new Set<string>()
+      const pushDecider = (actorId: string): void => {
+        const id = actorId.trim()
+        if (!id || id.startsWith('system:') || seen.has(id)) return
+        seen.add(id)
+        deciders.push(id)
+      }
+      for (const row of roundRows) pushDecider(row.actorId)
+      if (inFlight && inFlight.nodeKey === nodeKey) pushDecider(inFlight.actorId)
+      map[nodeKey] = deciders
+    }
+    return map
+  }
+
   // Dynamic-source discriminator. `metadata.resolvedFrom` is written ONLY by
   // `ApprovalAssigneeResolver` (the sole producer for dynamic `assigneeSources`);
   // legacy static `assigneeType`/`assigneeIds` assignments never carry it.
@@ -7939,16 +9588,231 @@ export class ApprovalProductService {
     }
   }
 
+  // Lock-7 L7-C / OD-L7-6(a) — the handler-node field write. Callable ONLY from step (2) of Lock-3
+  // §3's handle transaction (claim → apply → bump version → audit → resolve). The mask reads exactly
+  // `[nodeKey]` — the actor's SINGLE claimed seat, never a re-derivation (L7-A) — so `editable` ⇒
+  // writable and `readonly`/`hidden` ⇒ a values-free refusal that rolls back the whole transaction
+  // (G-3/G-15). Values are validated against the FROZEN version schema (create-path validators,
+  // G-6). Returns the changed field ids + before/after revisions so the caller writes the
+  // values-free `handle` audit row (changedFieldIds, no values — OD-L7-7) and the append-only
+  // revision rows. The `form_snapshot` UPDATE is IN PLACE (OD-L7-6(a)): every existing reader (DTO
+  // echo, FWB projection at `status='approved'`, condition routing) is then automatically correct
+  // with no composition step (G-17 — a delta table read-composed by each reader would be fail-OPEN
+  // by omission). Drivers can never be `editable` (publish pin 1 / OD-L7-8(a)), so the in-memory
+  // executor built from the pre-edit snapshot resolves the next node identically — an edit never
+  // re-routes.
+  private async applyHandlerFieldWrites(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    rawWrites: unknown,
+    context: {
+      runtimeGraph: RuntimeGraph
+      formSchema: FormSchema
+      frozenSnapshot: Record<string, unknown>
+    },
+  ): Promise<{ changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> }> {
+    // Payload must be a plain object of fieldId → value. `null` / array / scalar ⇒ values-free 400.
+    if (!isRecord(rawWrites)) {
+      throw new ServiceError('Field writes payload is invalid', 400, 'APPROVAL_FIELD_WRITE_PAYLOAD_INVALID', { nodeKey })
+    }
+    const writeEntries = Object.entries(rawWrites)
+    // An empty `{}` is an accepted payload with zero writes — the handle proceeds, no UPDATE, no rows.
+    if (writeEntries.length === 0) {
+      return { changedFieldIds: [], revisions: [] }
+    }
+    const schemaFields = new Map((context.formSchema.fields ?? []).map((field) => [field.id, field]))
+    const attachmentValueMode = isApprovalAttachmentsEnabled() ? 'ids' as const : 'legacy' as const
+    // Lock-7 OD-L7-8 RUNTIME driver guard (defense-in-depth, matrix-INDEPENDENT). The publish pin only
+    // rejects an EXPLICIT `editable` driver, but OD-L7-9's absent≡editable makes a driver simply OMITTED
+    // from this handler's matrix default-editable — and the mask below would then permit the write, so
+    // an approver could edit a `form_field_user` / `ConditionRule` / condition-formula field and choose
+    // their own downstream reviewer/branch (master §P4 exit: "cannot be bypassed by HTTP calls"). Refuse
+    // a write to ANY field in the instance's FROZEN-graph driver set regardless of its access
+    // (editable/readonly/hidden/absent), values-free. Same shared collection the pin uses (no drift).
+    // The collection re-parses each condition formula, but that cannot introduce a NEW in-flight break:
+    // the same dispatch already ran `asRuntimeGraph` (`:6794`) → `normalizeConditionFormulaPredicate`
+    // over the identical stored formulas, so an unparseable stored formula throws THERE first, before
+    // this guard is reached (§2.1 — no formula reaches here that has not already been re-parsed OK).
+    const routingDriverFieldIds = collectRoutingDriverFieldIds(context.runtimeGraph.nodes)
+    const revisions: Array<{ fieldId: string; before: unknown; after: unknown }> = []
+    const merge: Record<string, unknown> = {}
+    for (const [fieldId, value] of writeEntries) {
+      const field = schemaFields.get(fieldId)
+      // Unknown top-level field id. This is ALSO the OD-L7-12 detail sub-column case: a
+      // `fieldId.columnId` address is never a top-level schema id, so it lands here — v1 excludes
+      // per-sub-column access (the cross-reference set is top-level only). Fail-closed 400.
+      if (!field) {
+        throw new ServiceError('Field write references an unknown field', 400, 'APPROVAL_FIELD_WRITE_UNKNOWN_FIELD', { nodeKey, fieldId })
+      }
+      // Routing driver — never writable at any node, whatever the matrix says (see the guard note above).
+      if (routingDriverFieldIds.has(fieldId)) {
+        throw new ServiceError('Field write to a routing driver is not permitted', 403, 'APPROVAL_FIELD_WRITE_DRIVER_FORBIDDEN', { nodeKey, fieldId })
+      }
+      const access = fieldAccessAtNodes(context.runtimeGraph, [nodeKey], fieldId)
+      if (access !== 'editable') {
+        // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
+        throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
+      }
+      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` writes need binding+authz
+      // that Lock-7's named validators (validateFieldType/Constraints/Detail) do NOT cover —
+      // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
+      // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
+      // approval-node write surface (OD-L7-3's named next slice) carries the binding surfaces.
+      //
+      // Lock-8 L8-A (§1.1) gate P2-2 hardening: `explanation` joins this refusal for a DIFFERENT
+      // reason — it carries no value at ANY time (display-only, A-1). A handler node with NO matrix
+      // entry for it defaults to OD-L7-9 absent≡editable (`fieldAccessAtNodes` above), so the ONLY
+      // remaining backstop was `validateFieldType`'s explicit `case 'explanation'` arm
+      // (ApprovalGraphExecutor.ts) — which DOES refuse a non-null submitted value, but that function's
+      // own universal `value === undefined || value === null` early return (shared by every field
+      // type, not explanation-specific) lets a `null` write skip validation entirely. Without this
+      // arm, `fieldWrites: {<explanationId>: null}` would reach the `merge[fieldId] = value` in-place
+      // UPDATE below and add an `explanation` key to `form_snapshot` (plus a field-revision row) for a
+      // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
+      // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
+      // arm above, unaffected by this change.
+      if (field.type === 'record-link' || field.type === 'attachment' || field.type === 'explanation') {
+        throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
+      }
+      // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a
+      // field type with no explicit `validateFieldType` arm returns null ⇒ written unvalidated.
+      const errors = field.type === 'detail'
+        ? validateDetailFieldValue(field, value, { attachmentValueMode })
+        : [validateFieldType(field, value, { attachmentValueMode }), ...validateFieldConstraints(field, value)]
+            .filter((error): error is string => Boolean(error))
+      if (errors.length > 0) {
+        throw new ServiceError('Field write value is invalid', 400, 'APPROVAL_FIELD_WRITE_INVALID', { nodeKey, fieldId })
+      }
+      revisions.push({
+        fieldId,
+        before: Object.prototype.hasOwnProperty.call(context.frozenSnapshot, fieldId) ? context.frozenSnapshot[fieldId] : null,
+        after: value,
+      })
+      merge[fieldId] = value
+    }
+    // IN-PLACE UPDATE (OD-L7-6(a), R-10) — the first and only UPDATE of `form_snapshot`. `||` merges
+    // the written fields over the create-time snapshot, preserving untouched fields.
+    await client.query(
+      `UPDATE approval_instances
+          SET form_snapshot = COALESCE(form_snapshot, '{}'::jsonb) || $2::jsonb,
+              updated_at = now()
+        WHERE id = $1`,
+      [instanceId, JSON.stringify(merge)],
+    )
+    return { changedFieldIds: revisions.map((revision) => revision.fieldId), revisions }
+  }
+
+  // Lock-7 OD-L7-6(a) — append the per-field revision rows, each stamped with the `handle` audit
+  // row's id (`auditRecordId`) so `MAX(audit_record_id)` is the 内容变更 dedup ordinal (G-16). Values
+  // (before/after) live ONLY here, behind the mask-aware read — never on the broadly-scoped audit
+  // surface (OD-L7-7).
+  private async insertFormFieldRevisions(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    actorId: string,
+    nodeEntryEpoch: number | null,
+    auditRecordId: string,
+    revisions: Array<{ fieldId: string; before: unknown; after: unknown }>,
+  ): Promise<void> {
+    for (const revision of revisions) {
+      await client.query(
+        `INSERT INTO approval_form_field_revisions
+         (instance_id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)`,
+        [
+          instanceId,
+          nodeKey,
+          revision.fieldId,
+          revision.before === undefined ? null : JSON.stringify(revision.before),
+          revision.after === undefined ? null : JSON.stringify(revision.after),
+          actorId,
+          nodeEntryEpoch,
+          auditRecordId,
+        ],
+      )
+    }
+  }
+
+  /**
+   * Lock-7 OD-L7-7 / G-8 — the mask-aware revision read surface. Before/after VALUES live here (never
+   * on the broadly-scoped audit/history surface), and a field currently `hidden` at the instance's
+   * active node(s) has its before/after REDACTED (fail-closed), so a hidden field's value cannot leak
+   * through the revision surface either. WHO may call this at all (instance-detail read scope) is the
+   * OPEN owner question D-5 — Lock-7 deliberately does NOT settle it and adds no HTTP route here; the
+   * `actor` parameter is reserved for a later actor-scoped read once D-5 resolves.
+   */
+  async getFormFieldRevisions(
+    instanceId: string,
+    _actor?: { userId: string; roles?: string[] } | null,
+  ): Promise<Array<{ id: string; nodeKey: string; fieldId: string; before: unknown; after: unknown; actorId: string; nodeEntryEpoch: number | null; auditRecordId: string; redacted: boolean }>> {
+    if (!pool) throw new Error('Database not available')
+    const instanceResult = await pool.query<{ current_node_key: string | null; metadata: Record<string, unknown> | null; published_definition_id: string | null }>(
+      `SELECT current_node_key, metadata, published_definition_id FROM approval_instances WHERE id = $1`,
+      [instanceId],
+    )
+    const instance = instanceResult.rows[0]
+    let hiddenFieldIds = new Set<string>()
+    if (instance?.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: Record<string, unknown> }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtimeGraph = runtimeResult.rows[0]?.runtime_graph
+      if (runtimeGraph) {
+        hiddenFieldIds = collectHiddenFieldIds(
+          runtimeGraph as unknown as { nodes?: Array<{ key?: unknown; type?: unknown; config?: unknown } | null> },
+          collectActiveNodeKeys(instance.current_node_key, instance.metadata),
+        )
+      }
+    }
+    const revisionsResult = await pool.query<{
+      id: string | number
+      node_key: string
+      field_id: string
+      before_value: unknown
+      after_value: unknown
+      actor_id: string
+      node_entry_epoch: number | null
+      audit_record_id: string | number
+    }>(
+      `SELECT id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id
+         FROM approval_form_field_revisions
+        WHERE instance_id = $1
+        ORDER BY id ASC`,
+      [instanceId],
+    )
+    return revisionsResult.rows.map((row) => {
+      const redacted = hiddenFieldIds.has(row.field_id)
+      return {
+        id: String(row.id),
+        nodeKey: row.node_key,
+        fieldId: row.field_id,
+        before: redacted ? null : row.before_value,
+        after: redacted ? null : row.after_value,
+        actorId: row.actor_id,
+        nodeEntryEpoch: row.node_entry_epoch,
+        auditRecordId: String(row.audit_record_id),
+        redacted,
+      }
+    })
+  }
+
+  // Returns the inserted `approval_records.id` (decimal string). Lock-7 OD-L7-6(a) needs the `handle`
+  // row's id as the per-field revision rows' `audit_record_id` (the 内容变更 dedup ordinal, G-16) —
+  // callers that ignore the return value are unaffected (pure widening; RETURNING adds no round-trip).
   private async insertApprovalRecord(
     client: { query: typeof pool.query },
     instanceId: string,
     record: ApprovalRecordInsert,
     actor?: { ip?: string | null; userAgent?: string | null },
-  ): Promise<void> {
-    await client.query(
+  ): Promise<string> {
+    const result = await client.query<{ id: string | number }>(
       `INSERT INTO approval_records
        (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id`,
       [
         instanceId,
         record.action,
@@ -7965,6 +9829,12 @@ export class ApprovalProductService {
         actor?.userAgent || null,
       ],
     )
+    // Production: `RETURNING id` on a successful single-row INSERT always yields exactly one row, so
+    // this is the `handle` row's id (the revision rows' audit_record_id, OD-L7-6(a)). The `?? ''`
+    // guard covers ONLY unit mocks whose fake query returns an empty `rows` for this INSERT — those
+    // paths never insert revision rows (no field writes), so the empty id is never consumed.
+    const insertedId = result?.rows?.[0]?.id
+    return insertedId != null ? String(insertedId) : ''
   }
 }
 

@@ -36,8 +36,8 @@
  *
  * Outbox drain worker (lock 7.1a delivery side): with the env gate present the
  * plugin registered the drain job at activate; `runOnce` here is the EXACT
- * closure the shared scheduler ticks (module export, not a copy), and one pass
- * delivers every pending row this suite created. The paired no-env leg lives in
+ * closure the shared scheduler ticks (module export, not a copy), and it
+ * delivers every pending row THIS SUITE created. The paired no-env leg lives in
  * attendance-w4c2-live-scheduled-boundary.db.test.ts (gated=false), so
  * neutering the env gate fails that leg while this one stays green — exclusive.
  *
@@ -501,7 +501,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     ).rejects.toThrow(/W4C0_IMMUTABLE/)
   })
 
-  it('env-gated outbox drain worker: registered under this allowlist env, and ONE pass of the production closure delivers every pending row', async () => {
+  it('env-gated outbox drain worker: registered under this allowlist env, and the production closure delivers every pending row THIS SUITE created, losslessly', async () => {
     const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
       __attendanceW4OutboxDrainForTests?: {
         getState(): { gated: boolean }
@@ -516,42 +516,85 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     expect(probe!.getState()).toEqual({ gated: true })
 
     // Pending rows produced by the legs above: shadow(1) + eligible control(1)
-    // + freeze(2). The org-scoped count is exact; the drain pass itself is
-    // global by design, so its counts are anchored to the global pending total
-    // (== 4 on a fresh CI database; a dirty local re-run may carry stale rows).
-    const globalPending = async () =>
+    // + freeze(2). This ORG-SCOPED count is the exact claim, and it is what the
+    // module header's intent sentence names: the closure delivers every pending
+    // row THIS SUITE created.
+    //
+    // WHY THIS NO LONGER ANCHORS ON THE GLOBAL PENDING TOTAL (#4556 Gate D2,
+    // #4844 — not drift, a real behaviour change plus a latent coupling it
+    // exposed). This leg used to assert `drained === {claimed: globalBefore,
+    // delivered: globalBefore}` over a GLOBAL count, on the assumption recorded
+    // in its old comment that the global total "== 4 on a fresh CI database" —
+    // i.e. that no other suite in the shared-DB battery leaves pending rows.
+    // That assumption was never structural, and D2 falsified it. Authoritative
+    // `live_punch` punches now SUCCEED where they previously failed closed with
+    // W4C2_AUTHORITATIVE_MODE_NOT_DELIVERED (503, whole txn rolled back, zero
+    // rows), and each one enqueues its `attendance.punched` lifecycle event —
+    // CORRECT new behaviour, and the disclosed §6.2 default. The new
+    // `attendance-w4c2-d2-live-punch-authoritative.db.test.ts` drives ~27 such
+    // punches and leaves ~27 pending rows behind (measured on an isolated DB),
+    // pushing the battery's global pending total past the dispatcher's default
+    // `batchLimit` of 100 — so ONE pass claimed 100 of 101 and the global
+    // equality failed.
+    //
+    // Attribution checked rather than assumed: `attendance-w4c2-gate-matrix-e5
+    // .db.test.ts` leg 6a is also a newly-succeeding authoritative punch, but it
+    // is NOT part of this pressure — measured in isolation, that suite's own
+    // dispatcher legs deliver its punched row, and its single leftover pending
+    // row is a pre-existing `scheduled`/`attendance.absence.generated` event on
+    // a SHADOW org, unchanged by D2.
+    //
+    // The fix is NOT to raise the batch limit (that would weaken the production
+    // closure this leg exists to exercise) and NOT to suppress the new rows
+    // (they are the correct behaviour). It is to assert what this suite can
+    // actually own. The global form was also inherently racy under vitest's
+    // parallel file execution — another suite can enqueue between the count and
+    // the pass — so it was one more suite away from flaking regardless of D2.
+    // What is asserted instead, and is exact: every pass delivers everything it
+    // claims and fails nothing, and THIS SUITE's rows all end delivered with a
+    // timestamp, with none left pending.
+    const pendingScoped = async () =>
       Number((await pool.query(
-        `SELECT count(*)::int AS n FROM attendance_result_event_outbox WHERE delivery_state = 'pending'`,
-      )).rows[0].n)
-    const pendingBefore = Number(
-      (await pool.query(
         `SELECT count(*)::int AS n FROM attendance_result_event_outbox
          WHERE delivery_state = 'pending' AND org_id = ANY($1)`,
         [[shadowOrg, eligibleOrg, freezeOrg]],
-      )).rows[0].n,
-    )
+      )).rows[0].n)
+    const pendingBefore = await pendingScoped()
     expect(pendingBefore).toBe(4)
-    const globalBefore = await globalPending()
-    expect(globalBefore).toBeGreaterThanOrEqual(4)
 
-    const drained = await probe!.runOnce()
-    expect(drained).toEqual({ claimed: globalBefore, delivered: globalBefore, failed: 0 })
+    // The production closure, drained until this suite's own rows are gone. It
+    // takes ONE pass whenever the shared backlog is within the batch limit; the
+    // bound exists only so a larger backlog degrades into extra passes instead
+    // of a false failure. Every pass is asserted to be lossless.
+    let passes = 0
+    let firstPass: { claimed: number; delivered: number; failed: number } | null = null
+    while ((await pendingScoped()) > 0) {
+      const pass = await probe!.runOnce()
+      if (firstPass === null) firstPass = pass
+      // Lossless: nothing claimed is dropped, nothing fails.
+      expect(pass.failed).toBe(0)
+      expect(pass.delivered).toBe(pass.claimed)
+      passes += 1
+      expect(passes).toBeLessThanOrEqual(10)   // terminates; never spins
+    }
+    // Non-vacuous: the first pass really did claim work — at minimum this
+    // suite's own four rows were in reach of it.
+    expect(firstPass).not.toBeNull()
+    expect(firstPass!.claimed).toBeGreaterThanOrEqual(pendingBefore)
+
     for (const orgId of [shadowOrg, eligibleOrg, freezeOrg]) {
       for (const row of await outboxRows(orgId)) {
         expect(row.delivery_state).toBe('delivered')
         expect(row.delivered_at).not.toBeNull()
       }
     }
-    // Second pass: nothing left to claim.
+    // Nothing of this suite's remains to claim. (A further pass's GLOBAL claim
+    // count is deliberately not asserted: other suites run in parallel against
+    // this database and may enqueue at any moment.)
     const again = await probe!.runOnce()
-    expect(again).toEqual({ claimed: 0, delivered: 0, failed: 0 })
-    const pendingAfter = Number(
-      (await pool.query(
-        `SELECT count(*)::int AS n FROM attendance_result_event_outbox
-         WHERE delivery_state = 'pending' AND org_id = ANY($1)`,
-        [[shadowOrg, eligibleOrg, freezeOrg]],
-      )).rows[0].n,
-    )
+    expect(again.failed).toBe(0)
+    expect(again.delivered).toBe(again.claimed)
+    const pendingAfter = await pendingScoped()
     expect(pendingAfter).toBe(0)
   })
 })

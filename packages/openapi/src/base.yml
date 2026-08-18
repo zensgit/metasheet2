@@ -558,7 +558,9 @@ components:
           additionalProperties: false
           required: [projectionOwner, visibilityState, visibilityReason, posture]
           properties:
-            projectionOwner: { type: string, enum: [legacy_untracked, w4] }
+            # W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713):
+            # response enum widened with w4_group. INERT — no producer emits it yet.
+            projectionOwner: { type: string, enum: [legacy_untracked, w4, w4_group] }
             visibilityState: { type: string, enum: [active, retired] }
             visibilityReason: { type: string, enum: [active, review_placeholder, import_rollback, operator_retirement] }
             posture: { type: string, enum: [shadow, authoritative, undeterminable] }
@@ -3686,7 +3688,7 @@ components:
           type: string
         type:
           type: string
-          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail]
+          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment, detail, date_range, explanation]
         label:
           type: string
         required:
@@ -3762,6 +3764,8 @@ components:
           user: '#/components/schemas/FormFieldGeneric'
           attachment: '#/components/schemas/FormFieldGeneric'
           detail: '#/components/schemas/FormFieldGeneric'
+          date_range: '#/components/schemas/FormFieldGeneric'
+          explanation: '#/components/schemas/FormFieldGeneric'
     FormSchema:
       type: object
       properties:
@@ -3875,6 +3879,19 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        fieldAccess:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+            enum: [editable, readonly, hidden]
+          description: |
+            Lock-7 OD-L7-10 — the actor-scoped per-field access map for the viewer
+            at their claimed handler seat(s): fieldId → editable | readonly |
+            hidden. Present ONLY on the DETAIL read (getApproval); absent on the
+            list. A field absent from the map is editable (legacy default, OD-L7-9).
+            Presentation only — enforcement is server-side (a masked field write is
+            refused regardless of what the client renders).
         currentNodeKey:
           type: string
           nullable: true
@@ -4266,6 +4283,314 @@ components:
         - approvalGraph
         - createdAt
         - updatedAt
+    # --- W6-2 (#4556) group effective-policy aggregate schemas ---
+    # Promoted from packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml
+    # per design-lock docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md §7.3.
+    # Verbatim content; do not hand-edit independently of the draft's governing document.
+    AttendanceGroupEffectivePolicySourceLabel:
+      type: string
+      description: Closed source/effect label union (parent lock 5.1; OD-W6-3).
+      enum: [effective, org_inherited, preview_only, needs_configuration, conflict_action_required]
+
+    AttendanceGroupEffectivePolicyDomain:
+      type: string
+      description: Closed policy-domain union (OD-W6-4).
+      enum: [basics, membership, schedule, segments, flex, rules, punch_method, request_posture]
+
+    AttendanceGroupEffectivePolicyConflictCode:
+      type: string
+      description: Closed v1 conflict inventory (OD-W6-4).
+      enum:
+        - CALCULATION_GROUP_MEMBERSHIP_OVERLAP
+        - FIXED_SCHEDULE_CONFIGURATION_CHANGED
+        - FIXED_SCHEDULE_PENDING_APPLY
+        - FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW
+        - SCHEDULE_STRATEGY_INCOMPLETE
+        - RULE_SOURCE_MISSING
+        - TIMEZONE_MISSING
+
+    AttendanceGroupEffectivePolicyEditorRef:
+      description: >
+        Closed editor reference union (OD-W6-9). `group_context_route` reuses
+        the #4711 closed route family; `group_stage` reuses the existing
+        group-editor stage union. No caller-supplied section IDs (red line
+        W6-R8).
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, stage]
+          properties:
+            kind:
+              type: string
+              enum: [group_stage]
+            stage:
+              type: string
+              enum: [basics, people, schedule, policies]
+        - type: object
+          additionalProperties: false
+          required: [kind, step]
+          properties:
+            kind:
+              type: string
+              enum: [group_context_route]
+            step:
+              type: string
+              enum: [schedule, calendar, rules]
+            surface:
+              type: string
+              description: >
+                Closed per-step table from the #4711 lock section 3.1:
+                step=schedule allows shifts|assignments|advanced-scheduling;
+                step=rules allows rule-sets; step=calendar allows none.
+              enum: [shifts, assignments, advanced-scheduling, rule-sets]
+
+    AttendanceGroupEffectivePolicySourceRef:
+      type: object
+      additionalProperties: false
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          description: Closed configuration-source kinds (config IDs only, never user IDs).
+          # AUTHORITY: `ATTENDANCE_GROUP_EFFECTIVE_POLICY_SOURCE_REF_KINDS_V1` in
+          # `packages/core-backend/src/attendance/w6-group-effective-policy-contract.ts`.
+          # The runtime validator imports it and the exported TS `kind` union is derived
+          # from it. This YAML enum is a hand-kept third face; a unit test
+          # (`…-response-contract.test.ts`) parses this enum and asserts set-equality
+          # with that constant, so it reds if either side moves.
+          enum: [shift, rule_set, fixed_schedule_config]
+        id:
+          type: string
+          format: uuid
+
+    AttendanceGroupEffectivePolicyFixedSchedule:
+      type: object
+      description: >
+        Embedded verbatim from the existing FSER effectiveness service
+        (single source, red line W6-R4). States, reason codes, coverage, and
+        drift keys are the FSER lock's contract, unchanged; W6 adds no reason
+        code and no second derivation.
+      additionalProperties: false
+      required: [state, reasonCodes, desired, coverage, drift, evaluatedAt]
+      properties:
+        state:
+          type: string
+          enum: [not_configured, pending_apply, effective, configuration_changed]
+        reasonCodes:
+          type: array
+          items:
+            type: string
+            enum:
+              - NO_DESIRED_CONFIG
+              - NO_TARGET_MEMBERS
+              - DIFFERENT_MANAGED_KEY_ACTIVE
+              - TARGET_MEMBER_MISSING
+              - NON_MEMBER_TARGET_ACTIVE
+              - DUPLICATE_MATCHING_ASSIGNMENT
+              - ASSIGNMENT_VALUE_MISMATCH
+              - UNPUBLISHED_MANAGED_ROW
+              - EFFECTIVE
+        desired:
+          nullable: true
+          type: object
+          additionalProperties: false
+          required: [shiftId, startDate, endDate, revision]
+          properties:
+            shiftId: { type: string, format: uuid }
+            startDate: { type: string, format: date }
+            # Nullable by construction: the producer emits null for an
+            # open-ended managed row, and the underlying column is nullable.
+            endDate: { type: string, format: date, nullable: true }
+            revision: { type: integer, minimum: 1 }
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [targetMembers, matchingMembers, missingMembers, nonMemberTargets, differentKeyRows]
+          properties:
+            targetMembers: { type: integer, minimum: 0 }
+            matchingMembers: { type: integer, minimum: 0 }
+            missingMembers: { type: integer, minimum: 0 }
+            nonMemberTargets: { type: integer, minimum: 0 }
+            differentKeyRows: { type: integer, minimum: 0 }
+        drift:
+          type: object
+          additionalProperties: false
+          required: [unconfiguredManagedRows, unpublishedManagedRows, managedSets]
+          properties:
+            unconfiguredManagedRows: { type: integer, minimum: 0 }
+            unpublishedManagedRows: { type: integer, minimum: 0 }
+            managedSets:
+              type: array
+              description: Group-safe values only (FSER lock); never user IDs.
+              items:
+                type: object
+                additionalProperties: false
+                required: [shiftId, startDate, endDate, producerKey, rowCount]
+                properties:
+                  shiftId: { type: string, format: uuid }
+                  startDate: { type: string, format: date }
+                  # Nullable for the same reason as `desired.endDate` above.
+                  endDate: { type: string, format: date, nullable: true }
+                  producerKey: { type: string }
+                  rowCount: { type: integer, minimum: 1 }
+        evaluatedAt:
+          type: string
+          format: date-time
+
+    AttendanceGroupEffectivePolicyDomainSummary:
+      type: object
+      # NOTE: no `additionalProperties: false` here on purpose — this base
+      # schema is extended via allOf by per-domain keys (strategy,
+      # fixedSchedule, mode, source, ...), and a strict validator would
+      # otherwise reject the composed objects. Exact-key enforcement for the
+      # composed domain objects is owned by the W6-1 exact-key deepEqual
+      # tests; W6-2 may instead inline closed per-domain schemas when wiring
+      # this draft into the build.
+      required: [label, reasonCodes, editorRef]
+      properties:
+        label:
+          $ref: '#/components/schemas/AttendanceGroupEffectivePolicySourceLabel'
+        reasonCodes:
+          type: array
+          description: Values-free reason codes; de-duplicated, contract order.
+          items: { type: string }
+        sourceRefs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceGroupEffectivePolicySourceRef'
+        editorRef:
+          $ref: '#/components/schemas/AttendanceGroupEffectivePolicyEditorRef'
+
+    AttendanceGroupEffectivePolicyConflict:
+      type: object
+      additionalProperties: false
+      required: [code, domain, label, editorRef]
+      properties:
+        code:
+          $ref: '#/components/schemas/AttendanceGroupEffectivePolicyConflictCode'
+        domain:
+          $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomain'
+        label:
+          type: string
+          enum: [conflict_action_required]
+        affectedUserCount:
+          type: integer
+          minimum: 0
+          description: Count only; never user IDs (red line W6-R2).
+        editorRef:
+          $ref: '#/components/schemas/AttendanceGroupEffectivePolicyEditorRef'
+
+    AttendanceGroupEffectivePolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - groupId
+            - groupType
+            - timezone
+            - activeMemberCount
+            - managerPosture
+            - calculationPosture
+            - domains
+            - conflicts
+            - evaluatedAt
+          properties:
+            groupId: { type: string, format: uuid }
+            groupType:
+              type: string
+              description: Existing CHECK-constrained group type union.
+              enum: [fixed_shift, scheduled_shift, free_time]
+            timezone:
+              type: string
+              nullable: true
+              description: IANA zone; null surfaces TIMEZONE_MISSING.
+            activeMemberCount:
+              type: integer
+              minimum: 0
+            managerPosture:
+              type: object
+              additionalProperties: false
+              required: [ownerCount, subOwnerCount]
+              properties:
+                ownerCount: { type: integer, minimum: 0 }
+                subOwnerCount: { type: integer, minimum: 0 }
+            calculationPosture:
+              type: string
+              description: Read-only mirror of the org W4 rollout state.
+              enum: [legacy, shadow, eligible, authoritative, suspended]
+            domains:
+              type: object
+              additionalProperties: false
+              required: [membership, schedule, segments, flex, rules, punchMethod, requestPosture]
+              properties:
+                membership:
+                  $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                schedule:
+                  allOf:
+                    - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                    - type: object
+                      required: [strategy, fixedSchedule]
+                      properties:
+                        strategy:
+                          type: string
+                          enum: [fixed_shift, scheduled_shift, free_time]
+                        fixedSchedule:
+                          nullable: true
+                          allOf:
+                            - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyFixedSchedule'
+                segments:
+                  $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                flex:
+                  allOf:
+                    - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                    - type: object
+                      properties:
+                        mode:
+                          type: string
+                          description: W5 flex mode union (w5-flex-policy.ts), read-only.
+                          enum: [strict, flex_required_duration]
+                rules:
+                  allOf:
+                    - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                    - type: object
+                      required: [source]
+                      properties:
+                        source:
+                          type: string
+                          enum: [org_default, group_rule_set]
+                punchMethod:
+                  allOf:
+                    - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                    - type: object
+                      required: [source]
+                      properties:
+                        source:
+                          type: string
+                          description: OD-4556-9 keeps punch policy org-inherited in v1.
+                          enum: [org_inherited]
+                requestPosture:
+                  allOf:
+                    - $ref: '#/components/schemas/AttendanceGroupEffectivePolicyDomainSummary'
+                    - type: object
+                      required: [overtime, makeupPunch, outdoor]
+                      properties:
+                        overtime: { type: string, enum: [org_inherited] }
+                        makeupPunch: { type: string, enum: [org_inherited] }
+                        outdoor: { type: string, enum: [org_inherited] }
+            conflicts:
+              type: array
+              items:
+                $ref: '#/components/schemas/AttendanceGroupEffectivePolicyConflict'
+            evaluatedAt:
+              type: string
+              format: date-time
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token

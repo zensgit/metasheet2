@@ -2,9 +2,10 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump keeps the version-restore UAT fixture aligned with
-// publish-note and node-entry-epoch migrations already present in production.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260722-template-version-restore-current-round'
+// idempotent DDL. The current bump adds Lock-3's `handle` action to the approval_records CHECK so the
+// handler-node real-DB suite's audit INSERT is accepted (matches the production migration
+// zzzz20260817120000_add_handle_action_to_approval_records).
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260817-field-edit-enforcement-revisions'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -181,7 +182,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign', 'handle'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)
@@ -419,6 +420,25 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         END IF;
       END $$;
     `)
+
+    // Lock-7 OD-L7-6(a) — the append-only per-field revision ledger (matches production migration
+    // zzzz20260817130000_create_approval_form_field_revisions). Before/after VALUES live here (behind
+    // the mask-aware read), and MAX(audit_record_id) is the 内容变更 dedup ordinal (G-16).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_form_field_revisions (
+        id BIGSERIAL PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        node_key TEXT NOT NULL,
+        field_id TEXT NOT NULL,
+        before_value JSONB,
+        after_value JSONB,
+        actor_id TEXT NOT NULL,
+        node_entry_epoch INTEGER,
+        audit_record_id BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_field_revisions_instance ON approval_form_field_revisions(instance_id, id)`)
 
     await client.query(
       `INSERT INTO approval_test_schema_bootstrap_state (key, version, completed_at)

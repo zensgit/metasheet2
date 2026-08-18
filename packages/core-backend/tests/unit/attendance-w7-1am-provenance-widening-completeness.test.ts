@@ -1,0 +1,634 @@
+/**
+ * W7-1a-M (#4556) — the LOAD-BEARING completeness test.
+ *
+ * Ratified per #4556 comments 5293034619 + 5293478713, whose 执行序 makes a
+ * "derive-and-diff 完备性测试" the承重 deliverable for this slice: walk the
+ * derived consumer table and assert every point is widened — 漏一点即红.
+ *
+ * The source-text surface is checked here. The DB surface is checked in
+ * `../integration/attendance-w7-1am-provenance-widening.db.test.ts`, derived
+ * from the live catalogue rather than from migration text (see that file and the
+ * scanner's header for why migration text cannot be the source of truth).
+ */
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { describe, expect, it } from 'vitest'
+import {
+  ATTENDANCE_PROJECTION_OWNERS_SQL_LIST_V1,
+  ATTENDANCE_PROJECTION_OWNERS_V1,
+  ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1,
+  ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1,
+  ATTENDANCE_TRACE_SOURCE_KINDS_V1,
+  isAttendanceProjectionOwnerV1,
+  isAttendanceProjectionOwnerWithCalculationPointerV1,
+} from '../../src/attendance/w7-provenance-domain'
+import {
+  W7_PROVENANCE_WIDENING_LEDGER_V1,
+  deriveProvenanceWideningSurfaceV1,
+  deriveRenamedWideningSymbolsV1,
+  diffProvenanceWideningV1,
+  resolveRepoRootV1,
+  type W7DerivedSiteV1,
+} from '../utils/w7-provenance-widening-scan'
+
+const repoRoot = resolveRepoRootV1()
+const derivation = deriveProvenanceWideningSurfaceV1({ repoRoot })
+
+function sitesIn(fileSuffix: string): W7DerivedSiteV1[] {
+  return derivation.sites.filter((site) => site.file.endsWith(fileSuffix))
+}
+
+describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
+  it('every derived site is widened or carries a satisfied neutrality rule', () => {
+    const violations = diffProvenanceWideningV1(derivation, W7_PROVENANCE_WIDENING_LEDGER_V1)
+    expect(violations.map((violation) => `${violation.kind}: ${violation.detail}`)).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // Non-vacuity. A derivation that found nothing would pass the diff trivially,
+  // so the shape of what it found is asserted, not just the empty violation set.
+  // -------------------------------------------------------------------------
+
+  it('non-vacuity: the derivation actually walked the tree', () => {
+    expect(derivation.scannedFileCount).toBeGreaterThan(500)
+    expect(derivation.anchoredFileCount).toBeGreaterThanOrEqual(10)
+    expect(derivation.sites.length).toBeGreaterThanOrEqual(110)
+    expect(W7_PROVENANCE_WIDENING_LEDGER_V1.length).toBeGreaterThanOrEqual(100)
+  })
+
+  it('non-vacuity: the alias taint hop found real aliases', () => {
+    // `owner` (w4c2-authoritative-calculation-core) and `projectionOwner`
+    // (the `projection_owner AS "projectionOwner"` SQL rename + local consts).
+    expect(derivation.aliasIdentifiers).toContain('owner')
+    expect(derivation.aliasIdentifiers).toContain('projectionOwner')
+  })
+
+  it('non-vacuity: the derivation covers every kind of consumer the ruling names', () => {
+    // TS union.
+    expect(sitesIn('src/services/AttendanceDecisionTrace.ts').length).toBeGreaterThan(0)
+    // TS closed-set array behind a runtime `isClosedValue` gate.
+    expect(sitesIn('src/services/AttendanceW4CalculationDetail.ts').length).toBeGreaterThan(0)
+    // Exhaustive validations (two independent copies) + the pointer derivation.
+    expect(sitesIn('src/attendance/w4c3a-import-rollback.ts').length).toBeGreaterThanOrEqual(5)
+    // Silent-downgrade folds — the sites that contain NO target string.
+    expect(sitesIn('src/attendance/w4c2-authoritative-calculation-core.ts').length).toBeGreaterThan(0)
+    expect(sitesIn('src/attendance/w4c2-live-scheduled-boundary.ts').length).toBeGreaterThan(0)
+    // SQL embedded in TS.
+    expect(sitesIn('src/attendance/w4c3a-import-rollback-boundary.ts').length).toBeGreaterThan(0)
+    // OpenAPI enum.
+    expect(sitesIn('packages/openapi/src/base.yml').length).toBeGreaterThan(0)
+    // The web app's INDEPENDENT copy: closed array + exhaustive switch. The W7-0
+    // record asserted no exhaustive consumer of this union existed anywhere —
+    // the derivation refutes that, which is why enumeration was refused.
+    expect(sitesIn('apps/web/src/views/attendance/attendanceDecisionTrace.ts').length).toBeGreaterThanOrEqual(6)
+    // Ops scripts.
+    expect(sitesIn('scripts/ops/staging-attendance-tooling-teardown.mjs').length).toBeGreaterThan(0)
+  })
+
+  it('non-vacuity: every ledger rule name is actually exercised', () => {
+    const used = new Set(W7_PROVENANCE_WIDENING_LEDGER_V1.map((entry) => entry.rule))
+    for (const rule of [
+      'closed_set_member_list',
+      'exhaustive_switch_arm',
+      'widened_predicate',
+      'widened_predicate_continuation',
+      'legacy_polarity',
+      'write_side_emitter',
+      'null_default',
+      'single_member_selector',
+      'domain_definition',
+      'w7_0_recorded_snapshot',
+    ]) {
+      expect(used).toContain(rule)
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // Planted consumers. The diff must RED on an un-widened consumer, and the
+  // scanner must SEE a consumer that contains no target string at all.
+  // -------------------------------------------------------------------------
+
+  function scanPlanted(fileName: string, source: string) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w7-1am-planted-'))
+    try {
+      fs.mkdirSync(path.join(dir, 'planted'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'planted', fileName), source, 'utf8')
+      return deriveProvenanceWideningSurfaceV1({ repoRoot: dir, roots: ['planted'] })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('planted consumer: an un-widened membership test is derived and REDS the diff', () => {
+    const planted = scanPlanted(
+      'planted-consumer.ts',
+      [
+        'export function parse(row: { projection_owner: string }) {',
+        "  if (row.projection_owner !== 'legacy_untracked' && row.projection_owner !== 'w4') {",
+        "    throw new Error('unsupported')",
+        '  }',
+        '  return row.projection_owner',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    expect(planted.sites.length).toBeGreaterThan(0)
+
+    // Against the real ledger it is unledgered; that alone must fail.
+    const violations = diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1)
+    expect(violations.some((violation) => violation.kind === 'unledgered_site')).toBe(true)
+
+    // And even if someone ledgers it as widened, the evidence check still fails —
+    // so the ledger cannot be used to wave a real gap through.
+    const ledgered = diffProvenanceWideningV1(
+      planted,
+      planted.sites.map((site) => ({
+        file: site.file,
+        text: site.text,
+        rule: 'widened_predicate' as const,
+      })),
+    )
+    expect(ledgered.some((violation) => violation.kind === 'not_widened')).toBe(true)
+  })
+
+  it('planted consumer: a SILENT-DOWNGRADE fold containing no target string is still derived', () => {
+    // This is the shape the ratification calls out: no `w4_group` anywhere in it,
+    // so any derivation that grepped for the new value would miss it entirely.
+    const planted = scanPlanted(
+      'planted-fold.ts',
+      [
+        'export function fold(row: { projection_owner: string }) {',
+        "  return { projectionOwner: row.projection_owner === 'w4' ? 'w4' : 'legacy_untracked' }",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const foldSites = planted.sites.filter((site) => site.text.includes('legacy_untracked'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    expect(foldSites.every((site) => !site.text.includes('w4_group'))).toBe(true)
+    expect(
+      diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1).some(
+        (violation) => violation.kind === 'unledgered_site',
+      ),
+    ).toBe(true)
+  })
+
+  it('planted consumer: an exhaustive SWITCH arm is derived even though it names no field', () => {
+    // A `case 'w4':` line mentions neither the column nor an alias, and `'w4'` is
+    // an AMBIGUOUS member — so the anchor rule alone would make this whole
+    // consumer class invisible. This is the class that actually exists in
+    // `apps/web` for the trace family, where it was caught only because
+    // `policy_gate` happens to be distinctive. Owner-family switches have no such
+    // luck, hence the dedicated case-arm rule.
+    const planted = scanPlanted(
+      'planted-switch.ts',
+      [
+        'export function label(projectionOwner: string): string {',
+        '  switch (projectionOwner) {',
+        "    case 'w4':",
+        "      return 'W4 owned'",
+        '    default:',
+        "      return 'other'",
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const arms = planted.sites.filter((site) => site.text.startsWith('case '))
+    expect(arms.length).toBeGreaterThan(0)
+    // Negative control: the arm really does NOT name the field, so it could only
+    // have been derived by the case-arm rule.
+    expect(arms.every((site) => !/projection_owner|projectionOwner/.test(site.text))).toBe(true)
+    expect(
+      diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1).some(
+        (violation) => violation.kind === 'unledgered_site',
+      ),
+    ).toBe(true)
+  })
+
+  it('planted consumer: an un-widened consumer that names NO field spelling is still derived', () => {
+    // REGRESSION for the file-level anchor hole. Every other plant in this file
+    // spells `projection_owner`/`projectionOwner`, so all of them pre-satisfied
+    // the old anchor gate and none exercised this path. This one deliberately
+    // spells NEITHER: it is typed against the union, imports a predicate under a
+    // RENAMED local, folds silently, switches, and builds an un-widened SQL IN
+    // list. Four of the owner family's widening symbols do not contain any field
+    // spelling, so before the fix this derived ZERO sites while carrying a live
+    // silent downgrade of `w4_group` to `legacy_untracked`.
+    //
+    // `tsc` structurally cannot cover for this: a narrowing fold returns
+    // `'w4' | 'legacy_untracked'`, which is always assignable to the widened
+    // union, so widening can never make a narrowing consumer fail to compile.
+    const planted = scanPlanted(
+      'planted-unanchored.ts',
+      [
+        "import { isAttendanceProjectionOwnerWithCalculationPointerV1 as ownsPointer } from '../x'",
+        "import type { AttendanceProjectionOwnerV1 } from '../x'",
+        '',
+        'export function fold(raw: string): AttendanceProjectionOwnerV1 {',
+        "  return raw === 'w4' ? 'w4' : 'legacy_untracked'",
+        '}',
+        '',
+        'export function label(owner: AttendanceProjectionOwnerV1): string {',
+        '  switch (owner) {',
+        "    case 'w4':",
+        "      return 'W4'",
+        '    default:',
+        "      return 'legacy'",
+        '  }',
+        '}',
+        '',
+        'export function pointerOwned(owner: string): boolean {',
+        '  return ownsPointer(owner)',
+        '}',
+        '',
+        "export const SQL = `SELECT 1 WHERE owner IN ('w4', 'legacy_untracked')`",
+        '',
+      ].join('\n'),
+    )
+
+    // Negative control: the plant really does NOT name any field spelling, so it
+    // could only have been derived by the widened anchor set.
+    const source = planted.sites.map((site) => site.text).join('\n')
+    expect(/projection_owner|projectionOwner|PROJECTION_OWNERS/.test(source)).toBe(false)
+
+    expect(planted.sites.length).toBeGreaterThan(0)
+    expect(
+      diffProvenanceWideningV1(planted, W7_PROVENANCE_WIDENING_LEDGER_V1).some(
+        (violation) => violation.kind === 'unledgered_site',
+      ),
+    ).toBe(true)
+  })
+
+  it('planted consumer: an import-RENAMED widening symbol still anchors its call sites', () => {
+    // The rename hop on its own: the file anchors via the original symbol, but
+    // every call site spells only the local alias, so without the second taint
+    // hop the file anchored and no line was ever a site.
+    const planted = scanPlanted(
+      'planted-rename.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as isKnownOwner } from '../x'",
+        '',
+        'export function check(value: string): boolean {',
+        '  return isKnownOwner(value)',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const callSites = planted.sites.filter((site) => site.text.includes('isKnownOwner'))
+    expect(callSites.length).toBeGreaterThan(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // P3-6 (#4907 gate finding) — the rename hop / substring-membership defect.
+  //
+  // Carried into W7-1b as a scheduling reassignment because #4907 is closing,
+  // NOT because 1b "touches the scan domain": 1b builds a DIFFERENT
+  // derive-and-diff over the context-shape domain and reuses this module's
+  // TECHNIQUE, not this file. See the W7-1b PR body's scope-leak disclosure.
+  //
+  // The defect was a COMPOSITION of two halves, and each needs its own probe
+  // because fixing either alone leaves the hole open:
+  //   (i)  the rename hop matched `X as Y` ANYWHERE (type assertions, prose in
+  //        block comments, `import()` type positions), minting bogus aliases;
+  //   (ii) alias membership was `String.includes` — a SUBSTRING test — so a
+  //        legitimately-imported short alias that is a substring of the field
+  //        spelling inflated `hasWideningSymbol` for every line naming it.
+  //
+  // `hasWideningSymbol` is both a site-hood input AND the widened-evidence
+  // input the `widened_predicate` rule consults, so inflating it does not
+  // merely over-collect: it MANUFACTURES evidence of widening for lines that
+  // were never widened, defeating the ratification's "漏一点即红" property.
+  //
+  // Each probe below asserts the diff produces a `not_widened` violation even
+  // when the planted site is ledgered as `widened_predicate` — i.e. the ledger
+  // cannot be used to wave the gap through. Under the pre-fix module each probe
+  // is GREEN (no violation), which is the hole.
+  // -------------------------------------------------------------------------
+
+  /** Ledger the planted sites as `widened_predicate` and ask whether the
+   *  evidence check still fails. This is the discriminating question: an
+   *  `unledgered_site` violation fires for any plant and proves nothing about
+   *  the manufactured-evidence hole. */
+  function notWidenedViolationsForPlanted(planted: ReturnType<typeof scanPlanted>) {
+    return diffProvenanceWideningV1(
+      planted,
+      planted.sites.map((site) => ({
+        file: site.file,
+        text: site.text,
+        rule: 'widened_predicate' as const,
+      })),
+    ).filter((violation) => violation.kind === 'not_widened')
+  }
+
+  it('P3-6 half (i): a TYPE-ASSERTION `X as Y` must NOT mint a widening alias', () => {
+    // `isAttendanceProjectionOwnerV1 as ownerGate` here is a TS type assertion,
+    // not an import binding. The pre-fix hop minted `ownerGate` from it, and the
+    // fold line below spells `ownerGate` as a WHOLE token — so the un-widened
+    // `=== 'w4'` fold was accepted as widened. Anchoring the hop to a real
+    // import/export binding list is the only thing that closes this; a
+    // whole-token membership test does NOT (the alias is a genuine whole token).
+    const planted = scanPlanted(
+      'planted-type-assertion-alias.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 } from '../domain'",
+        '',
+        'type ownerGate = string',
+        'const coerced = isAttendanceProjectionOwnerV1 as ownerGate',
+        '',
+        'export function fold(row: { projection_owner: string }): string {',
+        "  const decided: ownerGate = row.projection_owner === 'w4' ? 'w4' : 'legacy_untracked'",
+        '  return decided',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    // Non-vacuity: the un-widened fold really was derived as a site.
+    const foldSites = planted.sites.filter((site) => site.text.includes('decided'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    // And it carries NO widening evidence — the assertion-position alias is gone.
+    expect(foldSites.every((site) => site.hasWideningSymbol)).toBe(false)
+    expect(notWidenedViolationsForPlanted(planted).length).toBeGreaterThan(0)
+  })
+
+  it('P3-6 half (ii): a SHORT alias that is a SUBSTRING of the field must not manufacture evidence', () => {
+    // Here the rename IS a real import binding, so half (i)'s anchoring does not
+    // stop it — `Owner` is legitimately minted. The defect is the membership
+    // test: `'row.projectionOwner === ...'.includes('Owner')` is true, so every
+    // line naming `projectionOwner` reported widening evidence it never had.
+    // Only the whole-token match closes this.
+    const planted = scanPlanted(
+      'planted-substring-alias.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as Owner } from '../domain'",
+        '',
+        'export function fold(row: { projectionOwner: string }): string {',
+        "  return row.projectionOwner === 'w4' ? 'w4' : 'legacy_untracked'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const foldSites = planted.sites.filter((site) => site.text.includes('projectionOwner'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    expect(foldSites.every((site) => site.hasWideningSymbol)).toBe(false)
+    expect(notWidenedViolationsForPlanted(planted).length).toBeGreaterThan(0)
+  })
+
+  it('P3-6 positive control: a LEGITIMATE import rename is still honoured as widening evidence', () => {
+    // The failure mode to guard against is a "fix" that simply DELETES the hop:
+    // it would pass both negative probes above and silently under-collect every
+    // renamed call site. The hop must be repaired, not removed.
+    const planted = scanPlanted(
+      'planted-legit-rename.ts',
+      [
+        "import { isAttendanceProjectionOwnerV1 as isKnown } from '../domain'",
+        '',
+        'export function fold(row: { projection_owner: string }): string {',
+        "  return isKnown(row.projection_owner) ? row.projection_owner : 'legacy_untracked'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const callSites = planted.sites.filter((site) => site.text.includes('isKnown('))
+    expect(callSites.length).toBeGreaterThan(0)
+    expect(callSites.some((site) => site.hasWideningSymbol)).toBe(true)
+  })
+
+  it('P3-6: the rename hop still reads a real import/export binding list, and only that', () => {
+    // Direct unit assertion on the exported hop, independent of the site walk —
+    // so a future refactor of the walk cannot make these probes vacuous.
+    const symbols = ['isAttendanceProjectionOwnerV1']
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "import { isAttendanceProjectionOwnerV1 as isKnown } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['isKnown'])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "export { isAttendanceProjectionOwnerV1 as reExported } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['reExported'])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        "import type { isAttendanceProjectionOwnerV1 as typeOnly } from '../domain'",
+        symbols,
+      ),
+    ).toEqual(['typeOnly'])
+    // Non-import positions must mint nothing.
+    expect(
+      deriveRenamedWideningSymbolsV1('const x = isAttendanceProjectionOwnerV1 as Gate', symbols),
+    ).toEqual([])
+    expect(
+      deriveRenamedWideningSymbolsV1(
+        '/* prose: treat isAttendanceProjectionOwnerV1 as Owner here */',
+        symbols,
+      ),
+    ).toEqual([])
+  })
+
+  it('planted consumer: an AMBIGUOUS-member trace fold is derived (no distinctive fallback)', () => {
+    // The owner family is protected here only by luck — `legacy_untracked` is
+    // distinctive. The trace family has no distinctive fallback member, so a
+    // fold between two ambiguous members carries no distinctive literal at all
+    // and evaded the line rule inside an already-anchored file.
+    const planted = scanPlanted(
+      'planted-trace-fold.ts',
+      [
+        'export function foldKind(k: string): AttendanceDecisionTraceSourceKind {',
+        "  return k === 'record' ? 'record' : 'snapshot'",
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const foldSites = planted.sites.filter((site) => site.text.includes('record'))
+    expect(foldSites.length).toBeGreaterThan(0)
+    expect(foldSites.every((site) => !site.text.includes('group_policy_snapshot'))).toBe(true)
+  })
+
+  it('planted consumer: a stale ledger entry (construct removed) REDS the diff', () => {
+    const violations = diffProvenanceWideningV1(derivation, [
+      ...W7_PROVENANCE_WIDENING_LEDGER_V1,
+      {
+        file: 'packages/core-backend/src/attendance/w7-provenance-domain.ts',
+        text: "const THIS_CONSTRUCT_DOES_NOT_EXIST = 'legacy_untracked'",
+        rule: 'domain_definition',
+      },
+    ])
+    expect(violations.some((violation) => violation.kind === 'stale_ledger_entry')).toBe(true)
+  })
+})
+
+describe('W7-1a-M provenance widening — superseding plpgsql body fidelity', () => {
+  // The slice hand-carries ~500 lines of plpgsql into a new migration. Nothing
+  // else in the tree proves those bodies are the historical ones plus ONLY the
+  // derived substitutions: the catalogue rule is satisfied by the mere presence
+  // of `w4_group`, and the neighbouring import-rollback suite re-applies 0725 +
+  // 0731 in its own `beforeAll`, so it exercises the 0731 body, not this one.
+  //
+  // Deliberately a SOURCE-TEXT diff of the two migration FILES, not a `prosrc`
+  // comparison: the ambient catalogue body is order-dependent (sibling suites
+  // replay historical migrations), and importing a migration yields `up`/`down`
+  // functions rather than the SQL string.
+  const HISTORICAL = 'packages/core-backend/src/db/migrations/zzzz20260731120000_w4c3a_import_rollback_foundation.ts'
+  const WIDENING = 'packages/core-backend/src/db/migrations/zzzz20260815120000_w7_1am_provenance_domain_widening.ts'
+
+  /** The `$fn$ … $fn$` body of `name` within one migration section. */
+  function functionBody(section: string, name: string): string {
+    const at = section.indexOf(`CREATE OR REPLACE FUNCTION ${name}()`)
+    expect(at, `definition not found: ${name}`).toBeGreaterThan(-1)
+    const open = section.indexOf('$fn$', at)
+    const close = section.indexOf('$fn$', open + 4)
+    expect(open, `body open delimiter not found: ${name}`).toBeGreaterThan(-1)
+    expect(close, `body close delimiter not found: ${name}`).toBeGreaterThan(open)
+    return section.slice(open + 4, close)
+  }
+
+  function sections(relPath: string): { up: string; down: string } {
+    const source = fs.readFileSync(path.join(repoRoot, relPath), 'utf8')
+    const boundary = source.indexOf('export async function down(')
+    expect(boundary, `down() boundary not found in ${relPath}`).toBeGreaterThan(-1)
+    return { up: source.slice(0, boundary), down: source.slice(boundary) }
+  }
+
+  /** The complete, derived set of substitutions this slice applies. */
+  const SUBSTITUTIONS: ReadonlyArray<{ fn: string; from: string; to: string }> = [
+    {
+      fn: 'attendance_w4_records_pointer_guard',
+      from: "AND OLD.projection_owner = 'w4'",
+      to: "AND OLD.projection_owner IN ('w4', 'w4_group')",
+    },
+    {
+      fn: 'attendance_w4c3a_restore_witness_command_guard',
+      from: "->> 'projectionOwner' NOT IN ('legacy_untracked', 'w4')",
+      to: "->> 'projectionOwner' NOT IN ('legacy_untracked', 'w4', 'w4_group')",
+    },
+    {
+      fn: 'attendance_w4c3a_restore_witness_command_guard',
+      from: "(reversed.parent_preimage_snapshot ->> 'projectionOwner' = 'w4'",
+      to: "(reversed.parent_preimage_snapshot ->> 'projectionOwner' IN ('w4', 'w4_group')",
+    },
+  ]
+
+  const FUNCTIONS = [
+    'attendance_w4_records_pointer_guard',
+    'attendance_w4c3a_restore_witness_command_guard',
+  ] as const
+
+  function applySubstitutions(fn: string, body: string): string {
+    let out = body
+    for (const substitution of SUBSTITUTIONS.filter((s) => s.fn === fn)) {
+      const parts = out.split(substitution.from)
+      // Exactly one occurrence — the same guarantee the generator enforced.
+      expect(parts.length, `substitution matched ${parts.length - 1}x in ${fn}: ${substitution.from}`).toBe(2)
+      out = parts.join(substitution.to)
+    }
+    return out
+  }
+
+  it('up(): each superseding body is the historical body plus ONLY the derived substitutions', () => {
+    const historical = sections(HISTORICAL).up
+    const widened = sections(WIDENING).up
+    for (const fn of FUNCTIONS) {
+      const before = functionBody(historical, fn)
+      const after = functionBody(widened, fn)
+      expect(applySubstitutions(fn, before), `${fn} carries an unaccounted change`).toBe(after)
+    }
+  })
+
+  it('down(): each restored body is BYTE-IDENTICAL to the historical body', () => {
+    const historical = sections(HISTORICAL).up
+    const restored = sections(WIDENING).down
+    for (const fn of FUNCTIONS) {
+      expect(functionBody(restored, fn)).toBe(functionBody(historical, fn))
+    }
+  })
+
+  it('non-vacuity: the extraction is real and the diff actually discriminates', () => {
+    const historical = sections(HISTORICAL).up
+    const widened = sections(WIDENING).up
+    for (const fn of FUNCTIONS) {
+      const before = functionBody(historical, fn)
+      const after = functionBody(widened, fn)
+      // The bodies are substantial, and exactly one side is widened.
+      expect(before.length).toBeGreaterThan(500)
+      expect(before).not.toContain('w4_group')
+      expect(after).toContain('w4_group')
+      // Only ONE definition was captured, not a neighbour swallowed with it.
+      expect(before.split('CREATE OR REPLACE FUNCTION')).toHaveLength(1)
+      expect(after.split('CREATE OR REPLACE FUNCTION')).toHaveLength(1)
+      // Positive control: a one-character stray edit anywhere else in the body
+      // MUST break the equality this test rests on. `RAISE EXCEPTION` appears in
+      // both guards, so the anchor is real for each (asserted, not assumed).
+      expect(after, `no anchor to tamper with in ${fn}`).toContain('RAISE EXCEPTION')
+      const tampered = after.replace('RAISE EXCEPTION', 'RAISE  EXCEPTION')
+      expect(tampered).not.toBe(after)
+      expect(applySubstitutions(fn, before)).not.toBe(tampered)
+    }
+  })
+})
+
+describe('W7-1a-M provenance widening — domain semantics', () => {
+  it('the widened owner domain is exactly the pre-widening set plus w4_group', () => {
+    expect([...ATTENDANCE_PROJECTION_OWNERS_V1]).toEqual(['legacy_untracked', 'w4', 'w4_group'])
+  })
+
+  it('w4_group inherits w4 NON-NULL pointer semantics; legacy_untracked is the only NULL member', () => {
+    expect([...ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_V1]).toEqual(['w4', 'w4_group'])
+    expect(isAttendanceProjectionOwnerWithCalculationPointerV1('w4_group')).toBe(true)
+    expect(isAttendanceProjectionOwnerWithCalculationPointerV1('w4')).toBe(true)
+    expect(isAttendanceProjectionOwnerWithCalculationPointerV1('legacy_untracked')).toBe(false)
+    // Every member is either pointer-owning or the single NULL-pointer member.
+    for (const owner of ATTENDANCE_PROJECTION_OWNERS_V1) {
+      expect(isAttendanceProjectionOwnerWithCalculationPointerV1(owner)).toBe(
+        owner !== 'legacy_untracked',
+      )
+    }
+  })
+
+  it('the widening does NOT open the domain generally', () => {
+    for (const novel of ['w4_team', 'w5', 'group', '', 'W4_GROUP', 'w4_group ', null, undefined, 7]) {
+      expect(isAttendanceProjectionOwnerV1(novel)).toBe(false)
+      expect(isAttendanceProjectionOwnerWithCalculationPointerV1(novel)).toBe(false)
+    }
+  })
+
+  it('the SQL literal lists render exactly the widened members', () => {
+    // `w4c3a-import-rollback-boundary.ts` interpolates the second constant into a
+    // query, so its rendered text IS the deployed predicate. Pinned here because
+    // a malformed list would only surface at query time.
+    expect(ATTENDANCE_PROJECTION_OWNERS_SQL_LIST_V1).toBe("'legacy_untracked', 'w4', 'w4_group'")
+    expect(ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1).toBe("'w4', 'w4_group'")
+  })
+
+  it('the interpolated closure predicate appears verbatim in the boundary query', () => {
+    const source = fs.readFileSync(
+      path.join(repoRoot, 'packages/core-backend/src/attendance/w4c3a-import-rollback-boundary.ts'),
+      'utf8',
+    )
+    expect(source).toContain(
+      'projection_owner IN (${ATTENDANCE_PROJECTION_OWNERS_WITH_CALCULATION_POINTER_SQL_LIST_V1})',
+    )
+    // Negative control: the pre-widening spelling is gone, so this is not a
+    // substring that would match either way.
+    expect(source).not.toContain("projection_owner = 'w4'")
+  })
+
+  it('the web app trace source-kind copy is member-equal to the backend domain', () => {
+    // apps/web cannot import backend source, so equality is held by this test.
+    const webFile = path.join(
+      repoRoot,
+      'apps/web/src/views/attendance/attendanceDecisionTrace.ts',
+    )
+    const source = fs.readFileSync(webFile, 'utf8')
+    const block = /export const ATTENDANCE_TRACE_SOURCE_KINDS = \[([\s\S]*?)\] as const/.exec(source)
+    expect(block).not.toBeNull()
+    const webMembers = [...(block as RegExpExecArray)[1].matchAll(/'([a-z_0-9]+)'/g)].map((m) => m[1])
+    expect(webMembers).toEqual([...ATTENDANCE_TRACE_SOURCE_KINDS_V1])
+    // Negative control: the parse really extracted members, not an empty match.
+    expect(webMembers).toContain('group_policy_snapshot')
+    expect(webMembers.length).toBeGreaterThanOrEqual(7)
+  })
+})

@@ -33,6 +33,7 @@
  * caller's concern.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
+import { assertConnectionIsIdleV1 } from './w4c0-identity'
 
 export class AttendanceW4OutboxDispatchError extends Error {
   readonly code: string
@@ -101,6 +102,13 @@ export async function dispatchAttendanceResultEventOutboxV1(
   let delivered = 0
   let failed = 0
 
+  // Gate E (#4844) first batch: `connection` is caller-supplied, same class as the operation-
+  // registry transaction wrapper — a dirty caller connection would let this function's own
+  // unconditional COMMIT durably publish the caller's uncommitted writes (PostgreSQL only WARNs,
+  // never errors, on the nested BEGIN below). Reuses the EXISTING exported probe rather than
+  // building a second one — see its own doc comment (w4c0-identity.ts) for the SAVEPOINT-probe
+  // proof and refusal code (`W4C0_CONNECTION_NOT_IDLE`, never a raw SQLSTATE).
+  await assertConnectionIsIdleV1(connection)
   await connection.query('BEGIN', [])
   try {
     // Claim due pending rows; SKIP LOCKED partitions the set between

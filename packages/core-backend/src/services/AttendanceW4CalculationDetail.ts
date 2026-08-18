@@ -1,9 +1,11 @@
 import type { QueryResult, QueryResultRow } from 'pg'
 import {
   deriveAttendanceLateTierFieldsV1,
-  validateFrozenContextShape,
+  routeFrozenAttendanceContextV1,
 } from '../attendance/w4c1-segment-calculator'
-import type { FrozenAttendanceContextV1 } from '../attendance/w4c0-write-boundary-types'
+import type { FrozenAttendanceContextSourceSelectorV2 } from '../attendance/w7-frozen-context-v2-contract'
+import { ATTENDANCE_PROJECTION_OWNERS_V1 } from '../attendance/w7-provenance-domain'
+import { ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1 } from '../attendance/w4c2-shadow-expected-differences'
 
 export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
   'equal',
@@ -22,12 +24,21 @@ export const ATTENDANCE_W4_SHADOW_DIFF_CODES = [
 
 export type AttendanceW4ShadowDiffCode = (typeof ATTENDANCE_W4_SHADOW_DIFF_CODES)[number]
 
-const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>([
-  'work_date_mismatch',
-  'context_mismatch',
-  'input_mismatch',
-  'review_required',
-])
+// W7-2 (#4556): derived from the ONE exported critical-code set
+// (ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1, doc comment there) so the
+// criticality classification cannot fork between this reader and the W7
+// compare-window counters. NOTE for editors: comments in this file must stay
+// free of stray backticks and apostrophes — the DML-inventory read census
+// derives SQL-literal boundaries with a quote-parity scan over the whole file,
+// and an odd quote count above a query strips its predicate fingerprint. For
+// a CLASSIFIED site the census then reds loudly on count/predicate drift
+// (gate-probed while landing W7-2 — the earlier wording here said the strip
+// was silent, which the gate refuted at classified sites); an UNCLASSIFIED
+// site would lose its fingerprint without that backstop, so keep comments
+// quote-clean either way.
+const CRITICAL_SHADOW_DIFF_CODES = new Set<AttendanceW4ShadowDiffCode>(
+  ATTENDANCE_W4_CRITICAL_SHADOW_DIFF_CODES_V1,
+)
 
 export const ATTENDANCE_W4_SHADOW_DIFF_LABELS: Readonly<Record<AttendanceW4ShadowDiffCode, string>> =
   Object.freeze({
@@ -91,7 +102,10 @@ const CALCULATION_OUTCOME_REASONS = [
   'operator_retirement',
 ] as const
 const PROJECTION_EFFECTS = ['none', 'set_active', 'set_retired'] as const
-const PROJECTION_OWNERS = ['legacy_untracked', 'w4'] as const
+// W7-1a-M (#4556, ratified per #4556 comments 5293034619 + 5293478713): the
+// closed set this route validates against is the widened live domain. `w4_group`
+// is ACCEPTED here; nothing emits it until W7-1b.
+const PROJECTION_OWNERS = ATTENDANCE_PROJECTION_OWNERS_V1
 const VISIBILITY_STATES = ['active', 'retired'] as const
 const VISIBILITY_REASONS = ['active', 'review_placeholder', 'import_rollback', 'operator_retirement'] as const
 const DAILY_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted', 'off'] as const
@@ -638,6 +652,31 @@ export interface AttendanceW4TraceEvidence {
   readonly snapshotSchemaVersion: 1
   readonly createdAt: string
   readonly projection: AttendanceW4TraceProjection | null
+  /**
+   * W7-4 (#4556) read-side labeling: the selector of the frozen context that
+   * belongs to the persisted calculation itself, threaded out of
+   * parseTraceProjection so the decision-trace basis builder can attribute the
+   * evidence to its producer.
+   *
+   * INTERNAL ONLY — this type is consumed exclusively by
+   * readAttendanceW4DecisionBasis (AttendanceDecisionTrace.ts), which emits
+   * basis/projection and never serializes this object into a response. Keeping
+   * the selector off every response type is what makes the W7-R3 byte-parity
+   * argument hold for legacy orgs (no new response key anywhere).
+   *
+   * Null ONLY on the non-completed path where parseTraceProjection returns
+   * null (there is no parsable context to attribute). NEVER a default for a
+   * missing selector field: selector is a mandatory member of both context
+   * schemas, and a context lacking it fails the shape gate closed — a
+   * nullish-coalescing default here would fail OPEN by relabeling
+   * unattributable evidence as legacy.
+   *
+   * (Comment style note: this block deliberately avoids apostrophes and quote
+   * characters — the W4C-4 SELECT-inventory scanner tracks quote state across
+   * the WHOLE file, and an unbalanced quote in a comment desyncs its SQL
+   * literal extraction for every read site below.)
+   */
+  readonly contextSelector: FrozenAttendanceContextSourceSelectorV2 | null
 }
 
 interface TraceCalculationRow extends QueryResultRow {
@@ -740,10 +779,19 @@ async function readTraceSegments(
   return segments
 }
 
+/** W7-4 (#4556): the completed-path result of parseTraceProjection — the
+ *  parsed projection PLUS the frozen-context selector of the calculation
+ *  itself. Internal to this module; the selector travels only on
+ *  AttendanceW4TraceEvidence. */
+interface ParsedTraceProjectionV1 {
+  readonly projection: AttendanceW4TraceProjection
+  readonly contextSelector: FrozenAttendanceContextSourceSelectorV2
+}
+
 function parseTraceProjection(
   row: TraceCalculationRow,
   segments: AttendanceCalculationDetailResponse['segments'],
-): AttendanceW4TraceProjection | null {
+): ParsedTraceProjectionV1 | null {
   const expectedSegmentCount = asAtMostThree(row.expected_segment_count)
   if (row.outcome !== 'completed') {
     if (expectedSegmentCount !== 0 || row.projected_status !== null
@@ -752,8 +800,21 @@ function parseTraceProjection(
     return null
   }
   if (expectedSegmentCount < 1 || segments.length !== expectedSegmentCount) unsupported()
-  if (!validateFrozenContextShape(row.context_snapshot)) unsupported()
-  const context = row.context_snapshot as FrozenAttendanceContextV1
+  // W7-1b X6 [MUST_WIDEN]: the admin calculation-detail READ API. Un-widened,
+  // it returns `unsupported()` for EVERY persisted group row — a read-side
+  // hard failure invisible to any write-path test. 1a-M widened this same file
+  // for `projectionOwner`; the context SHAPE is a different domain it did not
+  // touch.
+  //
+  // W7-4 (#4556): the same gate, in DISCRIMINATED form. The boolean
+  // (isSupportedFrozenAttendanceContextV1) IS the not-invalid verdict of this
+  // router, so acceptance is unchanged byte-for-byte; the discriminated call
+  // is what types context.selector on BOTH schema branches (legacy-only on v1
+  // by validation, the two-member union on v2) so the selector can be threaded
+  // out below without a cast and without a fail-open default.
+  const routed = routeFrozenAttendanceContextV1(row.context_snapshot)
+  if (routed.kind === 'invalid') unsupported()
+  const context = routed.context
   const status = parseDailyStatus(row.projected_status)
   if (status === null) unsupported()
   const workMinutes = asNullableNonNegativeInteger(row.projected_work_minutes)
@@ -766,15 +827,18 @@ function parseTraceProjection(
     context.absenceLateThresholdMinutes,
   )
   return Object.freeze({
-    status,
-    isWorkday: context.isWorkday,
-    workMinutes,
-    lateMinutes,
-    earlyLeaveMinutes,
-    severeLateCount: tiers.severe_late_count,
-    severeLateMinutes: tiers.severe_late_minutes,
-    absenceLateCount: tiers.absence_late_count,
-    segments,
+    projection: Object.freeze({
+      status,
+      isWorkday: context.isWorkday,
+      workMinutes,
+      lateMinutes,
+      earlyLeaveMinutes,
+      severeLateCount: tiers.severe_late_count,
+      severeLateMinutes: tiers.severe_late_minutes,
+      absenceLateCount: tiers.absence_late_count,
+      segments,
+    }),
+    contextSelector: context.selector,
   })
 }
 
@@ -819,6 +883,13 @@ export async function readAttendanceW4TraceEvidence(
   const expectedSegmentCount = asAtMostThree(row.expected_segment_count)
   const segments = await readTraceSegments(row, orgId, userId, runQuery)
   if (segments.length !== expectedSegmentCount) unsupported()
+  // W7-4 (#4556): a null parsed value is EXACTLY the non-completed path (the
+  // only null return in parseTraceProjection), so contextSelector is null if
+  // and only if there is no parsable context to attribute. No
+  // nullish-coalescing or logical-or default anywhere on this path: a
+  // persisted context missing selector already threw unsupported() inside the
+  // shape gate of parseTraceProjection.
+  const parsed = parseTraceProjection(row, segments)
   return {
     rolloutState,
     priorRolloutState,
@@ -828,7 +899,8 @@ export async function readAttendanceW4TraceEvidence(
       outcomeReasonCode: row.outcome_reason_code,
       snapshotSchemaVersion: 1,
       createdAt: asIsoString(row.created_at),
-      projection: parseTraceProjection(row, segments),
+      projection: parsed === null ? null : parsed.projection,
+      contextSelector: parsed === null ? null : parsed.contextSelector,
     },
   }
 }

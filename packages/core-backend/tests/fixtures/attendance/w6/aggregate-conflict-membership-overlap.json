@@ -17,7 +17,10 @@
         "label": "effective",
         "strategy": "fixed_shift",
         "reasonCodes": [],
-        "sourceRefs": [{ "kind": "shift", "id": "a4556006-0005-4000-8000-000000000101" }],
+        "sourceRefs": [
+          { "kind": "shift", "id": "a4556006-0005-4000-8000-000000000101" },
+          { "kind": "fixed_schedule_config", "id": "a4556006-0005-4000-8000-000000000102" }
+        ],
         "fixedSchedule": {
           "state": "effective",
           "reasonCodes": ["EFFECTIVE"],

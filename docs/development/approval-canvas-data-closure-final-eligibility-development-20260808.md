@@ -6,8 +6,8 @@
 **Pre-merge product tip (examples):** `0bfaeddeb180f25a05ea83563d43769cb4f4369b` (and later heads on the PR)  
 **Authoritative land SHA:** `323d7e1afef407f68c8ff2a6bfa940f175300f59`  
 **Authority:**  
-- `docs/development/approval-canvas-v2-development-plan-20260720.md` (D0–D11 + G gates; status remains PROPOSED for G0 owner ratify)  
-- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` (D0 interaction contract; still PROPOSED until G0)  
+- `docs/development/approval-canvas-v2-development-plan-20260720.md` (D0–D11 + G gates; G0 recorded 2026-08-15, O3 DEFER, UAT/flags still owner-controlled)  
+- `docs/development/approval-canvas-v2-interaction-design-lock-20260721.md` (D0 interaction contract; **G0 RATIFIED 2026-08-15**)  
 - `docs/development/approval-automation-canvas-completion-*-20260722.md` (prior compose stack on main)
 
 This document records the **engineering closeout** that closes remaining G5-C product-path gaps on the dormant Canvas V2 surface and re-asserts G5-R data-closure invariants. It does **not** enable production flags or claim real-tenant UAT.
@@ -43,17 +43,17 @@ Data-closure (already on main from the 20260722 stack) remains:
 ### Explicit non-changes
 
 - No production / staging flag flipped ON.  
-- No Vue Flow / ELK adoption (O3 remains open; bespoke layout retained).  
+- No Vue Flow / ELK adoption (O3 DEFER 2026-08-15; bespoke layout retained).  
 - No number FWB unlock.  
 - No optional D7 runtimes (handler nodes, within-node ordered approvers, new assignee sources, readonly enforcement).  
 - No free-form edge rewiring / large-graph virtualization / native mobile bottom sheet.  
-- G0 owner ratification of D0 is **not** claimed — lock/plan status text left PROPOSED; implementation follows the written lock as the contract for this goal.
+- G0 owner ratification of D0 is recorded separately (2026-08-15 RATIFY / O3 DEFER). This 2026-08-08 development MD still does **not** enable flags or claim real-tenant UAT.
 
 ## 3. Mapping to D0–D11 / G gates
 
 | Gate / item | Engineering status after this delivery |
 |---|---|
-| D0 interaction lock | Written contract implemented for history, canvas-first default under flag, retained list alternative; **G0 owner ratify still open** |
+| D0 interaction lock | Written contract implemented for history, canvas-first default under flag, retained list alternative; **G0 RATIFIED 2026-08-15** |
 | D1 hygiene | Unchanged / still holds (no JSON / raw-id ordinary path) |
 | D2-a/b/c | Command algebra + session history **mounted**; empty-branch / invalid-move fail closed |
 | D3 Vue Flow/ELK | **Not** started (O3 open); bespoke layout + session commands |
@@ -72,7 +72,7 @@ Data-closure (already on main from the 20260722 stack) remains:
 2. ~~Form palette~~ — **closed**: field-type palette (`approval-field-palette`) without ID entry.  
 3. Version dual-canvas full product shell still not claimed; TemplateDetailView now surfaces `buildApprovalVersionReadSummary` lines + overlay tallies.  
 4. Canvas shells extracted (`ApprovalFlowCanvas` / `ApprovalCanvasNodeInspector`).  
-5. G0 / O3 owner decisions still open (D3 Vue Flow not started).  
+5. G0 RATIFIED 2026-08-15; O3 DEFER (D3 Vue Flow not started).  
 6. Real-tenant UAT and staged flag ON not executed.
 
 These residuals do **not** block the engineering claim “G5-C product-path algebra + mounted undo/history + canvas-first under flag + G5-R invariants hold.” They **do** block an honest **product FINAL** label until owner gates close.

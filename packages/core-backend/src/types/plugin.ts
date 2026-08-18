@@ -1228,6 +1228,93 @@ export interface PluginServices {
       readonly context: unknown
     }): string | null
     /**
+     * W7-1b (#4556 comments 5293034619 + 5293478713) — THE single shared
+     * frozen-context issuance seam (ruling 3 / OD-W7-9 = REPLACE).
+     *
+     * Resolves the W7 context-source posture and returns the legacy arm's
+     * context (built by the caller's own injected legacy builder, bytes
+     * unchanged), a core-issued group-effective V2 context, or — W7-2, under
+     * the shadow-compare posture states — the dual-run variant carrying the
+     * served legacy context PLUS the unserved group comparison half. The
+     * arm-selection rule exists ONLY inside the seam; a caller that re-derives
+     * it is the drift the lock forbids, and
+     * `tests/unit/attendance-w7-1b-issuance-seam-closure.test.ts` pins that
+     * mechanically (S1 TS import graph, S2 adapter graph, S3 CJS require/port
+     * graph, S4 the OD-W7-10 no-seam-call rule, S0 non-vacuity — each ban leg
+     * with its own positive control), with the re-formed census in
+     * `tests/unit/attendance-w7-1a-inertness-sweep.test.ts` as the
+     * complementary exact-set importer closure over `w7-resolver/`. (W7-2
+     * correction of a correction: this block briefly asserted the closure
+     * suite never existed — false; it was added by 1b's own gate round and
+     * runs green. The W7-2 build carried a stale pre-gate-round anchor's
+     * negative forward without re-checking file existence at its base.)
+     *
+     * `deps` is injected by the plugin because three of the four dependencies
+     * are plugin-owned (the pure FSER derivation, the canonical producer-key
+     * builder, the org-rule loader) and because `buildLegacyFrozenContext` must
+     * be PRE-BOUND to the caller's own transaction client: the legacy builder
+     * reads a plugin-shaped client (`query()` -> row array) while the W7
+     * resolvers read a core-shaped one (`query()` -> `{ rows }`).
+     *
+     * `purpose` distinguishes a persisting producer from the fingerprint-only
+     * mirror for the CALLER-applied coherence precondition. It carries NO
+     * locking difference: W7-1a's facts resolver takes the composite advisory
+     * locks unconditionally as its step 1, so an "unlocked mirror path" does
+     * not exist and the mirror must supply its own transaction scope.
+     */
+    /**
+     * W7-1b (#4556) — the ARM-SELECTION rule, WITHOUT issuance.
+     *
+     * Ruling 7's mirror gate must read the real posture, never the allowlist
+     * env: re-deriving the two-part rule (persisted row AND allowlist AND
+     * implementation capability; any one alone => `off`) from the env alone
+     * reintroduces the exact allowlist-alone hole the ruling's inert negative
+     * controls exist to catch.
+     *
+     * Deliberately NOT short-circuited on the env: a short-circuit would skip
+     * W7-1a's three hard throws for every non-allowlisted org, making a corrupt
+     * or ambiguous posture row indistinguishable from an unconfigured one.
+     */
+    resolveAttendanceW7GroupArmSelectionV1(
+      trx: DatabaseTransaction,
+      orgId: string,
+    ): Promise<{ readonly effectiveState: string; readonly selectsGroupArm: boolean }>
+    issueAttendanceFrozenContextV1(
+      trx: DatabaseTransaction,
+      deps: {
+        readonly deriveFixedScheduleEffectiveness: (input: unknown) => unknown
+        readonly buildFixedScheduleProducerKey: (input: unknown) => string
+        readonly loadOrgRuleFacts: (
+          trx: DatabaseTransaction,
+          orgKey: string,
+        ) => Promise<{ severeLateThresholdMinutes: number; absenceLateThresholdMinutes: number }>
+        readonly buildLegacyFrozenContext: (args: {
+          readonly orgId: string
+          readonly userId: string
+          readonly workDate: string
+          readonly timezone: string
+          readonly isWorkday: boolean
+          readonly holidayKind: string | null
+          readonly shiftId: string
+        }) => Promise<unknown>
+        readonly now?: () => string
+      },
+      input: {
+        readonly orgId: string
+        readonly userId: string
+        readonly workDate: string
+        readonly timezone: string
+        readonly isWorkday: boolean
+        readonly holidayKind: string | null
+        readonly shiftId: string
+        readonly purpose: 'persist' | 'mirror'
+      },
+    ): Promise<{
+      readonly arm: 'legacy' | 'group'
+      readonly context: unknown
+      readonly reason: string | null
+    }>
+    /**
      * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
      * The plugin schedules this ONLY under the same env gate as the posture
      * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no

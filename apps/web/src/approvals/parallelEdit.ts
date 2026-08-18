@@ -159,10 +159,26 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
       return `continuous_managers:${source.levels}`
     case 'manager_at_level':
       return `manager_at_level:${source.level}`
+    case 'continuous_dept_heads':
+      return `continuous_dept_heads:${source.levels}`
+    case 'dept_head_at_level':
+      return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry (backend mirror — keep in lockstep): provably identical
+      // for the same referenced node — two branches asking "the deciders of node X" resolve the
+      // same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
     case 'form_field_user':
       return `form_field_user:${source.fieldId.trim()}`
     case 'static_user':
     case 'static_role':
+      return null
+    case 'requester_choice':
+      // Lock-1 §K2: `null` DELIBERATELY (backend mirror — keep in lockstep). Two
+      // requester_choice sources on parallel branches are NOT provably identical: the requester
+      // may pick different people per branch, so a same-person collision is the RUNTIME 409
+      // guard's job (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`), which sees the actual
+      // chosen ids. Authoring/publish cannot, and must not block the shape.
       return null
     default: {
       const _exhaustive: never = source
@@ -171,7 +187,10 @@ function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): strin
   }
 }
 
-function runtimeSuccessorTargets(
+// Exported for `approvalNodeEdit.ts`'s Lock-1 §K3 `legalPriorApproverNodeKeys` (the prior-node
+// picker's dominance walk) so both FE graph walks share ONE runtime-successor semantic — the
+// mirror of the backend's own `runtimeSuccessorTargets`.
+export function runtimeSuccessorTargets(
   node: ApprovalNode,
   edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
   outgoingBySource: Map<string, ApprovalGraph['edges']>,

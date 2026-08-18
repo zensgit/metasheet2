@@ -1,12 +1,25 @@
 name: Multitable Recovery-Flag Containment Check
 
-# W0 containment verification (owner-directed, 2026-07-14): prove on the RUNNING host that the two
-# destructive recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT` and
-# `MULTITABLE_ENABLE_PIT_RESET` must stay off until the W0-1 correction lock (#4262) is built and gated.
+# W0 containment verification (owner-directed, 2026-07-14; extended 2026-08-12): prove on the RUNNING
+# host that the destructive/strict recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT`,
+# `MULTITABLE_ENABLE_PIT_RESET`, `MULTITABLE_HISTORY_CONTIGUITY_STRICT`, and `MULTITABLE_ENABLE_WRITER_FENCE`
+# must all stay off. The closeout flips RECONSTRUCTION_CAUSALITY_LANDED=true, so the strict-precondition
+# and writer-fence consumers become reachable ONLY when the latter two flags are set — this leg proves
+# they are not (code-default-off is NOT evidence about the environment).
 # Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
 #
-# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + `docker inspect` + `docker compose config`
-# reads. No writes, no restarts, no config edits.
+# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + catalog-only database reads +
+# `docker inspect` + `docker compose config`. No writes, no restarts, no config edits.
+#
+# TWO MODES (`mode` fixed choice):
+#   • predeploy-flags — Leg 1 (running env) + Leg 3 (next-restart compose) FLAG checks only; Leg 2
+#     (live-DB schema) is skipped. Works on the CURRENTLY deployed image, BEFORE #4654's schema helper +
+#     trigger migrations exist — run this with target=both to obtain the pre-merge evidence that all four
+#     flags are OFF. Distinct PASS sentinel that explicitly states the schema was NOT verified.
+#   • postdeploy-full — the above PLUS Leg 2 (schema helper: 9 disabled triggers, 6 function fingerprints,
+#     no meta_links.foreign_record_id FK). Requires the deployed closeout image; run per-host AFTER deploy.
+#   The schema leg is gated by `if [ "$MODE" = "postdeploy-full" ]`: predeploy-flags skips it entirely, and
+#   postdeploy-full cannot bypass it (that guard is the only path to the schema check).
 #
 # `target` is a fixed `choice` input (staging | production | both) — NEVER free text. `choice` is a
 # UI-only guardrail (the REST API can still send an arbitrary string), so TARGET is re-validated with an
@@ -28,14 +41,20 @@ name: Multitable Recovery-Flag Containment Check
 # `ssh-keyscan -H <host>`, optionally piped through `base64`). Missing `DEPLOY_KNOWN_HOSTS` fails the job
 # closed with an explicit error — it is never silently treated as "skip verification".
 #
-# Two verification legs, both fail-closed:
+# Three verification legs, all fail-closed:
 #   1. Running env: every expected container must be observed running and have its live env checked;
 #      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
-#   2. Next-restart (authoritative): the compose project's OWN config is derived from the running
+#   2. Running database schema: the backend container runs the read-only, values-free schema helper.
+#      The nine recovery-authority triggers and their six function bodies must match the exact
+#      default-inert fingerprints (triggers disabled), and NO foreign-key constraint may cover
+#      meta_links.foreign_record_id — any FK on that column fails regardless of constraint name,
+#      referenced table/column, validation state, or ON DELETE action. Missing DATABASE_URL/helper/
+#      permissions, an unexpectedly enabled trigger, or any shape drift ⇒ FAIL.
+#   3. Next-restart (authoritative): the compose project's OWN config is derived from the running
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
 #      this covers env_file AND compose YAML/override merges, not just a directory's top-level `.env*`
-#      files — and the two flags are verdicted against that rendered, fully-resolved config.
+#      files — and the four flags are verdicted against that rendered, fully-resolved config.
 #
 # Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: a flag active (=true/1) anywhere
 # — running env OR rendered compose config — fails the job; a missing expected container, a broken/
@@ -51,6 +70,12 @@ on:
         type: choice
         options: [staging, production, both]
         default: both
+      mode:
+        description: 'predeploy-flags = flag-only (running env + next-restart compose), works on the CURRENTLY deployed image BEFORE #4654 / the new schema helper + trigger migrations land. postdeploy-full = also verifies the live-DB recovery schema (9 disabled triggers, 6 function fingerprints, no meta_links.foreign_record_id FK) and REQUIRES the closeout image to be deployed. Fixed choices only — never free text reaches the remote host.'
+        required: true
+        type: choice
+        options: [predeploy-flags, postdeploy-full]
+        default: postdeploy-full
 
 concurrency:
   group: multitable-recovery-flag-containment-check
@@ -71,6 +96,7 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           TARGET: ${{ github.event.inputs.target }}
+          MODE: ${{ github.event.inputs.mode }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -119,6 +145,19 @@ jobs:
 
           echo "target='${TARGET}'"
 
+          # Validate `mode` is EXACTLY one of the fixed choices before it reaches the ssh command line
+          # (same injection-boundary discipline as target; the unmapped default fails closed).
+          case "$MODE" in
+            predeploy-flags|postdeploy-full)
+              ;;
+            *)
+              echo "::error::unexpected mode '${MODE}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+
+          echo "mode='${MODE}'"
+
           # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
           # machine-greppable. TARGET (already validated above to be exactly staging|production|both,
           # i.e. a single word with no spaces or shell metacharacters) is the ONLY input-derived token
@@ -128,9 +167,11 @@ jobs:
           # as an env-assignment on the ssh command line, because ssh concatenates all trailing arguments
           # into a single string and re-parses it through the remote login shell — a space there
           # previously caused the second word to be parsed as a bogus extra command (exit 127).
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
-          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE"
+          SCHEMA_HELPER_SHA256="d8e8669a0e027480edd32703fa6b014e9e23124d4ef28293fab3d428c505dd00"
+          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           fail=0
           checked=0
 
@@ -155,6 +196,18 @@ jobs:
           esac
 
           echo "target='${TARGET:-}' -> EXPECTED_CONTAINERS='${EXPECTED_CONTAINERS}'"
+
+          # Re-validate MODE on the remote side (defense in depth, mirrors the TARGET re-mapping above);
+          # anything outside the fixed set fails closed rather than falling through to a mode-less run.
+          case "${MODE:-}" in
+            predeploy-flags|postdeploy-full)
+              ;;
+            *)
+              echo "VERDICT: FAIL — unexpected mode '${MODE:-}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              exit 2
+              ;;
+          esac
+          echo "mode='${MODE}'"
 
           if ! command -v docker >/dev/null 2>&1; then
             echo "VERDICT: FAIL — docker not available on host (observation broken)"
@@ -203,7 +256,44 @@ jobs:
               fi
             done
 
-            # Leg 2: authoritative next-restart check. Derive the compose project's OWN config from the
+            # Leg 2 (postdeploy-full mode ONLY): the schema helper + trigger migrations exist only on the
+            # deployed closeout image; requiring them on the pre-#4654 image would always FAIL (missing
+            # helper). predeploy-flags SKIPS this leg entirely so legs 1+3 still yield pre-deploy flag
+            # evidence. In postdeploy-full this guard is the ONLY thing gating the helper — full can never
+            # bypass it (there is no other exit from the schema check).
+            if [ "$MODE" = "postdeploy-full" ]; then
+            # Leg 2: live database schema. The helper runs inside the backend container so it observes
+            # the service's own DATABASE_URL without ever exporting or printing it. Its output contract
+            # is values-free: object counts, deterministic fingerprints, and PASS/FAIL only. Missing DB
+            # access/permissions/helper are hard failures, and exit 0 alone is insufficient: the exact
+            # helper source hash and PASS sentinel must both match this reviewed workflow revision.
+            schema_out="$(mktemp)"
+            helper_sha="$(docker exec "$name" sha256sum scripts/ops/multitable-recovery-schema-containment.mjs 2>/dev/null | awk '{print $1}' || true)"
+            if [ "$helper_sha" != "$SCHEMA_HELPER_SHA256" ]; then
+              echo "VERDICT: FAIL — schema containment helper is missing or differs from the reviewed fingerprint for $name"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            if ! docker exec "$name" node scripts/ops/multitable-recovery-schema-containment.mjs >"$schema_out" 2>&1; then
+              echo "VERDICT: FAIL — schema containment helper failed for $name (DB/helper/permission observation unavailable)"
+              sed 's/^/   schema: /' "$schema_out"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            sed 's/^/   schema: /' "$schema_out"
+            if ! grep -qxF "$SCHEMA_PASS_LINE" "$schema_out"; then
+              echo "VERDICT: FAIL — schema containment helper did not emit its exact PASS sentinel for $name"
+              rm -f "$schema_out"
+              fail=1
+              continue
+            fi
+            rm -f "$schema_out"
+            fi
+            # end Leg 2 (postdeploy-full only)
+
+            # Leg 3: authoritative next-restart check. Derive the compose project's OWN config from the
             # running container's own compose labels (covers env_file AND compose YAML/override merges,
             # not just a directory's top-level .env* files), then render the fully-resolved config
             # read-only with `docker compose config` and verdict against that rendering.
@@ -268,7 +358,13 @@ jobs:
           echo "== summary =="
           echo "containers expected: $checked"
           if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
-          echo "VERDICT: PASS — both recovery flags inactive in every expected container's running env AND in its rendered next-restart compose config"
+          # Two DISTINCT PASS sentinels — a predeploy-flags PASS must never be mistaken for a full
+          # containment PASS: it explicitly states the database schema was NOT verified in this mode.
+          if [ "$MODE" = "postdeploy-full" ]; then
+            echo "VERDICT: PASS (postdeploy-full) — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected default-inert posture (triggers disabled, no meta_links.foreign_record_id FK)"
+          else
+            echo "VERDICT: PASS (predeploy-flags) — recovery flags inactive in running AND next-restart compose config; database recovery schema NOT verified in this mode (pre-deploy flag-only check)"
+          fi
           REMOTE
 
       - name: Upload report

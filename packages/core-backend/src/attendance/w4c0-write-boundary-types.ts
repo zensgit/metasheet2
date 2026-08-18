@@ -14,6 +14,7 @@ import type {
 } from './w4c0-identity'
 import type { AuthorizedAttendanceWriteContextV1 } from './w4c0-authorization'
 import type { AttendanceInputProvenanceRefV1 } from './w4c0-fingerprints'
+import type { AttendanceProjectionOwnerV1 } from './w7-provenance-domain'
 import type { NormalizedAttendanceSourceOperationEnvelopeV1 } from './w4c0-source-commands'
 
 // ---------------------------------------------------------------------------
@@ -228,7 +229,7 @@ export type AttendanceProjectionDirectiveV1 =
       kind: 'restore'
       restoresCalculationId: string
       parentState: {
-        projectionOwner: 'legacy_untracked' | 'w4'
+        projectionOwner: AttendanceProjectionOwnerV1
         currentCalculationId: string | null
         visibilityState: 'active' | 'retired'
         visibilityReason: 'active' | 'review_placeholder' | 'import_rollback' | 'operator_retirement'

@@ -9,6 +9,7 @@
     stripe
     highlight-current-row
     :row-key="showSelection ? resolveRowKey : undefined"
+    :row-class-name="rowClassName"
     @row-click="$emit('row-click', $event)"
     @selection-change="$emit('selection-change', $event)"
   >
@@ -103,7 +104,7 @@ import StatusTag from '../../components/status/StatusTag.vue'
 //     column at all on those two tabs)
 // Presentation-only: every data-testid, handler, and event lives in the parent's slot content /
 // prop wiring, unchanged.
-withDefaults(
+const props = withDefaults(
   defineProps<{
     rows: UnifiedApprovalDTO[]
     loading: boolean
@@ -124,6 +125,12 @@ withDefaults(
      * tab, since `isRead` is only ever populated there.
      */
     showUnreadDot?: boolean
+    /**
+     * UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail
+     * pane's currently-selected row id. `undefined`/`null` (every caller before UI-7, and every
+     * caller on narrower widths/mobile) renders no marker class at all — purely additive.
+     */
+    selectedRowId?: string | null
   }>(),
   {
     showSelection: false,
@@ -131,6 +138,7 @@ withDefaults(
     showWaitColumn: false,
     actionsWidth: 150,
     showUnreadDot: false,
+    selectedRowId: null,
   },
 )
 
@@ -145,6 +153,14 @@ const tableRef = ref<{ clearSelection: () => void } | null>(null)
 // attribute on their `<el-table>` at all).
 function resolveRowKey(row: UnifiedApprovalDTO): string {
   return row.id
+}
+
+// UI-7: additive selected-row marker (blue border), keyed off `selectedRowId` — returns '' (no
+// class) whenever the prop is unset, so this is inert for every pre-UI-7 caller and every
+// narrower-than-wide-desktop / mobile render (ApprovalCenterView only ever passes a non-null id
+// once the master-detail pane is actually open).
+function rowClassName({ row }: { row: UnifiedApprovalDTO; rowIndex: number }): string {
+  return props.selectedRowId && row.id === props.selectedRowId ? 'approval-center-row--selected' : ''
 }
 
 function formatDate(dateStr: string | null | undefined): string {
@@ -216,5 +232,15 @@ defineExpose({
   margin-top: 2px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): master-detail pane selection —
+   a left blue border on the row currently loaded into the detail pane (Feishu-style selected
+   card), scoped via `:deep` since `row-class-name` applies the class to el-table's own internal
+   `<tr>`, outside this component's template. Inert unless `selectedRowId` is passed (see
+   `rowClassName` above). */
+:deep(.approval-center-row--selected) {
+  box-shadow: inset 3px 0 0 var(--ms-color-primary);
+  background-color: var(--el-color-primary-light-9);
 }
 </style>

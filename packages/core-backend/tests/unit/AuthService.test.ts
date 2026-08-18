@@ -55,7 +55,14 @@ vi.mock('../../src/security/SecretManager', () => ({
   secretManager: { get: secretManagerMocks.get }
 }))
 
-import { AuthService } from '../../src/auth/AuthService'
+import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError } from '../../src/auth/AuthService'
+import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+
+function recoveryAuthorityBusyError(): Error & { code: string } {
+  const error = new Error(RECOVERY_AUTHORITY_BUSY_MARKER) as Error & { code: string }
+  error.code = '40001'
+  return error
+}
 
 describe('AuthService.verifyToken', () => {
   beforeEach(() => {
@@ -104,6 +111,52 @@ describe('AuthService.verifyToken', () => {
     expect(user?.role).toBe('admin')
     expect(user?.permissions).toContain('attendance:admin')
     expect((user as any).password_hash).toBeUndefined()
+  })
+
+  // P23: resolveRbacProfile's attendance self-service backfill calls the SAME assignUserRoles
+  // that register() uses. It is reached on every authenticated read for a user missing
+  // attendance:* permissions, and it is NOT itself inside a try in the source — so a persistently
+  // busy recovery lease must be contained locally rather than failing the whole token verification
+  // (that would turn "recovery is busy" into "you are logged out" for a valid session), AND the
+  // unpersisted attendance:read/attendance:write permissions must not leak into the returned user.
+  it('omits unpersisted attendance self-service permissions when backfill role assignment cannot persist under a busy recovery lease', async () => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-backfill', email: 'backfill@x', role: 'user', iat: 0, exp: 0 })
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'u-backfill',
+        email: 'backfill@x',
+        name: 'Backfill',
+        role: 'user',
+        permissions: [],
+        password_hash: 'hash',
+        is_active: true,
+        activation_status: 'activated',
+        local_password_set: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }],
+    })
+    let userRolesAttempts = 0
+    poolMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('INSERT INTO user_roles')) {
+        userRolesAttempts++
+        throw recoveryAuthorityBusyError()
+      }
+      return { rows: [] }
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['spreadsheets:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('token')
+
+    // The read path itself must still succeed — a busy backfill is a degraded enhancement,
+    // not a reason to reject an otherwise-valid session.
+    expect(user).toBeTruthy()
+    expect(user?.permissions).not.toContain('attendance:read')
+    expect(user?.permissions).not.toContain('attendance:write')
+    expect(userRolesAttempts).toBe(USER_ROLE_ASSIGNMENT_RETRY_LIMIT)
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
   })
 
   it('preserves a verified token tenant only while active membership proves it', async () => {
@@ -510,6 +563,63 @@ describe('AuthService.register', () => {
     expect(poolMocks.transaction).toHaveBeenCalled()
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_login_aliases'))).toBe(true)
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(true)
+  })
+
+  // P23: user_roles is a recovery-authority table. While exact-anchor recovery holds its
+  // per-subject lease, a user_roles write fails fast with 40001 (RECOVERY_AUTHORITY_BUSY_MARKER).
+  // Before this slice, assignUserRoles caught EVERY error (including this one) and only warned —
+  // register() would then return the created user as a "success" with the role silently missing.
+  // Assert the opposite now: a persistently-busy lease must NOT resolve register() to a truthy
+  // user with no role assigned. It must propagate a retryable, named failure instead.
+  it('does not report a successful registration when the self-service role cannot persist under a busy recovery lease', async () => {
+    process.env.PRODUCT_MODE = 'attendance'
+    let userRolesAttempts = 0
+    let createdId = 'user-busy'
+    poolMocks.query.mockReset()
+    poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FROM users') && text.includes('lower(email)')) {
+        return { rows: [] }
+      }
+      if (text.includes('INSERT INTO users')) {
+        createdId = String(params?.[0] ?? createdId)
+        return {
+          rows: [{
+            id: createdId,
+            email: 'busy@example.com',
+            name: 'Busy',
+            role: 'user',
+            permissions: [],
+            created_at: new Date('2026-04-03T00:00:00.000Z'),
+            updated_at: new Date('2026-04-03T00:00:00.000Z'),
+          }],
+        }
+      }
+      // claimLoginAlias: INSERT alias then SELECT owner — the SELECT must echo back the SAME
+      // userId that was just inserted (createdId), matching the real login-alias-service
+      // ownership check, or the alias claim looks conflicted and createUser rolls back to null
+      // BEFORE assignUserRoles is ever reached — silently invalidating this test.
+      if (text.includes('INSERT INTO user_login_aliases')) return { rows: [] }
+      if (text.includes('SELECT user_id FROM user_login_aliases')) return { rows: [{ user_id: createdId }] }
+      if (text.includes('INSERT INTO user_permissions')) return { rows: [] }
+      if (text.includes('INSERT INTO user_roles')) {
+        userRolesAttempts++
+        throw recoveryAuthorityBusyError()
+      }
+      return { rows: [] }
+    })
+
+    const auth = new AuthService()
+    await expect(
+      auth.register('busy@example.com', 'WelcomePass9A', 'Busy'),
+    ).rejects.toBeInstanceOf(UserRoleAssignmentRecoveryBusyError)
+
+    // Bounded: exactly the configured retry limit worth of attempts, never unbounded and never
+    // a single silent try.
+    expect(userRolesAttempts).toBe(USER_ROLE_ASSIGNMENT_RETRY_LIMIT)
+    // The users row and permissions DID persist (createUser's own transaction is untouched by
+    // this slice) — it is specifically the "success with no role" outcome that must not happen.
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users'))).toBe(true)
   })
 })
 

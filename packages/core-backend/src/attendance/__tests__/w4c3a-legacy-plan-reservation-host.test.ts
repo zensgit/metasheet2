@@ -63,6 +63,12 @@ describe('W4C-3a P07 production reservation host', () => {
         client: {
           query: async (text: string) => {
             sql.push(text)
+            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
+            // contract the real driver gives `assertConnectionIsIdleV1`'s own
+            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
+            if (text === 'SAVEPOINT w4c5_idle_probe') {
+              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+            }
             if (text.includes('attendance_calculation_rollout_state')) {
               rolloutAttempts += 1
               if (rolloutAttempts === 1) {
@@ -169,6 +175,10 @@ describe('W4C-3a P07 production reservation host', () => {
     expect(released).toBe(1)
     expect(rolloutAttempts).toBe(2)
     expect(sql).toEqual([
+      // Gate E (#4844): the idle-precondition probe runs exactly ONCE, before the retry loop —
+      // never re-issued per attempt (the loop's own ROLLBACK already restores idle between
+      // attempts).
+      'SAVEPOINT w4c5_idle_probe',
       'BEGIN ISOLATION LEVEL SERIALIZABLE',
       "SELECT set_config('statement_timeout', $1, true)",
       "SELECT set_config('lock_timeout', $1, true)",

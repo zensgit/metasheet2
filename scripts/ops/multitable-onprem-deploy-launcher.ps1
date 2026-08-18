@@ -2,10 +2,18 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$PackageArchive,
   [string]$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
-  [string]$StagingRoot = ''
+  [string]$StagingRoot = '',
+  [ValidateSet('0', '1')]
+  [string]$InstallDeps = '1',
+  [ValidateSet('0', '1')]
+  [string]$RunMigrations = '1'
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($InstallDeps -eq '0' -and $RunMigrations -ne '0') {
+  throw 'PACKAGE_NO_DEPS_REQUIRES_NO_MIGRATIONS: InstallDeps=0 requires RunMigrations=0'
+}
 
 # multitable-onprem-deploy-launcher.ps1
 #
@@ -179,7 +187,12 @@ try {
   # complete" + health 200) reliably yields launcher exit 0 and a Last
   # Result of 0 in the outer scheduled task (#1526 follow-up).
   try {
-    & $stagedApply -RootDir $resolvedRoot -PackageArchive $resolvedArchive -StagingRoot $stagingBase
+    & $stagedApply `
+      -RootDir $resolvedRoot `
+      -PackageArchive $resolvedArchive `
+      -StagingRoot $stagingBase `
+      -InstallDeps $InstallDeps `
+      -RunMigrations $RunMigrations
     $launcherExit = 0
   }
   catch {

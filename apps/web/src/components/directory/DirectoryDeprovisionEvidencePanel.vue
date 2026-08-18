@@ -127,10 +127,11 @@
     </section>
 
     <section v-if="selectedEvent" class="deprov-evidence__section" data-testid="deprovision-restore-panel">
-      <h3>恢复 · 事件 {{ shortId(selectedEvent.id) }}</h3>
+      <h3>事件操作 · {{ shortId(selectedEvent.id) }}</h3>
       <ul v-if="effects.length" class="deprov-evidence__list">
         <li v-for="fx in effects" :key="fx.id">
           {{ fx.effect_type }} · {{ fx.status }} · after={{ fx.after_active }} · gen={{ fx.access_generation_at_apply }}
+          <span v-if="fx.grant_row_created"> · deny-row creation</span>
         </li>
       </ul>
 
@@ -168,6 +169,32 @@
       <p v-if="!canRestore" class="deprov-evidence__hint">
         该事件没有可恢复的 applied effects。
       </p>
+      <div v-if="canCompensate" class="deprov-evidence__card" data-testid="deprovision-compensation-panel">
+        <strong>OPS-01 残留 deny 行补偿</strong>
+        <p class="deprov-evidence__hint">
+          仅删除 superseded creation effect 留下的 disabled grant；不会恢复用户或成员关系。
+        </p>
+        <label class="deprov-evidence__check">
+          <input v-model="compensationConfirm" type="checkbox" data-testid="deprovision-compensation-confirm" />
+          我确认源、成员关系与当前 grant 状态已复核
+        </label>
+        <textarea
+          v-model="compensationNote"
+          class="deprov-evidence__textarea"
+          rows="2"
+          placeholder="补偿原因（≥8 字）"
+          data-testid="deprovision-compensation-note"
+        />
+        <button
+          class="deprov-evidence__btn deprov-evidence__btn--danger"
+          type="button"
+          :disabled="compensating || !compensationConfirm || compensationNote.trim().length < 8"
+          data-testid="deprovision-compensate-orphan-deny"
+          @click="void compensateOrphanDeny()"
+        >
+          {{ compensating ? '补偿中…' : '补偿残留 deny 行' }}
+        </button>
+      </div>
       <p v-if="restoreConflict" class="deprov-evidence__status deprov-evidence__status--error" data-testid="deprovision-drift-conflict">
         {{ restoreConflict }}
       </p>
@@ -220,9 +247,10 @@ type DeprovisionEvent = {
 type DeprovisionEffect = {
   id: string
   effect_type: string
-  status: 'applied' | 'reversed' | 'superseded'
+  status: 'applied' | 'reversed' | 'superseded' | 'compensated'
   after_active: boolean
   access_generation_at_apply: number
+  grant_row_created?: boolean
 }
 
 const props = defineProps<{
@@ -246,15 +274,46 @@ const events = ref<DeprovisionEvent[]>([])
 
 const selectedEvent = ref<DeprovisionEvent | null>(null)
 const effects = ref<DeprovisionEffect[]>([])
+const effectsEventId = ref<string | null>(null)
 const restoring = ref(false)
 const forceConfirm = ref(false)
 const forceNote = ref('')
+const compensating = ref(false)
+const compensationConfirm = ref(false)
+const compensationNote = ref('')
 const restoreConflict = ref('')
 const canRestore = computed(
   () =>
     selectedEvent.value?.status === 'applied'
-    && effects.value.some((effect) => effect.status === 'applied'),
+    && effectsEventId.value === selectedEvent.value.id
+    && effects.value.length > 0
+    && effects.value.every((effect) => effect.status === 'applied'),
 )
+const canCompensate = computed(
+  () =>
+    selectedEvent.value?.status === 'superseded'
+    && effectsEventId.value === selectedEvent.value.id
+    && effects.value.some(
+      (effect) =>
+        effect.effect_type === 'grant_changed'
+        && effect.grant_row_created === true
+        && effect.status === 'superseded',
+    ),
+)
+
+let eventsRequestId = 0
+let effectsRequestId = 0
+
+function clearEffects() {
+  effects.value = []
+  effectsEventId.value = null
+}
+
+function clearEventSelection() {
+  effectsRequestId += 1
+  selectedEvent.value = null
+  clearEffects()
+}
 
 function shortId(id: string): string {
   if (!id) return ''
@@ -314,68 +373,135 @@ async function runPreview() {
 }
 
 async function loadEvents() {
+  const requestId = ++eventsRequestId
+  const integrationId = props.integrationId
   loadingEvents.value = true
   try {
-    if (!props.integrationId) {
+    if (!integrationId) {
       events.value = []
-      selectedEvent.value = null
-      effects.value = []
+      clearEventSelection()
       return
     }
-    const selectedEventId = selectedEvent.value?.id
+    if (selectedEvent.value) {
+      effectsRequestId += 1
+      clearEffects()
+    }
     const params = new URLSearchParams()
     if (eventsUserFilter.value.trim()) params.set('userId', eventsUserFilter.value.trim())
     params.set('limit', '50')
     const response = await apiFetch(
-      `/api/admin/directory/integrations/${encodeURIComponent(props.integrationId)}/deprovision-events?${params.toString()}`,
+      `/api/admin/directory/integrations/${encodeURIComponent(integrationId)}/deprovision-events?${params.toString()}`,
     )
     const body = await response.json().catch(() => ({}))
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     if (!response.ok) {
       setError(body?.error?.message || '加载事件失败')
       return
     }
     events.value = (body?.data?.items || []) as DeprovisionEvent[]
+    const selectedEventId = selectedEvent.value?.id
     if (selectedEventId) {
-      selectedEvent.value =
-        events.value.find((event) => event.id === selectedEventId) ?? null
-      if (!selectedEvent.value) effects.value = []
+      const refreshedSelection = events.value.find((event) => event.id === selectedEventId)
+      if (refreshedSelection) {
+        await selectEvent(refreshedSelection)
+      } else {
+        clearEventSelection()
+      }
     }
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     if (body?.data?.flags) flags.value = body.data.flags as DeprovisionFlags
   } catch (error) {
+    if (requestId !== eventsRequestId || props.integrationId !== integrationId) return
     setError(error instanceof Error ? error.message : '加载事件失败')
   } finally {
-    loadingEvents.value = false
+    if (requestId === eventsRequestId) loadingEvents.value = false
   }
 }
 
 async function selectEvent(ev: DeprovisionEvent) {
+  const requestId = ++effectsRequestId
   selectedEvent.value = ev
+  clearEffects()
   restoreConflict.value = ''
   forceConfirm.value = false
   forceNote.value = ''
+  compensationConfirm.value = false
+  compensationNote.value = ''
   try {
     const response = await apiFetch(
       `/api/admin/directory/deprovision-events/${encodeURIComponent(ev.id)}/effects`,
     )
     const body = await response.json().catch(() => ({}))
+    if (requestId !== effectsRequestId || selectedEvent.value?.id !== ev.id) return
     if (!response.ok) {
       setError(body?.error?.message || '加载 effects 失败')
-      effects.value = []
       return
     }
     effects.value = (body?.data?.items || []) as DeprovisionEffect[]
+    effectsEventId.value = ev.id
   } catch (error) {
+    if (requestId !== effectsRequestId || selectedEvent.value?.id !== ev.id) return
     setError(error instanceof Error ? error.message : '加载 effects 失败')
+  }
+}
+
+async function compensateOrphanDeny() {
+  if (!selectedEvent.value || !canCompensate.value) return
+  const eventId = selectedEvent.value.id
+  compensating.value = true
+  restoreConflict.value = ''
+  try {
+    const response = await apiFetch(
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(eventId)}/compensate-orphan-deny`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirm: compensationConfirm.value,
+          note: compensationNote.value,
+        }),
+      },
+    )
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const code = body?.error?.code || 'ERROR'
+      const message = body?.error?.message || '补偿失败'
+      if (
+        code === 'DRIFT_CONFLICT'
+        || code === 'COMPENSATION_EVENT_NOT_SUPERSEDED'
+        || code === 'COMPENSATION_NOT_APPLICABLE'
+        || code === 'COMPENSATION_USER_INACTIVE'
+        || code === 'COMPENSATION_SOURCE_INACTIVE'
+        || code === 'COMPENSATION_MEMBERSHIP_INACTIVE'
+        || code === 'COMPENSATION_LIVE_EVIDENCE'
+      ) {
+        restoreConflict.value = `${code}: ${message}`
+      } else {
+        setError(`${code}: ${message}`)
+      }
+      return
+    }
+    setOk(
+      body?.data?.alreadyCompensated
+        ? '残留 deny 行此前已完成补偿'
+        : `残留 deny 行补偿成功 · gen=${body?.data?.accessGeneration}`,
+    )
+    await loadEvents()
+  } catch (error) {
+    setError(error instanceof Error ? error.message : '补偿失败')
+  } finally {
+    compensating.value = false
   }
 }
 
 async function restore(mode: 'rehire' | 'admin_force') {
   if (!selectedEvent.value || !canRestore.value) return
+  const eventId = selectedEvent.value.id
   restoring.value = true
   restoreConflict.value = ''
   try {
     const response = await apiFetch(
-      `/api/admin/directory/deprovision-events/${encodeURIComponent(selectedEvent.value.id)}/${
+      `/api/admin/directory/deprovision-events/${encodeURIComponent(eventId)}/${
         mode === 'rehire' ? 'reactivate' : 'force-reactivate'
       }`,
       {
@@ -409,7 +535,6 @@ async function restore(mode: 'rehire' | 'admin_force') {
       }`,
     )
     await loadEvents()
-    if (selectedEvent.value) await selectEvent(selectedEvent.value)
   } catch (error) {
     setError(error instanceof Error ? error.message : '恢复失败')
   } finally {
@@ -425,6 +550,9 @@ async function refreshAll() {
 watch(
   () => props.integrationId,
   () => {
+    eventsRequestId += 1
+    events.value = []
+    clearEventSelection()
     if (expanded.value) void loadEvents()
   },
 )

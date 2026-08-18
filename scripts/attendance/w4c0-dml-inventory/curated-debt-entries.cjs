@@ -74,6 +74,29 @@ function byW4C3aImportRollback(site) {
 // Exact P16 allowlist: relPath::enclosingSymbol::table::verb (W4C-3c hard zero-bypass).
 // Enumerated from the live HEAD census of intended staging tooling writers only.
 const P16_EXACT_ALLOWLIST = new Set([
+  // W4+W7 combined-soak seeder (#4556 soak, PR #4929): the ONE tracked DML site in the
+  // window-runner's soak-seed heredoc SQL — an idempotent (NOT EXISTS-guarded) INSERT of a
+  // published group-produced assignment, mirroring the trigger-legal shape of the W7-1b e2e
+  // fixture. Staging-only synthetic seeding: runs only behind assert_staging_only against
+  // metasheet-staging-postgres, only for orgs the seeder has just verified hold exclusively
+  // synth-w4w7-* content (customerData preflight), and never touches a posture table (those
+  // go through the Gate C / W7-3 CLIs). Same class as the a2-smoke assignments insert below.
+  // enclosingSymbol is (module-scope): shell heredocs have no enclosing function — which
+  // means this key's effective granularity is file+table+verb, broader than the
+  // symbol-scoped smoke-script entries around it: ANY second module-scope assignments
+  // INSERT added to this script would be absorbed by this same key, so additions to this
+  // script's seed SQL must be reviewed against this claim, not assumed newly gated.
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::insert",
+  // Retired TEXT-id family remint (identity-gate defect 2026-08-16, staging run 31957449480):
+  // soak-seed's one-time cleanup DELETEs of rows keyed to the RETIRED user-id shape
+  // (user_id LIKE 'synth-w4w7-%'). Current-family ids are minted UUIDs and can never match
+  // that prefix, so the scope is provably the retired shape only; runs behind the same
+  // assert_staging_only + synthetic-org preflight as the seeder, single transaction, no-op
+  // once the retired rows are gone. Same (module-scope) granularity caveat as the insert
+  // claim above: any OTHER module-scope delete on these tables added to this script would
+  // be absorbed by these keys and must be reviewed against this claim.
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_records::delete",
+  "scripts/ops/attendance-staging-window-runner-remote.sh::(module-scope)::attendance_shift_assignments::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_events::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_batches::delete",
   "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs::cleanup::attendance_import_items::delete",
@@ -155,8 +178,16 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-2',
     sharedHook: false,
     canonicalizedBy: 'W4C-2',
+    // Gate D2 (#4844) SPLIT `applyLivePunchProjectionLegacyV1`: its `attendance_events` INSERT
+    // moved verbatim into the new `insertLivePunchEventV1` seam (which the legacy adapter itself
+    // now calls, so the two paths are one writer), and the authoritative boundary branch calls
+    // that seam directly while skipping the `attendance_records` upsert. The DML is the SAME P01
+    // live-punch event insert under a new enclosing symbol — claimed here per-writer rather than
+    // registered as a new debt id, exactly as this entry's own header describes for renamed
+    // adapter-owned sites. A genuinely NEW event/record writer added to the plugin still fails CI.
     claims: (site) =>
       bySymbol(PLUGIN, /^applyLivePunchProjectionLegacyV1$/)(site) ||
+      bySymbol(PLUGIN, /^insertLivePunchEventV1$/)(site) ||
       bySymbol(PLUGIN, /^op$/)(site) ||
       bySymbol(PLUGIN, /^upsertAttendanceRecord$/)(site),
   },
@@ -565,6 +596,67 @@ const CURATED_DEBT_ENTRIES = [
         'attendance_leave_accrual_run_items',
         'attendance_leave_manual_adjustments',
       ].includes(site.table),
+  },
+  {
+    id: 'X06',
+    title: 'W4C-2 Gate D1 authoritative-result-write CORE: the parent-pointer/visibility move on attendance_records for a completed or reversed authoritative calculation (§7.5). INERT — no production caller; D2 wires live_punch, D3 wires scheduled.',
+    owningSlice: 'W4C-2',
+    sharedHook: false,
+    // NOT the 'W4C-2' removed-by-adapter marker (that exact set is pinned to the four legacy P01-P04
+    // writers). This is the canonical authoritative WRITER Gate D1 adds, not a legacy site being
+    // canonicalized away — its own Gate-D1 marker.
+    canonicalizedBy: 'W4C-2-gate-d1',
+    // The only tracked business DML in this INERT core is the attendance_records UPDATE that moves
+    // the parent pointer/owner/visibility to the just-appended authoritative row (completed →
+    // set_active; reversal → restore/retire). The calc/segment INSERTs target the append-only
+    // immutable tables (not the business daily-row bucket). Claimed per-writer by symbol so a new
+    // attendance_records writer added to this file cannot inherit the claim silently.
+    claims: (site) =>
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts',
+        /^writeCompletedRow$/,
+      )(site) ||
+      bySymbol(
+        'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts',
+        /^writeAuthoritativeReversalV1$/,
+      )(site),
+  },
+  {
+    id: 'X07',
+    title: 'W4C-2 Gate D2/D3 authoritative branches: the create-if-absent review-path parent placeholder INSERT on attendance_records (§7.5 F6 parent-state install).',
+    owningSlice: 'W4C-2',
+    sharedHook: false,
+    // Gate D3 (#4844) CLASSIFICATION NOTE — measured with the collectors, not reasoned:
+    //   * the scheduled authoritative branch's placeholder creation is a CALL to the same
+    //     `insertAuthoritativeReviewPlaceholderParentV1` helper this entry claims BY SYMBOL, so it
+    //     adds no new DML statement text and no new census site. The `bySymbol` claim is exactly
+    //     what makes a second call site inert here while still refusing a genuinely NEW
+    //     attendance_records writer added to the boundary file;
+    //   * the core call, the first production `recordAttendanceScheduledRunTargetOutcomeV1('failed')`
+    //     call and the `cancelAttendanceResultOperationV1` call are CALLS into already-claimed
+    //     writers (the D1 core / the run registry / the operation registry), not new DML;
+    //   * D3 REMOVES `applyScheduledAbsenceLegacy` from the authoritative arm — a classification
+    //     change rather than a new site: that adapter's own INSERT..SELECT stays claimed for the
+    //     legacy/shadow/legacy_compat paths that still call it;
+    //   * the branch's `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` statements carry
+    //     no verb the DML scanner tracks.
+    // Collector output on the D3 head: unclaimed = 0, with no census hand-edit.
+    // Its own Gate-D2 marker, not the 'W4C-2' removed-by-adapter marker (pinned to the four
+    // legacy P01-P04 writers) and not Gate D1's. This is the canonical authoritative-path parent
+    // creator D2 adds, not a legacy site being canonicalized away.
+    canonicalizedBy: 'W4C-2-gate-d2',
+    // The ONLY business-bucket DML the D2 boundary branch adds: an `ON CONFLICT DO NOTHING`
+    // INSERT that installs the retired/`review_placeholder` parent when the day has no record
+    // yet, so the D1 core (whose `lockParent` fails RECORD_NOT_FOUND on an absent parent, and
+    // whose `writeReviewRow` never touches `attendance_records`) has a parent to write against.
+    // Every other write on that path belongs to an already-claimed owner: the punch event INSERT
+    // is P01's (via `insertLivePunchEventV1`), and the parent pointer/visibility move is X06's
+    // (the core's own `writeCompletedRow`). Claimed per-writer BY SYMBOL so a future
+    // attendance_records writer added to this boundary file cannot inherit the claim silently.
+    claims: bySymbol(
+      'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts',
+      /^insertAuthoritativeReviewPlaceholderParentV1$/,
+    ),
   },
   {
     id: 'X05',

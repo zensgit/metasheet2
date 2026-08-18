@@ -81,6 +81,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Sync deploy host files
+        id: sync_deploy
+        continue-on-error: true
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -88,6 +90,9 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SYNC_MIN_FREE_KB: ${{ vars.DEPLOY_SYNC_MIN_FREE_KB || '1048576' }}
         run: |
+          set -uo pipefail
+          set +e
+          (
           set -euo pipefail
           mkdir -p ~/.ssh
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
@@ -142,9 +147,15 @@ jobs:
             scripts/ops/attendance-preflight.sh \
           | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
               "set -euo pipefail; mkdir -p '${remote_repo_path}/docker' '${remote_repo_path}/scripts/ops'; tar -xzf - -C '${remote_repo_path}'"
+          )
+          sync_rc=$?
+          set -e
+          echo "sync_rc=$sync_rc" >> "$GITHUB_OUTPUT"
+          exit "$sync_rc"
 
       - name: Remote deploy (with preflight logs)
         id: remote_deploy
+        if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}
         continue-on-error: true
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -574,6 +585,7 @@ jobs:
           METASHEET_FRONTEND_BASE_URL: ${{ vars.METASHEET_FRONTEND_BASE_URL || vars.PUBLIC_APP_URL || vars.METASHEET_BASE_URL || '' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
           K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
+          K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS: ${{ vars.K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS || '30000' }}
         run: |
           set -euo pipefail
           smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
@@ -584,6 +596,7 @@ jobs:
           args=(
             --base-url "$METASHEET_BASE_URL"
             --out-dir "$smoke_out_dir"
+            --timeout-ms "$K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS"
           )
           if [[ -n "${METASHEET_FRONTEND_BASE_URL:-}" ]]; then
             args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")
@@ -611,6 +624,7 @@ jobs:
       - name: Write deploy summary (preflight + runbooks)
         if: always()
         env:
+          SYNC_RC: ${{ steps.sync_deploy.outputs.sync_rc }}
           DEPLOY_RC: ${{ steps.remote_deploy.outputs.deploy_rc }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
@@ -621,11 +635,11 @@ jobs:
 
           preflight_status="UNKNOWN"
           overall="UNKNOWN"
-          if [[ -n "${DEPLOY_RC:-}" ]]; then
+          if [[ -n "${SYNC_RC:-}" && "${SYNC_RC}" != "0" ]]; then
+            overall="FAIL"
+          elif [[ "${SYNC_RC:-}" == "0" && -n "${DEPLOY_RC:-}" ]]; then
             overall="PASS"
-            if [[ "${DEPLOY_RC}" != "0" ]]; then
-              overall="FAIL"
-            fi
+            [[ "${DEPLOY_RC}" == "0" ]] || overall="FAIL"
           fi
 
           rc_meaning="unknown"
@@ -653,6 +667,7 @@ jobs:
           echo "## Deploy (Remote)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Host sync exit code: \`${SYNC_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${DEPLOY_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail stage: \`${DRILL_FAIL_STAGE:-none}\`" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${DRILL_FAIL_STAGE:-none}" != "none" ]]; then
@@ -914,6 +929,15 @@ jobs:
       - name: Fail when remote deploy failed
         if: always()
         run: |
+          sync_rc="${{ steps.sync_deploy.outputs.sync_rc }}"
+          if [[ -z "$sync_rc" ]]; then
+            echo "sync_rc missing; failing deploy job." >&2
+            exit 1
+          fi
+          if [[ "$sync_rc" != "0" ]]; then
+            echo "Sync deploy host files failed: rc=$sync_rc" >&2
+            exit 1
+          fi
           rc="${{ steps.remote_deploy.outputs.deploy_rc }}"
           if [[ -z "$rc" ]]; then
             echo "deploy_rc missing; failing deploy job." >&2

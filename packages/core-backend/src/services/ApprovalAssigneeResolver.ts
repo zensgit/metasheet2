@@ -21,6 +21,17 @@ export interface ResolveApprovalAssigneesOptions {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
   requesterSnapshot: Record<string, unknown> | null
+  /**
+   * Lock-1 §K3 (`prior_node_approver`) — referenced prior node key → that node's ACTUAL decider
+   * local user ids, read by the CALLER at node activation from instance-internal
+   * `approval_records` rows (LATEST `nodeEntryEpoch` round only, OD-L1-3(a); system sentinel
+   * actors already dropped) and passed in alongside the snapshots, exactly as `formSnapshot` and
+   * `requesterSnapshot` are. The resolver performs NO database access of its own (§2.1 purity —
+   * K3 is the one kind whose input is caller-supplied at activation rather than create-frozen).
+   * Absent/undefined (create-time cascade, read-only previews) ⇒ every `prior_node_approver`
+   * source resolves EMPTY and falls to the node's `emptyAssigneePolicy` (OD-L1-4(a)).
+   */
+  priorNodeApprovers?: Record<string, string[]>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,8 +48,23 @@ function metadataFor(source: ApprovalAssigneeSource, sourceIndex: number): Appro
       kind: source.kind,
       sourceIndex,
       ...(source.kind === 'form_field_user' ? { fieldId: source.fieldId } : {}),
+      // Lock-1 §K3 audit: the referenced prior node's key on the row (§2.6 — a template-authored
+      // node key, values-free), so "why is this person an approver" is answerable from the row.
+      ...(source.kind === 'prior_node_approver' ? { priorNodeKey: source.nodeKey } : {}),
     },
   }
+}
+
+/**
+ * Lock-1 §K3 — `system:`-namespaced sentinel actors (`system:auto-approval`,
+ * `system:approval-timeout`) are not assignable users and are DROPPED, never assigned. The
+ * caller's audit-row read already drops them; this pure re-check keeps the guarantee even for a
+ * hand-assembled `priorNodeApprovers` map. The `system:` prefix is the repo-wide non-user actor
+ * namespace (directory-sync.ts applies the same predicate to reject `system:`-prefixed ids as
+ * user ids).
+ */
+function isSystemSentinelActor(actorId: string): boolean {
+  return actorId.startsWith('system:')
 }
 
 function resolveFormUserValue(value: unknown): string | null {
@@ -227,6 +253,105 @@ export function resolveApprovalAssignees(
         assertFormUserSource(source, options.formSchema, options.nodeKey)
         const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])
         if (assigneeId) pushResolved('user', assigneeId, source, sourceIndex)
+        break
+      }
+      case 'requester_choice': {
+        // Lock-1 §K2: resolve to the requester's SUBMIT-TIME choice, read ONLY from the frozen
+        // snapshot map (node key → chosen local user ids). The choices were scope-validated at
+        // create (fail-closed 422 before any insert), so no live directory/role read happens
+        // here — the resolver stays pure, and a re-entered node (return / admin-jump /
+        // timeout-jump) re-resolves the SAME list regardless of any directory or role change
+        // after create. Changing an in-flight seat is `transfer` (a shipped action), never a
+        // re-choice. A missing/empty entry resolves EMPTY and falls to the node's
+        // emptyAssigneePolicy — unreachable via createApproval (which 422s on a missing
+        // choice); it covers only a made-then-unusable choice or a choices-free preview walk.
+        // NO self-exclusion (deliberate, unlike direct_manager/dept_head): the requester may
+        // legitimately be inside the configured scope; self-approval semantics stay owned by
+        // autoApprovalPolicy.mergeWithRequester.
+        const rawMap = options.requesterSnapshot?.requesterChoices
+        const rawList = isRecord(rawMap) ? rawMap[options.nodeKey] : undefined
+        const chosen = Array.isArray(rawList) ? rawList : []
+        chosen.forEach((entry) => {
+          const chosenId = normalizeId(entry)
+          if (chosenId) pushResolved('user', chosenId, source, sourceIndex)
+        })
+        break
+      }
+      case 'continuous_dept_heads': {
+        // Lock-1 §K4: resolve to the requester's DEPARTMENT-HEAD chain (levels 1..source.levels),
+        // frozen in the snapshot at create — a DIFFERENT pointer from continuous_managers'
+        // managerChainIds (the leader_in_dept LEADER pointer). This walks the department PARENT
+        // tree reading dept_manager_userid_list at each level
+        // (ApprovalDirectoryOrg.resolveDeptHeadChain), which — unlike managerChainIds — CONTINUES
+        // past a level whose head is unresolved (the ratified continue-past-empty-level posture,
+        // ratified Lock-1 §K4 / confirmed BINDING by Lock-2), since the chain-build's next hop is
+        // the department's own parent pointer, never a resolved manager. No live directory
+        // re-query happens HERE either way: this arm is a pure slice over the frozen chain,
+        // mirroring continuous_managers exactly (same self-exclusion, same dedup-via-pushResolved,
+        // same emptyAssigneePolicy fallthrough on an empty result).
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.deptHeadChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        chain.slice(0, source.levels).forEach((entry) => {
+          const headId = normalizeId(entry)
+          if (headId && headId !== requesterId) {
+            pushResolved('user', headId, source, sourceIndex)
+          }
+        })
+        break
+      }
+      case 'prior_node_approver': {
+        // Lock-1 §K3: resolve to the referenced prior node's ACTUAL decider(s), read from the
+        // caller-supplied `priorNodeApprovers` map (instance-internal approval_records actors,
+        // LATEST round only — OD-L1-3(a)); never from config, never from a directory read, and no
+        // resolver-internal database access (§2.1: K3's input is caller-supplied at activation).
+        // System sentinel actors are dropped here as a pure re-check (primary drop is in the
+        // caller's audit-row read); when nothing remains — the node was skipped, unreached,
+        // auto-approved under the system actor, or the map is absent (create-time cascade /
+        // choices-free preview) — resolution is EMPTY and falls to the node's emptyAssigneePolicy
+        // (OD-L1-4(a): fail-closed APPROVAL_ASSIGNEE_EMPTY under the default 'error'; an AUDITED
+        // auto-approval event under an explicit 'auto-approve' — never a silent nobody).
+        // NO self-exclusion (deliberate — the §K2 posture): a prior decider who is the requester
+        // still gets the seat; self-approval stays owned by autoApprovalPolicy.mergeWithRequester.
+        // Cross-node NO-DEDUP is structural: this node's `seen` set is per-resolution, so the same
+        // person approving at the prior node simply gets a fresh seat here; intra-node dedup
+        // (one seat per identity at THIS node) still applies via pushResolved.
+        const rawMap = options.priorNodeApprovers
+        const rawList = isRecord(rawMap) ? rawMap[source.nodeKey] : undefined
+        const deciders = Array.isArray(rawList) ? rawList : []
+        deciders.forEach((entry) => {
+          const deciderId = normalizeId(entry)
+          if (deciderId && !isSystemSentinelActor(deciderId)) {
+            pushResolved('user', deciderId, source, sourceIndex)
+          }
+        })
+        break
+      }
+      case 'dept_head_at_level': {
+        // Lock-1 §K5-b: resolve to a SINGLE level of the requester's DEPARTMENT-HEAD chain (the
+        // `source.level`-th entry, level 1 = the requester's own department head), frozen in the
+        // same `deptHeadChainIds` snapshot K4's `continuous_dept_heads` reads — positionally
+        // IDENTICAL to `manager_at_level` (:205-225 above), just over a different chain. Strictly
+        // downstream of K4: no new snapshot field, no new directory read of its own.
+        // Self-exclusion drops a hop resolving to the requester; an empty result (chain shorter
+        // than `level`, or `deptHeadChainIds` absent because no node in the published graph
+        // triggered the bake) falls through to `emptyAssigneePolicy` — Lock-1 §K5's explicit
+        // ruling that an in-contract level absent from THIS requester's chain is never a
+        // dispatch-time failure. deptHeadChainIds is DENSE under the RATIFIED
+        // continue-past-empty-level posture (resolveDeptHeadChain continues past an empty/
+        // unresolved level to that department's own parent — see the union member's doc
+        // comment), so chain[level-1] is the level-th *resolved* head walking up, NOT "the head
+        // N parent-hops up": an intermediate department with no resolvable head shifts every
+        // deeper level's position, exactly as `manager_at_level`'s own dense-chain contract does
+        // for managerChainIds. A null rung (defensive, never produced by the builder) resolves
+        // that level to empty via normalizeId — positional, no compaction.
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.deptHeadChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        const headId = normalizeId(chain[source.level - 1])
+        if (headId && headId !== requesterId) {
+          pushResolved('user', headId, source, sourceIndex)
+        }
         break
       }
       default:

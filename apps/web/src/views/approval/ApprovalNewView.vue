@@ -139,6 +139,54 @@
           </div>
         </el-card>
 
+        <!-- Lock-1 §K2 (提交人自选): submit-time approver chooser. Rendered only when the
+             loaded template's graph carries a requester_choice node; REQUIRED — handleSubmit
+             blocks until every such node has a mode-satisfying choice. The picker is
+             scope-filtered server-side (members/role scope → userIds/roleIds params on the
+             participant directory search); createApproval re-validates the submitted choice
+             fail-closed either way. -->
+        <el-card
+          v-if="requesterChoiceNodes.length > 0"
+          class="approval-new__requester-choice"
+          shadow="never"
+          data-testid="approval-requester-choice"
+        >
+          <template #header>
+            <span class="approval-new__flow-preview-header">选择审批人</span>
+          </template>
+          <el-form label-position="top">
+            <el-form-item
+              v-for="chooser in requesterChoiceNodes"
+              :key="chooser.nodeKey"
+              :label="`${chooser.nodeName}（${chooser.mode === 'multi' ? '可选多人' : '选一人'} · ${chooserScopeLabel(chooser)}）`"
+              required
+              data-testid="approval-requester-choice-item"
+            >
+              <el-select
+                :model-value="chooser.mode === 'multi' ? (requesterChoices[chooser.nodeKey] ?? []) : (requesterChoices[chooser.nodeKey]?.[0] ?? undefined)"
+                :multiple="chooser.mode === 'multi'"
+                filterable
+                remote
+                clearable
+                :remote-method="(q: string) => searchChoiceCandidates(chooser, q)"
+                :loading="choiceSearchLoading[chooser.nodeKey] === true"
+                class="ms-w-100pct"
+                placeholder="搜索并选择审批人"
+                :data-testid="`approval-requester-choice-picker-${chooser.nodeKey}`"
+                @update:model-value="(value: string[] | string | null) => setRequesterChoice(chooser, value)"
+                @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
+              >
+                <el-option
+                  v-for="option in choiceOptions[chooser.nodeKey] ?? []"
+                  :key="option.id"
+                  :label="choiceOptionLabel(option)"
+                  :value="option.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-form>
+        </el-card>
+
         <el-divider content-position="left">填写表单</el-divider>
 
         <el-form
@@ -236,6 +284,43 @@
               :placeholder="field.placeholder || `请选择${field.label}`"
               class="ms-w-100pct"
             />
+
+            <!-- Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-8) date_range:
+                 two pickers of the field's declared granularity, bound to `{ start, end }`, plus an
+                 ALWAYS-rendered read-only derived duration (never a control — a plain span, no
+                 v-model, no input element: OD-L8-8 forbids any authoring control that offers
+                 editing it). value-format is explicit on BOTH pickers so the submitted wire shape
+                 is a deterministic string matching the server's `date_range` value contract exactly
+                 (never the picker's own default Date-object binding). -->
+            <div
+              v-else-if="field.type === 'date_range'"
+              class="approval-new__date-range"
+              data-testid="approval-date-range-field"
+            >
+              <div class="approval-new__date-range-row">
+                <el-date-picker
+                  :model-value="dateRangeStart(field.id)"
+                  :type="dateRangePickerElementType(field.props?.dateType)"
+                  :value-format="dateRangePickerValueFormat(field.props?.dateType)"
+                  :placeholder="(field.props?.startLabel as string) || '起始'"
+                  data-testid="approval-date-range-start"
+                  @update:model-value="(value: string | null) => setDateRangeStart(field.id, value)"
+                />
+                <span class="approval-new__date-range-sep">至</span>
+                <el-date-picker
+                  :model-value="dateRangeEnd(field.id)"
+                  :type="dateRangePickerElementType(field.props?.dateType)"
+                  :value-format="dateRangePickerValueFormat(field.props?.dateType)"
+                  :placeholder="(field.props?.endLabel as string) || '结束'"
+                  data-testid="approval-date-range-end"
+                  @update:model-value="(value: string | null) => setDateRangeEnd(field.id, value)"
+                />
+              </div>
+              <div class="approval-new__date-range-duration" data-testid="approval-date-range-duration">
+                <span class="approval-new__date-range-duration-label">{{ dateRangeDurationLabel(field) }}</span>
+                <span data-testid="approval-date-range-duration-value">{{ dateRangeDurationDisplay(field) }}</span>
+              </div>
+            </div>
 
             <!-- select -->
             <el-select
@@ -446,6 +531,21 @@
               附件上传功能即将支持，请先在其他字段中注明附件信息。
             </div>
 
+            <!-- Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3)
+                 explanation: display-only. Renders the authored `props.text` body to the
+                 requester. No v-model: an explanation collects nothing (A-1), so there is no
+                 formData key to bind — WITHOUT this arm, an explanation field would fall through
+                 to the plain-text-input fallback below and silently collect a value it must never
+                 carry. white-space:pre-wrap preserves authored line breaks without interpreting
+                 markup (plain text, never raw HTML). -->
+            <div
+              v-else-if="field.type === 'explanation'"
+              class="approval-new__explanation"
+              data-testid="approval-explanation-field"
+            >
+              {{ (field.props?.text as string) || '' }}
+            </div>
+
             <!-- fallback -->
             <el-input
               v-else
@@ -453,15 +553,28 @@
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
 
-            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
-                 guessing); derived from the same value the backend total-check sees. Keep this
-                 outside the field-type v-if chain so earlier branches never fall through twice. -->
+            <!-- G-B2-16: 大写回显 — under the template-declared amount total (no label guessing),
+                 OR (L8-C, §0.4: "re-sites [amountInWords] to a per-field display flag") under a
+                 formatted-number field's own `props.uppercaseCny` — additive, neither trigger
+                 replaces the other (an old template with no `uppercaseCny` prop keeps behaving
+                 exactly as it does today). Keep this outside the field-type v-if chain so earlier
+                 branches never fall through twice. -->
             <div
-              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
+              v-if="field.type === 'number' && (isAutoSummedTotal(field.id) || isAmountWordsField(field)) && amountWordsFor(field)"
               class="approval-new__amount-words"
               data-testid="approval-amount-words"
             >
-              大写：{{ amountWordsFor(field.id) }}
+              大写：{{ amountWordsFor(field) }}
+            </div>
+
+            <!-- L8-C: formatted-number display caption (currency prefix / thousands grouping) —
+                 PRESENTATION ONLY, the same value the input holds (M10). -->
+            <div
+              v-if="field.type === 'number' && amountDisplayCaption(field)"
+              class="approval-new__amount-display"
+              data-testid="approval-amount-display"
+            >
+              {{ amountDisplayCaption(field) }}
             </div>
 
             <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
@@ -509,7 +622,12 @@ import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
-import type { FormField, FormSchema } from '../../types/approval'
+import type {
+  ApprovalAssigneeSource,
+  FormField,
+  FormSchema,
+  RequesterChoiceAssigneeSource,
+} from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
@@ -518,8 +636,15 @@ import { recordRecentTemplate } from '../../approvals/recentTemplates'
 import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
-import { numberFieldProps } from '../../approvals/numberFieldProps'
+import {
+  numberFieldProps,
+  amountDisplayProps,
+  isAmountWordsField,
+  formatAmountDisplay,
+  roundToFieldScale,
+} from '../../approvals/numberFieldProps'
 import { amountToChineseWords } from '../../approvals/amountInWords'
+import { numberFieldScale } from '../../approvals/amountAutoSum'
 import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
@@ -529,7 +654,12 @@ import {
   validateDetailRows,
 } from '../../approvals/detailField'
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
-import { previewApprovalRoute, type ApprovalRoutePreview } from '../../approvals/api'
+import {
+  previewApprovalRoute,
+  searchApprovalDirectoryUsers,
+  type ApprovalDirectoryUser,
+  type ApprovalRoutePreview,
+} from '../../approvals/api'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
@@ -541,6 +671,11 @@ import {
   recordLinkSheetId,
 } from '../../approvals/recordLinkField'
 import ApprovalRecordLinkPicker from '../../approvals/components/ApprovalRecordLinkPicker.vue'
+import {
+  computeDateRangeDurationText,
+  dateRangePickerElementType,
+  dateRangePickerValueFormat,
+} from '../../approvals/dateRangeField'
 import {
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
@@ -771,6 +906,104 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
 
+// ---------------------------------------------------------------------------
+// Lock-1 §K2 (提交人自选) — submit-time approver chooser state.
+// ---------------------------------------------------------------------------
+interface RequesterChoiceChooser {
+  nodeKey: string
+  nodeName: string
+  mode: 'single' | 'multi'
+  scope: RequesterChoiceAssigneeSource['scope']
+}
+
+// One chooser row per approval node whose sources include a requester_choice entry (the FIRST
+// such source drives the UI; the server validates the submitted choice against EVERY
+// requester_choice source on the node, so the UI can never under-constrain the create).
+const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
+  const graph = template.value?.approvalGraph
+  if (!graph) return []
+  const choosers: RequesterChoiceChooser[] = []
+  for (const node of graph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources
+    if (!Array.isArray(sources)) continue
+    const source = sources.find(
+      (entry): entry is RequesterChoiceAssigneeSource => !!entry && entry.kind === 'requester_choice',
+    )
+    if (source) {
+      choosers.push({
+        nodeKey: node.key,
+        nodeName: (node.name && node.name.trim()) || node.key,
+        mode: source.mode,
+        scope: source.scope,
+      })
+    }
+  }
+  return choosers
+})
+
+const requesterChoices = reactive<Record<string, string[]>>({})
+const choiceOptions = reactive<Record<string, ApprovalDirectoryUser[]>>({})
+const choiceSearchLoading = reactive<Record<string, boolean>>({})
+
+function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
+  if (chooser.scope.type === 'members') return '限指定成员'
+  if (chooser.scope.type === 'role') return '限指定角色的成员'
+  return '全公司可选'
+}
+
+function choiceOptionLabel(option: ApprovalDirectoryUser): string {
+  const primary = option.name?.trim() || option.id
+  const email = option.email?.trim()
+  return email ? `${primary} · ${email}` : primary
+}
+
+async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string): Promise<void> {
+  choiceSearchLoading[chooser.nodeKey] = true
+  try {
+    // Scope-filtered SERVER-SIDE so a members/role-scoped candidate outside the current search
+    // page still surfaces, and out-of-scope users never appear as pickable at all.
+    const scope = chooser.scope.type === 'members'
+      ? { userIds: chooser.scope.userIds }
+      : chooser.scope.type === 'role'
+        ? { roleIds: chooser.scope.roleIds }
+        : {}
+    choiceOptions[chooser.nodeKey] = await searchApprovalDirectoryUsers(q, 20, scope)
+  } finally {
+    choiceSearchLoading[chooser.nodeKey] = false
+  }
+}
+
+function setRequesterChoice(chooser: RequesterChoiceChooser, value: string[] | string | null): void {
+  const ids = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    : typeof value === 'string' && value.length > 0
+      ? [value]
+      : []
+  if (ids.length === 0) delete requesterChoices[chooser.nodeKey]
+  else requesterChoices[chooser.nodeKey] = ids
+  // A changed choice invalidates a previously resolved route preview (stale names must not stick).
+  routePreviewController.invalidate()
+}
+
+/** First chooser whose selection does not satisfy its mode cardinality; null when all chosen. */
+function missingRequesterChoiceNode(): RequesterChoiceChooser | null {
+  for (const chooser of requesterChoiceNodes.value) {
+    const ids = requesterChoices[chooser.nodeKey] ?? []
+    if (chooser.mode === 'single' ? ids.length !== 1 : ids.length === 0) return chooser
+  }
+  return null
+}
+
+function buildRequesterChoicesPayload(): Record<string, string[]> {
+  const payload: Record<string, string[]> = {}
+  for (const chooser of requesterChoiceNodes.value) {
+    const ids = requesterChoices[chooser.nodeKey]
+    if (ids && ids.length > 0) payload[chooser.nodeKey] = [...ids]
+  }
+  return payload
+}
+
 // RP-2 (B3-05): live route preview state. Compute-at-click; any form edit invalidates the resolved
 // path (stale resolution must never keep rendering as if it matched the current values). The
 // generation race-guard lives in createRoutePreviewController so it is unit-testable.
@@ -786,7 +1019,14 @@ const routePreviewController = createRoutePreviewController(previewApprovalRoute
 
 async function loadRoutePreview() {
   if (!template.value) return
-  await routePreviewController.run({ templateId: template.value.id, formData: { ...formData } })
+  // §K2: choices made so far ride along so the preview resolves the chosen names; pre-choice
+  // the server previews the requester_choice node honestly (placeholder / unresolved).
+  const choices = buildRequesterChoicesPayload()
+  await routePreviewController.run({
+    templateId: template.value.id,
+    formData: { ...formData },
+    ...(Object.keys(choices).length > 0 ? { requesterChoices: choices } : {}),
+  })
 }
 
 watch(formData, () => routePreviewController.invalidate(), { deep: true })
@@ -796,9 +1036,31 @@ watch(formData, () => routePreviewController.invalidate(), { deep: true })
 // (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
 const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
 
-// G-B2-16: uppercase caption for the declared amount total.
-function amountWordsFor(fieldId: string): string {
-  return amountToChineseWords(formData[fieldId])
+// G-B2-16: uppercase caption for the declared amount total. L8-C (§0.4) adds a SECOND, independent
+// trigger (`props.uppercaseCny`) without touching this branch's byte-identical existing behavior —
+// the auto-summed-total path below is UNCHANGED (same raw `formData` read, same call shape). The
+// new per-field-flag branch is additionally gated on `numberFieldScale(field) <= 2`:
+// amountInWords.ts's own header records that `amountToChineseWords` always rounds to 2 decimals
+// internally and is therefore only an honest caption when the field's declared scale is <= 2 — the
+// pre-existing auto-sum trigger stays within that bound by authoring convention (money-total
+// presets are 2-decimal), but L8-C's `uppercaseCny` is a free-standing per-field opt-in an author
+// could otherwise set on a `precision: 4` field, silently misrepresenting the stored value. Gating
+// here (rather than loosening amountToChineseWords's own 2-decimal rounding) keeps that pure
+// util's contract unchanged.
+function amountWordsFor(field: FormField): string {
+  if (isAutoSummedTotal(field.id)) return amountToChineseWords(formData[field.id])
+  if (isAmountWordsField(field) && numberFieldScale(field) <= 2) {
+    return amountToChineseWords(roundToFieldScale(formData[field.id], numberFieldScale(field)))
+  }
+  return ''
+}
+
+// L8-C: formatted-number display caption (currency prefix / thousands grouping), PRESENTATION ONLY
+// — reads the SAME `formData` value the input holds, rounded to the field's declared scale (the
+// same scale the total-check and the 大写 caption already respect).
+function amountDisplayCaption(field: FormField): string {
+  const spec = amountDisplayProps(field)
+  return formatAmountDisplay(formData[field.id], spec, numberFieldScale(field))
 }
 
 const formRules = computed<FormRules>(() => {
@@ -808,13 +1070,34 @@ const formRules = computed<FormRules>(() => {
     // template comment above), so a `required` attachment must never make the form unsubmittable;
     // there is no way for the user to satisfy it. Excluded from validation entirely.
     if (field.required && field.type !== 'attachment') {
-      rules[field.id] = [
+      if (field.type === 'date_range') {
+        // Lock-8 L8-B: `formData[field.id]` is `{ start, end }` — a non-null OBJECT even when both
+        // endpoints are blank, so el-form's built-in `required: true` empty-check (string/array/
+        // null/undefined only) would silently pass a wholly-unfilled required date_range. A custom
+        // validator closes that (the server's `isDateRangeEndpointValid` still catches it either
+        // way at submit — this is client-side UX clarity, not the authority).
+        rules[field.id] = [
+          {
+            required: true,
+            trigger: ['blur', 'change'],
+            validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
+              if (!dateRangeStart(field.id) || !dateRangeEnd(field.id)) {
+                callback(new Error(`请填写${field.label}`))
+                return
+              }
+              callback()
+            },
+          },
+        ]
+      } else {
         // B2-15: `blur` alone never reliably fires for a select / date-picker (the user picks via
         // a click in a popper, not a native blur on a text input), so a required select/date left
         // unset could silently pass validation until submit-time. `change` catches those; `blur`
         // stays too so leaving a text/textarea/number field empty validates without a submit click.
-        { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
-      ]
+        rules[field.id] = [
+          { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
+        ]
+      }
     }
   }
   return rules
@@ -907,6 +1190,44 @@ function onRecordLinkPicked(payload: { recordId: string; display: string }): voi
   }
   recordLinkPickerVisible.value = false
   recordLinkPickerField.value = null
+}
+
+// ---------------------------------------------------------------------------
+// Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-8) date_range fill helpers
+// — `formData[field.id]` is `{ start, end }`. Duration is DERIVED and DISPLAY-ONLY: computed fresh
+// on every read, never stored in `formData`, never submitted, no control offers editing it.
+// ---------------------------------------------------------------------------
+function dateRangeStart(fieldId: string): string {
+  const value = formData[fieldId]
+  return value && typeof value === 'object' && typeof (value as { start?: unknown }).start === 'string'
+    ? ((value as { start: string }).start)
+    : ''
+}
+
+function dateRangeEnd(fieldId: string): string {
+  const value = formData[fieldId]
+  return value && typeof value === 'object' && typeof (value as { end?: unknown }).end === 'string'
+    ? ((value as { end: string }).end)
+    : ''
+}
+
+function setDateRangeStart(fieldId: string, value: string | null): void {
+  formData[fieldId] = { start: value ?? '', end: dateRangeEnd(fieldId) }
+}
+
+function setDateRangeEnd(fieldId: string, value: string | null): void {
+  formData[fieldId] = { start: dateRangeStart(fieldId), end: value ?? '' }
+}
+
+function dateRangeDurationDisplay(field: FormField): string {
+  const dateType = field.props?.dateType
+  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id))
+  return text ?? '-'
+}
+
+function dateRangeDurationLabel(field: FormField): string {
+  const label = field.props?.durationLabel
+  return typeof label === 'string' && label.trim() ? label.trim() : '时长'
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,11 +1341,20 @@ async function handleSubmit() {
     }
   }
 
+  // Lock-1 §K2: block submit until every requester_choice node carries a mode-satisfying
+  // choice — the server would 422 values-free anyway; this surfaces the actionable message.
+  const missingChoice = missingRequesterChoiceNode()
+  if (missingChoice) {
+    ElMessage.warning(`请为「${missingChoice.nodeName}」选择审批人`)
+    return
+  }
+
   const templateId = route.params.templateId as string
   try {
     const result = await approvalStore.submitApproval({
       templateId,
       formData: buildSubmitFormData(),
+      ...(requesterChoiceNodes.value.length > 0 ? { requesterChoices: buildRequesterChoicesPayload() } : {}),
     })
     ElMessage.success('审批已提交')
     // G-B2-14: a successful submit consumes the draft.
@@ -1090,6 +1420,11 @@ onMounted(async () => {
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         // detail value is an array of row objects; seed empty so the fill table binds an array.
         formData[field.id] = []
+      } else if (field.type === 'date_range') {
+        // Lock-8 L8-B: value is `{ start, end }` — seed BOTH keys present (empty strings) so the
+        // two pickers and the derived-duration display always have a well-defined shape to bind
+        // against, rather than reading off `undefined`.
+        formData[field.id] = { start: '', end: '' }
       } else {
         formData[field.id] = undefined
       }
@@ -1121,6 +1456,8 @@ function syncVisibleFormState() {
         formData[field.id] = field.defaultValue
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         formData[field.id] = []
+      } else if (field.type === 'date_range') {
+        formData[field.id] = { start: '', end: '' }
       }
     }
   }
@@ -1176,6 +1513,11 @@ watch([visibleFieldIds, template], () => {
    deliberately NOT the authoring canvas's node-graph styling — this is a compact glance, not an
    editing surface. */
 .approval-new__flow-preview {
+  margin-bottom: 8px;
+}
+
+/* Lock-1 §K2: submit-time approver chooser card. */
+.approval-new__requester-choice {
   margin-bottom: 8px;
 }
 
@@ -1259,6 +1601,53 @@ watch([visibleFieldIds, template], () => {
   margin-top: var(--ms-space-1);
   font-size: 12px;
   color: var(--ms-text-3);
+}
+
+.approval-new__amount-display {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.approval-new__date-range-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2, 8px);
+  width: 100%;
+}
+
+.approval-new__date-range-row .el-date-editor {
+  flex: 1;
+}
+
+.approval-new__date-range-sep {
+  flex: none;
+  color: var(--el-text-color-secondary);
+}
+
+.approval-new__date-range-duration {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
+  display: flex;
+  gap: var(--ms-space-1, 4px);
+}
+
+.approval-new__date-range-duration-label::after {
+  content: '：';
+}
+
+.approval-new__explanation {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--ms-bg-subtle, var(--el-fill-color-light));
+  color: var(--ms-text-2, var(--el-text-color-regular));
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .approval-new__form {

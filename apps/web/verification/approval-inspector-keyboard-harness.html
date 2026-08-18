@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PR #4944 gate fix — approval inspector keyboard mechanism (real-browser harness)</title>
+    <!--
+      Gate fix round for PR #4944 (docs/development/approval-lock0-d0-interaction-delta-20260817.md,
+      review at /tmp/pr4944-review-claude-20260817.md), Deviation (4) / "minimum set to clear this
+      gate" item 3: "one real-browser keyboard check of the roster + tab strip is now mandatory
+      before merge — it can be a fixture page or a component-level browser mount, not the full app."
+
+      This harness mounts the REAL shipped components — ApprovalCanvasNodeInspector.vue +
+      ApprovalGraphNodeConfigEditor.vue, via the exact provide/inject wiring
+      TemplateAuthoringView.vue uses in production — so a real browser drives the real DOM
+      (native `role="radiogroup"` + `input[type=radio]` roster, native `role="tablist"`/`role="tab"`
+      tab strip), not a hand-copied replica. This is the one mechanism jsdom cannot execute AT ALL:
+      native radio-group commit-on-arrow semantics (gate P1-1 "Link B") and real Tab/roving-tabindex
+      focus movement (gate A-11/A-12). See approval-inspector-keyboard-harness.ts's header comment
+      for what is and is not covered here vs. the jsdom suite.
+    -->
+  </head>
+  <body style="margin:16px;font-family:system-ui">
+    <h3>PR #4944 — roster (P1-1) + tab strip (A-11/A-12) real-browser keyboard check</h3>
+    <div id="app"></div>
+    <script type="module" src="./approval-inspector-keyboard-harness.ts"></script>
+  </body>
+</html>

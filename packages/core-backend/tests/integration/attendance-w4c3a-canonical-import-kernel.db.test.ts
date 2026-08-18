@@ -23,6 +23,19 @@ import {
 import { parseAttendanceW4ShadowDiff } from '../../src/services/AttendanceW4CalculationDetail'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as addOffStatusUp } from '../../src/db/migrations/zzzz20260731120000_w4c3a_add_off_daily_status'
+// W7-1b P2-2: this suite builds its scratch schema from a HAND-PICKED migration
+// subset, which predated the W7-1a-M provenance widening — so
+// `chk_ar_projection_owner` there was still the pre-widening two-member set and
+// ANY group-owned import row would have been rejected by the fixture rather than
+// by the product. Applying the widening here is what makes the emission leg
+// below a test of the writer instead of a test of a stale schema.
+import { up as w7ProvenanceWideningUp } from '../../src/db/migrations/zzzz20260815120000_w7_1am_provenance_domain_widening'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -88,10 +101,13 @@ async function createBase(pool: Pool): Promise<void> {
     )`)
 }
 
-function frozenContext(orgId: string, userId: string, workDate: string) {
+/** W7-1b P2-2: `group` mints the v2 group-effective shape the seam now issues,
+ *  so the import kernel's PROVENANCE writer can be exercised for real. Default
+ *  stays the v1 legacy shape, so every pre-existing leg is unchanged. */
+function frozenContext(orgId: string, userId: string, workDate: string, selector: 'legacy' | 'group_effective' = 'legacy') {
   return {
-    schemaVersion: 1,
-    selector: 'legacy',
+    schemaVersion: selector === 'group_effective' ? 2 : 1,
+    selector,
     orgId,
     userId,
     workDate,
@@ -99,7 +115,7 @@ function frozenContext(orgId: string, userId: string, workDate: string) {
     shiftId: `shift-${run}`,
     isWorkday: true,
     holidayKind: null,
-    calculationGroupId: null,
+    calculationGroupId: selector === 'group_effective' ? `group-${run}` : null,
     roundingMinutes: 1,
     severeLateThresholdMinutes: 60,
     absenceLateThresholdMinutes: 240,
@@ -177,7 +193,7 @@ function policySourceProof(conflict: boolean) {
   }
 }
 
-function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflict?: boolean }>) {
+function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflict?: boolean; groupEffective?: boolean }>) {
   const orgId = crypto.randomUUID()
   const userId = crypto.randomUUID()
   const batchId = crypto.randomUUID()
@@ -207,7 +223,7 @@ function fixture(posture: 'shadow' | 'authoritative', input?: Readonly<{ conflic
     },
   })
   const attribution = frozenAttribution(orgId, userId, workDate)
-  const context = frozenContext(orgId, userId, workDate)
+  const context = frozenContext(orgId, userId, workDate, input?.groupEffective === true ? 'group_effective' : 'legacy')
   const policySource = policySourceProof(input?.conflict === true)
   const rawEvidence = {
     schemaVersion: 1,
@@ -466,14 +482,49 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     await createBase(pool)
     await w4c0Up(db)
     await addOffStatusUp(db)
+    await w7ProvenanceWideningUp(db)
   }, 90000)
 
   afterAll(async () => {
-    await db?.destroy()
-    await pool?.end()
-    await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
-    await adminPool?.end()
-  })
+    // #4820 recurrence: this suite owns both pools connected to the scratch database. Keep the
+    // exact administrator-termination handler scoped to teardown, then revoke new connections
+    // and drain before DROP instead of unconditionally killing idle clients with FORCE.
+    const teardownHandlers = [migrationPool, pool]
+      .filter((p): p is Pool => Boolean(p))
+      .map((p) => attachOwnedPoolTerminationHandler(p))
+    let closeError: unknown
+    let dropError: unknown
+    try {
+      try {
+        await db?.destroy()
+      } catch (error) {
+        closeError = error
+      }
+      try {
+        await pool?.end()
+      } catch (error) {
+        closeError ??= error
+      }
+      if (adminPool) {
+        try {
+          const outcome = await dropScratchDatabase(adminPool, scratchName)
+          console.log(formatScratchDropOutcome('w4c3a-canonical-import', outcome))
+        } catch (error) {
+          dropError = error
+          console.log(formatScratchDropFailure('w4c3a-canonical-import', error))
+        }
+      }
+    } finally {
+      try {
+        await adminPool?.end()
+      } catch (error) {
+        closeError ??= error
+      }
+      for (const handler of teardownHandlers) handler.detach()
+    }
+    if (closeError) throw closeError
+    if (dropError) throw dropError
+  }, 60000)
 
   async function execute(input: ReturnType<typeof fixture>): Promise<void> {
     const client = await pool.connect()
@@ -555,6 +606,51 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
       projected_work_minutes: 480,
     })])
     expect(rows.rows[0].current_calculation_id).toBe(rows.rows[0].calculation_id)
+  })
+
+  it('W7-1b P2-2 (T-P2): a GROUP-EFFECTIVE frozen context makes the import writer emit projection_owner = w4_group', async () => {
+    // The SECOND provenance emission point. `M-B6` covers only the core pointer
+    // writer (`w4c2-authoritative-calculation-core.ts`); neutering THIS one to a
+    // literal 'w4' left the whole battery green, which is what gate finding P2-2
+    // caught. Emission is derived from the CALCULATION's own frozen context —
+    // never the parent's existing `projection_owner` — so this leg drives a real
+    // v2 group context through the real import kernel.
+    const input = fixture('authoritative', { groupEffective: true })
+    await execute(input)
+    const rows = await pool.query(
+      `SELECT r.projection_owner, r.current_calculation_id::text AS current_calculation_id,
+              c.id::text AS calculation_id, c.context_snapshot
+         FROM attendance_records r
+         JOIN attendance_record_calculations c ON c.id = r.current_calculation_id
+        WHERE r.id = $1`,
+      [input.recordId],
+    )
+    expect(rows.rows.length, 'the import must have produced an authoritative row').toBe(1)
+    // Non-vacuity FIRST: the persisted context really is the group shape, so the
+    // owner assertion below is testing the derivation and not a constant.
+    expect((rows.rows[0].context_snapshot as Record<string, unknown>).selector).toBe('group_effective')
+    expect((rows.rows[0].context_snapshot as Record<string, unknown>).schemaVersion).toBe(2)
+    // POSITIVE equality, never `notEqual('w4')`.
+    expect(rows.rows[0].projection_owner).toBe('w4_group')
+    // ...and the pointer pair still holds, so the row the product actually
+    // produces satisfies `chk_ar_owner_pointer_pair` for real.
+    expect(rows.rows[0].current_calculation_id).toBe(rows.rows[0].calculation_id)
+  })
+
+  it('W7-1b P2-2 negative half: a LEGACY frozen context still emits w4 (the emitter is derived, not constant)', async () => {
+    // Without this, the leg above is equally consistent with "the writer always
+    // says w4_group now".
+    const input = fixture('authoritative')
+    await execute(input)
+    const rows = await pool.query(
+      `SELECT r.projection_owner, c.context_snapshot
+         FROM attendance_records r
+         JOIN attendance_record_calculations c ON c.id = r.current_calculation_id
+        WHERE r.id = $1`,
+      [input.recordId],
+    )
+    expect((rows.rows[0].context_snapshot as Record<string, unknown>).selector).toBe('legacy')
+    expect(rows.rows[0].projection_owner).toBe('w4')
   })
 
   it('folds two ordered source items into one calculation and seals both operations', async () => {

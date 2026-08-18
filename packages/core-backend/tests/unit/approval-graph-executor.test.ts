@@ -5,6 +5,7 @@ import {
   pruneHiddenFormData,
   validateApprovalFormData,
 } from '../../src/services/ApprovalGraphExecutor'
+import { resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -593,6 +594,217 @@ describe('ApprovalGraphExecutor', () => {
       code: 'APPROVAL_ASSIGNEE_EMPTY',
       statusCode: 400,
     }))
+  })
+
+  // Lock-1 §K5-b: this is the REAL resolveApprovalAssignees wired into the REAL executor (not a
+  // fake resolver returning `[]`) — the exact integration point the real-DB acceptance suite
+  // exercises over real SQL (approval-dept-head-at-level.db.test.ts's out-of-range leg), run here
+  // as a local, no-DB oracle for the SAME assertion: a `level` valid in contract but past the end
+  // of the frozen deptHeadChainIds resolves EMPTY via the resolver's own positional slice, and the
+  // executor's existing (unmodified) empty-assignee branching decides what happens next — never a
+  // crash, never a silently-materialized assignee. Positive control pair, per §K5's own text
+  // ("resolves EMPTY and falls to emptyAssigneePolicy, which is the shipped manager_at_level
+  // behavior, unchanged"): 'error' throws APPROVAL_ASSIGNEE_EMPTY; 'auto-approve' auto-approves —
+  // both are the SAME shipped emptyAssigneePolicy branch every other kind already goes through.
+  it('Lock-1 §K5-b: dept_head_at_level level past the end of the frozen deptHeadChainIds resolves EMPTY through the REAL resolver, and the executor applies the node emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve auto-approves) — never a crash, never a silent assignee', () => {
+    const requesterSnapshot = { id: 'requester-1', deptHeadChainIds: ['head-1', 'head-2'] }
+    const realResolver = ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: any }) =>
+      resolveApprovalAssignees({ nodeKey, sourceStep, config, formSnapshot: {}, requesterSnapshot })
+
+    const outOfRangeGraph = (emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'dhal-oor',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'dept_head_at_level', level: 5 }],
+            emptyAssigneePolicy,
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-oor', source: 'start', target: 'dhal-oor' },
+        { key: 'edge-oor-final', source: 'dhal-oor', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Positive control FIRST: an IN-RANGE level resolves a real assignee through the SAME real
+    // resolver + executor wiring (proves the fixture itself is capable of a non-empty result —
+    // the out-of-range legs below are not vacuously empty because of a broken fixture).
+    const inRangeExecutor = new ApprovalGraphExecutor(
+      { ...outOfRangeGraph('error'), nodes: outOfRangeGraph('error').nodes.map((n) => n.key === 'dhal-oor' ? { ...n, config: { assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }], emptyAssigneePolicy: 'error' } } : n) },
+      {},
+      { assignmentResolver: realResolver },
+    )
+    expect(inRangeExecutor.resolveInitialState().assignments).toEqual([
+      { assignmentType: 'user', assigneeId: 'head-1', nodeKey: 'dhal-oor', sourceStep: 1, metadata: { resolvedFrom: { kind: 'dept_head_at_level', sourceIndex: 0 } } },
+    ])
+
+    // 'error': out-of-range level (5) against a 2-entry chain -> empty resolution -> throws.
+    const errorExecutor = new ApprovalGraphExecutor(outOfRangeGraph('error'), {}, { assignmentResolver: realResolver })
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve': the SAME empty resolution, but the node's own policy governs — the shipped,
+    // unmodified `emptyAssigneePolicy: 'auto-approve'` branch fires (never a silent NOBODY: it is
+    // an EXPLICIT, audited autoApprovalEvents entry, not an unassigned pending node).
+    const autoExecutor = new ApprovalGraphExecutor(outOfRangeGraph('auto-approve'), {}, { assignmentResolver: realResolver })
+    const autoInitial = autoExecutor.resolveInitialState()
+    expect(autoInitial.currentNodeKey).toBe('final-review')
+    expect(autoInitial.autoApprovalEvents).toEqual([
+      { nodeKey: 'dhal-oor', sourceStep: 1, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
+  })
+
+  // ── Lock-1 §K6 precondition (landed by the K3 slice): normalizeApprovalMode fails CLOSED ──
+  // The executor's mode normalizer previously mapped ANY unrecognized mode silently to 'single'
+  // (fail-open). Contract-valid data never reached that arm (the authoring choke + the stored-graph
+  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode (e.g.
+  // 'sequential') would degrade it silently to first-approver-wins. These tests pin the closure:
+  // the MUTATION "revert normalizeApprovalMode to fail-open" must red the first test below.
+  it('fails CLOSED: an unrecognized approvalMode reaching the executor throws APPROVAL_MODE_UNSUPPORTED instead of running as single (G-14 arm; mutation: revert to fail-open reds THIS test)', () => {
+    const unknownModeGraph = (approvalMode: unknown): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'skewed',
+          type: 'approval',
+          // Hand-crafted config — the exact deploy-skew shape: a graph published by NEWER code
+          // carrying a mode THIS executor does not know. Bypasses the authoring choke on purpose.
+          config: { assigneeType: 'user', assigneeIds: ['approver-a', 'approver-b'], approvalMode: approvalMode as never },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-skewed', source: 'start', target: 'skewed' },
+        { key: 'edge-skewed-end', source: 'skewed', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    for (const unknown of ['sequential', 'SINGLE', 'or_sign', null, 42]) {
+      const executor = new ApprovalGraphExecutor(unknownModeGraph(unknown), {})
+      // Accessor path (getApprovalMode) and resolution path (resolveInitialState) both fail
+      // closed — under the OLD fail-open arm both would have run the node as 'single'.
+      expect(() => executor.getApprovalMode('skewed'), JSON.stringify(unknown)).toThrowError(expect.objectContaining({
+        code: 'APPROVAL_MODE_UNSUPPORTED',
+        statusCode: 400,
+      }))
+      expect(() => executor.resolveInitialState(), JSON.stringify(unknown)).toThrowError(expect.objectContaining({
+        code: 'APPROVAL_MODE_UNSUPPORTED',
+      }))
+    }
+    // Values-free: the error names the node key (template-authored — permitted), never the raw
+    // unknown value (which could be arbitrary junk).
+    try {
+      new ApprovalGraphExecutor(unknownModeGraph('or_sign'), {}).getApprovalMode('skewed')
+      expect.unreachable('getApprovalMode must throw for an unknown mode')
+    } catch (error) {
+      expect((error as Error).message).toContain('skewed')
+      expect((error as Error).message).not.toContain('or_sign')
+    }
+  })
+
+  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold — still executes (the rejection is unknown-selected, not blanket)', () => {
+    const modeGraph = (config: Record<string, unknown>): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'node-m', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['approver-a', 'approver-b'], ...config } as never },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-m', source: 'start', target: 'node-m' },
+        { key: 'edge-m-end', source: 'node-m', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Absent → the documented 'single' default (the ONE legitimate non-member input).
+    const absentExecutor = new ApprovalGraphExecutor(modeGraph({}), {})
+    expect(absentExecutor.getApprovalMode('node-m')).toBe('single')
+    expect(absentExecutor.resolveInitialState().assignments).toHaveLength(2)
+
+    for (const mode of ['single', 'all', 'any'] as const) {
+      const executor = new ApprovalGraphExecutor(modeGraph({ approvalMode: mode }), {})
+      expect(executor.getApprovalMode('node-m')).toBe(mode)
+      expect(executor.resolveInitialState().assignments).toHaveLength(2)
+    }
+    // threshold needs its approvalThreshold to pass assertThresholdReachable.
+    const thresholdExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'threshold', approvalThreshold: 2 }), {})
+    expect(thresholdExecutor.getApprovalMode('node-m')).toBe('threshold')
+    expect(thresholdExecutor.resolveInitialState().assignments).toHaveLength(2)
+  })
+
+  // ── Lock-1 §K3 prior_node_approver — REAL resolver + REAL executor oracle ──
+  // The same no-DB wiring precedent as the §K5-b test above: the REAL resolveApprovalAssignees
+  // (not a fake returning []) inside the REAL executor, the exact integration point the real-DB
+  // suite drives over SQL. The map is CALLER-supplied (the §2.1 contract): the test plays the
+  // caller's role exactly as dispatchAction does after reading audit rows.
+  it('Lock-1 §K3: a prior_node_approver node activated after the referenced node resolves that node ACTUAL deciders from the caller-supplied map; an absent/empty map falls to emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve is an explicit audited event — never a silent nobody)', () => {
+    const k3Graph = (emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'gate', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['approver-1'] }] } },
+        { key: 'again', type: 'approval', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }], emptyAssigneePolicy } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'gate' },
+        { key: 'edge-gate-again', source: 'gate', target: 'again' },
+        { key: 'edge-again-end', source: 'again', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+    const resolverWith = (priorNodeApprovers?: Record<string, string[]>) =>
+      ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: never }) =>
+        resolveApprovalAssignees({
+          nodeKey,
+          sourceStep,
+          config,
+          formSnapshot: {},
+          requesterSnapshot: { id: 'requester-1' },
+          ...(priorNodeApprovers !== undefined ? { priorNodeApprovers } : {}),
+        })
+
+    // Happy path (positive control FIRST): gate approved by approver-1 → the caller (playing
+    // dispatchAction's role) supplies { gate: ['approver-1'] } → 'again' assigns approver-1 with
+    // the §2.6 audit trail (resolvedFrom.priorNodeKey).
+    const happyExecutor = new ApprovalGraphExecutor(k3Graph('error'), {}, { assignmentResolver: resolverWith({ gate: ['approver-1'] }) as never })
+    const advanced = happyExecutor.resolveAfterApprove('gate')
+    expect(advanced.currentNodeKey).toBe('again')
+    expect(advanced.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'approver-1',
+        nodeKey: 'again',
+        sourceStep: 2,
+        metadata: { resolvedFrom: { kind: 'prior_node_approver', sourceIndex: 0, priorNodeKey: 'gate' } },
+      },
+    ])
+
+    // 'error' + no map (skipped/unreached/sentinel-only referenced round): fail-closed throw.
+    const errorExecutor = new ApprovalGraphExecutor(k3Graph('error'), {}, { assignmentResolver: resolverWith(undefined) as never })
+    expect(() => errorExecutor.resolveAfterApprove('gate')).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve' + sentinel-only map: the drop leaves nothing and the node's OWN policy fires
+    // an EXPLICIT audited auto-approval event (OD-L1-4(a)) — never a silently-materialized
+    // assignee, never an unassigned pending node.
+    const autoExecutor = new ApprovalGraphExecutor(k3Graph('auto-approve'), {}, { assignmentResolver: resolverWith({ gate: ['system:auto-approval'] }) as never })
+    const autoAdvanced = autoExecutor.resolveAfterApprove('gate')
+    expect(autoAdvanced.status).toBe('approved')
+    expect(autoAdvanced.autoApprovalEvents).toEqual([
+      { nodeKey: 'again', sourceStep: 2, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
   })
 
   it('tags resolveAfterApprove resolutions with the resolved-away node aggregate mode', () => {

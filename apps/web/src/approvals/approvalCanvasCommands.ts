@@ -213,7 +213,8 @@ function executeMoveNodeIntoEdge(
     }
     return fail('unsupported-node-type', `move: parallel nodes cannot be moved`)
   }
-  if (node.type !== 'approval' && node.type !== 'cc') {
+  // Lock-3 R-23: a handler moves like an approval/cc linear node (single-in/single-out).
+  if (node.type !== 'approval' && node.type !== 'cc' && node.type !== 'handler') {
     return fail('unsupported-node-type', `move: ${String(node.type)} nodes cannot be moved`)
   }
 

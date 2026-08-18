@@ -17,6 +17,20 @@
         </span>
         <span class="template-authoring__meta-count">{{ draft.fields.length }} 个表单字段</span>
         <span class="template-authoring__meta-count">{{ authoringFlowNodeCount }} 个流程节点</span>
+        <!-- P1-D (master §4 UI-3/UI-9): compact navigation-only link to the existing version
+             history section on TemplateDetailView.vue — no new version storage here. Lives in the
+             #meta info line (not #actions) so it never contends with the Lock-0 L0-5 header
+             route-preview toggle debt, which parent §9/§2 places in the ACTIONS/toolbar area. -->
+        <el-button
+          v-if="hasSavedVersionHistory"
+          text
+          size="small"
+          class="template-authoring__version-history-link"
+          data-testid="approval-template-version-history-link"
+          @click="goToVersionHistory"
+        >
+          版本历史
+        </el-button>
       </template>
       <template #actions>
         <div class="template-authoring__actions">
@@ -98,10 +112,6 @@
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
         <nav class="template-authoring__steps" aria-label="模板配置步骤">
-          <div class="template-authoring__steps-heading">
-            <strong>模板配置</strong>
-            <span>按步骤完成，随时可保存草稿</span>
-          </div>
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -109,22 +119,25 @@
             :class="{ 'is-active': activeAuthoringSection === section.id }"
             text
             :aria-current="activeAuthoringSection === section.id ? 'step' : undefined"
+            :aria-label="`${index + 1} ${section.label} ${section.description}${section.id === 'basic' && basicInfoIssueCount > 0 ? `，${basicInfoIssueCount} 项不完善` : ''}`"
             :data-testid="`approval-template-section-${section.id}`"
             @click="selectAuthoringSection(section.id)"
           >
             <span class="template-authoring__step-index">{{ index + 1 }}</span>
             <span class="template-authoring__step-copy">
               <strong>{{ section.label }}</strong>
-              <small>{{ section.description }}</small>
             </span>
+            <!-- P1-A0: typed-issue-derived count, basic-info step only (see `basicInfoIssueCount`
+                 above — NOT the parent-lock header count, which stays undelivered debt).
+                 Reuses the pre-existing `.template-authoring__step-count` pill style, which had
+                 no template usage before this slice. -->
             <span
-              v-if="section.id === 'fields'"
+              v-if="section.id === 'basic' && basicInfoIssueCount > 0"
               class="template-authoring__step-count"
-            >{{ draft.fields.length }}</span>
-            <span
-              v-else-if="section.id === 'flow'"
-              class="template-authoring__step-count"
-            >{{ authoringFlowNodeCount }}</span>
+              data-testid="approval-template-section-basic-issue-count"
+            >
+              {{ basicInfoIssueCount }} 项不完善
+            </span>
           </el-button>
         </nav>
 
@@ -182,10 +195,20 @@
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
           </el-form-item>
           <el-form-item label="分类">
-            <el-input v-model="draft.category" :disabled="readOnly" placeholder="如 请假 / 采购 / 报销" />
+            <el-input
+              v-model="draft.category"
+              :disabled="readOnly"
+              placeholder="如 请假 / 采购 / 报销"
+              data-testid="approval-template-category"
+            />
           </el-form-item>
           <el-form-item label="SLA 小时">
-            <el-input v-model="draft.slaHoursText" :disabled="readOnly" placeholder="留空表示不启用" />
+            <el-input
+              v-model="draft.slaHoursText"
+              :disabled="readOnly"
+              placeholder="留空表示不启用"
+              data-testid="approval-template-sla-hours"
+            />
           </el-form-item>
           <el-form-item label="描述" class="template-authoring__wide">
             <el-input
@@ -193,11 +216,17 @@
               :disabled="readOnly"
               type="textarea"
               :rows="3"
+              data-testid="approval-template-description"
             />
           </el-form-item>
           <el-form-item label="可见范围">
             <div class="template-authoring__inline">
-              <el-select v-model="draft.visibilityType" :disabled="readOnly" class="ms-w-140">
+              <el-select
+                v-model="draft.visibilityType"
+                :disabled="readOnly"
+                class="ms-w-140"
+                data-testid="approval-template-visibility-type"
+              >
                 <el-option label="全员" value="all" />
                 <el-option label="部门" value="dept" />
                 <el-option label="角色" value="role" />
@@ -207,11 +236,16 @@
                 v-model="draft.visibilityIdsText"
                 :disabled="readOnly || draft.visibilityType === 'all'"
                 placeholder="逗号分隔，按所选范围填写"
+                data-testid="approval-template-visibility-ids"
               />
             </div>
           </el-form-item>
           <el-form-item label="发布策略">
-            <el-checkbox v-model="draft.allowRevoke" :disabled="readOnly">
+            <el-checkbox
+              v-model="draft.allowRevoke"
+              :disabled="readOnly"
+              data-testid="approval-template-allow-revoke"
+            >
               允许发起人撤回
             </el-checkbox>
           </el-form-item>
@@ -221,7 +255,7 @@
       <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>表单字段</strong>
+            <strong>表单设计</strong>
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
@@ -252,313 +286,36 @@
           </div>
         </template>
 
-        <!-- D6-f2 palette: ordinary users pick a field kind; no field-id entry. -->
-        <div
-          v-if="!readOnly"
-          class="template-authoring__field-palette"
-          data-testid="approval-field-palette"
-          role="group"
-          aria-label="添加表单字段类型"
-        >
-          <el-button
-            v-for="entry in fieldPaletteEntries"
-            :key="entry.type"
-            size="small"
-            :data-testid="`approval-field-palette-${entry.type}`"
-            @click="addFieldOfType(entry.type)"
-          >
-            {{ entry.label }}
-          </el-button>
-        </div>
-
-        <div
-          v-for="(field, index) in draft.fields"
-          :id="`approval-field-row-${field.localId}`"
-          :key="field.localId"
-          class="template-authoring__item"
-          :class="{ 'template-authoring__item--focused': formFieldFocusLocalId === field.localId }"
-          data-testid="approval-template-field-row"
-          :data-field-local-id="field.localId"
-          :data-selected="formFieldFocusLocalId === field.localId ? 'true' : undefined"
-          :aria-current="formFieldFocusLocalId === field.localId ? 'true' : undefined"
-          tabindex="-1"
-          :draggable="!readOnly"
-          @focusin="selectFormFieldFocus(field.localId)"
-          @dragstart="onFieldDragStart(index)"
-          @dragover.prevent
-          @drop="onFieldDrop(index)"
-        >
-          <div class="template-authoring__item-toolbar">
-            <strong>字段 {{ index + 1 }}</strong>
-            <div>
-              <el-button size="small" :disabled="readOnly || index === 0" @click="moveField(index, -1)">上移</el-button>
-              <el-button size="small" :disabled="readOnly || index === draft.fields.length - 1" @click="moveField(index, 1)">下移</el-button>
-              <el-button size="small" type="danger" :disabled="readOnly || draft.fields.length === 1" @click="removeField(index)">删除</el-button>
-            </div>
-          </div>
-          <div class="template-authoring__grid">
-            <!-- D1 hygiene: field.id is auto-generated / load-preserved; not an ordinary control. -->
-            <el-form-item label="字段名称">
-              <el-input v-model="field.label" :disabled="readOnly" />
-            </el-form-item>
-            <el-form-item label="类型">
-              <el-select
-                v-model="field.type"
-                :disabled="readOnly"
-                class="ms-w-100pct"
-                data-testid="approval-field-type"
-                @change="invalidateStaleRecordLinkDependencies(field)"
-              >
-                <el-option label="文本" value="text" />
-                <el-option label="多行文本" value="textarea" />
-                <el-option label="数字" value="number" />
-                <el-option label="日期" value="date" />
-                <el-option label="日期时间" value="datetime" />
-                <el-option label="单选" value="select" />
-                <el-option label="多选" value="multi-select" />
-                <el-option label="用户" value="user" />
-                <el-option label="明细（子表单）" value="detail" />
-                <el-option label="关联记录" value="record-link" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="占位文本">
-              <el-input v-model="field.placeholder" :disabled="readOnly" />
-            </el-form-item>
-            <el-form-item label="是否必填">
-              <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
-            </el-form-item>
-            <el-form-item
-              v-if="field.type === 'record-link'"
-              label="关联目标"
-              class="template-authoring__wide"
-              data-testid="approval-record-link-config"
-            >
-              <div
-                v-if="recordLinkCatalogError"
-                class="template-authoring__hint template-authoring__record-link-catalog-error"
-                data-testid="approval-record-link-catalog-error"
-              >
-                <span>{{ recordLinkCatalogError }}</span>
-                <el-button
-                  type="primary"
-                  link
-                  size="small"
-                  :loading="recordLinkCatalogLoading"
-                  data-testid="approval-record-link-catalog-retry"
-                  @click="retryRecordLinkCatalog"
-                >
-                  重试
-                </el-button>
-              </div>
-              <div class="template-authoring__grid">
-                <el-form-item label="目标空间">
-                  <el-select
-                    :model-value="field.recordLinkBaseId || undefined"
-                    :disabled="readOnly || recordLinkCatalogLoading"
-                    filterable
-                    clearable
-                    class="ms-w-100pct"
-                    placeholder="请选择目标空间"
-                    data-testid="approval-record-link-base-select"
-                    @update:model-value="(value: string | null | undefined) => onRecordLinkBaseChange(field, value)"
-                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
-                  >
-                    <el-option
-                      v-for="opt in recordLinkBaseOptionsFor(field)"
-                      :key="opt.value"
-                      :label="opt.label"
-                      :value="opt.value"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="目标表">
-                  <el-select
-                    :model-value="field.recordLinkSheetId || undefined"
-                    :disabled="readOnly || recordLinkCatalogLoading || !field.recordLinkBaseId.trim()"
-                    filterable
-                    clearable
-                    class="ms-w-100pct"
-                    placeholder="请选择目标表"
-                    data-testid="approval-record-link-sheet-select"
-                    @update:model-value="(value: string | null | undefined) => onRecordLinkSheetChange(field, value)"
-                    @visible-change="(open: boolean) => { if (open && !recordLinkCatalogLoaded) retryRecordLinkCatalog() }"
-                  >
-                    <el-option
-                      v-for="opt in recordLinkSheetOptionsFor(field)"
-                      :key="opt.value"
-                      :label="opt.label"
-                      :value="opt.value"
-                    />
-                  </el-select>
-                </el-form-item>
-              </div>
-              <div class="template-authoring__hint">
-                仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
-              </div>
-            </el-form-item>
-
-            <el-form-item
-              v-if="field.type === 'select' || field.type === 'multi-select'"
-              label="选项"
-              class="template-authoring__wide"
-            >
-              <el-input
-                v-model="field.optionsText"
-                :disabled="readOnly"
-                type="textarea"
-                :rows="3"
-                placeholder="每行一个选项，格式：显示名:值"
-              />
-            </el-form-item>
-            <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each
-                 sub-field is a LEAF type (no nested detail). Mirrors the backend column schema. -->
-            <el-form-item
-              v-if="field.type === 'detail'"
-              label="明细子字段"
-              class="template-authoring__wide"
-            >
-              <div class="template-authoring__detail" data-testid="approval-detail-config">
-                <el-table
-                  v-if="field.detailColumns.length > 0"
-                  :data="field.detailColumns"
-                  border
-                  size="small"
-                  class="template-authoring__detail-table"
-                >
-                  <!-- D1 hygiene: detail column id is auto-generated / load-preserved; not ordinary UI. -->
-                  <el-table-column label="名称" min-width="120">
-                    <template #default="{ row }">
-                      <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="类型" min-width="120">
-                    <template #default="{ row }">
-                      <el-select v-model="row.type" :disabled="readOnly" class="ms-w-100pct">
-                        <el-option
-                          v-for="leaf in detailLeafTypeOptions"
-                          :key="leaf.value"
-                          :label="leaf.label"
-                          :value="leaf.value"
-                        />
-                      </el-select>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="必填" width="70" align="center">
-                    <template #default="{ row }">
-                      <el-checkbox v-model="row.required" :disabled="readOnly" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="选项" min-width="160">
-                    <template #default="{ row }">
-                      <el-input
-                        v-if="row.type === 'select' || row.type === 'multi-select'"
-                        v-model="row.optionsText"
-                        :disabled="readOnly"
-                        type="textarea"
-                        :rows="2"
-                        placeholder="每行一个：显示名:值"
-                      />
-                      <span v-else class="template-authoring__hint">—</span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="操作" width="70" align="center">
-                    <template #default="{ $index }">
-                      <el-button
-                        type="danger"
-                        link
-                        :disabled="readOnly"
-                        @click="removeDetailColumn(field, $index)"
-                      >
-                        删除
-                      </el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
-                <div v-else class="template-authoring__hint">尚无子字段，请添加至少一个。</div>
-                <div class="template-authoring__detail-actions">
-                  <el-button
-                    size="small"
-                    type="primary"
-                    plain
-                    :disabled="readOnly"
-                    data-testid="approval-detail-add-column"
-                    @click="addDetailColumn(field)"
-                  >
-                    添加子字段
-                  </el-button>
-                  <el-input
-                    v-model="field.minRowsText"
-                    :disabled="readOnly"
-                    placeholder="最小行数"
-                    class="ms-w-120"
-                  />
-                  <el-input
-                    v-model="field.maxRowsText"
-                    :disabled="readOnly"
-                    placeholder="最大行数"
-                    class="ms-w-120"
-                  />
-                </div>
-              </div>
-            </el-form-item>
-            <el-form-item label="显隐规则" class="template-authoring__wide">
-              <div class="template-authoring__visibility">
-                <el-select
-                  v-model="field.visibility.dependsOnFieldId"
-                  :disabled="readOnly"
-                  class="ms-w-200"
-                  data-testid="approval-field-visibility-depends"
-                >
-                  <el-option label="无（始终显示）" value="" />
-                  <el-option
-                    v-for="dep in visibilityFieldOptions(field)"
-                    :key="dep.localId"
-                    :label="dep.label"
-                    :value="dep.id"
-                  />
-                </el-select>
-                <template v-if="field.visibility.dependsOnFieldId">
-                  <el-select
-                    v-model="field.visibility.operator"
-                    :disabled="readOnly"
-                    class="ms-w-130"
-                    data-testid="approval-field-visibility-operator"
-                  >
-                    <el-option label="等于" value="eq" />
-                    <el-option label="不等于" value="neq" />
-                    <el-option label="包含" value="in" />
-                    <el-option label="为空" value="isEmpty" />
-                    <el-option label="不为空" value="notEmpty" />
-                  </el-select>
-                  <el-input
-                    v-if="field.visibility.operator === 'in'"
-                    v-model="field.visibility.valueText"
-                    :disabled="readOnly"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="每行一个值"
-                    class="ms-w-240"
-                    data-testid="approval-field-visibility-values"
-                  />
-                  <el-input
-                    v-else-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'"
-                    v-model="field.visibility.valueText"
-                    :disabled="readOnly"
-                    placeholder="比较值"
-                    class="ms-w-240"
-                    data-testid="approval-field-visibility-value"
-                  />
-                </template>
-              </div>
-              <div v-if="field.visibility.dependsOnFieldId" class="template-authoring__hint">
-                仅当依赖字段满足条件时才显示本字段。
-                <template v-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'">
-                  比较值留空表示「{{ field.visibility.operator === 'eq' ? '等于' : '不等于' }}空值」；要取消规则请把依赖字段设为「无」。
-                </template>
-              </div>
-            </el-form-item>
-          </div>
-        </div>
+        <ApprovalFormInlineEditor
+          data-testid="approval-form-designer"
+          :fields="draft.fields"
+          :read-only="readOnly"
+          :template-name="draft.name"
+          :form-field-focus-local-id="formFieldFocusLocalId"
+          :field-palette-groups="fieldPaletteGroups"
+          :field-palette-labels="FIELD_PALETTE_LABELS"
+          :detail-leaf-type-options="detailLeafTypeOptions"
+          :record-link-catalog-error="recordLinkCatalogError"
+          :record-link-catalog-loading="recordLinkCatalogLoading"
+          :record-link-catalog-loaded="recordLinkCatalogLoaded"
+          :record-link-base-options-for="recordLinkBaseOptionsFor"
+          :record-link-sheet-options-for="recordLinkSheetOptionsFor"
+          :visibility-field-options="visibilityFieldOptions"
+          @add-field-of-type="addFieldOfType"
+          @palette-drag-start="onPaletteDragStart"
+          @preview-drop="onPreviewDrop"
+          @select-field-focus="selectFormFieldFocus"
+          @field-drag-start="onFieldDragStart"
+          @field-drop="onFieldDrop"
+          @move-field="moveField"
+          @remove-field="removeField"
+          @invalidate-record-link-deps="invalidateStaleRecordLinkDependencies"
+          @retry-record-link-catalog="retryRecordLinkCatalog"
+          @record-link-base-change="onRecordLinkBaseChange"
+          @record-link-sheet-change="onRecordLinkSheetChange"
+          @add-detail-column="addDetailColumn"
+          @remove-detail-column="removeDetailColumn"
+        />
       </el-card>
 
       <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
@@ -612,10 +369,12 @@
             :minimap-width="CANVAS_MINIMAP_W"
             :minimap-height="CANVAS_MINIMAP_H"
             :graph-node-label="graphNodeLabel"
+            :canvas-node-summary="canvasNodeCardSummary"
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
             :can-insert-parallel-on-edge="canInsertParallelOnEdge"
+            :can-insert-handler-on-edge="canInsertHandlerOnEdge"
             :canvas-move-target-label="canvasMoveTargetLabel"
             @undo="onCanvasUndo"
             @redo="onCanvasRedo"
@@ -632,8 +391,10 @@
             @drop="onCanvasNodeDrop"
             @toggle-edge-insert="toggleEdgeInsertMenu"
             @edge-insert-approval="onEdgeInsertApproval"
+            @edge-insert-cc="onEdgeInsertCc"
             @edge-insert-condition="onEdgeInsertCondition"
             @edge-insert-parallel="onEdgeInsertParallel"
+            @edge-insert-handler="onEdgeInsertHandler"
           />
           <ApprovalCanvasNodeInspector
             v-if="selectedCanvasInspectorNode"
@@ -807,6 +568,10 @@
                 <el-option label="连续多级上级" value="continuous_managers" />
                 <el-option label="指定层级上级" value="manager_at_level" />
                 <el-option label="表单用户字段" value="form_field_user" />
+                <el-option label="提交人自选" value="requester_choice" />
+                <el-option label="连续多级部门负责人" value="continuous_dept_heads" />
+                <el-option label="指定层级部门负责人" value="dept_head_at_level" />
+                <el-option label="节点审批人" value="prior_node_approver" />
               </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'continuous_managers'" label="上级层级数">
@@ -822,6 +587,18 @@
                 data-testid="approval-step-levels"
               />
             </el-form-item>
+            <!-- Lock-1 §K4 (连续多级部门负责人) linear authoring: reuses the shared `levels`
+                 field, same cap posture as continuous_managers. -->
+            <el-form-item v-if="step.sourceKind === 'continuous_dept_heads'" label="部门负责人层级数">
+              <el-input-number
+                v-model="step.levels"
+                :min="1"
+                :max="10"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-dept-head-levels"
+              />
+            </el-form-item>
             <el-form-item v-if="step.sourceKind === 'manager_at_level'" label="指定上级层级">
               <el-input-number
                 v-model="step.level"
@@ -831,6 +608,38 @@
                 :disabled="readOnly"
                 data-testid="approval-step-level"
               />
+            </el-form-item>
+            <!-- Lock-1 §K5-b (指定层级部门负责人) linear authoring: reuses the shared `level`
+                 field, same shape/cap posture as manager_at_level (a single level, not a count). -->
+            <el-form-item v-if="step.sourceKind === 'dept_head_at_level'" label="指定部门负责人层级">
+              <el-input-number
+                v-model="step.level"
+                :min="1"
+                :max="10"
+                :step="1"
+                :disabled="readOnly"
+                data-testid="approval-step-dept-head-level"
+              />
+            </el-form-item>
+            <!-- Lock-1 §K3 (节点审批人) linear authoring: a TYPED picker over the STRICTLY-EARLIER
+                 steps only (never a free-text node key). The reference is stored as the earlier
+                 step's stable localId, so insert/reorder can never silently retarget it; the
+                 builder emits that step's current positional key at save. -->
+            <el-form-item v-if="step.sourceKind === 'prior_node_approver'" label="引用审批步骤">
+              <el-select
+                v-model="step.priorStepLocalId"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="选择之前的审批步骤"
+                data-testid="approval-step-prior-node"
+              >
+                <el-option
+                  v-for="option in priorStepOptions(index)"
+                  :key="option.localId"
+                  :label="option.label"
+                  :value="option.localId"
+                />
+              </el-select>
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'static_user'" label="选择用户">
               <el-select
@@ -884,6 +693,75 @@
                 />
               </el-select>
             </el-form-item>
+            <!-- Lock-1 §K2 (提交人自选) linear authoring: mode + scope with typed pickers only
+                 (the scope id list rides the shared idsText chip carrier via stepIds/setStepIds). -->
+            <el-form-item v-if="step.sourceKind === 'requester_choice'" label="选择方式">
+              <el-select v-model="step.requesterChoiceMode" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-requester-choice-mode">
+                <el-option label="单选（提交时选一人）" value="single" />
+                <el-option label="多选（提交时可选多人）" value="multi" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="step.sourceKind === 'requester_choice'" label="可选范围">
+              <el-select
+                :model-value="step.requesterChoiceScopeType"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                data-testid="approval-step-requester-choice-scope"
+                @update:model-value="(type: 'company' | 'members' | 'role') => setStepRequesterChoiceScopeType(step, type)"
+              >
+                <el-option label="全公司（任意成员）" value="company" />
+                <el-option label="指定成员" value="members" />
+                <el-option label="指定角色的成员" value="role" />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              v-if="step.sourceKind === 'requester_choice' && step.requesterChoiceScopeType === 'members'"
+              label="可选成员"
+            >
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                remote
+                :remote-method="onUserSearch"
+                :loading="directory.usersLoading.value"
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="搜索用户名 / 邮箱"
+                data-testid="approval-step-requester-choice-user-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+                @visible-change="(visible: boolean) => visible && onUserSearch('')"
+              >
+                <el-option
+                  v-for="user in directory.users.value"
+                  :key="user.id"
+                  :label="directoryUserDisplayLabel(user)"
+                  :value="user.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              v-if="step.sourceKind === 'requester_choice' && step.requesterChoiceScopeType === 'role'"
+              label="可选角色"
+            >
+              <el-select
+                :model-value="stepIds(step)"
+                multiple
+                filterable
+                :disabled="readOnly"
+                class="ms-w-100pct"
+                placeholder="选择角色"
+                data-testid="approval-step-requester-choice-role-picker"
+                @update:model-value="(ids: string[]) => setStepIds(step, ids)"
+              >
+                <el-option
+                  v-for="role in directory.roles.value"
+                  :key="role.id"
+                  :label="directoryRoleDisplayLabel(role)"
+                  :value="role.id"
+                />
+              </el-select>
+            </el-form-item>
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
@@ -907,14 +785,15 @@
               </el-checkbox>
             </el-form-item>
           </div>
-          <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` is
-               enforced at runtime (server echo-redaction); `只读` round-trips but is not yet enforced
-               (T1-4b). A field left `可编辑` carries no persisted entry (absent === editable). -->
+          <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` and
+               `只读` are BOTH enforced server-side (Lock-7 P4-B: 隐藏 redacts the read echo + blocks a
+               write; 只读 blocks a write at this node). A field left `可编辑` carries no persisted
+               entry (absent === editable). -->
           <div class="template-authoring__field-perms" data-testid="approval-step-field-permissions">
             <div class="template-authoring__field-perms-head">
               <strong>字段权限</strong>
               <span class="template-authoring__hint">
-                「隐藏」在审批到该节点时对所有查看者隐藏该字段（仅回显隐藏，不影响审批人解析与条件路由）；「只读」将在后续版本生效。字段默认为「可编辑」。
+                「隐藏」在审批到该节点时对所有查看者隐藏该字段（仅回显隐藏，不影响审批人解析与条件路由）；「只读」表示该字段在本节点仅可查看、不可编辑。字段默认为「可编辑」。
               </span>
             </div>
             <div v-if="fieldPermissionFields.length === 0" class="template-authoring__hint">
@@ -940,18 +819,75 @@
                 <el-option label="隐藏" value="hidden" />
               </el-select>
               <span
-                v-if="stepFieldAccess(step, field.id) === 'readonly'"
-                class="template-authoring__hint"
-                data-testid="approval-step-field-readonly-hint"
-              >只读将在后续版本（T1-4b）生效，当前保存但暂不强制</span>
-              <span
-                v-else-if="stepFieldAccess(step, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+                v-if="stepFieldAccess(step, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
                 class="template-authoring__hint template-authoring__hint--warn"
                 data-testid="approval-step-field-routing-hint"
               >该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析</span>
             </div>
           </div>
         </div>
+      </el-card>
+
+      <!-- P3-B / Lock-6 L6-A (docs/development/approval-lock6-requester-global-policy-20260817.md §1,
+           §2.7) — the fifth wizard step. M7 (master §4 P3-B exit): this step is authorized ONLY because
+           it now carries one REAL, server-enforced control (the template-level dedup tier); it does not
+           exist as an empty/disabled shell. The tier is an immediate-apply typed control — no separate
+           Save/Cancel transaction, matching the D0 grammar the rest of this view already uses (e.g.
+           `draft.allowRevoke` above). -->
+      <el-card v-show="activeAuthoringSection === 'more-settings'" class="template-authoring__panel" shadow="never">
+        <template #header>
+          <strong>更多设置</strong>
+        </template>
+        <el-form label-position="top" class="template-authoring__grid">
+          <el-form-item label="审批人去重" class="template-authoring__wide">
+            <!-- L6-A shape (Lock-4 OD-L4-6(a)): a 3-way tier projected over the two ALREADY
+                 server-enforced booleans `dedupeHistoricalApprover` / `mergeAdjacentApprover` on
+                 `runtimeGraph.policy.autoApproval` — no new engine behavior, no new contract field.
+                 M8 honesty: labels name the EXACT shipped predicate (§1 L6-A / Lock-4 F4-D), not the
+                 corpus's broader "撤回撤销" framing this product does not implement. -->
+            <el-radio-group
+              v-model="draft.autoApprovalDedupTier"
+              :disabled="readOnly || isAutoApprovalDedupTierLocked"
+              data-testid="approval-template-dedup-tier"
+            >
+              <el-radio value="none" data-testid="approval-template-dedup-tier-none">
+                不去重
+              </el-radio>
+              <el-radio value="dedupe_historical" data-testid="approval-template-dedup-tier-dedupe-historical">
+                仅一次全自动同意
+              </el-radio>
+              <el-radio value="merge_adjacent" data-testid="approval-template-dedup-tier-merge-adjacent">
+                仅连续节点自动同意
+              </el-radio>
+            </el-radio-group>
+            <p class="template-authoring__hint">
+              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；仅对未单独设置去重规则的审批节点生效，返回上一节点后该节点重新计入本轮去重历史。
+            </p>
+            <!-- M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover has a second,
+                 real server effect beyond the dedup cascade — it also exempts the graph from two
+                 publish-time duplicate-assignee checks for a parallel gateway (the static branch
+                 check `allowParallelDuplicateAssignees` and the dynamic-source preflight
+                 `assertNoParallelDynamicAssigneeConflicts`, ApprovalProductService.ts:4595/:4623-4625),
+                 because the merge machinery legitimately absorbs the same-approver overlap at
+                 runtime instead of leaving it to 409. Undisclosed, an admin could not know why a
+                 previously-rejected parallel graph now publishes. Scoped to the ACTUAL exemption
+                 (parallel branches only) — no other semantic invented. -->
+            <p
+              v-if="draft.autoApprovalDedupTier === 'merge_adjacent'"
+              class="template-authoring__hint"
+              data-testid="approval-template-dedup-tier-merge-adjacent-hint"
+            >
+              选择该项还会放宽并行分支的发布校验：同一审批人出现在同一并行网关的多个分支中不再阻止发布，运行时会自动跳过重复分支的指派。
+            </p>
+            <p
+              v-if="isAutoApprovalDedupTierLocked"
+              class="template-authoring__hint template-authoring__hint--warn"
+              data-testid="approval-template-dedup-tier-locked-hint"
+            >
+              当前已通过接口设置了本控件无法表达的去重组合，已保持只读并原样保留，不会被此处的选择覆盖。
+            </p>
+          </el-form-item>
+        </el-form>
       </el-card>
 
       <!-- D1 ordinary-user hygiene: JSON formSchema/approvalGraph preview removed from the review
@@ -1243,7 +1179,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type CSSProperties } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -1268,6 +1204,7 @@ import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import ApprovalFormInlineEditor from '../../approvals/components/ApprovalFormInlineEditor.vue'
 import ApprovalGraphNodeConfigEditor from '../../approvals/components/ApprovalGraphNodeConfigEditor.vue'
 import ApprovalFlowCanvas from '../../approvals/components/ApprovalFlowCanvas.vue'
 import ApprovalCanvasNodeInspector from '../../approvals/components/ApprovalCanvasNodeInspector.vue'
@@ -1279,10 +1216,10 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildPublishPolicy,
   buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
-  AUTHORABLE_FIELD_TYPES,
   createEmptyFieldDraft,
   type AuthorableFieldType,
   createEmptyStepDraft,
@@ -1297,7 +1234,13 @@ import {
   unsupportedTemplateAuthoringReason,
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
+  validateTemplateBasicInfo,
+  type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
+  isPlaceholderRoleSource,
+  addAssigneeSourceCard,
+  removeAssigneeSourceCard,
+  legalPriorApproverNodeKeys,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1314,12 +1257,15 @@ import {
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
   moveItemToIndex,
+  isTemplateDedupTierLocked,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
   addParallelBranch,
   adjacentLinearNodeMoveTarget,
   appendApprovalNode,
+  appendCcNode,
+  appendHandlerNode,
   collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
@@ -1376,6 +1322,7 @@ import type {
   CcNodeConfig,
   ConditionNodeConfig,
   EmptyAssigneePolicy,
+  HandlerMode,
   FormField,
   NodeFieldAccess,
   ParallelJoinMode,
@@ -1386,6 +1333,9 @@ import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 import {
   buildRecordLinkBaseSelectOptions,
   buildRecordLinkSheetSelectOptions,
+  dateRangeVisibilityEndpointOptions,
+  dateRangeVisibilityFieldId,
+  visibilityReferenceBaseFieldId,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1497,15 +1447,22 @@ watch(
   { immediate: true },
 )
 
-type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'review'
+// P3-B / Lock-6 §2.7 (docs/development/approval-lock6-requester-global-policy-20260817.md):
+// "Activation is a typed change to the AuthoringSectionId union and the authoringSections array
+// ... performed by the SAME PR that lands the functional L6-A control". This PR lands the L6-A
+// dedup-tier control (below) in the SAME commit as this activation — the fifth step, `更多设置`,
+// is never an empty/disabled shell (master M7); it exists BECAUSE the tier control it hosts is now
+// real and server-enforced. `测试发布` stays last, unconditionally.
+type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'more-settings' | 'review'
 const authoringSections: Array<{
   id: AuthoringSectionId
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础设置', description: '名称、范围与模板起点' },
+  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
   { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
-  { id: 'flow', label: '审批流程', description: '审批人、分支与字段权限' },
+  { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等模板级策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1524,6 +1481,18 @@ const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+// P1-D (master §4 UI-3/UI-9 — editor version entry, parent-lock §9/:276 gap): a compact link to the
+// existing TemplateDetailView.vue "版本历史" section (`data-testid="template-detail-version-history"`).
+// PRESENTATION ONLY — no new version storage, no route-preview toggle (that stays Lock-0 L0-5 debt,
+// not this slice). `latestVersionId` is read straight off the loaded/updated template DTO (never
+// folded into `draft`, so it can never leak into a save payload) purely to gate "saved template WITH
+// at least one recorded version" — a brand-new unsaved draft has neither an id nor a version yet.
+const templateLatestVersionId = ref<string | null>(null)
+const hasSavedVersionHistory = computed(() => isEditMode.value && Boolean(templateLatestVersionId.value))
+function goToVersionHistory(): void {
+  if (!templateId.value) return
+  router.push({ path: `/approval-templates/${templateId.value}` })
+}
 const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
@@ -1543,6 +1512,24 @@ const authoringFlowNodeCount = computed(() => (
 ))
 const authoringSectionIndex = computed(() => (
   authoringSections.findIndex(section => section.id === activeAuthoringSection.value)
+))
+
+// P1-A0 (master §4 UI-0 "live validation count"; Lock-0 L0-3 typed-issue-record delta, scoped to
+// the 基础信息 step only — the parent-lock header count over the FULL publishChecklist stays
+// undelivered L0-5-adjacent debt, tracked separately, and is NOT what this badge claims to be).
+// Typed source of truth; the step-nav badge below reads `.length` off this array — it never
+// hand-counts or hardcodes a number.
+const basicInfoIssues = computed<AuthoringValidationIssue[]>(() => (
+  validateTemplateBasicInfo(draft.value, unsupportedReason.value)
+))
+const basicInfoIssueCount = computed<number>(() => basicInfoIssues.value.length)
+
+// P3-B / Lock-6 §2.6, gate X-1 — a persisted template with BOTH dedup booleans true is a
+// combination the 3-way tier cannot express. Reads the HYDRATED `originalPolicy`, not the
+// projected `draft.autoApprovalDedupTier`, so the lock state is derived from the actual persisted
+// definition every time, not from whatever the radio group last rendered.
+const isAutoApprovalDedupTierLocked = computed<boolean>(() => (
+  isTemplateDedupTierLocked(draft.value.originalPolicy?.autoApproval)
 ))
 
 function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
@@ -1599,10 +1586,21 @@ const NODE_TYPE_LABELS: Record<string, string> = {
   cc: '抄送',
   condition: '条件分支',
   parallel: '并行分支',
+  // Lock-3 §1.5 — handler (办理) node card label.
+  handler: '办理',
   end: '结束',
 }
 function nodeTypeLabel(type: string): string {
   return NODE_TYPE_LABELS[type] ?? type
+}
+
+function canvasNodeCardSummary(nodeKey: string): string {
+  const node = canvasNodeByKey(nodeKey)
+  if (!node) return '点击配置'
+  if (node.type === 'start') return '可设置提交人'
+  if (node.type === 'end') return '可设置抄送'
+  const lines = nodeConfigSummary(node)
+  return lines[0] || '点击配置'
 }
 
 // `assigneeSourceSummary` (single-source label) now lives in `../../approvals/assigneeSource` —
@@ -1744,12 +1742,22 @@ function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
 }
 
 // Field options for a rule's fieldId picker — exclude record-link/detail (server v1 reject).
+// Lock-8 L8-B OD-L8-5(c) [accepted residual]: date_range is excluded from graph condition rules
+// ENTIRELY (unlike visibility rules, which admit its .start/.end endpoints — see
+// visibilityFieldOptions below) — its `{start,end}` value has no per-type predicate for MS-9 in
+// this slice, and `validateConditionEdits` (conditionEdit.ts) rejects any rule that references one.
+// Offering it here would be an M7 inert control: always selectable, never publishable.
+// Lock-8 L8-A (§1.1): explanation carries no value at all — excluded the same way, an M7 inert
+// control would otherwise always fail publish (`validateConditionEdits` rejects any rule
+// referencing one).
 const conditionFieldOptions = computed(() =>
   draft.value.fields
     .filter((field) => (
       field.id.trim()
       && field.type !== 'record-link'
       && field.type !== 'detail'
+      && field.type !== 'date_range'
+      && field.type !== 'explanation'
     ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
@@ -1878,6 +1886,25 @@ function graphNodeLabel(nodeKey: string): string {
   return node.name?.trim() || nodeTypeLabel(node.type)
 }
 
+// Lock-1 §K3 — the LEGAL candidates for a prior_node_approver picker on `nodeKey`'s card:
+// approval nodes strictly upstream on every runtime-reachable path of the LIVE effective graph
+// (`legalPriorApproverNodeKeys`, the FE mirror of the backend publish dominance gate — which
+// stays the sole arbiter). Labels reuse `graphNodeLabel` (template-authored names, never ids).
+function priorApproverNodeOptions(nodeKey: string): Array<{ key: string; label: string }> {
+  return legalPriorApproverNodeKeys(canvasEffectiveGraph.value, nodeKey)
+    .map((key) => ({ key, label: graphNodeLabel(key) }))
+}
+
+// Lock-1 §K3 — the linear editor's picker candidates for step `index`: the STRICTLY-EARLIER
+// steps only (referenced by stable localId; the builder emits the referenced step's current
+// positional key at save — see ApprovalStepDraft.priorStepLocalId).
+function priorStepOptions(index: number): Array<{ localId: string; label: string }> {
+  return draft.value.steps.slice(0, index).map((candidate, candidateIndex) => ({
+    localId: candidate.localId,
+    label: candidate.name.trim() || `审批人 ${candidateIndex + 1}`,
+  }))
+}
+
 function graphEdgeTargetLabel(nodeKey: string, edgeKey: string): string {
   const edge = canvasEffectiveGraph.value.edges.find(
     (candidate) => candidate.source === nodeKey && candidate.key === edgeKey,
@@ -1927,8 +1954,10 @@ function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
 function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefined {
   return draft.value.approvalNodeEdits?.[nodeKey]
 }
-function approvalNodeFirstSource(nodeKey: string): ApprovalAssigneeSource | undefined {
-  return approvalNodeEditFor(nodeKey)?.assigneeSources[0]
+// P1-B: replaces the old assigneeSources[0]-only accessor — every card is addressed by its own
+// sourceIndex now (see nodeConfigEditorContext.ts's doc comment on the required-index posture).
+function approvalNodeSourceAt(nodeKey: string, sourceIndex: number): ApprovalAssigneeSource | undefined {
+  return approvalNodeEditFor(nodeKey)?.assigneeSources[sourceIndex]
 }
 function approvalNodeMode(nodeKey: string): ApprovalMode {
   return approvalNodeEditFor(nodeKey)?.approvalMode ?? 'single'
@@ -1957,6 +1986,23 @@ function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): v
   else delete policy.mergeWithRequester
   edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
 }
+// Lock-3 §1.1 — handler-only mode + opinion accessors (same edit model, keyed by nodeKey).
+function handlerNodeMode(nodeKey: string): HandlerMode {
+  return approvalNodeEditFor(nodeKey)?.handlerMode ?? 'all'
+}
+function setHandlerNodeMode(nodeKey: string, mode: HandlerMode): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (edit) edit.handlerMode = mode
+}
+function handlerNodeOpinionRequired(nodeKey: string): boolean {
+  return Boolean(approvalNodeEditFor(nodeKey)?.opinionRequired)
+}
+function setHandlerNodeOpinionRequired(nodeKey: string, required: boolean): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  if (required) edit.opinionRequired = true
+  else delete edit.opinionRequired
+}
 function approvalNodeFieldAccess(nodeKey: string, fieldId: string): NodeFieldAccess {
   return approvalNodeEditFor(nodeKey)?.fieldPermissions?.find((permission) => permission.fieldId === fieldId)?.access ?? 'editable'
 }
@@ -1967,38 +2013,128 @@ function setApprovalNodeFieldAccess(nodeKey: string, fieldId: string, access: No
   if (access !== 'editable') next.push({ fieldId, access })
   edit.fieldPermissions = next
 }
-// Replace ONLY the primary (first) source; preserve any extra sources verbatim (no flatten).
-function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource): void {
+// P1-B: replace ONLY the card AT sourceIndex; every other card (and every other node field) is
+// preserved verbatim (no flatten). Out-of-range indexes are refused as a no-op.
+function setApprovalNodeSourceAt(nodeKey: string, sourceIndex: number, source: ApprovalAssigneeSource): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
-  edit.assigneeSources = [source, ...edit.assigneeSources.slice(1)]
+  if (sourceIndex < 0 || sourceIndex >= edit.assigneeSources.length) return
+  const next = edit.assigneeSources.slice()
+  next[sourceIndex] = source
+  edit.assigneeSources = next
 }
-function approvalSourceKind(nodeKey: string): ApprovalAssigneeSourceKind {
-  return approvalNodeFirstSource(nodeKey)?.kind ?? 'requester'
+function approvalSourceKind(nodeKey: string, sourceIndex: number): ApprovalAssigneeSourceKind {
+  return approvalNodeSourceAt(nodeKey, sourceIndex)?.kind ?? 'requester'
 }
-function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
-  const next: ApprovalAssigneeSource =
-    kind === 'static_user' ? { kind, userIds: [] }
-      : kind === 'static_role' ? { kind, roleIds: [] }
-        : kind === 'form_field_user' ? { kind, fieldId: '' }
-          : kind === 'continuous_managers' ? { kind, levels: 1 }
-            : kind === 'manager_at_level' ? { kind, level: 1 }
-              : { kind }
-  setApprovalNodeSource(nodeKey, next)
+// Gate P1-1 fix: the roster is a native `role="radiogroup"` (APG requires arrows to move AND
+// select, so commit-on-arrow stays — see the L0-2 radio grid), which means an accidental
+// ArrowUp/ArrowDown traversal calls this on every focus step. Naively replacing a card with a
+// fresh, empty-payload object per kind (the pre-fix behaviour) is therefore destructive: one arrow
+// out and one arrow back silently discarded a configured `userIds`/`roleIds`/`fieldId`/`levels`/
+// `level` with no undo (canvas history never records a per-keystroke config edit — A-8) and no
+// save path (the stripped payload fails node validation).
+// Fix: cache the outgoing payload per (nodeKey, sourceIndex, kind) for this editing session BEFORE
+// switching, and restore it verbatim if the author switches back to a previously-configured kind on
+// THAT card. P1-B: keyed by card, not just node — two cards on one node cache independently, and
+// `resetApprovalSourceKindCache()` (draft reseed) still clears the whole session cache. Any
+// structural change to a node's source list (add/remove a card) also drops that node's cache slice
+// — see `addApprovalSourceCard`/`removeApprovalSourceCard` — because indexes shift and a stale
+// per-index cache entry would otherwise attribute one card's cached payload to a different card.
+const approvalSourceKindCache = ref<Record<string, Partial<Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource>>>>({})
+function resetApprovalSourceKindCache(): void {
+  approvalSourceKindCache.value = {}
 }
-function approvalSourceIds(nodeKey: string): string[] {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceKindCacheKey(nodeKey: string, sourceIndex: number): string {
+  return `${nodeKey}:${sourceIndex}`
+}
+function clearApprovalSourceKindCacheForNode(nodeKey: string): void {
+  const prefix = `${nodeKey}:`
+  const next: typeof approvalSourceKindCache.value = {}
+  for (const [key, value] of Object.entries(approvalSourceKindCache.value)) {
+    if (!key.startsWith(prefix)) next[key] = value
+  }
+  approvalSourceKindCache.value = next
+}
+function cloneAssigneeSource(source: ApprovalAssigneeSource): ApprovalAssigneeSource {
+  return JSON.parse(JSON.stringify(source)) as ApprovalAssigneeSource
+}
+function defaultApprovalSourceForKind(kind: ApprovalAssigneeSourceKind): ApprovalAssigneeSource {
+  return kind === 'static_user' ? { kind, userIds: [] }
+    : kind === 'static_role' ? { kind, roleIds: [] }
+      : kind === 'form_field_user' ? { kind, fieldId: '' }
+        : kind === 'continuous_managers' ? { kind, levels: 1 }
+          : kind === 'manager_at_level' ? { kind, level: 1 }
+            // Lock-1 §K2: single choice over the whole company is the widest, always-valid start.
+            : kind === 'requester_choice' ? { kind, mode: 'single', scope: { type: 'company' } }
+              // Lock-1 §K4: same default shape as continuous_managers.
+              : kind === 'continuous_dept_heads' ? { kind, levels: 1 }
+                // Lock-1 §K5-b: same default shape as manager_at_level.
+                : kind === 'dept_head_at_level' ? { kind, level: 1 }
+                  // Lock-1 §K3: '' = not yet chosen — invalid to save until the typed picker
+                  // selects a legal upstream node (never silently defaulted to one).
+                  : kind === 'prior_node_approver' ? { kind, nodeKey: '' }
+                    : { kind: kind as 'requester' | 'direct_manager' | 'dept_head' }
+}
+function setApprovalSourceKind(nodeKey: string, sourceIndex: number, kind: ApprovalAssigneeSourceKind): void {
+  const cacheKey = approvalSourceKindCacheKey(nodeKey, sourceIndex)
+  const current = approvalNodeSourceAt(nodeKey, sourceIndex)
+  if (current && current.kind !== kind) {
+    const cacheForCard = approvalSourceKindCache.value[cacheKey] ?? {}
+    cacheForCard[current.kind] = cloneAssigneeSource(current)
+    approvalSourceKindCache.value = { ...approvalSourceKindCache.value, [cacheKey]: cacheForCard }
+  }
+  const cached = approvalSourceKindCache.value[cacheKey]?.[kind]
+  const next: ApprovalAssigneeSource = cached ? cloneAssigneeSource(cached) : defaultApprovalSourceForKind(kind)
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, next)
+}
+function approvalSourceIds(nodeKey: string, sourceIndex: number): string[] {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   if (source?.kind === 'static_user') return source.userIds
   if (source?.kind === 'static_role') return source.roleIds
   return []
 }
-// G-5 sentinel hint: true when the source is a static_role still carrying the starter-preset
+// G-5 sentinel hint: true when THIS card is a static_role still carrying the starter-preset
 // placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
-// in the editor so the admin replaces it first. Non-blocking — the draft still saves. Delegates to
-// the shared `placeholderRoleNodeKeys` (B2-03) so the per-node hint and the aggregate publish
-// checklist item share one predicate.
-function approvalSourceIsPlaceholder(nodeKey: string): boolean {
-  return publishPlaceholderRoleKeys.value.includes(nodeKey)
+// in the editor so the admin replaces it first. Non-blocking — the draft still saves. Computed
+// directly off the card at sourceIndex (not the aggregate `publishPlaceholderRoleKeys` list) so a
+// node with N cards points the hint at the EXACT offending card rather than lighting up all of them.
+// Delegates to the SAME `isPlaceholderRoleSource` predicate `placeholderRoleNodeKeys` uses, so the
+// per-card hint and the aggregate publish checklist item can never disagree on what counts.
+function approvalSourceIsPlaceholder(nodeKey: string, sourceIndex: number): boolean {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
+  return Boolean(source && isPlaceholderRoleSource(source))
+}
+// P1-B: card count for the v-for + the "keep ≥1" remove-guard's disabled state.
+function approvalSourceCount(nodeKey: string): number {
+  return approvalNodeEditFor(nodeKey)?.assigneeSources.length ?? 0
+}
+// P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
+// editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
+// button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
+// unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
+// kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
+// the end), so a card the author already configured-then-switched-away-from keeps its cached
+// payload intact across an unrelated add — clearing here would silently re-open the exact P1-1
+// config-loss bug in a new sequence (configure → switch away → add a card → switch back → cache
+// gone → empty payload, no undo).
+function addApprovalSourceCard(nodeKey: string, defaultKind: ApprovalAssigneeSourceKind): void {
+  const edits = draft.value.approvalNodeEdits
+  if (!edits) return
+  addAssigneeSourceCard(edits, nodeKey, defaultApprovalSourceForKind(defaultKind))
+}
+// P1-B fail-closed remove: a node must always keep ≥1 assignee source. Delegates to the pure,
+// independently unit-tested `removeAssigneeSourceCard` (approvalNodeEdit.ts), which refuses at
+// length<=1 REGARDLESS of the remove button's `disabled` attribute — see that function's doc
+// comment for why disabled-button DOM testing alone cannot prove this guard. Clears the P1-1
+// kind-switch cache for this node HERE (unlike add): removing a card SHIFTS every subsequent card's
+// index, so a stale per-index cache entry would otherwise attribute one card's cached payload to a
+// now-different card at the same index — clearing avoids that misattribution. It is a session-only
+// UX convenience (never persisted), so losing it on remove is a strictly safe/conservative choice.
+function removeApprovalSourceCard(nodeKey: string, sourceIndex: number): void {
+  const edits = draft.value.approvalNodeEdits
+  if (!edits) return
+  clearApprovalSourceKindCacheForNode(nodeKey)
+  removeAssigneeSourceCard(edits, nodeKey, sourceIndex)
 }
 
 // ── Topology authoring (graphTopologyEdit + authoring session history) ──
@@ -2110,6 +2246,10 @@ function reseedCanvasHistoryFromDraft(): void {
     draft.value,
     currentCanvasSelection(),
   )
+  // P1-1 fix: every call site is a fresh draft/graph seed (load / save / preset / linear→graph
+  // promotion) — the per-kind assignee-source cache is session state for the PRIOR graph and must
+  // not leak into a differently-keyed node in a new one.
+  resetApprovalSourceKindCache()
 }
 
 function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
@@ -2170,8 +2310,24 @@ function onAddConditionBranch(nodeKey: string): void {
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
+function selectInsertedNode(beforeKeys: Set<string>): void {
+  const inserted = canvasEffectiveGraph.value.nodes.find((node) => !beforeKeys.has(node.key))?.key
+  if (inserted) selectedCanvasNode.value = inserted
+}
 function onInsertApprovalAfter(nodeKey: string): void {
-  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'node', nodeKey })
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
+}
+function onInsertCcAfter(nodeKey: string): void {
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendCcNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
+}
+function onInsertHandlerAfter(nodeKey: string): void {
+  const beforeKeys = new Set(canvasEffectiveGraph.value.nodes.map((node) => node.key))
+  runTopologyOp((graph) => appendHandlerNode(graph, nodeKey), { kind: 'none' })
+  selectInsertedNode(beforeKeys)
 }
 function onInsertConditionAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
@@ -2236,10 +2392,23 @@ const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(dr
 const canvasLayout = computed<GraphLayout>(() => computeLayout(canvasEffectiveGraph.value))
 const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
 const canvasZoomLabel = computed(() => `${Math.round(canvasZoom.value * 100)}%`)
-const canvasStageStyle = computed(() => ({
-  width: `${Math.round(canvasLayout.value.width * canvasZoom.value)}px`,
-  height: `${Math.round(canvasLayout.value.height * canvasZoom.value)}px`,
-}))
+const canvasStageStyle = computed<CSSProperties>(() => {
+  const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
+  const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
+  const vpW = canvasViewportState.value.width
+  const vpH = canvasViewportState.value.height
+  return {
+    minWidth: '100%',
+    minHeight: vpH ? `${vpH}px` : '100%',
+    width: `${Math.max(vpW, scaledW)}px`,
+    height: `${Math.max(vpH, scaledH + 56)}px`,
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    boxSizing: 'border-box',
+    padding: '28px 16px 64px',
+  }
+})
 const canvasSurfaceStyle = computed(() => ({
   position: 'relative' as const,
   width: `${canvasLayout.value.width}px`,
@@ -2437,22 +2606,64 @@ function canInsertParallelOnEdge(edgeKey: string): boolean {
   const source = edgeSourceNode(edgeKey)
   return Boolean(source && canInsertParallelAfter(source))
 }
+// Lock-3 §1.3/§1.5: a handler is linear-only in v1 — allowed on a normal linear edge, hidden on any
+// edge inside a parallel region (its source node is in the region key set).
+function canInsertHandlerOnEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  return Boolean(source && canInsertOnCanvasEdge(edgeKey) && !parallelRegionKeys.value.has(source.key))
+}
+function canInsertOnCanvasEdge(edgeKey: string): boolean {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || source.type === 'end') return false
+  return canvasEffectiveGraph.value.edges.filter((edge) => edge.source === source.key).length === 1
+}
+function rejectEdgeInsert(): void {
+  ElMessage.warning('当前连线不能插入这种节点')
+  closeEdgeInsertMenu()
+}
 function onEdgeInsertApproval(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertApprovalAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertCc(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
+  onInsertCcAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertCondition(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertAfter(source)) return
+  if (!source || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertConditionAfter(source.key)
   closeEdgeInsertMenu()
 }
 function onEdgeInsertParallel(edgeKey: string): void {
   const source = edgeSourceNode(edgeKey)
-  if (!source || !canInsertParallelAfter(source)) return
+  if (!source || !canInsertParallelAfter(source) || !canInsertOnCanvasEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
   onInsertParallelAfter(source.key)
+  closeEdgeInsertMenu()
+}
+function onEdgeInsertHandler(edgeKey: string): void {
+  const source = edgeSourceNode(edgeKey)
+  if (!source || !canInsertHandlerOnEdge(edgeKey)) {
+    rejectEdgeInsert()
+    return
+  }
+  onInsertHandlerAfter(source.key)
   closeEdgeInsertMenu()
 }
 function moveCanvasNodeStep(nodeKey: string, direction: 'up' | 'down'): void {
@@ -2481,10 +2692,10 @@ function onCanvasNodeDrop(event: DragEvent, edgeKey: string): void {
   event.stopPropagation()
   applyCanvasNodeMove(edgeKey)
 }
-function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
-  else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
+function setApprovalSourceIds(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  const kind = approvalSourceKind(nodeKey, sourceIndex)
+  if (kind === 'static_user') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, userIds: ids })
+  else if (kind === 'static_role') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, roleIds: ids })
 }
 // G-B2-18 manual-ID advanced fallback for the complex-node picker. Unlike the linear step (whose
 // idsText is a real persisted draft field — the SOLE carrier, only parsed into ids at save time),
@@ -2495,26 +2706,32 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
 // buffer is the raw carrier instead (never part of node.config / the saved graph): read back
 // verbatim once the author has touched the field, falling back to the derived join before that
 // (hydrate / a node nobody has edited yet).
-function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
-  setApprovalSourceIds(nodeKey, ids)
+function setApprovalSourceIdsFromPicker(nodeKey: string, sourceIndex: number, ids: string[]): void {
+  setApprovalSourceIds(nodeKey, sourceIndex, ids)
 }
-function approvalSourceFieldId(nodeKey: string): string {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceFieldId(nodeKey: string, sourceIndex: number): string {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   return source?.kind === 'form_field_user' ? source.fieldId : ''
 }
-function setApprovalSourceFieldId(nodeKey: string, fieldId: string): void {
-  setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
+function setApprovalSourceFieldId(nodeKey: string, sourceIndex: number, fieldId: string): void {
+  setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind: 'form_field_user', fieldId })
 }
-function approvalSourceLevel(nodeKey: string): number {
-  const source = approvalNodeFirstSource(nodeKey)
+function approvalSourceLevel(nodeKey: string, sourceIndex: number): number {
+  const source = approvalNodeSourceAt(nodeKey, sourceIndex)
   if (source?.kind === 'manager_at_level') return source.level
   if (source?.kind === 'continuous_managers') return source.levels
+  // Lock-1 §K4: same shared-field shape as continuous_managers.
+  if (source?.kind === 'continuous_dept_heads') return source.levels
+  // Lock-1 §K5-b: same shared-field shape as manager_at_level.
+  if (source?.kind === 'dept_head_at_level') return source.level
   return 1
 }
-function setApprovalSourceLevel(nodeKey: string, value: number): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
-  else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
+function setApprovalSourceLevel(nodeKey: string, sourceIndex: number, value: number): void {
+  const kind = approvalSourceKind(nodeKey, sourceIndex)
+  if (kind === 'manager_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
+  else if (kind === 'continuous_managers') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
+  else if (kind === 'continuous_dept_heads') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, levels: value })
+  else if (kind === 'dept_head_at_level') setApprovalNodeSourceAt(nodeKey, sourceIndex, { kind, level: value })
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
@@ -2524,10 +2741,25 @@ const userFields = computed(() => draft.value.fields.filter((field) => field.typ
 const fieldPermissionFields = computed(() => draft.value.fields.filter((field) => field.id.trim()))
 // Form fields that DRIVE routing (a form_field_user assignee source references them). Hiding one is
 // allowed — redaction is echo-only, so resolution is unaffected — but the UI surfaces a hint.
+//
+// Gate P2-1/D5 fix: this MUST read both authoring models, not just `draft.steps` (the linear step
+// list). Once a draft is promoted to graph authoring, `steps` is always `[]` — see
+// `draftFromEditedGraph` / `draftFromTemplate`'s `complex` branch — and the per-node source instead
+// lives on `draft.approvalNodeEdits[key].assigneeSources`. The canvas inspector mounts ONLY on
+// complex graphs, so a linear-only read left this computed structurally empty on exactly the
+// surface D5 targets (measured: `draft.steps.length === 0` there). One computed, unioning both
+// models, shared verbatim by the linear step editor (below) and the canvas graph inspector via
+// `nodeConfigEditorApi.routingDriverFieldIds` — the two surfaces render the hint under the identical
+// condition because they read the identical Set, not two independently-derived ones.
 const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
   for (const step of draft.value.steps) {
     if (step.sourceKind === 'form_field_user' && step.fieldId.trim()) ids.add(step.fieldId.trim())
+  }
+  for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    for (const source of edit.assigneeSources) {
+      if (source.kind === 'form_field_user' && source.fieldId.trim()) ids.add(source.fieldId.trim())
+    }
   }
   return ids
 })
@@ -2548,6 +2780,14 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+// Lock-1 §K2: a scope-type switch clears the shared idsText carrier deliberately — userIds and
+// roleIds are different id domains, so carrying one list into the other would author wrong config.
+function setStepRequesterChoiceScopeType(step: ApprovalStepDraft, type: 'company' | 'members' | 'role'): void {
+  if (step.requesterChoiceScopeType === type) return
+  step.requesterChoiceScopeType = type
+  step.idsText = ''
+}
+
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
   // Keep already-selected ids visible as chips even if the new search page omits them —
@@ -2556,10 +2796,8 @@ async function onUserSearch(query: string): Promise<void> {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   }
-  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
-    if (approvalSourceKind(nodeKey) !== 'static_user') continue
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
-  }
+  // P1-B: a node may carry N cards now — sync EVERY card's chips, not just card 0.
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
   for (const nodeKey of Object.keys(draft.value.ccEdits ?? {})) {
     const edit = ccEditFor(nodeKey)
     if (!edit || edit.targetType !== 'user') continue
@@ -2574,6 +2812,13 @@ function syncStepOptions(step: ApprovalStepDraft): void {
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   } else if (step.sourceKind === 'static_role') {
     for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
+  } else if (step.sourceKind === 'requester_choice') {
+    // §K2: the scope id list rides idsText — keep its chips visible per scope type.
+    if (step.requesterChoiceScopeType === 'members') {
+      for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+    } else if (step.requesterChoiceScopeType === 'role') {
+      for (const id of parseIdsText(step.idsText)) directory.ensureRoleOptionVisible(id)
+    }
   }
 }
 
@@ -2582,14 +2827,26 @@ function syncAllStepOptions(): void {
 }
 
 // G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to complex-graph
-// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey).
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey). P1-B: loops EVERY card on
+// the node — a node with N sources needs N cards' worth of chips kept visible, not just card 0.
 function syncApprovalNodeOptions(nodeKey: string): void {
-  const kind = approvalSourceKind(nodeKey)
-  if (kind === 'static_user') {
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
-  } else if (kind === 'static_role') {
-    for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
-  }
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.assigneeSources.forEach((source, sourceIndex) => {
+    const kind = source.kind
+    if (kind === 'static_user') {
+      for (const id of approvalSourceIds(nodeKey, sourceIndex)) directory.ensureUserOptionVisible(id)
+    } else if (kind === 'static_role') {
+      for (const id of approvalSourceIds(nodeKey, sourceIndex)) directory.ensureRoleOptionVisible(id)
+    } else if (kind === 'requester_choice') {
+      // §K2: keep the configured scope list's chips visible in the sub-form pickers.
+      if (source.scope.type === 'members') {
+        for (const id of source.scope.userIds) directory.ensureUserOptionVisible(id)
+      } else if (source.scope.type === 'role') {
+        for (const id of source.scope.roleIds) directory.ensureRoleOptionVisible(id)
+      }
+    }
+  })
 }
 
 function syncAllApprovalNodeOptions(): void {
@@ -2645,6 +2902,8 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionEdgeLabel,
   graphEdgeTargetLabel,
   graphNodeLabel,
+  // Lock-1 §K3: legal upstream candidates for the prior_node_approver typed node picker.
+  priorApproverNodeOptions,
   parallelJoinModeLabel,
   ccTargetTypeLabel,
   approvalSourceKind,
@@ -2659,15 +2918,26 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalSourceLevel,
   setApprovalSourceLevel,
   approvalSourceIsPlaceholder,
+  approvalSourceCount,
+  addApprovalSourceCard,
+  removeApprovalSourceCard,
   approvalNodeMode,
   setApprovalNodeMode,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,
   setApprovalNodeMergeWithRequester,
+  handlerNodeMode,
+  setHandlerNodeMode,
+  handlerNodeOpinionRequired,
+  setHandlerNodeOpinionRequired,
   approvalNodeFieldAccess,
   setApprovalNodeFieldAccess,
   nodeConfigSummary,
+  // Gate P2-1/D5: the graph-wide computed above (unions `draft.steps` + `draft.approvalNodeEdits`),
+  // not a node-local approximation — see that computed's comment for why a node-local read would be
+  // a narrower predicate than the linear editor's.
+  routingDriverFieldIds,
   onUserSearch,
   directoryUsers: directory.users,
   directoryUsersLoading: directory.usersLoading,
@@ -2697,6 +2967,20 @@ function swap<T>(items: T[], index: number, delta: -1 | 1) {
   return copy
 }
 
+// NOTE (Lock-8 L8-B, approval-lock8-field-vocabulary-20260817.md §2.6): this view's own copy of
+// the label/mark/group literals CANNOT be collapsed onto the F2 Designer 2.0 palette component's
+// (apps/web/src/approvals/components/ApprovalForm + Palette.vue, split across this comment on
+// purpose) shipped constants — the F2 no-mount-pin gate (approval-form-builder-slots.spec.ts)
+// source-scans every file under src/views for that literal component name and fails the build if
+// it appears, even as an import of its exported constants. This stays a SECOND, non-derived
+// registration site the F2 forcing-function test (approval-form-palette-chips.spec.ts:107) does
+// NOT cover — and neither did approval-date-range-field.test.ts's own "census" (correction, gate
+// P2-1: an earlier version of this comment claimed that file checked THIS array; it only ever
+// re-read the F2 component's own APPROVAL_FORM_PALETTE_GROUPS, never `fieldPaletteGroups` below —
+// deleting `explanation` from this array alone left every then-reachable spec green). This array's
+// completeness against AUTHORABLE_FIELD_TYPES is covered by a REAL mount of this view (not a
+// duplicated literal): apps/web/tests/approval-form-inline-editor-extract.spec.ts's "(o) MS-13
+// completeness" test queries the rendered `approval-field-palette-*` chip DOM directly.
 const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   text: '文本',
   textarea: '多行文本',
@@ -2708,11 +2992,57 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   user: '人员',
   detail: '明细',
   'record-link': '关联记录',
+  date_range: '日期区间',
+  explanation: '说明',
 }
-const fieldPaletteEntries = AUTHORABLE_FIELD_TYPES.map((type) => ({
-  type,
-  label: FIELD_PALETTE_LABELS[type],
+const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
+  text: 'A',
+  textarea: 'Aa',
+  number: '123',
+  date: '日',
+  datetime: '时',
+  select: '○',
+  'multi-select': '☑',
+  user: '人',
+  detail: '表',
+  'record-link': '链',
+  date_range: '区',
+  explanation: '明',
+}
+// Lock-8 L8-A (§2.6): the group needs an owner decision — placed in 其他 as a REVERSIBLE
+// presentation choice (goal-set provenance; see this repo's execution ledger §3), not a ratified
+// OD-L8-3 group. Same choice as the F2 Designer 2.0 palette component's independent copy
+// (apps/web/src/approvals/components/ApprovalForm + Palette.vue, split across this comment on
+// purpose — see that file's own doc comment for why the literal name can't appear here whole).
+const fieldPaletteGroups = [
+  { id: 'text', label: '文本', types: ['text', 'textarea'] },
+  { id: 'number', label: '数值', types: ['number'] },
+  { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
+  { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
+  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
+].map((group) => ({
+  ...group,
+  entries: group.types.map((type) => ({
+    type: type as AuthorableFieldType,
+    label: FIELD_PALETTE_LABELS[type as AuthorableFieldType],
+    mark: FIELD_PALETTE_MARKS[type as AuthorableFieldType],
+  })),
 }))
+const paletteDragType = ref<AuthorableFieldType | null>(null)
+function onPaletteDragStart(type: AuthorableFieldType, event: DragEvent): void {
+  if (readOnly.value) {
+    event.preventDefault()
+    return
+  }
+  paletteDragType.value = type
+  event.dataTransfer?.setData('text/plain', type)
+}
+function onPreviewDrop(event: DragEvent): void {
+  event.preventDefault()
+  const type = paletteDragType.value
+  paletteDragType.value = null
+  if (type) addFieldOfType(type)
+}
 
 function addField() {
   if (readOnly.value) return
@@ -2766,7 +3096,14 @@ function onFieldDragStart(index: number) {
   if (!readOnly.value) draggedFieldIndex.value = index
 }
 function onFieldDrop(index: number) {
-  if (readOnly.value || draggedFieldIndex.value === null) return
+  if (readOnly.value) return
+  if (paletteDragType.value) {
+    const type = paletteDragType.value
+    paletteDragType.value = null
+    addFieldOfType(type)
+    return
+  }
+  if (draggedFieldIndex.value === null) return
   const from = draggedFieldIndex.value
   draggedFieldIndex.value = null
   if (from === index) return
@@ -2801,33 +3138,76 @@ function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
 
 // Visibility-rule depends-on options: other fields that have an id (excludes self).
 // FWB-0 Layer 2 P1-2: record-link / detail cannot be visibility dependencies (server fail-closed).
+// Lock-8 L8-B OD-L8-5(a) [R]: date_range is never offered as a single bare dependency (its
+// `{start,end}` value is non-scalar — server rejects it, matching record-link/detail) but its two
+// ENDPOINTS are separately selectable, each producing the dotted `${fieldId}.start`/`.end` address
+// `resolveVisibilityFieldReference` (ApprovalGraphExecutor.ts / fieldVisibility.ts) resolves at
+// runtime and `validateFormFieldVisibilityRules` accepts at publish. M7: this is what makes the
+// `dateRangeVisibilityEndpointOptions` affordance reachable — without it, selecting a date_range
+// field here would either be impossible (silent narrowing to OD-L8-5(c)) or always fail publish
+// (an inert control worse than absence).
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
-  return draft.value.fields
-    .filter((field) => (
-      field.localId !== current.localId
-      && field.id.trim().length > 0
-      && field.type !== 'record-link'
-      && field.type !== 'detail'
-    ))
-    .map((field) => ({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) }))
+  const options: Array<{ localId: string; id: string; label: string }> = []
+  for (const field of draft.value.fields) {
+    if (field.localId === current.localId) continue
+    if (!field.id.trim()) continue
+    if (field.type === 'record-link' || field.type === 'detail') continue
+    // Lock-8 L8-A (§1.1): explanation carries no value at all — never offered, bare or dotted (it
+    // has no endpoints, unlike date_range).
+    if (field.type === 'explanation') continue
+    if (field.type === 'date_range') {
+      const fieldId = field.id.trim()
+      const label = fieldDisplayLabel(field)
+      for (const endpoint of dateRangeVisibilityEndpointOptions(field.type)) {
+        options.push({
+          localId: `${field.localId}#${endpoint.endpoint}`,
+          id: dateRangeVisibilityFieldId(fieldId, endpoint.endpoint),
+          label: `${label}(${endpoint.label})`,
+        })
+      }
+      continue
+    }
+    options.push({ localId: field.localId, id: field.id.trim(), label: fieldDisplayLabel(field) })
+  }
+  return options
 }
 
 /**
  * When a field is retyped to/from record-link (or detail), drop stale visibility deps and
  * condition rules that referenced it — otherwise the UI would keep a now-illegal dependency
  * that only fails at server save.
+ *
+ * Lock-8 L8-B: date_range needs BOTH directions handled, unlike record-link/detail which only
+ * need the "became banned" direction (nothing could validly have depended on them before, since
+ * they were never offered by visibilityFieldOptions/conditionFieldOptions). date_range's
+ * endpoints ARE validly selectable while the field IS date_range, so retyping AWAY from
+ * date_range can orphan a dotted `${id}.start`/`.end` dependency — that direction is checked via
+ * `visibilityReferenceBaseFieldId` (base-id match with a dotted suffix) rather than an exact
+ * string match, and is only cleared when the field is no longer date_range.
  */
 function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft) {
   const changedId = changedField.id.trim()
   if (!changedId) return
-  const banned = changedField.type === 'record-link' || changedField.type === 'detail'
-  if (!banned) return
+  const bareBanned =
+    changedField.type === 'record-link'
+    || changedField.type === 'detail'
+    || changedField.type === 'date_range'
+    // Lock-8 L8-A (§1.1): explanation matches record-link/detail's ONE-direction shape — nothing
+    // could ever validly have depended on it, so only "became explanation" needs clearing.
+    || changedField.type === 'explanation'
+  const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
-    if (field.visibility.dependsOnFieldId.trim() === changedId) {
+    const dependsOn = field.visibility.dependsOnFieldId.trim()
+    if (!dependsOn) continue
+    const baseId = visibilityReferenceBaseFieldId(dependsOn)
+    if (baseId !== changedId) continue
+    const isDottedEndpoint = baseId !== dependsOn
+    const shouldClear = isDottedEndpoint ? !stillDateRange : bareBanned
+    if (shouldClear) {
       field.visibility = { dependsOnFieldId: '', operator: 'eq', valueText: '' }
     }
   }
-  if (draft.value.conditionEdits) {
+  if (bareBanned && draft.value.conditionEdits) {
     for (const edit of Object.values(draft.value.conditionEdits)) {
       for (const branch of edit.branches) {
         for (const rule of branch.rules) {
@@ -2877,6 +3257,7 @@ async function loadTemplateForEdit() {
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = null
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
@@ -2890,6 +3271,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = template.latestVersionId
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
@@ -2946,6 +3328,7 @@ async function persistDraft() {
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
       formFieldFocusLocalId.value = null
+      templateLatestVersionId.value = updated.latestVersionId
       reseedCanvasHistoryFromDraft()
       reseedFormHistoryFromDraft()
       snapshotDraft()
@@ -2956,6 +3339,7 @@ async function persistDraft() {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = created.latestVersionId
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft() // before the route replace so the leave guard stays quiet
@@ -2979,6 +3363,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     formFieldFocusLocalId.value = null
+    templateLatestVersionId.value = created.latestVersionId
     syncAllStepOptions()
     syncAllApprovalNodeOptions()
     syncAllCcOptions()
@@ -3018,13 +3403,29 @@ async function confirmPublish() {
   publishChecklistVisible.value = false
   publishing.value = true
   try {
+    // Publish-sequencing fix (Lock-6 L6-P1 gate F3 finding, corroborated by an independent
+    // component-level probe during P3-B): `policy` is a PUBLISH-ONLY argument — it never travels
+    // through the create/update payload OR response (Lock-6 §0: "policy is a PUBLISH argument,
+    // never a template/version column"). `persistDraft()` below REPLACES `draft.value` wholesale
+    // via `draftFromTemplate(saved)`, re-deriving `allowRevoke` / the L6-A dedup tier from
+    // `saved.policy` — which can only ever echo the LAST-PUBLISHED policy (or nothing, for a
+    // template that has never published), never an in-progress, not-yet-published edit the admin
+    // just made in this same sitting. Reading `draft.value` for the publish payload AFTER
+    // `persistDraft()` therefore silently discarded any such edit — the allowRevoke checkbox (and,
+    // once added, the L6-A dedup-tier control) worked in the DOM but never reached the server.
+    // Fix: snapshot the in-progress policy BEFORE persistDraft() replaces the draft, and publish
+    // THAT snapshot. This does not change persistDraft/draftFromTemplate/hydrate behavior at all —
+    // an untouched draft's snapshot is byte-identical to what the old post-persistDraft read would
+    // have produced, so P-1/P-2 round-trip behavior is unaffected; only an in-session edit now
+    // survives to publish.
+    const policyToPublish = buildPublishPolicy(draft.value)
     const saved = await persistDraft()
     if (!saved) return
     // B3-09 — whitespace-only normalizes to null server-side; send undefined to keep the wire
     // payload identical to pre-B3-09 publishes when the admin typed nothing.
     const note = publishNote.value.trim()
     await publishTemplate(saved.id, {
-      policy: { allowRevoke: draft.value.allowRevoke },
+      policy: policyToPublish,
       ...(note ? { note } : {}),
     })
     ElMessage.success('模板已发布')
@@ -3218,6 +3619,10 @@ onUnmounted(() => {
   background: var(--ms-color-warning);
 }
 
+.template-authoring__version-history-link {
+  margin-left: var(--ms-space-1);
+}
+
 .template-authoring__alert {
   margin-bottom: 16px;
 }
@@ -3238,57 +3643,51 @@ onUnmounted(() => {
 
 .template-authoring__workspace {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: var(--ms-space-5);
+  gap: var(--ms-space-4);
 }
 
 .template-authoring__steps {
   position: sticky;
-  top: 116px;
-  display: grid;
-  gap: var(--ms-space-2);
-  padding: var(--ms-space-3);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-lg);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
-}
-
-.template-authoring__steps-heading {
-  display: grid;
-  gap: var(--ms-space-1);
-  padding: var(--ms-space-2) var(--ms-space-2) var(--ms-space-3);
-  color: var(--ms-text-1);
-}
-
-.template-authoring__steps-heading span {
-  color: var(--ms-text-3);
-  font-size: 12px;
+  top: 72px;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  border-radius: 0;
+  background: var(--ms-bg-page);
+  box-shadow: none;
 }
 
 .template-authoring__step {
-  width: 100%;
+  width: auto;
   height: auto;
-  min-height: 58px;
+  min-height: 48px;
   margin: 0;
-  padding: var(--ms-space-2);
+  padding: 10px 16px 12px;
   color: var(--ms-text-2);
-  white-space: normal;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
 }
 
 .template-authoring__step :deep(> span) {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  display: inline-flex;
   align-items: center;
-  gap: var(--ms-space-2);
-  width: 100%;
+  gap: 8px;
+  width: auto;
   text-align: left;
 }
 
 .template-authoring__step.is-active {
-  background: var(--el-color-primary-light-9);
+  background: transparent;
   color: var(--ms-color-primary);
+  border-bottom-color: var(--ms-color-primary);
 }
 
 .template-authoring__step-index,
@@ -3584,27 +3983,13 @@ pre {
 
 @media (max-width: 1024px) {
   .template-authoring__workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .template-authoring__steps {
-    position: sticky;
-    top: 108px;
-    z-index: 2;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .template-authoring__steps-heading {
-    display: none;
-  }
-
-  .template-authoring__step-copy small,
-  .template-authoring__step-count {
-    display: none;
-  }
-
-  .template-authoring__step :deep(> span) {
-    grid-template-columns: 28px minmax(0, 1fr);
+    top: 0;
+    justify-content: flex-start;
+    overflow-x: auto;
   }
 }
 
@@ -3640,7 +4025,7 @@ pre {
 
   .template-authoring__steps {
     top: 0;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: flex-start;
   }
 
   .template-authoring__grid {
@@ -3665,16 +4050,15 @@ pre {
 .template-authoring__canvas-workspace {
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  gap: 0;
   min-width: 0;
   width: 100%;
+  min-height: min(72vh, 760px);
 }
-.template-authoring__field-palette {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
+/* .template-authoring__form-designer / -palette-pane / -field-palette* /
+   -form-preview* / -form-phone* / -form-drop-hint* / -form-inspector-pane and
+   their 1100px media query moved to ApprovalFormInlineEditor.vue (F0 extraction,
+   delta §5 F0) — exclusive to the extracted three-region shell. */
 @media (max-width: 960px) {
   .template-authoring__canvas-workspace {
     flex-direction: column;

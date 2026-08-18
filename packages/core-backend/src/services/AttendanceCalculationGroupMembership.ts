@@ -2,6 +2,23 @@ import { randomUUID } from 'node:crypto'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { query, transaction } from '../db/pg'
 
+/**
+ * g1 (W7-1b) — the canonical org key used for ADVISORY LOCK KEYS ONLY.
+ *
+ * Deliberately TOTAL and non-throwing. `input.orgId` arrives from an
+ * unvalidated request string, and this function's only job is to make two
+ * spellings of the same org derive the SAME lock key. Throwing here would turn
+ * a lock-key alignment into a new request-rejection path, which is a behaviour
+ * change nobody asked for; the real validation still happens downstream where
+ * it already did.
+ *
+ * Matches `parseCanonicalAttendanceRolloutOrgKeyV1`'s lower-casing without
+ * importing it, because that function REJECTS non-canonical input by design.
+ */
+function canonicalLockOrgKeyV1(orgId: string): string {
+  return String(orgId ?? '').trim().toLowerCase()
+}
+
 export const ATTENDANCE_CALCULATION_GROUP_MEMBERSHIP_OVERLAP =
   'ATTENDANCE_CALCULATION_GROUP_MEMBERSHIP_OVERLAP'
 
@@ -330,9 +347,18 @@ export async function transitionAttendanceCalculationGroupMembership(
     return await transaction(async (client) => {
       const runQuery = client.query as QueryExecutor
 
+      // g1 (W7-1b): CANONICAL org key in the advisory-lock key. W7-1a's composite
+      // helper keys off the canonical form, so a mixed-case spelling here derived
+      // a different key and bought no mutual exclusion. No-op for a canonical
+      // spelling; a non-canonical spelling could never commit anyway (`org_id` is
+      // `text`, so every `WHERE org_id = $1` already failed to match), which is
+      // why this cannot change any outcome that previously succeeded.
       await runQuery(
         `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-        [`attendance-calc-operation\u001f${input.orgId}\u001f${input.correlationId}`],
+        [
+          `attendance-calc-operation\u001f${canonicalLockOrgKeyV1(input.orgId)}` +
+            `\u001f${input.correlationId}`,
+        ],
       )
 
       const operationResult = await runQuery(
@@ -371,9 +397,16 @@ export async function transitionAttendanceCalculationGroupMembership(
         }
       }
 
+      // g1 (W7-1b): the TIMELINE key — the one W7-1a's
+      // `buildAttendanceW7MembershipTimelineLockKeyV1` mirrors. This is the pair
+      // that must agree, or a W7 group resolution and a W1 timeline write can run
+      // concurrently on the same (org, user) without excluding each other.
       await runQuery(
         `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-        [`attendance-calc-timeline\u001f${input.orgId}\u001f${input.userId}`],
+        [
+          `attendance-calc-timeline\u001f${canonicalLockOrgKeyV1(input.orgId)}` +
+            `\u001f${input.userId}`,
+        ],
       )
 
       const targetGroup = await runQuery(

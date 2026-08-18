@@ -19,6 +19,10 @@ const TARGET_FILES = [
   'src/views/approval/ApprovalCardDecisionView.vue',
   'src/views/approval/ApprovalCenterTable.vue',
   'src/views/approval/ApprovalCenterView.vue',
+  // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): brand-new desktop
+  // master-detail pane, clean from the start (no legacy hex to migrate) — same precedent as the
+  // IU-3/IU-4 wizard components above.
+  'src/views/approval/ApprovalCenterDetailPane.vue',
   'src/views/approval/ApprovalDetailView.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
@@ -30,6 +34,23 @@ const TARGET_FILES = [
   'src/views/approval/TemplateDetailView.vue',
   // FWB record-link picker is part of the approval authoring surface and starts token-only.
   'src/approvals/components/ApprovalRecordLinkPicker.vue',
+  // F0 (docs/development/approval-form-builder-parity-delta-design-20260811.md §5 F0): extracted
+  // from the already-token-only TemplateAuthoringView.vue verbatim, so it starts clean too.
+  'src/approvals/components/ApprovalFormInlineEditor.vue',
+  // F2 (same delta §5 F2 / §6 rules): the NEW Designer 2.0 palette + builder join the UF-6
+  // target set in their introducing slice, born token-only (var(--el-*) exclusively).
+  'src/approvals/components/ApprovalFormPalette.vue',
+  'src/approvals/components/ApprovalFormBuilder.vue',
+  // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D): the canvas
+  // node-card flat-card-grammar migration and the condition-branch priority/default presentation.
+  // Note: ApprovalFlowCanvas.vue was NOT already token-only pre-migration — main carried a
+  // literal `box-shadow: 0 1px 2px rgb(0 0 0 / 4%)` that P1-D's flat-card change deleted, so this
+  // enrollment is a real migration for that file, not a clean pass (corrected from the PR body).
+  'src/approvals/components/ApprovalFlowCanvas.vue',
+  'src/approvals/components/ApprovalGraphNodeConfigEditor.vue',
+  // F3 (same delta §5 F3 / §6 rules): the NEW selected-field inspector joins in its
+  // introducing slice, born token-only too.
+  'src/approvals/components/ApprovalFormFieldInspector.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',

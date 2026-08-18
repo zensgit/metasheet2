@@ -58,6 +58,15 @@ import {
   resolveAttendanceFlexExpectationV1,
   type AttendanceFlexPolicyRequiredDurationV1,
 } from './w5-flex-policy'
+// W7-1b (#4556 comments 5293034619 + 5293478713): the V2 half of the frozen-
+// context discriminant routing. Imported ONE WAY ONLY — the router module never
+// imports this file, so `validateFrozenContextShape` (which stays byte-unchanged)
+// and the v2 rule cannot form a cycle.
+import {
+  readFrozenAttendanceContextSchemaVersionV1,
+  validateFrozenAttendanceContextV2ShapeV1,
+  type RoutedFrozenAttendanceContextV1,
+} from './w7-frozen-context-router'
 
 export const ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1 = 'w4c1-segment-calculator@1'
 
@@ -410,6 +419,49 @@ export function validateFrozenContextShape(context: unknown): context is FrozenA
     }
   }
   return true
+}
+
+/**
+ * W7-1b — THE DISCRIMINANT ROUTER. `schemaVersion` FIRST, then the branch rule.
+ *
+ * ORDER IS THE CONTRACT. The W7-0 draft ran its exact-14-key guard BEFORE the
+ * discriminant; copying that order into production would strip W5 flex from
+ * every existing v1 context, because the live v1 rule is a [14, 15] WINDOW with
+ * `flexPolicy` optional while v2 is exact-14 and the 14 key NAMES are identical.
+ * Every flex org calculation would silently become `input_schema_invalid`.
+ *
+ * The v1 branch DELEGATES to `validateFrozenContextShape` verbatim — it is not
+ * re-implemented here, so the window rule has exactly one definition and cannot
+ * drift. `validateFrozenContextShape` itself is byte-unchanged by W7-1b.
+ *
+ * `invalid` for an unknown `schemaVersion` is fail-closed on purpose: assuming
+ * v1 would feed an unknown future shape into the v1 field readers.
+ */
+export function routeFrozenAttendanceContextV1(context: unknown): RoutedFrozenAttendanceContextV1 {
+  const schemaVersion = readFrozenAttendanceContextSchemaVersionV1(context)
+  if (schemaVersion === 1) {
+    return validateFrozenContextShape(context)
+      ? { kind: 'v1', context }
+      : { kind: 'invalid', context: null }
+  }
+  if (schemaVersion === 2) {
+    return validateFrozenAttendanceContextV2ShapeV1(context)
+      ? { kind: 'v2', context }
+      : { kind: 'invalid', context: null }
+  }
+  return { kind: 'invalid', context: null }
+}
+
+/**
+ * "Is this a frozen context this tree can work with, in EITHER schema."
+ *
+ * Deliberately NOT a type predicate over `FrozenAttendanceContextV1` — that is
+ * the lie a blanket widening of `validateFrozenContextShape` would tell, and
+ * `core-backend` compiles with `strict: false`, so the compiler would help
+ * propagate it quietly. A caller needing v1-only fields must route explicitly.
+ */
+export function isSupportedFrozenAttendanceContextV1(context: unknown): boolean {
+  return routeFrozenAttendanceContextV1(context).kind !== 'invalid'
 }
 
 // ---------------------------------------------------------------------------
@@ -846,8 +898,24 @@ export function calculateAttendanceSegmentsV1(
   if (attributionCheck.kind === 'invalid') return review('input_schema_invalid')
   if (attributionCheck.kind === 'review') return review(attributionCheck.reason)
   if (input.context === null) return review('missing_frozen_context')
-  if (!validateFrozenContextShape(input.context)) return review('input_schema_invalid')
-  const context = input.context
+  // W7-1b X1 [MUST_WIDEN]: accept {v1-legacy, v2-legacy, v2-group_effective}.
+  // The 14 key NAMES are identical across the schemas and v2 carries no
+  // `flexPolicy`, so every field read below is shape-compatible with either
+  // arm; only the discriminants differ. Un-widened, EVERY group calculation
+  // reviews out as `input_schema_invalid` and the cutover is a silent no-op.
+  if (!isSupportedFrozenAttendanceContextV1(input.context)) {
+    return review('input_schema_invalid')
+  }
+  // The cast is SCHEMA-AGNOSTIC BY CONSTRUCTION, not by luck, and the argument
+  // belongs here rather than in a commit message: every field read below is a
+  // member of the SHARED 14-key set, identically named and typed in v1 and v2.
+  // The one v1-only key is `flexPolicy`, which a v2 context never carries — so
+  // the flex reads downstream see `undefined`, which is exactly the STRICT
+  // behaviour a group-effective context (which has no flex arm in W7-1b) must
+  // get. `strict: false` means the compiler will NOT catch a future v2-only
+  // divergence here, so if the two key sets ever stop coinciding this cast must
+  // become an explicit `routeFrozenAttendanceContextV1` branch.
+  const context = input.context as FrozenAttendanceContextV1
   const windows = attributionCheck.windows
 
   // 3. Attribution/context identity must agree (same frozen selection).

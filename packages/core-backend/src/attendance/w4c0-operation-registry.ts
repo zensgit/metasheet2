@@ -39,6 +39,7 @@ import type {
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
+  assertConnectionIsIdleV1,
   createVerifiedAttendanceOperationIdentityV1,
   createVerifiedAttendanceOrgIdentityV1,
   deriveAttendanceOperationCandidateIdentityV1,
@@ -560,12 +561,25 @@ export type AttendanceResultOperationPreflightResultV1 =
       readonly batchIdentity: VerifiedAttendanceOperationIdentityV1 | null
       readonly itemIdentities: readonly VerifiedAttendanceOperationIdentityV1[]
       readonly legacyNullIdCount: number
+      /** See `referenceSegments` below. */
+      readonly referenceSegments: boolean
     }
   | {
       /** legacy_projection_only with ONLY null-ID commands: no operation row at all. */
       readonly kind: 'legacy_no_operation'
       readonly org: VerifiedAttendanceOrgIdentityV1
       readonly legacyNullIdCount: number
+      /**
+       * #4899 residual R4: the resolved `referenceSegments` bit from the SAME posture
+       * resolution this preflight already performed under the class-`00` rollout SHARED
+       * lock (step 2 below). Surfaced on the result — NOT folded into
+       * `VerifiedAttendanceOrgIdentityV1`, whose witness shape is `orgId` +
+       * `acceptedWritePosture` only and is re-minted by the rehydration constructors.
+       * Callers that execute an adapter after preflight pass this down instead of
+       * resolving the posture a second time (which would re-take the rollout lock below
+       * their row locks — the ordering the owner-P1 counterexample forbids).
+       */
+      readonly referenceSegments: boolean
     }
 
 export async function attendanceResultOperationPreflightV1(
@@ -604,7 +618,12 @@ export async function attendanceResultOperationPreflightV1(
   const isLegacy = org.acceptedWritePosture === 'legacy_projection_only'
   if (isLegacy && plan.sourced.length === 0 && plan.batch === null) {
     // Null-ID legacy commands create no operation row (lock 4.1/8.2).
-    return { kind: 'legacy_no_operation', org, legacyNullIdCount: plan.legacyNullIdCount }
+    return {
+      kind: 'legacy_no_operation',
+      org,
+      legacyNullIdCount: plan.legacyNullIdCount,
+      referenceSegments: posture.referenceSegments,
+    }
   }
   if (!isLegacy && plan.legacyNullIdCount > 0) {
     // W4-enabled clients that cannot supply a stable identity fail before source DML.
@@ -689,6 +708,7 @@ export async function attendanceResultOperationPreflightV1(
     batchIdentity,
     itemIdentities,
     legacyNullIdCount: plan.legacyNullIdCount,
+    referenceSegments: posture.referenceSegments,
   }
 }
 
@@ -918,6 +938,16 @@ export async function runAttendanceResultOperationTransactionV1<T>(
   connection: AttendanceW4TransactionClientV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
 ): Promise<T> {
+  // Gate E (#4844) first batch: `connection` is CALLER-supplied. PostgreSQL only WARNs on a
+  // nested `BEGIN` (never errors) — on a dirty caller connection this function's own `COMMIT`
+  // below would durably publish the caller's uncommitted writes, strictly worse than a merely
+  // wrong snapshot: this function actually commits. Proven idle exactly ONCE, BEFORE the retry
+  // loop (not inside it) — the loop's own `ROLLBACK` on a failed attempt already restores idle
+  // between attempts, so the precondition is "idle on entry", not "idle every iteration".
+  // Reuses the EXISTING exported probe (w4c0-identity.ts) rather than building a second one —
+  // see that function's own doc comment for the SAVEPOINT-probe proof and refusal code
+  // (`W4C0_CONNECTION_NOT_IDLE`, never a raw SQLSTATE).
+  await assertConnectionIsIdleV1(connection)
   let attempt = 0
   // W4_TRANSACTION_MAX_RETRIES retries => up to (1 + retries) attempts.
   for (;;) {

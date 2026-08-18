@@ -142,6 +142,14 @@
       </template>
     </el-alert>
 
+    <!-- UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail
+         layout. `approval-center__split` is rendered UNCONDITIONALLY at every width — the pane
+         itself only ever renders at `masterDetailEnabled` widths (>= ~1440px) with a live
+         selection, but the wrapper's `display: flex` still applies at every narrower width and on
+         mobile (P1-01 fix: it is NOT a no-op div there — see the CSS comment below for why that
+         assumption caused a real-browser layout regression, and .approval-center__tabs's own rule
+         for the fix). -->
+    <div class="approval-center__split" :class="{ 'approval-center__split--active': showDetailPane }">
     <el-tabs v-model="activeTab" class="approval-center__tabs" @tab-change="handleTabChange">
       <el-tab-pane name="pending">
         <!-- Wave 2 WP3 slice 1/2: 红点 / 未读计数 — badge shows `unreadCount`
@@ -260,6 +268,7 @@
           :loading="store.loading"
           :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
           :summary-line-for="summaryLineFor"
+          :selected-row-id="masterDetailEnabled && activeTab === 'pending' ? selectedApprovalId : null"
           show-selection
           :selectable="isRowBatchSelectable"
           show-wait-column
@@ -334,6 +343,7 @@
           :loading="store.loading"
           :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
           :summary-line-for="summaryLineFor"
+          :selected-row-id="masterDetailEnabled && activeTab === 'mine' ? selectedApprovalId : null"
           :actions-width="170"
           @row-click="handleRowClick"
         >
@@ -388,6 +398,7 @@
           :loading="store.loading"
           :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
           :summary-line-for="summaryLineFor"
+          :selected-row-id="masterDetailEnabled && activeTab === 'cc' ? selectedApprovalId : null"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -419,6 +430,7 @@
           :loading="store.loading"
           :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
           :summary-line-for="summaryLineFor"
+          :selected-row-id="masterDetailEnabled && activeTab === 'completed' ? selectedApprovalId : null"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -454,6 +466,7 @@
           :loading="store.loading"
           :empty-text="searchText ? '未找到匹配的审批' : '暂无已处理审批'"
           :summary-line-for="summaryLineFor"
+          :selected-row-id="masterDetailEnabled && activeTab === 'processed' ? selectedApprovalId : null"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -467,6 +480,23 @@
         />
       </el-tab-pane>
     </el-tabs>
+
+    <ApprovalCenterDetailPane
+      v-if="showDetailPane"
+      :row="paneDisplayRow!"
+      :detail="paneApproval"
+      :detail-loading="paneLoading"
+      :detail-error="paneError"
+      :summary-line="paneSummaryLine"
+      :show-quick-actions="paneShowQuickActions"
+      :approve-loading="paneApproveLoading"
+      :actions-disabled="paneActionsDisabled"
+      @quick-approve="handleInlineApprove"
+      @quick-reject="openRowReject"
+      @open-full-detail="navigateToApprovalDetail"
+      @close="closeDetailPane"
+    />
+    </div>
 
     <!-- Batch reject: a comment is offered (some templates require one; a per-row failure is captured
          in the manifest rather than aborting the batch). -->
@@ -581,18 +611,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
+import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
 import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
@@ -600,6 +631,7 @@ import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import ApprovalCenterTable from './ApprovalCenterTable.vue'
+import ApprovalCenterDetailPane from './ApprovalCenterDetailPane.vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 
@@ -637,6 +669,150 @@ watch(allVisibleApprovals, (rows) => {
 const { hasFeature } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+
+// UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
+// Reuses the SAME matchMedia-based composable/pattern as `isMobileLayout` above (a second,
+// independent call with a wide-desktop query) rather than a new ResizeObserver mechanism — see
+// `useMobileViewport.ts`'s own doc comment for why a bare width query is sufficient here (the
+// pane is not behind a separate feature flag; it is default behavior at wide widths only).
+// Narrower widths and mobile are UNCHANGED: `masterDetailEnabled` stays false there, so
+// `handleRowClick` keeps navigating exactly as it did before this slice.
+const { isMobile: isWideLayout } = useMobileViewport('(min-width: 1440px)')
+const masterDetailEnabled = computed(() => isWideLayout.value && !isMobileLayout.value)
+
+// The row currently loaded into the pane, URL-stable via `?detail=<id>` so a refresh restores it
+// (see the dedicated `route.query.detail` watcher below — deliberately NOT folded into the
+// existing deep-link watcher, which reloads the list and would wipe the batch-approve selection on
+// every row click; see that watcher's own comment for the incident this caused).
+const selectedApprovalId = ref<string | null>(null)
+
+const activeTabRows = computed<UnifiedApprovalDTO[]>(() => {
+  switch (activeTab.value) {
+    case 'pending': return store.pendingApprovals
+    case 'mine': return store.myApprovals
+    case 'cc': return store.ccApprovals
+    case 'completed': return store.completedApprovals
+    case 'processed': return store.processedApprovals
+    default: return []
+  }
+})
+
+// The selection's row from the currently-loaded page of the active tab (zero-cost — already
+// fetched for the table). May be `null` if the id is not on the current page (e.g. a stale
+// `?detail=` restored before the list finishes loading, or the row since paged/filtered away);
+// `paneDisplayRow` below falls back to the single-fetch detail in that case.
+const selectedRow = computed<UnifiedApprovalDTO | null>(() => {
+  const id = selectedApprovalId.value
+  if (!id) return null
+  return activeTabRows.value.find((row) => row.id === id) ?? null
+})
+
+// ── Single-fetch detail (getApproval — the SAME data-client call ApprovalDetailView uses,
+// reused directly rather than via `store.loadDetail`, which would flash `store.loading` — the
+// SAME flag ApprovalCenterTable's `v-loading` binds — on every row selection, and would clobber
+// `store.activeApproval` out from under ApprovalDetailView). See
+// `approvalCenterDetailPaneController.ts` for the generation-counter cancel/replace-on-reselection
+// race guard (mirrors `routePreviewController.ts`).
+const paneApproval = ref<UnifiedApprovalDTO | null>(null)
+const paneLoading = ref(false)
+const paneError = ref('')
+// Wrapped in a closure (never `getApproval` passed directly) so the api-module property read is
+// deferred to the moment `.select()` actually runs (gated behind `masterDetailEnabled &&
+// selectedApprovalId`, both false/null on every narrower-than-wide-desktop mount) rather than at
+// setup(). This matters for tests: several pre-existing approval-center* specs stub
+// `../../approvals/api` with an explicit export list that omits `getApproval` (they never open the
+// pane), and Vitest's mocked-module proxy throws on an eager read of a name the mock never listed.
+const paneController = createDetailPaneController((id: string) => getApproval(id), (patch) => {
+  if ('approval' in patch) paneApproval.value = patch.approval ?? null
+  if (patch.loading !== undefined) paneLoading.value = patch.loading
+  if (patch.error !== undefined) paneError.value = patch.error
+})
+
+// Prefers the already-known list row (zero cost, immediate paint); falls back to the fetched
+// detail once available so the pane still renders after the id has paged/filtered off-screen or
+// on a fresh refresh before the list has loaded.
+const paneDisplayRow = computed<UnifiedApprovalDTO | null>(() => selectedRow.value ?? paneApproval.value)
+const showDetailPane = computed(() => masterDetailEnabled.value && !!selectedApprovalId.value && !!paneDisplayRow.value)
+
+// Mirrors the row actions' own gate exactly (§ B1-03 `isRowBatchSelectable`) — pending tab,
+// platform-native rows only.
+const paneShowQuickActions = computed(() => {
+  const row = paneDisplayRow.value
+  return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row)
+})
+const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(paneDisplayRow.value) : ''))
+// Reuses the EXACT same shared gate the row-level inline approve button already reads
+// (`inlineApprovingId`) — never a second, independently-tracked loading flag. This is also the
+// mechanism that makes a "pane bypasses the shared handler" mutation mechanically detectable: if
+// the pane ever dispatched its own action instead of calling `handleInlineApprove`, this gate
+// would never flip and every OTHER row's approve button would stay clickable while the pane's own
+// request is in flight.
+const paneApproveLoading = computed(() => inlineApprovingId.value !== null && inlineApprovingId.value === selectedApprovalId.value)
+const paneActionsDisabled = computed(() => inlineApprovingId.value !== null)
+
+function selectApprovalRow(id: string): void {
+  selectedApprovalId.value = id
+  if (route.query.detail !== id) {
+    router.replace({ query: { ...route.query, detail: id } })
+  }
+}
+
+function closeDetailPane(): void {
+  if (!selectedApprovalId.value) return
+  selectedApprovalId.value = null
+  const rest: Record<string, unknown> = { ...route.query }
+  delete rest.detail
+  router.replace({ query: rest as Record<string, string> })
+}
+
+function navigateToApprovalDetail(row: UnifiedApprovalDTO): void {
+  router.push({ name: 'approval-detail', params: { id: row.id } })
+}
+
+// P2-03 fix: an Element Plus overlay (select dropdown / date-picker panel / any teleported
+// `.el-popper`) is "open" when its popper node exists in the DOM and is not hidden — Element Plus
+// toggles both `display: none` (v-show) and `aria-hidden="true"` on close, so checking either is
+// sufficient and neither is a false-negative-prone signal on its own. Heuristic chosen because
+// there is no existing codebase precedent for this check (verified: no other `.el-popper` query
+// exists in apps/web/src) — it mirrors Element Plus's own internal close-state contract instead of
+// inventing a new one.
+function hasOpenElPopper(): boolean {
+  const poppers = document.querySelectorAll<HTMLElement>('.el-popper')
+  for (const popper of poppers) {
+    if (popper.getAttribute('aria-hidden') === 'true') continue
+    if (popper.style.display === 'none') continue
+    return true
+  }
+  return false
+}
+
+// Keyboard: Esc closes the pane, Up/Down move the selection — only while the pane is actually
+// open, and never while a reject/batch-result dialog is open (its own textarea needs Up/Down for
+// cursor movement, and Esc must close IT, not the pane underneath). The editable-target check is
+// hoisted above the Escape branch (P2-03 fix) — previously it only guarded Arrow keys, so Escape
+// from a focused filter input (or any other INPUT/TEXTAREA/SELECT) silently closed the pane
+// underneath it too. The `.el-popper` check catches the remaining case where the open overlay's
+// own reference element is not one of those three tags (e.g. a non-filterable el-select trigger).
+function handleDetailPaneKeydown(event: KeyboardEvent): void {
+  if (!masterDetailEnabled.value || !selectedApprovalId.value) return
+  if (batchRejectDialogVisible.value || rowRejectDialogVisible.value || batchResultDialogVisible.value) return
+  const target = event.target as HTMLElement | null
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+  if (event.key === 'Escape') {
+    if (hasOpenElPopper()) return
+    event.preventDefault()
+    closeDetailPane()
+    return
+  }
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  const rows = activeTabRows.value
+  const idx = rows.findIndex((row) => row.id === selectedApprovalId.value)
+  if (idx === -1) return
+  const nextIdx = event.key === 'ArrowDown' ? idx + 1 : idx - 1
+  if (nextIdx < 0 || nextIdx >= rows.length) return
+  event.preventDefault()
+  selectApprovalRow(rows[nextIdx]!.id)
+}
 
 // i18n follow-up (ballot T3-1 build-contract must-fix): the mobile card
 // list's per-tab empty-state copy shipped in #3517 as hardcoded Chinese
@@ -689,8 +865,16 @@ function waitClass(createdAt: string): string {
 
 // Only platform-native pending rows are batch-actionable here; attendance-backed approvals live in the
 // attendance module (their row-click routes away), so excluding them keeps the batch honest.
+// Lock-3 §2.2: a 办理 (handler) task is NOT an approval task — it has no member 同意/拒绝 decision (an
+// approve/reject would 409). Exclude it from the approve/reject action surface entirely so no inert
+// control is offered (M7). This gate feeds the checkbox `:selectable`, the inline 通过/驳回 (`v-if`),
+// and the batch selection (`rows.filter(isRowBatchSelectable)`), so all three surfaces are covered.
+// The handler row stays VISIBLE (informational); the member 办理 surface itself is P5.
+function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
+  return row.currentNodeType === 'handler'
+}
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
-  return row.status === 'pending' && !isAttendanceApproval(row)
+  return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
@@ -1050,6 +1234,14 @@ const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+// P2-04 fix: the URL-restore select watcher below (`watch([selectedApprovalId, masterDetailEnabled],
+// ..., { immediate: true })`) already fires the pane's single fetch synchronously during setup() —
+// BEFORE onMounted runs — whenever a fresh mount carries `?detail=<id>` at wide width. Without this
+// flag, `loadCurrentTab()`'s own pane-refresh block (needed for every SUBSEQUENT reload, including a
+// pane-triggered 通过/驳回) would redundantly re-fetch on that very first onMounted() call too,
+// producing 2 fetches instead of 1.
+let isInitialTabLoad = true
+
 function loadCurrentTab() {
   const query = {
     search: searchText.value || undefined,
@@ -1073,11 +1265,24 @@ function loadCurrentTab() {
   // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
   // reload had already fetched. A choke point cannot be forgotten by the next call site.
   void refreshPendingBadgeCount({ resnapshot: true })
+  // UI-7: this is also the ONE place every list reload passes through — including a pane-triggered
+  // 通过/驳回 (`handleInlineApprove`/`submitRowReject` both call `loadCurrentTab()` on success), and
+  // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
+  // keeps showing a stale current-node/pending-approver snapshot (or a stale 通过/驳回 affordance)
+  // after the very reload that changed it. A no-op whenever the pane is not open.
+  if (!isInitialTabLoad && selectedApprovalId.value && masterDetailEnabled.value) {
+    void paneController.select(selectedApprovalId.value)
+  }
+  isInitialTabLoad = false
 }
 
 function handleTabChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // UI-7: the pane's selection belongs to the tab it was opened from — switching tabs closes it
+  // (also drops a stale `?detail=` from the URL) rather than leaving a phantom selection whose row
+  // id likely does not even exist in the newly-active tab's rows.
+  closeDetailPane()
   // loadCurrentTab() refreshes the badge and re-baselines the G-B2-11 pill (see its choke point).
   loadCurrentTab()
 }
@@ -1141,7 +1346,14 @@ function handleRowClick(row: UnifiedApprovalDTO) {
     })
     return
   }
-  router.push({ name: 'approval-detail', params: { id: row.id } })
+  // UI-7: wide desktop only — select into the master-detail pane instead of navigating away.
+  // Narrower widths and mobile are UNCHANGED: `masterDetailEnabled` is false there, so this falls
+  // straight through to the existing navigation, exactly as before this slice.
+  if (masterDetailEnabled.value) {
+    selectApprovalRow(row.id)
+    return
+  }
+  navigateToApprovalDetail(row)
 }
 
 function openAttendanceApprovalQueue() {
@@ -1167,6 +1379,11 @@ function openAttendanceApprovalQueue() {
 // filter. Otherwise navigating from a filtered drill-down to the bare 审批中心 menu entry
 // (query {}) would silently keep serving the old template/date-scoped list under an
 // unfiltered-looking URL.
+//
+// UI-7 NOTE: `?detail=<id>` (the master-detail pane's own URL-stable selection, see
+// `selectApprovalRow`/`closeDetailPane`) is a SEPARATE query key this function never reads. The
+// watcher right below it is scoped to exactly the three keys this function DOES read — see that
+// watcher's own comment for why.
 function applyDeepLinkFilters(): void {
   const rawTemplateId = route.query.templateId
   templateFilter.value = typeof rawTemplateId === 'string' ? rawTemplateId : ''
@@ -1184,13 +1401,58 @@ function applyDeepLinkFilters(): void {
 // ignored. Re-sync the filter bar from the query and explicitly reload from page 1. The
 // route-name guard keeps the watcher inert while navigating AWAY (the global `route` object
 // mutates to the target route before this instance unmounts).
-watch(() => route.query, () => {
-  if (route.name !== 'approval-list') return
-  applyDeepLinkFilters()
-  currentPage.value = 1
-  clearPendingSelection()
-  loadCurrentTab()
-})
+// UI-7 fix: this used to watch the WHOLE `route.query` object (a single getter returning the
+// object itself). Every `router.replace` that changes ONLY `?detail=<id>` (a row selection) still
+// creates a new `query` object identity, so that form re-fired this watcher on every single row
+// click — reloading the list from page 1 and wiping the pending-tab batch-approve selection out
+// from under the operator. Vue's MULTI-source watch form below tracks each of the three keys this
+// callback actually reads as an INDEPENDENT primitive dependency, so it only fires when one of
+// THEM changes — `detail` changing alone leaves this inert, exactly as intended.
+watch(
+  [
+    () => route.query.templateId,
+    () => route.query.createdFrom,
+    () => route.query.createdTo,
+  ],
+  () => {
+    if (route.name !== 'approval-list') return
+    applyDeepLinkFilters()
+    currentPage.value = 1
+    clearPendingSelection()
+    loadCurrentTab()
+  },
+)
+
+// UI-7: the pane's own URL-stable selection — deliberately a SEPARATE watcher scoped to only the
+// `detail` key (see the watcher above for why folding it in there would reload the list on every
+// selection). `immediate: true` also restores the selection from a fresh page load/refresh.
+// Guarded to a genuine value change so `selectApprovalRow`/`closeDetailPane`'s own
+// `router.replace` calls (which already set `selectedApprovalId` first) do not redundantly re-fire
+// the pane fetch a second time.
+watch(
+  () => route.query.detail,
+  (rawId) => {
+    const next = typeof rawId === 'string' && rawId ? rawId : null
+    if (next === selectedApprovalId.value) return
+    selectedApprovalId.value = next
+  },
+  { immediate: true },
+)
+
+// UI-7: fires the single detail fetch on selection (and on enabling — e.g. resizing into wide
+// layout with a URL-restored selection already pending), cancels/clears on deselect or narrowing
+// back below the wide threshold. `{ immediate: true }` covers the initial mount state.
+watch(
+  [selectedApprovalId, masterDetailEnabled],
+  ([id, enabled]) => {
+    if (enabled && id) {
+      void paneController.select(id)
+    } else {
+      paneController.clear()
+    }
+  },
+  { immediate: true },
+)
 
 // B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
 // raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
@@ -1209,6 +1471,11 @@ onMounted(() => {
   // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
   void loadTemplateOptions()
+  window.addEventListener('keydown', handleDetailPaneKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleDetailPaneKeydown)
 })
 </script>
 
@@ -1315,7 +1582,33 @@ onMounted(() => {
   margin-bottom: var(--ms-space-4);
 }
 
+/* UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail split.
+   RENDERED UNCONDITIONALLY (no `v-if`) at every width — `display: flex` therefore applies even
+   when the pane itself does not render (every narrower-than-wide-desktop width, every mobile
+   render). This is NOT inert: a flex container changes its single implicit child's sizing from
+   block (`width: 100%` of the container by default) to flex-item (`flex: 0 1 auto`, i.e.
+   fit-content, unless told otherwise) — see .approval-center__tabs's own rule immediately below
+   for the fix (P1-01: this exact false "it's a no-op div elsewhere" assumption caused a real,
+   measured layout regression at every viewport width, invisible to jsdom). */
+.approval-center__split {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ms-space-4);
+}
+
+/* Unconditional: `.approval-center__split` is `display: flex` at every width (open or closed
+   pane), so the tabs must be told to stretch the row at every width too. Gating this behind
+   `--active` (pre-fix) left the closed-pane state — the default at every width, and the *only*
+   state below 1440px and on mobile — as a fit-content flex item instead of a container-stretched
+   one, collapsing the whole approval center. Verified via real-Chromium cold-layout measurement
+   at 1600/1440/1366/1024/768/390: this restores merge-base widths exactly and eliminates 390px
+   overflow. See apps/web/tests/approval-center-master-detail.spec.ts's "P1-01 CSS source pin"
+   describe block for the source-pin regression guard (jsdom cannot measure real layout — the
+   guard only pins that this rule stays unconditional in source; the actual proof is the
+   real-Chromium measurement above, see the PR body's browser-harness backlog note). */
 .approval-center__tabs {
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 480px;
   padding: 0 var(--ms-space-4) var(--ms-space-4);
   border: 1px solid var(--ms-border-light);

@@ -10,6 +10,8 @@ import type {
   FormField,
   FormFieldVisibilityRule,
   FormSchema,
+  HandlerMode,
+  HandlerNodeConfig,
   ParallelNodeConfig,
   RuntimeGraph,
 } from '../types/approval-product'
@@ -155,6 +157,24 @@ function isParallelNodeConfig(config: unknown): config is ParallelNodeConfig {
     && (config.joinMode === 'all' || config.joinMode === 'any')
 }
 
+// Lock-3 §1.1 — a normalized handler config always carries an `assigneeSources` array (empty arrays
+// are rejected at authoring, so a runtime handler node always has ≥1 source). Structural only: the
+// normalize choke (ApprovalProductService) owns the seven-member registry + prohibition gates.
+function isHandlerNodeConfig(config: unknown): config is HandlerNodeConfig {
+  return isRecord(config) && Array.isArray(config.assigneeSources)
+}
+
+/**
+ * Lock-3 §1.1 — handler aggregation mode. Fails CLOSED from line one (unlike `normalizeApprovalMode`,
+ * which silently maps any unrecognized mode to `'single'`): only the two evidenced values survive;
+ * anything else — including a hand-malformed runtime graph — collapses to `'all'`, the stronger
+ * guarantee. Absent ≡ `'all'`. Authoring already rejects out-of-set values (APPROVAL_HANDLER_MODE_INVALID),
+ * so this is the runtime backstop, never the primary gate.
+ */
+function normalizeHandlerMode(value: unknown): HandlerMode {
+  return value === 'any' ? 'any' : 'all'
+}
+
 function looksLikeComparableDateString(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}(?:$|[T\s].*)/.test(value)
 }
@@ -189,8 +209,91 @@ function isEmptyValue(value: unknown): boolean {
     || (Array.isArray(value) && value.length === 0)
 }
 
-function evaluateVisibilityRule(rule: FormFieldVisibilityRule, formData: Record<string, unknown>): boolean {
-  const value = formData[rule.fieldId]
+// Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): the
+// granularity enum `date_range.props.dateType` declares. Exactly D-2's two shipped value contracts
+// are reused — 'date' compares as the strict lexicographic civil-date string
+// (`isValidIsoCalendarDate`); 'date_half_day' and 'date_minute' BOTH compare as Date.parse-able
+// instants (§1.2: "each arm reuses D-2's shipped value contract rather than inventing a third" —
+// the corpus's 3-way granularity enum maps onto our 2 value contracts, not a third).
+export const DATE_RANGE_DATE_TYPES = new Set(['date', 'date_half_day', 'date_minute'])
+
+function isDateRangeEndpointValid(dateType: unknown, value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  if (dateType === 'date') return isValidIsoCalendarDate(value)
+  if (dateType === 'date_half_day' || dateType === 'date_minute') {
+    return !Number.isNaN(Date.parse(value))
+  }
+  // Fail closed: an absent/off-enum dateType (should never survive publish, §1.2's props gate)
+  // accepts nothing — never falls through to the permissive instant branch.
+  return false
+}
+
+/** -1 / 0 / 1 per the arm's own comparison rule (lexicographic for 'date', epoch otherwise). */
+function compareDateRangeEndpoints(dateType: unknown, a: string, b: string): number {
+  if (dateType === 'date') {
+    return a < b ? -1 : a > b ? 1 : 0
+  }
+  const left = Date.parse(a)
+  const right = Date.parse(b)
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+/**
+ * Lock-8 L8-B OD-L8-5(a) — a visibility/condition rule's `fieldId` may reference a field's whole
+ * value directly, OR — for a `date_range` field ONLY — one of its two endpoints via the dotted
+ * address `${fieldId}.start` / `${fieldId}.end` (extending the shipped `{fieldId.columnId}` detail
+ * formula-token grammar — `conditionEdit.ts` FE / `ApprovalConditionFormula.ts` BE — to visibility).
+ * A bare reference to a date_range field's own id is REFUSED: "never as one comparable value" — a
+ * range is not a scalar. Every other type keeps the plain whole-field form; `null` on any
+ * unresolvable input (unknown field, malformed address, non-date_range base for a dotted suffix,
+ * or a bare date_range id) — callers treat that identically to "field not found" (fail-closed).
+ */
+export interface VisibilityFieldReference {
+  field: FormField
+  endpoint?: 'start' | 'end'
+}
+
+export function resolveVisibilityFieldReference(
+  rawFieldId: string,
+  fields: readonly FormField[],
+): VisibilityFieldReference | null {
+  const fieldMap = new Map(fields.map((field) => [field.id, field]))
+  const direct = fieldMap.get(rawFieldId)
+  if (direct) {
+    // Lock-8 L8-A (§1.1, MS-8): `explanation` carries no value at all — refused as a bare
+    // reference the same way date_range's WHOLE value is, and with no endpoint fallback (it has
+    // none). A saved graph can never legitimately reach this branch (publish already denies it,
+    // ApprovalProductService.ts), but this runtime resolver stays defensive independent of that.
+    return direct.type === 'date_range' || direct.type === 'explanation' ? null : { field: direct }
+  }
+  const dot = rawFieldId.lastIndexOf('.')
+  if (dot <= 0 || dot === rawFieldId.length - 1) return null
+  const suffix = rawFieldId.slice(dot + 1)
+  if (suffix !== 'start' && suffix !== 'end') return null
+  const base = fieldMap.get(rawFieldId.slice(0, dot))
+  if (!base || base.type !== 'date_range') return null
+  return { field: base, endpoint: suffix }
+}
+
+/** Read the value a resolved visibility reference points at (whole field, or one date_range endpoint). */
+export function readVisibilityReferenceValue(
+  reference: VisibilityFieldReference,
+  formData: Record<string, unknown>,
+): unknown {
+  const raw = formData[reference.field.id]
+  if (!reference.endpoint) return raw
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)[reference.endpoint]
+    : undefined
+}
+
+function evaluateVisibilityRule(
+  rule: FormFieldVisibilityRule,
+  formData: Record<string, unknown>,
+  fields: readonly FormField[],
+): boolean {
+  const reference = resolveVisibilityFieldReference(rule.fieldId, fields)
+  const value = reference ? readVisibilityReferenceValue(reference, formData) : undefined
   switch (rule.operator) {
     case 'eq':
       return value === rule.value
@@ -237,12 +340,18 @@ function buildVisibilityLookup(formSchema: FormSchema, formData: Record<string, 
       return false
     }
 
+    // OD-L8-5(a): the dependency's OWN visibility is checked against its BASE field id — a dotted
+    // `${id}.start`/`${id}.end` endpoint address resolves to the date_range field itself for this
+    // purpose (there is no separate "endpoint field" to recurse into). An unresolvable address
+    // (never published, but defensive against a stale/older graph) is treated as "not visible",
+    // matching the pre-existing missing-field fail-closed behavior below.
+    const reference = resolveVisibilityFieldReference(field.visibilityRule.fieldId, formSchema.fields)
     stack.add(fieldId)
-    const dependentFieldVisible = isVisible(field.visibilityRule.fieldId)
+    const dependentFieldVisible = reference ? isVisible(reference.field.id) : false
     stack.delete(fieldId)
 
     const visible = dependentFieldVisible
-      ? evaluateVisibilityRule(field.visibilityRule, formData)
+      ? evaluateVisibilityRule(field.visibilityRule, formData, formSchema.fields)
       : false
     cache.set(fieldId, visible)
     return visible
@@ -288,8 +397,33 @@ export function pruneHiddenFormData(
   )
 }
 
-function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'all' || value === 'any' || value === 'single' || value === 'threshold' ? value : 'single'
+/**
+ * Lock-1 §K6 precondition (named by the K3 slice sequencing): the executor's approval-mode
+ * normalizer must fail CLOSED. The previous arm silently mapped ANY unrecognized mode to
+ * `'single'` — for contract-valid data the gap was unreachable (the authoring choke rejects
+ * unknown modes, and `asRuntimeGraph` re-normalizes every STORED graph through that same choke on
+ * each dispatch), but the moment a new mode (e.g. `sequential`) becomes authorable, deploy skew or
+ * rollback would degrade it silently to first-approver-wins with no error and no audit signal —
+ * the precise inverse of the S7 governing precedent.
+ *
+ * Enumerated legitimate inputs (widen-only: every value a re-normalized stored graph can carry):
+ *   - `undefined` — the absent default, ≡ `'single'` (the shipped contract; the service-side
+ *     normalizer emits the key only when set, and `single` is the documented absent default);
+ *   - the four shipped members `'single' | 'all' | 'any' | 'threshold'` — pass through unchanged.
+ * ANYTHING else (an unknown string, `null`, a non-string) throws a typed error instead of running
+ * as `'single'`. `null` is deliberately in the reject set: the authoring choke has always rejected
+ * it (`typeof null !== 'string'`), so no legitimately stored graph carries it. The raw value is
+ * deliberately NOT echoed into the message (values-free; the node key — template-authored — is).
+ */
+function normalizeApprovalMode(value: unknown, nodeKey: string): ApprovalMode {
+  if (value === undefined) return 'single'
+  if (value === 'all' || value === 'any' || value === 'single' || value === 'threshold') return value
+  throw new ServiceError(
+    `Approval node ${nodeKey} has an unsupported approval mode`,
+    400,
+    'APPROVAL_MODE_UNSUPPORTED',
+    { nodeKey },
+  )
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -339,7 +473,11 @@ export interface ApprovalFormValidationOptions {
   attachmentValueMode?: 'legacy' | 'ids'
 }
 
-function validateFieldType(
+// Lock-7 L7-C — exported so the handler field-write path (applyHandlerFieldWrites) re-runs the SAME
+// per-value validators against the FROZEN version schema (create-path validation, one function). This
+// inherits Lock-8 MS-3's fail-open default verbatim (`default: return null` below) — asserted, not
+// fixed, by Lock-7 G-6.
+export function validateFieldType(
   field: FormField,
   value: unknown,
   options: ApprovalFormValidationOptions,
@@ -409,6 +547,29 @@ function validateFieldType(
         ? null
         : `${field.id} must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)`
     }
+    case 'date_range': {
+      // Lock-8 L8-B MS-3: structural shape is exactly `{ start, end }`, both non-blank strings
+      // valid for the field's declared `dateType` granularity — no arrays, no extra keys. `dateType`
+      // is required-with-no-absent-default at publish (§1.2); a value validated against a missing
+      // or off-enum dateType is rejected here too (`isDateRangeEndpointValid` fails closed).
+      if (!isRecord(value)) return `${field.id} must be an object`
+      const keys = Object.keys(value)
+      if (keys.length !== 2 || !keys.includes('start') || !keys.includes('end')) {
+        return `${field.id} must be exactly { start, end }`
+      }
+      const dateType = field.props?.dateType
+      if (!isDateRangeEndpointValid(dateType, value.start) || !isDateRangeEndpointValid(dateType, value.end)) {
+        return `${field.id} start and end must be valid dates for the declared date type`
+      }
+      return null
+    }
+    // Lock-8 L8-A (§1.1, MS-3): explanation accepts NO submitted value — an explicit arm, not the
+    // fall-through `default: return null` above (which would make the type fail-OPEN: any value
+    // silently accepted). This function only reaches here when `value !== undefined && value !==
+    // null` (the early return above already lets an absent/unset value through) — so this arm ONLY
+    // fires when a client actually submitted something for a field that must carry nothing.
+    case 'explanation':
+      return `${field.id} does not accept a submitted value`
     default:
       return null
   }
@@ -466,7 +627,9 @@ function getFieldPropString(field: FormField, key: string): string | null {
   return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
 }
 
-function validateFieldConstraints(field: FormField, value: unknown): string[] {
+// Lock-7 L7-C — exported for applyHandlerFieldWrites (see validateFieldType above). MS-3 fail-open
+// default (`default: return []`) is inherited and asserted by G-6, not fixed here.
+export function validateFieldConstraints(field: FormField, value: unknown): string[] {
   if (value === undefined || value === null) {
     return []
   }
@@ -549,6 +712,23 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
       }
       return errors
     }
+    case 'date_range': {
+      // Lock-8 L8-B B-1: `start <= end`, the ONE cross-endpoint check. Values-free (Lock-5 §2.4 /
+      // §2.3): the message carries the field id ONLY — never either endpoint — because this array
+      // is serialized verbatim into `ServiceError.details` and returned to the client
+      // (ApprovalProductService.ts submit path). The shape was already type-validated by
+      // `validateFieldType` before constraints run; a malformed value here is silently skipped
+      // (same non-enforced precedent as an invalid `pattern`/min/max above) rather than duplicating
+      // that check.
+      if (!isRecord(value) || typeof value.start !== 'string' || typeof value.end !== 'string') return []
+      const dateType = field.props?.dateType
+      if (!isDateRangeEndpointValid(dateType, value.start) || !isDateRangeEndpointValid(dateType, value.end)) {
+        return []
+      }
+      return compareDateRangeEndpoints(dateType, value.start, value.end) > 0
+        ? [`${field.id} start must not be after end`]
+        : []
+    }
     default:
       return []
   }
@@ -563,7 +743,9 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 // Attachment top-level-only (flag-ON / attachmentValueMode:'ids'): an attachment-typed leaf inside
 // a detail group is rejected. Flag-OFF / legacy mode keeps detail-leaf attachment values
 // legacy-valid (string/record) for byte compatibility with pre-feature snapshots.
-function validateDetailFieldValue(
+// Lock-7 L7-C — exported for applyHandlerFieldWrites: a `detail` field write re-runs this against the
+// frozen sub-schema (per-row visibility + required, same as create).
+export function validateDetailFieldValue(
   field: FormField,
   value: unknown,
   options: ApprovalFormValidationOptions,
@@ -649,6 +831,10 @@ export class ApprovalGraphExecutor {
   private readonly nodeMap = new Map<string, ApprovalNode>()
   private readonly outgoingEdges = new Map<string, ApprovalEdge[]>()
   private readonly approvalNodeOrder: string[]
+  // Lock-3 §1.4 / OD-L3-5(b): handler nodes in graph order, for the SEPARATE handler ordinal used
+  // ONLY as `approval_assignments.source_step` — so each handler seat gets a distinct, stable ordinal
+  // WITHOUT touching `approvalNodeOrder`, `stepIndexForNode`, or `totalSteps` (all byte-identical).
+  private readonly handlerNodeOrder: string[]
 
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
@@ -665,6 +851,9 @@ export class ApprovalGraphExecutor {
     }
     this.approvalNodeOrder = runtimeGraph.nodes
       .filter((node) => node.type === 'approval')
+      .map((node) => node.key)
+    this.handlerNodeOrder = runtimeGraph.nodes
+      .filter((node) => node.type === 'handler')
       .map((node) => node.key)
   }
 
@@ -703,6 +892,31 @@ export class ApprovalGraphExecutor {
       }
     }
     return this.resolveFromNode(next, completionContext)
+  }
+
+  /**
+   * Lock-3 §2.2 — advance PAST a handler node once its aggregation (会签 all / 或签 first) is
+   * satisfied. A handler completes by SUBMISSION, not approval, and is NOT a counted approval step,
+   * so the resolution carries NO aggregate mode (`null`) — the caller writes an `action:'handle'`
+   * audit row, never an `approve`. Structurally identical to `resolveAfterApprove`'s advance but keyed
+   * on a handler node (whose config `getApprovalNodeConfig` would reject).
+   */
+  resolveAfterHandle(currentNodeKey: string): ApprovalGraphResolution {
+    const next = this.firstTargetForNode(currentNodeKey)
+    if (!next) {
+      return {
+        status: 'approved',
+        currentNodeKey: null,
+        currentStep: this.totalSteps,
+        totalSteps: this.totalSteps,
+        assignments: [],
+        ccEvents: [],
+        autoApprovalEvents: [],
+        aggregateMode: null,
+        aggregateComplete: true,
+      }
+    }
+    return this.resolveFromNode(next, { aggregateMode: null, aggregateComplete: true })
   }
 
   /**
@@ -813,7 +1027,12 @@ export class ApprovalGraphExecutor {
   }
 
   getApprovalMode(nodeKey: string): ApprovalMode {
-    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
+    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode, nodeKey)
+  }
+
+  // Lock-3 §2.2 — handler aggregation mode, fail-closed to `'all'` (see `normalizeHandlerMode`).
+  getHandlerMode(nodeKey: string): HandlerMode {
+    return normalizeHandlerMode(this.getHandlerNodeConfig(nodeKey).handlerMode)
   }
 
   /**
@@ -874,6 +1093,15 @@ export class ApprovalGraphExecutor {
         continue
       }
 
+      // Lock-3 R-3: a handler is a NON-approval node — it never joins the return-target trail. WITHOUT
+      // this arm an unhandled type leaves `nextNodeKey` unchanged and the next iteration throws
+      // `cycle near X` — loud but MISATTRIBUTED (the return would report a phantom cycle). Pass through
+      // to the next node exactly as `cc` does; a handler is never itself a legal return target.
+      if (node.type === 'handler') {
+        nextNodeKey = this.firstTargetForNode(node.key)
+        continue
+      }
+
       if (node.type === 'approval') {
         approvalTrail.push(node.key)
         if (node.key === currentNodeKey) {
@@ -905,7 +1133,9 @@ export class ApprovalGraphExecutor {
   }
 
   buildTransferAssignments(currentNodeKey: string, targetUserId: string): ApprovalGraphAssignment[] {
-    const currentStep = this.stepIndexForNode(currentNodeKey)
+    // Lock-3 §1.4: a transfer at a HANDLER node carries the disjoint handler ordinal; an approval-node
+    // transfer keeps the unchanged approval step index (byte-identical to before this slice).
+    const currentStep = this.sourceStepForNode(currentNodeKey)
     return [{
       assignmentType: 'user',
       assigneeId: targetUserId,
@@ -1014,7 +1244,7 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
@@ -1038,6 +1268,41 @@ export class ApprovalGraphExecutor {
           status: 'pending',
           currentNodeKey: node.key,
           currentStep: sourceStep,
+          totalSteps: this.totalSteps,
+          assignments,
+          ccEvents,
+          autoApprovalEvents,
+          aggregateMode: context.aggregateMode,
+          aggregateComplete: context.aggregateComplete,
+        }
+      }
+
+      // Lock-3 §2.2 R-4: a handler PAUSES the instance exactly as an approval node does — resolve its
+      // roster from the FROZEN snapshot (same `assignmentResolver`), insert assignments, wait. It differs
+      // in what may then happen (submit-only; §2.2 is in the route dispatch). NO auto-pass arm: a handler
+      // carries no empty-assignee/fallback key (§1.2), so an empty RESOLUTION at dispatch is the shipped
+      // APPROVAL_ASSIGNEE_EMPTY 400 — never a silent skip of 财务打款/盖章. `source_step` uses the SEPARATE
+      // handler ordinal (§1.4 / OD-L3-5b); the display `currentStep` is approval steps completed so far
+      // (a handler is not a counted step — `totalSteps` unchanged, G-4).
+      if (node.type === 'handler') {
+        const handlerConfig = isHandlerNodeConfig(node.config) ? node.config : null
+        if (!handlerConfig) {
+          throw new Error(`Handler node ${node.key} has invalid config`)
+        }
+        const sourceStep = this.handlerSourceStepForNode(node.key)
+        const assignments = this.resolveAssignmentsForHandlerNode(node.key, handlerConfig, sourceStep)
+        if (assignments.length === 0) {
+          throw new ServiceError(
+            `Handler node ${node.key} has no assignees`,
+            400,
+            'APPROVAL_ASSIGNEE_EMPTY',
+            { nodeKey: node.key },
+          )
+        }
+        return {
+          status: 'pending',
+          currentNodeKey: node.key,
+          currentStep: this.approvalStepsCompletedBefore(node.key),
           totalSteps: this.totalSteps,
           assignments,
           ccEvents,
@@ -1306,7 +1571,7 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
-        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
@@ -1339,6 +1604,15 @@ export class ApprovalGraphExecutor {
         throw new Error(`Nested parallel nodes are not supported in v1 (at ${node.key})`)
       }
 
+      // Lock-3 §1.3 R-5 (CONFIRM-EXCLUDE): a handler inside a parallel region is a PUBLISH-time 400
+      // (validateHandlerNodePlacement). This throw is the deliberately-RETAINED second door — if a
+      // pre-gate stored graph somehow carried one, it fails loudly here rather than colliding at runtime
+      // with a sibling branch's assignee (§1.4). Widening handlers into parallel regions is OD-L3-1(b)
+      // and must FIRST extend collectAllBranchAssignees + the fingerprint gate, not just delete a check.
+      if (node.type === 'handler') {
+        throw new Error(`Handler nodes are not supported inside a parallel region in v1 (at ${node.key})`)
+      }
+
       if (node.type === 'end') {
         throw new Error(`Parallel branch terminated at an end node before reaching join ${joinNodeKey}`)
       }
@@ -1363,6 +1637,40 @@ export class ApprovalGraphExecutor {
     return index >= 0 ? index + 1 : 0
   }
 
+  /**
+   * Lock-3 §1.4 / OD-L3-5(b) — the SEPARATE handler ordinal used ONLY as `approval_assignments.source_step`.
+   * `stepIndexForNode` returns `0` for every node absent from `approvalNodeOrder`, so with option (a) all
+   * handler seats would collide in one `source_step = 0` bucket (which AttendanceDecisionTrace groups on).
+   * Instead each handler node gets a distinct ordinal in a range DISJOINT from approval step indices
+   * (`0` and `[1..totalSteps]`): `totalSteps + 1 + handlerIndex`. Stable within a frozen runtime graph.
+   * `stepIndexForNode` and `totalSteps` stay byte-identical (G-4). A non-handler key falls back to
+   * `totalSteps + 1` (never used in practice — the callers gate on node type).
+   */
+  private handlerSourceStepForNode(nodeKey: string): number {
+    const index = this.handlerNodeOrder.indexOf(nodeKey)
+    return this.totalSteps + 1 + (index >= 0 ? index : 0)
+  }
+
+  // Lock-3 §1.4 — the source_step an assignment at `nodeKey` carries: the SEPARATE handler ordinal for a
+  // handler node, else the unchanged approval step index. Used by `buildTransferAssignments` so a handler
+  // transfer seat (§2.2) also lands in the disjoint handler bucket rather than the `source_step = 0` one.
+  private sourceStepForNode(nodeKey: string): number {
+    return this.nodeMap.get(nodeKey)?.type === 'handler'
+      ? this.handlerSourceStepForNode(nodeKey)
+      : this.stepIndexForNode(nodeKey)
+  }
+
+  // Lock-3 §2.2 — display progress while PAUSED at a handler: how many approval steps are already behind
+  // it. A handler is not a counted step, so this stays in `[0..totalSteps]` and never reads as ">M".
+  private approvalStepsCompletedBefore(nodeKey: string): number {
+    let count = 0
+    for (const node of this.runtimeGraph.nodes) {
+      if (node.key === nodeKey) break
+      if (node.type === 'approval') count += 1
+    }
+    return count
+  }
+
   private getApprovalNodeConfig(nodeKey: string): ApprovalNodeConfig {
     const node = this.nodeMap.get(nodeKey)
     if (!node || node.type !== 'approval') {
@@ -1373,6 +1681,40 @@ export class ApprovalGraphExecutor {
       throw new Error(`Approval node ${node.key} has invalid config`)
     }
     return approvalConfig
+  }
+
+  // Lock-3 §2.2 R-8 — handler config accessor (the approval accessor throws for a handler key). Used by
+  // the route dispatch's `handle` arm to read `handlerMode` / `opinionRequired`.
+  getHandlerNodeConfig(nodeKey: string): HandlerNodeConfig {
+    const node = this.nodeMap.get(nodeKey)
+    if (!node || node.type !== 'handler') {
+      throw new Error(`Handler node ${nodeKey} is not registered in the runtime graph`)
+    }
+    const handlerConfig = isHandlerNodeConfig(node.config) ? node.config : null
+    if (!handlerConfig) {
+      throw new Error(`Handler node ${node.key} has invalid config`)
+    }
+    return handlerConfig
+  }
+
+  /**
+   * Lock-3 §2.2 R-9 — resolve a handler node's seats through the SAME frozen-snapshot
+   * `assignmentResolver` the approval nodes use (a PURE function over the create-time snapshot — no live
+   * directory read at dispatch). The handler config's `assigneeSources` is the only assignee carrier, so
+   * the resolver input shape is identical; threshold reachability is approval-only and never runs here.
+   */
+  private resolveAssignmentsForHandlerNode(
+    nodeKey: string,
+    handlerConfig: HandlerNodeConfig,
+    sourceStep: number,
+  ): ApprovalGraphAssignment[] {
+    if (this.options.assignmentResolver) {
+      return this.options.assignmentResolver({ nodeKey, sourceStep, config: handlerConfig as unknown as ApprovalNodeConfig })
+    }
+    // No resolver injected (unit-level executor without the service resolver): a handler carries no
+    // legacy assigneeIds pair, so there is nothing to resolve statically — fail closed to empty, which
+    // the PAUSE arm turns into APPROVAL_ASSIGNEE_EMPTY.
+    return []
   }
 
   private resolveAssignmentsForApprovalNode(
@@ -1412,7 +1754,7 @@ export class ApprovalGraphExecutor {
     approvalConfig: ApprovalNodeConfig,
     assignments: ApprovalGraphAssignment[],
   ): void {
-    if (normalizeApprovalMode(approvalConfig.approvalMode) !== 'threshold') return
+    if (normalizeApprovalMode(approvalConfig.approvalMode, nodeKey) !== 'threshold') return
     if (assignments.length === 0) return
     const threshold = this.getApprovalThreshold(nodeKey)
     const distinctSlots = new Set(

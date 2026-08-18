@@ -127,10 +127,12 @@ export function createAttendanceLegacyPlanReservationHostV1(
     async reserveLegacyImportPlanV1(input) {
       validateHostInputBeforeConnection(input)
       const acquired = await deps.acquireConnection()
-      const trx = acquired.client
+      // Freshly-acquired, idle-on-entry connection — NOT a transaction handle yet (the wrapper
+      // below opens the transaction on it after `assertConnectionIsIdleV1` certifies idle).
+      const connection = acquired.client
       try {
-        return await runAttendanceResultOperationTransactionV1(trx, async () => {
-        const posture = await resolveSegmentCalculationPosture(trx, input.orgId)
+        return await runAttendanceResultOperationTransactionV1(connection, async () => {
+        const posture = await resolveSegmentCalculationPosture(connection, input.orgId)
         const org = createVerifiedAttendanceOrgIdentityV1({
           orgKey: input.orgId,
           posture,
@@ -221,7 +223,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
             : []
 
         return reserveAttendanceLegacyImportPlanJobV1(
-          trx,
+          connection,
           authorization,
           {
             batchIdentity,

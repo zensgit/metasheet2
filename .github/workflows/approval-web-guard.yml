@@ -15,6 +15,7 @@
 name: Approval Web Guard
 
 on:
+  merge_group:
   pull_request:
     paths:
       - 'apps/web/src/approvals/conditionEdit.ts'
@@ -70,6 +71,7 @@ on:
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/approvals/requesterPreviewFields.ts'
+      - 'apps/web/tests/requesterPreviewFields.spec.ts'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/src/views/approval/ApprovalMetricsView.vue'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
@@ -82,6 +84,9 @@ on:
       - 'apps/web/tests/approval-common-template-presets.test.ts'
       - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
+      # UI-6 (2026-08-17, master §4 UI-6): ApprovalDetailView.vue detail tab anchors +
+      # audit-derived 审批记录 table projection (chrome only, same already-fetched history).
+      - 'apps/web/tests/approval-detail-record-table.spec.ts'
       - 'apps/web/tests/approval-record-link.test.ts'
       - 'apps/web/tests/approval-record-link-picker.spec.ts'
       - 'apps/web/src/approvals/components/ApprovalRecordLinkPicker.vue'
@@ -98,7 +103,13 @@ on:
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-canvas-inspector.spec.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
+      # L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1) — policy
+      # carrier fix: hydrate reflects the persisted allowRevoke; buildPublishPolicy merges onto
+      # the persisted policy instead of replacing it.
+      - 'apps/web/tests/approval-template-authoring-policy-carrier.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
+      - 'apps/web/tests/approval-handler-node-authoring.spec.ts'
+      - 'apps/web/tests/approval-handler-node-config.spec.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
       - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
       - 'apps/web/src/approvals/components/ApprovalFlowCanvas.vue'
@@ -110,6 +121,7 @@ on:
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
       - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
       - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/tests/approval-form-palette-focus.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -124,6 +136,29 @@ on:
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      # F0 (2026-08-17, PR #4939): ApprovalFormInlineEditor.vue extraction (form section pulled out
+      # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
+      - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
+      - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
+      # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
+      - 'apps/web/src/approvals/approvalFormIdentity.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
+      - 'apps/web/tests/approval-form-identity.test.ts'
+      - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
+      # F2 (2026-08-17, delta §5 F2): typed drag codec + Designer 2.0 palette/builder components
+      # (standalone until the F4 mount) + their mounted specs.
+      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
+      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
+      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
+      - 'apps/web/tests/approval-form-drag-payload.test.ts'
+      - 'apps/web/tests/approval-form-palette-chips.spec.ts'
+      - 'apps/web/tests/approval-form-builder-slots.spec.ts'
+      # F3 (2026-08-17, delta §5 F3): typed retype/update commands + Designer 2.0 selected-field
+      # inspector + their specs. approvalFormCommands.ts, the adapter, and the builder are listed above.
+      - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
+      - 'apps/web/tests/approval-form-field-update.test.ts'
+      - 'apps/web/tests/approval-form-field-inspector.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -147,6 +182,12 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
+      # the presentational pane, its pure generation-counter race-guard controller, and both specs.
+      - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
+      - 'apps/web/src/approvals/approvalCenterDetailPaneController.ts'
+      - 'apps/web/tests/approval-center-master-detail.spec.ts'
+      - 'apps/web/tests/approval-center-detail-pane-controller.test.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -223,6 +264,20 @@ on:
       - 'apps/web/tests/approval-center.spec.ts'
       - 'apps/web/tests/approvalMetricsView.spec.ts'
       - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
+      # L8-B (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.2): date_range (日期区间).
+      # dateRangeField.ts is new; fieldVisibility.ts joins the guarded set here (OD-L8-5(a) dotted
+      # .start/.end endpoint resolver landed in this slice — it had no path entry before).
+      - 'apps/web/src/approvals/dateRangeField.ts'
+      - 'apps/web/src/approvals/fieldVisibility.ts'
+      - 'apps/web/tests/approval-date-range-field.test.ts'
+      - 'apps/web/tests/approval-date-range-visibility.test.ts'
+      - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
+      # L8-A (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.1): explanation (说明).
+      # No new src file (every touched src file already has a path entry above); three new spec
+      # files.
+      - 'apps/web/tests/approval-explanation-field.test.ts'
+      - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
+      - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -257,6 +312,8 @@ on:
       - 'apps/web/tests/approval-template-authoring-linear-step-spine.test.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
+      - 'apps/web/src/approvals/requesterPreviewFields.ts'
+      - 'apps/web/tests/requesterPreviewFields.spec.ts'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/src/views/approval/ApprovalMetricsView.vue'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
@@ -275,6 +332,9 @@ on:
       - 'apps/web/tests/approval-common-template-presets.test.ts'
       - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
+      # UI-6 (2026-08-17, master §4 UI-6): ApprovalDetailView.vue detail tab anchors +
+      # audit-derived 审批记录 table projection (chrome only, same already-fetched history).
+      - 'apps/web/tests/approval-detail-record-table.spec.ts'
       - 'apps/web/tests/approval-record-link.test.ts'
       - 'apps/web/tests/approval-record-link-picker.spec.ts'
       - 'apps/web/src/approvals/components/ApprovalRecordLinkPicker.vue'
@@ -291,7 +351,13 @@ on:
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-canvas-inspector.spec.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
+      # L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1) — policy
+      # carrier fix: hydrate reflects the persisted allowRevoke; buildPublishPolicy merges onto
+      # the persisted policy instead of replacing it.
+      - 'apps/web/tests/approval-template-authoring-policy-carrier.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
+      - 'apps/web/tests/approval-handler-node-authoring.spec.ts'
+      - 'apps/web/tests/approval-handler-node-config.spec.ts'
       - 'apps/web/tests/approval-canvas-commands.test.ts'
       - 'apps/web/src/approvals/approvalAuthoringHistory.ts'
       - 'apps/web/src/approvals/components/ApprovalFlowCanvas.vue'
@@ -303,6 +369,7 @@ on:
       - 'apps/web/tests/approval-version-dual-canvas.test.ts'
       - 'apps/web/tests/approval-flow-canvas-a11y.test.ts'
       - 'apps/web/tests/approval-canvas-inspector-a11y.test.ts'
+      - 'apps/web/tests/approval-form-palette-focus.test.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/approvalVersionDualCanvas.ts'
       - 'apps/web/src/approvals/approvalVersionReadSummary.ts'
@@ -317,6 +384,29 @@ on:
       - 'apps/web/tests/approval-canvas-viewport.test.ts'
       - 'apps/web/tests/approval-template-version-diff.test.ts'
       - 'apps/web/tests/approval-version-graph-overlay.test.ts'
+      # F0 (2026-08-17, PR #4939): ApprovalFormInlineEditor.vue extraction (form section pulled out
+      # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
+      - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
+      - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
+      # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
+      - 'apps/web/src/approvals/approvalFormIdentity.ts'
+      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
+      - 'apps/web/tests/approval-form-identity.test.ts'
+      - 'apps/web/tests/approval-form-authoring-adapter.test.ts'
+      # F2 (2026-08-17, delta §5 F2): typed drag codec + Designer 2.0 palette/builder components
+      # (standalone until the F4 mount) + their mounted specs (same set as the pull_request block).
+      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
+      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
+      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
+      - 'apps/web/tests/approval-form-drag-payload.test.ts'
+      - 'apps/web/tests/approval-form-palette-chips.spec.ts'
+      - 'apps/web/tests/approval-form-builder-slots.spec.ts'
+      # F3 (2026-08-17, delta §5 F3): typed retype/update commands + Designer 2.0 selected-field
+      # inspector + their specs (same set as the pull_request block).
+      - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
+      - 'apps/web/tests/approval-form-field-update.test.ts'
+      - 'apps/web/tests/approval-form-field-inspector.spec.ts'
       # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
@@ -340,6 +430,12 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
+      # the presentational pane, its pure generation-counter race-guard controller, and both specs.
+      - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
+      - 'apps/web/src/approvals/approvalCenterDetailPaneController.ts'
+      - 'apps/web/tests/approval-center-master-detail.spec.ts'
+      - 'apps/web/tests/approval-center-detail-pane-controller.test.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -415,6 +511,18 @@ on:
       - 'apps/web/tests/approval-center.spec.ts'
       - 'apps/web/tests/approvalMetricsView.spec.ts'
       - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
+      # L8-B (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.2): date_range (same set
+      # as the pull_request block above).
+      - 'apps/web/src/approvals/dateRangeField.ts'
+      - 'apps/web/src/approvals/fieldVisibility.ts'
+      - 'apps/web/tests/approval-date-range-field.test.ts'
+      - 'apps/web/tests/approval-date-range-visibility.test.ts'
+      - 'apps/web/tests/approval-date-range-inline-editor.spec.ts'
+      # L8-A (2026-08-17, approval-lock8-field-vocabulary-20260817.md §1.1): explanation (same set
+      # as the pull_request block above).
+      - 'apps/web/tests/approval-explanation-field.test.ts'
+      - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
+      - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -470,12 +578,33 @@ jobs:
             approval-version-dual-canvas \
             approval-flow-canvas-a11y \
             approval-canvas-inspector-a11y \
+            approval-form-palette-focus \
+            approval-form-inline-editor-extract \
+            approval-form-identity \
+            approval-form-authoring-adapter \
+            approval-form-drag-payload \
+            approval-form-palette-chips \
+            approval-form-builder-slots \
+            approval-form-field-update \
+            approval-form-field-inspector \
+            approval-date-range-field \
+            approval-date-range-visibility \
+            approval-date-range-inline-editor \
+            approval-explanation-field \
+            approval-explanation-inline-editor \
+            approval-lock8-field-type-census \
             --reporter=dot
 
       - name: Run FWB mapping authoring contract
         run: pnpm --filter @metasheet/web exec vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
 
       - name: Run approval web guard specs (targeted)
+        # UI-6 (2026-08-17, master §4 UI-6): approval-detail-record-table — ApprovalDetailView.vue
+        # detail tab anchors (审批详情/审批记录/全文评论, desktop-only) + the 审批记录
+        # timeline/table toggle. The table is an audit-derived projection of the SAME
+        # already-fetched store.history the existing parallel-aware timeline renders (no new
+        # endpoint, no second fetch); synthetic 提交/结束 bookend rows are presentation-only and
+        # are asserted absent from any persisted history array.
         # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +
         # column-draft validation (mirrors backend normalizeDetailFieldParts) + buildFormSchema
         # detail emit/round-trip + validateTemplateDraft detail branch.
@@ -521,4 +650,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff --reporter=dot
+run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier --reporter=dot

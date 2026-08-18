@@ -1,5 +1,6 @@
 import type { FormField, FormSchema } from '../types/approval'
 import { getVisibleFormFields, describeFieldVisibilityRule } from './fieldVisibility'
+import { visibilityReferenceBaseFieldId } from './recordLinkField'
 
 /**
  * G-B2-21 (模板编辑器发起人视角预览): split a template's form fields into what a REQUESTER would
@@ -46,9 +47,16 @@ export function computeRequesterPreviewFields(
       //  - its own rule evaluated false → describe that rule (it's what the author must fix);
       //  - its own rule would pass, but the field it DEPENDS ON is itself hidden → the chain hid
       //    it. Describing its own rule here would mislead: the rule's condition may well be met.
-      const dependencyHidden = !!rule && !visibleIds.has(rule.fieldId)
+      // Lock-8 L8-B OD-L8-5(a): `rule.fieldId` may be a dotted date_range endpoint address
+      // (`${id}.start`/`${id}.end`) — `visibleIds` only ever holds BASE field ids, and no field
+      // literally has a dotted id, so both the visibility check and the label lookup must resolve
+      // through the shared base-id stripper. Without it every date_range-endpoint dependent would
+      // misreport as "chain-hidden" even when its base field is visible (false diagnosis), and the
+      // fallback label lookup would leak the raw dotted address into requester-facing copy (M8).
+      const dependencyBaseId = rule ? visibilityReferenceBaseFieldId(rule.fieldId) : ''
+      const dependencyHidden = !!rule && !visibleIds.has(dependencyBaseId)
       const reason = dependencyHidden
-        ? `其依赖的字段「${labelOf(rule!.fieldId)}」当前被隐藏，故此字段一并隐藏`
+        ? `其依赖的字段「${labelOf(dependencyBaseId)}」当前被隐藏，故此字段一并隐藏`
         : describeFieldVisibilityRule(field, formSchema) ?? '当前样例下不显示'
       return { field, reason }
     })

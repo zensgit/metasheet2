@@ -255,6 +255,9 @@ jobs:
           out_dir="output/releases/multitable-onprem"
           pkg_tgz="$(ls -1 ${out_dir}/*.tgz | sort | tail -n 1)"
           pkg_zip="$(ls -1 ${out_dir}/*.zip | sort | tail -n 1)"
+          pkg_meta="${pkg_tgz%.tgz}.json"
+          pkg_bootstrap_ps1="${pkg_tgz%.tgz}-deploy-bootstrap.ps1"
+          pkg_bootstrap_bat="${pkg_tgz%.tgz}-deploy-bootstrap.bat"
           pkg_name="$(basename "${pkg_tgz%.tgz}")"
           verify_dir="${out_dir}/verify"
           mkdir -p "$verify_dir"
@@ -289,16 +292,29 @@ jobs:
           tgz_sha="$(sha256sum "$pkg_tgz" | awk '{print $1}')"
           zip_sha="$(sha256sum "$pkg_zip" | awk '{print $1}')"
 
-          # Stage exactly what the downstream jobs need, in ONE directory, so the
-          # artifact's least-common-ancestor is unambiguous and SHA256SUMS lands
-          # as a SIBLING of the archives — multitable-onprem-package-verify.sh:827-828
-          # requires it adjacent to the package it is verifying.
+          # Stage the complete release bundle in ONE directory, so the artifact's
+          # least-common-ancestor is unambiguous and SHA256SUMS lands as a sibling
+          # of every file it indexes. The downstream verifier requires the index
+          # adjacent to the archives (multitable-onprem-package-verify.sh:827-828),
+          # while an entity-machine handoff also needs the bootstrap sidecars.
           stage="output/main-package-verify-artifact"
           mkdir -p "$stage"
-          cp "$pkg_tgz" "$pkg_zip" "${pkg_tgz}.sha256" "${pkg_zip}.sha256" "$stage/"
+          cp "$pkg_tgz" "$pkg_zip" "$pkg_meta" \
+            "$pkg_bootstrap_ps1" "$pkg_bootstrap_bat" \
+            "${pkg_tgz}.sha256" "${pkg_zip}.sha256" \
+            "${pkg_bootstrap_ps1}.sha256" "${pkg_bootstrap_bat}.sha256" \
+            "$stage/"
           cp "${out_dir}/SHA256SUMS" "$stage/"
           cp "${verify_dir}/${pkg_name}.tgz.verify.json" "${verify_dir}/${pkg_name}.tgz.verify.md" "$stage/"
           cp "${verify_dir}/${pkg_name}.zip.verify.json" "${verify_dir}/${pkg_name}.zip.verify.md" "$stage/"
+
+          # This is deliberately run against the staged upload, not out_dir. It
+          # catches a release-bundle file being generated and indexed but omitted
+          # from the artifact, which archive-only verification cannot detect.
+          (
+            cd "$stage"
+            sha256sum -c SHA256SUMS
+          )
 
           {
             echo "artifact_name=main-package-${{ github.run_id }}-${{ github.run_attempt }}"
@@ -332,6 +348,7 @@ jobs:
             echo "buildProvenanceGitCommitMatchesBuildSha=PASS"
             echo "packageVerificationTgz=PASS"
             echo "packageVerificationZip=PASS"
+            echo "stagedReleaseBundleChecksums=PASS"
             echo "dependencyPreflight=PASS"
             echo "releasePublished=false"
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -372,6 +389,13 @@ jobs:
         with:
           name: ${{ needs.build-main-package.outputs.artifact_name }}
           path: pkg
+
+      - name: Verify the downloaded release bundle checksum index
+        working-directory: pkg
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          echo "downloadedReleaseBundleChecksums=PASS"
 
       - name: PIN-3 — recomputed artifact SHA-256 must equal the build job's recorded value
         run: |
@@ -535,6 +559,7 @@ jobs:
         run: |
           {
             echo "sameArtifactAsBuildJob=PASS"
+            echo "downloadedReleaseBundleChecksums=PASS"
             echo "packageVerificationTgz=PASS"
             echo "packageVerificationZip=PASS"
             echo "packagedMigration074Present=PASS"
@@ -856,6 +881,8 @@ jobs:
             echo "migrationExcludeDriftCheck=PASS"
             echo "packageVerificationTgz=PASS"
             echo "packageVerificationZip=PASS"
+            echo "stagedReleaseBundleChecksums=PASS"
+            echo "downloadedReleaseBundleChecksums=PASS"
             echo "sameArtifactAcrossAllJobs=PASS"
             echo "packagedMigration074Present=PASS"
             echo "packagedMigration075Present=PASS"

@@ -106,7 +106,16 @@ function approvalTemplateRequest() {
     formSchema: {
       fields: [
         { id: 'summary', type: 'text', label: 'Summary', required: true },
-        { id: 'amount', type: 'number', label: 'Amount', required: true },
+        // M-1(ii) (approval-lock8-field-vocabulary-20260817.md §3): carries every L8-C
+        // formatted-number display prop so the file's EXISTING number-mapping assertions below
+        // (save gate ~:371, setRuleEnabled bypass ~:543, execute-time guard ~:714) double as
+        // real save+execute proof that a formatted-number SOURCE field does not weaken the
+        // `exact_number_mapping_unavailable` stop rule — props are display-only (M10) and never
+        // reach `hasUnavailableFwbNumberMapping`, which only inspects the mapping's `targetType`.
+        {
+          id: 'amount', type: 'number', label: 'Amount', required: true,
+          props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true, precision: 2 },
+        },
       ],
     },
     approvalGraph: {

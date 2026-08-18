@@ -10,10 +10,42 @@ export const APPROVAL_PRODUCT_PERMISSIONS = [
 
 export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[number]
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
+// Lock-3 §1.1 R-1: `handler` (办理节点) is the seventh node type — a NON-approval business
+// operation node with its own roster + submit-only completion. Three mirror sites must move
+// together (this union, `apps/web/src/types/approval.ts`, and the `APPROVAL_NODE_TYPES` runtime
+// admission set in ApprovalProductService.ts) or the type is unpublishable.
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
+
+/**
+ * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry: exactly SEVEN of the
+ * shipped kinds. `continuous_managers` is excluded (corpus C-2 lists 连续多级上级 for approvers, not
+ * handlers), and `requester_choice` — though now shipped (Lock-1 K2) and §1.5 says it ADMITS once
+ * Lock-1 lands — is NOT added here: §1.5 says "each row lands in the SAME slice as its kind", and
+ * gate G-13 freezes the seven-member set by exact-set equality (adding a kind must FAIL). Widening
+ * to requester_choice is a separate follow-up decision, not P4-A. This is the per-node-type M4
+ * fail-closed registry: a handler config carrying any kind outside this set is rejected at authoring.
+ */
+export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
+  'static_user',
+  'static_role',
+  'requester',
+  'form_field_user',
+  'direct_manager',
+  'dept_head',
+  'manager_at_level',
+] as const
+export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
+
+/**
+ * Lock-3 §1.1 — handler aggregation mode. A NEW key (not a reuse of `ApprovalMode`, which drags
+ * `single`/`threshold` the corpus evidences none of for handlers, and inherits the fail-OPEN
+ * `normalizeApprovalMode`). `'all'` (会签, every handler submits) / `'any'` (或签, first submits).
+ * Absent ≡ `'all'` (the stronger guarantee; corpus states no default).
+ */
+export type HandlerMode = 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export const APPROVAL_ACTION_TYPES = [
@@ -25,6 +57,10 @@ export const APPROVAL_ACTION_TYPES = [
   'return',
   'add_sign',
   'reduce_sign',
+  // Lock-3 §2.1 — a handler completes by SUBMITTING; the verb is `handle`. Three sites move together:
+  // this const, the route dispatch guard (routes/approvals.ts), and the `approval_records_action_check`
+  // DB migration (a `handle` audit INSERT would violate the shipped 14-member CHECK otherwise).
+  'handle',
 ] as const
 export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
@@ -69,6 +105,25 @@ export type FormFieldType =
   | 'detail'
   /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
   | 'record-link'
+  /**
+   * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): a
+   * start+end date pair. Value is `{ start: string; end: string }`; props carry a REQUIRED
+   * `dateType` granularity (no absent-default) plus `startLabel`/`endLabel` and an optional
+   * `durationLabel`. Excluded from detail columns (OD-L8-4) and never selectable as a whole-value
+   * visibility/condition dependency (OD-L8-5) — only its `${fieldId}.start`/`${fieldId}.end`
+   * endpoints are.
+   */
+  | 'date_range'
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3): a
+   * DISPLAY-ONLY field (说明) — renders authored `props.text` to the requester/approver. No
+   * submitted value: `required`/`defaultValue`/`options`/`placeholder` are all refused at
+   * publish (A-1), the field never enters `formSnapshot` or FWB source candidates, is excluded
+   * from detail columns (MS-4/MS-5), and is never a whole-value visibility/condition dependency
+   * (MS-8/MS-9/MS-10) — it has no value to compare. `label` stays authoring-list-only (BE
+   * requires a non-blank label for every field, `:786`); the rendered body is `props.text`.
+   */
+  | 'explanation'
 
 export interface ApprovalNode {
   key: string
@@ -79,7 +134,24 @@ export interface ApprovalNode {
     | ConditionNodeConfig
     | CcNodeConfig
     | ParallelNodeConfig
+    | HandlerNodeConfig
     | Record<string, never>
+}
+
+/**
+ * Lock-3 §1.1 — handler / 办理节点 config. `assigneeSources` is the ONLY assignee carrier (no legacy
+ * assigneeType/assigneeIds pair). Deliberately carries NO empty-assignee/fallback key in v1 (§1.2 /
+ * OD-L3-2(a)): a handler mints no second vocabulary for Lock-4 to supersede and no inert switch reaches
+ * the inspector (M4/M7). Empty resolution at dispatch terminates at the shipped APPROVAL_ASSIGNEE_EMPTY
+ * 400 (§2.2). `fieldPermissions` share the approval-node shape; ENFORCEMENT is Lock-7 (a handler submit
+ * carries no field writes until then — §3, fail-closed 422).
+ */
+export interface HandlerNodeConfig {
+  assigneeSources: ApprovalAssigneeSource[]
+  handlerMode?: HandlerMode
+  /** 办理意见; absent ≡ false (corpus C-7 default / OD-L3-3(a)). */
+  opinionRequired?: boolean
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 // T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wired `remind`
@@ -168,6 +240,89 @@ export type ApprovalAssigneeSource =
    * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time.
    */
   | { kind: 'manager_at_level'; level: number }
+  /**
+   * Lock-1 §K2 — 提交人自选 (requester choice). The REQUESTER picks the approver(s) at SUBMIT
+   * time: the chosen local user ids travel in the create payload
+   * (`CreateApprovalRequest.requesterChoices`, keyed by node key), are validated server-side
+   * against THIS configured `scope` at create (fail-closed 422 BEFORE any insert), and are
+   * frozen into `ApprovalRequesterSnapshot.requesterChoices`. The resolver reads ONLY that
+   * frozen map — never a live directory/role read — so return/admin-jump/timeout re-entry
+   * re-resolves the SAME list; changing an in-flight seat is `transfer`, not a re-choice.
+   * `mode: 'single'` requires exactly one chosen id; `'multi'` requires at least one.
+   * Scope semantics at create: `company` = any active local user; `members` = only ids in the
+   * configured list; `role` = only ids holding a configured role in a FRESH `user_roles` read
+   * (plain role membership — deliberately NOT the `approval_usable`-curated
+   * `resolveApprovalRequesterRoleIds`, which serves the `requester.role` ROUTING predicate).
+   */
+  | {
+      kind: 'requester_choice'
+      mode: 'single' | 'multi'
+      scope:
+        | { type: 'company' }
+        | { type: 'members'; userIds: string[] }
+        | { type: 'role'; roleIds: string[] }
+    }
+  /**
+   * Lock-1 §K4 — 连续多级部门负责人 (continuous department heads), levels 1..`levels` (level 1 =
+   * the requester's own department head), resolved from the baked `deptHeadChainIds` snapshot.
+   * A DIFFERENT pointer from `continuous_managers`/`managerChainIds`: that chain walks the
+   * `leader_in_dept` LEADER pointer (`ApprovalDirectoryOrg.resolveManagerChain`); this one walks
+   * the DEPARTMENT PARENT tree (`directory_departments.external_parent_department_id`), reading
+   * `dept_manager_userid_list` at each level (`ApprovalDirectoryOrg.resolveDeptHeadChain`). The
+   * two chains coincide only where every department's leader is also its listed manager.
+   * RATIFIED continue-past-empty-level posture: a level whose manager list is empty or resolves
+   * to no linked local user contributes NOTHING to the chain, but the walk CONTINUES to that
+   * department's parent (the next hop is the department's OWN parent pointer, independent of
+   * whether a head resolves at this level) — unlike `managerChainIds`, whose next hop IS the
+   * resolved leader and so DOES stop when none is found. `levels` is validated
+   * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time, byte-identically to `continuous_managers`.
+   */
+  | { kind: 'continuous_dept_heads'; levels: number }
+  /**
+   * Lock-1 §K5-b — 指定层级部门负责人 (dept head at a specific level): `deptHeadChainIds[level-1]`,
+   * positionally IDENTICAL to `manager_at_level` but reading the K4 department-head chain instead
+   * of `managerChainIds` (a different pointer — see the `continuous_dept_heads` doc comment above).
+   * Level 1 = the requester's own department head (byte-identical to the single-level `dept_head`).
+   * Strictly downstream of K4: this reads the SAME `deptHeadChainIds` snapshot field K4 builds — it
+   * does not add a snapshot field of its own. `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]`
+   * at normalize time, byte-identically to `manager_at_level`. A `level` valid in contract but past
+   * the end of THIS requester's (possibly shorter) chain resolves EMPTY and falls to
+   * `emptyAssigneePolicy` — the shipped `manager_at_level` behavior, unchanged (Lock-1 §K5: never a
+   * dispatch-time failure).
+   */
+  | { kind: 'dept_head_at_level'; level: number }
+  /**
+   * Lock-1 §K3 — 节点审批人 (prior-node approver): resolves to the referenced prior node's ACTUAL
+   * decider(s) from INSTANCE state — the audited `action='approve'` actors at that node — never
+   * from that node's config and never from a directory read. `nodeKey` MUST reference an
+   * `approval` node strictly upstream on EVERY runtime-reachable path to the carrying node
+   * (a DOMINANCE check, enforced at publish by `assertPriorNodeApproverReferencesUpstream` —
+   * dangling / non-approval / self / not-on-every-path references are a publish-time 400,
+   * never a dispatch-time surprise).
+   *
+   * This is the ONE kind whose resolution is not a pure function of the create-time snapshot
+   * (§2.1 "K3 alone"): the deciders are unknowable at create, so the CALLER reads them at node
+   * activation from instance-internal `approval_records` rows (LATEST `nodeEntryEpoch` round only
+   * — OD-L1-3(a)) and passes them in alongside the snapshots
+   * (`ResolveApprovalAssigneesOptions.priorNodeApprovers`); the resolver itself stays pure and
+   * adds no database access. System sentinel actors (`system:auto-approval`,
+   * `system:approval-timeout` — the `system:` namespace) are DROPPED, never assigned; when
+   * dropping leaves nothing (or the referenced node was skipped / not reached), resolution is
+   * EMPTY and falls to the node's `emptyAssigneePolicy` (OD-L1-4(a) — under the default 'error'
+   * that is a fail-closed APPROVAL_ASSIGNEE_EMPTY, and under an explicit 'auto-approve' an
+   * AUDITED auto-approval event, never a silent nobody).
+   *
+   * Explicit NO-DEDUP across nodes (§K3): the same person approves AGAIN at the referencing node;
+   * intra-node identity dedup (the resolver's `seen` set) still collapses one identity to one
+   * seat WITHIN this node. NO self-exclusion (deliberate, the §K2 posture): a prior decider who
+   * happens to be the requester still gets the seat — self-approval semantics stay owned by
+   * `autoApprovalPolicy.mergeWithRequester`. The RULE (which node to reference) is frozen in the
+   * instance's pinned published runtime graph, so a re-publish never alters an in-flight
+   * instance's reference.
+   */
+  | { kind: 'prior_node_approver'; nodeKey: string }
+
+export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
 export interface ApprovalAssigneeResolutionMetadata {
   /**
@@ -180,6 +335,12 @@ export interface ApprovalAssigneeResolutionMetadata {
     kind: ApprovalAssigneeSourceKind
     sourceIndex: number
     fieldId?: string
+    /**
+     * Lock-1 §K3 (`prior_node_approver` only): the referenced prior node's key, so "why is this
+     * person an approver" is answerable from the row alone (§2.6 — a template-authored node key,
+     * values-free).
+     */
+    priorNodeKey?: string
   }
   /**
    * Set when a delegation (委托) substituted this assignee: the original delegator's
@@ -352,6 +513,21 @@ export interface ApprovalRequesterSnapshot {
    */
   managerChainIds?: string[]
   /**
+   * Lock-1 §K4 — ordered local user ids of the requester's DEPARTMENT-HEAD chain, level 1 first
+   * (the requester's own department head). A DIFFERENT pointer from `managerChainIds` — see the
+   * `continuous_dept_heads` union member doc comment for the leader-pointer vs parent-tree
+   * distinction. Frozen at create time when the published graph uses `continuous_dept_heads` OR
+   * Lock-1 §K5-b `dept_head_at_level` (gated by `runtimeGraphUsesDeptHeadChain`, EXTENDED to both
+   * kinds, so it is not baked for every approval).
+   * Cycle-guarded (visited set of external DEPARTMENT ids) + capped at MAX_MANAGER_CHAIN_LEVELS;
+   * self-excluded on the requester's LOCAL id; absent when unresolvable or unused. A level whose
+   * head is unresolved contributes nothing but does NOT truncate the walk (ratified
+   * continue-past-empty-level posture). Read by `continuous_dept_heads` (slices it to its own
+   * `levels`) and by `dept_head_at_level` (positional single-level pick, `[level-1]`). Purely
+   * additive; existing snapshots omit it.
+   */
+  deptHeadChainIds?: string[]
+  /**
    * Delegation (委托) substitution map (delegator localUserId -> delegatee localUserId),
    * frozen at create time from the active `approval_delegations` scoped to this template
    * + the create-time instant. Read by `ApprovalAssigneeResolver` inside `pushResolved`
@@ -359,6 +535,16 @@ export interface ApprovalRequesterSnapshot {
    * delegation applies; purely additive.
    */
   delegations?: Record<string, string>
+  /**
+   * Lock-1 §K2 (requester_choice) — the requester's submit-time approver choices, FROZEN at
+   * create: node key → chosen local user ids, validated against each `requester_choice`
+   * source's configured scope BEFORE any insert. OPT-IN: present only when the published
+   * runtime graph carries a `requester_choice` source (unrelated approvals pay nothing).
+   * The resolver reads ONLY this map (no live read at dispatch/return/admin-jump/timeout),
+   * so a re-entered node re-resolves the SAME list; a directory/role change after create
+   * never alters it — the sanctioned in-flight mutation is `transfer`.
+   */
+  requesterChoices?: Record<string, string[]>
   [key: string]: unknown
 }
 
@@ -405,6 +591,15 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the TYPE of the instance's current node, resolved from the frozen runtime graph.
+   * Lets the member 待办 surface tell a handler (办理) task apart from an approval task so it can
+   * withhold the approve/reject action affordance (a handler node has no member decision — 同意/拒绝
+   * would 409). Absent/`null` for bridged/external instances (no node config) and non-platform rows;
+   * consumers treat absent as "not a handler" (the safe default: an ordinary approval task stays
+   * actionable). Values-free (a node-type token, never an id/value).
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in
    * parallel state (length ≥ 2). For non-parallel state this equals
    * `[currentNodeKey]` or is omitted. Callers that don't care about
@@ -431,6 +626,15 @@ export interface UnifiedApprovalHistoryDTO {
 export interface CreateApprovalRequest {
   templateId: string
   formData: Record<string, unknown>
+  /**
+   * Lock-1 §K2 (requester_choice) — submit-time approver choices, keyed by the published
+   * `requester_choice` node's key. REQUIRED (per node) when the published route carries a
+   * `requester_choice` source: a missing/empty entry is a values-free 422 at create, never an
+   * empty resolution. Validated server-side against the node's configured scope + mode
+   * cardinality BEFORE any instance/assignment insert, then frozen into the requester
+   * snapshot (`requesterChoices`) that the resolver reads.
+   */
+  requesterChoices?: Record<string, string[]>
 }
 
 export interface ApprovalActionRequest {
@@ -460,6 +664,16 @@ export interface ApprovalActionRequest {
    * Only rows stamped `metadata.addSign === true` are removable.
    */
   targetAssignmentUserId?: string
+  /**
+   * Lock-3 §3 / Lock-7 L7-C — the field-write channel for a handler `handle` submission. Lock-7 P4-B
+   * lands the write: a plain object `{ fieldId: value }` is applied under the actor's single-node mask
+   * (`editable` writes; `readonly`/`hidden`/unknown/detail-sub-column refuse values-free), validated
+   * against the FROZEN version schema, then UPDATEs `form_snapshot` in place inside the handle
+   * transaction plus append-only revision rows (OD-L7-6). `{}` is an accepted zero-write no-op;
+   * `null` / a non-object is a values-free 400 `APPROVAL_FIELD_WRITE_PAYLOAD_INVALID`. Meaningful only
+   * on `handle` — present on any other action it is a values-free 400. Detected by key PRESENCE.
+   */
+  fieldWrites?: unknown
 }
 
 export interface ApprovalTemplateListItemDTO {
@@ -494,6 +708,16 @@ export interface ApprovalTemplateListItemDTO {
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+  /**
+   * L6-P1 carrier fix — the ACTIVE published definition's runtime policy (the same object a
+   * publish call would need to preserve on republish), or `null` when the template has never
+   * been published. `policy` is a PUBLISH argument, never a template/version column (this DTO
+   * has no other source for it) — required so the authoring draft can hydrate `allowRevoke` from
+   * the persisted value instead of a hardcoded default, and so a republish can merge onto the
+   * full object instead of replacing it and destroying sibling fields (e.g. `autoApproval`) set
+   * only through the publish API.
+   */
+  policy: RuntimePolicy | null
 }
 
 export interface ApprovalTemplateVisibilityScope {

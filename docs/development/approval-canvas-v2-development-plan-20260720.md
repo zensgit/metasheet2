@@ -1,6 +1,6 @@
 # Approval Canvas V2 Development Plan (2026-07-20)
 
-**Status:** PROPOSED - owner ratification required before D3 canvas foundation work starts
+**Status:** G0 RATIFIED 2026-08-15 (D0 lock). O3 DEFER — bespoke canvas retained; Vue Flow / ELK not authorized. Runtime flags and real-tenant UAT remain owner-controlled; not product FINAL.
 **Baseline:** `origin/main@a98996ee2e0269b22801a6b87d2b8d5b5f076025`
 **Scope:** approval form authoring, approval-flow canvas, template versions, form/decision-value writeback, and attachment integration
 **Flags:** Canvas V2 defaults OFF until G5-C plus owner UAT; FWB and attachments retain separate default-OFF gates
@@ -622,6 +622,7 @@ flags or production rollout.
       if the accessible-authoring equivalence gate passes.
 - [ ] O3 - Choose Vue Flow plus lazy-loaded ELK, accepting its measured bundle/license cost; otherwise amend
       the plan to authorize and verify a Dagre post-layout ordering/rerouting layer. No silent fallback.
+      **Owner 2026-08-15: DEFER** — do not start Vue Flow / ELK; keep the shipped bespoke renderer.
 - [ ] O3-p - Authorize D3-p as a pre-G0 compatibility repair for already-shipped timeout/threshold semantics.
       This does not ratify D0, start D3, or enable a flag.
 - [ ] O4 - Dragging is semantic placement; arbitrary persisted positions are out of scope.
@@ -671,5 +672,7 @@ The initial commit `2338eb928` received two read-only independent reviews before
   regression ownership. Manager/dept/level assignee sources are not attendance-only; they are present in the
   core approval types and product service and now have D7-c1 parity ownership.
 
-Subagent findings are inputs, not proof. This revision was reconciled against the repository by Codex; the plan
-remains PROPOSED until the owner checks section 13.
+Subagent findings are inputs, not proof. This revision was reconciled against the repository by Codex.
+G0 of the D0 lock was owner-RATIFIED 2026-08-15 (`docs/development/approval-canvas-g0-ratify-20260815.md`).
+O3 is DEFER (do not start Vue Flow / ELK). Section 13 items other than that O3 deferral, plus UAT and
+flag enablement, remain owner-controlled.

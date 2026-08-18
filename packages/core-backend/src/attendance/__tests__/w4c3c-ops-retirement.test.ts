@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertParentNotOperatorRetiredV1,
+  assertParentNotRetiredForAuthoritativePunchV1,
   assertParentNotRetiredForOrdinaryWriterV1,
   assertToolingOnlyNonW4FixtureTeardownAllowedV1,
   buildLegacyRetirementBaselineProvenanceV1,
@@ -54,6 +55,82 @@ describe('W4C-3c ops retirement + recompute identity', () => {
         visibility_reason: 'active',
       }),
     ).not.toThrow()
+  })
+
+  // Gate D2 (#4556 / #4844) — the AUTHORITATIVE live-punch retirement guard.
+  //
+  // ANTI-ENUMERATION PIN. This guard's whole point is that it is DEFAULT-REFUSE with one named
+  // carve-out, not an enumerate-the-known-reasons-with-implicit-proceed structure. The synthetic
+  // reason leg below cannot be driven through a real DB insert — `chk_ar_visibility_reason` blocks
+  // an out-of-domain value at the row level — so it is exercised at the FUNCTION seam, which is
+  // exactly what proves the guard is not merely parasitic on that CHECK.
+  describe('Gate D2 authoritative-punch retirement guard (default refuse, one carve-out)', () => {
+    it('proceeds for a non-retired parent', () => {
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibility_state: 'active',
+          visibility_reason: 'active',
+        }),
+      ).not.toThrow()
+    })
+
+    it('CARVE-OUT: proceeds for retired/review_placeholder (the F6 create-if-absent steady state)', () => {
+      // The one reason that MUST pass: a completed outcome promotes this parent via the core's
+      // own pointer UPDATE, and a review outcome preserves it. Refusing here would break F6.
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibility_state: 'retired',
+          visibility_reason: 'review_placeholder',
+        }),
+      ).not.toThrow()
+    })
+
+    it('TERMINAL, distinctly coded: operator_retirement refuses with ATTENDANCE_RECORD_OPERATOR_RETIRED, not the generic code', () => {
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibility_state: 'retired',
+          visibility_reason: 'operator_retirement',
+        }),
+      ).toThrowError(ATTENDANCE_OPERATOR_RETIREMENT_ERROR_CODES.OPERATOR_RETIRED)
+    })
+
+    it('DEFAULT REFUSE: import_rollback refuses with ATTENDANCE_RECORD_RETIRED', () => {
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibility_state: 'retired',
+          visibility_reason: 'import_rollback',
+        }),
+      ).toThrowError(/ATTENDANCE_RECORD_RETIRED/)
+    })
+
+    it('[anti-enumeration pin] DEFAULT REFUSE: a SYNTHETIC / unlisted retired reason refuses with ATTENDANCE_RECORD_RETIRED rather than falling through to the core reactivation', () => {
+      // A reason outside {review_placeholder, import_rollback, operator_retirement} — i.e. any
+      // reason a future migration adds. Falling through here would reach the core, whose
+      // completed-path pointer UPDATE reactivates the parent to w4/active/active UNCONDITIONALLY.
+      for (const reason of ['some_future_reason', 'gdpr_erasure', '', 'ACTIVE']) {
+        expect(() =>
+          assertParentNotRetiredForAuthoritativePunchV1({
+            visibility_state: 'retired',
+            visibility_reason: reason,
+          }),
+        ).toThrowError(/ATTENDANCE_RECORD_RETIRED/)
+      }
+    })
+
+    it('reads both the snake_case row shape and the camelCase boundary shape', () => {
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibilityState: 'retired',
+          visibilityReason: 'import_rollback',
+        }),
+      ).toThrowError(/ATTENDANCE_RECORD_RETIRED/)
+      expect(() =>
+        assertParentNotRetiredForAuthoritativePunchV1({
+          visibilityState: 'retired',
+          visibilityReason: 'review_placeholder',
+        }),
+      ).not.toThrow()
+    })
   })
 
   it('requires the closed tooling-only non-W4 fixture teardown guard', () => {

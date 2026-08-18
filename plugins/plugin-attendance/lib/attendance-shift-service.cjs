@@ -54,9 +54,19 @@ const SEGMENT_MIN = 1
 const SEGMENT_MAX = 3
 const MINUTES_PER_DAY = 1440
 const SEGMENT_CALCULATION_FLAG_ENV = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
-// W3 has no authoritative segment calculator. An environment value alone must never
-// make reference writers accept multi-segment shifts or advertise authoritative
-// results. W4 must flip this only in the same reviewed change that adds the calculator.
+// #4556 Gate A / Option B cutover: this constant is NO LONGER a reference-writer gate.
+// The plugin's own env-reading predicate (`isSegmentCalculationEnabled`) has been retired
+// so there is ONE source of truth for reference-writer authorization — the core canonical
+// posture port (`resolveOrgSegmentCalculationPosture`, exact-org allowlist, wildcard-refused,
+// persisted rollout row). Every reference writer now resolves the port on its write trx and
+// passes an explicit boolean; nothing here reads the environment for authorization.
+//
+// The constant survives ONLY as an injected, values-safe DIAGNOSTIC of whether the W4
+// AUTHORITATIVE CALCULATOR itself has shipped (it has not — this stays `false`). Its sole
+// consumer is the W6 group effective-policy aggregate via `attendance-admin.ts`, where it is
+// the second conjunct of `calculationPosture === 'authoritative' && segmentCalculationImplemented`
+// — i.e. even an org the port resolves `authoritative` must not be shown 'effective' results
+// until the calculator exists. Flipping it belongs to the reviewed change that lands W4C-1.
 const SEGMENT_CALCULATION_IMPLEMENTED = false
 const SHIFT_REFERENCE_DELETED_LABEL = 'Deleted or unavailable shift'
 
@@ -487,27 +497,28 @@ function createAttendanceShiftService(deps) {
   }
 
   /**
-   * Org-scoped authoritative-calculation flag. The env var holds a comma-separated
-   * list of opted-in org ids ('*' = all); unset/empty means OFF for every org.
-   * W3 ships it OFF everywhere; enabling it is a separately authorized rollout step.
-   */
-  function isSegmentCalculationEnabled(orgId) {
-    if (!SEGMENT_CALCULATION_IMPLEMENTED) return false
-    const raw = typeof process.env[SEGMENT_CALCULATION_FLAG_ENV] === 'string'
-      ? process.env[SEGMENT_CALCULATION_FLAG_ENV]
-      : ''
-    const entries = raw.split(',').map((entry) => entry.trim()).filter(Boolean)
-    if (entries.length === 0) return false
-    if (entries.includes('*')) return true
-    return entries.includes(String(orgId ?? DEFAULT_ORG_ID))
-  }
-
-  /**
    * Values-safe capability projection: state and labels only, no secrets and no
    * member/user values. Shows authoritative segment calculation disabled by default.
+   *
+   * #4556 Gate A / Option B: this projection is a pure DTO with no write trx / port in
+   * hand, so it is pinned to the closed legacy posture (`enabled: false`) rather than
+   * re-deriving posture from the environment. That is byte-identical to the retired
+   * env-gate's production behaviour (the plugin master gate was OFF, so this was always
+   * `false`). The authoritative reference-writer decision is made by the port, not here;
+   * a shadow/authoritative org's capability hint stays 'preview_only'.
+   *
+   * STILL PINNED after the residual-R4 slice — deliberately, and adjudicated rather than
+   * forgotten. R4 opened the AUTHORIZATION door
+   * (`index.cjs`, `assertWorkContextSegmentCalculationAllowed`), which refuses writes; this
+   * function is a DISPLAY hint that gates nothing (Gate A adjudication #3: the whole
+   * `SEGMENT_CALCULATION_IMPLEMENTED` family reaches only the read-only W6 effective-policy
+   * aggregate, whose transaction is `SET TRANSACTION READ ONLY`). Making it accurate needs a
+   * posture read on a request-scoped client this synchronous DTO does not have, i.e. a route
+   * change, not a one-line thread-through. Named out of scope, not claimed resolved: an
+   * enabled org sees `preview_only` in the shift DTO while its writers are admitted.
    */
   function buildShiftCapabilities(orgId) {
-    const enabled = isSegmentCalculationEnabled(orgId)
+    const enabled = false
     return {
       segmentCalculation: {
         enabled,
@@ -762,7 +773,13 @@ function createAttendanceShiftService(deps) {
       if (mode === 'segments') {
         segments = validateShiftSegments(patch.segments)
         const currentCount = currentSegmentCount === 0 ? 1 : currentSegmentCount
-        if (segments.length > 1 && currentCount <= 1 && !isSegmentCalculationEnabled(orgId)) {
+        // #4556 Gate A / Option B: the service holds a write trx but no port, so the
+        // 1->multi conversion guard is pinned to the closed legacy posture (block whenever
+        // durable references exist). Byte-identical to the retired env-gate's production
+        // behaviour (master gate OFF => the env term was always true). Residual R4: a
+        // Gate-C-enabled shadow org still cannot convert here until this guard is re-sourced
+        // from the port in a later slice.
+        if (segments.length > 1 && currentCount <= 1) {
           const blockers = await findShiftDeleteBlockers(trx, { orgId, shiftId, shiftName: existing.name })
           if (blockers.length > 0) {
             throw new HttpError(
@@ -1072,9 +1089,15 @@ function createAttendanceShiftService(deps) {
     await assertLockedShiftReferenceAllowed(trx, { orgId, shiftId, producer, referenceSegments })
   }
 
+  // #4556 Gate A / Option B: a PURE function of the explicit `referenceSegments` boolean.
+  // `true` (the org's canonical posture, resolved by the port on the caller's write trx —
+  // exact-org allowlisted, wildcard-refused, persisted rollout row) admits any segment count.
+  // Anything else (`false`, or a caller that failed to resolve the port) is fail-closed: a
+  // multi-segment / unverifiable shift throws the typed 422. There is no environment read and
+  // no `=== undefined => isSegmentCalculationEnabled` fallback anymore — the plugin's second
+  // gating mechanism is retired, leaving the port as the one source of truth.
   function assertSegmentCalculationAllowed({ orgId, shiftId, segmentCount, producer, referenceSegments }) {
     if (referenceSegments === true) return
-    if (referenceSegments === undefined && isSegmentCalculationEnabled(orgId)) return
     const normalizedCount = Number(segmentCount)
     if (segmentCount == null || !Number.isInteger(normalizedCount) || normalizedCount < 0) {
       throw new HttpError(
@@ -1181,7 +1204,6 @@ function createAttendanceShiftService(deps) {
     mapFlexPolicyFromRow,
     deriveEnvelopeFromSegments,
     synthesizeSegmentsFromEnvelope,
-    isSegmentCalculationEnabled,
     buildShiftCapabilities,
     mapShiftWithSegments,
     loadSegmentsByShiftId,

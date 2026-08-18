@@ -76,6 +76,7 @@ function baseInput(overrides = {}) {
       targetSystemId: 'target_1',
       targetObject: 'target_items',
       createdBy: 'owner-7',
+      options: { source: { filters: { approvedSlice: 'fixture' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'externalId', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name', validation: [{ type: 'required' }] },
@@ -165,6 +166,158 @@ async function testReadyDryRunIssuesTokenAndStaysValuesFree() {
   assert.equal(evidenceText.includes('Widget'), false, 'evidence must not include source names')
   assert.equal(evidenceText.includes(result.dryRunToken), false, 'evidence must not include the bearer dry-run token')
   assert.equal(result.evidence.dryRunTokenPresent, true)
+}
+
+async function testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness() {
+  const reads = []
+  const filterValue = 'PRIVATE-FILTER-SENTINEL'
+  const persistedFilters = {
+    zString: filterValue,
+    aNull: null,
+    mNumber: 7,
+    bBoolean: true,
+  }
+  const { input } = baseInput({
+    input: {
+      maxRows: 3,
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: persistedFilters } },
+      },
+    },
+    sourceRead: (readInput) => {
+      reads.push(JSON.parse(JSON.stringify(readInput)))
+      if (!readInput.filters) {
+        return {
+          records: [
+            { code: 'P-001', name: 'Widget', status: 'new' },
+            { code: 'P-002', name: 'Gadget', status: 'old' },
+            { code: 'P-003', name: 'Third', status: 'new' },
+          ],
+          done: false,
+          nextCursor: '3',
+        }
+      }
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const result = await dryRunExternalWrite(input)
+  assert.equal(result.status, 'ready', 'persisted filter changes the unfiltered truncated RED plan to ready')
+  assert.deepEqual(reads, [{
+    object: 'items',
+    filters: { aNull: null, bBoolean: true, mNumber: 7, zString: filterValue },
+    limit: 3,
+    cursor: null,
+  }])
+  const publicText = JSON.stringify(result)
+  assert.equal(publicText.includes(filterValue), false, 'filter values never enter public result/evidence')
+  assert.equal(publicText.includes('zString'), false, 'filter keys never enter public result/evidence')
+}
+
+async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree() {
+  for (const [filters, expectedCode] of [
+    [undefined, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{}, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{ secretField: { $operator: 'PRIVATE-ERROR-SENTINEL' } }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ 'invalid-key-PRIVATE': 'PRIVATE-KEY-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ $or: 'PRIVATE-OPERATOR-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [JSON.parse('{"__proto__":"PRIVATE-PROTO-SENTINEL"}'), 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+  ]) {
+    let reads = 0
+    const { input, calls } = baseInput({
+      input: {
+        pipeline: {
+          ...baseInput().input.pipeline,
+          options: filters === undefined ? {} : { source: { filters } },
+        },
+      },
+      sourceRead: () => { reads += 1; return { records: [], done: true, nextCursor: null } },
+    })
+    await assert.rejects(
+      () => dryRunExternalWrite(input),
+      (error) => {
+        const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+        return error && error.code === expectedCode
+          && [
+            'secretField',
+            'PRIVATE-ERROR-SENTINEL',
+            'invalid-key-PRIVATE',
+            'PRIVATE-KEY-SENTINEL',
+            '$or',
+            'PRIVATE-OPERATOR-SENTINEL',
+            '__proto__',
+            'PRIVATE-PROTO-SENTINEL',
+          ].every((sentinel) => !text.includes(sentinel))
+      },
+    )
+    assert.equal(reads, 0, 'invalid/missing persisted filter fails before source contact')
+    assert.equal(calls.test.length, 0, 'invalid/missing persisted filter also fails before target capability contact')
+  }
+}
+
+async function testSqlFilterDriverFailuresAreRedactedForDryRunAndApply() {
+  const filterKey = 'privateFilterColumn'
+  const filterValue = 'PRIVATE-FILTER-LITERAL'
+  const driverLeak = `invalid input for ${filterKey}: ${filterValue}`
+  let failRead = true
+  const { input } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: { [filterKey]: filterValue } } },
+      },
+    },
+    sourceRead: () => {
+      if (failRead) throw new Error(driverLeak)
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const assertRedacted = (error) => {
+    const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+    return error && error.code === 'C6_WRITE_SOURCE_READ_FAILED'
+      && error.status === 502
+      && !text.includes(filterKey)
+      && !text.includes(filterValue)
+      && !text.includes(driverLeak)
+  }
+
+  await assert.rejects(() => dryRunExternalWrite(input), assertRedacted)
+
+  failRead = false
+  const dryRun = await dryRunExternalWrite(input)
+  failRead = true
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    assertRedacted,
+    'Apply recomputation uses the same values-free filtered-read failure boundary',
+  )
+}
+
+async function testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite() {
+  const { input, calls } = baseInput({ input: { dryRunUser: 'user_write' } })
+  const dryRun = await dryRunExternalWrite(input)
+  input.pipeline.options.source.filters.approvedSlice = 'changed-after-dry-run'
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+  )
+  assert.equal(calls.insertRows.length, 0, 'stored filter revision mismatch fails before insert')
+  assert.equal(calls.updateRows.length, 0, 'stored filter revision mismatch fails before update')
 }
 
 async function testApplyConsumesTokenRecomputesAndWritesEligibleRows() {
@@ -628,6 +781,7 @@ async function testAmbiguousTargetKeyHoldsAndDoesNotIssueToken() {
 
 async function testTruncatedSourceReadDoesNotIssueToken() {
   const { input } = baseInput({
+    input: { maxRows: 1 },
     sourceRead: () => ({ records: [{ code: 'P-001', name: 'Widget', status: 'new' }], done: false, nextCursor: 'next-page' }),
   })
   const result = await dryRunExternalWrite(input)
@@ -708,6 +862,300 @@ function fakeWriteProfile() {
     assertSafeCapabilityState(state) {
       if (state.ok !== true) throw new Error('fake target capability state is unsafe')
     },
+  }
+}
+
+function k3ExactTwoAcceptanceInput(overrides = {}) {
+  const fixture = baseInput({
+    test: () => ({ success: true, capabilityState: { ok: true } }),
+    lookupByKey: () => ({ data: [], metadata: {} }),
+    ...overrides,
+  })
+  fixture.input.targetWriteProfile = {
+    ...fakeWriteProfile(),
+    kind: 'erp:k3-wise-webapi',
+  }
+  fixture.input.targetSystem = {
+    id: 'target_1',
+    kind: 'erp:k3-wise-webapi',
+    config: {
+      dataSourceId: 'k3-save-only',
+      object: 'material',
+      keyFields: ['externalId'],
+      writableFields: ['name', 'status'],
+      acceptancePolicy: {
+        profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+      },
+    },
+  }
+  return fixture
+}
+
+async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.canApply, true)
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 2)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.skip, 0)
+  assert.equal(dryRun.counts.held, 0)
+  assert.equal(dryRun.counts.failed, 0)
+  assert.deepEqual(dryRun.evidence.acceptancePolicy, {
+    profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+    expectedRows: 2,
+    ready: true,
+    cleanupRequired: true,
+  })
+
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two',
+  })
+  assert.equal(apply.status, 'succeeded')
+  assert.equal(apply.counts.written, 2)
+  assert.equal(apply.counts.add, 2)
+  assert.equal(apply.counts.update, 0)
+  assert.equal(calls.insertRows.length, 2, 'two-row acceptance performs exactly two isolated Save calls')
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(apply.evidence.acceptancePolicy.ready, true)
+  assert.equal(apply.evidence.acceptancePolicy.cleanupRequired, true)
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true, 'exact-two add-only binds strict absence into planner policy')
+  assert.equal(calls.lookupByKey.length, 6, 'apply preflights both add rows after the planner lookups')
+}
+
+async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
+  const deadLetters = []
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    insertRows: () => {
+      throw new Error('K3 Save failed with private row values')
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  const apply = await applyExternalWrite({
+    ...input,
+    dryRunToken: dryRun.dryRunToken,
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two_first_save_failure',
+    deadLetterStore: {
+      async createDeadLetter(entry) {
+        deadLetters.push(entry)
+        return { ...entry, id: `dl_${deadLetters.length}` }
+      },
+    },
+  })
+
+  assert.equal(apply.status, 'failed')
+  assert.equal(apply.counts.written, 0)
+  assert.equal(apply.counts.add, 0)
+  assert.equal(apply.counts.failed, 1)
+  assert.equal(calls.insertRows.length, 1, 'strict exact-two stops without attempting the sibling Save')
+  assert.equal(calls.updateRows.length, 0)
+  assert.deepEqual(apply.deadLetters, { attempted: 1, persisted: 1 })
+  const evidence = JSON.stringify(apply) + JSON.stringify(deadLetters)
+  for (const privateValue of ['P-001', 'P-002', 'Widget', 'Gadget']) {
+    assert.equal(evidence.includes(privateValue), false, `strict failure evidence stays values-free (${privateValue})`)
+  }
+}
+
+async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    sourceRows: [
+      { code: ' MAT-001 ', name: 'Widget', status: 'new' },
+      { code: 'mat-001', name: 'Gadget', status: 'old' },
+    ],
+  })
+  input.pipeline.fieldMappings = input.pipeline.fieldMappings.map((mapping) => (
+    mapping.targetField === 'externalId'
+      ? { ...mapping, targetField: 'FNumber' }
+      : mapping
+  ))
+  input.targetSystem.config.keyFields = ['FNumber']
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null)
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.held, 1)
+  assert.equal(dryRun.evidence.acceptancePolicy.ready, false)
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('duplicate_target_key'))
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+  assert.equal(calls.lookupByKey.length, 1, 'the duplicate key is refused before a second target lookup')
+  assert.equal(input.tokenStore.map.size, 0, 'a duplicate target key never mints an Apply token')
+
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_REQUIRED',
+  )
+  assert.equal(calls.insertRows.length, 0, 'the duplicate-key plan cannot reach K3 Save')
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality() {
+  for (const fixture of [
+    k3ExactTwoAcceptanceInput({
+      lookupByKey: ({ key }) => key.externalId === 'P-002'
+        ? { data: [{ externalId: 'P-002', name: 'old', status: 'old' }] }
+        : { data: [] },
+    }),
+    k3ExactTwoAcceptanceInput({ sourceRows: [{ code: 'P-001', name: 'Widget', status: 'new' }] }),
+  ]) {
+    const result = await dryRunExternalWrite(fixture.input)
+    assert.equal(result.status, 'not_applyable')
+    assert.equal(result.canApply, false)
+    assert.equal(result.dryRunToken, null)
+    assert.equal(result.evidence.acceptancePolicy.ready, false)
+    assert.ok(result.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+    assert.equal(fixture.calls.insertRows.length, 0)
+    assert.equal(fixture.calls.updateRows.length, 0)
+  }
+}
+
+async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
+  const invalid = k3ExactTwoAcceptanceInput()
+  invalid.input.targetSystem.config.acceptancePolicy.extra = true
+  await assert.rejects(
+    () => dryRunExternalWrite(invalid.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(invalid.calls.test.length, 0, 'invalid persisted policy fails before target capability/network work')
+
+  const nonK3 = k3ExactTwoAcceptanceInput()
+  nonK3.input.targetSystem.kind = 'data-source:sql-write-gated'
+  nonK3.input.targetWriteProfile = {
+    ...nonK3.input.targetWriteProfile,
+    kind: 'data-source:sql-write-gated',
+  }
+  await assert.rejects(
+    () => dryRunExternalWrite(nonK3.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(nonK3.calls.test.length, 0, 'K3-only persisted policy fails closed on a non-K3 target')
+
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  delete input.targetSystem.config.acceptancePolicy
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+    'removing the persisted policy after dry-run invalidates the revision before write',
+  )
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      const error = new Error('K3 read business response failed')
+      error.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }
+      throw error
+    },
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.details && error.details.code === 'K3_WISE_READ_BUSINESS_ERROR',
+  )
+  assert.equal(input.tokenStore.map.size, 0, 'a generic K3 business-read error never mints a token under exact-two')
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true)
+}
+
+async function testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange() {
+  let lookups = 0
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      lookups += 1
+      if (lookups <= 4) return { data: [], metadata: {} }
+      return { data: [{ externalId: 'now-present' }], metadata: {} }
+    },
+  })
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(typeof dryRun.dryRunToken, 'string')
+  assert.equal(lookups, 2, 'dry-run plans two absent rows')
+
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
+      && error.details && error.details.reason === 'target_exists',
+  )
+  assert.equal(lookups, 6, 'apply recomputes two planner lookups then preflights both rows')
+  assert.equal(calls.insertRows.length, 0, 'a post-plan existence change refuses the whole batch with zero Save')
+  assert.equal(calls.updateRows.length, 0)
+  const leaked = JSON.stringify(calls) + JSON.stringify(dryRun.evidence)
+  assert.equal(leaked.includes('now-present'), false, 'preflight evidence stays values-free')
+}
+
+async function testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave() {
+  for (const fixture of [
+    {
+      reason: 'ambiguous_target_key',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { data: [{ externalId: 'a' }, { externalId: 'b' }], metadata: {} }
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          throw new Error('lookup exploded')
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { metadata: {} }
+        }
+      })(),
+    },
+  ]) {
+    const { input, calls } = k3ExactTwoAcceptanceInput({ lookupByKey: fixture.lookupByKey })
+    const dryRun = await dryRunExternalWrite(input)
+    await assert.rejects(
+      () => applyExternalWrite({
+        ...input,
+        dryRunToken: dryRun.dryRunToken,
+        applyUser: 'user_read',
+      }),
+      (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
+        && error.details && error.details.reason === fixture.reason,
+    )
+    assert.equal(calls.insertRows.length, 0, `preflight ${fixture.reason} performs zero Save`)
+    assert.equal(calls.updateRows.length, 0)
   }
 }
 
@@ -806,8 +1254,20 @@ async function testWriteSourceSeamIsolatesRowFailureValuesFree() {
 
 async function main() {
   await testReadyDryRunIssuesTokenAndStaysValuesFree()
+  await testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness()
+  await testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
+  await testSqlFilterDriverFailuresAreRedactedForDryRunAndApply()
+  await testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite()
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
+  await testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan()
+  await testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure()
+  await testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply()
+  await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
+  await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
+  await testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent()
+  await testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange()
+  await testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
   await testTruncatedSourceReadDoesNotIssueToken()
   await testRejectsNonC6Target()

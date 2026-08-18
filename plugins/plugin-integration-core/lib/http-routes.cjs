@@ -1,5 +1,7 @@
 'use strict'
 
+const crypto = require('node:crypto')
+
 // ---------------------------------------------------------------------------
 // HTTP routes — plugin-integration-core
 //
@@ -10,6 +12,7 @@
 
 const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
+  ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
@@ -51,6 +54,7 @@ const ROUTES = [
   ['POST', '/api/integration/pipelines/:id/external-write/apply', 'pipelinesExternalWriteApply'],
   ['GET', '/api/integration/table-actions', 'tableActionsList'],
   ['POST', '/api/integration/table-actions/:actionId/dry-run', 'tableActionDryRun'],
+  ['POST', '/api/integration/table-actions/:actionId/mvp-persist', 'tableActionMvpPersist'],
   ['POST', '/api/integration/table-actions/:actionId/apply', 'tableActionApply'],
   ['POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', 'tableActionLargeBomExpansionJobStart'],
   ['GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId', 'tableActionLargeBomExpansionJobGet'],
@@ -146,6 +150,7 @@ const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
 ])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
+const { hasPrivateConfigMutation } = require('./external-systems.cjs')
 const { createRunLogger } = require('./run-log.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
@@ -154,6 +159,7 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+const { getK3WiseCallAuditSnapshot } = require('./adapters/k3-wise-call-audit.cjs')
 // DF-T3b-2a: from_reference_table resolves a per-material reference via the shared resolver (the
 // SAME decision both the preview and the record materializer use, so they cannot diverge).
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
@@ -251,6 +257,7 @@ const {
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
@@ -557,6 +564,36 @@ function resolveAuthUserTenantId(req) {
   return tenantId
 }
 
+function collectExplicitTenantIds(req, input = {}) {
+  const body = requestBody(req)
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  return [input.tenantId, body && body.tenantId, query && query.tenantId, params && params.tenantId]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+}
+
+// Write-bearing C6 Apply and private adapter-config mutation derive tenant from the
+// authenticated principal only. Tenantless role:admin and any mismatched tenant carrier
+// fail closed. An explicit tenantId that equals the auth tenant is compatibility-only.
+function resolveAuthenticatedWriteTenantId(req, input = {}) {
+  const tenantId = resolveAuthUserTenantId(req)
+  for (const explicit of collectExplicitTenantIds(req, input)) {
+    if (explicit !== tenantId) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return tenantId
+}
+
+function scopedAuthenticatedWriteInput(req, input = {}) {
+  return {
+    ...input,
+    tenantId: resolveAuthenticatedWriteTenantId(req, input),
+    workspaceId: resolveWorkspaceId(req, input),
+  }
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -619,6 +656,21 @@ function stockPreparationPlmAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
+// Direct readonly table-action -> internal MVP persistence is a separately staged capability. It is
+// deliberately NOT implied by either source-run auto-persist flag: only the exact literal `true`
+// enables this manually-invoked admin write route, and a missing/malformed value stays fail-closed.
+function stockPreparationTableActionMvpPersistEnabled() {
+  return String(process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// Entity-level delivery containment. This negative gate is intentionally
+// independent from the dry-run route: an internal evaluation environment can
+// keep previews usable while refusing every C6 Apply before request parsing,
+// token consumption, pipeline loading, or adapter/network activity.
+function c6WriteApplyDisabled() {
+  return String(process.env.INTEGRATION_C6_WRITE_APPLY_DISABLED ?? '').trim().toLowerCase() === 'true'
+}
+
 // T3b OD-2 (layered semantics — deliberately NOT a copy of the ERP guard): with auto-persist ON the
 // PLM source-run gains a write side-effect, so an explicit tenantId on ANY carrier is a steering
 // vector and is rejected fail-closed BEFORE body normalization and any I/O. projectId differs from
@@ -638,6 +690,29 @@ function assertStockPreparationPlmAutoPersistNoSteering(req) {
       400,
       'STOCK_PREPARATION_PLM_AUTOPERSIST_STEERING_NOT_ALLOWED',
       'an explicit tenantId (any carrier) or a query/params projectId is not allowed on the auto-persisting PLM source-run; the tenant and staging target derive from the authenticated principal and the business projectId rides only in the body',
+    )
+  }
+}
+
+// The table-action MVP route derives every physical scope from the authenticated principal and the
+// deployed action config. Reject all request carriers that could otherwise influence tenant,
+// workspace, or project selection before action lookup, source-system lookup, adapter creation, or
+// source I/O. The route parameter `actionId` and body `parameters.projectNo` are its only selectors.
+function assertStockPreparationTableActionMvpPersistNoSteering(req) {
+  const steeringKeys = [
+    'tenantId', 'workspaceId', 'projectId', 'targetProjectId', 'baseId', 'sheetId', 'objectId',
+    'syncRunId', 'snapshotBatchId', 'snapshotVersion',
+  ]
+  const steers = (src) => Boolean(src) && steeringKeys
+    .some((key) => `${src[key] ?? ''}`.trim() !== '')
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  const unsupportedParam = Object.keys(params).some((key) => key !== 'actionId')
+  if (steers(requestBody(req)) || Object.keys(query).length !== 0 || unsupportedParam || steers(params)) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_STEERING_NOT_ALLOWED',
+      'tenantId, workspaceId, and projectId are derived from the authenticated principal and deployed action config',
     )
   }
 }
@@ -717,6 +792,7 @@ function publicRunInput(body = {}) {
 }
 
 const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
+const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
@@ -2509,8 +2585,9 @@ function createHandlers(services, options = {}) {
 
   const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
   // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
-  // SQL db can still register read routes), but every stock-prep WRITE op fails closed without it —
-  // an unaudited confirm/generation/resolve is refused, not silently allowed.
+  // SQL db can still register read routes), but every W5b human-decision write fails closed without
+  // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
+  // persists instead carry their immutable run record inside the same unit of work.
   const stockPreparationAudit = services.stockPreparationAuditStore || null
   function requireStockPreparationAudit() {
     if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
@@ -2660,8 +2737,12 @@ function createHandlers(services, options = {}) {
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
+    if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
     const system = await loadSystem(scopedInput(req, sourceScope))
+    if (options.requireActive === true && (!system || system.status !== 'active')) {
+      throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
+    }
     if (!system || system.kind !== action.source.kind) {
       throw new HttpRouteError(422, 'TABLE_ACTION_SOURCE_INVALID', `table action source must be ${action.source.kind}`, {
         actionId: action.actionId,
@@ -2726,6 +2807,15 @@ function createHandlers(services, options = {}) {
       })
     },
 
+    async k3WiseCallAudit(req, res) {
+      // Internal operational evidence only. The snapshot is process-local and
+      // values-free, but still reveals connector activity, so keep it admin-only
+      // and reuse the existing tenant boundary before selecting its partition.
+      requireAccess(req, 'admin')
+      const tenantId = resolveTenantId(req, requestQuery(req))
+      return sendOk(res, getK3WiseCallAuditSnapshot({ tenantId }))
+    },
+
     async adaptersList(req, res) {
       requireAccess(req, 'read')
       const describe = typeof adapterRegistry.getAdapterMetadata === 'function'
@@ -2747,7 +2837,12 @@ function createHandlers(services, options = {}) {
 
     async externalSystemsUpsert(req, res) {
       requireAccess(req, 'write')
-      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, requestBody(req))), 201)
+      const body = requestBody(req)
+      if (hasPrivateConfigMutation(body.kind, body.config)) {
+        requireAccess(req, 'admin')
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, body)), 201)
+      }
+      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
     },
 
     async externalSystemsGet(req, res) {
@@ -3503,8 +3598,12 @@ function createHandlers(services, options = {}) {
 
     async pipelinesExternalWriteApply(req, res) {
       requireAccess(req, 'write')
+      if (c6WriteApplyDisabled()) {
+        throw new HttpRouteError(403, 'C6_WRITE_APPLY_DISABLED', 'C6 external-write Apply is disabled for this deployment')
+      }
+      resolveAuthenticatedWriteTenantId(req)
       const body = normalizeC6WriteApplyBody(requestBody(req))
-      const scope = scopedInput(req, {
+      const scope = scopedAuthenticatedWriteInput(req, {
         id: requestParams(req).id,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3526,7 +3625,7 @@ function createHandlers(services, options = {}) {
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+      const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3540,7 +3639,7 @@ function createHandlers(services, options = {}) {
       // Peek first, then re-load WITH credentials only for kinds that actually build a target
       // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
       // for, so this does not widen credential exposure for them.
-      const targetSystemScope = scopedInput(req, {
+      const targetSystemScope = scopedAuthenticatedWriteInput(req, {
         id: pipeline.targetSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
@@ -3663,6 +3762,61 @@ function createHandlers(services, options = {}) {
         policyStore: context.storage,
         conflictPolicyReview: body.conflictPolicyReview,
       }))
+    },
+
+    // Re-run the approved readonly table action and commit its expansion directly
+    // into the MetaSheet-internal MVP snapshot tables. Raw rows stay in-process;
+    // this route never calls the table-action Apply writer or any external writer.
+    async tableActionMvpPersist(req, res) {
+      requireAccess(req, 'admin')
+      if (!stockPreparationTableActionMvpPersistEnabled()) {
+        throw new HttpRouteError(
+          403,
+          'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED',
+          'table-action MVP persistence is disabled',
+        )
+      }
+      assertStockPreparationTableActionMvpPersistNoSteering(req)
+      const tenantId = resolveAuthUserTenantId(req)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
+      const parameters = normalizeActionParameters(body.parameters)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
+      const prepared = await prepareStockPreparationMvpSnapshot({
+        action,
+        parameters,
+        sourceAdapter,
+        recordsApi: getMultitableRecordsApi(),
+      })
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
+      const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
+      const batchScope = `${stableScope}\n${prepared.revision}`
+      const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
+      const result = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        lockTenantId: tenantId,
+        projectId,
+        syncRunId: `sync_${batchDigest}`,
+        snapshotBatchId: `snapshot_${batchDigest}`,
+        allocateSnapshotVersion: true,
+        sourceSystem: action.source.kind,
+        sourceProjectNo: prepared.parameters.projectNo,
+        expansionResult: prepared.expansionResult,
+        readPlan: action.source.readPlan,
+      })
+      return sendOk(res, {
+        status: result.persisted ? 'created' : 'skipped_existing',
+        persisted: result.persisted === true,
+        created: result.created,
+        source: prepared.evidence,
+        evidence: result.evidence,
+      }, result.persisted ? 201 : 200)
     },
 
     async tableActionApply(req, res) {
@@ -5203,6 +5357,8 @@ module.exports = {
     requireAccess,
     resolveTenantId,
     resolveAuthUserTenantId,
+    resolveAuthenticatedWriteTenantId,
+    scopedAuthenticatedWriteInput,
     scopedInput,
     sendError,
     inferHttpStatus,
