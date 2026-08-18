@@ -309,6 +309,16 @@ export default defineConfig({
       // rationale as the K2 lane immediately above — plugin-tests.yml is an s6a sha256-pinned
       // provenance input, deliberately not extended). Two-point wiring, same commit.
       'tests/integration/approval-template-policy-carrier.db.test.ts',
+      // Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7
+      // (docs/development/approval-lock4-flow-policies-20260817.md §F4-D;
+      // docs/development/approval-lock6-requester-global-policy-20260817.md §1/§3) — real-DB proof
+      // that a RETURN round-scopes the dedup cascade's history (loadApprovalHistory's new
+      // to_version floor + the return branch's `[]` seed). DATABASE_URL-gated (describeIfDatabase);
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by the
+      // DEDICATED .github/workflows/approval-realdb-l6a-roundscoping.yml workflow (same standalone
+      // rationale as the L6-P1 lane immediately above — plugin-tests.yml is an s6a sha256-pinned
+      // provenance input, deliberately not extended). Two-point wiring, same commit.
+      'tests/integration/approval-dedup-return-round-scoping.db.test.ts',
       // Lock-1 §K4 continuous_dept_heads real-DB acceptance (G-1/G-2/G-13, continue-past-empty,
       // freeze purity). DATABASE_URL-gated; excluded here so the no-DB default job cannot
       // collect-and-skip-green it, and carried by the SAME dedicated

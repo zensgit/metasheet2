@@ -3897,6 +3897,36 @@ export class ApprovalProductService {
     // must not seed an auto-approval skip. This is the NEW per-edit marker (NOT `nodeEntryEpoch`,
     // which never bumps on a same-round edit). The single-call edit+complete case is handled by the
     // caller passing `[]` (this txn's edit is not yet persisted here).
+    //
+    // Lock-4 OD-L4-10(a) / F4-D 回退 invalidation, priced into Lock-6 L6-A (gate A-7): a BACKWARD
+    // re-entry must invalidate every dedup-relevant approval that predates it, or `mergeAdjacentApprover`
+    // / `dedupeHistoricalApprover` re-merge a re-entered node against a stale pre-re-entry decision and
+    // silently nullify the send-back. OD-L4-10(a)'s boundary is corrected here (adversarial gate finding
+    // on #4965, live-reproduced): it is BACKWARD RE-ENTRY, not literally `action='return'` — a backward
+    // `timeout.jumpToNodeKey` effect (`applyNodeTimeoutEffect`) reaches an already-visited node through
+    // the SAME `resolveReturnToNode` resolver and is exactly as nullifying if left unfloored. A FORWARD
+    // jump (admin jump is structurally forward-only — `isReachableDownstream` rejects otherwise — and a
+    // forward timeout-jump is legitimate progress) must NOT re-floor; "compose after the jump" stays
+    // correct for those. The floor below therefore keys on `action = 'return'` OR a `'jump'` row this
+    // service stamped `metadata.backwardReentry: true` (computed at the jump dispatch site via the SAME
+    // "already on the static path to the current node" predicate the manual return action's own target
+    // validation uses).
+    //
+    // Scope by `to_version` rather than the literal `nodeEntryEpoch` int: `to_version` is a per-instance
+    // monotonic counter stamped on every 'approve'-and-cascade-adjacent `approval_records` row this query
+    // reads (manual approves AND `insertAutoApprovalEvents` rows alike — NOT every action; `transfer` /
+    // `comment` / `sign` rows outside a cascade are written with `toVersion` left at the CURRENT version,
+    // unbumped, and are excluded here by the `action = 'approve'` filter regardless) with no legacy-NULL
+    // case, so it needs no cutoff-fallback branch the way the T2-4 threshold tally's epoch reader does
+    // (:8000ish, "Dual-read fallback (§6)") — the SAME round-boundary idea that machinery already proves
+    // out for the threshold tally, applied here without inventing a second bookkeeping column. `>=` (not
+    // `>`): the invalidating action's OWN same-transaction cascade events (`insertAutoApprovalEvents`
+    // stamps them with the SAME `toVersion` as the return/backward-jump row, §L6-A round-scoping) must
+    // stay visible to LATER evaluations, not just future actions strictly after this version. Neither the
+    // manual-return nor the backward-jump call site depends on this predicate for its OWN evaluation — at
+    // the moment either one's cascade runs, its own audit row is not committed yet, so both pass `[]`
+    // directly (mirrors the create-cascade pattern below) rather than relying on this floor to
+    // self-exclude a not-yet-existing row.
     const result = await client.query<{
       id: string | number
       actor_id: string
@@ -3908,6 +3938,12 @@ export class ApprovalProductService {
          AND action = 'approve'
          AND id > COALESCE(
            (SELECT MAX(audit_record_id) FROM approval_form_field_revisions WHERE instance_id = $1),
+           0
+         )
+         AND to_version >= COALESCE(
+           (SELECT MAX(to_version) FROM approval_records
+             WHERE instance_id = $1
+               AND (action = 'return' OR (action = 'jump' AND (metadata->>'backwardReentry')::boolean IS TRUE))),
            0
          )
        ORDER BY occurred_at ASC, id ASC`,
@@ -7023,8 +7059,28 @@ export class ApprovalProductService {
         return await consumeAndSkip('skipped_invalid_config', 'jump_target_invalid')
       }
 
+      // Lock-4 OD-L4-10(a) / Lock-6 L6-A — direction-aware re-entry (adversarial gate finding on
+      // #4965: a BACKWARD timeout-jump nullifies a send-back the same way a manual return does).
+      // Unlike `adminJump` (`:6202` area — `isReachableDownstream` REJECTS a non-forward target, so
+      // admin jump structurally cannot go backward and needs no such check), `assertNodeTimeoutConfig`
+      // (`:1676-1694`) places NO forward-only constraint on `timeout.jumpToNodeKey` — a template author
+      // may point it at any approval node, including one already passed. `resolveReturnToNode` (the
+      // SAME resolver the manual return action uses) does not itself distinguish direction either.
+      // Determine it here, where topology is available: `targetNodeKey` is BACKWARD iff it is among
+      // the approval nodes already visited on the STATIC path to `currentNodeKey` (excluding
+      // `currentNodeKey` itself) — the identical predicate the manual return action's own validation
+      // uses (`listVisitedApprovalNodeKeysUntil(currentNodeKey).slice(0, -1)`), so "backward" here
+      // means exactly what it means there. A FORWARD jump (not in that set) is legitimate progress —
+      // it must NOT re-floor (matches the preserved "compose after the jump" behavior for admin jump).
+      const timeoutJumpVisitedApprovalNodes = executor.listVisitedApprovalNodeKeysUntil(currentNodeKey)
+      const isBackwardReentryJump = timeoutJumpVisitedApprovalNodes.slice(0, -1).includes(targetNodeKey)
+
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
+      // A backward re-entry's OWN synchronous cascade must not see history that predates it — the
+      // same reason the manual return branch seeds `[]` instead of reading `loadApprovalHistory`
+      // (that call's `action:'jump'` row has not committed yet, so the durable to_version floor
+      // below cannot yet exclude what it surfaces). A forward jump keeps composing normally.
       const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
         ? this.applyAutoApprovalCascade(
             id,
@@ -7032,7 +7088,7 @@ export class ApprovalProductService {
             executor,
             jumpResolution,
             typeof requesterId === 'string' ? requesterId : null,
-            await this.loadApprovalHistory(client, id),
+            isBackwardReentryJump ? [] : await this.loadApprovalHistory(client, id),
           )
         : jumpResolution
       if (resolution.status !== 'pending' && !nodeTimeoutTerminalEffectsEnabled()) {
@@ -7089,6 +7145,12 @@ export class ApprovalProductService {
           nextNodeKey: resolution.currentNodeKey,
           oldAssignees,
           newAssignees,
+          // Lock-4 OD-L4-10(a) — the round-scoping floor in `loadApprovalHistory` keys on this flag
+          // (in addition to `action='return'`) so a BACKWARD timeout-jump re-floors the dedup
+          // cascade's history exactly like a manual return. Omitted (not `false`) for a forward
+          // jump, matching the omit-when-absent convention `insertApprovalRecord` metadata already
+          // uses elsewhere in this file.
+          ...(isBackwardReentryJump ? { backwardReentry: true } : {}),
         },
       })
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, timeoutJumpEntryEpoch)
@@ -7899,6 +7961,16 @@ export class ApprovalProductService {
         await this.deactivateAllActiveAssignments(client, id)
         const returnResolution = executor.resolveReturnToNode(targetNodeKey)
         const requesterId = requesterSnapshot?.id
+        // Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 — this return's own `action:'return'` row has not
+        // committed yet, so `loadApprovalHistory`'s new `to_version >=` return-floor (above) cannot see
+        // it and would still surface every PRE-return approval (e.g. an adjacent node's stale approval
+        // by the same person the target node is re-assigned to). Seed this synchronous cascade with an
+        // EMPTY history instead — the same pattern the create-cascade already uses (`:5905` — a brand
+        // new instance starts empty too) — so mergeAdjacentApprover / dedupeHistoricalApprover cannot
+        // re-merge against anything that predates this return. Auto-approval events THIS cascade itself
+        // produces are still chained correctly: `applyAutoApprovalCascade` appends each event into this
+        // same array as it evaluates, and `insertAutoApprovalEvents` below persists them with the SAME
+        // `toVersion` as the `action:'return'` row, so later evaluations see them via the floor query.
         const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
           ? this.applyAutoApprovalCascade(
               id,
@@ -7906,7 +7978,7 @@ export class ApprovalProductService {
               executor,
               returnResolution,
               typeof requesterId === 'string' ? requesterId : null,
-              await this.loadApprovalHistory(client, id),
+              [],
             )
           : returnResolution
         await client.query(
