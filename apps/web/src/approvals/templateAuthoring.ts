@@ -827,7 +827,7 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
 // P1-C CORRECTION (approval-parity-master-design-lock-20260817.md §P1-C): earlier revisions of this
 // comment claimed the backend "silently drops" `approvalThreshold`/`timeout` on a complex graph — that
 // was never true. `normalizeApprovalGraph`'s per-node-type switch has ONE `case 'approval':` branch
-// (ApprovalProductService.ts :2260-2347) that runs identically regardless of the graph's overall
+// (ApprovalProductService.ts :2256-2347) that runs identically regardless of the graph's overall
 // topology; it re-emits both keys (:2339-2340, :2344) for EVERY approval node, complex or linear. The
 // two keys were simply ABSENT from this allowlist, which forced every carrying template fully
 // read-only (I12/I13) rather than actually losing data on save — this slice adds them (with the
@@ -1944,7 +1944,19 @@ export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): str
     const parallelRegionNodeKeys = draft.preservedGraph
       ? collectParallelRegionNodeKeys(draft.preservedGraph)
       : new Set<string>()
-    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields, parallelRegionNodeKeys))
+    // fix-round P2-1: the FE mirror of backend `timeout.jumpToNodeKey references unknown node` /
+    // `must target an approval node` — an edited graph (e.g. deleting a node the timeout jump still
+    // points at) must not pass this preview with a dangling target.
+    // `undefined` (not an empty Set) when there is no preserved graph to derive one from: per
+    // `validateApprovalNodeEdits`'s own optional-param contract, omitted ⇒ skip the check, matching
+    // `fields` above. An empty Set would invert that — "no approval nodes exist" — and reject every
+    // jump target on a branch this code path never actually reaches in practice (`approvalNodeEdits`
+    // is only ever populated alongside `preservedGraph`, see the comment above), but shipping the
+    // wrong failure mode on an unreachable branch is still worth avoiding.
+    const approvalNodeKeys = draft.preservedGraph
+      ? new Set(draft.preservedGraph.nodes.filter((node) => node.type === 'approval').map((node) => node.key))
+      : undefined
+    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields, parallelRegionNodeKeys, approvalNodeKeys))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {

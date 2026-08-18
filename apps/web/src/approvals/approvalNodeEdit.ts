@@ -288,11 +288,21 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
  * `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED`). Optional so existing callers/tests that don't touch
  * threshold/timeout are unaffected; omitting it treats every node as outside a parallel region (the
  * caller — `validateTemplateApprovalFlow` — always supplies the real set for the live app).
+ *
+ * `approvalNodeKeys` (fix-round follow-up, gate P2-1): the set of the preserved graph's `approval`-
+ * type node keys, mirroring backend `timeout.jumpToNodeKey references unknown node` /
+ * `must target an approval node` (ApprovalProductService.ts :1809-1813) — a SINGLE membership test
+ * covers both since only `approval`-typed keys are in the set. Without this a jump target that a
+ * complex-graph edit (e.g. `removeLinearNode` deleting the target node) leaves dangling passed FE
+ * validation and reached the backend as a raw 400 instead of the linear editor's inline preview
+ * error. Optional for the same backward-compat reason as `parallelRegionNodeKeys`; the real caller
+ * always supplies it.
  */
 export function validateApprovalNodeEdits(
   edits: ApprovalNodeEdits,
   fields?: Array<{ id: string; type: string }>,
   parallelRegionNodeKeys?: Set<string>,
+  approvalNodeKeys?: Set<string>,
 ): string[] {
   const errors: string[] = []
   const topLevelUserFieldIds = fields
@@ -325,6 +335,20 @@ export function validateApprovalNodeEdits(
       // Lock-3 §1.1: handlerMode ∈ {'all','any'}; handler edits never carry approval-node keys.
       if (edit.handlerMode !== undefined && !(['all', 'any'] as const).includes(edit.handlerMode)) {
         errors.push(`办理节点 ${edit.nodeKey} 的办理模式无效`)
+      }
+      // Fix-round follow-up (gate P2-2's handler/nodeType note): mirrors backend
+      // `APPROVAL_HANDLER_CONFIG_INVALID` (ApprovalProductService.ts :2449) — `timeout`/
+      // `approvalThreshold` are approval-node-only and REJECTED outright on a handler config.
+      // `applyApprovalNodeEditsToGraph`'s handler branch never reads either field for a handler node
+      // today, so a stray value here cannot yet reach a real save payload — but nothing on the EDIT
+      // MODEL itself enforced the invariant `ApprovalNodeSourceEdit`'s own doc comment claims, so a
+      // stray value (e.g. a future setter call without a nodeType check) would silently pass this
+      // preview rather than failing it. Belt on the door this function owns, not a new setter guard.
+      if (edit.timeout !== undefined && edit.timeout !== null) {
+        errors.push(`办理节点 ${edit.nodeKey} 不支持节点超时`)
+      }
+      if (edit.approvalThreshold !== undefined) {
+        errors.push(`办理节点 ${edit.nodeKey} 不支持门槛会签人数`)
       }
     } else {
       if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold'] as const).includes(edit.approvalMode)) {
@@ -369,6 +393,12 @@ export function validateApprovalNodeEdits(
               errors.push(`审批节点 ${edit.nodeKey} 的超时跳转需要选择目标审批节点`)
             } else if (jumpTarget === edit.nodeKey) {
               errors.push(`审批节点 ${edit.nodeKey} 的超时跳转不能指向自身`)
+            } else if (approvalNodeKeys && !approvalNodeKeys.has(jumpTarget)) {
+              // Mirrors the linear editor's `…的超时跳转目标节点不存在` (templateAuthoring.ts) — one
+              // message for both "no such node" and "exists but isn't an approval node", same as the
+              // linear path (whose candidates are always approval steps, so it never needed to
+              // distinguish the two).
+              errors.push(`审批节点 ${edit.nodeKey} 的超时跳转目标节点不存在`)
             } else if (parallelRegionNodeKeys?.has(jumpTarget)) {
               errors.push(`审批节点 ${edit.nodeKey} 的超时跳转目标节点位于并行分支内，不受支持`)
             }

@@ -782,7 +782,8 @@
                  honestly rather than pretending to validate M here (M8). -->
             <el-form-item v-if="step.approvalMode === 'threshold'" label="通过所需人数（N）">
               <el-input-number
-                v-model="step.approvalThreshold"
+                :model-value="step.approvalThreshold"
+                @update:model-value="(value: number | null) => { step.approvalThreshold = value ?? 1 }"
                 :min="1"
                 :step="1"
                 :disabled="readOnly"
@@ -2100,10 +2101,17 @@ function approvalNodeMode(nodeKey: string): ApprovalMode {
 function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
-  // P1-C linear-only fail-closed floor: the mode picker must not OFFER 'threshold' inside a parallel
-  // region (see the `:disabled` option below), but a native `<select>`'s disabled option cannot even
-  // dispatch a change event — same untestable-without-a-mutator posture as P1-B's remove-card guard
-  // — so THIS is the actual invariant enforcement point, independent of the render-layer gating.
+  // P1-C linear-only fail-closed floor, defense-in-depth: the mode picker must not OFFER 'threshold'
+  // inside a parallel region (see the `:disabled` option below); this guard covers a caller that
+  // bypasses that render-layer gate (e.g. a forced DOM event past the disabled option, or a future
+  // non-select entry point). CORRECTION (fix-round gate P2-2): this is NOT the invariant's actual
+  // enforcement point for SAVE — that is `validateApprovalNodeEdits`'s `inParallelRegion` check
+  // (approvalNodeEdit.ts), wired end-to-end from `draft.preservedGraph` in
+  // `validateTemplateApprovalFlow`, which blocks `validate()`/`persistDraft` regardless of whether
+  // this setter ever ran (mutation-proven: neutering ONLY this line does not turn the save path
+  // green for a threshold edit inside a parallel region). Mutation-proven for what it DOES guard:
+  // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeMode refuses threshold…"
+  // test reds if this line is removed.
   if (mode === 'threshold' && approvalNodeInParallelRegion(nodeKey)) return
   edit.approvalMode = mode
 }
@@ -2159,8 +2167,12 @@ function setApprovalNodeTimeoutEnabled(nodeKey: string, enabled: boolean): void 
     edit.timeout = null
     return
   }
-  // Fail-closed floor mirroring `setApprovalNodeMode`'s threshold guard above — a disabled checkbox
-  // cannot dispatch a change event either, so this is the real enforcement point.
+  // Fail-closed floor, defense-in-depth, mirroring `setApprovalNodeMode`'s threshold guard above —
+  // see that guard's comment (CORRECTION, fix-round gate P2-2): the invariant's actual enforcement
+  // point for SAVE is `validateApprovalNodeEdits`'s `inParallelRegion` timeout branch
+  // (approvalNodeEdit.ts), not this setter. Mutation-proven for what it DOES guard:
+  // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeTimeoutEnabled refuses…"
+  // test reds if this line is removed.
   if (approvalNodeInParallelRegion(nodeKey)) return
   if (edit.timeout) return // already enabled — do not clobber an in-progress configuration
   edit.timeout = { afterMinutes: 60, effect: 'remind' }

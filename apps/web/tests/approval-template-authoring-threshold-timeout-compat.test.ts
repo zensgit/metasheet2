@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
+  applyTopologyToComplexDraft,
   buildApprovalGraph,
   draftFromTemplate,
   unsupportedTemplateAuthoringReason,
@@ -12,7 +13,7 @@ import {
   approvalNodeEditsFromGraph,
   validateApprovalNodeEdits,
 } from '../src/approvals/approvalNodeEdit'
-import { collectParallelRegionNodeKeys } from '../src/approvals/graphTopologyEdit'
+import { collectParallelRegionNodeKeys, removeLinearNode } from '../src/approvals/graphTopologyEdit'
 
 // P1-C (approval-parity-master-design-lock-20260817.md §P1-C, master M6): the shipped engine
 // `threshold` (T2-4 N-of-M / 门槛会签) approval mode and `timeout` (T1-1) node config were
@@ -125,6 +126,90 @@ describe('P1-C linear no-flatten (I12/I13)', () => {
         : n)),
     }
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  // Fix-round follow-up (gate P2-2): the LINEAR-path counterparts of the three COMPLEX malformed-
+  // timeout positive controls below (`P1-C complex no-flatten` describe block) — these guard
+  // `unsupportedTemplateAuthoringReason`'s LINEAR branch call to `timeoutConfigHasBackendDrop`
+  // (templateAuthoring.ts), which was previously exercised ONLY from the complex branch.
+  it('positive control: a linear timeout carrying unit:"wall_clock" explicitly forces read-only (normalize never emits it)', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_TIMEOUT_GRAPH,
+      nodes: LINEAR_TIMEOUT_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, timeout: { afterMinutes: 45, effect: 'remind', unit: 'wall_clock' } as never } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('positive control: a linear timeout with an extra unknown key forces read-only', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_TIMEOUT_GRAPH,
+      nodes: LINEAR_TIMEOUT_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, timeout: { afterMinutes: 45, effect: 'remind', futureFlag: true } as never } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('positive control: a linear timeout with a non-numeric afterMinutes forces read-only', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_TIMEOUT_GRAPH,
+      nodes: LINEAR_TIMEOUT_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, timeout: { afterMinutes: '45', effect: 'remind' } as never } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  // Fix-round follow-up (gate P2-2, finding (e)): a `timeout` that is not even a plain object — the
+  // FIRST sub-check inside `timeoutConfigHasBackendDrop`, `!isPlainRecord(value)`. A bare string/
+  // number timeout would NOT discriminate this specific sub-check on its own: it also fails the
+  // `typeof value.afterMinutes !== 'number'` check a few lines down (accessing a property on a
+  // primitive just yields `undefined`), so it stays red even with `isPlainRecord` neutered — the two
+  // checks overlap. An ARRAY carrying every OTHER field a valid timeout would (arrays are objects
+  // that can hold named properties, but `isPlainRecord` excludes them via `Array.isArray`) does NOT
+  // overlap: mutation-verified — with `isPlainRecord`'s neutered, this exact construction survives
+  // every remaining sub-check and `unsupportedTemplateAuthoringReason` wrongly returns null.
+  it('positive control: a linear timeout that is not a plain object (array-shaped) forces read-only', () => {
+    const arrayShapedTimeout = Object.assign([], { afterMinutes: 45, effect: 'remind' })
+    const graph: ApprovalGraph = {
+      ...LINEAR_TIMEOUT_GRAPH,
+      nodes: LINEAR_TIMEOUT_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, timeout: arrayShapedTimeout as never } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  // Fix-round follow-up (gate P2-2, finding (d)): the LINEAR branch's own "threshold mode needs a
+  // valid N" gate at load time (`unsupportedTemplateAuthoringReason`) — distinct from the SAVE-time
+  // preview at `validateTemplateApprovalFlow` ("P1-C linear validation preview" describe block
+  // above). Without this, a persisted linear node with `approvalMode: 'threshold'` and a missing/
+  // invalid N would hydrate `approvalThreshold` to a silently-defaulted 1
+  // (`approvalNodeThreshold`/`stepDraftFromApprovalNode`) rather than staying read-only — an N-of-M
+  // → 1-of-M approval-strength downgrade on save.
+  it('positive control: a linear threshold node with N absent forces read-only', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_THRESHOLD_GRAPH,
+      nodes: LINEAR_THRESHOLD_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { assigneeSources: n.config.assigneeSources, approvalMode: 'threshold' as const, emptyAssigneePolicy: 'error' as const } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('positive control: a linear threshold node with N=0 forces read-only', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_THRESHOLD_GRAPH,
+      nodes: LINEAR_THRESHOLD_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, approvalThreshold: 0 } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('positive control: a linear threshold node with N=1.5 (non-integer) forces read-only', () => {
+    const graph: ApprovalGraph = {
+      ...LINEAR_THRESHOLD_GRAPH,
+      nodes: LINEAR_THRESHOLD_GRAPH.nodes.map((n) => (n.key === 'approval_1'
+        ? { ...n, config: { ...n.config, approvalThreshold: 1.5 } }
+        : n)),
+    }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
   })
 })
 
@@ -399,5 +484,77 @@ describe('P1-C linear-only fail-closed (complex path) + positive control', () =>
     draft.approvalNodeEdits!.inner_approval.approvalMode = 'threshold'
     draft.approvalNodeEdits!.inner_approval.approvalThreshold = 1
     expect(validateTemplateApprovalFlow(draft).some((e) => e.includes('并行分支内'))).toBe(true)
+  })
+})
+
+// Fix-round follow-up (gate P2-1): a jump target that no longer exists (or exists but isn't an
+// `approval` node) must not survive `validateApprovalNodeEdits`/`validateTemplateApprovalFlow` into
+// the publish payload — mirrors backend `timeout.jumpToNodeKey references unknown node` /
+// `must target an approval node` (ApprovalProductService.ts :1809-1813) and the LINEAR editor's
+// existing `…的超时跳转目标节点不存在` message (templateAuthoring.ts's `validateTemplateApprovalFlow`
+// linear branch, unaffected by this slice).
+describe('P1-C jump-target existence + type check (complex path, gate P2-1)', () => {
+  it('rejects a timeout jump target that does not exist in the graph (dangling reference)', () => {
+    const errors = validateApprovalNodeEdits({
+      join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], timeout: { afterMinutes: 30, effect: 'jump', jumpToNodeKey: 'no_such_node' } },
+    }, undefined, undefined, new Set(['join']))
+    expect(errors.some((e) => e.includes('超时跳转目标节点不存在'))).toBe(true)
+  })
+  it('rejects a timeout jump target that exists in the graph but is not an approval-type node', () => {
+    // 'cc_1' exists in the real graph but is excluded from `approvalNodeKeys` (as the real caller,
+    // `validateTemplateApprovalFlow`, would exclude any non-approval node) — same error as a fully
+    // dangling reference, mirroring the LINEAR editor (whose candidates are always approval steps,
+    // so it never needed a separate message for this case either).
+    const errors = validateApprovalNodeEdits({
+      join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], timeout: { afterMinutes: 30, effect: 'jump', jumpToNodeKey: 'cc_1' } },
+    }, undefined, undefined, new Set(['join']))
+    expect(errors.some((e) => e.includes('超时跳转目标节点不存在'))).toBe(true)
+  })
+  it('POSITIVE CONTROL: a timeout jump target that exists and IS an approval node is accepted', () => {
+    const errors = validateApprovalNodeEdits({
+      join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], timeout: { afterMinutes: 30, effect: 'jump', jumpToNodeKey: 'inner_approval' } },
+    }, undefined, undefined, new Set(['join', 'inner_approval']))
+    expect(errors).toEqual([])
+  })
+  it('omitting approvalNodeKeys treats every jump target as valid (existing callers unaffected)', () => {
+    const errors = validateApprovalNodeEdits({
+      join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], timeout: { afterMinutes: 30, effect: 'jump', jumpToNodeKey: 'anything' } },
+    })
+    expect(errors).toEqual([])
+  })
+
+  // CONSTRUCTED FAILURE reproduction (originally the gate's live-fire probe, now closed): the
+  // shipped delete affordance (`canRemoveNode`/`removeLinearNode`, TemplateAuthoringView.vue) on a
+  // single-in/single-out approval node inside a preserved COMPLEX graph, via the SAME
+  // `applyTopologyToComplexDraft` bridge the view uses, followed by the SAME re-seed
+  // (`draftFromEditedGraph` → `approvalNodeEditsFromGraph`) that carries the dangling `timeout.
+  // jumpToNodeKey` forward. Before this slice's fix, `validateTemplateApprovalFlow` returned `[]`
+  // here (FE said the draft was fine) and the author only found out from a raw backend 400.
+  it('deleting the timeout jump target node is caught end-to-end by validateTemplateApprovalFlow', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'approval_1', type: 'approval', name: '一审',
+          config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', timeout: { afterMinutes: 60, effect: 'jump', jumpToNodeKey: 'approval_2' } },
+        },
+        { key: 'approval_2', type: 'approval', name: '二审', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'approval_2' },
+        { key: 'e3', source: 'approval_2', target: 'cc_1' },
+        { key: 'e4', source: 'cc_1', target: 'end' },
+      ],
+    }
+    const draft = draftFromTemplate(buildTemplate(graph))
+    expect(validateTemplateApprovalFlow(draft)).toEqual([]) // sanity: valid BEFORE the delete
+
+    const afterDelete = applyTopologyToComplexDraft(draft, (g) => removeLinearNode(g, 'approval_2'))
+    expect(afterDelete.preservedGraph!.nodes.some((n) => n.key === 'approval_2')).toBe(false)
+    expect(afterDelete.approvalNodeEdits!.approval_1.timeout).toMatchObject({ jumpToNodeKey: 'approval_2' })
+    expect(validateTemplateApprovalFlow(afterDelete).some((e) => e.includes('超时跳转目标节点不存在'))).toBe(true)
   })
 })
