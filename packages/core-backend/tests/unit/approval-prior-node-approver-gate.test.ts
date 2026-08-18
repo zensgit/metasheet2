@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assertPriorNodeApproverReferencesUpstream,
   collectRuntimeGraphPriorNodeApproverTargets,
+  runtimeGraphUsesOrgAssigneeSource,
 } from '../../src/services/ApprovalProductService'
 import type { ApprovalGraph, RuntimeGraph } from '../../src/types/approval-product'
 
@@ -199,5 +200,20 @@ describe('Lock-1 §K3 collectRuntimeGraphPriorNodeApproverTargets (OPT-IN detect
     expect(collectRuntimeGraphPriorNodeApproverTargets(asRuntime(linearGraph([
       approvalNode('gate', [staticSource('u1')]),
     ]))).size).toBe(0)
+  })
+
+  it('does NOT arm the org-read fail-closed detector: a graph using ONLY prior_node_approver is not an org-derived source (§2.1 extends that detector to K4/K5-b only — K3 reads instance-internal audit rows, no org read)', () => {
+    const k3Only = asRuntime(linearGraph([
+      approvalNode('gate', [staticSource('u1')]),
+      approvalNode('again', [priorSource('gate')]),
+    ]))
+    expect(runtimeGraphUsesOrgAssigneeSource(k3Only)).toBe(false)
+    // Positive control (the detector is source-selected, not dead): the SAME graph shape with an
+    // org-derived source DOES arm it.
+    const orgDerived = asRuntime(linearGraph([
+      approvalNode('gate', [{ kind: 'direct_manager' }]),
+      approvalNode('again', [priorSource('gate')]),
+    ]))
+    expect(runtimeGraphUsesOrgAssigneeSource(orgDerived)).toBe(true)
   })
 })
