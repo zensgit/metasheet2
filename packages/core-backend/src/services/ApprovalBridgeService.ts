@@ -13,6 +13,7 @@ import {
   type PlmApprovalBridgeSource,
 } from '../federation/plm-approval-bridge'
 import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
+import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -1010,12 +1011,20 @@ export class ApprovalBridgeService {
       return []
     }
 
+    // Lock-5 §1.4 fact 2 / gate D-3 — the SECOND unfiltered full-timeline reader. A refused member
+    // operation writes an `action:'policy_denied'` audit row (§1.4, OD-L5-9(a)); it is an
+    // administrator/audit fact, not member-visible history, so it is excluded here exactly as it is
+    // in `routes/approval-history.ts`. The action-FILTERED readers (`loadApprovalHistory`'s
+    // `action='approve'`, the revoke window's `IN ('approve','reject','transfer')`, the threshold
+    // tally, and the multitable projection's `DECISION_ACTIONS`) need no change — gate D-4 pins that
+    // they do not move, with an injected real `approve` row as the non-vacuity control.
     const result = await pool.query<ApprovalRecordRow>(
       `SELECT id, action, actor_id, actor_name, comment, from_status, to_status, metadata, occurred_at
        FROM approval_records
        WHERE instance_id = $1
+         AND action <> $2
        ORDER BY occurred_at DESC`,
-      [id],
+      [id, APPROVAL_POLICY_DENIED_ACTION],
     )
 
     return result.rows.map((row) => ({

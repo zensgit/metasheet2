@@ -2,10 +2,11 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump adds Lock-3's `handle` action to the approval_records CHECK so the
-// handler-node real-DB suite's audit INSERT is accepted (matches the production migration
-// zzzz20260817120000_add_handle_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260817-field-edit-enforcement-revisions'
+// idempotent DDL. The current bump adds Lock-5's `policy_denied` action to the approval_records CHECK
+// so the per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the
+// production migration zzzz20260818090000_add_policy_denied_action_to_approval_records). The previous
+// bump added Lock-3's `handle` (zzzz20260817120000_add_handle_action_to_approval_records).
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260818-node-operation-policy-denied-action'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -182,7 +183,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign', 'handle'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign', 'handle', 'policy_denied'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)

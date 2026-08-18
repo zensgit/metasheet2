@@ -32,6 +32,8 @@ import type {
   HandlerNodeConfig,
   NodeFieldAccess,
   NodeFieldPermission,
+  NodeOperationPolicy,
+  NodeOperationPolicyActionKey,
   SignaturePolicy,
   NodeTimeoutConfig,
   NodeTimeoutEffect,
@@ -42,7 +44,13 @@ import type {
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { APPROVAL_TERMINAL_STATUSES, HANDLER_ASSIGNEE_SOURCE_KINDS } from '../types/approval-product'
+import {
+  ACTION_POLICY_KEYS,
+  APPROVAL_POLICY_DENIED_ACTION,
+  APPROVAL_TERMINAL_STATUSES,
+  HANDLER_ASSIGNEE_SOURCE_KINDS,
+  HANDLER_NODE_OPERATION_POLICY_KEYS,
+} from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -1544,6 +1552,89 @@ function normalizeNodeSignaturePolicy(
   }
 }
 
+/** Lock-5 §1.1 — the complete `nodeOperationPolicy` sub-key set an `approval` node admits. */
+const NODE_OPERATION_POLICY_BOOLEAN_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+] as const
+const NODE_OPERATION_POLICY_RETURN_REVIEW_MODES = ['resume_forward', 'jump_back_to_current'] as const
+const NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES = ['never', 'reject_only', 'always'] as const
+
+/**
+ * Lock-5 §1.1 L5-A — normalize a node's `nodeOperationPolicy`. Modelled key-for-key on
+ * `normalizeNodeSignaturePolicy` above (gate A-6):
+ *   - an UNKNOWN sub-key `failValidation`s (400) — never silently stripped;
+ *   - an out-of-enum `returnReviewMode` / `commentRequired` `failValidation`s — never COERCED to a
+ *     default (the shipped `addSignMode` coercion is exactly the mislabel this program is repairing);
+ *   - absent, or an object whose every switch is absent, → `undefined` so the CALLER OMITS the key.
+ *     Authoring all-default switches therefore leaves the persisted config byte-identical (A-6's
+ *     emptiness half + Lock-4 §0's `buildStepConfig` omit-empty discipline).
+ *
+ * `admittedKeys` narrows the admitted set per node type (§2.5, the registry's job): an `approval`
+ * node admits all six; a `handler` node admits `allowTransfer` + `commentRequired` only (§1.6 /
+ * OD-L5-11(a)) and the caller raises `APPROVAL_HANDLER_CONFIG_INVALID` for the other three BEFORE
+ * calling this, so the message a handler author sees names the handler contract.
+ *
+ * DISCLOSED HAZARD (inherited from `signaturePolicy`, NOT introduced here — §1.1): because
+ * `normalizeApprovalGraph` also runs on every LOAD (`asApprovalGraph` / `asRuntimeGraph`),
+ * strict-on-unknown means a sub-key written by a NEWER server makes the graph unloadable on an
+ * older one. The fix, if wanted, is a forward-compatibility slice covering BOTH keys — never a
+ * weakening here.
+ */
+function normalizeNodeOperationPolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+  admittedKeys: readonly string[] = [
+    ...NODE_OPERATION_POLICY_BOOLEAN_KEYS,
+    'returnReviewMode',
+    'commentRequired',
+  ],
+): NodeOperationPolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  const allowed = new Set(admittedKeys)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      failValidation(context, `${path}.${key} is not supported`)
+    }
+  }
+  const normalized: NodeOperationPolicy = {}
+  for (const key of NODE_OPERATION_POLICY_BOOLEAN_KEYS) {
+    const raw = value[key]
+    if (raw === undefined) continue
+    if (typeof raw !== 'boolean') {
+      failValidation(context, `${path}.${key} must be a boolean`)
+    }
+    normalized[key] = raw as boolean
+  }
+  if (value.returnReviewMode !== undefined) {
+    if (!(NODE_OPERATION_POLICY_RETURN_REVIEW_MODES as readonly unknown[]).includes(value.returnReviewMode)) {
+      failValidation(
+        context,
+        `${path}.returnReviewMode must be ${NODE_OPERATION_POLICY_RETURN_REVIEW_MODES.join(' or ')}`,
+      )
+    }
+    normalized.returnReviewMode = value.returnReviewMode as NodeOperationPolicy['returnReviewMode']
+  }
+  if (value.commentRequired !== undefined) {
+    if (!(NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES as readonly unknown[]).includes(value.commentRequired)) {
+      failValidation(
+        context,
+        `${path}.commentRequired must be one of ${NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES.join(', ')}`,
+      )
+    }
+    normalized.commentRequired = value.commentRequired as NodeOperationPolicy['commentRequired']
+  }
+  // An all-absent object is OMITTED rather than persisted as `{}` (§1.1) — byte-stability for a
+  // template whose author opened the tab and changed nothing.
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
 /**
  * T1-1: preserve a node's `timeout` config through normalization so it survives into the stored /
  * runtime graph (the surrounding `normalizedNode.config` is a strict whitelist — an un-copied field is
@@ -2463,6 +2554,26 @@ function normalizeApprovalGraph(
       }
     }
 
+    // Lock-5 §2.5 / gate A-5 — `nodeOperationPolicy` is a MEMBER-ACTION policy, so it is admitted
+    // ONLY on the two node types that hold a member seat: `approval` (all six §1.1 fields) and
+    // `handler` (two, §1.6). On `start`/`end`/`cc`/`condition`/`parallel` it fails the AUTHORING
+    // choke with a 400 rather than being silently dropped by the per-type rebuild below (the
+    // `default: config = {}` arm). Unlike Lock-7's `editable` gate above this is NOT relaxed for
+    // `STORED_RUNTIME_CONTEXT`: the key is new in this slice, so no stored graph can legitimately
+    // carry it on such a node — a graph that does is structurally invalid, and fail-closed is
+    // correct. `normalizeApprovalGraph` re-runs on every load, so this also pins the placement for
+    // reads, not just publish.
+    if (
+      node.type !== 'approval'
+      && node.type !== 'handler'
+      && (node.config as { nodeOperationPolicy?: unknown }).nodeOperationPolicy !== undefined
+    ) {
+      failValidation(
+        context,
+        `approvalGraph.nodes[${index}].config.nodeOperationPolicy is not supported on a ${node.type} node`,
+      )
+    }
+
     switch (node.type) {
       case 'approval':
         {
@@ -2539,6 +2650,16 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.signaturePolicy`,
           )
+          // Lock-5 §1.1 L5-A / §2.2 — this is the FIRST of the four allowlists the key must land in
+          // (the other three are on the FE, `templateAuthoring.ts`). An un-copied field is silently
+          // dropped by this fixed spread, so omitting it here would make the key vanish on save AND
+          // on every reload (`asApprovalGraph` / `asRuntimeGraph` re-normalize) — `signaturePolicy`'s
+          // live failure mode.
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            node.config.nodeOperationPolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.nodeOperationPolicy`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -2554,6 +2675,7 @@ function normalizeApprovalGraph(
             ...(fieldPermissions ? { fieldPermissions } : {}),
             ...(timeout ? { timeout } : {}),
             ...(signaturePolicy ? { signaturePolicy } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
           }
         }
         break
@@ -2733,11 +2855,37 @@ function normalizeApprovalGraph(
             context,
             `${handlerPath}.fieldPermissions`,
           )
+          // Lock-5 §1.6 L5-F / OD-L5-11(a): a handler admits a NARROWED nodeOperationPolicy —
+          // `allowTransfer` + `commentRequired` ONLY. Lock-3 §2.2 already 409s add_sign/reduce_sign/
+          // return at a handler node, so a switch over those verbs is M8 theater; they are rejected
+          // HERE, at the authoring choke, with Lock-3's own code so the message names the handler
+          // contract. `allowTransfer` absent ≡ true reproduces Lock-3's hardcoded transfer-allowed
+          // with no behavior change (gate F-1's positive control).
+          const rawOperationPolicy = rawConfig.nodeOperationPolicy
+          if (isRecord(rawOperationPolicy)) {
+            for (const key of Object.keys(rawOperationPolicy)) {
+              if (!(HANDLER_NODE_OPERATION_POLICY_KEYS as readonly string[]).includes(key)) {
+                throw new ServiceError(
+                  `${handlerPath}.nodeOperationPolicy.${key} is not allowed on a handler node`,
+                  400,
+                  'APPROVAL_HANDLER_CONFIG_INVALID',
+                  { nodeKey: normalizedNode.key },
+                )
+              }
+            }
+          }
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            rawOperationPolicy,
+            context,
+            `${handlerPath}.nodeOperationPolicy`,
+            HANDLER_NODE_OPERATION_POLICY_KEYS,
+          )
           normalizedNode.config = {
             assigneeSources,
             ...(handlerMode ? { handlerMode } : {}),
             ...(opinionRequired !== undefined ? { opinionRequired } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
           }
         }
         break
@@ -7663,6 +7811,82 @@ export class ApprovalProductService {
           { nodeKey: currentNodeKey },
         )
       }
+
+      // ─────────────────────────────────────────────────────────────────────────────────────────
+      // Lock-5 §2.1 / §1.4 — THE SINGLE PER-NODE OPERATION-POLICY CHOKE (gates A-1, D-1, X-1).
+      //
+      // WHY HERE, and nowhere else. Three placement facts, each load-bearing:
+      //  (1) AFTER the authorization gate (`APPROVAL_ASSIGNMENT_REQUIRED`, above): the actor must
+      //      already hold a seat, which is what makes the 409-not-403 choice right (§1.1: the actor
+      //      IS authorized; this is a template-configuration state, not a re-authenticate signal)
+      //      AND what makes the denial row safe (D-2: the denied actor is already a participant by
+      //      the assignment clause, so the four `actor_id`-keyed readers gain nothing from it).
+      //  (2) AFTER Lock-3's handler verb gate (immediately above): a handler node's
+      //      add_sign/reduce_sign/return keep returning `APPROVAL_HANDLER_ACTION_NOT_ALLOWED`. The
+      //      operation policy must never RESURRECT a verb Lock-3 §2.2 forbids, and no shipped
+      //      client's error handling for those verbs changes.
+      //  (3) BEFORE the card-delivery block below — NOT merely "before the first verb branch". That
+      //      block takes `FOR UPDATE` on `dingtalk_approval_card_deliveries` and CLAIMS the card
+      //      (`SET card_state='acted'`) inside this transaction. The records-only COMMIT below would
+      //      carry that claim with it and CONSUME a card for an operation that never happened. At
+      //      THIS point the transaction holds only `SELECT … FOR UPDATE` and has written nothing
+      //      (`guardAttendanceCentralMutationOrThrow` is SELECT-only), so committing the denial row
+      //      commits the denial row and nothing else.
+      //
+      // ONE gate, not one per verb branch: `comment`/`transfer`/`add_sign`/`reduce_sign`/`revoke`
+      // all `return` early BEFORE the reject-comment / pending checks further down, so a gate placed
+      // near those would silently miss four of the five. The gate iterates the exported
+      // `ACTION_POLICY_KEYS` table rather than naming verbs by hand (A-1).
+      const nodeOperationPolicyKey: NodeOperationPolicyActionKey | null = ACTION_POLICY_KEYS[request.action]
+      if (nodeOperationPolicyKey !== null && currentNodeKey) {
+        const gatedNodeConfig = runtimeGraph.nodes.find((entry) => entry.key === currentNodeKey)?.config
+        const gatedPolicy = isRecord(gatedNodeConfig)
+          ? (gatedNodeConfig as { nodeOperationPolicy?: NodeOperationPolicy }).nodeOperationPolicy
+          : undefined
+        // Widen-only / OD-L5-3(a): ABSENT ≡ ALLOWED. Only an explicit `false` refuses, so every
+        // pre-Lock-5 stored graph — which carries no `nodeOperationPolicy` at all — behaves exactly
+        // as it does today, with no migration and no backfill.
+        if (gatedPolicy?.[nodeOperationPolicyKey] === false) {
+          // §1.4 fact 1 / OD-L5-9(a) — the DENIAL ROW, durable and isolated. Every other refusal in
+          // this method throws inside the transaction and is rolled back, so a denied click today
+          // survives nothing. Here the transaction has written nothing, so we INSERT the row, COMMIT
+          // that records-only transaction, and throw: one connection, atomic, no post-rollback second
+          // write. The outer `catch` still calls `rollbackQuietly`, which is a no-op once committed
+          // (it swallows "no transaction in progress"), so the row survives and the operation's own
+          // effects — assignment, epoch bump, version bump, status change — never happen (D-1).
+          const deniedNodeEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+          await this.insertApprovalRecord(client, id, {
+            action: APPROVAL_POLICY_DENIED_ACTION,
+            actorId: actor.userId,
+            actorName,
+            comment: null,
+            // from/to unchanged: a denial is not a transition. Version is NOT bumped either — the
+            // instance row is not touched at all by this path.
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: instance.version,
+            metadata: {
+              nodeKey: currentNodeKey,
+              ...(deniedNodeEntryEpoch !== null ? { nodeEntryEpoch: deniedNodeEntryEpoch } : {}),
+              operation: request.action,
+              policyKey: nodeOperationPolicyKey,
+            },
+          }, actor)
+          await client.query('COMMIT')
+          // §1.1: 409, not 403 — matches `APPROVAL_REVOKE_DISABLED` and the `*_UNSUPPORTED` refusals.
+          // §2.4 / X-1: `details` IS serialized to clients, so it carries `{ nodeKey, operation }`
+          // ONLY — never an actor id, target id, seat count, or form value — and the message is
+          // values-free too (the verb and node key are the same two facts `details` already carries).
+          throw new ServiceError(
+            `Operation ${request.action} is disabled at this node`,
+            409,
+            'APPROVAL_NODE_OPERATION_DISABLED',
+            { nodeKey: currentNodeKey, operation: request.action },
+          )
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────────────────────────
 
       // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
       // (ApprovalCardDeliveryAction.buildSummary) runs OUTSIDE this FOR UPDATE txn, so a concurrent

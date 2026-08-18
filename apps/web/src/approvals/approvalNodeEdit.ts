@@ -10,6 +10,7 @@ import type {
   HandlerNodeConfig,
   NodeFieldPermission,
   NodeTimeoutConfig,
+  NodeOperationPolicy,
 } from '../types/approval'
 import {
   APPROVAL_ROLE_CONFIGURE_SENTINEL,
@@ -68,6 +69,15 @@ export interface ApprovalNodeSourceEdit {
   // author (mirrors the `autoApprovalPolicy` null-clears-it convention); a `NodeTimeoutConfig` value =
   // author-set/edited.
   timeout?: NodeTimeoutConfig | null
+  /**
+   * Lock-5 §1.1 L5-A — the per-node 操作权限 object, authored by the inspector's third tab.
+   * Carried for BOTH node types (a handler admits the narrowed `allowTransfer`/`commentRequired`
+   * set, §1.6). Absent ≡ untouched (the config's own value survives); `null` ≡ the author turned
+   * every switch back to its default, so the key is REMOVED — the same absent/`null` grammar
+   * `autoApprovalPolicy` already uses here, and what makes gate A-6's "authoring all-default
+   * switches leaves the persisted config byte-identical" hold end to end.
+   */
+  nodeOperationPolicy?: NodeOperationPolicy | null
 }
 
 /** Map of approval-node source edits keyed by node key, seeded from a preserved graph. */
@@ -113,6 +123,11 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
         ...(node.config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(node.config.autoApprovalPolicy) } : {}),
         ...(node.config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(node.config.fieldPermissions) } : {}),
         ...(node.config.timeout !== undefined ? { timeout: cloneJson(node.config.timeout) } : {}),
+        // Lock-5 §1.1: seeding is IDENTITY — an untouched edit reproduces the persisted object
+        // byte-for-byte (including a mixed add/reduce pair the tab renders read-only, A-7).
+        ...(node.config.nodeOperationPolicy !== undefined
+          ? { nodeOperationPolicy: cloneJson(node.config.nodeOperationPolicy) }
+          : {}),
       }
     } else if (node.type === 'handler') {
       // Lock-3 §1.1 — seed the handler edit with its own fields only (never approval-node keys).
@@ -124,6 +139,10 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
         ...(handlerConfig.handlerMode !== undefined ? { handlerMode: handlerConfig.handlerMode } : {}),
         ...(handlerConfig.opinionRequired !== undefined ? { opinionRequired: handlerConfig.opinionRequired } : {}),
         ...(handlerConfig.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(handlerConfig.fieldPermissions) } : {}),
+        // Lock-5 §1.6: a handler carries the narrowed policy; seeding is identity here too.
+        ...(handlerConfig.nodeOperationPolicy !== undefined
+          ? { nodeOperationPolicy: cloneJson(handlerConfig.nodeOperationPolicy) as NodeOperationPolicy }
+          : {}),
       }
     }
   }
@@ -191,6 +210,10 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
       else delete config.opinionRequired
       if (edit.fieldPermissions !== undefined && edit.fieldPermissions.length > 0) config.fieldPermissions = cloneJson(edit.fieldPermissions)
       else delete config.fieldPermissions
+      // Lock-5 §1.1/§1.6 — `null` removes the key (every switch back to default), absent leaves the
+      // persisted value untouched.
+      if (edit.nodeOperationPolicy === null) delete config.nodeOperationPolicy
+      else if (edit.nodeOperationPolicy !== undefined) config.nodeOperationPolicy = cloneJson(edit.nodeOperationPolicy)
       return { ...cloneJson(node), config } as ApprovalNode
     }
     if (node.type !== 'approval') return cloneJson(node)
@@ -218,6 +241,9 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
     // `undefined` leaves whatever `originalConfig` carried (already spread in) untouched.
     if (edit.timeout === null) delete config.timeout
     else if (edit.timeout !== undefined) config.timeout = cloneJson(edit.timeout)
+    // Lock-5 §1.1 — see the handler arm above for the absent/`null` grammar.
+    if (edit.nodeOperationPolicy === null) delete config.nodeOperationPolicy
+    else if (edit.nodeOperationPolicy !== undefined) config.nodeOperationPolicy = cloneJson(edit.nodeOperationPolicy)
     return { ...cloneJson(node), config }
   })
   return {

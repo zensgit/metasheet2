@@ -19,6 +19,7 @@ import type {
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   SupportedNodeTimeoutEffect,
+  NodeOperationPolicy,
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
@@ -257,6 +258,15 @@ export interface ApprovalStepDraft {
   // '' (wall-clock, the backend absent-default) or 'business'. Mirrors `normalizeNodeTimeout`'s
   // emitted shape: 'wall_clock' is never persisted as an explicit value, only as key-absence.
   timeoutUnit: '' | 'business'
+  /**
+   * Lock-5 §1.1 L5-A — PRESERVE-VERBATIM carrier for the per-node 操作权限 object. The linear
+   * editor has no `操作权限` surface (that tab lives in the canvas inspector), so this field is
+   * never authored here; it exists so hydrate → `buildStepConfig` re-emits the persisted object
+   * unchanged instead of silently dropping it on save. Same role as
+   * `originalAutoApprovalPolicy` / `FieldAuthoringDraft.original`. Absent for the overwhelming
+   * majority of steps, and omitted from the built config when absent (byte-stability).
+   */
+  nodeOperationPolicy?: NodeOperationPolicy
 }
 
 export interface TemplateAuthoringDraft {
@@ -736,6 +746,12 @@ function stepDraftFromApprovalNode(
     timeoutTransferToUserId,
     timeoutJumpToStepLocalId,
     timeoutUnit,
+    // Lock-5 §1.1: stash the persisted 操作权限 object so `buildStepConfig` re-emits it verbatim.
+    // A malformed shape is separately caught by `unsupportedTemplateAuthoringReason` (fail-closed
+    // read-only, so save is blocked) — this hydrate never repairs or flattens it.
+    ...(config.nodeOperationPolicy !== undefined
+      ? { nodeOperationPolicy: config.nodeOperationPolicy as NodeOperationPolicy }
+      : {}),
   }
 }
 
@@ -844,6 +860,13 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'autoApprovalPolicy',
   'fieldPermissions',
   'timeout',
+  // Lock-5 §1.1 / §2.2 — allowlist 2 of 4. The backend approval-node rebuild re-emits
+  // `nodeOperationPolicy` (ApprovalProductService.ts, the `case 'approval'` spread), so a template
+  // carrying it must stay EDITABLE rather than being forced read-only by the drop-check below. All
+  // four allowlists move in ONE slice or the key inherits `signaturePolicy`'s live state (read-only
+  // in both editors) — gate A-3, whose positive control is precisely that `signaturePolicy` STILL
+  // goes read-only here, proving the guard was widened for this key and not removed.
+  'nodeOperationPolicy',
 ]
 // The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
 // allowlist must be shape-level, not just top-level:
@@ -895,6 +918,49 @@ function requesterChoiceSourceHasBackendDrop(source: Record<string, unknown>): b
 }
 const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
 const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
+// Lock-5 §1.1 / §2.2 — allowlist 4 of 4 (the NESTED one, beside BACKEND_AUTO_APPROVAL_POLICY_KEYS).
+// `nodeOperationPolicy` is an OBJECT, so a top-level allowlist entry alone is incomplete: the
+// backend `normalizeNodeOperationPolicy` rebuilds it from a fixed sub-key set and REJECTS (400) any
+// other sub-key. On the FE the posture is the same either way — a shape the backend will not re-emit
+// verbatim must force read-only, never silently flatten on save.
+//
+// NOTE the asymmetry with the backend, and why it is correct: the backend admits only
+// `allowTransfer` + `commentRequired` on a HANDLER node (§1.6 / OD-L5-11(a)); that narrowing is
+// carried by BACKEND_HANDLER_NODE_OPERATION_POLICY_KEYS below, not by this approval-node list.
+const BACKEND_NODE_OPERATION_POLICY_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+  'returnReviewMode',
+  'commentRequired',
+]
+const BACKEND_HANDLER_NODE_OPERATION_POLICY_KEYS = ['allowTransfer', 'commentRequired']
+const BACKEND_RETURN_REVIEW_MODES = ['resume_forward', 'jump_back_to_current']
+const BACKEND_COMMENT_REQUIRED_VALUES = ['never', 'reject_only', 'always']
+
+/**
+ * Lock-5 §1.1 — true when a `nodeOperationPolicy` value is one the backend normalizer would REJECT
+ * or not re-emit verbatim: a non-object, an unknown sub-key, a non-boolean switch, an out-of-enum
+ * `returnReviewMode`/`commentRequired`, or (the emptiness rule) an object with no field at all,
+ * which the backend OMITS rather than persisting as `{}`. Any of those makes the FE's verbatim
+ * round-trip differ from the real save, so fail closed to read-only.
+ */
+function nodeOperationPolicyHasBackendDrop(value: unknown, allowedKeys: string[]): boolean {
+  if (!isPlainRecord(value)) return true
+  if (hasKeyOutside(value, allowedKeys)) return true
+  if (Object.keys(value).length === 0) return true
+  for (const key of ['allowTransfer', 'allowAddSign', 'allowReduceSign', 'allowReturn']) {
+    if (value[key] !== undefined && typeof value[key] !== 'boolean') return true
+  }
+  if (value.returnReviewMode !== undefined && !BACKEND_RETURN_REVIEW_MODES.includes(value.returnReviewMode as string)) {
+    return true
+  }
+  if (value.commentRequired !== undefined && !BACKEND_COMMENT_REQUIRED_VALUES.includes(value.commentRequired as string)) {
+    return true
+  }
+  return false
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -980,6 +1046,13 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
       if (isBackendDroppedFieldPermission(perm)) return true
     }
   }
+  // Lock-5 §1.1: the nested object shape-check (allowlist 4 of 4).
+  if (
+    config.nodeOperationPolicy !== undefined
+    && nodeOperationPolicyHasBackendDrop(config.nodeOperationPolicy, BACKEND_NODE_OPERATION_POLICY_KEYS)
+  ) {
+    return true
+  }
   return false
 }
 
@@ -992,7 +1065,9 @@ const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
 const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
 // Lock-3 R-21 — the handler config keys the backend `normalizeApprovalGraph` (case 'handler') re-emits.
 // Any other key is silently dropped on save, so it must trip the backend-drop check (fail-closed).
-const BACKEND_HANDLER_CONFIG_KEYS = ['assigneeSources', 'handlerMode', 'opinionRequired', 'fieldPermissions']
+// Lock-5 §1.6: `nodeOperationPolicy` joins the handler allowlist (narrowed sub-key set, checked
+// separately in `complexNodeConfigHasBackendDrop` below).
+const BACKEND_HANDLER_CONFIG_KEYS = ['assigneeSources', 'handlerMode', 'opinionRequired', 'fieldPermissions', 'nodeOperationPolicy']
 const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
 const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules', 'formula']
 const BACKEND_CONDITION_FORMULA_KEYS = ['expression']
@@ -1014,7 +1089,12 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
       return hasKeyOutside(config, BACKEND_CC_CONFIG_KEYS)
     case 'handler':
       // Lock-3 R-21: a handler key outside the backend allowlist is a silent backend-drop.
+      // Lock-5 §1.6: plus the NARROWED nodeOperationPolicy sub-key set — a handler carrying
+      // allowAddSign/allowReduceSign/allowReturn is rejected 400 by the backend authoring choke, so
+      // it must be read-only here rather than looking editable and failing at save.
       return hasKeyOutside(config, BACKEND_HANDLER_CONFIG_KEYS)
+        || (config.nodeOperationPolicy !== undefined
+          && nodeOperationPolicyHasBackendDrop(config.nodeOperationPolicy, BACKEND_HANDLER_NODE_OPERATION_POLICY_KEYS))
     case 'parallel':
       return hasKeyOutside(config, BACKEND_PARALLEL_CONFIG_KEYS)
     case 'condition': {
@@ -1101,6 +1181,14 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       // so it is no longer an unknown config key that would force the whole template read-only.
       'fieldPermissions',
       'timeout',
+      // Lock-5 §1.1 / §2.2 — allowlist 3 of 4. The linear ("辅助编辑模式") editor does NOT author
+      // `nodeOperationPolicy` (the `操作权限` tab is a CANVAS-inspector surface), but A-3's bar is
+      // "stays EDITABLE", not merely "round-trips safely": a linear template carrying the key must
+      // stay editable. That obliges `buildStepConfig` to re-emit it VERBATIM from
+      // `ApprovalStepDraft.nodeOperationPolicy` — the `originalAutoApprovalPolicy` preserve-verbatim
+      // pattern — or save would silently flatten it, which is exactly what this allowlist entry
+      // would otherwise permit.
+      'nodeOperationPolicy',
     ]
     if (Object.keys(config).some((key) => !allowedConfigKeys.includes(key))) return true
     // P1-C: `approvalMode` itself must be a KNOWN value — the key-only check above can't see this.
@@ -1116,6 +1204,14 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
     if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
+    // The linear path preserves the object verbatim, so a shape the backend would reject or
+    // re-emit differently must still fail closed to read-only (same predicate as the complex path).
+    if (
+      config.nodeOperationPolicy !== undefined
+      && nodeOperationPolicyHasBackendDrop(config.nodeOperationPolicy, BACKEND_NODE_OPERATION_POLICY_KEYS)
+    ) {
+      return true
+    }
     const sources = config.assigneeSources
     if (sources !== undefined) {
       if (!Array.isArray(sources) || sources.length !== 1) return true
@@ -1559,6 +1655,12 @@ function buildStepConfig(
     .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
     .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
   const timeout = buildStepTimeoutConfig(step, stepLocalIdToNodeKey)
+  // Lock-5 §1.1: re-emit the preserved 操作权限 object VERBATIM (a fresh deep copy so the emitted
+  // graph never aliases the reactive draft). The linear editor authors nothing here; omitting the
+  // key when absent keeps every pre-Lock-5 linear template byte-identical.
+  const nodeOperationPolicy = step.nodeOperationPolicy
+    ? (JSON.parse(JSON.stringify(step.nodeOperationPolicy)) as NodeOperationPolicy)
+    : undefined
   return {
     assigneeSources: [sourceFromStep(step, allSteps)],
     approvalMode: step.approvalMode,
@@ -1570,6 +1672,7 @@ function buildStepConfig(
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
     ...(timeout ? { timeout } : {}),
+    ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
   }
 }
 
