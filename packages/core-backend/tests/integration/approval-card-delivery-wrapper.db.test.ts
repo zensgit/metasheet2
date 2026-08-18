@@ -19,6 +19,7 @@ import {
   getApprovalCardDeliverySummary,
   verifyApprovalCardLinkToken,
 } from '../../src/services/ApprovalCardDeliveryAction'
+import { applyDingTalkApprovalCardWebTerminalUpdate } from '../../src/integrations/dingtalk/interactive-card-update'
 import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
@@ -116,7 +117,11 @@ async function newInstance(tid: string = templateId): Promise<string> {
 
 async function newSentDelivery(
   instanceId: string,
-  opts: { nodeKey?: string; entryEpoch?: number | null } = {},
+  opts: {
+    nodeKey?: string
+    entryEpoch?: number | null
+    deliveryKind?: 'work_notice_action_card' | 'interactive_card'
+  } = {},
 ): Promise<string> {
   const nodeKey = opts.nodeKey ?? 'approval_1'
   // P1-1 STRICT epoch: an actionable card MUST carry the round's non-null epoch (the real send path
@@ -128,7 +133,7 @@ async function newSentDelivery(
     nodeKey,
     recipientUserId: APPROVER,
     recipientDingTalkUserId: `dd_${APPROVER}`,
-    deliveryKind: 'work_notice_action_card',
+    deliveryKind: opts.deliveryKind ?? 'work_notice_action_card',
     entryEpoch,
   })
   await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_cdw')
@@ -527,6 +532,45 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       expect(retry.summary.actedAction).toBe('reject')
       expect(retry.summary.approval.status).toBe('rejected')
     }
+  })
+
+  test('WEB REJECT no-rollback: DingTalk update failure cannot undo the committed approval or acted ledger claim', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId, { deliveryKind: 'interactive_card' })
+    const action = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      {
+        deliveryId,
+        token: tokenFor(deliveryId),
+        decision: 'reject',
+        comment: '材料不完整',
+        actor: approverActor,
+      },
+    )
+    expect(action.status).toBe('ok')
+
+    const update = await applyDingTalkApprovalCardWebTerminalUpdate(
+      action,
+      async () => { throw new Error('DingTalk response body must stay values-free') },
+    )
+    expect(update).toEqual({ status: 'failed', outTrackId: deliveryId, reason: 'Error' })
+
+    const approval = await q('SELECT status FROM approval_instances WHERE id = $1', [instanceId])
+    expect(approval.rows[0]).toMatchObject({ status: 'rejected' })
+    const card = await q(
+      `SELECT card_state, acted_action, acted_by FROM dingtalk_approval_card_deliveries WHERE id = $1`,
+      [deliveryId],
+    )
+    expect(card.rows[0]).toMatchObject({
+      card_state: 'acted',
+      acted_action: 'reject',
+      acted_by: APPROVER,
+    })
+    const records = await q(
+      `SELECT COUNT(*)::int AS count FROM approval_records WHERE instance_id = $1 AND action = 'reject'`,
+      [instanceId],
+    )
+    expect((records.rows[0] as { count: number }).count).toBe(1)
   })
 
   test('CONCURRENCY tripwire: two simultaneous approves — exactly one engine action, one claim, loser gets the real terminal state', async () => {

@@ -50,6 +50,7 @@ export type ApprovalCardDecision = 'approve' | 'reject'
 
 export interface ApprovalCardDeliverySummary {
   deliveryId: string
+  deliveryKind: DingTalkApprovalCardDeliveryRow['delivery_kind']
   cardState: DingTalkApprovalCardDeliveryRow['card_state']
   sendStatus: DingTalkApprovalCardDeliveryRow['send_status']
   nodeKey: string
@@ -174,6 +175,7 @@ async function buildSummary(
   if (!instance) return null
   return {
     deliveryId: delivery.id,
+    deliveryKind: delivery.delivery_kind,
     cardState: delivery.card_state,
     sendStatus: delivery.send_status,
     nodeKey: delivery.node_key,

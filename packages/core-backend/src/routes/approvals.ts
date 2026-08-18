@@ -23,6 +23,7 @@ import {
   executeApprovalActionFromCardDelivery,
   getApprovalCardDeliverySummary,
 } from '../services/ApprovalCardDeliveryAction'
+import { applyDingTalkApprovalCardWebTerminalUpdate } from '../integrations/dingtalk/interactive-card-update'
 import {
   ApprovalProductService,
   resolveApprovalListPaging,
@@ -1965,6 +1966,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         },
       )
+      // The approval action and delivery-ledger claim have already committed inside the wrapper.
+      // This presentation follow-up is failure-isolated and idempotent; DingTalk failure must not
+      // change the HTTP decision result or roll back the approval.
+      await applyDingTalkApprovalCardWebTerminalUpdate(outcome)
       if (outcome.status === 'not_found') {
         return res.status(404).json(approvalErrorResponse('APPROVAL_CARD_DELIVERY_NOT_FOUND', 'Card delivery not found'))
       }
