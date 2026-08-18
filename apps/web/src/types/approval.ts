@@ -19,9 +19,49 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver'
-export type ApprovalMode = 'single' | 'all' | 'any'
+// P1-C (approval-parity-master-design-lock-20260817.md §P1-C / M6): 'threshold' is the shipped
+// ENGINE 4th mode (N-of-M / 门槛会签, ApprovalGraphExecutor.ts `normalizeApprovalMode`) — this type
+// was FE-unexposed until this slice. Byte-mirrors backend packages/core-backend/src/types/
+// approval-product.ts `ApprovalMode`. Linear-only in v1: the backend rejects a 'threshold' node
+// INSIDE a parallel region (`APPROVAL_THRESHOLD_IN_PARALLEL`, ApprovalProductService.ts
+// :2706-2712 / :2757-2763) — see `collectParallelRegionNodeKeys` in templateAuthoring.ts for the FE
+// mirror of that exact region definition.
+export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+
+// P1-C: byte-mirrors backend packages/core-backend/src/types/approval-product.ts `NodeTimeoutEffect`
+// — the FULL declared enum, so a persisted/loaded graph round-trips any value without narrowing. Only
+// a SUBSET is actually wired end-to-end (`NODE_TIMEOUT_SUPPORTED_EFFECTS` below) — `auto_approve` /
+// `auto_reject` are reserved (ApprovalProductService.ts `NODE_TIMEOUT_SUPPORTED_EFFECTS`,
+// `APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED` at publish) and must NOT be offered by any picker.
+export type NodeTimeoutEffect = 'remind' | 'transfer' | 'jump' | 'auto_approve' | 'auto_reject'
+
+// P1-C: the effects `ApprovalSlaScheduler.fireNodeTimeouts` actually acts on AND publish accepts
+// (ApprovalProductService.ts `NODE_TIMEOUT_SUPPORTED_EFFECTS`). The ONLY set any authoring picker may
+// offer — do not widen without a corresponding backend scheduler + publish-validator change.
+export const NODE_TIMEOUT_SUPPORTED_EFFECTS = ['remind', 'transfer', 'jump'] as const
+export type SupportedNodeTimeoutEffect = typeof NODE_TIMEOUT_SUPPORTED_EFFECTS[number]
+
+// P1-C: byte-mirrors backend `NODE_TIMEOUT_MAX_AFTER_MINUTES` (ApprovalProductService.ts :550) — the
+// inclusive upper bound `validateNodeTimeoutConfigs` enforces on `timeout.afterMinutes`.
+export const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
+
+/**
+ * P1-C: byte-mirrors the SHAPE backend `normalizeNodeTimeout` re-emits (ApprovalProductService.ts
+ * :1468-1493) — the exact carrier a save round-trips. `unit` is OMITTED for the 'wall_clock' default
+ * (normalize only ever emits `unit: 'business'`, never `unit: 'wall_clock'` — a byte-identical
+ * round-trip must mirror that omission, not merely accept both). `transferToUserId`/`jumpToNodeKey`
+ * are per-effect target fields (`validateNodeTimeoutConfigs` §T1-1 slice-2): required+exclusive to
+ * their matching effect, never present together, never present on 'remind'.
+ */
+export interface NodeTimeoutConfig {
+  afterMinutes: number
+  effect: NodeTimeoutEffect
+  transferToUserId?: string
+  jumpToNodeKey?: string
+  unit?: 'business'
+}
 
 // Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
 // backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
@@ -126,11 +166,20 @@ export interface ApprovalNodeConfig {
   assigneeIds?: string[]
   assigneeSources?: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
+  // P1-C (T2-4 N-of-M / 门槛会签): the number of DISTINCT approver identities required. Present
+  // ONLY when `approvalMode === 'threshold'` — backend `normalizeApprovalGraph` assigns it exclusively
+  // inside that branch (ApprovalProductService.ts :2281-2305) and never emits it otherwise, so a
+  // node carrying it under a different mode is a backend-drop shape, never a valid persisted state.
+  approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
-  // P1-C node-level field permissions. Default-absent === editable === current behavior. `hidden`
+  // Node-level field permissions. Default-absent === editable === current behavior. `hidden`
   // entries are enforced server-side (echo-redaction); `readonly`/`editable` are runtime-inert.
   fieldPermissions?: NodeFieldPermission[]
+  // P1-C (T1-1): node-level SLA timeout. Byte-mirrors what backend `normalizeNodeTimeout` re-emits;
+  // see `NodeTimeoutConfig`. Never present on a `handler` node config (§1.2 forbidden-key list,
+  // ApprovalProductService.ts :2449) — timeout is `approval`-node-only.
+  timeout?: NodeTimeoutConfig
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.

@@ -7,7 +7,9 @@ import type {
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
+  NodeTimeoutConfig,
   ParallelJoinMode,
+  SupportedNodeTimeoutEffect,
 } from '../types/approval'
 import type {
   ConditionBranchEdit,
@@ -81,10 +83,33 @@ export interface ApprovalNodeConfigEditorApi {
   removeApprovalSourceCard: (nodeKey: string, sourceIndex: number) => void
   approvalNodeMode: (nodeKey: string) => ApprovalMode
   setApprovalNodeMode: (nodeKey: string, mode: ApprovalMode) => void
+  // P1-C (T2-4 N-of-M / 门槛会签). Meaningful only when `approvalNodeMode(nodeKey) === 'threshold'`.
+  approvalNodeThreshold: (nodeKey: string) => number
+  setApprovalNodeThreshold: (nodeKey: string, value: number) => void
+  // P1-C linear-only fail-closed gate: true when `nodeKey` lies inside ANY parallel node's branch
+  // region (`collectParallelRegionNodeKeys` in templateAuthoring.ts — the FE mirror of the backend's
+  // `APPROVAL_THRESHOLD_IN_PARALLEL` / `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED` region). The mode
+  // picker must not OFFER 'threshold', and the timeout section must not be enterable, when true.
+  approvalNodeInParallelRegion: (nodeKey: string) => boolean
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
   approvalNodeMergeWithRequester: (nodeKey: string) => boolean
   setApprovalNodeMergeWithRequester: (nodeKey: string, enabled: boolean) => void
+  // P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids `timeout`,
+  // §1.2). `undefined` when the node has none configured (the section renders collapsed/disabled).
+  approvalNodeTimeout: (nodeKey: string) => NodeTimeoutConfig | undefined
+  setApprovalNodeTimeoutEnabled: (nodeKey: string, enabled: boolean) => void
+  setApprovalNodeTimeoutAfterMinutes: (nodeKey: string, minutes: number) => void
+  // Restricted to the WIRED subset (`NODE_TIMEOUT_SUPPORTED_EFFECTS`) — 'auto_approve'/'auto_reject'
+  // are reserved and this control never offers them (M6/M8).
+  setApprovalNodeTimeoutEffect: (nodeKey: string, effect: SupportedNodeTimeoutEffect) => void
+  setApprovalNodeTimeoutTransferToUserId: (nodeKey: string, userId: string) => void
+  setApprovalNodeTimeoutJumpToNodeKey: (nodeKey: string, targetNodeKey: string) => void
+  setApprovalNodeTimeoutUnit: (nodeKey: string, unit: 'wall_clock' | 'business') => void
+  /** Candidate jump targets for `nodeKey`'s timeout: every OTHER `approval` node NOT inside a
+   *  parallel region (mirrors `validateNodeTimeoutConfigs`'s jump-target legality). Business labels
+   *  only (`graphNodeLabel`-equivalent) — never a raw node key in the rendered option text. */
+  timeoutJumpTargetOptions: (nodeKey: string) => Array<{ key: string; label: string }>
   // Lock-3 §1.1 — handler-node mode (会签/或签) + 办理意见 required. Reuse the shared source helpers
   // (approvalSourceKind/…) for the roster; these two are the handler-only controls.
   handlerNodeMode: (nodeKey: string) => HandlerMode
