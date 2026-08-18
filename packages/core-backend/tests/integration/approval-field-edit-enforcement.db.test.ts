@@ -429,32 +429,204 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
     expect(maskedMemo.after).toBe('audit-me')
   })
 
-  // ── G-12 — non-approval node types: editable elsewhere is REJECTED, not dropped ───────────────
-  it('G-12: editable on a cc/start/end/condition/parallel node is a 400; hidden/readonly on those types is (still) silently dropped (D-1 deferred); an approval-node hidden still round-trips', async () => {
-    // Positive control first: hidden on an APPROVAL node round-trips through save.
+  // ── G-12 / D-1 fix — non-approval node types: ANY fieldPermissions entry is REJECTED, not dropped ──
+  // docs/development/approval-lock7-field-edit-enforcement-20260817.md §2.7 D-1 + OD-L7-4. P4-B (the
+  // Lock-7 landing PR, #4961) closed only the `editable` arm — the load-bearing privilege-escalation
+  // half — and left the READ axis (`readonly`/`hidden`) silently dropped, logged as D-1 "for a
+  // separate fix slice" (independently reproduced by the P7 phase-A verification ledger, which flagged
+  // that `readonly`/`hidden` were STILL silently dropped on these five node types at that baseline).
+  // This IS that slice: ALL THREE access values — the whole NodeFieldAccess enum — on ALL FIVE
+  // non-write-capable node types (cc/start/end/condition/parallel — the complement of
+  // {approval, handler} in APPROVAL_NODE_TYPES) now fail publish with the SAME typed values-free 4xx,
+  // instead of a silent, effect-free drop. This closes BOTH axes: the `editable` write-side hazard
+  // (already closed by P4-B) AND the `readonly`/`hidden` read-side silent-loss the P7 ledger flagged.
+  it('G-12 (D-1 closed, both axes): fieldPermissions — EVERY access value (editable/readonly/hidden) — on EVERY non-write-capable node type is REJECTED with a typed values-free 400; an empty array and an approval-node matrix still round-trip', async () => {
+    // Positive control first: hidden on an APPROVAL node round-trips through save (unchanged by this slice).
     const okGraph = handlerGraph([{ fieldId: 'memo', access: 'hidden' }])
     okGraph.nodes[2]!.config = { ...okGraph.nodes[2]!.config, fieldPermissions: [{ fieldId: 'secret', access: 'hidden' }] } as never
     await createTemplateId(`${KEYPFX}-g12-ok`, okGraph)
 
-    // editable on a cc node → 400 APPROVAL_VALIDATION_ERROR (fail-closed, not dropped).
-    const ccEditable = {
+    async function assertRejected(res: Response, label: string, nodeKey: string): Promise<void> {
+      expect(res.status, `${label}: ${await res.clone().text()}`).toBe(400)
+      const body = (await res.json()) as ErrorBody
+      expect(errorCode(body), label).toBe('APPROVAL_NODE_FIELD_PERMISSIONS_UNSUPPORTED_NODE_TYPE')
+      // values-free: neither the fieldId nor any submitted value is echoed — only the structural
+      // node key / node type identify WHERE the rejection fired.
+      const detailsStr = JSON.stringify(body.error?.details ?? {})
+      expect(detailsStr).toContain(nodeKey)
+      expect(detailsStr).not.toContain('memo')
+      expect(detailsStr).not.toContain('secret')
+    }
+
+    // One graph-builder per non-write-capable node type, each returning { graph, nodeKey } so a SINGLE
+    // loop below drives all 3 access values × all 5 types = 15 negative assertions off one table.
+    type NonWriteType = 'cc' | 'start' | 'end' | 'condition' | 'parallel'
+    function graphFor(type: NonWriteType, fieldPermissions: NodeFieldPermission[]): { graph: unknown; nodeKey: string } {
+      const fp = fieldPermissions.length > 0 ? { fieldPermissions } : {}
+      switch (type) {
+        case 'cc':
+          return {
+            nodeKey: 'cc_x',
+            graph: {
+              nodes: [
+                { key: 'start', type: 'start', name: 's', config: {} },
+                { key: 'cc_x', type: 'cc', name: 'cc', config: { targetType: 'user', targetIds: [FINAL], ...fp } },
+                { key: 'approval_final', type: 'approval', name: 'f', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'end', type: 'end', name: 'e', config: {} },
+              ],
+              edges: [{ key: 's2c', source: 'start', target: 'cc_x' }, { key: 'c2f', source: 'cc_x', target: 'approval_final' }, { key: 'f2e', source: 'approval_final', target: 'end' }],
+            },
+          }
+        case 'start':
+          return {
+            nodeKey: 'start',
+            graph: {
+              nodes: [
+                { key: 'start', type: 'start', name: 's', config: fp },
+                { key: 'approval_final', type: 'approval', name: 'f', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'end', type: 'end', name: 'e', config: {} },
+              ],
+              edges: [{ key: 's2f', source: 'start', target: 'approval_final' }, { key: 'f2e', source: 'approval_final', target: 'end' }],
+            },
+          }
+        case 'end':
+          return {
+            nodeKey: 'end',
+            graph: {
+              nodes: [
+                { key: 'start', type: 'start', name: 's', config: {} },
+                { key: 'approval_final', type: 'approval', name: 'f', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'end', type: 'end', name: 'e', config: fp },
+              ],
+              edges: [{ key: 's2f', source: 'start', target: 'approval_final' }, { key: 'f2e', source: 'approval_final', target: 'end' }],
+            },
+          }
+        case 'condition':
+          return {
+            nodeKey: 'cond_x',
+            graph: {
+              nodes: [
+                { key: 'start', type: 'start', name: 's', config: {} },
+                {
+                  key: 'cond_x',
+                  type: 'condition',
+                  name: 'c',
+                  config: {
+                    branches: [{ edgeKey: 'c2high', rules: [{ fieldId: 'amount', operator: 'gt', value: 100 }] }],
+                    defaultEdgeKey: 'c2low',
+                    ...fp,
+                  },
+                },
+                { key: 'approval_high', type: 'approval', name: 'high', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'approval_low', type: 'approval', name: 'low', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'end', type: 'end', name: 'e', config: {} },
+              ],
+              edges: [
+                { key: 's2c', source: 'start', target: 'cond_x' },
+                { key: 'c2high', source: 'cond_x', target: 'approval_high' },
+                { key: 'c2low', source: 'cond_x', target: 'approval_low' },
+                { key: 'high2e', source: 'approval_high', target: 'end' },
+                { key: 'low2e', source: 'approval_low', target: 'end' },
+              ],
+            },
+          }
+        case 'parallel':
+          return {
+            nodeKey: 'par_x',
+            graph: {
+              nodes: [
+                { key: 'start', type: 'start', name: 's', config: {} },
+                {
+                  key: 'par_x',
+                  type: 'parallel',
+                  name: 'p',
+                  config: { branches: ['p2a', 'p2b'], joinNodeKey: 'join', joinMode: 'all', ...fp },
+                },
+                { key: 'approval_a', type: 'approval', name: 'a', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'approval_b', type: 'approval', name: 'b', config: { assigneeSources: staticUser([HANDLER]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'join', type: 'approval', name: 'j', config: { assigneeSources: staticUser([GATE]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+                { key: 'end', type: 'end', name: 'e', config: {} },
+              ],
+              edges: [
+                { key: 's2p', source: 'start', target: 'par_x' },
+                { key: 'p2a', source: 'par_x', target: 'approval_a' },
+                { key: 'p2b', source: 'par_x', target: 'approval_b' },
+                { key: 'a2j', source: 'approval_a', target: 'join' },
+                { key: 'b2j', source: 'approval_b', target: 'join' },
+                { key: 'j2e', source: 'join', target: 'end' },
+              ],
+            },
+          }
+      }
+    }
+
+    // 3 access values × 5 node types = 15 negatives, EVERY ONE typed + values-free.
+    const NON_WRITE_TYPES: NonWriteType[] = ['cc', 'start', 'end', 'condition', 'parallel']
+    for (const type of NON_WRITE_TYPES) {
+      for (const access of ['editable', 'readonly', 'hidden'] as const) {
+        const { graph, nodeKey } = graphFor(type, [{ fieldId: 'memo', access }])
+        const res = await createTemplate(`${KEYPFX}-g12-${type}-${access}`, graph)
+        await assertRejected(res, `${type}/${access}`, nodeKey)
+      }
+    }
+
+    // Malformed entry (missing `fieldId`) is ALSO rejected — the check is presence-of-non-empty-array
+    // selected, not access-value selected, so it does not depend on the entry's internal shape being
+    // valid to fire.
+    const malformedRes = await createTemplate(
+      `${KEYPFX}-g12-cc-malformed`,
+      graphFor('cc', [{ access: 'hidden' } as unknown as NodeFieldPermission]).graph,
+    )
+    await assertRejected(malformedRes, 'cc/malformed', 'cc_x')
+
+    // Positive control: an EMPTY array is NOT rejected (OD-L7-9 absent/empty ≡ no permissions; the FE
+    // always initialises `fieldPermissions: []` on a step draft — rejecting emptiness would brick
+    // ordinary authoring, apps/web/src/approvals/templateAuthoring.ts).
+    const emptyRes = await createTemplate(`${KEYPFX}-g12-cc-empty`, graphFor('cc', []).graph)
+    expect(emptyRes.status, await emptyRes.clone().text()).toBe(201)
+  })
+
+  // ── D-1 fix — in-flight tolerance: a STORED graph carrying cc-fieldPermissions still dispatches ──
+  it('D-1 fix in-flight tolerance: a STORED runtime graph carrying fieldPermissions on a cc node (hand-edited, never publishable through the choke) still dispatches — §2.1 widen-only rule', async () => {
+    // The publish-time choke above makes this shape UN-PUBLISHABLE going forward, so the only way to
+    // exercise the dispatch re-normalize tolerance is the same technique the shipped "G-4 legacy
+    // explicit-editable subcase" test uses: publish a valid graph, then hand-edit the STORED
+    // `runtime_graph` row directly (bypassing the authoring choke entirely, as a defensively-tolerated
+    // legacy/corrupted shape would).
+    const ccGraph = {
       nodes: [
         { key: 'start', type: 'start', name: 's', config: {} },
-        { key: 'cc_x', type: 'cc', name: 'cc', config: { targetType: 'user', targetIds: [FINAL], fieldPermissions: [{ fieldId: 'memo', access: 'editable' }] } },
+        { key: 'cc_x', type: 'cc', name: 'cc', config: { targetType: 'user', targetIds: [FINAL] } },
         { key: 'approval_final', type: 'approval', name: 'f', config: { assigneeSources: staticUser([FINAL]), approvalMode: 'single', emptyAssigneePolicy: 'error' } },
         { key: 'end', type: 'end', name: 'e', config: {} },
       ],
       edges: [{ key: 's2c', source: 'start', target: 'cc_x' }, { key: 'c2f', source: 'cc_x', target: 'approval_final' }, { key: 'f2e', source: 'approval_final', target: 'end' }],
     }
-    const ccRes = await createTemplate(`${KEYPFX}-g12-cc`, ccEditable)
-    expect(ccRes.status).toBe(400)
+    const tid = await createPublished(`${KEYPFX}-d1-inflight`, ccGraph)
 
-    // D-1 deferral positive control: hidden (NOT editable) on the SAME cc node is accepted (silently
-    // dropped — Lock-7 does not fix the read axis), proving the pin is editable-selected.
-    const ccHidden = JSON.parse(JSON.stringify(ccEditable)) as typeof ccEditable
-    ;(ccHidden.nodes[1]!.config as { fieldPermissions: NodeFieldPermission[] }).fieldPermissions = [{ fieldId: 'memo', access: 'hidden' }]
-    const ccHiddenRes = await createTemplate(`${KEYPFX}-g12-cc-hidden`, ccHidden)
-    expect(ccHiddenRes.status, await ccHiddenRes.clone().text()).toBe(201)
+    const pool = poolManager.get()
+    const defRow = await pool.query<{ id: string; runtime_graph: { nodes: Array<{ key: string; config?: Record<string, unknown> }> } }>(
+      `SELECT id, runtime_graph FROM approval_published_definitions WHERE template_id = $1 AND is_active = TRUE`,
+      [tid],
+    )
+    const rg = defRow.rows[0]!.runtime_graph
+    const ccNode = rg.nodes.find((n) => n.key === 'cc_x')!
+    ccNode.config = { ...ccNode.config, fieldPermissions: [{ fieldId: 'memo', access: 'hidden' }] }
+    await pool.query(`UPDATE approval_published_definitions SET runtime_graph = $2 WHERE id = $1`, [defRow.rows[0]!.id, JSON.stringify(rg)])
+
+    // Dispatch: creating the instance itself walks start → cc_x → approval_final (cc is a pass-through
+    // notify node, ApprovalGraphExecutor auto-advances past it — `node.type === 'cc'` follows the first
+    // outgoing edge), which re-normalizes the STORED graph via `asRuntimeGraph`/STORED_RUNTIME_CONTEXT
+    // over the hand-edited cc_x node. A 201 here is already the tolerance proof; a comment + approve at
+    // the (now-current) approval node re-normalizes the SAME stored graph again on every subsequent
+    // dispatch. Neither call may 500 — the hand-edited shape must be tolerated, not rejected.
+    const iid = await createInstance(tid)
+    expect((await instanceRow(iid)).current_node_key).toBe('approval_final')
+    const comment = await act(iid, finalTok, { action: 'comment', comment: 'dispatch re-normalize tolerates cc.fieldPermissions' })
+    expect(comment.status, await comment.clone().text()).toBe(200)
+    const approve = await act(iid, finalTok, { action: 'approve' })
+    expect(approve.status, await approve.clone().text()).toBe(200)
+    expect((await instanceRow(iid)).status).toBe('approved')
   })
 
   // ── G-4 — routing drivers cannot be editable at ANY node ──────────────────────────────────────
