@@ -519,6 +519,9 @@ describe('legacy length-derived helpers - frozen fallback baseline (delta §5 F1
       dateRangeStartLabel: '',
       dateRangeEndLabel: '',
       dateRangeDurationLabel: '',
+      // L8-A (approval-lock8-field-vocabulary-20260817.md §1.1): same deliberate-widening,
+      // neutral-defaults discipline — meaningless until retyped to `explanation`.
+      explanationText: '',
     })
     expect(localId).toMatch(/^field_\d+_[0-9a-f]{1,6}$/)
     // Default-arg pin: the historical `index = 1` default stays intact.

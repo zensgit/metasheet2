@@ -81,6 +81,8 @@ export const APPROVAL_FORM_FIELD_TYPE_LABELS: Record<
   'record-link': '关联记录',
   // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
   date_range: '日期区间',
+  // Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1).
+  explanation: '说明',
 }
 
 export const APPROVAL_FORM_FIELD_TYPE_MARKS: Record<AuthorableFieldType, string> = {
@@ -95,14 +97,18 @@ export const APPROVAL_FORM_FIELD_TYPE_MARKS: Record<AuthorableFieldType, string>
   detail: '表',
   'record-link': '链',
   date_range: '区',
+  explanation: '明',
 }
 
+// Lock-8 L8-A (§2.6): the group needs an owner decision — placed in 其他 as a REVERSIBLE
+// presentation choice (goal-set provenance; see this repo's execution ledger §3 for the one-line
+// note), not a ratified OD-L8-3 group. Moving it later is a data-only change to this array.
 export const APPROVAL_FORM_PALETTE_GROUPS: ApprovalFormPaletteGroup[] = [
   { id: 'text', label: '文本', types: ['text', 'textarea'] },
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link'] },
+  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
 ].map(({ id, label, types }) => ({
   id,
   label,

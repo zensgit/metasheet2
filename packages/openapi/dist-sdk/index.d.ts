@@ -16514,7 +16514,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment" | "detail" | "date_range";
+            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment" | "detail" | "date_range" | "explanation";
             label: string;
             required?: boolean;
             placeholder?: string;

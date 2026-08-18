@@ -5803,7 +5803,8 @@
               "user",
               "attachment",
               "detail",
-              "date_range"
+              "date_range",
+              "explanation"
             ]
           },
           "label": {
@@ -5914,7 +5915,8 @@
             "user": "#/components/schemas/FormFieldGeneric",
             "attachment": "#/components/schemas/FormFieldGeneric",
             "detail": "#/components/schemas/FormFieldGeneric",
-            "date_range": "#/components/schemas/FormFieldGeneric"
+            "date_range": "#/components/schemas/FormFieldGeneric",
+            "explanation": "#/components/schemas/FormFieldGeneric"
           }
         }
       },

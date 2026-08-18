@@ -85,9 +85,13 @@ export function isRecordLinkType(type: FormFieldType): boolean {
  * non-scalar and "never as one comparable value"; its two endpoints are separately selectable via
  * `dateRangeVisibilityEndpointOptions` below, a per-type ADDITIVE affordance, not a widening of
  * this boolean.
+ *
+ * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, MS-9) extends the SAME exclusion
+ * to `explanation` — it carries no value at all (a stricter case than "non-scalar": there is
+ * nothing to compare, ever), and unlike date_range it gets no endpoint fallback (it has none).
  */
 export function isSelectableConditionOrVisibilityDependencyType(type: FormFieldType | string): boolean {
-  return type !== 'record-link' && type !== 'detail' && type !== 'date_range'
+  return type !== 'record-link' && type !== 'detail' && type !== 'date_range' && type !== 'explanation'
 }
 
 /**
@@ -130,7 +134,10 @@ export function visibilityReferenceBaseFieldId(rawFieldId: string): string {
  * Pure helper for authoring + unit tests. Lock-8 L8-B: `date_range` joins record-link/detail as a
  * type whose retype-away must clear stale dependents — including a dotted endpoint address
  * (`${id}.start`/`${id}.end`), which `visibilityReferenceBaseFieldId` resolves to the same base id
- * a bare reference would use, so neither form survives orphaned.
+ * a bare reference would use, so neither form survives orphaned. Lock-8 L8-A: `explanation` joins
+ * too, matching record-link/detail's ONE-direction shape (nothing could ever validly have
+ * depended on it, so only "became explanation" needs clearing — there is no endpoint fallback to
+ * distinguish, unlike date_range).
  */
 export function clearStaleRecordLinkDependencies<T extends {
   id: string
@@ -142,7 +149,12 @@ export function clearStaleRecordLinkDependencies<T extends {
   changedFieldId: string,
   changedType: string,
 ): { fields: T[]; conditionRules: Array<{ fieldId: string }> } {
-  if (changedType !== 'record-link' && changedType !== 'detail' && changedType !== 'date_range') {
+  if (
+    changedType !== 'record-link' &&
+    changedType !== 'detail' &&
+    changedType !== 'date_range' &&
+    changedType !== 'explanation'
+  ) {
     return { fields, conditionRules }
   }
   const id = changedFieldId.trim()

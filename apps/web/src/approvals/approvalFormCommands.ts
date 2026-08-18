@@ -151,6 +151,7 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
+  explanation: '说明',
 }
 
 const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
@@ -328,6 +329,11 @@ export function addFormField(
     dateRangeStartLabel: '',
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
+    // L8-A: same neutral-defaults discipline as the L8-B/L8-C keys above — no authoring affordance
+    // for `explanationText` exists here; a freshly-added explanation field simply carries an empty
+    // body (matching §1.1's no-absent-default: it stays publish-rejected until the OTHER, live
+    // authoring surface — ApprovalFormInlineEditor — writes one).
+    explanationText: '',
   }
 
   const fields = [...draft.fields]

@@ -83,6 +83,7 @@ reviewable behavior.
 | Number FWB | fail-closed | existing FWB contract | independent exact-number decision |
 | Flag order | Canvas, durable prerequisite plus FWB, attachments | owner handoff plus production FWB dependency | explicit owner change |
 | Private release prerequisites | tracked outside public repository artifacts | disclosure discipline | owner records closure out of band |
+| explanation (说明) palette group (Lock-8 L8-A §2.6) | 其他 group, in both `ApprovalFormPalette.vue` (F2) and `TemplateAuthoringView.vue`'s own copy | reversible presentation choice, goal-set instruction (2026-08-17) executing this slice — Lock-8 §2.6 records the group as needing an owner decision, not yet ratified as an OD-L8-3 group | owner picks a different group; a data-only change to both palette arrays |
 
 ## 4. Evidence ledger template
 

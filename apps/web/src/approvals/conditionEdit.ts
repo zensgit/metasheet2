@@ -131,6 +131,10 @@ export function approvalFormulaInsertOptions(formSchema: FormSchema): FormulaIns
     // would silently never match. OD-L8-5 admits date_range endpoints ONLY into field-level
     // visibility (a separate mechanism); it stays excluded from condition branches entirely.
     if (field.type === 'date_range') continue
+    // Lock-8 L8-A (§1.1): explanation carries no value at all — a stricter case than date_range's
+    // non-scalar exclusion (there is nothing to compare, ever). Excluded from condition rules AND
+    // formulas the same way.
+    if (field.type === 'explanation') continue
     if (field.type === 'detail') {
       // Detail only contributes aggregate column tokens, not a bare top-level `{detailId}`.
       for (const column of field.columns ?? []) {
@@ -288,6 +292,12 @@ export function validateConditionEdits(
   const dateRangeFieldIds = new Set(
     formSchema.fields.filter((field) => field.type === 'date_range').map((field) => field.id),
   )
+  // Lock-8 L8-A (§1.1): explanation carries no value at all — excluded from condition
+  // branches/formulas entirely, same mechanism as record-link/date_range above. FE PREVIEW mirror
+  // of the backend `validateNonScalarFieldsNotUsedInConditions` guard.
+  const explanationFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'explanation').map((field) => field.id),
+  )
   // Outgoing edge keys per node key (edges whose `source` is that node) — the legal targets for a
   // branch/default edge of that condition node.
   const outgoingByNode = new Map<string, Set<string>>()
@@ -317,6 +327,12 @@ export function validateConditionEdits(
             errors.push(`${formulaLabel} 不能引用日期区间字段 ${fieldId}（v1）`)
           }
         }
+        for (const fieldId of explanationFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用说明字段 ${fieldId}（无值）`)
+          }
+        }
         return
       }
       // A rules-mode branch with ZERO rules is never legitimate: the runtime evaluates
@@ -338,6 +354,8 @@ export function validateConditionEdits(
           errors.push(`${ruleLabel} 不能引用关联记录字段（v1）`)
         } else if (dateRangeFieldIds.has(fieldId)) {
           errors.push(`${ruleLabel} 不能引用日期区间字段（v1）`)
+        } else if (explanationFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用说明字段（无值）`)
         }
         if (!isConditionRuleOperator(rule.operator)) {
           errors.push(`${ruleLabel} 的运算符无效`)

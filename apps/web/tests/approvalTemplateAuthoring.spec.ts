@@ -3334,6 +3334,74 @@ describe('TemplateAuthoringView', () => {
     // the matching <option> disappears regardless of whether the reactive string was actually cleared.
     expect(operatorSelect()).toBeNull()
   })
+
+  // Lock-8 L8-A (§1.1) gate P2-1 hardening: explanation carries no value at all, so
+  // `visibilityFieldOptions` excludes it TOTALLY (no bare option, and — unlike date_range — no
+  // dotted endpoint options either, since it has none). Until now nothing distinguished the
+  // `if (field.type === 'explanation') continue` guard from a no-op: deleting it alone left every
+  // reachable spec green. The number-field leg is a mandatory positive control.
+  it('Lock-8 L8-A: the visibility depends-on picker excludes an explanation field entirely (no bare option, no endpoint options), while a sibling number field remains selectable', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'note', type: 'explanation', label: '说明', props: { text: '请仔细阅读' } },
+          { id: 'reason', type: 'text', label: '事由' },
+        ],
+      } as any,
+    }))
+    await mountView()
+    await flushUi()
+
+    const reasonRow = () => container!.querySelectorAll('[data-testid="approval-template-field-row"]')[2] as HTMLElement
+    const dependsSelect = reasonRow().querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    const optionValues = Array.from(dependsSelect.options).map((o) => o.value)
+    // Positive control FIRST — proves the options list is non-trivial, not accidentally emptied.
+    expect(optionValues).toContain('amount')
+    expect(optionValues).not.toContain('note')
+    expect(optionValues.some((v) => v.startsWith('note.'))).toBe(false)
+  })
+
+  // Lock-8 L8-A (§1.1) gate P2-1 hardening: `conditionFieldOptions` (graph condition rule field
+  // picker) also excludes explanation entirely — `validateConditionEdits` rejects any rule
+  // referencing a valueless field, so offering it here would be an M7 inert control. Until now
+  // nothing distinguished this PR's `&& field.type !== 'explanation'` guard from a no-op: deleting
+  // it alone left every reachable spec green.
+  it('Lock-8 L8-A: the condition rule field picker excludes an explanation field entirely while a sibling number field remains selectable', async () => {
+    routeParams = { id: 'tpl_1' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'note', type: 'explanation', label: '说明', props: { text: '请仔细阅读' } },
+        ],
+      } as any,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] }], defaultEdgeKey: 'e-b' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-c', source: 'start', target: 'cond_1' },
+          { key: 'e-a', source: 'cond_1', target: 'app_a' },
+          { key: 'e-b', source: 'cond_1', target: 'end' },
+          { key: 'e-a-end', source: 'app_a', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const fieldSelect = container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    expect(fieldSelect).not.toBeNull()
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value)
+    // Positive control FIRST — proves the options list is non-trivial, not accidentally emptied.
+    expect(optionValues).toContain('amount')
+    expect(optionValues).not.toContain('note')
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {
