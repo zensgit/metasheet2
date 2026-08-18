@@ -251,7 +251,7 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
   const calcsFor = async (userId: string) =>
     (
       await pool.query(
-        `SELECT c.version, c.outcome, c.shadow_diff_code, c.shadow_diff,
+        `SELECT c.version, c.outcome, c.mode, c.shadow_diff_code, c.shadow_diff,
                 c.projected_status, c.projected_first_in_at, c.projected_last_out_at,
                 c.projected_late_minutes, c.projected_early_leave_minutes,
                 c.attendance_record_id::text AS attendance_record_id
@@ -270,8 +270,12 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
    */
   const readProbeFromRows = (rows: any[], index: number) => {
     const row = rows[index]
+    // #4969 gate P2-3: convergence means the next SHADOW row — versions are per-record
+    // across ALL modes (uq_arc_record_version), so an interleaved non-shadow row must be
+    // skipped, exactly as the reconciliation SQL's LATERAL does (mode='shadow').
     const next = rows
       .filter((candidate) => candidate.attendance_record_id === row.attendance_record_id
+        && candidate.mode === 'shadow'
         && Number(candidate.version) > Number(row.version))
       .sort((a, b) => Number(a.version) - Number(b.version))[0]
     return {
@@ -385,5 +389,26 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
     expect(rows.length).toBe(1)
     expect(rows[0].shadow_diff_code).toBe('late_minutes_mismatch')
     expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(readProbeFromRows(rows, 0))).toBe(false)
+  })
+
+  it('probe builder convergence means the next SHADOW row — an interleaved authoritative row neither converges nor blocks (#4969 gate P2-3)', () => {
+    const base = {
+      attendance_record_id: 'rec-1',
+      shadow_diff: { changedFields: ['lateMinutes'], absoluteMinuteDelta: 90 },
+      projected_status: 'partial',
+      projected_first_in_at: '2026-08-12T00:00:00Z',
+      projected_last_out_at: null,
+      projected_late_minutes: 90,
+      projected_early_leave_minutes: 0,
+    }
+    const shadowV1 = { ...base, version: 1, mode: 'shadow', shadow_diff_code: 'late_minutes_mismatch' }
+    const authV2equal = { ...base, version: 2, mode: 'authoritative', shadow_diff_code: 'equal' }
+    const shadowV3equal = { ...base, version: 3, mode: 'shadow', shadow_diff_code: 'equal' }
+    // authoritative 'equal' alone must NOT count as convergence...
+    expect(readProbeFromRows([shadowV1, authV2equal], 0).convergedToEqual).toBe(false)
+    // ...and must not BLOCK it either: the next SHADOW row (v3) converges past it.
+    expect(readProbeFromRows([shadowV1, authV2equal, shadowV3equal], 0).convergedToEqual).toBe(true)
+    // plain two-row shadow lifecycle still converges (positive control).
+    expect(readProbeFromRows([shadowV1, { ...shadowV3equal, version: 2 }], 0).convergedToEqual).toBe(true)
   })
 })

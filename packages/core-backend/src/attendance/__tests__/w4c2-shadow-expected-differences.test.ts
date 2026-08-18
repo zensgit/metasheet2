@@ -10,6 +10,9 @@
  * grants `adjusted` only when leave/overtime minutes > 0 — index.cjs ~L11369 —
  * so the same day projects `normal`).
  */
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type {
   ApprovedAttendanceFactV1,
@@ -279,5 +282,32 @@ describe('w4c2 expected shadow differences (#4607 handover P0)', () => {
     expect(isExpectedAttendanceW4C2ReadSideDifferenceV1(READ_PROBE_IN_ONLY, [ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1[0]])).toBe(false)
     const parsed = parseAttendanceW4C2ReadSideProbeV1(READ_PROBE_IN_ONLY)
     expect(parsed.shadowDiffCode).toBe('late_minutes_mismatch')
+  })
+
+  it('CROSS-FILE DRIFT PIN (#4969 gate P2-1): the boundary relabel target literal equals the derived presented code', () => {
+    // The boundary rewrite (reading the matched entry) is a SEPARATE, already-flagged
+    // change; until it lands, this pin makes the two sites un-driftable: the gate proved a
+    // mutation of the relabel literal to a CRITICAL code left every other test green — this
+    // leg is the one that reds it.
+    const here = dirname(fileURLToPath(import.meta.url))
+    const boundarySource = readFileSync(
+      join(here, '..', 'w4c2-live-scheduled-boundary.ts'),
+      'utf8',
+    )
+    const relabel = boundarySource.match(/\{ \.\.\.shadowDiffCandidate, code: '([a-z_]+)' as const \}/)
+    expect(relabel, 'the relabel branch must exist in the boundary').not.toBeNull()
+    expect(relabel?.[1]).toBe(ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1)
+  })
+
+  it('read evaluator CODE conjunct is load-bearing in isolation (#4969 gate P3: parser-passable wrong-code probe with the SAME changedFields)', () => {
+    // expected_break_exclusion permits arbitrary non-empty changedFields through the read
+    // parser, so this probe differs from the in-only accept ONLY in its code — isolating
+    // the code conjunct the departure matrix could not reach.
+    expect(
+      isExpectedAttendanceW4C2ReadSideDifferenceV1({
+        ...READ_PROBE_IN_ONLY,
+        shadowDiffCode: 'expected_break_exclusion',
+      }),
+    ).toBe(false)
   })
 })

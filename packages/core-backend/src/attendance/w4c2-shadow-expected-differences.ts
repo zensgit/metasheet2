@@ -211,6 +211,10 @@ export const ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1: readonly Attendance
  * predicate cannot drift from the entry it executes.
  */
 export const ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1: AttendanceW4ShadowDiffCodeV1 = (() => {
+  // #4969 gate P2-2: the roster assert runs INSIDE this derivation — the presented code
+  // cannot exist without the module-load invariants having held, so deleting a floating
+  // assert call can never silently disarm them.
+  assertAttendanceW4C2RosterV1(ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1)
   const writeEntries = ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1.filter(
     (entry) => entry.evaluator === 'write_probe_v1',
   )
@@ -427,4 +431,3 @@ export function assertAttendanceW4C2RosterV1(
   if (writeEntries !== 1) fail(code)
 }
 
-assertAttendanceW4C2RosterV1(ATTENDANCE_W4C2_EXPECTED_SHADOW_DIFFERENCES_V1)
