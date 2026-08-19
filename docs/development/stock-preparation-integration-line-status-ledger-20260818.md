@@ -52,7 +52,7 @@
 | win32 `chmod` 静默无效、仓库无 `icacls` | 声称的私密性在 Windows 运行时不存在 | #4989 attestation 门;后续 deploy launcher 加 `icacls` + 导出 attestation |
 | PG 矩阵未设 `PGOPTIONS`/`metasheet.sealed_export_*_role` → 073–075 走 latent 分支 | 非 superuser 路径首次在真机跑 | 待验证 + 角色绑定迁移臂(进行中) |
 | PG16+ `createrole_self_grant` 可能触发 `pg_auth_members` 零行谓词、无诊断 | DBA 建角色方式差异即失败 | 待验证 + 负控/诊断(进行中) |
-| provenance pins 按 LF 字节哈希;`core.autocrlf=true` 检出无法过 S5 evidence | 仅影响 Windows 开发机跑 CI 契约 | `.gitattributes -text` 或 LF 归一摘要 |
+| ~~provenance pins 按 LF 字节哈希;`core.autocrlf=true` 检出无法过 S5 evidence~~ | 仅影响 Windows 开发机跑 CI 契约 | 已闭环:`.gitattributes` 对 63 个受 pin 文件加 `text eol=lf`(非 `-text`,以便 `git add` 也归一,阻止 CRLF 字节进 blob);`sha256File` 保持逐字节,不做 LF 归一 |
 | `PROVENANCE_READ_NOT_IMPLEMENTED` 501 | 按行 provenance 读缺席 | 待排期 |
 
 ## 6. 与部署速度直接相关的 PR(2026-08-18)
