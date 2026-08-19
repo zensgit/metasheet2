@@ -56,7 +56,25 @@ export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[num
  */
 export type HandlerMode = 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
-export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+// Lock-4 §3 (F4-B, docs/development/approval-lock4-flow-policies-20260817.md) — 'designated' is the
+// P3-A slice landed here. Quoting the ratified text: "`EmptyAssigneePolicy` grows from `'error' |
+// 'auto-approve'` to add `'designated'`, whose targets ride ONE new top-level key
+// `emptyAssigneeFallback` ... `'error'` stays the absent default." OD-L4-3(a): 'designated' ONLY —
+// 转审批管理员 is expressed by DESIGNATING the admin (as a static_user/static_role fallback target);
+// there is NO reverse admin-role lookup, and none is built here.
+export type EmptyAssigneePolicy = 'error' | 'auto-approve' | 'designated'
+/**
+ * Lock-4 §3 F4-B — the ONLY carrier for `emptyAssigneePolicy: 'designated'` targets (one key, not
+ * two, "because every added key must move four allowlists at once"). Filled through typed pickers
+ * only (D0 §10.2); shape deliberately mirrors `static_user`/`static_role` (`ApprovalAssigneeSource`)
+ * so the SAME resolver path (`resolveApprovalAssignees`) can consume it without a hand-built path.
+ * "Fallback is exactly ONE non-recursive step (locked)" — this type carries NO nested fallback of
+ * its own, by construction.
+ */
+export interface EmptyAssigneeFallback {
+  userIds?: string[]
+  roleIds?: string[]
+}
 export const APPROVAL_ACTION_TYPES = [
   'approve',
   'reject',
@@ -212,6 +230,10 @@ export interface ApprovalNodeConfig {
    */
   approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
+  // other policy value (including absent policy, which stays byte-identical to today). See
+  // EmptyAssigneeFallback's own doc comment for the "one key" / "one non-recursive step" quotes.
+  emptyAssigneeFallback?: EmptyAssigneeFallback
   autoApprovalPolicy?: AutoApprovalPolicy
   // P1-C node-level field permissions. Default-absent === editable === current
   // behavior. `hidden` entries are enforced server-side; `readonly`/`editable`

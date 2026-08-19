@@ -23,6 +23,7 @@ import type {
   ConditionFormulaPredicate,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
+  EmptyAssigneeFallback,
   EmptyAssigneePolicy,
   AmountConsistencyMapping,
   FormField,
@@ -558,7 +559,8 @@ const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'pa
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
 const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
-const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
+// Lock-4 §3 F4-B — 'designated' joins the enum. §1.3 four-allowlist arithmetic tracks the FE side.
+const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve', 'designated'])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
 const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
 // T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
@@ -623,9 +625,65 @@ function normalizeEmptyAssigneePolicy(
 ): EmptyAssigneePolicy | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !EMPTY_ASSIGNEE_POLICIES.has(value as EmptyAssigneePolicy)) {
-    failValidation(context, `${path} must be error or auto-approve`)
+    failValidation(context, `${path} must be error, auto-approve, or designated`)
   }
   return value as EmptyAssigneePolicy
+}
+
+// Lock-4 §3 F4-B — a lenient string-array normalizer (unlike `normalizeStringArray`, an EMPTY array
+// is tolerated here, not rejected). This is deliberate: `{userIds: [], roleIds: []}` must normalize
+// down to "absent" so the B-s10 cross-field publish gate below treats an explicitly-empty fallback
+// identically to an omitted one — one emptiness check, not two divergent shapes of the same bug.
+function normalizeOptionalNonEmptyEntriesStringArray(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((entry) => !isNonEmptyString(entry))) {
+    failValidation(context, `${path} must be a string array`)
+  }
+  return value.map((entry) => entry.trim())
+}
+
+/**
+ * Lock-4 §3 F4-B (OD-L4-3(a)) — normalizes `emptyAssigneeFallback`, the ONE key carrying
+ * `emptyAssigneePolicy: 'designated'`'s targets. Unknown SUB-keys (inside the object) are REJECTED
+ * (Lock-1 §G-1 posture for NEW kinds — no silent drop), mirroring `prior_node_approver`'s own
+ * exact-shape check. Returns `undefined` when both arrays end up empty/absent — see the array
+ * normalizer's own comment for why.
+ *
+ * Placement on a NON-approval node type (cc/condition/parallel/start/end) is a DIFFERENT question,
+ * answered by the per-type rebuild in the switch below: this key is silently dropped there, exactly
+ * like its sibling `emptyAssigneePolicy` (an existing, pre-F4-B key) already is — a deliberate
+ * byte-for-byte match to the sibling it is co-located with, not a gap this slice introduces. This
+ * differs from the newer `nodeOperationPolicy` / Lock-7 pin-2 precedent (explicit 400 on a
+ * non-carrying node type); retrofitting `emptyAssigneePolicy` itself to that stricter posture is a
+ * separate, pre-existing-behavior change out of scope for this slice.
+ */
+function normalizeEmptyAssigneeFallback(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): EmptyAssigneeFallback | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  const knownKeys = ['userIds', 'roleIds']
+  const extraKeys = Object.keys(value).filter((key) => !knownKeys.includes(key))
+  if (extraKeys.length > 0) {
+    failValidation(context, `${path} carries unknown keys: ${extraKeys.join(', ')}`)
+  }
+  const userIds = normalizeOptionalNonEmptyEntriesStringArray(value.userIds, context, `${path}.userIds`)
+  const roleIds = normalizeOptionalNonEmptyEntriesStringArray(value.roleIds, context, `${path}.roleIds`)
+  const nonEmptyUserIds = userIds && userIds.length > 0 ? userIds : undefined
+  const nonEmptyRoleIds = roleIds && roleIds.length > 0 ? roleIds : undefined
+  if (!nonEmptyUserIds && !nonEmptyRoleIds) return undefined
+  return {
+    ...(nonEmptyUserIds ? { userIds: nonEmptyUserIds } : {}),
+    ...(nonEmptyRoleIds ? { roleIds: nonEmptyRoleIds } : {}),
+  }
 }
 
 function normalizeOptionalBoolean(
@@ -2109,6 +2167,39 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
 }
 
 /**
+ * Lock-4 §3 F4-B, gate B-s10 — cross-field publish/author-time 400: an `emptyAssigneePolicy:
+ * 'designated'` node must carry a non-empty `emptyAssigneeFallback`. Quoting the ratified text
+ * (docs/development/approval-lock4-flow-policies-20260817.md §3): "an empty primary source with
+ * 'designated' dispatches to the designated set" presupposes there IS a designated set.
+ *
+ * Called ONLY from the FIVE authoring entry points (create/update/publish/restore/clone), mirroring
+ * `validateFieldEditEnforcementPins`'s own documented posture — NOT from `normalizeApprovalGraph`
+ * (which `asApprovalGraph`/`asRuntimeGraph` re-run on every LOAD and DISPATCH). Enforcing this rule
+ * inside the re-normalize path would make an already-published, already-dispatching instance's graph
+ * throw on its next read if the rule ever tightened; the lock's own words are "fail-closed at the
+ * AUTHORING CHOKE, not at dispatch" — this function IS that choke, deliberately not the load path.
+ *
+ * Takes the ALREADY-NORMALIZED graph (typed `emptyAssigneePolicy`/`emptyAssigneeFallback`), exactly
+ * like `validateNodeTimeoutConfigs` immediately above — both run downstream of `assertApprovalGraph`.
+ */
+function validateEmptyAssigneeFallbackConfigs(approvalGraph: ApprovalGraph): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config = node.config as { emptyAssigneePolicy?: EmptyAssigneePolicy; emptyAssigneeFallback?: EmptyAssigneeFallback }
+    if (config.emptyAssigneePolicy !== 'designated') continue
+    const fallback = config.emptyAssigneeFallback
+    const hasTarget = Boolean(fallback && ((fallback.userIds?.length ?? 0) > 0 || (fallback.roleIds?.length ?? 0) > 0))
+    if (!hasTarget) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} emptyAssigneeFallback is required when emptyAssigneePolicy is 'designated'`,
+        400,
+        'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED',
+      )
+    }
+  }
+}
+
+/**
  * Lock-3 §1.3 — handler topology legality (publish/author-time 400). A handler is LEGAL on the main
  * path between start and end, and inside a `condition` branch body. It is ILLEGAL in v1 inside a
  * parallel region and as a parallel `joinNodeKey`: `collectAllBranchAssignees` and the fingerprint
@@ -2754,6 +2845,20 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.emptyAssigneePolicy`,
           )
+          // B-s10's cross-field rule ('designated' requires a non-empty emptyAssigneeFallback) is
+          // DELIBERATELY NOT enforced here. `normalizeApprovalGraph` re-runs on every LOAD
+          // (`asApprovalGraph` / `asRuntimeGraph`, i.e. the dispatch re-normalize path too), and the
+          // lock is explicit: fail-closed "at the AUTHORING CHOKE, not at dispatch." Enforcing it here
+          // would make an already-published, already-dispatching instance's graph throw on its NEXT
+          // read if the rule ever tightened — the same hazard `validateFieldEditEnforcementPins`
+          // documents and avoids by living OUTSIDE this function. See
+          // `validateEmptyAssigneeFallbackConfigs`, called only from the five authoring entry points
+          // (create/update/publish/restore/clone), never from the dispatch/read path.
+          const emptyAssigneeFallback = normalizeEmptyAssigneeFallback(
+            node.config.emptyAssigneeFallback,
+            context,
+            `approvalGraph.nodes[${index}].config.emptyAssigneeFallback`,
+          )
           const autoApprovalPolicy = normalizeAutoApprovalPolicy(
             node.config.autoApprovalPolicy,
             context,
@@ -2795,6 +2900,11 @@ function normalizeApprovalGraph(
             ...(approvalMode ? { approvalMode } : {}),
             ...(approvalThreshold !== undefined ? { approvalThreshold } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
+            // Lock-4 §3 F4-B — allowlist 1 of 4 (§1.3). An un-copied key is silently dropped by this
+            // fixed spread, vanishing on save AND on every reload (`asApprovalGraph` / `asRuntimeGraph`
+            // re-normalize) — this is the F4-B-specific instance of the signaturePolicy live failure
+            // mode this comment block already warns about below.
+            ...(emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
             ...(timeout ? { timeout } : {}),
@@ -5105,6 +5215,7 @@ export class ApprovalProductService {
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateEmptyAssigneeFallbackConfigs(approvalGraph)
       validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
 
@@ -5172,6 +5283,7 @@ export class ApprovalProductService {
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateEmptyAssigneeFallbackConfigs(approvalGraph)
     validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
@@ -5337,6 +5449,7 @@ export class ApprovalProductService {
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNonScalarFieldsNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateEmptyAssigneeFallbackConfigs(nextApprovalGraph)
         validateHandlerNodePlacement(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
@@ -5471,6 +5584,7 @@ export class ApprovalProductService {
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
       validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateEmptyAssigneeFallbackConfigs(approvalGraph)
       validateHandlerNodePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
@@ -5779,6 +5893,7 @@ export class ApprovalProductService {
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateEmptyAssigneeFallbackConfigs(approvalGraph)
     validateHandlerNodePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 

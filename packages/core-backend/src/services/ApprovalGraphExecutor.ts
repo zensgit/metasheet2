@@ -1,5 +1,6 @@
 import type {
   ApprovalAssigneeResolutionMetadata,
+  ApprovalAssigneeSource,
   ApprovalAutoApprovalReason,
   ApprovalEdge,
   ApprovalMode,
@@ -1247,7 +1248,28 @@ export class ApprovalGraphExecutor {
         const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
-          if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
+          // Lock-4 §3 F4-B, gate B-1 (EXECUTOR SITE 1 of 2 — inside `resolveFromNode`, which
+          // `resolveAfterApprove` tail-calls, so this arm covers BOTH initial resolution AND
+          // after-approve re-entry). See `resolveBranchAdvance` below for site 2 of 2, reachable only
+          // through a parallel branch's second node.
+          if (approvalConfig.emptyAssigneePolicy === 'designated') {
+            const fallbackAssignments = this.resolveDesignatedFallbackAssignments(node.key, approvalConfig, sourceStep)
+            if (fallbackAssignments.length > 0) {
+              return {
+                status: 'pending',
+                currentNodeKey: node.key,
+                currentStep: sourceStep,
+                totalSteps: this.totalSteps,
+                assignments: fallbackAssignments,
+                ccEvents,
+                autoApprovalEvents,
+                aggregateMode: context.aggregateMode,
+                aggregateComplete: context.aggregateComplete,
+              }
+            }
+            // Gate B-2 (locked): "never chaining to 'auto-approve', never falling back to a manager,
+            // never retrying" — an empty designated set falls straight through to the terminal throw.
+          } else if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
               sourceStep,
@@ -1574,7 +1596,25 @@ export class ApprovalGraphExecutor {
         const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
-          if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
+          // Lock-4 §3 F4-B, gate B-1 (EXECUTOR SITE 2 of 2 — inside `resolveBranchAdvance`, reachable
+          // ONLY through a parallel branch's second node via `resolveAfterApproveInParallel`; NOT
+          // reached by `resolveAfterApprove`, which tail-calls `resolveFromNode` = site 1 above). A
+          // one-sided edit here without site 1 (or vice versa) is the classic half-wired defect —
+          // gate B-3 pins both arms as independently mutation-discriminating.
+          if (approvalConfig.emptyAssigneePolicy === 'designated') {
+            const fallbackAssignments = this.resolveDesignatedFallbackAssignments(node.key, approvalConfig, sourceStep)
+            if (fallbackAssignments.length > 0) {
+              return {
+                kind: 'pending-approval',
+                approvalNodeKey: node.key,
+                assignments: fallbackAssignments,
+                ccEvents,
+                autoApprovalEvents,
+              }
+            }
+            // Gate B-2 (locked): never chains to 'auto-approve', never falls back further — falls
+            // straight through to the terminal APPROVAL_ASSIGNEE_EMPTY throw below.
+          } else if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
               sourceStep,
@@ -1732,6 +1772,74 @@ export class ApprovalGraphExecutor {
         }))
     this.assertThresholdReachable(nodeKey, approvalConfig, assignments)
     return assignments
+  }
+
+  /**
+   * Lock-4 §3 F4-B (docs/development/approval-lock4-flow-policies-20260817.md, OD-L4-3(a)) — resolves
+   * `emptyAssigneePolicy: 'designated'`'s target set. Quoting the lock: "Fallback is exactly ONE
+   * non-recursive step (locked)." This method is called ONLY from the two empty-assignee branches
+   * below (never recursively, never from itself) — the caller is solely responsible for terminating
+   * at `APPROVAL_ASSIGNEE_EMPTY` when this returns `[]`; it must NEVER be chained into another
+   * `emptyAssigneePolicy` arm, retried, or substituted with a manager lookup ("转审批管理员 is
+   * expressed by designating the admin ... there is NO reverse admin lookup").
+   *
+   * The designated set is routed through the SAME `assignmentResolver` (→ `resolveApprovalAssignees`)
+   * that `static_user`/`static_role` sources already use — built as a synthetic one-off
+   * `ApprovalNodeConfig` carrying only `assigneeSources`, never hand-built — so delegation
+   * substitution and the `seen` dedup collapse apply identically to a designated fallback as to any
+   * other static source.
+   *
+   * PROVENANCE DISCLOSURE: because of the above, a dispatched fallback assignment's
+   * `metadata.resolvedFrom.kind` reads `'static_user'`/`'static_role'` — describing HOW the fallback
+   * itself resolved, not that this seat exists because the node's real primary source (which may be
+   * an entirely different kind, e.g. `manager_at_level`) came back empty. Checked against both known
+   * `resolvedFrom` readers: `ApprovalProductService.isDynamicallyResolvedAssignment` only tests
+   * presence (any resolver-produced `resolvedFrom`, any kind, routes through the active-assignment
+   * conflict check — correct here too), and `AttendanceDecisionTrace.classifyApproverAssignmentMetadata`
+   * special-cases only `direct_manager`/`dept_head`/`manager_at_level`, so a fallback seat falls
+   * through to its generic 'static'/'unknown' bucket rather than being mislabeled as one of those
+   * three. Net effect: no consumer is misled into naming a mechanism that didn't fire, but the
+   * decision trace also cannot yet say "this seat exists because the designated fallback fired" —
+   * a real but narrow observability gap, not a correctness defect. Not fixed here (no new metadata
+   * shape is in the ratified Lock-4 §3 text); flag if a future consumer needs to distinguish it.
+   */
+  private resolveDesignatedFallbackAssignments(
+    nodeKey: string,
+    approvalConfig: ApprovalNodeConfig,
+    sourceStep: number,
+  ): ApprovalGraphAssignment[] {
+    const fallback = approvalConfig.emptyAssigneeFallback
+    const userIds = fallback?.userIds ?? []
+    const roleIds = fallback?.roleIds ?? []
+    if (userIds.length === 0 && roleIds.length === 0) return []
+    const fallbackSources: ApprovalAssigneeSource[] = [
+      ...(userIds.length > 0 ? [{ kind: 'static_user' as const, userIds }] : []),
+      ...(roleIds.length > 0 ? [{ kind: 'static_role' as const, roleIds }] : []),
+    ]
+    const fallbackAssignments: ApprovalGraphAssignment[] = this.options.assignmentResolver
+      ? this.options.assignmentResolver({ nodeKey, sourceStep, config: { assigneeSources: fallbackSources } })
+      // No resolver injected (unit-level executor without the service resolver, mirroring
+      // `resolveAssignmentsForApprovalNode`'s own no-resolver branch immediately above): no
+      // delegation substitution is available at this layer either way, so build directly.
+      : fallbackSources.flatMap((source): ApprovalGraphAssignment[] => {
+          if (source.kind === 'static_user') {
+            return source.userIds.map((assigneeId) => ({ assignmentType: 'user' as const, assigneeId, nodeKey, sourceStep }))
+          }
+          if (source.kind === 'static_role') {
+            return source.roleIds.map((assigneeId) => ({ assignmentType: 'role' as const, assigneeId, nodeKey, sourceStep }))
+          }
+          return []
+        })
+    // T2-4 threshold reachability applies to the FALLBACK set too — `resolveAssignmentsForApprovalNode`
+    // (the primary-source path) already runs this check, but this method bypasses that caller
+    // entirely, so it must re-run it here on its OWN result. Without this, a threshold node whose
+    // DYNAMIC primary source (e.g. `manager_at_level`) resolves empty and falls to a 'designated'
+    // fallback smaller than the node's threshold would dispatch a permanently-unreachable node — the
+    // exact "3-of-2" failure mode `assertThresholdReachable`'s own doc comment describes. A no-op for
+    // site 2 (`resolveBranchAdvance`): threshold mode is publish-time rejected inside a parallel
+    // region, so `normalizeApprovalMode(...) !== 'threshold'` always holds there.
+    this.assertThresholdReachable(nodeKey, approvalConfig, fallbackAssignments)
+    return fallbackAssignments
   }
 
   /**
