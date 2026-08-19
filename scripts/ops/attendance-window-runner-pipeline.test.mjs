@@ -1365,8 +1365,10 @@ test('MUTATION (legacy control): reverting [Q14] to the posture-derived universe
   const original = readFileSync(REMOTE_SH, 'utf8')
   const q14Anchor = "org-count summary; config closed set)\" \\"
   assert.ok(original.includes(q14Anchor), 'mutation anchor must hit the Q14 header')
-  const closedSet = original.indexOf("FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7", original.indexOf(q14Anchor))
-  assert.ok(closedSet !== -1, 'mutation anchor must hit Q14ʼs closed-set universe')
+  const q14Start = original.indexOf(q14Anchor)
+  const q14End = original.indexOf('posture rows for the three soak orgs', q14Start)
+  const closedSet = original.indexOf("FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7", q14Start)
+  assert.ok(q14Start !== -1 && q14End !== -1 && closedSet !== -1 && closedSet < q14End, 'mutation anchor must hit Q14ʼs closed-set universe inside the Q14 block')
   const mutated = original.slice(0, closedSet)
     + original.slice(closedSet).replace(
       "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id)",
@@ -1375,7 +1377,9 @@ test('MUTATION (legacy control): reverting [Q14] to the posture-derived universe
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
-    /omits the legacy control org/,
+    // Q14's OWN message only (#5008 gate P2: the loose /omits the legacy control org/ was
+    // a substring of Q3's message too, so the oracle could not tell which site it tested).
+    /\[Q14\] must derive its universe/,
   )
 })
 
