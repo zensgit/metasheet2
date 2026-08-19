@@ -575,16 +575,42 @@ jobs:
   # `needs` includes verify-built-package on purpose: there is no reason to
   # migrate an artifact that has not passed the five-check verifier, PIN-1 and
   # the tamper control first.
+  #
+  # NODE 24 LEG. The on-prem test host this package actually gets installed
+  # and migrated on runs Node 24.x, but every leg here previously ran the
+  # package's install/verify/migrate steps under Node 20 only (the build job
+  # above stays pinned to Node 20 deliberately — see its own comment — because
+  # it must match multitable-onprem-package-build.yml's build-time toolchain
+  # byte for byte). This job is where the built package's OWN dependency
+  # install (`pnpm install --frozen-lockfile` against the packaged lockfile)
+  # and its OWN migration runner (`packages/core-backend/dist/src/db/migrate.js`)
+  # actually execute, which is exactly the host-parity question. The matrix
+  # below is expressed as explicit `include:` combinations, not a `pg`x`node`
+  # cross product, so the three existing pg15/16/17-on-Node20 legs are
+  # untouched and exactly one new pg17-on-Node24 leg is added (pg17 chosen as
+  # the newest/most-representative PostgreSQL major already in this matrix;
+  # migrate-postgres-role-bound is left alone — it is a specialized PG16/17
+  # CREATEROLE negative-control arm, not a general Node-runtime check, and
+  # doubling its already-heavy positive+negative-control steps would not add
+  # Node-compatibility signal).
   # ---------------------------------------------------------------------
   migrate-postgres:
-    name: Migrate on PostgreSQL ${{ matrix.pg }}
+    name: Migrate on PostgreSQL ${{ matrix.pg }} (Node ${{ matrix.node }})
     needs: [build-main-package, verify-built-package]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        pg: ['15', '16', '17']
+        include:
+          - pg: '15'
+            node: '20'
+          - pg: '16'
+            node: '20'
+          - pg: '17'
+            node: '20'
+          - pg: '17'
+            node: '24'
     services:
       postgres:
         image: postgres:${{ matrix.pg }}
@@ -715,7 +741,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # matrix.node: '20' for the three original legs, '24' for the new
+          # host-parity leg (see this job's header comment). The root
+          # package.json engines field (">=18.0.0") does not reject Node 24.
+          node-version: ${{ matrix.node }}
 
       - name: Install the package's own pinned dependencies (frozen lockfile — never relaxed)
         working-directory: ${{ env.PKG_ROOT }}
@@ -805,7 +834,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: main-package-migrate-postgres-${{ matrix.pg }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          # matrix.node is included because pg='17' now appears in TWO legs
+          # (node 20 and node 24, see this job's header comment); without it
+          # both legs would upload under the same artifact name in the same
+          # run and collide.
+          name: main-package-migrate-postgres-${{ matrix.pg }}-node${{ matrix.node }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           if-no-files-found: warn
           path: |
@@ -818,6 +851,7 @@ jobs:
         run: |
           {
             echo "postgresMajorVersion=${{ matrix.pg }}"
+            echo "nodeMajorVersion=${{ matrix.node }}"
             echo "postgresServerVersionPinMatch=PASS"
             echo "sameArtifactAsBuildJob=PASS"
             echo "packagedMigration074Present=PASS"
@@ -1511,6 +1545,7 @@ jobs:
             echo "migration075ExecutedAllVersions=PASS"
             echo "oneByteNegativeCheck=PASS"
             echo "postgresMajorVersionsExercised=15,16,17"
+            echo "nodeMajorVersionsExercised=20,24"
             echo "migrationApplyAllVersions=PASS"
             echo "migrationReplayIdempotentAllVersions=PASS"
             echo "migrationClaimScope=PACKAGE_MIGRATIONS_MINUS_EXCLUSION_SET"
