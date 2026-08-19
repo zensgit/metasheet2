@@ -2392,7 +2392,19 @@ function scalar(sql) {
 function residueFingerprint() {
   return {
     largeObjects: scalar('SELECT count(*) FROM pg_largeobject_metadata'),
-    probeTables: scalar("SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'o2\\_%' ESCAPE '\\'"),
+    // Round-6 gate P3-2: the first version counted only tables whose NAME began `o2_`, which is a
+    // guess about what a future leak will be called. The gate planted an `o2_`-prefixed SEQUENCE,
+    // a ROLE, and a plain non-`o2_` TABLE and all three survived an armed run — and the suite's own
+    // `SELECT … INTO` probe creates `ro_evasion_probe_tbl_o2p3`, which that prefix never matched
+    // either. Count every relation by kind with NO name filter instead: a leak cannot dodge this by
+    // being named something the author did not anticipate (枚举陷阱不收敛, applied to my own guard).
+    // `pg_roles` is cluster-scoped rather than database-scoped, so it is measured separately.
+    relations: scalar(
+      "SELECT relkind::text || ':' || count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace" +
+        " WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')" +
+        ' GROUP BY relkind ORDER BY relkind',
+    ),
+    roles: scalar('SELECT count(*) FROM pg_roles'),
   }
 }
 
@@ -2577,19 +2589,27 @@ if (canRunExecutionLayer) {
 // the armed run and fails on ANY increase, so the "no residue" property is asserted by the suite
 // rather than asserted by a human afterwards.
 //
-// Baseline is captured lazily at first use (module load order across node:test files is not
-// something to rely on) and compared here. A null measurement means psql could not answer — that
+// Baseline is captured EAGERLY at module load, before any test body runs, and compared here.
+// (Round-6 gate NIT-2: an earlier version of this comment claimed lazy capture — the code never
+// did that. A comment describing something not built is the same defect class this file exists to
+// catch, so it is corrected rather than left as prose that reads plausibly.) A null measurement means psql could not answer — that
 // is a FAILURE, never a silent pass (fail-toward-flagging), because "could not measure" and
 // "measured zero" must not look alike.
 if (canRunExecutionLayer) {
   test('EXECUTION: the armed run leaves NO residue behind — large objects and o2_* probe tables are back at their pre-run counts (round-5 gate NIT-2: this was a hand-check outside CI until now)', () => {
   const after = residueFingerprint()
   assert.notEqual(after.largeObjects, null, 'could not measure pg_largeobject_metadata — treat an unmeasurable residue check as a failure, not a pass')
-  assert.notEqual(after.probeTables, null, 'could not measure information_schema.tables — treat an unmeasurable residue check as a failure, not a pass')
+  assert.notEqual(after.relations, null, 'could not measure pg_class — treat an unmeasurable residue check as a failure, not a pass')
+  assert.notEqual(after.roles, null, 'could not measure pg_roles — treat an unmeasurable residue check as a failure, not a pass')
   assert.equal(
-    after.probeTables,
-    '0',
-    `a probe table survived the armed run (o2_* count = ${after.probeTables}) — a write shape reached the server, meaning a static guard regressed`,
+    after.relations,
+    RESIDUE_BASELINE.relations,
+    `a relation survived the armed run (per-relkind counts moved: ${RESIDUE_BASELINE.relations} -> ${after.relations}) — a write shape reached the server, meaning a static guard regressed`,
+  )
+  assert.equal(
+    after.roles,
+    RESIDUE_BASELINE.roles,
+    `pg_roles moved during the armed run (${RESIDUE_BASELINE.roles} -> ${after.roles}) — a cluster-scoped write reached the server`,
   )
   assert.equal(
     after.largeObjects,
