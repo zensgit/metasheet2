@@ -1,8 +1,16 @@
 # 审批对标程序 — 验证报告（FINAL，2026-08-18）
 
-**Status:** FINAL — **审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
+**Status:** FINAL — **已执行批次的审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
 **P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 的残留枚举守卫其后由 **#5004 `6ace2e5a01`** DISCHARGED）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
 本文件**不是完成声明**，不 ratify 任何东西，不授权任何 flag、部署或 UAT。
+
+> **⚠️ 「FINAL」= 最终文档快照，不是「验证已完成」。** 实现批次（45 个 PR）已全部合并，且一个较大的验证子集为绿（8/8 phase-A FAIL FIXED + 15/15 已落地特性判别检查 PASS + 6/6 优越性 re-smoke PASS，§2.5）——**但验证未完成**：
+> - 127 行 phase-A **完整**矩阵未在 exact 当前 `origin/main` 上重跑（**V-1**，§6.1）；
+> - Canvas / FWB / 附件三项租户 UAT 均 **NOT RUN**（§6.6）；
+> - 审批线自身的证据车道（五个 `approval-realdb-*`、`approval-browser-verify`、`approval-web-guard`）**均不在分支保护必需检查内**（**live @ 2026-08-19**，`gh api repos/zensgit/metasheet2/branches/main/protection` 现读：9 条必需 context、`strict=false`，无一条审批专属，**V-13**；§4.1 记的是 2026-08-18 撰写时刻的观测 `strict=true`——两者是不同时点各自的实测值，不是矛盾，不回填 §4.1）；
+> - PG15↔PG16 一致性缺口未收口（**V-14**，本地 PG 15.17 vs CI `postgres:16`，OPEN）。
+>
+> **CORE-PARITY / DATA-CLOSURE / PRODUCT-FINAL 三个完成标签均为 NO（§6.6），不因上述任何一条而改变。**
 
 | 锚点 | 值 |
 |---|---|
@@ -283,10 +291,10 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 
 | 切片 | PR | Reviewed SHA + 判定 | 合并 squash SHA |
 |---|---|---|---|
-| UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `44005ba8e1…` — CHANGES-REQUESTED（0/2/3/5）；12/12 变异全红 | `b296b4d6eb` |
-| UI-7 审批中心桌面主从面板 | #4948 | `3fe98e1f13…` — CHANGES-REQUESTED（1/6/5/1）；真 Chromium 布局测量 | `9f50cd46a3` |
+| UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `44005ba8e1…` — CHANGES-REQUESTED（0/2/3/5）；12/12 变异全红 → requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN** | `b296b4d6eb` |
+| UI-7 审批中心桌面主从面板 | #4948 | `3fe98e1f13…` — CHANGES-REQUESTED（1/6/5/1）；真 Chromium 布局测量 → requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN** | `9f50cd46a3` |
 
-> **⚠️ D-3 保留**：#4946 / #4948 闸门均 CHANGES-REQUESTED 且无 requalification 段，均已合并。如实记为「合并时闸门项未记录闭合」，不得写成「闸门 CLEAR」。
+> **⚠️ D-3（订正）**：#4946 / #4948 闸门均 CHANGES-REQUESTED，**原始合并**时未记录闭合——这半句形状事实原样成立：`gh api …/pulls/4946/reviews`、`…/pulls/4948/reviews` 仍为 0，两 PR 合入当时零记录评审。**但闭合本身已补跑**：一轮 requalify（20260819，reviewer-local，`/private/tmp/pr4948-requal-20260819.md`，未入库）在 main `d8ac22c989` 上逐条核对两 PR 的 gate-fix-round 请求，#4948 7/7、#4946 2/2（+ 一处撤回的失实声明）**全部 ADDRESSED-ON-MAIN**，两个判定均 **REQUALIFIED-CLEAN**（各留一条已披露 P3 残留，见 §5 V-5）。如实记为「合入时闸门项未记录闭合，requalify 已事后补跑并 CLEAR」；不得写成「合入时闸门 CLEAR」，也不得因 requalify 结果而抹去合入时零评审的事实。
 
 ---
 
@@ -357,7 +365,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 | **V-2** | 八个 FAIL 在 main 上仍活 | ✅ **DISCHARGED（8/8 FIXED，phase-B §2.4）**；phase-B 曾记的 FAIL-0 机械枚举守卫残留**亦已 DISCHARGED @ #5004 `6ace2e5a01`**（守卫落地，且当场抓到并闭合一个真实未接线套件 `approval-pack1a-lifecycle`）。**DRAFT 的 FAIL-1 运行时红在 phase-B 复核为已修（real Chromium 1 passed）** |
 | **V-3** | #4965 requalify NOT-CLEAR，合并后闭合无记录 | ✅ **DISCHARGED**（§3.5，两 floor 臂 mutation-proven at merged main） |
 | **V-4** | #4974 带 2 个未闭合 P2 合并 | **OPEN**（= D-2，合并时闸门项未记录闭合） |
-| **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | **OPEN**（= D-3，同上） |
+| **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | ✅ **DISCHARGED（requalify 侧）**：20260819 reviewer-local requalify（`/private/tmp/pr4948-requal-20260819.md`，未入库）在 main `d8ac22c989` 上逐条核对，两 PR 全部 requested changes ADDRESSED-ON-MAIN，判定均 **REQUALIFIED-CLEAN**（§3.10）。**process-gap 半边仍 OPEN**：合入当时两 PR 零记录评审（`gh api …/reviews` = 0）是独立于代码正确性的形状事实，requalify 不能倒填历史记录——**= D-3**，同上 |
 | **V-6** | `approval-web-guard` 无效窗口未定 | **OPEN**（§4.4） |
 | **V-7** | PPO 计数不自洽：§1 汇总 **63**，§15 第 4 条写「the discriminating-negative half of **33**」 | **OPEN**：**63 = 绿测试总行数**；**33 = 显式点名了所欠反例的子集**。本 FINAL 保留两个数并保留 V-7 为**未解决**（不静默塌缩成 33）；owner/后续版本机械重算 |
 | **V-8 / F10** | F10 / P0 完成度 | ✅ **DISCHARGED（挂载半边）**：F4 #4994 落地，F10 由必需 job 收集（§2.3 gate 5）；CORE-PARITY 仍 NO（owner UAT/签署/分支保护步） |
