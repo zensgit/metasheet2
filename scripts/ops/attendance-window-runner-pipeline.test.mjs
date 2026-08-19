@@ -1172,10 +1172,31 @@ function assertSoakContract({ remote, workflow }) {
     slices.status.includes('alerts+=("Q3b_posture_constancy_violations'),
     'a posture-constancy violation must raise a mechanical alert',
   )
+  // Post-merge review P3: [Q14]'s universe must also be the config closed set — the
+  // posture-derived universe rendered a two-row summary that hid the control org.
+  const q14Idx = slices.status.indexOf('[Q14] posture-state distribution')
+  const q14Sql = slices.status.slice(q14Idx, slices.status.indexOf('posture rows for the three soak orgs', q14Idx))
   assert.match(
-    slices.status,
-    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\) LEFT JOIN attendance_calculation_rollout_state w4/,
+    q14Sql,
+    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\)/,
+    '[Q14] must derive its universe from the config closed set (a posture-derived universe omits the legacy control org)',
+  )
+  assert.doesNotMatch(
+    q14Sql,
+    /SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION/,
+    '[Q14] must not fall back to the posture-derived universe',
+  )
+  const q3Idx = slices.status.indexOf('[Q3] org/posture classification')
+  const q3Sql = slices.status.slice(q3Idx, slices.status.indexOf('[Q4a]', q3Idx))
+  assert.match(
+    q3Sql,
+    /FROM \(VALUES \('\$\{SOAK_ORG1\}'\),\('\$\{SOAK_ORG2\}'\),\('\$\{SOAK_ORG3\}'\)\) AS target\(org_id\)/,
     '[Q3] universe must be the config closed set — a posture-derived universe structurally omits the legacy control org',
+  )
+  assert.doesNotMatch(
+    q3Sql,
+    /SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION/,
+    '[Q3] must not fall back to the posture-derived universe',
   )
   assert.ok(slices.status.includes("'group_effective'"), 'W7-2 counters must scope on the selector discriminator')
 
@@ -1323,17 +1344,38 @@ test('MUTATION (legacy control): dropping the legacy-regime addend from [Q1] tur
 
 test('MUTATION (legacy control): reverting [Q3] to the posture-derived universe turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
-  // Anchor includes Q3's own LEFT JOIN target so it cannot hit [Q2]'s closed-set join.
-  const anchor = "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4"
-  assert.ok(original.includes(anchor), 'mutation anchor must hit the Q3 closed-set universe')
-  const mutated = original.replace(
-    anchor,
-    'FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4',
-  )
+  // Position-bounded: locate the VALUES clause INSIDE the [Q3] block (both [Q2] and [Q14]
+  // now carry closed-set joins of their own — third anchor-ambiguity of this family).
+  const q3Start = original.indexOf('[Q3] org/posture classification')
+  const q3End = original.indexOf('[Q4a]', q3Start)
+  const valuesClause = "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id)"
+  const at = original.indexOf(valuesClause, q3Start)
+  assert.ok(q3Start !== -1 && at !== -1 && at < q3End, 'mutation anchor must hit the Q3 closed-set universe inside the Q3 block')
+  const mutated = original.slice(0, at)
+    + 'FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target'
+    + original.slice(at + valuesClause.length)
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /structurally omits the legacy control org/,
+  )
+})
+
+test('MUTATION (legacy control): reverting [Q14] to the posture-derived universe turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const q14Anchor = "org-count summary; config closed set)\" \\"
+  assert.ok(original.includes(q14Anchor), 'mutation anchor must hit the Q14 header')
+  const closedSet = original.indexOf("FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7", original.indexOf(q14Anchor))
+  assert.ok(closedSet !== -1, 'mutation anchor must hit Q14ʼs closed-set universe')
+  const mutated = original.slice(0, closedSet)
+    + original.slice(closedSet).replace(
+      "FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id)",
+      'FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target',
+    )
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /omits the legacy control org/,
   )
 })
 
