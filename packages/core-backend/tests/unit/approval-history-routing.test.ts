@@ -5,9 +5,14 @@ import { usePinnedServer } from '../utils/pinned-server'
 
 const authState = vi.hoisted(() => ({
   user: {
+    id: 'user-1',
     sub: 'user-1',
     userId: 'user-1',
     tenantId: 'tenant-a',
+    // Guard alignment: the route now sits behind rbacGuard('approvals', 'read')
+    // (matching GET /api/approvals/:id), so the fixture needs a principal that
+    // satisfies it — the admin-role short-circuit needs no RBAC table rows.
+    roles: ['admin'],
   } as Record<string, unknown> | null,
 }))
 
@@ -46,9 +51,11 @@ describe('approval history routing', () => {
   beforeEach(() => {
     pinned.setApp(app)
     authState.user = {
+      id: 'user-1',
       sub: 'user-1',
       userId: 'user-1',
       tenantId: 'tenant-a',
+      roles: ['admin'],
     }
     pgState.pool.query.mockReset()
     pgState.pool.connect.mockReset()

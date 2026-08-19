@@ -3,6 +3,7 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { IPLMAdapter } from '../di/identifiers'
 import { authenticate } from '../middleware/auth'
+import { rbacGuard } from '../rbac/rbac'
 import { pool } from '../db/pg'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import type { ApprovalBridgePlmAdapter } from '../services/approval-bridge-types'
@@ -42,7 +43,11 @@ function sendHistoryServiceError(res: Response, error: ServiceError): void {
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
   const r = Router()
 
-  r.get('/api/approvals/:id/history', authenticate, async (req: Request, res: Response) => {
+  // Guard alignment: matches GET /api/approvals/:id (routes/approvals.ts), which applies
+  // authenticate + rbacGuard('approvals', 'read') ahead of its handler. This guard sits before the
+  // `isPlmApprovalId` branch below, so both id shapes (platform and `plm:`-prefixed) get the same
+  // posture — the same way the detail route applies one guard regardless of id shape internally.
+  r.get('/api/approvals/:id/history', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       const id = req.params.id
       if (isPlmApprovalId(id)) {
