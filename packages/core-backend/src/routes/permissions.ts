@@ -8,6 +8,7 @@ import type { Request, Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
 import { pool } from '../db/pg'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { auditLog } from '../audit/audit'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
 import { userHasPermission, listUserPermissions, isAdmin, invalidateUserPerms } from '../rbac/service'
@@ -193,6 +194,10 @@ export function permissionsRouter(): Router {
         permission
       })
     } catch (error) {
+      // O2-S2: user_permissions is a recovery-authority table — a marker 40001 under a
+      // held recovery lease is a retryable 409, not an unclassified 500. Additive only:
+      // every other error keeps the exact path below.
+      if (sendIfRecoveryConflict(res, error)) return
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!permsDegraded) {
           logger.warn('Permissions service degraded - tables not found')
@@ -262,6 +267,8 @@ export function permissionsRouter(): Router {
         permission
       })
     } catch (error) {
+      // O2-S2: see the grant handler — marker 40001 → retryable 409, all else unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!permsDegraded) {
           logger.warn('Permissions service degraded - tables not found')
@@ -402,6 +409,8 @@ export function permissionsRouter(): Router {
         isAdmin: admin,
       })
     } catch (error) {
+      // O2-S2: see the grant handler — marker 40001 → retryable 409, all else unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!permsDegraded) {
           logger.warn('Permissions template service degraded - tables not found')

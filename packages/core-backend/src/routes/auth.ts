@@ -31,6 +31,7 @@ import {
 } from '../auth/invite-accept-writes'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
+import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
@@ -806,6 +807,12 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
       }
     })
   } catch (error) {
+    // O2-S2: registration writes users/user_roles (recovery-authority tables). Both the
+    // raw marker 40001 and AuthService's already-retried, named
+    // UserRoleAssignmentRecoveryBusyError surface as the uniform retryable 409
+    // (RECOVERY_AUTHORITY_BUSY) instead of collapsing to a generic 500. Every other
+    // error keeps the exact 500 below.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('Registration error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
@@ -989,6 +996,9 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    // O2-S2: applyInviteAcceptanceWrites re-raises a marker 40001 as the named retryable
+    // RecoveryConflictError → uniform retryable 409. INVITE_* semantics unchanged below.
+    if (sendIfRecoveryConflict(res, error)) return
     const code = inviteAcceptWriteErrorCode(error)
     if (code === INVITE_TARGET_UPDATE_MISMATCH) {
       return res.status(409).json({
@@ -1342,6 +1352,9 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
       data: nextSnapshot,
     })
   } catch (error) {
+    // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → uniform
+    // retryable 409. Policy errors and the fail-closed 500 below are unchanged.
+    if (sendIfRecoveryConflict(res, error)) return
     if (error instanceof DingTalkLoginPolicyError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -1586,6 +1599,11 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
           },
         })
       } catch (error) {
+        // O2-S2: a recovery conflict (named retryable RecoveryConflictError from
+        // activatePendingUser) must NOT collapse into the 500 'activate_failed'
+        // fallback — rethrow it whole for the outer catch's uniform retryable 409.
+        // Every ACTIVATE_* mapping below is unchanged.
+        if (classifyRecoveryConflict(error) === 'recovery_conflict') throw error
         throw mapDingTalkActivationFailure(error)
       }
 
@@ -1653,6 +1671,11 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    // O2-S2: bind/JIT-provision/activate all write recovery-authority tables — marker
+    // 40001 (re-raised as the named retryable RecoveryConflictError by the service
+    // layer) → uniform retryable 409. Every DingTalk policy/request mapping below is
+    // unchanged; nothing fail-closed is loosened.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
     const statusCode = error instanceof DingTalkActivationIntentError
       ? error.statusCode
@@ -1760,6 +1783,9 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       },
     })
   } catch (error) {
+    // O2-S2: container login can JIT-provision a users row — marker 40001 → uniform
+    // retryable 409; the mappings below are unchanged.
+    if (sendIfRecoveryConflict(res, error)) return
     logger.error('DingTalk container login error', error instanceof Error ? error : undefined)
     // DingTalkBusinessError here is DingTalk refusing the payload (typically an
     // invalid/expired authCode) — the caller's fault, not an upstream outage.

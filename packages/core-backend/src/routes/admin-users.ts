@@ -50,7 +50,13 @@ import {
   type AccessGraphTransactionClient,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
-import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import {
+  classifyRecoveryConflict,
+  RECOVERY_CONFLICT_HTTP_CODE,
+  RECOVERY_CONFLICT_HTTP_MESSAGE,
+  RECOVERY_CONFLICT_HTTP_STATUS,
+  sendIfRecoveryConflict,
+} from '../db/recovery-conflict'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -393,16 +399,12 @@ const ADMIN_USER_PROFILE_SELECT = `
 // Reuses the SAME discriminator (isRecoveryAuthorityBusyError) and error code
 // (RECOVERY_AUTHORITY_BUSY) as univer-meta.ts — no new marker/constant is introduced.
 // Body is values-free: fixed code/message/retryable flag, no user- or request-derived data.
+// O2-S2: now delegates to the ONE shared classifier/adapter (db/recovery-conflict.ts).
+// Status/code/message/details are byte-identical to the previous inline body; the
+// discriminator is additive-only (it also recognises the named retryable service errors
+// of the same family — RecoveryConflictError / UserRoleAssignmentRecoveryBusyError).
 function sendIfRecoveryAuthorityBusy(res: Response, error: unknown): boolean {
-  if (!isRecoveryAuthorityBusyError(error)) return false
-  jsonError(
-    res,
-    409,
-    'RECOVERY_AUTHORITY_BUSY',
-    'Recovery is stabilizing permissions; retry this change.',
-    { retryable: true },
-  )
-  return true
+  return sendIfRecoveryConflict(res, error)
 }
 
 function getRequestUserId(req: Request): string {
@@ -1955,6 +1957,18 @@ export const ACTIVATE_ERROR_POLICY: Readonly<Record<ActivateErrorCode, ActivateP
  *   3. a TypeScript-AST scan of the `throwCoded` call sites, set-equal against this table's keys.
  */
 export function mapActivateError(error: unknown): { status: number; code: string; message: string } {
+  // O2-S2: activation writes users (a recovery-authority table). A recovery conflict —
+  // the marker 40001, re-raised by activatePendingUser as the named retryable
+  // RecoveryConflictError — is a retryable 409, not the ACTIVATE_FAILED 500 fallback.
+  // The classifier reads nothing that is published: status/code/message here are fixed
+  // constants, so the "never echo driver text" contract holds on this branch too.
+  if (classifyRecoveryConflict(error) === 'recovery_conflict') {
+    return {
+      status: RECOVERY_CONFLICT_HTTP_STATUS,
+      code: RECOVERY_CONFLICT_HTTP_CODE,
+      message: RECOVERY_CONFLICT_HTTP_MESSAGE,
+    }
+  }
   const rawCode = (error as { code?: unknown } | null)?.code
   // Exact membership, never a prefix. `.code` is the only property read off the thrown value.
   if (typeof rawCode === 'string') {

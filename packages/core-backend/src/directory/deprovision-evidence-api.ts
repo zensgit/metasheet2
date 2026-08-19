@@ -3,6 +3,7 @@
  */
 
 import { query, transaction } from '../db/pg'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import { invalidateUserPerms } from '../rbac/service'
 import {
   resolveLeastDestructiveDirectoryDeprovisionPolicy,
@@ -282,7 +283,11 @@ export async function compensateSupersededDenyGrant(options: {
     )
   }
 
-  const compensated = await transaction(async (client) => {
+  // O2-S2: this transaction writes users / user_external_auth_grants under the access-graph
+  // mutex — a marker 40001 (recovery lease held) re-raises as the named retryable
+  // RecoveryConflictError; every other error (COMPENSATION_* / DRIFT_CONFLICT / 55P03 →
+  // COMPENSATION_SOURCE_BUSY included) rethrows unchanged.
+  const compensated = await translateRecoveryConflict(() => transaction(async (client) => {
     const ownerResult = await client.query(
       `SELECT local_user_id
          FROM directory_deprovision_events
@@ -543,7 +548,7 @@ export async function compensateSupersededDenyGrant(options: {
       accessGeneration: nextGeneration,
       alreadyCompensated: false,
     }
-  })
+  }))
 
   if (!compensated.alreadyCompensated) {
     invalidateUserPerms(compensated.event.local_user_id)
@@ -587,7 +592,9 @@ export async function restoreDeprovisionEvent(options: {
     }
   }
 
-  const restored = await transaction(async (client) => {
+  // O2-S2: writes users under the access-graph mutex — marker 40001 → named retryable
+  // RecoveryConflictError; every other error rethrows unchanged.
+  const restored = await translateRecoveryConflict(() => transaction(async (client) => {
     // Event identity is DB-immutable. Read only the owner first so the canonical
     // users-row mutex remains the first blocking lock shared with every other
     // access-graph writer.
@@ -966,7 +973,7 @@ export async function restoreDeprovisionEvent(options: {
       },
       restoredEffectCount: applied.length,
     }
-  })
+  }))
   invalidateUserPerms(restored.event.local_user_id)
 
   return {

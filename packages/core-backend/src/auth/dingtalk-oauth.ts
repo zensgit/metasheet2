@@ -24,6 +24,7 @@ import {
   LoginAliasClaimError,
 } from './login-alias-service'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
@@ -821,7 +822,10 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
     // Load-bearing alias writer hook: claim real email/mobile inside the same transaction
     // as the JIT users insert. Removing claimNonEmptyLoginAliasesOrThrow must fail the
     // dingtalk_jit writer tests. Placeholder email is intentionally omitted from claims.
-    const row = await transaction(async (client) => {
+    // O2-S2: the JIT INSERT into users (a recovery-authority table) under a held recovery
+    // lease fails with the marker 40001 → named retryable RecoveryConflictError. Strictly
+    // additive: every other error falls through the fail-closed mappings below unchanged.
+    const row = await translateRecoveryConflict(() => transaction(async (client) => {
       // Persist real mobile on users.mobile in the same transaction as the alias claim.
       // Claiming a mobile login alias without storing users.mobile left profile/login
       // mirrors inconsistent under T2a OR-column reads.
@@ -857,7 +861,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
       }
 
       return created
-    })
+    }))
     return row
   } catch (error) {
     if (error instanceof LoginAliasClaimError && error.code === 'ALIAS_CONFLICT') {
@@ -1282,7 +1286,10 @@ export async function bindDingTalkIdentityToUser(input: {
   const openId = dtUser.openId || ''
   const unionId = dtUser.unionId || ''
 
-  await transaction(async (client) => {
+  // O2-S2: bind runs under the access-graph users mutex — a marker 40001 (recovery lease
+  // held) re-raises as the named retryable RecoveryConflictError; every policy error and
+  // fail-closed path below rethrows unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -1393,7 +1400,7 @@ export async function bindDingTalkIdentityToUser(input: {
         reason: 'DingTalk identity bound by OAuth callback',
       })
     }
-  })
+  }))
 }
 
 export async function unbindSelfManagedDingTalkIdentity(input: {
@@ -1404,7 +1411,9 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
   const actorId = String(input.actorId || '').trim() || localUserId
   if (!localUserId) throw new Error('localUserId is required')
 
-  return transaction(async (client) => {
+  // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → named
+  // retryable RecoveryConflictError; every other error rethrows unchanged.
+  return translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -1447,7 +1456,7 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
       reason: 'DingTalk identity unbound by the local user',
     })
     return true
-  })
+  }))
 }
 
 /**
