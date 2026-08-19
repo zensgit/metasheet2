@@ -24598,7 +24598,18 @@ async function loadSelfAttendanceRules(): Promise<void> {
     // from the token alone. Human-tail finding 2026-08-19: real browsers with a tenant
     // hint got a 400 banner here; synthetic traffic never sends the header.
     const response = await apiFetch('/api/attendance/rules/me', {
-      omitHeaders: ['x-tenant-id', 'x-user-id', 'x-org-id', 'x-workspace-id', 'x-group-id'],
+      // The COMPLETE server-side forbidden set (index.cjs
+      // ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS, 7 keys) — a partial copy would leave
+      // the 400 banner reachable for whichever hint type it missed (#5012 gate P3-1).
+      omitHeaders: [
+        'x-user-id',
+        'x-org-id',
+        'x-tenant-id',
+        'x-workspace-id',
+        'x-group-id',
+        'x-attendance-group-id',
+        'x-schedule-group-id',
+      ],
     })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
