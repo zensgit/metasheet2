@@ -199,12 +199,20 @@ describeIfDatabase('Lock-4 F4-C — same-person policy (审批人=提交人): se
     return result.rows as never
   }
 
-  /** Strip the one field that legitimately differs per-instance (nodeEntryEpoch) before a deep-equal. */
+  /**
+   * Strip the fields that legitimately differ per-instance before a deep-equal:
+   * `nodeEntryEpoch` (per-instance activation counter) and `requestNo` (the `action:'created'`
+   * row's metadata carries the sequential request number `allocateRequestNo()` mints — see
+   * ApprovalProductService.ts's `createApproval`; it is allocated once per instance and is
+   * NEVER equal across two separate `createApproval` calls, even from the same template, so
+   * leaving it in would make this "byte-identical" comparison structurally unsatisfiable
+   * regardless of whether F4-C's own behavior is byte-identical).
+   */
   function normalizeRecordsForComparison(rows: Array<{ action: string; actor_id: string; metadata: Record<string, unknown> | null }>) {
     return rows.map((row) => ({
       action: row.action,
       actor_id: row.actor_id,
-      metadata: row.metadata ? { ...row.metadata, nodeEntryEpoch: undefined } : row.metadata,
+      metadata: row.metadata ? { ...row.metadata, nodeEntryEpoch: undefined, requestNo: undefined } : row.metadata,
     }))
   }
 
