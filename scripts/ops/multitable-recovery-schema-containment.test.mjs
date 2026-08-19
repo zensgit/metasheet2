@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -476,22 +477,28 @@ function runLocal({ target, mode }) {
     DEPLOY_SSH_KEY_B64: Buffer.from('dummy-deploy-key').toString('base64'),
     DEPLOY_KNOWN_HOSTS: 'deploy.invalid ssh-ed25519 AAAAdummyknownhostentry',
   }
-  const result = spawnSync('bash', [localScriptPath], {
-    env,
-    cwd: containmentStubBase,
-    encoding: 'utf8',
-  })
-  assert.equal(
-    result.error,
-    undefined,
-    `bash must spawn cleanly: ${result.error && result.error.message}`,
-  )
-  const log = readFileSync(logPath, 'utf8')
-  return {
-    status: result.status,
-    sshCalled: /^ssh /m.test(log),
-    stdout: result.stdout || '',
-    stderr: result.stderr || '',
+  try {
+    const result = spawnSync('bash', [localScriptPath], {
+      env,
+      cwd: containmentStubBase,
+      encoding: 'utf8',
+    })
+    assert.equal(
+      result.error,
+      undefined,
+      `bash must spawn cleanly: ${result.error && result.error.message}`,
+    )
+    const log = readFileSync(logPath, 'utf8')
+    return {
+      status: result.status,
+      sshCalled: /^ssh /m.test(log),
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+    }
+  } finally {
+    // The per-run fake HOME (holding the script's ~/.ssh writes) is not reused; remove it so
+    // repeated runs don't accumulate ct-home-* dirs under the system tmpdir.
+    rmSync(fakeHome, { recursive: true, force: true })
   }
 }
 
