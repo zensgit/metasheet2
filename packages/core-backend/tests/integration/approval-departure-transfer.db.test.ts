@@ -24,6 +24,16 @@ import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schem
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 
+// TOP-LEVEL, outside describeIfDatabase (mirrors approval-dedup-return-round-scoping.db.test.ts
+// :45-46). The in-describe-block sentinel further down is NOT the anti-skip-green sentinel — that
+// one is skipped along with the rest of the suite the moment DATABASE_URL is absent, so it can
+// never fire. approval-realdb-departure-transfer.yml sets EXPECT_DB=1: in THAT lane a missing or
+// broken DATABASE_URL must go RED, never silently report the whole file as skipped.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 const REQ = `dep-req-${TS}`
 const U = `dep-u-${TS}` // E-1: departed user WITH a resolvable manager
 const MGR = `dep-mgr-${TS}` // U's (and U2's, U3's) manager — leader of DEPT1

@@ -32,6 +32,14 @@ const P26_APPROVAL_ASSIGNMENT_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/ApprovalBridgeService.ts', 'queryFn', 'update', 2, 'central_bridge_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalBridgeService.ts', 'queryFn', 'insert', 1, 'central_bridge_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'skip', 'update', 1, 'bulk_reassign_contract'),
+  // F4-E (P3-A Lock-4) — applyApprovalDepartureTransfer's own local closure. It was originally
+  // also named `skip` (matching bulkReassignApprovals's closure above), which made the census's
+  // nearest-preceding-declaration heuristic attribute BOTH functions' UPDATE approval_assignments
+  // to the identical key `ApprovalProductService.ts :: skip :: update` — silently folding a new,
+  // independent writer into the reviewed `bulk_reassign_contract` entry (count drift 1->2). Fixed
+  // at the source by renaming the closure to `skipDepartureTransfer` so each writer gets its own
+  // distinct, honestly-owned key instead of widening/count-bumping the older entry.
+  entry('packages/core-backend/src/services/ApprovalProductService.ts', 'skipDepartureTransfer', 'update', 1, 'departure_transfer_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'consumeAndSkip', 'update', 1, 'timeout_transfer_jump_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'targetUserIds', 'update', 6, 'generic_action_fail_closed'),
   entry('packages/core-backend/src/services/ApprovalProductService.ts', 'queryFn', 'update', 2, 'generic_action_helpers'),

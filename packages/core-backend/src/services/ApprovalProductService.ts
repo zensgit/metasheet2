@@ -7964,7 +7964,7 @@ export class ApprovalProductService {
     if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
 
     const result: ApprovalDepartureTransferResult = { transferred: [], noManagerResolved: [], skipped: [] }
-    const skip = (id: string, reasonCode: ApprovalDepartureTransferSkipReason): void => {
+    const skipDepartureTransfer = (id: string, reasonCode: ApprovalDepartureTransferSkipReason): void => {
       result.skipped.push({ id, reason: reasonCode })
     }
 
@@ -8022,12 +8022,12 @@ export class ApprovalProductService {
         const instance = instanceResult.rows[0]
         if (!instance) {
           await client.query('ROLLBACK')
-          skip(instanceId, 'not-found')
+          skipDepartureTransfer(instanceId, 'not-found')
           continue
         }
         if (instance.status !== 'pending') {
           await client.query('ROLLBACK')
-          skip(instanceId, 'not-pending')
+          skipDepartureTransfer(instanceId, 'not-pending')
           continue
         }
 
@@ -8043,7 +8043,7 @@ export class ApprovalProductService {
         } catch (error) {
           if (error instanceof AttendanceCentralApprovalError) {
             await client.query('ROLLBACK')
-            skip(instanceId, 'attendance-central-unsupported')
+            skipDepartureTransfer(instanceId, 'attendance-central-unsupported')
             continue
           }
           throw error
@@ -8070,7 +8070,7 @@ export class ApprovalProductService {
         )
         if (sourceAssignments.rows.length === 0) {
           await client.query('ROLLBACK')
-          skip(instanceId, 'no-active-seat')
+          skipDepartureTransfer(instanceId, 'no-active-seat')
           continue
         }
 
@@ -8113,7 +8113,7 @@ export class ApprovalProductService {
         const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
         if (requesterId && requesterId === resolvedManagerId) {
           await client.query('ROLLBACK')
-          skip(instanceId, 'target-is-requester')
+          skipDepartureTransfer(instanceId, 'target-is-requester')
           continue
         }
 
@@ -8130,7 +8130,7 @@ export class ApprovalProductService {
         )
         if (targetAssignments.rows.length > 0) {
           await client.query('ROLLBACK')
-          skip(instanceId, 'target-already-assignee')
+          skipDepartureTransfer(instanceId, 'target-already-assignee')
           continue
         }
 
@@ -8206,7 +8206,7 @@ export class ApprovalProductService {
           `approval departure transfer error for instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
           error instanceof Error ? error : undefined,
         )
-        skip(instanceId, 'error')
+        skipDepartureTransfer(instanceId, 'error')
       } finally {
         client?.release()
       }
