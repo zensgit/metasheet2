@@ -103,6 +103,25 @@ const DECL_SCAN_RE = /\b(?:it|test|describe|suite)((?:\s*\.\s*[A-Za-z_$][\w$]*)+
 const EXECUTION_SUPPRESSING_MEMBERS = new Set(['only', 'skip', 'todo'])
 
 /**
+ * The ban scan runs over RAW source — deliberately NOT over `stripComments()` output.
+ *
+ * `stripComments` is a regex line-comment stripper with no string awareness, so
+ * a focused declaration placed after `const note = 'see // below';` on ONE line had
+ * its tail deleted and the focused declaration evaded the scan. That was proven live
+ * on this branch before this note was written: the planted focused test produced
+ * "25 passed" — a clean green over a hollowed-out suite.
+ *
+ * A string-aware stripper would just move the attack surface onto the stripper itself
+ * (判据本身也要被攻击 — regex literals containing quotes reopen the same hole). Scanning
+ * raw source has NO such surface: the scan is fail-closed by construction. The stated
+ * cost is that a comment or string literally spelling out a banned declaration also
+ * reds; that is the safe direction, and the fix is to reword it (this file's own header
+ * was reworded for exactly that reason). It therefore builds its own
+ * planted controls by concatenation (`${'it'}.only(` never matches, since `it` is
+ * followed by a quote, not by the member chain).
+ */
+
+/**
  * The census core, over CONTENT (not paths) so the negative controls can run the exact
  * same logic against mutated copies. Returns human-readable violations; [] means wired.
  */
@@ -250,8 +269,7 @@ function auditNoSuppressedTests(testContents: ReadonlyMap<string, string>): stri
       violations.push(`${file}: EMPTY — focus/skip scan broken`)
       continue
     }
-    const stripped = stripComments(content)
-    for (const match of stripped.matchAll(DECL_SCAN_RE)) {
+    for (const match of content.matchAll(DECL_SCAN_RE)) {
       const members = match[1].split('.').map((part) => part.trim()).filter(Boolean)
       for (const member of members) {
         if (EXECUTION_SUPPRESSING_MEMBERS.has(member)) {
@@ -530,6 +548,22 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     for (const source of allowed) {
       expect(auditNoSuppressedTests(new Map([['planted.test.ts', `${source}\n`]]))).toEqual([])
     }
+  })
+
+  it('NEGATIVE CONTROL: a focused declaration hidden behind a // inside a STRING is still caught', () => {
+    // The evasion that a comment-stripping scan permits: the regex line-comment stripper
+    // is not string-aware, so it deletes from the `//` to end of line and eats the
+    // declaration. Proven live on this branch (planted `it.only` → "25 passed") before
+    // the scan was moved onto raw source.
+    const evasion = `const note = 'see // below'; ${'it'}.only('planted', () => { void note })\n`
+    const violations = auditNoSuppressedTests(new Map([['planted.test.ts', evasion]]))
+    expect(violations.length).toBe(1)
+    expect(violations[0]).toContain('suppresses execution')
+    // The stripper this scan used to depend on really does destroy that line — this is
+    // the mechanism of the evasion, asserted rather than asserted-about.
+    expect(stripComments(evasion)).not.toContain('only')
+    // Positive control for the same stripper on the shape it DOES handle (`://`).
+    expect(stripComments(`const u = 'https://x/y'; ${'it'}.only('p', () => {})\n`)).toContain('only')
   })
 
   it('NEGATIVE CONTROL: excluding a census-linked suite from vitest would be caught', () => {
