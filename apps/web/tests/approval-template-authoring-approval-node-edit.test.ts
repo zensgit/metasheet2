@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalAssigneeSource, ApprovalAssigneeSourceKind, ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
   buildApprovalGraph,
   draftFromTemplate,
+  isComplexApprovalGraph,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
   type TemplateAuthoringDraft,
@@ -768,4 +769,83 @@ describe('P1-B: placeholderRoleNodeKeys widened to ALL sources (backend assertNo
     }
     expect(placeholderRoleNodeKeys(edits)).toEqual([])
   })
+})
+
+// I3 (residual-hardening, 2026-08-19; closes the linear/authoring half of P1-C's "single door"
+// discipline). templateAuthoring.ts:1244's `if (!['static_user', ... 'form_field_user_dept_head']
+// .includes(source?.kind)) return true` is the LINEAR branch's OWN inline allowlist — a SEPARATE
+// hand-maintained list from the complex path's BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND (the file warns
+// at :858-862 they must not be shared/derived from one another). stepDraftFromApprovalNode defaults
+// sourceKind to 'requester' (:631) for any kind it doesn't recognize, so a hole in THIS guard means
+// hydrate silently flattens an out-of-registry kind to 'requester' and persistDraft re-saves the
+// flattened value — i.e. a real 会签/自定义源 loses its configuration on the very next save. This is
+// the exact linear analogue of the already-covered P1-C approvalMode "single door" at :1220. The
+// COMPLEX path already covers the kind guard (node-edit spec above, 'flags an unknown assignee
+// source KIND', via complexWith() forcing the complex branch) and the display-degradation half is
+// covered too (approval-assignee-source.test.ts). The LINEAR authoring-guard half was the one
+// genuine gap this closes.
+describe('I3 — LINEAR path assignee-source-kind allowlist (fail-closed, closes the linear half of the P1-C single-door discipline)', () => {
+  // Two linear approval nodes (not one): `prior_node_approver`'s own shape check requires a
+  // STRICTLY-EARLIER approval node in the ordered chain, so the per-kind loop below needs a real
+  // upstream approval node to reference when it is approval_1's turn.
+  function buildLinearTwoStepGraph(secondSource: ApprovalAssigneeSource): ApprovalGraph {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'approval_0', type: 'approval', name: '一级',
+          config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+        },
+        {
+          key: 'approval_1', type: 'approval', name: '二级',
+          config: { assigneeSources: [secondSource], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_0', source: 'start', target: 'approval_0' },
+        { key: 'edge-approval_0-approval_1', source: 'approval_0', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('sanity: this fixture is genuinely LINEAR (isComplexApprovalGraph is false), so the linear branch under test is the one that actually runs', () => {
+    const graph = buildLinearTwoStepGraph({ kind: 'direct_manager' })
+    expect(isComplexApprovalGraph(graph)).toBe(false)
+  })
+
+  it('NEGATIVE: an out-of-registry assignee-source kind on a LINEAR graph forces read-only (blocks the :631 default-requester flatten)', () => {
+    const graph = buildLinearTwoStepGraph({ kind: 'future_kind' } as unknown as ApprovalAssigneeSource)
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+
+  // Every SHIPPED kind, well-formed, must stay editable on the linear path — this loop is also the
+  // guard against the INVERSE drift (a shipped kind accidentally dropped from the :1244 inline
+  // list, which would falsely force a real template read-only).
+  const VALID_SHAPE_BY_KIND: Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSource> = {
+    static_user: { kind: 'static_user', userIds: ['u1'] },
+    static_role: { kind: 'static_role', roleIds: ['r1'] },
+    requester: { kind: 'requester' },
+    form_field_user: { kind: 'form_field_user', fieldId: 'mgr_field' },
+    direct_manager: { kind: 'direct_manager' },
+    dept_head: { kind: 'dept_head' },
+    continuous_managers: { kind: 'continuous_managers', levels: 2 },
+    manager_at_level: { kind: 'manager_at_level', level: 2 },
+    requester_choice: { kind: 'requester_choice', mode: 'single', scope: { type: 'company' } },
+    continuous_dept_heads: { kind: 'continuous_dept_heads', levels: 2 },
+    dept_head_at_level: { kind: 'dept_head_at_level', level: 2 },
+    // References approval_0 — the strictly-earlier approval node buildLinearTwoStepGraph seeds.
+    prior_node_approver: { kind: 'prior_node_approver', nodeKey: 'approval_0' },
+    user_group: { kind: 'user_group', groupIds: ['g1'] },
+    form_field_user_manager: { kind: 'form_field_user_manager', fieldId: 'mgr_field', level: 1 },
+    form_field_user_dept_head: { kind: 'form_field_user_dept_head', fieldId: 'mgr_field', level: 1 },
+  }
+
+  for (const kind of Object.keys(VALID_SHAPE_BY_KIND) as ApprovalAssigneeSourceKind[]) {
+    it(`POSITIVE (${kind}): a shipped kind with a well-formed shape stays editable on the LINEAR path`, () => {
+      const graph = buildLinearTwoStepGraph(VALID_SHAPE_BY_KIND[kind])
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+    })
+  }
 })
