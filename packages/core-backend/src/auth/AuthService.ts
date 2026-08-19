@@ -15,6 +15,7 @@ import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
+  LoginAliasClaimError,
   assertAliasCutoverAllowed,
   claimNonEmptyLoginAliasesOrThrow,
   findUserIdByLoginAlias,
@@ -87,6 +88,21 @@ const USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS = 20
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * O2-A3 (gate NIT-2): the register-path discrimination between "identity already taken"
+ * (swallow to `null` → the route's 409 "already exists") and every other failure
+ * (rethrow → the route's real 500). Register claims only the email alias, so an
+ * ALIAS_CONFLICT LoginAliasClaimError here IS an email-identity conflict (a WRITE_FAILED
+ * one is a real write failure and must rethrow); Postgres 23505 on this path is the
+ * users email unique index (user_permissions/user_roles both insert with
+ * ON CONFLICT DO NOTHING, and the id is a fresh randomUUID). NOT a general-purpose
+ * duplicate detector — scoped to register()'s write set only.
+ */
+function isDuplicateIdentityConflict(error: unknown): boolean {
+  if (error instanceof LoginAliasClaimError) return error.code === 'ALIAS_CONFLICT'
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
 }
 
 /**
@@ -477,10 +493,20 @@ export class AuthService {
             await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
             continue
           }
-          // Non-retryable DB failure keeps the historical createUser swallow: warn + null
-          // (e.g. an alias conflict has rolled the whole transaction back, fail-closed).
+          // O2-A3 (gate NIT-2): `null` must mean "identity already taken" and NOTHING
+          // else — the registration route maps null to 409 "User with this email
+          // already exists" (routes/auth.ts). A duplicate-identity conflict (the alias
+          // claim losing a concurrent-register race, or the users email unique index
+          // firing — the race twin of the getUserByEmail pre-check) keeps the
+          // historical swallow-to-null; the whole transaction has rolled back,
+          // fail-closed. Every OTHER transaction failure now rethrows, so the route's
+          // catch answers its real 500 instead of fabricating an "exists" 409.
+          if (isDuplicateIdentityConflict(txnError)) {
+            this.logger.warn('Registration identity conflict', txnError instanceof Error ? txnError : undefined)
+            return null
+          }
           this.logger.warn('Database insert failed', txnError instanceof Error ? txnError : undefined)
-          return null
+          throw txnError
         }
         if (newUser && selfServiceRoleIds.length > 0) {
           // Only after the transaction actually committed — invalidating before commit
@@ -496,9 +522,15 @@ export class AuthService {
       // re-throw so the caller (the registration route in routes/auth.ts, which wraps this
       // call in its own try/catch) sees a retryable failure instead of a fabricated
       // success — never swallow this one to `null` alongside the ordinary "email already
-      // exists" case. Every other error keeps the existing swallow-to-null behavior.
+      // exists" case.
       if (error instanceof UserRoleAssignmentRecoveryBusyError) throw error
-      return null
+      // O2-A3 (gate NIT-2): the same discrimination as the transaction catch — `null`
+      // is reserved for "identity already taken". Anything else (bcrypt failure,
+      // getUserByEmail infrastructure error, rethrown transaction failures passing
+      // through) propagates to the route's own catch → its real 500, never a
+      // fabricated "email already exists" 409.
+      if (isDuplicateIdentityConflict(error)) return null
+      throw error
     }
   }
 

@@ -151,7 +151,7 @@ beforeEach(() => {
 })
 
 describe('routes/roles.ts', () => {
-  it('POST /api/roles: marker 40001 on the write → exact uniform retryable 409', async () => {
+  it('[recovery-census:roles:create] POST /api/roles: marker 40001 on the write → exact uniform retryable 409', async () => {
     pgMocks.poolQuery.mockRejectedValue(markerError())
     const res = mockResponse()
     await invokeHandler(rolesRouter(), 'post', '/api/roles', {
@@ -172,7 +172,7 @@ describe('routes/roles.ts', () => {
     expect(res.body).toBeUndefined()
   })
 
-  it('DELETE /api/roles/:id: marker 40001 (FK cascade into role_permissions/user_roles) → 409', async () => {
+  it('[recovery-census:roles:delete] DELETE /api/roles/:id: marker 40001 (FK cascade into role_permissions/user_roles) → 409', async () => {
     pgMocks.poolQuery
       .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
       .mockRejectedValueOnce(markerError())
@@ -183,10 +183,36 @@ describe('routes/roles.ts', () => {
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
   })
+
+  it('[recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the UPDATE → exact uniform retryable 409', async () => {
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] }) // SELECT before
+      .mockRejectedValueOnce(markerError()) // UPDATE roles
+    const res = mockResponse()
+    await invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
+      params: { id: 'role-1' },
+      body: { name: 'Renamed' },
+    }, res)
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+  })
+
+  it('PUT /api/roles/:id: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
+    const original = otherDbError()
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
+      .mockRejectedValueOnce(original)
+    const res = mockResponse()
+    await expect(invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
+      params: { id: 'role-1' },
+      body: { name: 'Renamed' },
+    }, res)).rejects.toBe(original)
+    expect(res.body).toBeUndefined()
+  })
 })
 
 describe('routes/spreadsheet-permissions.ts', () => {
-  it('grant: marker 40001 inside the locked transaction → exact uniform retryable 409', async () => {
+  it('[recovery-census:spreadsheet-permissions:grant] grant: marker 40001 inside the locked transaction → exact uniform retryable 409', async () => {
     pgMocks.transaction.mockRejectedValue(markerError())
     const res = mockResponse()
     await invokeHandler(
@@ -214,7 +240,7 @@ describe('routes/spreadsheet-permissions.ts', () => {
     expect(res.body).toBeUndefined()
   })
 
-  it('revoke: marker 40001 inside the locked transaction → exact uniform retryable 409', async () => {
+  it('[recovery-census:spreadsheet-permissions:revoke] revoke: marker 40001 inside the locked transaction → exact uniform retryable 409', async () => {
     pgMocks.transaction.mockRejectedValue(markerError())
     const res = mockResponse()
     await invokeHandler(
@@ -230,7 +256,7 @@ describe('routes/spreadsheet-permissions.ts', () => {
 })
 
 describe('routes/permissions.ts', () => {
-  it('grant: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
+  it('[recovery-census:permissions:grant] grant: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     pgMocks.poolQuery
       .mockResolvedValueOnce({ rows: [{ code: 'perm:x' }] }) // permission exists
@@ -255,6 +281,52 @@ describe('routes/permissions.ts', () => {
     expect(res.statusCode).toBe(500)
     expect(res.body).toEqual({ error: 'Failed to grant permission' })
   })
+
+  it('[recovery-census:permissions:revoke] revoke: marker 40001 on the user_permissions DELETE → exact uniform retryable 409', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.poolQuery.mockRejectedValueOnce(markerError()) // DELETE FROM user_permissions
+    const res = mockResponse()
+    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
+      body: { userId: 'user-1', permission: 'perm:x' },
+    }, res)
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+  })
+
+  it('revoke: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.poolQuery.mockRejectedValueOnce(otherDbError())
+    const res = mockResponse()
+    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
+      body: { userId: 'user-1', permission: 'perm:x' },
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ error: 'Failed to revoke permission' })
+  })
+
+  it('[recovery-census:permissions:template-apply] template apply: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    // 'attendance-employee' is a REAL preset-backed template with non-empty permissions,
+    // so the handler reaches the INSERT INTO user_permissions write.
+    pgMocks.poolQuery.mockRejectedValueOnce(markerError())
+    const res = mockResponse()
+    await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
+      body: { userId: 'user-1', templateId: 'attendance-employee' },
+    }, res)
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+  })
+
+  it('template apply: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.poolQuery.mockRejectedValueOnce(otherDbError())
+    const res = mockResponse()
+    await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
+      body: { userId: 'user-1', templateId: 'attendance-employee' },
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ error: 'Failed to apply permission template' })
+  })
 })
 
 describe('routes/attendance-admin.ts', () => {
@@ -275,7 +347,7 @@ describe('routes/attendance-admin.ts', () => {
     })
   }
 
-  it('single role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
+  it('[recovery-census:attendance-admin:assign] single role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
     installUserRolesRejection(markerError())
     rbacServiceMocks.listUserPermissions.mockResolvedValue([])
     rbacServiceMocks.isAdmin.mockResolvedValue(false)
@@ -308,7 +380,7 @@ describe('routes/attendance-admin.ts', () => {
     })
   })
 
-  it('batch role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
+  it('[recovery-census:attendance-admin:batch-assign] batch role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
     const batchUserId = '10000000-0000-4000-8000-000000000001'
     pgMocks.query.mockImplementation(async (sql: string) => {
       if (/INSERT INTO user_roles/.test(sql)) throw markerError()
@@ -322,6 +394,82 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/batch/roles/assign',
+      { body: { userIds: [batchUserId], roleId: 'role-x' } },
+      res,
+    )
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+  })
+
+  it('[recovery-census:attendance-admin:unassign] single role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (/DELETE FROM user_roles/.test(sql)) throw markerError()
+      if (/FROM users/.test(sql)) {
+        return {
+          rows: [{
+            id: 'user-1', email: 'u@example.com', name: 'U', employeeNo: null,
+            department: null, role: 'user', is_active: true, is_admin: false,
+            last_login_at: null, created_at: 'now',
+          }],
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const res = mockResponse()
+    await invokeHandler(
+      attendanceAdminRouter(),
+      'post',
+      '/api/attendance-admin/users/:userId/roles/unassign',
+      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      res,
+    )
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+  })
+
+  it('single role unassign: non-40001 error → ORIGINAL 500 ROLE_UNASSIGN_FAILED, exactly as before', async () => {
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (/DELETE FROM user_roles/.test(sql)) throw otherDbError()
+      if (/FROM users/.test(sql)) {
+        return {
+          rows: [{
+            id: 'user-1', email: 'u@example.com', name: 'U', employeeNo: null,
+            department: null, role: 'user', is_active: true, is_admin: false,
+            last_login_at: null, created_at: 'now',
+          }],
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const res = mockResponse()
+    await invokeHandler(
+      attendanceAdminRouter(),
+      'post',
+      '/api/attendance-admin/users/:userId/roles/unassign',
+      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      res,
+    )
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'ROLE_UNASSIGN_FAILED', message: 'deadlock detected', details: undefined },
+    })
+  })
+
+  it('[recovery-census:attendance-admin:batch-unassign] batch role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
+    const batchUserId = '10000000-0000-4000-8000-000000000002'
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (/DELETE FROM user_roles/.test(sql)) throw markerError()
+      if (/FROM users/.test(sql)) {
+        return { rows: [{ id: batchUserId, email: 'u@example.com', name: 'U', is_active: true }] }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const res = mockResponse()
+    await invokeHandler(
+      attendanceAdminRouter(),
+      'post',
+      '/api/attendance-admin/users/batch/roles/unassign',
       { body: { userIds: [batchUserId], roleId: 'role-x' } },
       res,
     )

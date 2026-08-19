@@ -787,6 +787,14 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     const user = await authService.register(cleanEmail, password, cleanName)
 
     if (!user) {
+      // O2-A3 (gate NIT-2): this 409 is truthful BY CONSTRUCTION — AuthService.register
+      // returns `null` ONLY for "identity already taken" (the getUserByEmail pre-check,
+      // or its race twins: a LoginAliasClaimError on the email claim / a 23505 from the
+      // users email unique index — see isDuplicateIdentityConflict in AuthService.ts).
+      // Every other failure rethrows and lands in the catch below (recovery conflict →
+      // 409 RECOVERY_AUTHORITY_BUSY; anything else → the generic 500), so an infra
+      // failure can no longer be misreported to the operator as "email already exists".
+      // Pinned by tests/unit/auth-register-null-discrimination.test.ts.
       logger.warn(`Registration attempt with existing email: ${cleanEmail} from ${ip}`)
       return res.status(409).json({
         success: false,
