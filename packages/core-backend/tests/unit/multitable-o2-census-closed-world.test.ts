@@ -15,7 +15,7 @@
  *      declarations, and count real call sites of the four adapter tokens
  *      (same counting semantics as the census, reimplemented here on purpose so a bug in
  *      one copy cannot hide in both directions of the comparison).
- *   B. REGISTRY — parse WIRING_CENSUS out of recovery-conflict-census.test.ts's SOURCE
+ *   B. REGISTRY — parse WIRING_CENSUS out of tests/unit/lib/recovery-census-table.ts's SOURCE
  *      (that table is the authoritative registered-site ledger; parsing it instead of
  *      duplicating it means there is exactly ONE census to keep current).
  *
@@ -41,7 +41,12 @@ import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 const SRC_ROOT = path.resolve(__dirname, '../../src')
-const CENSUS_TEST_PATH = path.resolve(__dirname, 'recovery-conflict-census.test.ts')
+// P3-1 extracted WIRING_CENSUS out of recovery-conflict-census.test.ts into this shared
+// module so the static census and the runtime leg recorder read ONE table. Parse it from
+// there — the "exactly one census to keep current" property is unchanged (and stronger:
+// the table now has a dedicated home). The parser's fail-loud control proves a wrong or
+// emptied path throws instead of silently yielding an empty registry.
+const CENSUS_TEST_PATH = path.resolve(__dirname, 'lib/recovery-census-table.ts')
 
 /** The four adapter tokens whose call sites define the census population. */
 const ADAPTER_TOKENS = [
