@@ -53,7 +53,7 @@
 | PG 矩阵未设 `PGOPTIONS`/`metasheet.sealed_export_*_role` → 073–075 走 latent 分支 | 非 superuser 路径首次在真机跑 | 待验证 + 角色绑定迁移臂(进行中) |
 | PG16+ `createrole_self_grant` 可能触发 `pg_auth_members` 零行谓词、无诊断 | DBA 建角色方式差异即失败 | 待验证 + 负控/诊断(进行中) |
 | ~~provenance pins 按 LF 字节哈希;`core.autocrlf=true` 检出无法过 S5 evidence~~ | 仅影响 Windows 开发机跑 CI 契约 | 已闭环:`.gitattributes` 对 63 个受 pin 文件加 `text eol=lf`(非 `-text`,以便 `git add` 也归一,阻止 CRLF 字节进 blob);`sha256File` 保持逐字节,不做 LF 归一 |
-| `PROVENANCE_READ_NOT_IMPLEMENTED` 501 | 按行 provenance 读缺席 | 待排期 |
+| ~~`PROVENANCE_READ_NOT_IMPLEMENTED` 501;按行 provenance 读缺席~~ | 无——出货注册表命中不到该分支(此前误记为运行时缺口) | 已核实非缺口:`listProvenanceByRow` 已实现于 `lib/pipelines.cjs:727`(读 migration-060 `PROVENANCE_VIEW`、tenant/workspace 作用域、window 先于 limit/offset、`(run_created_at, event_index)` 排序),并由 `createPipelineRegistry` 返回(`lib/pipelines.cjs:802`);`index.cjs:260` 创建后于 `index.cjs:351` 作为 `services.pipelineRegistry` 注入 `registerIntegrationRoutes`,路由注册于 `lib/http-routes.cjs:142`。501 是**设计即如此**的 optional-method 兜底(`listProvenanceByRow` 故意不入 `requireService`,让旧 host 注册表优雅降级而非注册失败——见 `docs/development/data-factory-df-n2-2c-provenance-read-verification-20260528.md` §Scope boundary),仅当 mock 显式 `delete` 该方法时才可达(`__tests__/http-routes.test.cjs:3629-3630`)。保留为 fail-closed 守卫,不改代码。本地:`df-n2-2c-provenance-read.test.cjs`、`http-routes.test.cjs` 绿;`provenance-contracts.test.cjs` 因无 `js-yaml` 报 MODULE_NOT_FOUND(环境性) |
 
 ## 6. 与部署速度直接相关的 PR(2026-08-18)
 
