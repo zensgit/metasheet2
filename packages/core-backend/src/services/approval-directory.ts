@@ -82,6 +82,66 @@ export async function searchDirectoryUsers(
   return result.rows.map((row) => ({ id: row.id, name: row.name ?? '', email: row.email ?? '' }))
 }
 
+const RESOLVE_MAX_IDS = 200
+
+function sanitizeResolveIds(ids: readonly string[]): string[] {
+  const seen = new Set<string>()
+  for (const raw of ids) {
+    const id = typeof raw === 'string' ? raw.trim() : ''
+    if (!id) continue
+    seen.add(id)
+    if (seen.size >= RESOLVE_MAX_IDS) break
+  }
+  return Array.from(seen)
+}
+
+/**
+ * member-display-identity (2026-08-19) — EXACT batch id->name resolver for the participant
+ * directory. Distinct from `searchDirectoryUsers`: no ILIKE/substring matching (the id list is
+ * ANDed with `id = ANY($1)`, never combined with a `q` term), and — the important difference for
+ * a values-free display resolver — a row whose `name` is null/blank is DROPPED from the result
+ * rather than returned with an empty string, so "absent from the response" is the single,
+ * unambiguous unresolved signal a caller needs (no per-caller "is this name blank" convention).
+ * `is_active = TRUE` (same predicate `searchDirectoryUsers` uses): a deactivated/removed account
+ * resolves to unresolved, not an error and not its old name — the caller decides how to render
+ * that (a values-free placeholder / count, never the raw id).
+ *
+ * Ids are de-duplicated and capped at `RESOLVE_MAX_IDS` (200, matching the existing `?userIds=`
+ * scope-narrowing cap on the participant directory search route) so a hostile query cannot smuggle
+ * an unbounded `id = ANY(...)` array. An empty/all-blank input short-circuits to `[]` with no query.
+ */
+export async function resolveDirectoryUsersByIds(ids: readonly string[]): Promise<DirectoryUserOption[]> {
+  const safeIds = sanitizeResolveIds(ids)
+  if (safeIds.length === 0) return []
+  const result = await query<{ id: string; name: string | null; email: string }>(
+    `SELECT id, name, COALESCE(email, '') AS email
+     FROM users
+     WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+    [safeIds],
+  )
+  return result.rows
+    .filter((row) => typeof row.name === 'string' && row.name.trim().length > 0)
+    .map((row) => ({ id: row.id, name: (row.name as string).trim(), email: row.email ?? '' }))
+}
+
+/**
+ * member-display-identity (2026-08-19) — EXACT batch id->name resolver for roles, the sibling of
+ * `resolveDirectoryUsersByIds` above. Roles carry no `is_active` column (unlike users) — a role
+ * row either exists with a name or it does not; a blank/null name (or a deleted role id) is
+ * dropped the same values-free way.
+ */
+export async function resolveDirectoryRolesByIds(ids: readonly string[]): Promise<DirectoryRoleOption[]> {
+  const safeIds = sanitizeResolveIds(ids)
+  if (safeIds.length === 0) return []
+  const result = await query<{ id: string; name: string | null }>(
+    `SELECT id, name FROM roles WHERE id = ANY($1::varchar[])`,
+    [safeIds],
+  )
+  return result.rows
+    .filter((row) => typeof row.name === 'string' && row.name.trim().length > 0)
+    .map((row) => ({ id: row.id, name: (row.name as string).trim() }))
+}
+
 /**
  * List roles as id/name options. Deliberately leaner than admin-users' fetchRoleCatalog
  * (which also computes permissions + member counts); the picker only needs id + label.

@@ -86,9 +86,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
+import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail pane's
 // read-only content. Presentation only: every mutating action is EMITTED to the parent
@@ -120,13 +121,16 @@ defineEmits<{
 }>()
 
 // `assignment.metadata` carries no display name today — only `assigneeId` (see
-// `ApprovalAssignmentDTO`). Prefers `metadata.assigneeName` if a producer ever populates it; when
-// unresolvable, falls back to a values-free, still-distinguishable ordinal (`成员 N`) rather than
-// the raw internal user id — mirrors ApprovalDetailView's own `assignmentDisplayLabel` values-free
-// convention (no separate directory fetch here; no new network call).
+// `ApprovalAssignmentDTO`). Prefers `metadata.assigneeName` if a producer ever populates it; then
+// (member-display-identity, 2026-08-19) the shared authorized-scope resolver
+// (`getResolvedUserName`, ensured by the watcher below); when still unresolvable, falls back to a
+// values-free, still-distinguishable ordinal (`成员 N`) rather than the raw internal user id —
+// mirrors ApprovalDetailView's own `assignmentDisplayLabel` values-free convention.
 function assigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): string {
   const metaName = assignment.metadata?.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  const resolved = getResolvedUserName(assignment.assigneeId)
+  if (resolved) return resolved
   return `成员 ${ordinal}`
 }
 
@@ -147,6 +151,14 @@ const pendingApproverLabels = computed<string[]>(() => {
     .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
     .map((a, index) => assigneeLabel(a, index + 1))
 })
+
+// member-display-identity (2026-08-19): a `watch` side effect (never inside the `computed` above)
+// kicks off the batch resolve for every pending-approver id this pane has in view.
+watch(
+  () => props.detail?.assignments.map((a) => a.assigneeId) ?? [],
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 </script>
 
 <style scoped>

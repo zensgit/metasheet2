@@ -1311,6 +1311,66 @@ export async function searchApprovalDirectoryUsers(
 }
 
 // ---------------------------------------------------------------------------
+// member-display-identity (2026-08-19) — authorized-scope EXACT batch id->name resolver, wrapping
+// GET /api/approvals/directory/resolve. SAME degrade-to-empty-safely doctrine as
+// searchApprovalDirectoryUsers above (network error / non-OK / malformed JSON / malformed entries
+// all resolve to [], never throw) — a caller with no name for an id shows a values-free
+// placeholder/count, it never crashes. An id absent from the response is the SERVER's own
+// unresolved signal (inactive user / blank name / nonexistent id / role id the caller cannot
+// resolve) — this wrapper does not invent a fallback name, it just omits what the server omitted.
+// ---------------------------------------------------------------------------
+export interface ApprovalDirectoryRole {
+  id: string
+  name: string
+}
+
+function parseIdNameArray(value: unknown): Array<{ id: string; name: string }> {
+  if (!Array.isArray(value)) return []
+  const out: Array<{ id: string; name: string }> = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id : ''
+    const name = typeof record.name === 'string' ? record.name : ''
+    if (!id || !name) continue
+    out.push({ id, name })
+  }
+  return out
+}
+
+/** Resolves a batch of user ids to `{id,name}` — never a raw id, never blank-name padding. */
+export async function resolveApprovalDirectoryUsers(ids: readonly string[]): Promise<Array<{ id: string; name: string }>> {
+  const cleanIds = ids.map((id) => id.trim()).filter((id) => id.length > 0)
+  if (cleanIds.length === 0) return []
+  try {
+    const params = new URLSearchParams()
+    params.set('userIds', cleanIds.join(','))
+    const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
+    if (!response.ok) return []
+    const payload = await response.json().catch(() => null) as { users?: unknown } | null
+    return parseIdNameArray(payload?.users)
+  } catch {
+    return []
+  }
+}
+
+/** Resolves a batch of role ids to `{id,name}` — never a raw id, never blank-name padding. */
+export async function resolveApprovalDirectoryRoles(ids: readonly string[]): Promise<ApprovalDirectoryRole[]> {
+  const cleanIds = ids.map((id) => id.trim()).filter((id) => id.length > 0)
+  if (cleanIds.length === 0) return []
+  try {
+    const params = new URLSearchParams()
+    params.set('roleIds', cleanIds.join(','))
+    const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
+    if (!response.ok) return []
+    const payload = await response.json().catch(() => null) as { roles?: unknown } | null
+    return parseIdNameArray(payload?.roles)
+  } catch {
+    return []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // FWB-0 Layer 2 — dedicated record-link candidate picker (pinned baseId+sheetId).
 // Does NOT call multitable /fields/:fieldId/link-options.
 // ---------------------------------------------------------------------------

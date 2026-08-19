@@ -20,6 +20,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -45,10 +46,16 @@ vi.mock('../src/approvals/permissions', () => ({
   useApprovalPermissions: () => ({ canAct: mockCanAct }),
 }))
 
+// member-display-identity (2026-08-19): defaults to "nothing resolves" — this file's raw-id-shaped
+// fixtures have no producer of `metadata.assigneeName`, matching the existing count-fallback
+// pinned assertions unless a specific test overrides it.
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', () => ({
   markApprovalRead: vi.fn().mockResolvedValue({ ok: true }),
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
   searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
+  resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
+  resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
 }))
 
 const mockCurrentUserId = ref<string | null>(null)
@@ -341,6 +348,8 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
     loadHistorySpy.mockClear()
     pushSpy.mockClear()
     mockCurrentUserId.value = null
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -716,6 +725,8 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
     loadHistorySpy.mockClear()
     pushSpy.mockClear()
     mockCurrentUserId.value = null
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -877,6 +888,40 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
       await mountView()
 
       expect(container!.textContent).toContain('其他 2 位审批人已失效')
+      expect(container!.textContent).not.toContain('user_secret_42')
+      expect(container!.textContent).not.toContain('user_secret_43')
+    })
+
+    // POSITIVE CONTROL, resolver path (member-display-identity, 2026-08-19): proves the NEW
+    // `getResolvedUserName` path — not just the pre-existing assignment-metadata path the first
+    // test in this block already covers — turns the cancelled ids into real names.
+    it('resolves to real names via the directory resolver when no assignment metadata carries them (positive control)', async () => {
+      resolveApprovalDirectoryUsersSpy.mockResolvedValue([
+        { id: 'user_secret_42', name: '钱八' },
+        { id: 'user_secret_43', name: '周九' },
+      ])
+      mockActiveApproval.value = baseInstance({ assignments: [] })
+      mockHistory.value = historyWithCancelled(['user_secret_42', 'user_secret_43'])
+      await mountView()
+      await flushUi(12)
+
+      expect(container!.textContent).toContain('其他审批人已失效: 钱八、周九')
+      expect(container!.textContent).not.toContain('user_secret_42')
+      expect(container!.textContent).not.toContain('user_secret_43')
+    })
+
+    // Mixed case: ONE of two cancelled ids resolves, the other doesn't -- the all-or-nothing
+    // convention (mirrors the pre-existing assignment-metadata behavior) must fall back to the
+    // values-free count rather than a partial name list padded with a placeholder.
+    it('a PARTIAL resolve (one id resolves, one does not) still falls back to the values-free count', async () => {
+      resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'user_secret_42', name: '钱八' }])
+      mockActiveApproval.value = baseInstance({ assignments: [] })
+      mockHistory.value = historyWithCancelled(['user_secret_42', 'user_secret_43'])
+      await mountView()
+      await flushUi(12)
+
+      expect(container!.textContent).toContain('其他 2 位审批人已失效')
+      expect(container!.textContent).not.toContain('钱八')
       expect(container!.textContent).not.toContain('user_secret_42')
       expect(container!.textContent).not.toContain('user_secret_43')
     })

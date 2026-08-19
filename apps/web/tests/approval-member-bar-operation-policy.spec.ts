@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // unmounts its app, and the next test then warns "There is already an app instance mounted".
 vi.setConfig({ testTimeout: 15_000 })
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
 /**
  * Lock-5 gate A-2 (FE door) + gate CR-3 (detail dialog) — the MEMBER action bar.
@@ -79,10 +80,16 @@ vi.mock('../src/approvals/components/ApprovalUserPicker.vue', () => ({
   },
 }))
 
+// member-display-identity (2026-08-19): `resolveApprovalDirectoryUsersMock` defaults to "nothing
+// resolves" (matches this file's pre-existing raw-id-shaped fixtures, which have zero producers of
+// `metadata.assigneeName`) — tests that need a resolvable name override it per-test.
+const resolveApprovalDirectoryUsersMock = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', () => ({
   markApprovalRead: vi.fn().mockResolvedValue({ ok: true }),
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
   searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
+  resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersMock(...args),
+  resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
 }))
 
 const mockCurrentUserId = ref<string | null>('user_1')
@@ -242,7 +249,12 @@ function baseInstance(overrides: Record<string, unknown> = {}): any {
     policy: { allowRevoke: true, sourceOfTruth: 'platform' },
     assignments: [
       { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
-      { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true } },
+      // member-display-identity (2026-08-19): `assigneeName` present -- this fixture's seat is
+      // RESOLVABLE, matching the ordinary production case. The deliberately-UNRESOLVABLE 减签
+      // shape (raw-id, `metadata: {}`) lives in this file's OWN dedicated `reduceSignInstance()`
+      // fixture below, whose whole point is to be unresolvable for the disabled/refused-submit
+      // negative tests -- this shared base fixture must not accidentally collide with that.
+      { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: '七号审批人' } },
     ],
     ...overrides,
   }
@@ -272,6 +284,8 @@ describe('Lock-5 A-2 (FE door) — the member bar mirrors the per-node operation
     mockCurrentUserId.value = 'user_1'
     executeActionSpy.mockReset()
     executeActionSpy.mockResolvedValue({})
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -406,6 +420,8 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
     mockCurrentUserId.value = 'user_1'
     executeActionSpy.mockReset()
     executeActionSpy.mockResolvedValue({})
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -639,6 +655,8 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
     mockCurrentUserId.value = 'user_1'
     executeActionSpy.mockReset()
     executeActionSpy.mockResolvedValue({})
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -741,7 +759,19 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
   })
 
   it('submits the selected assigneeId (the option VALUE, not the fallback LABEL) through the real reduce_sign handler', async () => {
-    mockActiveApproval.value = reduceSignInstance()
+    // member-display-identity (2026-08-19): the target must be RESOLVABLE — an unresolved option
+    // is now `disabled` and the submit handler itself refuses it (see the two new tests below), so
+    // this "does a real submit work" test needs a name-bearing seat, not the raw-id-shaped default
+    // `reduceSignInstance()` fixture (which is deliberately built to stay UNresolved for the
+    // negative test above).
+    mockActiveApproval.value = baseInstance({
+      nodeOperations: { ...ALL_ALLOWED },
+      assignments: [
+        { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+        { id: 'as_2', type: 'user', assigneeId: 'user_9', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true } },
+        { id: 'as_3', type: 'user', assigneeId: 'user_42', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: '孙七' } },
+      ],
+    })
     await mountView()
 
     ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
@@ -749,6 +779,8 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
 
     const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
     const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    const targetOption = Array.from(select.querySelectorAll('option')).find((o) => (o as HTMLOptionElement).value === 'user_42') as HTMLOptionElement
+    expect(targetOption.disabled, 'a resolved (named) option must NOT be disabled').toBe(false)
     select.value = 'user_42'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
@@ -759,6 +791,63 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
     expect(executeActionSpy).toHaveBeenCalled()
     const lastCall = executeActionSpy.mock.calls[executeActionSpy.mock.calls.length - 1]
     expect(lastCall[1]).toMatchObject({ action: 'reduce_sign', targetAssignmentUserId: 'user_42' })
+  })
+
+  // member-display-identity (2026-08-19) — owner directive: an unresolvable member's 减签 option
+  // is DISABLED, not just relabelled with an ordinal and left pickable. Two doors, proved
+  // separately (mirrors this file's own §2.3 discipline above): the `<el-option disabled>`
+  // attribute is the UI door; `submitReduceSign`'s own resolved-and-not-disabled check is the
+  // handler door — neutering either alone must not let the other cover for it.
+  it('an unresolvable member: the option is disabled AND the submit handler itself refuses it (both doors)', async () => {
+    mockActiveApproval.value = reduceSignInstance() // user_9/user_42, metadata: {} — never resolves (mock returns [])
+    await mountView()
+
+    ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
+    const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options).toHaveLength(2)
+    for (const option of options) {
+      expect(option.disabled, `option ${option.value} must be disabled while unresolved`).toBe(true)
+    }
+
+    // Handler door: force-set the value the way a real click on a disabled native <option> cannot,
+    // and confirm submitReduceSign refuses it anyway — the disabled attribute is not the ONLY gate.
+    select.value = 'user_42'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(q(container!, 'approval-reduce-sign-submit') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(executeActionSpy, 'an unresolved member must never reach executeAction').not.toHaveBeenCalled()
+  })
+
+  // POSITIVE CONTROL for the test above, resolved via the DIRECTORY RESOLVER this time (not
+  // `metadata.assigneeName`) — proves the resolver path itself (not just the pre-existing
+  // metaName path) turns the ordinal into a real name AND flips the option to selectable.
+  it('POSITIVE CONTROL: a member resolvable via the directory resolver gets its real name AND becomes selectable', async () => {
+    resolveApprovalDirectoryUsersMock.mockResolvedValue([
+      { id: 'user_9', name: '钱八' },
+      { id: 'user_42', name: '周九' },
+    ])
+    mockActiveApproval.value = reduceSignInstance()
+    await mountView()
+
+    ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
+    const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+    const labels = options.map((o) => o.textContent?.trim())
+    expect(labels).toEqual(['钱八', '周九'])
+    expect(labels.join('|')).not.toContain('user_9')
+    expect(labels.join('|')).not.toContain('user_42')
+    for (const option of options) {
+      expect(option.disabled, `resolved option ${option.value} must NOT be disabled`).toBe(false)
+    }
   })
 })
 
@@ -772,6 +861,8 @@ describe('Lock-5 CR-3 (detail dialog) — the comment requirement derives from t
     mockCurrentUserId.value = 'user_1'
     executeActionSpy.mockReset()
     executeActionSpy.mockResolvedValue({})
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })

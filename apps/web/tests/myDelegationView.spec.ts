@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
 import type { DelegationRecord } from '../src/approvals/delegations'
 import { useLocale } from '../src/composables/useLocale'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
 // B2-05 — MyDelegationView (self-service 我的委托) MOUNTED-component coverage. Neither
 // myDelegationForm.spec.ts nor myDelegationRoute.spec.ts (the only pre-existing specs naming this
@@ -36,11 +37,17 @@ vi.mock('element-plus', () => ({
 // (participant directory), replacing the manual free-text id input. `vi.importActual` keeps every
 // other export (listDelegations, createDelegation, ...) real.
 const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+// member-display-identity (2026-08-19): defaults to "nothing resolves" — the pre-existing
+// `fixtureRow()` delegatee id ('bob') has no producer of a real name, matching the values-free
+// placeholder fallback unless a test overrides it.
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
+    resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -172,6 +179,8 @@ describe('MyDelegationView (self-service 我的委托) — B2-05 status tag + di
     createOwnDelegationSpy.mockReset()
     confirmSpy.mockReset().mockResolvedValue(undefined)
     messageErrorSpy.mockReset()
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     columnSeq = 0
   })
 
@@ -285,6 +294,30 @@ describe('MyDelegationView (self-service 我的委托) — B2-05 status tag + di
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+  })
+
+  // member-display-identity (2026-08-19) — this self-service view is reachable by ANY
+  // authenticated user and used to render the raw `delegateeUserId` verbatim in the 被委托人
+  // column (`prop="delegateeUserId"`). Unresolved (the default mock) -> a values-free placeholder,
+  // never the raw id.
+  it('the 被委托人 column never renders the raw delegateeUserId when unresolved (discriminating negative)', async () => {
+    await mountView([fixtureRow({ id: 'd-1', delegateeUserId: 'bob' })])
+
+    const cell = container!.querySelector('[data-el-row="0"] [data-el-cell="被委托人"]')
+    expect(cell?.textContent).not.toContain('bob')
+    expect(cell?.textContent?.trim()).toBe('未知用户')
+  })
+
+  // POSITIVE CONTROL: proves the assertion above isn't vacuously true against a column that never
+  // reads `delegateeUserId` into the resolver at all.
+  it('POSITIVE CONTROL: the 被委托人 column shows the RESOLVED name once the directory resolver returns it', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'bob', name: '鲍勃' }])
+    await mountView([fixtureRow({ id: 'd-1', delegateeUserId: 'bob' })])
+    await flushUi(12)
+
+    const cell = container!.querySelector('[data-el-row="0"] [data-el-cell="被委托人"]')
+    expect(cell?.textContent?.trim()).toBe('鲍勃')
+    expect(cell?.textContent).not.toContain('bob')
   })
 
   it('static tripwire: the view source contains no hardcoded fake-people literals', () => {

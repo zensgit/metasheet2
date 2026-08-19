@@ -37,6 +37,11 @@ export default defineConfig({
       'tests/integration/after-sales-registry-backfill.test.ts',
       'tests/integration/approval-directory-endpoints.api.test.ts',
       'tests/integration/approval-participant-directory.api.test.ts',
+      // member-display-identity (2026-08-19): the authorized-scope EXACT id->name batch resolver
+      // (GET /api/approvals/directory/resolve). Requires real PostgreSQL (users/roles rows);
+      // excluded from the no-DB job so describeIfDatabase cannot skip-green it, and wired as a
+      // WHOLE FILE into plugin-tests.yml's "Run approval real-DB integration" step.
+      'tests/integration/approval-directory-resolve.api.test.ts',
       'tests/integration/approval-p1c-field-permissions.api.test.ts',
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',

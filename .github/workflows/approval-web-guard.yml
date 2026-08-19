@@ -93,6 +93,15 @@ on:
       # FWB-0 Layer 2 record-link load-bearing sources (not already listed above).
       - 'apps/web/src/approvals/recordLinkField.ts'
       - 'apps/web/src/approvals/api.ts'
+      # member-display-identity (2026-08-19): authorized-scope display-name resolver — the shared
+      # cache module, its dedicated unit spec (folded into searchApprovalDirectoryUsers.spec.ts),
+      # the mechanical coverage-enumeration guard, and ApprovalUserPicker.vue + its own spec (the
+      # FLOW-CHANGING selector this fix disables an unresolvable option on).
+      - 'apps/web/src/approvals/directoryResolve.ts'
+      - 'apps/web/tests/searchApprovalDirectoryUsers.spec.ts'
+      - 'apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts'
+      - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
+      - 'apps/web/tests/approvalUserPicker.spec.ts'
       - 'apps/web/src/approvals/prefillFromSnapshot.ts'
       - 'apps/web/src/types/approval.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
@@ -364,6 +373,15 @@ on:
       # FWB-0 Layer 2 record-link load-bearing sources (not already listed above).
       - 'apps/web/src/approvals/recordLinkField.ts'
       - 'apps/web/src/approvals/api.ts'
+      # member-display-identity (2026-08-19): authorized-scope display-name resolver — the shared
+      # cache module, its dedicated unit spec (folded into searchApprovalDirectoryUsers.spec.ts),
+      # the mechanical coverage-enumeration guard, and ApprovalUserPicker.vue + its own spec (the
+      # FLOW-CHANGING selector this fix disables an unresolvable option on).
+      - 'apps/web/src/approvals/directoryResolve.ts'
+      - 'apps/web/tests/searchApprovalDirectoryUsers.spec.ts'
+      - 'apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts'
+      - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
+      - 'apps/web/tests/approvalUserPicker.spec.ts'
       - 'apps/web/src/approvals/prefillFromSnapshot.ts'
       - 'apps/web/src/types/approval.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
