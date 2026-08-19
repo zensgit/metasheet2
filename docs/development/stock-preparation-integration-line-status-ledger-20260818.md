@@ -48,25 +48,36 @@
 
 | 缺口 | 影响 | 处置 |
 |---|---|---|
-| win32 目录 fsync EPERM → S6-A 第一个 chunk 卡死 | Windows 主机上 S6-A 不可用 | #4989 修复(仅跳过目录 fsync,完整性校验不变) |
-| win32 `chmod` 静默无效、仓库无 `icacls` | 声称的私密性在 Windows 运行时不存在 | #4989 attestation 门;后续 deploy launcher 加 `icacls` + 导出 attestation |
-| PG 矩阵未设 `PGOPTIONS`/`metasheet.sealed_export_*_role` → 073–075 走 latent 分支 | 非 superuser 路径首次在真机跑 | 待验证 + 角色绑定迁移臂(进行中) |
-| PG16+ `createrole_self_grant` 可能触发 `pg_auth_members` 零行谓词、无诊断 | DBA 建角色方式差异即失败 | 待验证 + 负控/诊断(进行中) |
+| ~~win32 目录 fsync EPERM → S6-A 第一个 chunk 卡死~~ | Windows 主机上 S6-A 不可用 | 已闭环:#4989(`bd4ad6e60`)仅跳过目录 fsync,文件 fsync 与全部完整性校验不变;POSIX 字节级不变 |
+| ~~win32 `chmod` 静默无效、仓库无 `icacls`~~ | 声称的私密性在 Windows 运行时不存在 | 已闭环:#4989 attestation 门(win32 + 旗标开 → 需 `..._WIN32_ARTIFACT_ACL_ATTESTED='true'`,否则 `SEALED_EXPORT_PROFILE_UNCERTIFIED`/`field=win32ArtifactAclAttested`);#4998(`c0c9ebbd7`)deploy path 在 apply-package 阶段按旗标 `icacls` + `Get-Acl` 复核,通过才写 attestation、失败撤销 |
+| ~~PG 矩阵未设 `PGOPTIONS`/`metasheet.sealed_export_*_role` → 073–075 走 latent 分支~~ | 非 superuser 路径首次在真机跑 | 已闭环并实证:#4991(`7d44a610b`)在 `stock-prep-main-package-verify.yml` 加角色绑定臂,run 32138432824 PG 15/16/17 三腿 `latentBranchTaken=false`、073/074/075 `Confirmed=PASS`+`ExecutedInThisRun=PASS`、`overGrantGuards=PASS` |
+| ~~PG16+ `createrole_self_grant` 可能触发 `pg_auth_members` 零行谓词、无诊断~~ | DBA 建角色方式差异即失败 | 已闭环并实证:同上 run,16/17 负控 `negativeControlRefused=PASS`、`negativeControlExclusiveToPgAuthMembers=PASS`;诊断写入 4695 运维检查表 B13(073 迁移与 runbook 均为摘要 pin,未动) |
 | ~~provenance pins 按 LF 字节哈希;`core.autocrlf=true` 检出无法过 S5 evidence~~ | 仅影响 Windows 开发机跑 CI 契约 | 已闭环:`.gitattributes` 对 63 个受 pin 文件加 `text eol=lf`(非 `-text`,以便 `git add` 也归一,阻止 CRLF 字节进 blob);`sha256File` 保持逐字节,不做 LF 归一 |
-| `PROVENANCE_READ_NOT_IMPLEMENTED` 501 | 按行 provenance 读缺席 | 待排期 |
+| ~~`PROVENANCE_READ_NOT_IMPLEMENTED` 501;按行 provenance 读缺席~~ | 无——出货注册表命中不到该分支(此前误记为运行时缺口) | 已核实非缺口:`listProvenanceByRow` 已实现于 `lib/pipelines.cjs:727`(读 migration-060 `PROVENANCE_VIEW`、tenant/workspace 作用域、window 先于 limit/offset、`(run_created_at, event_index)` 排序),并由 `createPipelineRegistry` 返回(`lib/pipelines.cjs:802`);`index.cjs:260` 创建后于 `index.cjs:351` 作为 `services.pipelineRegistry` 注入 `registerIntegrationRoutes`,路由注册于 `lib/http-routes.cjs:142`。501 是**设计即如此**的 optional-method 兜底(`listProvenanceByRow` 故意不入 `requireService`,让旧 host 注册表优雅降级而非注册失败——见 `docs/development/data-factory-df-n2-2c-provenance-read-verification-20260528.md` §Scope boundary),仅当 mock 显式 `delete` 该方法时才可达(`__tests__/http-routes.test.cjs:3629-3630`)。保留为 fail-closed 守卫,不改代码。本地:`df-n2-2c-provenance-read.test.cjs`、`http-routes.test.cjs` 绿;`provenance-contracts.test.cjs` 因无 `js-yaml` 报 MODULE_NOT_FOUND(环境性) |
 
-## 6. 与部署速度直接相关的 PR(2026-08-18)
+## 6. 与部署速度直接相关的 PR(2026-08-18 / 19)
 
-| PR | 用途 |
-|---|---|
-| #4982 | Windows 契约测试规范化(auto-merge) |
-| #4809 | K3 `config.url` 摘要 fallback(auto-merge) |
-| #4985 | Recovery07 一次成功包(PoNR 地图、预检、负控、owner block/证据模板) |
-| #4986 | 部署路径加速图 + LAB-0 自动盘点脚本(非变更性) |
-| #4987 | S6-A 合成 e2e 在 CI 的可行性(#4708 证据映射) |
-| #4988 | GIP 接线决定书草案 |
-| #4989 | S6-A Windows 运行时兼容修复 |
-| 保留 draft:#4786(K3 API Profile 演进)、#4675(谓词类型诊断 v5) | 等 owner |
+| PR | 合入 | 用途 |
+|---|---|---|
+| #4982 | `ad5a16278` | Windows 契约测试规范化 |
+| #4809 | `65a5bb4c9` | K3 `config.url` 摘要 fallback |
+| #4985 | `45d672aed` | Recovery07 一次成功包(PoNR 地图、预检、负控、owner block/证据模板) |
+| #4986 | `c42671054` | 部署路径加速图 + LAB-0 自动盘点脚本(非变更性) |
+| #4987 | `c70eb2534` | S6-A 合成 e2e 在 CI 的可行性(#4708 证据映射) |
+| #4988 | `59f21e5b1` | GIP 接线决定书草案 |
+| #4989 | `bd4ad6e60` | S6-A Windows 运行时兼容修复 |
+| #4990 | `350325094` | 本账本 |
+| #4991 | `7d44a610b` | PG 15/16/17 角色绑定迁移臂 + PG16 自动成员负控 |
+| #4992 | `05e27aae9` | e2e 走廊 `lab_mode`(安装包模式 + ON 后 OFF 恢复臂) |
+| #4996 | `895b857bb` | 63 个受 pin 路径 `text eol=lf` |
+| #4998 | `c0c9ebbd7` | deploy path:win32 artifact-root ACL 应用+复核+attestation |
+| #4999 | auto-merge | LAB-0 盘点加 artifact-root 文件系统探针(hardlink 支持) |
+| #5000 | auto-merge | **热修**:恢复 launcher 中字面 `-StagingRoot $stagingBase` 调用——#4998 的 splat 写法破坏了 package-verify 的固定字符串契约,#4998 之后从 main 打的包全部校验失败(run 32202464007) |
+| #5001 | auto-merge | package-build workflow 直接吐出粘贴即用的冻结块(+ no-node-modules 测试、provenance manifest 摘要);分支 dispatch run 32202981686 成功 |
+| #5002 | auto-merge | package-verify 的 61 条 launcher/apply 固定字符串契约改为 PR 上评估(防 #4998 类回归再次静默进 main) |
+| 保留 draft:#4786(K3 API Profile 演进)、#4675(谓词类型诊断 v5) | — | 等 owner |
+
+设计与验证总记录:`stock-preparation-integration-line-design-and-verification-20260819.md`。
 
 ## 7. 收尾判据(满足全部才可写 CLOSEOUT)
 
