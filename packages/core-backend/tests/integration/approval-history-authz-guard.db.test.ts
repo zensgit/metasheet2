@@ -14,6 +14,13 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  * values-free, before any `approval_records` row is read) and that legitimate readers — a principal
  * holding `approvals:read`, and an admin — are unaffected, whether or not they are the instance's
  * requester.
+ *
+ * NOTE: this suite does NOT call `grantApprovalWriteForIntegrationActor` (the `permissions` +
+ * `user_permissions` seeding helper other approval real-DB suites use) and does not insert any
+ * `users` row. Under the trusted-claims path (see `devToken` below) the dev-token's own `perms`
+ * query param IS the grant — RBAC table rows are never consulted for a principal whose claims
+ * already resolve the permission check. Do not "fix" the absence of a grant helper here; it is
+ * absent on purpose.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -99,6 +106,15 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
   }
 
   it('DISCRIMINATING NEGATIVE: denies a principal without approvals:read — values-free (no record/comment text, no instance id) in the body', async () => {
+    // This suite's negatives depend on the trusted-claims path (see devToken's docblock) reading
+    // the `perms` claim rather than skipping straight to a DB-derived fallback. Pin that precondition
+    // here so a future removal of RBAC_TOKEN_TRUST from tests/setup.integration.ts fails LOUDLY
+    // (this assertion) instead of turning this negative into a false 200: with the trust path gone,
+    // `AuthService.getUserById` finds no `users` row for a freshly-minted id and returns the
+    // NODE_ENV!=='production' dev-fallback mock user (AuthService.ts, "降级：返回mock用户" branch),
+    // which is `role: 'admin', permissions: ['*:*']` — i.e. exactly the opposite of this test's intent.
+    expect(process.env.RBAC_TOKEN_TRUST).toBe('true')
+
     const outsiderId = `hist-guard-outsider-${TS}`
     const requesterId = `hist-guard-req-a-${TS}`
     const marker = `MARKER-A-${TS}`
@@ -118,13 +134,47 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     expect(JSON.parse(bodyText)).toEqual({ error: 'Insufficient permissions' })
   })
 
-  it('POSITIVE CONTROL: the SAME shape of principal, granted approvals:read, reads the history — isolates the guard as the cause of the negative above', async () => {
+  it('DISCRIMINATING NEGATIVE: a populated perms claim for another resource does not satisfy approvals:read', async () => {
+    // Distinct from the empty-perms negative above: an EMPTY perms claim could theoretically 403
+    // because the claim is never consulted at all, not because the guard evaluated it and found it
+    // insufficient. A non-empty claim for an unrelated resource can only 403 if the guard actually
+    // read `perms` and matched it against 'approvals:read' — so this is the arm that isolates
+    // "the guard reads and checks the claim" from "the guard denies by default".
+    const outsiderId = `hist-guard-outsider2-${TS}`
+    const requesterId = `hist-guard-req-a2-${TS}`
+    const marker = `MARKER-A2-${TS}`
+    const instanceId = await seedInstanceWithComment(requesterId, marker)
+
+    const token = await devToken(baseUrl, outsiderId, 'viewer', 'multitable:read')
+    const response = await getHistory(baseUrl, instanceId, token)
+
+    expect(response.status).toBe(403)
+    const bodyText = await response.text()
+    expect(bodyText).not.toContain(marker)
+    expect(JSON.parse(bodyText)).toEqual({ error: 'Insufficient permissions' })
+  })
+
+  it('POSITIVE CONTROL: the SAME shape of principal, granted approvals:read, reads the history — isolates the guard as the cause of the negatives above', async () => {
     const grantedId = `hist-guard-granted-${TS}`
     const requesterId = `hist-guard-req-b-${TS}`
     const marker = `MARKER-B-${TS}`
     const instanceId = await seedInstanceWithComment(requesterId, marker)
 
     const token = await devToken(baseUrl, grantedId, 'viewer', 'approvals:read')
+    const response = await getHistory(baseUrl, instanceId, token)
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { data: { items: Array<{ comment: string | null }> } }
+    expect(body.data.items.some((item) => item.comment === marker)).toBe(true)
+  })
+
+  it('POSITIVE CONTROL: the approvals:* wildcard grant also satisfies the guard (hasPermissionCode\'s resource-wildcard arm)', async () => {
+    const grantedId = `hist-guard-wildcard-${TS}`
+    const requesterId = `hist-guard-req-b2-${TS}`
+    const marker = `MARKER-B2-${TS}`
+    const instanceId = await seedInstanceWithComment(requesterId, marker)
+
+    const token = await devToken(baseUrl, grantedId, 'viewer', 'approvals:*')
     const response = await getHistory(baseUrl, instanceId, token)
 
     expect(response.status).toBe(200)
