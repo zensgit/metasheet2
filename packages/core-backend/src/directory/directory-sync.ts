@@ -6,6 +6,7 @@ import { issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   fetchDingTalkAppAccessToken,
@@ -3885,7 +3886,11 @@ export async function syncDirectoryIntegration(
     const autoAdmissionInvites: Array<{ userId: string; email: string; inviteToken: string }> = []
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
-    await transaction(async (client) => {
+    // O2-S2: the local-apply transaction writes users (admission / deprovision) — recovery-
+    // authority tables. A marker 40001 (recovery lease held) re-raises as the named retryable
+    // RecoveryConflictError; every other error, DirectorySyncLeaseLostError included,
+    // rethrows unchanged.
+    await translateRecoveryConflict(() => transaction(async (client) => {
       // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
       // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
       // is 'repeatable read' this transaction's snapshot would be taken by the
@@ -4617,7 +4622,7 @@ export async function syncDirectoryIntegration(
       if (completion.rows.length === 0) {
         throw new DirectorySyncLeaseLostError(runId)
       }
-    })
+    }))
 
     for (const invite of autoAdmissionInvites) {
       await recordInvite({
@@ -6738,7 +6743,9 @@ export async function bindDirectoryAccount(
   if (!localUser) throw new Error('Local user not found')
   const expectedPriorLocalUserId = previousLinkedUser?.local_user_id ?? null
 
-  await transaction(async (client) => {
+  // O2-S2: binds write users-adjacent recovery-authority state under the access-graph
+  // mutex — marker 40001 → named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [
       localUser.id,
       ...(expectedPriorLocalUserId ? [expectedPriorLocalUserId] : []),
@@ -6757,7 +6764,7 @@ export async function bindDirectoryAccount(
       localUser: lockedTargetUser,
       expectedPriorLocalUserId,
     })
-  })
+  }))
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
   if (!summary) {
@@ -6830,7 +6837,9 @@ export async function admitDirectoryAccountUser(
 
   let userId = ''
 
-  await transaction(async (client) => {
+  // O2-S2: admission INSERTs a users row — a recovery-authority table. Marker 40001 →
+  // named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const created = await createDirectoryAdmittedUserInTransaction(client, {
       account,
       adminUserId: normalizedAdminUserId,
@@ -6844,7 +6853,7 @@ export async function admitDirectoryAccountUser(
       expectedPriorLocalUserId: previousLinkedUser?.local_user_id ?? null,
     })
     userId = created.userId
-  })
+  }))
 
   // Pending: never issue invite or temporary password (T3 owns activation credentials).
   let resolvedInviteToken: string | null = null
@@ -6932,7 +6941,9 @@ export async function unbindDirectoryAccount(
 
   let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
 
-  await transaction(async (client) => {
+  // O2-S2: unbind writes users / deprovision evidence under the access-graph mutex —
+  // marker 40001 → named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     // This unlocked read is only an expected-holder snapshot. The first row lock is still the
     // canonical users row; after it is held, the account/link are locked and re-read. A mismatch
     // fails closed instead of modifying an unprotected replacement holder.
@@ -7073,7 +7084,7 @@ export async function unbindDirectoryAccount(
         reason: 'directory account unbound by an administrator',
       })
     }
-  })
+  }))
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
   if (!summary) {

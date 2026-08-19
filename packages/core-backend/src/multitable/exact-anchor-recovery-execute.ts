@@ -20,6 +20,7 @@ import {
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   verifyExactAnchorRecoveryIdentity,
+  type ExactAnchorRecoveryIdentityClaims,
   type ExactAnchorRecoveryMode,
 } from './restore-preview-identity'
 import { composeBaselineOverlay, ExactAnchorHistoryDataError, type EvaluateRecoveryFullReadAccess } from './exact-anchor-recovery'
@@ -440,13 +441,54 @@ export type ExactAnchorAppliedMutation =
  */
 export type ExactAnchorMutationTxnHook = (query: QueryFn, mutation: ExactAnchorAppliedMutation) => Promise<void>
 
-/** Typed control-flow error: thrown inside the txn to force a FULL rollback, mapped to a refusal outside. */
+/** Typed control-flow error: thrown inside the txn to force a FULL rollback, mapped to a refusal outside.
+ * `leaseBusy` marks the ONE retryable channel (O2-S3): the exclusive authority lease lost a NOWAIT race
+ * against ordinary shared-lease writers. Only that channel is eligible for the bounded backoff re-attempt;
+ * every other refusal (including a genuine preview drift, which shares the same PUBLIC reason) stays
+ * single-attempt so the retry loop can never mask a real drift/authorization refusal. */
 class ApplyRefusalError extends Error {
-  constructor(readonly reason: ExactAnchorApplyRefusal) {
+  constructor(
+    readonly reason: ExactAnchorApplyRefusal,
+    readonly leaseBusy: boolean = false,
+  ) {
     super(`exact-anchor apply refused: ${reason}`)
     this.name = 'ApplyRefusalError'
   }
 }
+
+/**
+ * O2-S3 — bounded backoff for exclusive-authority-lease starvation.
+ *
+ * The shared-writer/exclusive-recovery lease model is globally NOWAIT (no waiting ⇒ no deadlock cycles),
+ * so under a continuous stream of ordinary writers holding the SHARED lease, recovery's single NOWAIT
+ * try returned `busy` immediately — potentially forever. These constants bound a retry ladder: at most
+ * {@link RECOVERY_LEASE_BACKOFF_MAX_ATTEMPTS} whole-transaction attempts, separated by the increasing
+ * delays in {@link RECOVERY_LEASE_BACKOFF_DELAYS_MS} (last entry repeats if attempts exceed entries).
+ *
+ * Each attempt is a FRESH NOWAIT try: the busy attempt's transaction has fully ROLLED BACK (advisory
+ * xact locks are only releasable at transaction end, so a partially-taken lease can ONLY be released by
+ * rollback — the retry deliberately re-runs the whole apply transaction, never a mid-transaction
+ * re-poll) before the inter-attempt sleep runs. NOTHING is held during the sleep, so writers proceed
+ * freely and the no-deadlock model is preserved: no blocking lock acquisition is introduced and each
+ * round repeats the identical, unchanged lock order from zero. Exhaustion keeps the existing named busy
+ * outcome (`preview-drift` → 409 re-preview) — fail-closed unchanged.
+ */
+export const RECOVERY_LEASE_BACKOFF_MAX_ATTEMPTS = 4
+export const RECOVERY_LEASE_BACKOFF_DELAYS_MS: readonly number[] = [50, 100, 200]
+
+/** Delay (ms) to sleep after `attemptJustFailed` (1-based); clamps to the last configured rung. */
+export function recoveryLeaseBackoffDelayMs(
+  attemptJustFailed: number,
+  delays: readonly number[] = RECOVERY_LEASE_BACKOFF_DELAYS_MS,
+): number {
+  if (delays.length === 0) return 0
+  const index = Math.min(Math.max(1, Math.floor(attemptJustFailed)), delays.length) - 1
+  const value = delays[index]
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+}
+
+const defaultLeaseBackoffSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms))
 
 /** Postgres unique-violation on the burn PK ⇒ the token was already used. */
 const isUniqueViolation = (e: unknown): boolean =>
@@ -756,6 +798,17 @@ export interface ExactAnchorApplyInput {
    * applied revert/delete AFTER that mutation's writes, BEFORE sealOperation. A throw ⇒ full rollback.
    */
   onMutationApplied?: ExactAnchorMutationTxnHook
+  /**
+   * OPTIONAL O2-S3 lease-backoff overrides — production callers omit this and get the exported defaults
+   * ({@link RECOVERY_LEASE_BACKOFF_MAX_ATTEMPTS} / {@link RECOVERY_LEASE_BACKOFF_DELAYS_MS}); tests use it
+   * to tighten budgets and observe attempts. `sleep(ms, attemptJustFailed)` runs BETWEEN attempts, strictly
+   * AFTER the failed attempt's transaction has fully rolled back — no lock of any kind is held while it runs.
+   */
+  leaseBackoff?: {
+    maxAttempts?: number
+    delaysMs?: readonly number[]
+    sleep?: (ms: number, attemptJustFailed: number) => Promise<void>
+  }
 }
 
 /**
@@ -769,10 +822,42 @@ export async function applyExactAnchorRecovery(
   // Identity verification is pure (no DB) — fail fast before opening a transaction.
   const verified = verifyExactAnchorRecoveryIdentity(input.token, { sheetId: input.sheetId, actorId: input.actorId })
   if (!verified.valid || !verified.claims) return { ok: false, reason: 'identity-invalid' }
-  const { anchorSeq, checkpointId, scopeHash, liveSetHash, schemaHash, mode, authorizedScopeHash } = verified.claims
+
+  // O2-S3 — bounded lease-starvation backoff. ONLY the authority-lease NOWAIT loss (`leaseBusy`) is
+  // retried; every other outcome returns immediately (single attempt, unchanged behaviour). By the time
+  // an attempt reports `leaseBusy`, its transaction has already fully ROLLED BACK (pool.transaction
+  // awaits ROLLBACK before rethrowing), so during the inter-attempt sleep NO fence/row/advisory lock is
+  // held and ordinary writers proceed freely. Each next round is a brand-new transaction repeating the
+  // identical existing lock order from zero — no new lock ordering, no blocking wait is introduced, and
+  // exhaustion returns the attempt's own named busy outcome (`preview-drift`) fail-closed unchanged.
+  const maxAttempts = Math.max(
+    1,
+    Math.floor(input.leaseBackoff?.maxAttempts ?? RECOVERY_LEASE_BACKOFF_MAX_ATTEMPTS),
+  )
+  const delays = input.leaseBackoff?.delaysMs ?? RECOVERY_LEASE_BACKOFF_DELAYS_MS
+  const sleep = input.leaseBackoff?.sleep ?? defaultLeaseBackoffSleep
+  for (let attempt = 1; ; attempt++) {
+    const { result, leaseBusy } = await applyExactAnchorRecoveryAttempt(transaction, input, verified.claims)
+    if (!leaseBusy || attempt >= maxAttempts) return result
+    await sleep(recoveryLeaseBackoffDelayMs(attempt, delays), attempt)
+  }
+}
+
+/**
+ * ONE whole-transaction NOWAIT attempt of the destructive apply. `leaseBusy` is true ONLY when the
+ * exclusive authority lease lost its NOWAIT race against shared-lease writers (the O2-S3 retryable
+ * channel); the attempt's transaction is fully rolled back in that case and `result` carries the named
+ * busy outcome that exhaustion returns unchanged.
+ */
+async function applyExactAnchorRecoveryAttempt(
+  transaction: <T>(fn: (query: QueryFn) => Promise<T>) => Promise<T>,
+  input: ExactAnchorApplyInput,
+  claims: ExactAnchorRecoveryIdentityClaims,
+): Promise<{ result: ExactAnchorApplyResult; leaseBusy: boolean }> {
+  const { anchorSeq, checkpointId, scopeHash, liveSetHash, schemaHash, mode, authorizedScopeHash } = claims
 
   try {
-    return await transaction(async (query) => {
+    const success = await transaction(async (query) => {
       // 0. PROVE a real ongoing transaction (pg_current_xact_id probe) before any fence/burn/write. A
       //    forged wrapper over a pool/autocommit client is caught by Postgres itself, not a marker; the
       //    refusal is the same values-free substrate refusal as every other trust failure (non-oracular).
@@ -1039,7 +1124,10 @@ export async function applyExactAnchorRecovery(
         }
       }
       const authorityLease = await input.stabilizeAuthorization(query, authorizationContext)
-      if (authorityLease === 'busy') throw new ApplyRefusalError('preview-drift')
+      // `leaseBusy: true` — the ONE bounded-backoff-retryable channel (O2-S3). The throw forces a FULL
+      // rollback (releasing every fence/row lock and any partially-taken exclusive authority key), after
+      // which the outer loop may re-attempt the whole transaction as a fresh NOWAIT try.
+      if (authorityLease === 'busy') throw new ApplyRefusalError('preview-drift', true)
       if (authorityLease === 'unavailable') {
         throw new ApplyRefusalError('recovery-trust-required')
       }
@@ -1406,10 +1494,13 @@ export async function applyExactAnchorRecovery(
           mode === 'revert' ? plan.createdAfterAnchor.length + plan.deletedAtAnchorLiveNow.length : 0,
       }
     })
+    return { result: success, leaseBusy: false }
   } catch (e) {
-    if (e instanceof ApplyRefusalError) return { ok: false, reason: e.reason }
+    if (e instanceof ApplyRefusalError) {
+      return { result: { ok: false, reason: e.reason }, leaseBusy: e.leaseBusy }
+    }
     const conflict = classifyExactAnchorDatabaseConflict(e)
-    if (conflict) return { ok: false, reason: conflict }
+    if (conflict) return { result: { ok: false, reason: conflict }, leaseBusy: false }
     throw e
   }
 }

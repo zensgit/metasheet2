@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 
 // Use the global Express.Request type which already includes user property
 type AuthenticatedRequest = Request
@@ -52,15 +53,23 @@ export function spreadsheetPermissionsRouter(): Router {
       // grant write serializes against a concurrent revert under ONE lock model. A grant INSERT already blocks on the
       // revert via the FK's implicit FOR KEY SHARE on meta_sheets vs the revert's FOR UPDATE; the explicit lock makes
       // the legacy route UNIFORM with #3402 rather than relying on that implicit FK lock (it does not close a new hole).
-      await transaction(async ({ query }) => {
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
-        await query(
-          `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
-           VALUES ($1, $2, 'user', $2, $3)
-           ON CONFLICT DO NOTHING`,
-          [req.params.id, userId, perm],
-        )
-      })
+      try {
+        await transaction(async ({ query }) => {
+          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+          await query(
+            `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
+             VALUES ($1, $2, 'user', $2, $3)
+             ON CONFLICT DO NOTHING`,
+            [req.params.id, userId, perm],
+          )
+        })
+      } catch (error) {
+        // O2-S2: spreadsheet_permissions is a recovery-authority table — a marker 40001
+        // under a held recovery lease is a retryable 409. Every other error rethrows
+        // unchanged (the handler had no catch before, so that path is byte-identical).
+        if (sendIfRecoveryConflict(res, error)) return
+        throw error
+      }
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()
@@ -95,17 +104,23 @@ export function spreadsheetPermissionsRouter(): Router {
       // (unlike a grant INSERT) it is NOT FK-serialized against a concurrent permission-revert and could interleave
       // the revert's live-grant re-check and its apply. Take the SAME meta_sheets FOR UPDATE the revert holds so it
       // cannot. (#3402-style: lock the sheet row first, then write.)
-      await transaction(async ({ query }) => {
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
-        await query(
-          `DELETE FROM spreadsheet_permissions
-           WHERE sheet_id = $1
-             AND subject_type = 'user'
-             AND user_id = $2
-             AND perm_code = $3`,
-          [req.params.id, userId, perm],
-        )
-      })
+      try {
+        await transaction(async ({ query }) => {
+          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+          await query(
+            `DELETE FROM spreadsheet_permissions
+             WHERE sheet_id = $1
+               AND subject_type = 'user'
+               AND user_id = $2
+               AND perm_code = $3`,
+            [req.params.id, userId, perm],
+          )
+        })
+      } catch (error) {
+        // O2-S2: marker 40001 → retryable 409 (see grant); all else rethrows unchanged.
+        if (sendIfRecoveryConflict(res, error)) return
+        throw error
+      }
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()

@@ -51,6 +51,7 @@ import {
   readDeprovisionRuntimeFlags,
   restoreDeprovisionEvent,
 } from '../directory/deprovision-evidence-api'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -585,6 +586,8 @@ export function adminDirectoryRouter(): Router {
           jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
           return
         }
+        // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
+        if (sendIfRecoveryConflict(res, error)) return
         const message = readErrorMessage(error, 'Failed to start directory sync')
         jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
         return
@@ -606,6 +609,8 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
         return
       }
+      // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
     }
@@ -897,6 +902,8 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { account: result.account })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the bind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to bind directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -983,6 +990,8 @@ export function adminDirectoryRouter(): Router {
         enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the admission write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1047,6 +1056,8 @@ export function adminDirectoryRouter(): Router {
         failed: outcome.failed,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from a bind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1153,6 +1164,8 @@ export function adminDirectoryRouter(): Router {
         enableDingTalkGrantApplied,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from an admission write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1194,6 +1207,8 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { account: result.account })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the unbind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to unbind directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1249,6 +1264,8 @@ export function adminDirectoryRouter(): Router {
         disableDingTalkGrant,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from an unbind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch unbind directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1481,6 +1498,11 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, result)
     } catch (error) {
+      // O2-S2: restoreDeprovisionEvent re-raises a marker 40001 as the named retryable
+      // RecoveryConflictError → uniform retryable 409. Every coded mapping below is
+      // unchanged (RECOVERY_AUTHORITY_BUSY is not in its lists, so it previously fell
+      // to the unclassified 500).
+      if (sendIfRecoveryConflict(res, error)) return
       const errorCode = (error as { code?: unknown })?.code
       const code = typeof errorCode === 'string' ? errorCode : ''
       const knownStatus =
@@ -1561,6 +1583,9 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, result)
     } catch (error) {
+      // O2-S2: compensateSupersededDenyGrant re-raises a marker 40001 as the named
+      // retryable RecoveryConflictError → uniform retryable 409; mappings below unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       const errorCode =
         (error as { code?: string })?.code
         || 'DEPROVISION_COMPENSATION_FAILED'

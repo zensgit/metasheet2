@@ -10,6 +10,7 @@
  */
 
 import { transaction } from '../db/pg'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
@@ -37,7 +38,10 @@ export function inviteAcceptWriteErrorCode(error: unknown): string | undefined {
  * Throws with code INVITE_LEDGER_CONSUME_FAILED or INVITE_TARGET_UPDATE_MISMATCH.
  */
 export async function applyInviteAcceptanceWrites(input: InviteAcceptWriteInput): Promise<void> {
-  await transaction(async (client) => {
+  // O2-S2: `users` is a recovery-authority table — a write under a held recovery lease
+  // fails with the marker 40001. Surface it as the named retryable RecoveryConflictError;
+  // every other error rethrows unchanged (INVITE_* codes keep their exact semantics).
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const locked = await lockUsersForAccessGraphWrite(client, [input.userId])
     const lockedUser = locked.get(input.userId)
     if (!lockedUser) {
@@ -82,5 +86,5 @@ export async function applyInviteAcceptanceWrites(input: InviteAcceptWriteInput)
         reason: 'superseded by invite acceptance activation',
       })
     }
-  })
+  }))
 }

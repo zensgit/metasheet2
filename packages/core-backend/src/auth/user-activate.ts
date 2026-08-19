@@ -20,6 +20,7 @@
 
 import * as bcrypt from 'bcryptjs'
 import { transaction } from '../db/pg'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   lockUsersForAccessGraphWrite,
@@ -138,7 +139,11 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     localPasswordSet = false
   }
 
-  await transaction(async (client) => {
+  // O2-S2: `users` is a recovery-authority table — a write under a held recovery lease
+  // fails with the marker 40001. Re-raise it as the named retryable RecoveryConflictError
+  // (mapActivateError in routes/admin-users.ts maps it to a retryable 409); every other
+  // error — every ACTIVATE_* reason included — rethrows unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
     const user = lockedUsers.get(userId)
     if (!user) {
@@ -281,7 +286,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       actorId: input.adminUserId ?? userId,
       reason: 'superseded by pending-user activation',
     })
-  })
+  }))
 
   return {
     userId,

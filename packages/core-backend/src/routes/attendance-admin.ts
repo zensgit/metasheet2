@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
@@ -958,6 +959,9 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: user_roles is a recovery-authority table — a marker 40001 under a held
+      // recovery lease is a retryable 409, not a 500. Every other error keeps its path.
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
     }
   })
@@ -1024,6 +1028,8 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
     }
   })
@@ -1089,6 +1095,8 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
     }
   })
@@ -1126,6 +1134,8 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
     }
   })
