@@ -2419,8 +2419,11 @@ action_soak_status() {
   # (uq_arc_w7_comparison_identity makes that marker operationId unique per (org,entrypoint)).
   soak_status_scalar "[Q4b]_w7_group_arm_clean_punches_cumulative" \
     "SELECT count(DISTINCT (c.input_provenance -> 'w7GroupShadowCompare' ->> 'operationId')) FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id WHERE c.created_at >= '${window_start}'::timestamptz AND c.created_at < now() AND c.mode = 'shadow' AND (c.input_provenance ? 'w7GroupShadowCompare') AND c.context_snapshot IS NOT NULL AND (c.context_snapshot ->> 'selector') = 'group_effective' AND c.outcome = 'completed' AND (c.shadow_diff_code IS NULL OR c.shadow_diff_code = 'equal');" >/dev/null
-  soak_status_rows "[Q14] posture-state distribution (org-count summary)" \
-    "SELECT COALESCE(w4.state,'legacy') AS w4_posture, COALESCE(w7.state,'off') AS w7_posture, count(*)::int AS org_count FROM (SELECT DISTINCT org_id FROM attendance_calculation_rollout_state UNION SELECT DISTINCT org_id FROM attendance_calculation_context_source_state) target LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id GROUP BY w4_posture, w7_posture ORDER BY w4_posture, w7_posture;"
+  # [Q14] universe = config CLOSED SET (post-merge review P3: a posture-table-derived
+  # universe omits the legacy_only control org — no state rows — and the two-row summary
+  # misleads on-duty readers even though C1-C3 acceptance reads Q1-Q3, not Q14).
+  soak_status_rows "[Q14] posture-state distribution (org-count summary; config closed set)" \
+    "SELECT COALESCE(w4.state,'legacy') AS w4_posture, COALESCE(w7.state,'off') AS w7_posture, count(*)::int AS org_count FROM (VALUES ('${SOAK_ORG1}'),('${SOAK_ORG2}'),('${SOAK_ORG3}')) AS target(org_id) LEFT JOIN attendance_calculation_rollout_state w4 ON w4.org_id = target.org_id LEFT JOIN attendance_calculation_context_source_state w7 ON w7.org_id = target.org_id GROUP BY w4_posture, w7_posture ORDER BY w4_posture, w7_posture;"
   soak_status_rows "posture rows for the three soak orgs (W4 then W7)" \
     "SELECT 'w4' AS machine, org_id, state, version, prior_state FROM attendance_calculation_rollout_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') UNION ALL SELECT 'w7', org_id, state, version, prior_state FROM attendance_calculation_context_source_state WHERE org_id IN ('${SOAK_ORG1}','${SOAK_ORG2}','${SOAK_ORG3}') ORDER BY 1, 2;"
 
