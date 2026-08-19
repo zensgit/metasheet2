@@ -114,6 +114,13 @@ const ANY_CENSUS_TAG_RE = /\[recovery-census:[^\]]+\]/g
  *
  * A new multi-tag declaration NOT listed here reds — adding one requires a human to
  * add it here explicitly, alongside the same delegation justification.
+ *
+ * NIT-2 (round-4 gate): the "unconditionally invokes the inner one" claim above is
+ * PINNED, not just prose — see the `NIT-2 (round-4 gate) — the allowlisted delegation
+ * is pinned, not just asserted in prose` describe block further down in this file. It
+ * reads the REAL `sendIfRecoveryAuthorityBusy` body and reds if it ever grows a branch
+ * or guard (or loses the delegation), which is exactly the condition this entry's
+ * justification requires and which nothing before NIT-2 mechanically checked.
  */
 const ALLOWED_MULTI_TAG_SITE_SETS: readonly (readonly string[])[] = [
   ['admin-users:busy-delegation', 'admin-users:role-assign'],
@@ -146,6 +153,36 @@ function countCalls(strippedSource: string, token: string): number {
   )
   const matches = withoutDeclarations.match(new RegExp(`\\b${token}\\s*\\(`, 'g'))
   return matches ? matches.length : 0
+}
+
+/**
+ * NIT-2 (round-4 adversarial gate) — extracts the exact body text of a top-level named
+ * function declaration (`function <name>(...) { ... }`), using BRACE BALANCING rather
+ * than a lazy regex, so a nested `{ }` inside the body cannot truncate the match early.
+ * Used to pin `sendIfRecoveryAuthorityBusy`'s body as EXACTLY the single unconditional
+ * delegation statement the multi-tag allowlist's rationale depends on (see
+ * `ALLOWED_MULTI_TAG_SITE_SETS` below and its "pinned by" pointer) — a substring check
+ * would still match `if (x) return sendIfRecoveryConflict(res, error)`, so the caller
+ * must compare against the WHOLE returned body, not merely check it `.includes(...)`.
+ */
+function extractFunctionBody(source: string, name: string): string {
+  const declRe = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`)
+  const match = declRe.exec(source)
+  if (!match) {
+    throw new Error(`extractFunctionBody: no declaration found for ${name}`)
+  }
+  const bodyStart = match.index + match[0].length
+  let depth = 1
+  let i = bodyStart
+  while (depth > 0) {
+    if (i >= source.length) {
+      throw new Error(`extractFunctionBody: unbalanced braces scanning ${name}`)
+    }
+    if (source[i] === '{') depth++
+    else if (source[i] === '}') depth--
+    i++
+  }
+  return source.slice(bodyStart, i - 1)
 }
 
 /**
@@ -941,6 +978,71 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     expect(isExcluded(entries, RBAC)).toBe(true)
     // Positive control: an unrelated exclude entry must NOT match.
     expect(isExcluded(vitestExcludeEntries("['tests/unit/some-other.test.ts']"), RBAC)).toBe(false)
+  })
+})
+
+/**
+ * NIT-2 (round-4 adversarial gate) — the multi-tag allowlist's ONLY entry
+ * (`ALLOWED_MULTI_TAG_SITE_SETS` above) is justified entirely by a PROSE claim: that
+ * `sendIfRecoveryAuthorityBusy`'s body is a single, unconditional delegation to
+ * `sendIfRecoveryConflict`, so hitting the outer call site (`admin-users:role-assign`)
+ * necessarily also hits the inner one (`admin-users:busy-delegation`) in the SAME
+ * request. Nothing before this block pinned that claim mechanically — a helper that
+ * later grew a condition true under test and false in production (or true/false on any
+ * input the census itself never varies) would leave the call-site COUNTS unchanged, so
+ * `auditRecoveryConflictWiring` would stay green, and the allowlist entry would still
+ * read as textually valid, while the pair silently stopped being genuinely co-executed
+ * (注释断言≠不变量 — a comment is not a check).
+ *
+ * The criterion: extract the helper's REAL body (brace-balanced via
+ * `extractFunctionBody`, not a lazy regex that a nested `{ }` could truncate early) and
+ * assert it is EXACTLY the one-line delegation statement — not merely that it CONTAINS
+ * that statement. A substring/`.includes()` check would still pass for `if (someFlag)
+ * return sendIfRecoveryConflict(res, error)`, which is precisely the shape that would
+ * break the allowlist's premise while looking unchanged to a substring test — so this
+ * predicate compares the WHOLE trimmed body against the expected text.
+ */
+describe('NIT-2 (round-4 gate) — the allowlisted delegation is pinned, not just asserted in prose', () => {
+  const EXPECTED_DELEGATION_BODY = 'return sendIfRecoveryConflict(res, error)'
+
+  it("sendIfRecoveryAuthorityBusy's body is EXACTLY the single unconditional delegation (pins the ALLOWED_MULTI_TAG_SITE_SETS rationale)", () => {
+    const source = stripComments(
+      readFileSync(path.join(SRC_ROOT, 'routes/admin-users.ts'), 'utf8'),
+    )
+    const body = extractFunctionBody(source, 'sendIfRecoveryAuthorityBusy').trim()
+    expect(body).toBe(EXPECTED_DELEGATION_BODY)
+  })
+
+  it('POSITIVE CONTROL: the extractor really reads the delegation body — not an accidental empty/whitespace match', () => {
+    const source = stripComments(
+      readFileSync(path.join(SRC_ROOT, 'routes/admin-users.ts'), 'utf8'),
+    )
+    const body = extractFunctionBody(source, 'sendIfRecoveryAuthorityBusy').trim()
+    expect(body.length).toBeGreaterThan(0)
+    expect(body).toContain('sendIfRecoveryConflict')
+  })
+
+  it('NEGATIVE CONTROL: extractFunctionBody is brace-balanced — a nested object literal in the body does not truncate the match early', () => {
+    const planted = 'function withNested(res, error) {\n  const cfg = { retry: { max: 1 } }\n  return sendIfRecoveryConflict(res, error)\n}\n'
+    expect(extractFunctionBody(planted, 'withNested').trim()).toBe(
+      'const cfg = { retry: { max: 1 } }\n  return sendIfRecoveryConflict(res, error)',
+    )
+  })
+
+  it('NEGATIVE CONTROL: wrapping the delegation in a condition reds the pin — a substring check would NOT catch this', () => {
+    const planted = 'function sendIfRecoveryAuthorityBusy(res, error) {\n  if (someFlag) return sendIfRecoveryConflict(res, error)\n  return false\n}\n'
+    // Mutation anchor (无效mutation教训): this planted body must actually CONTAIN the
+    // expected statement as a substring, proving a `.includes()` predicate would be
+    // fooled by it — while the exact-match pin below is not.
+    expect(planted).toContain(EXPECTED_DELEGATION_BODY)
+    const body = extractFunctionBody(planted, 'sendIfRecoveryAuthorityBusy').trim()
+    expect(body).not.toBe(EXPECTED_DELEGATION_BODY)
+  })
+
+  it('NEGATIVE CONTROL: removing the delegation entirely reds the pin', () => {
+    const planted = 'function sendIfRecoveryAuthorityBusy(res, error) {\n  return false\n}\n'
+    const body = extractFunctionBody(planted, 'sendIfRecoveryAuthorityBusy').trim()
+    expect(body).not.toBe(EXPECTED_DELEGATION_BODY)
   })
 })
 
