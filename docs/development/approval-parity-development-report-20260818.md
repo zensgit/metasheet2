@@ -1,9 +1,9 @@
 # 审批对标程序 — 开发报告（FINAL，2026-08-18）
 
-**Status:** FINAL — **审批实现切片全部落地**。曾唯一在飞行的 K6 `#4993`（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C）已于 **`ffa3a5f595`**（squash merge，2026-08-18T14:58:58Z）落地，闸门 **MERGE-CLEAN（0 P1）**；落地后派单人 union = **15 成员**（前后端逐字一致）。
+**Status:** FINAL — **已执行批次的审批实现切片全部落地**。曾唯一在飞行的 K6 `#4993`（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C）已于 **`ffa3a5f595`**（squash merge，2026-08-18T14:58:58Z）落地，闸门 **MERGE-CLEAN（0 P1）**；落地后派单人 union = **15 成员**（前后端逐字一致）。
 八个 P7 phase-A FAIL 已由 **P7 phase-B 在 fresh `origin/main` 复核 = 8/8 FIXED**（见 §5.8）；phase-B 曾记的 FAIL-0 枚举守卫残留与可执行的判别性反例债（I3）已由 **#5004（`6ace2e5a01`）DISCHARGED**。
 本文件**不 ratify 任何东西**，不授权运行时能力、租户 UAT、部署或 feature flag，**不是完成声明**。
-**所有剩余事项均为 owner 专属项（第 7 节）**——无一个在飞行的实现切片，无未 discharge 的可执行硬化项。
+**已执行批次内无一个在飞行的实现切片，无未 discharge 的可执行硬化项**；但剩余工作分两类，不得压平成一类——**尚未开发的代码切片**（P5-C / P3-A / Lock-2 其余实现 / L5-B 后加签运行时等，§6.3；见 §8 全表）与**owner 专属项**（第 7 节）。
 
 | 锚点 | 值 |
 |---|---|
@@ -13,7 +13,7 @@
 | **最后一个能力切片 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions … (Lock-2 §L2-C) (#4993)` |
 | **当前 `origin/main` tip** | `6ace2e5a01` — `test(approval): FAIL-0 enumeration guard + discriminating-negative discharge (#5004)`（**test-only residual-hardening**，不改任何能力面/union/计数；K6 与它之间 #5001–5003 为非审批） |
 | 程序基线（母锁 header 自陈） | `origin/main@d33a6a0fa120452b721ea76d449dfa1463727463` |
-| 已合并审批切片 | **45 个 PR** = 12 文档锁 + 32 能力实现 + **1 residual-hardening（#5004）**，逐条见 §3.1。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..6ace2e5a01 \| grep -iE "approval"` 返回 **46** 行，其中 `f2ed020d1b` (#4970, CI 触发器) 非程序切片 ⇒ **46 − 1 = 45**。从 git 枚举，非清单背诵 |
+| 已合并审批切片 | **45 个 PR** = **9 锁（Lock-0…Lock-8）+ 3 治理文档 PR**（#4935 母锁统一提案，一次落地母锁/台账/验证三份文档；#4937 母锁 RATIFY 状态翻转；#4866 表单构建器对标 delta 锁提案）+ **32 能力实现** + **1 residual-hardening（#5004）**，逐条见 §3.1。**订正**：先前版本写「12 文档锁」——文档锁只有 9 个（Lock-0…Lock-8，见 §2）；连同上述 3 个非 Lock 编号的治理/delta 文档 PR 才凑成「12 个文档 PR」，两者不是同一回事，已逐条对 `git log` 核实（见 §3.1 文档 PR 表，行数一致）。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..6ace2e5a01 \| grep -iE "approval"` 返回 **46** 行，其中 `f2ed020d1b` (#4970, CI 触发器) 非程序切片 ⇒ **46 − 1 = 45**。从 git 枚举，非清单背诵 |
 | Flags | **全程 OFF**，无一次改动（§1.4） |
 | 完成标签 | CORE-PARITY: **NO** · DATA-CLOSURE: **NO** · PRODUCT-FINAL: **NO**（三者均需 owner 签署，见 §7.2） |
 
@@ -177,7 +177,7 @@ git show origin/main:docs/development/approval-lock<N>-*.md | grep -oE "OD-L<N>-
 | `8bb237a5de` | #4953 | Lock-2 组织控件/字段路由 |
 | `0ccd680862` | #4955 | Lock-7 字段编辑/可见性强制 |
 
-**实现 PR（按阶段，31 个）。** 尾部六切片的闸门判定与合并 SHA 见下表加粗行；判定绑 reviewed head SHA，**合并 squash SHA 通常未被重新过闸**（这是形状事实，见验证报告 §3.1）。
+**实现 PR（按阶段，32 个，不含 #5004 residual-hardening）。**（**订正**：先前版本误写 31 个；下表逐行清点为 32 行，加上 §3.3 之前的 9 锁 + 3 治理文档 + 1 residual = 45，与 §0 锚点表一致。）尾部六切片的闸门判定与合并 SHA 见下表加粗行；判定绑 reviewed head SHA，**合并 squash SHA 通常未被重新过闸**（这是形状事实，见验证报告 §3.1）。
 
 | 阶段 | 切片 | PR | squash SHA | 闸门判定（reviewed head） | 修复轮 |
 |---|---|---|---|---|---|
@@ -351,7 +351,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 
 ---
 
-## 6. 尾部未竟（实现切片全部落地 + 合并时未闭合的闸门项）
+## 6. 尾部未竟（已执行批次实现切片全部落地 + 未起草代码切片 + 合并时未闭合的闸门项）
 
 ### 6.1 实现切片：**全部落地**（曾唯一在飞行的 K6 已合并）
 
@@ -395,6 +395,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | **#4984 P2-1 / FAIL-0 枚举守卫** | 6 个新接线真库套件缺自身 anti-skip-green 哨兵；排除清单无机械枚举守卫 | ✅ **DISCHARGED @ #5004 `6ace2e5a01`**（机械枚举守卫 `approval-ci-coverage-enumeration.test.ts` 落地，闸门证实有牙且当场抓到真实未接线套件 `approval-pack1a-lifecycle`，§5.8） |
 | **#4995 残留** | G-6 gate 文本不可满足（owner 裁）；picker 跨命名空间元数据（已披露） | §5.9 |
 | **D-9** | 已合并 PR 的合并后 squash SHA 基本都未被重新过闸（闸门绑 pre-merge / requalified head） | 形状事实，不得塌缩成「闸门 CLEAR，已合并」 |
+| **D-10（新）** | **原始 user-ID 渲染残留** — 当前 head 机械核实：`apps/web/src/views/approval/ApprovalDetailView.vue:731` 加签（P1-B）弹窗 chip 渲染 `{{ addSignUserLabels[uid] \|\| uid }}`；`:1960` 标签写入本身在 picker 返回的 `option.name` 缺失时也回退为 `option.id`——两处在缺名场景下都会把原始内部 user id 渲染给普通管理员看。**这与 §0/§5.10 中已由 #4981 修复的三个候选是不同位置**（那三个在 `assignmentDisplayLabel` / `formatFieldValue` 数组分支 / 节点变更占位符，均在 #4981 diff 中逐条可查）。**由 Codex 独立复核（2026-08-19）标出为新发现；本报告只做了上述两行的静态代码核实，未对其可达性/机制做独立对抗闸门复核（无变异、无浏览器证据）。** | 需要新的修复 PR（fix PR: pending）；这是**代码工作，不是 owner 专属项** |
 
 ### 6.5 OD 勘误候选（汇总，逐条见 §7.4）
 
@@ -475,6 +476,13 @@ Lock-7 §2.7 把 D-5 read-scope 留作 OPEN 的 owner 问题；P4-B 闸门补充
 ## 8. 本报告自身的边界
 
 - 本报告是 FINAL 而非完成声明。它**不 ratify、不授权、不启用**任何东西。
-- **实现切片全部落地**（K6 #4993 = `ffa3a5f595` 为最后一个能力切片；#5004 `6ace2e5a01` 为 test-only residual-hardening）。**无一个在飞行的实现切片，无未 discharge 的可执行硬化项**；剩余项全部 owner 专属（§7）。
+- **已执行/已 ratify 批次（45 个 PR，见 §0 锚点表「已合并审批切片」行）内的实现切片全部落地**（K6 #4993 = `ffa3a5f595` 为最后一个能力切片；#5004 `6ace2e5a01` 为 test-only residual-hardening）；**该批次内无一个在飞行的实现切片，无未 discharge 的可执行硬化项**。**⚠️ 这不等于「剩余项全部 owner 专属」——先前版本的这句话与 §6.3 / §6.5 / §7.2 自相矛盾，已订正。** 完整 CORE-PARITY 仍需要**尚未开发的代码切片**，至少包括（逐条缺席证据见 §6.3，非穷举列表）：
+  - **P5-C**（成员动作对话框语法统一，`NOT STARTED`）
+  - **P3-A**（Lock-4 自动通过/拒绝、扩展空派单人兜底、离职兜底、`auto_reject` 等缺失语义，`NOT DRAFTED`）
+  - **Lock-2 其余实现**（字段派生部门路由、部门/联系人字段类型；§L2-C 已由 K6 落地，其余 `NOT STARTED`）
+  - **L5-B 后加签（`'after'`）运行时**（OD-L5-4/5，节点插入式后加签仍推迟）
+  - **原始 user-ID 渲染修复**（新增项，§6.4 D-10；Codex 独立复核 2026-08-19 标出，与 §0/§5.10 中已由 #4981 修复的三个候选不是同一处）
+
+  **上述五项都是代码工作，不是 owner 专属项。** owner 专属项单独集中于第 7 节，两者不得混为一谈。
 - 本 FINAL 新做的机械核实（均已在正文标注出处）：尾部六切片的合并 SHA 与闸门判定；派单人/字段/`ApprovalMode`/`nodeOperationPolicy` 的 union 与 registry 实测；F10 挂载与必需 job 收集；四个迁移枚举；run-list / vitest.config UNION 存活；V-3 闭合证据引用。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。

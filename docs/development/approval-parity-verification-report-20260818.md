@@ -1,8 +1,16 @@
 # 审批对标程序 — 验证报告（FINAL，2026-08-18）
 
-**Status:** FINAL — **审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
+**Status:** FINAL — **已执行批次的审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
 **P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 的残留枚举守卫其后由 **#5004 `6ace2e5a01`** DISCHARGED）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
 本文件**不是完成声明**，不 ratify 任何东西，不授权任何 flag、部署或 UAT。
+
+> **⚠️ 「FINAL」= 最终文档快照，不是「验证已完成」。** 实现批次（45 个 PR）已全部合并，且一个较大的验证子集为绿（8/8 phase-A FAIL FIXED + 15/15 已落地特性判别检查 PASS + 6/6 优越性 re-smoke PASS，§2.5）——**但验证未完成**：
+> - 127 行 phase-A **完整**矩阵未在 exact 当前 `origin/main` 上重跑（**V-1**，§6.1）；
+> - Canvas / FWB / 附件三项租户 UAT 均 **NOT RUN**（§6.6）；
+> - 审批线自身的证据车道（五个 `approval-realdb-*`、`approval-browser-verify`、`approval-web-guard`）**均不在分支保护必需检查内**（**live @ 2026-08-19**，`gh api repos/zensgit/metasheet2/branches/main/protection` 现读：9 条必需 context、`strict=false`，无一条审批专属，**V-13**；§4.1 记的是 2026-08-18 撰写时刻的观测 `strict=true`——两者是不同时点各自的实测值，不是矛盾，不回填 §4.1）；
+> - PG15↔PG16 一致性缺口未收口（**V-14**，本地 PG 15.17 vs CI `postgres:16`，OPEN）。
+>
+> **CORE-PARITY / DATA-CLOSURE / PRODUCT-FINAL 三个完成标签均为 NO（§6.6），不因上述任何一条而改变。**
 
 | 锚点 | 值 |
 |---|---|
