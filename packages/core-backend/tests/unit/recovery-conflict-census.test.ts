@@ -43,6 +43,16 @@
  * `sendIfRecoveryAuthorityBusy` wrapper (which delegates to sendIfRecoveryConflict), so
  * they are counted under their OWN token with six site-level legs — the single
  * delegation call inside the helper can no longer satisfy the row for all of them.
+ *
+ * P3-1 upgrade (round-3 adversarial gate, T1) — ONE TAG PER DECLARATION: neither the
+ * per-file tag-uniqueness count nor the runtime `currentTestName`-binding stops a SINGLE
+ * declaration from carrying TWO different sites' tags in its own name — delete the real
+ * `roles:delete` leg outright, graft its tag onto the surviving `roles:update` leg's
+ * name, and record both sites from that one running test: each tag still occurs exactly
+ * once file-wide, and `currentTestName` legitimately contains both tags, so one PUT test
+ * now "proves" a DELETE site whose production call site is dead underneath it. Measured
+ * GREEN, 7 files, 200/200, exit 0, before this closure. `auditCensusLegLinkage` now also
+ * asserts each tagged declaration's own line carries exactly one census tag.
  */
 
 import { readFileSync } from 'node:fs'
@@ -74,6 +84,52 @@ const VITEST_CONFIG = path.resolve(__dirname, '../../vitest.config.ts')
 const RECORDER_SPECIFIER = './lib/recovery-census-recorder'
 
 const IMPORT_RE = /from\s+['"][^'"]*\/db\/recovery-conflict['"]/
+
+/**
+ * P3-1 (round-3 adversarial gate, T1) — matches ANY `[recovery-census:<site>]` tag
+ * substring, not scoped to one particular site. Used to count how many tags sit on a
+ * single tagged declaration's line (see `auditCensusLegLinkage` below).
+ */
+const ANY_CENSUS_TAG_RE = /\[recovery-census:[^\]]+\]/g
+
+/**
+ * P3-1 (round-3 gate, T1) — a CLOSED, hand-reviewed allowlist of the only site pairs
+ * legitimately allowed to share one declaration. This is not a general permission for
+ * "two tags is fine sometimes": every entry here must be a pair of DIFFERENT ADAPTER
+ * TOKENS where the outer call site's own implementation UNCONDITIONALLY invokes the
+ * inner one, so hitting one call site in a running test deterministically also runs
+ * the other — not two independent, mutually-exclusive call sites (which is exactly
+ * what the T1 counterexample forges by grafting a dead `roles:delete` tag onto the
+ * unrelated, mutually-exclusive `roles:update` leg).
+ *
+ * Today's one member: `sendIfRecoveryAuthorityBusy` (registered site-by-site, six
+ * legs including `admin-users:role-assign` — the NIT-1 upgrade above) delegates, as
+ * its own single internal statement, to `sendIfRecoveryConflict` (the ONE call site
+ * registered as `admin-users:busy-delegation`) — see that row's own comment in
+ * tests/unit/lib/recovery-census-table.ts. Exercising the role-assign route therefore
+ * genuinely, unconditionally runs both call sites in the same request, which is why
+ * `admin-users-routes.test.ts`'s one test for it carries both tags and records both
+ * sites — verified to be the ONLY multi-tag declaration in the pristine census family
+ * (checked by direct grep over every linked suite before this allowlist was written).
+ *
+ * A new multi-tag declaration NOT listed here reds — adding one requires a human to
+ * add it here explicitly, alongside the same delegation justification.
+ */
+const ALLOWED_MULTI_TAG_SITE_SETS: readonly (readonly string[])[] = [
+  ['admin-users:busy-delegation', 'admin-users:role-assign'],
+]
+
+/** Whether every tag on one declaration line matches an entry in the allowlist above. */
+function isAllowedMultiTagDeclaration(tags: readonly string[]): boolean {
+  const sites = tags
+    .map((entry) => entry.slice('[recovery-census:'.length, -1))
+    .slice()
+    .sort()
+    .join(' ')
+  return ALLOWED_MULTI_TAG_SITE_SETS.some(
+    (allowed) => [...allowed].sort().join(' ') === sites,
+  )
+}
 
 /** Comments must not satisfy the census — strip them before counting call tokens. */
 function stripComments(source: string): string {
@@ -287,6 +343,38 @@ function auditCensusLegLinkage(testContents: ReadonlyMap<string, string>): strin
     if (tagLine === -1) {
       violations.push(
         `${leg.site}: no test DECLARATION tagged ${tag} in ${leg.testFile}`,
+      )
+      continue
+    }
+    // P3-1 (round-3 adversarial gate, T1) — a tagged DECLARATION must carry exactly ONE
+    // `[recovery-census:<site>]` tag, UNLESS the exact set of tags on it is explicitly
+    // allowlisted (`ALLOWED_MULTI_TAG_SITE_SETS` above) as a genuine nested call-site
+    // pairing. The occurrence-count guard above (each tag unique FILE-WIDE) does not
+    // stop a single test from carrying TWO different sites' tags in its own name:
+    // delete the real `roles:delete` leg outright, graft its tag onto the SURVIVING
+    // `roles:update` leg's declaration, and record both sites from inside that one
+    // test. Each tag still occurs exactly once in the file (satisfies the guard above),
+    // `assertRecordedFromOwnTaggedLeg` accepts BOTH `record()` calls because
+    // `currentTestName` legitimately contains both tags, and one running PUT test now
+    // "proves" the DELETE site while its production call site (`src/routes/roles.ts:91`)
+    // is dead underneath it. Measured GREEN, 7 files, 200/200, exit 0, before this check
+    // existed (round-2's structural window and round-2's occurrence count are both
+    // satisfied; this is a NAMING shape, not a calling shape, and not a constructed
+    // name — the prior guards have no row for "one declaration, two sites"). This is
+    // NOT a blanket ban, though: `admin-users-routes.test.ts` has one PRISTINE
+    // declaration carrying two tags for real (`admin-users:busy-delegation` +
+    // `admin-users:role-assign` — a genuinely nested call site, see the allowlist's own
+    // comment), which a blanket ban would have falsely flagged. The allowlist keeps the
+    // check fail-closed for every OTHER combination while carving out that one, hand-
+    // reviewed exception.
+    const lineTags = lines[tagLine].match(ANY_CENSUS_TAG_RE) ?? []
+    if (lineTags.length > 1 && !isAllowedMultiTagDeclaration(lineTags)) {
+      violations.push(
+        `${leg.site}: the tagged declaration in ${leg.testFile} carries ${lineTags.length} `
+        + `census tags on one line (${lineTags.join(', ')}) — a single declaration may `
+        + 'satisfy exactly ONE site (or an explicitly allowlisted nested pair; see '
+        + 'ALLOWED_MULTI_TAG_SITE_SETS) — an unlisted extra tag lets one running test '
+        + 'forge coverage for a leg that never executed',
       )
       continue
     }
@@ -658,6 +746,79 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
       + 'same tag (in any calling shape) can satisfy the runtime binding while the real '
       + 'leg is suppressed; the tag must be unique per file',
     ])
+  })
+
+  it('NEGATIVE CONTROL (P3-1, round-3 adversarial gate T1): a declaration carrying TWO census tags for two different sites turns the linkage audit red', () => {
+    // Round-3 gate counterexample, exactly: delete the real `roles:delete` leg outright
+    // (so its tag occurs nowhere else), graft its tag onto the SURVIVING `roles:update`
+    // leg's declaration name, and record both sites from inside that one running test.
+    // Each tag still occurs exactly once in the file — the round-2 occurrence-count guard
+    // above is satisfied — and `assertRecordedFromOwnTaggedLeg` would accept BOTH
+    // `record()` calls, because `currentTestName` legitimately contains both tags (see
+    // the "P3-1 (2nd gate) — record() binds to the RUNNING test" suite below: a
+    // currentTestName that CONTAINS a tag satisfies that tag's own check). Measured
+    // GREEN over a dead `src/routes/roles.ts:91` before this guard existed: 7 files,
+    // 200/200, exit 0.
+    const testContents = loadRealTestContents()
+    const original = testContents.get(RBAC) as string
+    const updateTag = '[recovery-census:roles:update]'
+    const deleteTag = '[recovery-census:roles:delete]'
+
+    // Delete the real roles:delete leg's whole body — the SAME structural bound the
+    // audit itself uses (tag line through the next test declaration) — via the DECL_RE
+    // boundary, not a hand-typed literal block, so this stays correct if the leg's
+    // assertions are edited later.
+    const lines = original.split('\n')
+    const deleteTagLine = lines.findIndex((line) => line.includes(deleteTag) && DECL_RE.test(line))
+    const updateTagLineBefore = lines.findIndex((line) => line.includes(updateTag) && DECL_RE.test(line))
+    expect(deleteTagLine).toBeGreaterThan(-1)
+    expect(updateTagLineBefore).toBeGreaterThan(deleteTagLine)
+    let deleteLegEnd = lines.length
+    for (let i = deleteTagLine + 1; i < lines.length; i += 1) {
+      if (DECL_RE.test(lines[i])) {
+        deleteLegEnd = i
+        break
+      }
+    }
+    // Sanity: the next declaration after the delete leg really is the update leg — this
+    // is what makes grafting the tag onto it (below) the round-3 gate's exact shape.
+    expect(deleteLegEnd).toBe(updateTagLineBefore)
+    const withoutDeleteLeg = [...lines.slice(0, deleteTagLine), ...lines.slice(deleteLegEnd)]
+
+    // Graft the deleted leg's tag onto roles:update's own declaration name, and record
+    // both sites from inside that one surviving test.
+    const updateTagLine = withoutDeleteLeg.findIndex(
+      (line) => line.includes(updateTag) && DECL_RE.test(line),
+    )
+    expect(updateTagLine).toBeGreaterThan(-1)
+    withoutDeleteLeg[updateTagLine] = withoutDeleteLeg[updateTagLine].replace(
+      updateTag,
+      `${updateTag} ${deleteTag}`,
+    )
+    const recordLine = withoutDeleteLeg.findIndex((line) => line.includes("census.record('roles:update')"))
+    expect(recordLine).toBeGreaterThan(-1)
+    withoutDeleteLeg.splice(recordLine + 1, 0, "    census.record('roles:delete')")
+
+    const mutated = withoutDeleteLeg.join('\n')
+    expect(mutated).not.toBe(original)
+    // Sanity: this really does satisfy the round-2 guard alone — each tag occurs exactly
+    // once, so ONLY the new one-tag-per-declaration check can catch this shape.
+    expect(mutated.split(updateTag).length - 1).toBe(1)
+    expect(mutated.split(deleteTag).length - 1).toBe(1)
+
+    testContents.set(RBAC, mutated)
+    const violations = auditCensusLegLinkage(testContents)
+    // Both sites resolve to the SAME two-tag declaration, so both are flagged — each
+    // violation names the offending declaration's site and BOTH tags found on its line.
+    expect(violations.length).toBe(2)
+    for (const site of ['roles:update', 'roles:delete']) {
+      const violation = violations.find((entry) => entry.startsWith(`${site}:`))
+      expect(violation).toBeDefined()
+      expect(violation).toContain(RBAC)
+      expect(violation).toContain('carries 2 census tags')
+      expect(violation).toContain(updateTag)
+      expect(violation).toContain(deleteTag)
+    }
   })
 
   it('POSITIVE CONTROL: every REAL registered site has its tag exactly once in its file', () => {
