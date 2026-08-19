@@ -349,6 +349,14 @@ export default defineConfig({
       // rationale as the L6-P1 lane immediately above — plugin-tests.yml is an s6a sha256-pinned
       // provenance input, deliberately not extended). Two-point wiring, same commit.
       'tests/integration/approval-dedup-return-round-scoping.db.test.ts',
+      // Lock-4 F4-E (docs/development/approval-lock4-flow-policies-20260817.md §5) — 离职自动转上级,
+      // OD-L4-9(a) real-DB acceptance for `applyApprovalDepartureTransfer` (gates E-1/E-2/E-3 +
+      // a constructed two-connection concurrency race). DATABASE_URL-gated (describeIfDatabase);
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by the
+      // DEDICATED .github/workflows/approval-realdb-departure-transfer.yml workflow (same standalone
+      // rationale as the L6-A lane immediately above — plugin-tests.yml is an s6a sha256-pinned
+      // provenance input, deliberately not extended). Two-point wiring, same commit.
+      'tests/integration/approval-departure-transfer.db.test.ts',
       // Lock-1 §K4 continuous_dept_heads real-DB acceptance (G-1/G-2/G-13, continue-past-empty,
       // freeze purity). DATABASE_URL-gated; excluded here so the no-DB default job cannot
       // collect-and-skip-green it, and carried by the SAME dedicated
