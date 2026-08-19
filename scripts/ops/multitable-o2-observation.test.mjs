@@ -2,24 +2,62 @@
 //   scripts/ops/multitable-o2-observation.sql   (read-only ladder observation queries)
 //   scripts/ops/multitable-o2-canary-drill.md   (L4/L5 canary drill runbook)
 //
-// Hermetic: no database, no network, no pnpm install — `node --test` against the
-// checked-out tree only (same shape as data-source-exposure-inventory.test.mjs / its
-// standalone workflow). What a hermetic test CAN prove here:
-//   * the SQL file is read-only by construction (statement-head census, with a positive
-//     control proving the census would catch a write statement);
-//   * the query set and its per-ladder-level shape documentation are complete;
-//   * the trigger/function/lock-key literals the queries observe are the SAME literals the
-//     authoritative migration installs (drift guard — a migration change reds this test);
-//   * every host-reaching command mentioned in the runbook is OWNER-GATED (again with a
-//     positive control proving the scanner catches an unmarked command);
-//   * every evidence-anchor path the runbook cites exists in the tree.
-// What it can NOT prove (and does not claim): that the queries return the documented
-// shapes against a real database — that evidence leg is produced by running the .sql file
-// against a freshly migrated scratch DB (recorded in the authoring branch's evidence).
+// Two layers prove the SQL file is read-only. Neither is sufficient alone —
+// see the P3-2 gate note below.
+//
+// LAYER 1 — STATIC census (hermetic: no database, no network, no pnpm install —
+// `node --test` against the checked-out tree only, same shape as
+// data-source-exposure-inventory.test.mjs). Beyond the original statement-HEAD-only
+// check (SELECT/WITH heads), a body-aware census also flags: data-modifying CTEs
+// (`WITH … AS (INSERT/UPDATE/DELETE/MERGE …)`), row-locking clauses (FOR UPDATE /
+// NO KEY UPDATE / SHARE / KEY SHARE), `SELECT … INTO` (creates a table), and
+// lock/session/side-effect function calls (the pg_advisory_* family,
+// pg_terminate_backend, pg_cancel_backend, pg_promote, pg_switch_wal, pg_reload_conf,
+// setval/nextval, dblink*, lo_import/export/unlink, COPY … PROGRAM) plus bare DDL
+// keywords. This layer is a blocklist — per the trap-enumeration lesson, a
+// blocklist alone never converges, so it exists as defense-in-depth, not the
+// load-bearing guard. See LAYER 2.
+//
+// LAYER 2 — EXECUTION proof (real Postgres, DATABASE_URL-gated; skipped, loudly,
+// when no DATABASE_URL is reachable — see the sentinel test below for the
+// fail-not-skip discipline when a CI step marker says the DB step should be
+// running). Runs the ENTIRE SQL file via `psql` inside a session pinned
+// `SET default_transaction_read_only = on` and asserts a clean exit. WHEN IT
+// RUNS, this is the load-bearing layer for most evasion shapes: Postgres
+// itself refuses any write attempt under a read-only session (SQLSTATE
+// 25006), regardless of how the static regex was fooled. It does NOT catch
+// everything, though — verified here empirically: `pg_advisory_lock(...)` is
+// NOT blocked by `default_transaction_read_only` at all (an advisory lock is
+// a session-level action, not a data write — the guard silently succeeds).
+// `pg_terminate_backend` DOES abort a self-targeting run, but only
+// incidentally (its own connection dies) — NOT via a 25006 read-only
+// refusal, and NOT if it targeted a different backend. For that residual
+// family the STATIC census in layer 1 is the load-bearing catch, not layer
+// 2 — each evasion-shape test below states which layer(s) actually caught
+// it, and pins the SPECIFIC error text so an incidental abort is never
+// mistaken for read-only enforcement.
+//
+// ⚠ CURRENT CI WIRING GAP: .github/workflows/multitable-o2-observation-kit.yml
+// is deliberately hermetic (checkout + setup-node only — no postgres
+// service, no DATABASE_URL, no pnpm install, no METASHEET_REAL_DB_TEST_STEP)
+// and this file does not add a workflow to change that. So on every PR today,
+// layer 2 ALWAYS takes the loud-skip path and layer 1 (the static blocklist)
+// is the ONLY layer actually gating a change to the .sql file in CI. Layer 2
+// is real and load-bearing for an operator/local run against a reachable
+// DATABASE_URL (or once a DB-enabled job is wired to set
+// METASHEET_REAL_DB_TEST_STEP=1) — but until that wiring lands, do not read
+// "two layers" as "CI enforces both".
+//
+// What NEITHER layer claims: that the queries return the documented per-ladder-
+// level SHAPES against a real database — that evidence leg is a separate,
+// authoring-time exercise (recorded in the authoring branch's evidence), not a
+// read-only/safety claim.
 
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
@@ -54,7 +92,9 @@ function stripLineComments(sql) {
 }
 
 /** Split into statements on `;`. Sound ONLY while the file has no dollar-quoting /
- *  procedural bodies — asserted separately below. */
+ *  procedural bodies, and no slash-star block comments (a `;` inside one would
+ *  mis-split, which the per-statement regex census in layer 1 relies on being
+ *  correct) — both asserted separately below. */
 function splitStatements(sql) {
   return stripLineComments(sql)
     .split(';')
@@ -72,8 +112,9 @@ function findNonReadonlyStatements(sql) {
   return offenders
 }
 
-test('SQL: no dollar-quoting, so the statement splitter is sound', () => {
+test('SQL: no dollar-quoting and no slash-star block comments, so the statement splitter (and the layer-1 per-statement census that depends on it) is sound', () => {
   assert.ok(!sqlText.includes('$$'), 'observation SQL must not contain $$ bodies')
+  assert.ok(!sqlText.includes('/*'), 'observation SQL must not contain /* block comments (a `;` inside one would mis-split statements)')
 })
 
 test('SQL: every statement is SELECT/WITH (read-only by construction)', () => {
@@ -87,6 +128,139 @@ test('SQL: read-only census POSITIVE CONTROL — a write statement IS flagged', 
   // Statement-head trickery (comment before the verb) is also caught.
   const sneaky = sqlText + '\n-- harmless\nDELETE FROM meta_sheets;\n'
   assert.deepEqual(findNonReadonlyStatements(sneaky), ['DELETE'])
+})
+
+// ---------------------------------------------------------------------------
+// P3-2 gate fix, layer 1: body-aware static census.
+//
+// findNonReadonlyStatements above only looks at the FIRST keyword of a
+// statement. A gate review proved six shapes all have a SELECT/WITH head yet
+// write, lock, or touch server state: `WITH … DELETE`, `WITH … UPDATE`,
+// `SELECT … FOR UPDATE`, `SELECT pg_advisory_lock(…)`, `SELECT … INTO t`, and
+// `SELECT pg_terminate_backend(…)`. findUnsafeConstructs below is a body-aware
+// scan for exactly those (plus MERGE CTEs, the other locking-clause variants,
+// more lock/session functions, COPY … PROGRAM, and bare DDL keywords).
+// ---------------------------------------------------------------------------
+
+const CTE_WRITE_RE = /\bAS\s*\(\s*(INSERT|UPDATE|DELETE|MERGE)\b/i
+const LOCKING_CLAUSE_RE = /\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b/i
+const INSERT_INTO_RE = /\bINSERT\s+INTO\b/gi
+const BARE_INTO_RE = /\bINTO\b/i
+// Lock, session-control, sequence, and other side-effect functions that are NOT
+// data writes in the ordinary INSERT/UPDATE/DELETE sense, so a plain read-only
+// role or the read-only-transaction execution layer may not stop them (verified
+// for the advisory-lock and backend-signal families — see the execution-layer
+// tests below).
+const LOCK_OR_SIDE_EFFECT_FN_RE =
+  /\b(pg_advisory_(?:xact_)?lock(?:_shared)?|pg_try_advisory_(?:xact_)?lock(?:_shared)?|pg_advisory_unlock(?:_all|_shared)?|pg_terminate_backend|pg_cancel_backend|pg_promote|pg_switch_wal|pg_switch_xlog|pg_reload_conf|pg_rotate_logfile|pg_create_restore_point|pg_backup_start|pg_backup_stop|pg_start_backup|pg_stop_backup|setval|nextval|dblink(?:_exec)?|lo_import|lo_export|lo_unlink)\s*\(/i
+const COPY_PROGRAM_RE = /\bCOPY\b[^;]*\b(FROM|TO)\s+PROGRAM\b/i
+const DDL_KEYWORD_RE = /\b(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|VACUUM|REINDEX|CLUSTER)\b/i
+
+/** Body-aware findings, per statement, for constructs a head-only census misses.
+ *  Returns [{ stmt, reasons }] — empty array means clean. */
+function findUnsafeConstructs(sql) {
+  const findings = []
+  for (const stmt of splitStatements(sql)) {
+    const reasons = []
+    if (CTE_WRITE_RE.test(stmt)) {
+      reasons.push('data-modifying CTE (WITH … AS (INSERT/UPDATE/DELETE/MERGE))')
+    }
+    if (LOCKING_CLAUSE_RE.test(stmt)) {
+      reasons.push('row-locking clause (FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE)')
+    }
+    // Exclude legitimate `INSERT INTO` (already caught, if a head, by
+    // findNonReadonlyStatements; if inside a CTE, already caught above) before
+    // checking for a bare INTO, i.e. `SELECT … INTO t`.
+    if (BARE_INTO_RE.test(stmt.replace(INSERT_INTO_RE, ''))) {
+      reasons.push('SELECT … INTO (creates a table)')
+    }
+    if (LOCK_OR_SIDE_EFFECT_FN_RE.test(stmt)) {
+      reasons.push('lock/session/side-effect function call (pg_advisory_*, pg_terminate_backend, setval, dblink, …)')
+    }
+    if (COPY_PROGRAM_RE.test(stmt)) {
+      reasons.push('COPY … PROGRAM (arbitrary shell execution)')
+    }
+    if (DDL_KEYWORD_RE.test(stmt)) {
+      reasons.push('DDL/administrative keyword (CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/VACUUM/REINDEX/CLUSTER)')
+    }
+    if (reasons.length > 0) findings.push({ stmt: stmt.slice(0, 80), reasons })
+  }
+  return findings
+}
+
+test('SQL: static census is clean on the pristine file (positive control — not vacuously empty because nothing runs)', () => {
+  assert.deepEqual(findUnsafeConstructs(sqlText), [])
+})
+
+// The six shapes the gate proved slip through findNonReadonlyStatements, plus a
+// COPY…PROGRAM bonus shape. Reused below by the execution-layer tests too, so
+// each fragment references REAL tables from the migrated schema (so an
+// execution-layer run fails on the read-only mechanism itself, not on an
+// incidental "relation does not exist").
+const EVASION_SHAPES = [
+  {
+    name: 'WITH … DELETE (data-modifying CTE)',
+    fragment: 'WITH d AS (DELETE FROM meta_recovery_token_burns WHERE 1=0 RETURNING sheet_id) SELECT count(*) FROM d;',
+    // Postgres refuses the whole statement under a read-only session.
+    executionMode: 'blocked',
+  },
+  {
+    name: 'WITH … UPDATE (data-modifying CTE)',
+    fragment: 'WITH u AS (UPDATE users SET password_hash = password_hash WHERE 1=0 RETURNING id) SELECT count(*) FROM u;',
+    executionMode: 'blocked',
+  },
+  {
+    name: 'SELECT … FOR UPDATE (row lock)',
+    fragment: 'SELECT id FROM users WHERE 1=0 FOR UPDATE;',
+    executionMode: 'blocked',
+  },
+  {
+    name: 'SELECT pg_advisory_lock(…) (session-scoped lock)',
+    fragment: 'SELECT pg_advisory_lock(424242); SELECT pg_advisory_unlock(424242);',
+    // Verified empirically (see mutationEvidence): advisory locks are NOT
+    // blocked by default_transaction_read_only — Postgres treats them as a
+    // session-level action, not a data write. The static census is the only
+    // guard for this shape.
+    executionMode: 'not-blocked',
+  },
+  {
+    name: 'SELECT … INTO t (creates a table)',
+    fragment: 'SELECT 1 AS x INTO ro_evasion_probe_tbl_o2p3;',
+    executionMode: 'blocked',
+    cleanupSql: 'DROP TABLE IF EXISTS ro_evasion_probe_tbl_o2p3;',
+  },
+  {
+    name: 'SELECT pg_terminate_backend(…) (kills the current backend)',
+    fragment: 'SELECT pg_terminate_backend(pg_backend_pid());',
+    // Verified empirically: default_transaction_read_only does NOT block
+    // pg_terminate_backend (it is a signal to the postmaster, not a data
+    // write). Self-targeting it DOES abort the run — but only as an incidental
+    // side effect (the probe's own connection dies mid-script with a distinct
+    // "terminating connection due to administrator command" / "server closed
+    // the connection" signature), never as a "cannot execute … in a read-only
+    // transaction" refusal. Targeted at any OTHER backend it would succeed
+    // silently even read-only. So this is a static-census shape: the execution
+    // layer's abort here is real but incidental, not a general enforcement
+    // guarantee, and the static census (asserted above) is the load-bearing
+    // catch.
+    executionMode: 'blocked-incidental',
+  },
+]
+
+// One test per shape (not one loop inside a single test) so a regression in
+// any single regex reds exactly its own shape's test — a shared loop would
+// throw on the first failing shape and hide whether the rest still pass.
+for (const shape of EVASION_SHAPES) {
+  test(`SQL: static census catches evasion shape — ${shape.name}`, () => {
+    const doctored = `${sqlText}\n${shape.fragment}\n`
+    const findings = findUnsafeConstructs(doctored)
+    assert.ok(findings.length > 0, `static census missed evasion shape: ${shape.name}`)
+  })
+}
+
+test('SQL: static census bonus shape — COPY … PROGRAM (arbitrary shell execution) is flagged', () => {
+  const doctored = `${sqlText}\nCOPY (SELECT 1) TO PROGRAM 'echo pwned';\n`
+  assert.ok(findUnsafeConstructs(doctored).length > 0, 'COPY … PROGRAM must be flagged')
 })
 
 test('SQL: balanced parentheses per statement (parse-shape sanity)', () => {
@@ -364,3 +538,165 @@ test('workflow filter guard is not vacuous: removing a cited path from one filte
   const missing = missingFilterEntries(doctoredLines.join('\n'), cited)
   assert.deepEqual(missing, [`paths-section#1 (of 2): ${victim}`])
 })
+// P3-2 gate fix, layer 2: EXECUTION-level proof against a real, migrated
+// scratch Postgres, inside a session pinned `default_transaction_read_only`.
+//
+// DATABASE_URL-gated, mirroring the repo's sentinel discipline (see e.g.
+// packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts):
+// absence of DATABASE_URL is a loud SKIP (node:test tracks `skipped` as a count
+// distinct from `pass` — it cannot be mistaken for a green test), UNLESS a CI
+// step marker (METASHEET_REAL_DB_TEST_STEP=1) says this step is supposed to be
+// running a real DB, in which case a missing DATABASE_URL is a hard FAILURE.
+//
+// The DATABASE_URL, when set, must point to an ALREADY-MIGRATED database the
+// operator/CI step is authorized to reach (same contract as the .sql file's own
+// "HOW TO RUN" header) — this test does not run migrations itself. No `pg` npm
+// dependency is used (keeps the existing hermetic CI job's "no pnpm install"
+// contract intact even after this file grows a DB-aware layer): the `psql`
+// binary is invoked directly via node:child_process, exactly as the .sql
+// file's own header instructs an operator to do.
+// ---------------------------------------------------------------------------
+
+const DATABASE_URL = process.env.DATABASE_URL
+const REAL_DB_STEP = process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+
+test('sentinel: the real-DB execution-layer step must have DATABASE_URL (fail-not-skip, mirrors recovery-conflict-classifier-realdb.test.ts)', () => {
+  if (REAL_DB_STEP && !DATABASE_URL) {
+    throw new Error(
+      'multitable-o2-observation execution-layer step (METASHEET_REAL_DB_TEST_STEP=1) is missing DATABASE_URL — this must FAIL, not silently skip the read-only execution proof',
+    )
+  }
+})
+
+function psqlAvailable() {
+  try {
+    execFileSync('psql', ['--version'], { stdio: ['ignore', 'ignore', 'ignore'] })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const canRunExecutionLayer = Boolean(DATABASE_URL) && psqlAvailable()
+
+if (!DATABASE_URL) {
+  test('EXECUTION-LAYER SKIPPED — no DATABASE_URL reachable', { skip: true }, () => {})
+  // eslint-disable-next-line no-console
+  console.error(
+    '\n*** multitable-o2-observation.test.mjs: EXECUTION-LAYER read-only proof SKIPPED (no DATABASE_URL). ' +
+      'This is NOT evidence the SQL file is read-only-safe — only the static census ran. ' +
+      'Set DATABASE_URL to an already-migrated scratch Postgres to run the real proof. ***\n',
+  )
+} else if (!psqlAvailable()) {
+  if (REAL_DB_STEP) {
+    test('EXECUTION-LAYER: psql binary must be on PATH when the real-DB step marker is set', () => {
+      assert.fail('METASHEET_REAL_DB_TEST_STEP=1 but the `psql` binary is not on PATH — cannot run the read-only execution proof')
+    })
+  } else {
+    test('EXECUTION-LAYER SKIPPED — DATABASE_URL set but `psql` binary not found on PATH', { skip: true }, () => {})
+    // eslint-disable-next-line no-console
+    console.error('\n*** multitable-o2-observation.test.mjs: EXECUTION-LAYER read-only proof SKIPPED (no `psql` on PATH). ***\n')
+  }
+}
+
+/** Run `sql` (full text) via psql against DATABASE_URL, in one session pinned
+ *  default_transaction_read_only=on, ON_ERROR_STOP so any failing statement
+ *  aborts the whole run non-zero. Returns { status, stdout, stderr }. */
+function runReadOnlySql(sql) {
+  const dir = mkdtempSync(join(tmpdir(), 'o2p3-ro-'))
+  const file = join(dir, 'probe.sql')
+  try {
+    writeFileSync(file, sql, 'utf8')
+    const result = spawnSync(
+      'psql',
+      [DATABASE_URL, '-v', 'ON_ERROR_STOP=1', '--no-psqlrc', '-q', '-c', 'SET default_transaction_read_only = on;', '-f', file],
+      { encoding: 'utf8', timeout: 20000 },
+    )
+    return result
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** Run `sql` normally (NOT read-only) — used only for defensive cleanup of any
+ *  artefact a doctored probe might have left behind if a guard regressed. */
+function runCleanupSql(sql) {
+  try {
+    execFileSync('psql', [DATABASE_URL, '-v', 'ON_ERROR_STOP=1', '--no-psqlrc', '-q', '-c', sql], {
+      encoding: 'utf8',
+      timeout: 20000,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+  } catch {
+    // best-effort only
+  }
+}
+
+if (canRunExecutionLayer) {
+  test('EXECUTION: pristine SQL file runs clean (exit 0) inside a session pinned default_transaction_read_only=on — positive control that the file really is read-only end to end', () => {
+    const result = runReadOnlySql(sqlText)
+    assert.equal(result.status, 0, `pristine file should succeed read-only; stderr:\n${result.stderr}`)
+  })
+
+  for (const shape of EVASION_SHAPES) {
+    test(`EXECUTION: doctored copy with ${shape.name}`, () => {
+      const doctored = `${sqlText}\n${shape.fragment}\n`
+      let result
+      try {
+        result = runReadOnlySql(doctored)
+        if (shape.executionMode === 'blocked') {
+          // Positive assertion pinned to the SPECIFIC Postgres refusal text
+          // (not a bare "status !== 0", which cannot distinguish "blocked for
+          // the right reason" from "failed for some unrelated reason").
+          assert.match(
+            result.stderr,
+            /cannot execute \S+.*in a read-only transaction/i,
+            `expected a read-only-transaction refusal (SQLSTATE 25006 family); got exit ${result.status}, stderr:\n${result.stderr}`,
+          )
+        } else if (shape.executionMode === 'blocked-incidental') {
+          // Aborts, but NOT via the read-only mechanism — via the backend
+          // self-terminating. Pin to that specific, distinct signature so this
+          // is not mistaken for a 25006 read-only refusal.
+          assert.match(
+            result.stderr,
+            /terminating connection due to administrator command|server closed the connection unexpectedly/i,
+            `expected the self-termination signature (NOT a read-only refusal); got exit ${result.status}, stderr:\n${result.stderr}`,
+          )
+          assert.doesNotMatch(
+            result.stderr,
+            /in a read-only transaction/i,
+            'this abort must NOT be the read-only mechanism — that would falsely credit layer 2 for a shape it does not actually enforce',
+          )
+          // The incidental self-abort is not a safety guarantee (targeting any
+          // OTHER backend would succeed silently, even read-only). The static
+          // census is this shape's real guard — assert it here too, so a
+          // regression in that regex is caught even though this specific
+          // execution outcome (self-kill) would otherwise still look "red" for
+          // an unrelated reason.
+          assert.ok(
+            findUnsafeConstructs(doctored).length > 0,
+            'static census must catch this shape — the execution-layer abort above is incidental, not a reliable guarantee',
+          )
+        } else {
+          // executionMode 'not-blocked': documented Postgres behaviour, proven
+          // here with a real run — the read-only session does NOT stop this
+          // shape. The static census (asserted above) is this shape's actual
+          // guard; this assertion exists so a future Postgres/behavioural
+          // change that DID start blocking it would be noticed, not silently
+          // relied upon.
+          assert.equal(
+            result.status,
+            0,
+            `expected pg_advisory_lock NOT to be blocked by read-only mode (documents the real gap the static census covers); stderr:\n${result.stderr}`,
+          )
+          assert.ok(
+            findUnsafeConstructs(doctored).length > 0,
+            'static census must catch this shape since the execution layer does not',
+          )
+        }
+      } finally {
+        if (shape.cleanupSql) runCleanupSql(shape.cleanupSql)
+      }
+    })
+  }
+}
