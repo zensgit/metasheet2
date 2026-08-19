@@ -416,6 +416,61 @@ async function awaitBulkReassignTestBarrier(
 }
 
 /**
+ * F4-E departure transfer (Lock-4) test-only concurrency seam, mirroring the shipped
+ * `W4c3bBulkReassignBarrierPoint` seam above. Production callers never set this; tests use it to
+ * interleave a second connection (a concurrent decide/approve on the same node) while the departure
+ * txn still holds the instance FOR UPDATE lock — proving the race is resolved by that lock, not by
+ * argument.
+ */
+export type ApprovalDepartureTransferBarrierPoint = 'after_instance_lock'
+
+type ApprovalDepartureTransferBarrierFn = (
+  point: ApprovalDepartureTransferBarrierPoint,
+  info: { instanceId: string },
+) => Promise<void>
+
+let departureTransferTestBarrierForTests: ApprovalDepartureTransferBarrierFn | null = null
+
+/** Test-only. Pass null to clear. */
+export function __setApprovalDepartureTransferTestBarrierForTests(
+  hook: ApprovalDepartureTransferBarrierFn | null,
+): void {
+  departureTransferTestBarrierForTests = hook
+}
+
+async function awaitApprovalDepartureTransferBarrier(
+  point: ApprovalDepartureTransferBarrierPoint,
+  instanceId: string,
+): Promise<void> {
+  if (departureTransferTestBarrierForTests) {
+    await departureTransferTestBarrierForTests(point, { instanceId })
+  }
+}
+
+/** F4-E — per-instance reason `applyApprovalDepartureTransfer` did not move the departed user's seat(s). */
+export type ApprovalDepartureTransferSkipReason =
+  | 'not-found'
+  | 'not-pending'
+  | 'no-active-seat'
+  | 'target-already-assignee'
+  | 'error'
+
+export interface ApprovalDepartureTransferSkip {
+  id: string
+  reason: ApprovalDepartureTransferSkipReason
+}
+
+/** F4-E — outcome of `applyApprovalDepartureTransfer` across every pending instance where the
+ *  departed user held an active seat. */
+export interface ApprovalDepartureTransferResult {
+  /** Instance ids where at least one seat moved to the resolved manager. */
+  transferred: string[]
+  /** OD-L4-9(a) fail-closed: no manager resolvable — seat(s) left in place, audited + warned. */
+  noManagerResolved: string[]
+  skipped: ApprovalDepartureTransferSkip[]
+}
+
+/**
  * P1#2e producer family 1 — wrap an in-transaction pg client (the connection that has BEGUN and not yet
  * COMMITted) as the durable seam's `TransactionalQueryable`. The `isTransaction: true` marker documents intent
  * but proves nothing on its own; `produceAutomationEvent`'s `pg_current_xact_id()` probe (pg-transaction-guard)
@@ -582,6 +637,11 @@ export type ApprovalNodeTimeoutEffectOutcome =
   | 'skipped_invalid_config'
   | 'skipped_terminal_gated'
   | 'skipped_parallel_state'
+// Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级, OD-L4-9(a):
+// system sentinel recorded as the actor of an out-of-band departure transfer. `isSystemSentinelActor`
+// (ApprovalAssigneeResolver.ts) drops any `system:`-prefixed actor on a bare `startsWith` predicate, so
+// this NEW value needs zero edits there — it is covered by construction, not by an enumerated list.
+const APPROVAL_DEPARTURE_SYSTEM_ACTOR = 'system:approval-departure'
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
@@ -7827,6 +7887,286 @@ export class ApprovalProductService {
       skipped: result.skipped,
       affectedRequesterIds: result.affectedRequesterIds,
     })
+    return result
+  }
+
+  /**
+   * Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级,
+   * OD-L4-9(a). OUT-OF-BAND, not in-resolver: "The departed person is an arbitrary approver, not
+   * the requester. Their manager is NOT in the frozen requester snapshot, and Lock-1 §2.1 forbids
+   * a database call inside the resolver." Modeled on the SHIPPED SLA timeout transfer's MUTATION
+   * posture (`applyNodeTimeoutEffect`'s `transfer` branch above): own transaction, instance
+   * `FOR UPDATE`, re-verify in-txn, single-shot per instance, preserve each moved seat's
+   * `entry_epoch` (NEVER bump `node_activation_seq`), and — matching that branch's own "an
+   * in-place handover does not bump the instance version" parity comment — this in-place seat
+   * swap does not bump `approval_instances.version` either. DML shape (per-assignee, epoch-bucketed
+   * inserts, audit rows) is modeled on `bulkReassignApprovals` above; unlike that admin path this
+   * is scoped to ONE departed user's own seats, not an admin-chosen (from, to) pair, and it does
+   * NOT go through `bulkReassignApprovals` (the lock: "does not duplicate `bulkReassignApprovals`,
+   * which stays the admin-driven path").
+   *
+   * Detection source (OD-L4-8a, disclosed here so the caller cannot silently drop it): the intended
+   * trigger is the directory deprovision `user_changed` effect (`deprovision-planner.ts`'s
+   * `mark_inactive` + `globallyClear` emit, consumed via `directory-sync.ts`'s
+   * `usersDeactivatedCount`), which is gated behind `DIRECTORY_DEPROVISION_ENABLED` —
+   * **default OFF per org** (`isDirectoryDeprovisionEnabled()`). 离职自动转上级 therefore does NOT
+   * fire for every org; this method is deliberately NOT wired to that consumer in this slice (P3-A
+   * scope — the wiring + operator-warning surface is a separate slice per the Lock-4 P3-A briefs).
+   * Any authoring/disclosure copy describing this feature MUST carry that limit and MUST NOT claim
+   * universal coverage.
+   *
+   * Contract:
+   * - Sentinel actor `APPROVAL_DEPARTURE_SYSTEM_ACTOR` ('system:approval-departure').
+   * - Audit verb is `'reassign'`, NEVER `'transfer'` — `'transfer'` is one of the four actions the
+   *   revoke-window guard counts (`action IN ('approve','reject','transfer','handle')`, scoped to
+   *   `metadata->>'nodeKey'`); a departure writing `'transfer'` would silently close the
+   *   requester's revoke window as a side effect of an approver leaving. `'reassign'` is the verb
+   *   `bulkReassignApprovals` already uses and is already admitted by the CHECK constraint — no new
+   *   verb, no bootstrap bump, no migration.
+   * - Gate E-3 (delegation): a seat already substituted by delegation is NOT re-transferred on the
+   *   DELEGATOR's departure — `pushResolved` (ApprovalAssigneeResolver.ts) already rewrites the row's
+   *   `assignee_id` to the DELEGATEE, so a delegator's own `assignee_id` never appears among a
+   *   node's active rows once delegated; the `assignee_id = $departedUserId` filter below is
+   *   naturally exclusive for that case. The delegatee's OWN departure DOES transfer that seat (its
+   *   `assignee_id` IS the delegatee) — asserted on the seat's CURRENT assignee, not the departed id.
+   *   The extra `(metadata ->> 'delegatedFrom') IS DISTINCT FROM $departedUserId` predicate is
+   *   defense-in-depth (structurally redundant with the `assignee_id` filter today) so a future
+   *   resolver change cannot silently reopen this gate.
+   * - Fail-closed default (locked, not an enum): when no ACTIVE manager is resolvable, the
+   *   assignment is LEFT IN PLACE — an audit row (`outcome: 'no_manager_resolved'`) plus an operator
+   *   warning log are emitted. Never auto-approved, never dropped, never escalated to an admin seat.
+   * - NOT parallel-restricted: unlike the SLA transfer (which hands the WHOLE node over and must
+   *   therefore refuse an in-flight parallel region), this method only ever touches the departed
+   *   user's OWN seat rows by `assignee_id` — it never deactivates a node wholesale — so a departed
+   *   user's seat inside one branch of a parallel region is safe to move without disturbing sibling
+   *   branches.
+   * - Concurrency: the instance `FOR UPDATE` lock (same pattern as every other terminal/mutating
+   *   approval path in this file, including the `/approve` and `/actions` routes' own instance locks)
+   *   is the sole race guard — a concurrent decide on the same instance blocks until this transaction
+   *   commits or rolls back, then re-reads current (post-transfer) state. `awaitApprovalDepartureTransferBarrier`
+   *   is the test-only seam that pauses here, held-locked, so a test can construct that race for real
+   *   rather than argue it.
+   */
+  async applyApprovalDepartureTransfer(departedUserId: string): Promise<ApprovalDepartureTransferResult> {
+    if (!pool) throw new Error('Database not available')
+    const userId = departedUserId.trim()
+    if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
+
+    const result: ApprovalDepartureTransferResult = { transferred: [], noManagerResolved: [], skipped: [] }
+    const skip = (id: string, reasonCode: ApprovalDepartureTransferSkipReason): void => {
+      result.skipped.push({ id, reason: reasonCode })
+    }
+
+    // ONE live directory read for this departure signal (not per-instance, not inside the pure
+    // resolver — Lock-1 §2.1). A multi-org routing ambiguity / policy misconfig / transient read
+    // failure all collapse to the SAME "manager unresolved" fail-closed outcome below — OD-L4-9(a)
+    // treats every unresolved case identically, never distinguishing by cause.
+    let resolvedManagerId: string | null = null
+    try {
+      const orgRelations = await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})
+      const candidate = orgRelations.managerId ? orgRelations.managerId.trim() : ''
+      if (candidate && candidate !== userId) {
+        const activeManager = await pool.query<{ id: string }>(
+          `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
+          [candidate],
+        )
+        if (activeManager.rows.length > 0) resolvedManagerId = candidate
+      }
+    } catch (error) {
+      approvalProductLogger.warn(
+        `approval departure transfer: manager resolution failed for ${userId}: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error : undefined,
+      )
+    }
+
+    const candidates = await pool.query<{ instance_id: string }>(
+      `SELECT DISTINCT a.instance_id
+         FROM approval_assignments a
+         JOIN approval_instances i ON i.id = a.instance_id
+        WHERE a.assignment_type = 'user'
+          AND a.assignee_id = $1
+          AND a.is_active = TRUE
+          AND i.status = 'pending'
+          AND COALESCE(i.source_system, 'platform') = 'platform'
+          AND (a.metadata ->> 'delegatedFrom') IS DISTINCT FROM $1
+        ORDER BY a.instance_id ASC`,
+      [userId],
+    )
+
+    for (const candidateRow of candidates.rows) {
+      const instanceId = candidateRow.instance_id
+      let client: ApprovalDbClient | null = null
+      try {
+        client = await pool.connect()
+        await client.query('BEGIN')
+
+        const instanceResult = await client.query<ApprovalInstanceRow>(
+          `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+          [instanceId],
+        )
+        const instance = instanceResult.rows[0]
+        if (!instance) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-found')
+          continue
+        }
+        if (instance.status !== 'pending') {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-pending')
+          continue
+        }
+
+        // Holds the instance FOR UPDATE — a concurrent decide/reassign on this instance blocks here
+        // until this transaction commits or rolls back (see the concurrency note above).
+        await awaitApprovalDepartureTransferBarrier('after_instance_lock', instanceId)
+
+        // Gate E-3: source seats are the departed user's CURRENT active assignments, excluding any
+        // row a future resolver change might leave carrying `delegatedFrom === userId` (see contract
+        // note above — structurally redundant with `assignee_id = $2` today).
+        const sourceAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+              AND (metadata ->> 'delegatedFrom') IS DISTINCT FROM $2
+            ORDER BY COALESCE(node_key, ''), created_at ASC
+            FOR UPDATE`,
+          [instanceId, userId],
+        )
+        if (sourceAssignments.rows.length === 0) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'no-active-seat')
+          continue
+        }
+
+        if (!resolvedManagerId) {
+          // OD-L4-9(a) fail-closed default: LEAVE the assignment(s) in place. One audit row per seat
+          // (`outcome: 'no_manager_resolved'`) + an operator warning; fromVersion === toVersion and
+          // fromStatus === toStatus record that nothing moved. Never auto-approve, drop, or escalate.
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'no_manager_resolved',
+                fromUserId: userId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: no manager resolved for departed user on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
+          result.noManagerResolved.push(instanceId)
+          continue
+        }
+
+        // Collision guard, mirroring bulkReassignApprovals's own `target-already-assignee` skip: if
+        // the resolved manager already holds ANY active seat on this instance, skip the whole
+        // instance rather than risk a partial-mutation collision with the active-assignment unique
+        // index (idx_approval_assignments_active_unique).
+        const targetAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT id
+             FROM approval_assignments
+            WHERE instance_id = $1 AND assignment_type = 'user' AND assignee_id = $2 AND is_active = TRUE
+            FOR UPDATE`,
+          [instanceId, resolvedManagerId],
+        )
+        if (targetAssignments.rows.length > 0) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'target-already-assignee')
+          continue
+        }
+
+        // MUTATION (nodeEntryEpoch §4·B), same posture as the SLA timeout transfer and
+        // bulkReassignApprovals: preserve each seat's OWN entry_epoch (read off the still-active
+        // locked row, BEFORE the deactivate below) — NEVER bump node_activation_seq. Grouped by
+        // epoch so a departed user holding parallel-branch seats never creates a mixed-epoch node.
+        const reassignmentsByEpoch = new Map<
+          number | null,
+          Array<{ assignmentType: 'user'; assigneeId: string; sourceStep: number; nodeKey: string; metadata: Record<string, unknown> }>
+        >()
+        for (const assignment of sourceAssignments.rows) {
+          const epoch = assignment.entry_epoch ?? null
+          const bucket = reassignmentsByEpoch.get(epoch) ?? []
+          bucket.push({
+            assignmentType: 'user' as const,
+            assigneeId: resolvedManagerId,
+            sourceStep: assignment.source_step ?? 0,
+            nodeKey: assignment.node_key || '',
+            metadata: {
+              departureTransfer: true,
+              reassignedFrom: userId,
+              previousAssignmentId: assignment.id,
+            },
+          })
+          reassignmentsByEpoch.set(epoch, bucket)
+        }
+
+        await client.query(
+          `UPDATE approval_assignments
+              SET is_active = FALSE, updated_at = now()
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+              AND (metadata ->> 'delegatedFrom') IS DISTINCT FROM $2`,
+          [instanceId, userId],
+        )
+        const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
+        for (const [epoch, bucket] of reassignmentsByEpoch) {
+          createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, bucket, epoch)))
+        }
+
+        for (const assignment of sourceAssignments.rows) {
+          await this.insertApprovalRecord(client, instanceId, {
+            action: 'reassign',
+            actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+            actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+            comment: null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: instance.version,
+            metadata: {
+              departureTransfer: true,
+              outcome: 'transferred',
+              fromUserId: userId,
+              toUserId: resolvedManagerId,
+              nodeKey: assignment.node_key,
+              previousAssignmentId: assignment.id,
+            },
+            targetUserId: resolvedManagerId,
+          })
+        }
+
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
+        await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
+        result.transferred.push(instanceId)
+      } catch (error) {
+        await rollbackQuietly(client)
+        approvalProductLogger.warn(
+          `approval departure transfer error for instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+          error instanceof Error ? error : undefined,
+        )
+        skip(instanceId, 'error')
+      } finally {
+        client?.release()
+      }
+    }
+
     return result
   }
 

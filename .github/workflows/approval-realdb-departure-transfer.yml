@@ -1,0 +1,133 @@
+name: Approval departure transfer real-DB acceptance (Lock-4 F4-E gates E-1/E-2/E-3)
+
+# EVIDENCE LANE for the Lock-4 F4-E (离职自动转上级, OD-L4-9(a)) real-DB acceptance suite
+# (tests/integration/approval-departure-transfer.db.test.ts — a departure signal moves the
+# departed user's active seats to a live-resolved manager, same node-entry epoch, with the
+# system:approval-departure sentinel and a 'reassign' audit row; fail-closed when no manager is
+# resolvable; a delegation-substituted seat is not re-transferred on the delegator's departure but
+# IS transferred on the delegatee's own departure; plus a constructed two-connection concurrency
+# race). Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag
+# change — `applyApprovalDepartureTransfer` is invoked only by this suite's explicit test-visible
+# entry point, not wired to any directory-sync trigger.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
+# every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
+# approval-realdb-l6a-roundscoping.yml lane and the approval-realdb-acceptance.yml /
+# approval-realdb-handler.yml precedents it and they cite.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
+# actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run
+# in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
+# file as skipped.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # No `branches:` filter, mirroring the approval-realdb-l6a-roundscoping.yml precedent: a
+    # brand-new workflow cannot be workflow_dispatch-ed until it has run once via a trigger it
+    # responds to, and a stacked-base PR would silently skip a branch-filtered trigger. The `paths`
+    # filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-departure-transfer.db.test.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - '.github/workflows/approval-realdb-departure-transfer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-departure-transfer.db.test.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - '.github/workflows/approval-realdb-departure-transfer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-departure-transfer:
+    name: approval-realdb-departure-transfer
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step / the
+          # sibling approval-realdb-l6a-roundscoping.yml lane — this lane provisions the identical
+          # schema.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-4 F4-E departure transfer real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in the
+        # log instead of reading as green.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-departure-transfer.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-departure-transfer.db.test.ts"
+            echo "lock=approval-lock4-flow-policies-20260817 F4-E / OD-L4-9(a)"
+            echo "gates=E-1,E-2,E-3"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
