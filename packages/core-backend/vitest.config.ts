@@ -1065,6 +1065,10 @@ export default defineConfig({
       // O2-S3 lease-starvation backoff goldens (DATABASE_URL-gated; two-point wired via the
       // exact-anchor CI wiring contract).
       'tests/integration/multitable-recovery-lease-backoff-realdb.test.ts',
+      // O2-S2 recovery-conflict classifier vs the REAL authority-trigger 40001 (DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot collect-skip-green it; two-point pinned via the
+      // exact-anchor CI wiring contract).
+      'tests/integration/recovery-conflict-classifier-realdb.test.ts',
       // TM-closeout slice goldens (DATABASE_URL-gated; two-point wired via the exact-anchor CI wiring contract).
       'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',

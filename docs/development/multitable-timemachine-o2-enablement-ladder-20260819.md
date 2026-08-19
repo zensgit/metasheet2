@@ -26,6 +26,9 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
 - [ ] O2-S1（注册同事务原子性）、O2-S2（40001 单一分类器 + 11 写者 census）、
       O2-S3（recovery 租约有界退避）已合 main 且随镜像部署到目标主机。
 - [ ] 目标主机 `postdeploy-full` containment PASS（当前镜像、pending migrations = 0）。
+- [ ] **census 可达性升级已闭合**（对抗门 P3-1：40001 census 目前只数 token 不辨死代码——
+      `if (false && …)` 化 9 处仍全绿；trigger DISABLED 期为 P3，**L1 打开 trigger 前必须**
+      把 census 升级为可达性/行为级或逐面补判别腿）。
 - [ ] 回滚路径演练过一次：`ALTER TABLE … DISABLE TRIGGER` 全量脚本 + 单 flag 移除步骤
       （见 §5），并重跑 postdeploy-full 验证回到 inert 姿态。
 
