@@ -470,6 +470,95 @@ function findDisallowedPgFunctionCalls(stmt) {
   }
   return [...found]
 }
+
+// ---------------------------------------------------------------------------
+// P3-3 gate fix (round 3): the pg_* allowlist above is sound WITHIN its own namespace,
+// but structurally BLIND outside it — `lo_create(0)` and `lo_from_bytea(0, …)` are real,
+// non-pg_*-prefixed function names, so PG_FUNCTION_CALL_RE cannot see them at all;
+// `lo_create`/`lo_from_bytea`/`lo_put`/`lo_open`/`lo_write`/`lo_truncate` are not (all)
+// named in LOCK_OR_SIDE_EFFECT_FN_RE either (only lo_import/lo_export/lo_unlink are); and
+// NEITHER of the two write-target GUCs the invariant canary watches is touched by a
+// large-object write, so the canary stays silent by design. Verified empirically this
+// gate: under `default_transaction_read_only = on`, `lo_create(0)` and
+// `lo_from_bytea(0, '\x0102'::bytea)` each create a REAL, PERSISTENT large object
+// (`pg_largeobject_metadata` row count increases; exit 0) — see mutationEvidence for the
+// OIDs. dblink_connect(...) and set_config(...) are two more non-pg_*-prefixed names this
+// file already separately bans by NAME (LOCK_OR_SIDE_EFFECT_FN_RE) — this fix makes that
+// banning non-enumerative too.
+//
+// STRUCTURAL fix, same shape as the pg_* allowlist above (not a replacement for it — kept
+// alongside as defense-in-depth / documentation, same convention as
+// LOCK_OR_SIDE_EFFECT_FN_RE vs PG_FUNCTION_CALL_RE): default-deny over EVERY function
+// call in the file, not namespaced to pg_*. This observation kit's ENTIRE function-call
+// surface today is exactly 8 names — count, max, min, btrim, hashtext, hashtextextended,
+// current_database, current_schema — verified below (positive control, derived from the
+// file's own splitStatements tokenizer, not a separate ad hoc scan). Framed precisely,
+// per the round-3 gate's own NIT-1.3 correction of the sibling pg_* comment: this is
+// default-deny over every CALL SITE modulo a short, justified EXCLUSION LIST of SQL
+// grammar keywords that name no callable function at all (below) — it is not claimed to
+// be "structural, not enumerative" in some absolute sense, because the exclusion list
+// itself is a small, closed enumeration by construction. What is non-enumerative is the
+// thing that matters: the ALLOWLIST (which functions may be called), not the grammar
+// carve-out (which tokens are not function names).
+const FUNCTION_CALL_RE = /\b([A-Za-z_][A-Za-z0-9_]*)"?\s*(?=\()/g
+// SQL clause keywords that are legitimately followed by `(` in ordinary SQL syntax but are
+// not — and cannot be — function calls: `AND (...)` / grouping, `IN (...)`, `AS (...)` (a
+// CTE body — already handled on its own terms by CTE_WRITE_RE above), `VALUES (...)`.
+// Deliberately TRIMMED to exactly what this file's own pristine content requires (proven
+// by running FUNCTION_CALL_RE over the real, tokenized statements — see the positive
+// control below) rather than a speculative, larger SQL-keyword list: every entry here is
+// empirically load-bearing against the real file, so a mutation that deletes one reds the
+// pristine-census test naming a real keyword, not a dead predicate nothing exercises.
+const SQL_CLAUSE_KEYWORDS = new Set(['and', 'as', 'in', 'values'])
+const ALLOWED_FUNCTION_CALLS = new Set([
+  'count',
+  'max',
+  'min',
+  'btrim',
+  'hashtext',
+  'hashtextextended',
+  'current_database',
+  'current_schema',
+])
+
+/** True if the function-call-shaped match at `matchIndex` in `stmt` is actually a CTE
+ *  name-with-column-list header — `WITH name(col, col) AS (...)` — not a function call:
+ *  Postgres CTE syntax allows an explicit column list directly after the CTE name, and
+ *  this file's only two occurrences (`subjects(kind, subject_id)`, `canary_sheets(sheet_id)`)
+ *  are both this shape, immediately preceded by the `WITH` keyword. Deliberately narrow —
+ *  only the exact `WITH name(` adjacency is excluded, so a FUTURE multi-CTE list
+ *  (`WITH a AS (…), b(cols) AS (…)`) or `WITH RECURSIVE name(cols)` is intentionally left
+ *  UNEXCLUDED and would be FLAGGED (fail-closed) until someone extends this predicate and
+ *  justifies why — not silently "fixed" by broadening it ahead of need. */
+function isCteColumnListHeader(stmt, matchIndex) {
+  return /\bWITH\s*$/i.test(stmt.slice(0, matchIndex))
+}
+
+/** Function calls in `stmt` that are not on the explicit allowlist — default-deny over
+ *  EVERY function call (not namespaced to pg_*, unlike findDisallowedPgFunctionCalls
+ *  above), so `lo_create`, `lo_from_bytea`, `dblink_connect`, `set_config`, and any future
+ *  non-pg_*-prefixed sibling are flagged without needing to be named by this file's other,
+ *  narrower predicates. Strips a trailing `"` before comparing (same quoted-identifier
+ *  tolerance as PG_FUNCTION_CALL_RE/LOCK_OR_SIDE_EFFECT_FN_RE), skips SQL grammar keywords
+ *  and CTE column-list headers (neither is a callable function), and skips names already
+ *  covered by the narrower pg_* allowlist above (pg_* names are validated there — listing
+ *  them again here too would just be the same verdict via a second path, not a distinct
+ *  check; NOT skipped for that reason in existing narrower-predicate tests below, which
+ *  intentionally call the pg_*-specific and named-blocklist predicates directly instead of
+ *  routing through this general one — see their own comments). */
+function findDisallowedFunctionCalls(stmt) {
+  const found = new Set()
+  for (const m of stmt.matchAll(FUNCTION_CALL_RE)) {
+    if (isCteColumnListHeader(stmt, m.index)) continue
+    const name = m[1].toLowerCase()
+    if (SQL_CLAUSE_KEYWORDS.has(name)) continue
+    if (name.startsWith('pg_')) continue
+    if (!ALLOWED_FUNCTION_CALLS.has(name)) found.add(name)
+  }
+  return [...found]
+}
+// ---------------------------------------------------------------------------
+
 // P3-3 gate fix: dynamic-SQL-execution XML functions take a raw SQL TEXT argument and
 // EXECUTE it via SPI, returning the result as XML — a regex census cannot see inside the
 // string literal to know it carries a DELETE (query_to_xml('DELETE …', …) has a SELECT-
@@ -531,6 +620,21 @@ function findUnsafeConstructs(sql) {
         `pg_* function call(s) not on the explicit allowlist (${disallowedPg.join(', ')}) — structural ` +
           'default-deny: any pg_* call this file has not explicitly justified is flagged, independent of ' +
           'name enumeration',
+      )
+    }
+    // P3-3 gate fix (round 3): the GENERAL structural default-deny backstop — catches
+    // every function call, pg_*-prefixed or not, not on ALLOWED_FUNCTION_CALLS. Load-
+    // bearing for lo_create/lo_from_bytea/dblink_connect/set_config and any future
+    // non-pg_*-prefixed sibling the two narrower checks above (findDisallowedPgFunctionCalls,
+    // LOCK_OR_SIDE_EFFECT_FN_RE) have not enumerated. Not a replacement for either — kept
+    // alongside them as defense-in-depth, same convention as pg_* allowlist vs
+    // LOCK_OR_SIDE_EFFECT_FN_RE.
+    const disallowedFn = findDisallowedFunctionCalls(stmt)
+    if (disallowedFn.length > 0) {
+      reasons.push(
+        `function call(s) not on the explicit allowlist (${disallowedFn.join(', ')}) — structural default-deny ` +
+          'over EVERY function call (not namespaced to pg_*): any call this file has not explicitly justified ' +
+          'is flagged, independent of namespace or name enumeration',
       )
     }
     if (reasons.length > 0) findings.push({ stmt: stmt.slice(0, 80), reasons })
@@ -674,6 +778,42 @@ const EVASION_SHAPES = [
     fragment: 'SELECT pg_stat_reset();',
     executionMode: 'not-blocked',
   },
+  {
+    // P3-3 gate fix (round 3): a REAL, PERSISTENT write that is NOT pg_*-prefixed, so
+    // PG_FUNCTION_CALL_RE structurally cannot see it, and not fully named in
+    // LOCK_OR_SIDE_EFFECT_FN_RE (only lo_import/lo_export/lo_unlink are listed there —
+    // lo_create is not). Verified empirically this gate, against a real, migrated scratch
+    // database, under `default_transaction_read_only = on`: lo_create(0) returns a real
+    // OID and `pg_largeobject_metadata` gains a row — a genuine write, not merely
+    // unflagged, and NOT blocked by read-only mode (large objects are not table data in
+    // the sense `default_transaction_read_only` governs). The general function-call
+    // default-deny (findDisallowedFunctionCalls, above) is this shape's only guard — this
+    // fragment self-cleans (wraps the create in lo_unlink) so the execution-layer run
+    // below leaves no large object behind in the operator's database. HONESTY NOTE
+    // (multiple fail-closed doors covering for each other): `lo_unlink` is already a named
+    // member of LOCK_OR_SIDE_EFFECT_FN_RE, so this fragment's OWN static-census assertion
+    // (`findUnsafeConstructs(doctored).length > 0`, in the execution-layer loop below) is
+    // satisfied via THAT door even if the new general default-deny regressed — it is not,
+    // by itself, a discriminating test for the general check. The discriminating tests are
+    // the dedicated hermetic ones (`findDisallowedFunctionCalls('SELECT lo_create(0);')`,
+    // above), which use a bare, non-self-cleaning fragment with no already-blocklisted
+    // name in it — mutation-verified (see mutationEvidence) to red on their own when the
+    // general check is disabled, while this EVASION_SHAPES entry's static assertion stays
+    // green throughout (masked by `lo_unlink`).
+    name: 'SELECT lo_create(0) (large-object write, not pg_*-prefixed — not blocked by read-only mode)',
+    fragment: 'SELECT lo_unlink(lo_create(0));',
+    executionMode: 'not-blocked',
+  },
+  {
+    // P3-3 gate fix (round 3): the bytea-content sibling of lo_create — same real,
+    // persistent, not-pg_*-prefixed, not-read-only-gated write, verified empirically this
+    // gate. Self-cleaning, same reasoning as lo_create above — including the same
+    // masked-by-`lo_unlink` honesty note (the dedicated hermetic test for lo_from_bytea is
+    // the discriminating one, not this entry's static-census assertion).
+    name: "SELECT lo_from_bytea(0, '\\x0102'::bytea) (large-object write via bytea content, not blocked by read-only mode)",
+    fragment: "SELECT lo_unlink(lo_from_bytea(0, '\\x0102'::bytea));",
+    executionMode: 'not-blocked',
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -701,6 +841,23 @@ const SET_CONFIG_DISARM_SHAPE = {
   name: "SELECT set_config('default_transaction_read_only', 'off', false) (guard disarm)",
   fragment: "SELECT set_config('default_transaction_read_only', 'off', false);",
   executionMode: 'disarm',
+}
+
+// P3-2 gate fix (round 3): the BOUNDED sibling of SET_CONFIG_DISARM_SHAPE — disarm, WRITE,
+// then RESTORE before the session (and this canary) ever runs. Round-3 gate finding: this
+// exact chain passes every layer under the OLD session-default-only posture (the canary is
+// blind because the restore already ran; the write itself succeeded because the session
+// default really was 'off' at the moment it executed). See runReadOnlySql's own comment for
+// why wrapping the whole script in an explicit `BEGIN READ ONLY; … COMMIT;` transaction
+// closes this: the WRITE line itself now errors 25006, before the disarm's restore
+// statement is ever reached — a structurally different, and strictly earlier, catch than
+// the end-of-session canary.
+const BOUNDED_DISARM_WRITE_SHAPE = {
+  name: 'bounded guard disarm + write + restore (disarm, CREATE TEMP TABLE, restore, all before session end)',
+  fragment:
+    "SELECT set_config('default_transaction_read_only', 'off', false);\n" +
+    'CREATE TEMP TABLE o2_bounded_disarm_write_probe(x int);\n' +
+    "SELECT set_config('default_transaction_read_only', 'on', false);",
 }
 
 // One test per shape (not one loop inside a single test) so a regression in
@@ -770,17 +927,79 @@ test('SQL: static census catches a quoted-identifier pg_* call — `"pg_ls_waldi
 })
 
 // Deliberately uses `setval` (NOT a pg_*-prefixed name) rather than `pg_read_file`: a
-// pg_*-prefixed quoted call would ALSO be caught by the structural allowlist above
-// regardless of this regex's own quote-tolerance, which would make this test pass even
-// with a regression in LOCK_OR_SIDE_EFFECT_FN_RE's fix specifically (confirmed by
-// mutation — see mutationEvidence). `setval` is only on this named blocklist, not the
-// pg_* allowlist, so this test is load-bearing on THIS regex alone.
-test('SQL: static census catches a quoted-identifier named-blocklist call — `"setval"(...)` (LOCK_OR_SIDE_EFFECT_FN_RE, a non-pg_*-prefixed member so the structural pg_* allowlist above cannot mask a regression here)', () => {
+// pg_*-prefixed quoted call would ALSO be caught by the structural pg_* allowlist above
+// regardless of this regex's own quote-tolerance. Asserts the REGEX DIRECTLY, not via
+// findUnsafeConstructs (multiple fail-closed doors cover for each other — a door-level
+// pass is not proof any SPECIFIC door still fires): since the P3-3 round-3 general
+// function-call default-deny (findDisallowedFunctionCalls, below) ALSO now flags `setval`
+// (it is not pg_*-prefixed and not on ALLOWED_FUNCTION_CALLS), routing this test through
+// findUnsafeConstructs would keep it green even if LOCK_OR_SIDE_EFFECT_FN_RE's own
+// quote-tolerance regressed — the general check would silently cover for it. Asserting
+// LOCK_OR_SIDE_EFFECT_FN_RE.test(...) directly keeps this test load-bearing on THIS regex
+// alone, exactly as originally intended.
+test('SQL: LOCK_OR_SIDE_EFFECT_FN_RE catches a quoted-identifier named-blocklist call — `"setval"(...)` (a non-pg_*-prefixed member, asserted directly so the general function-call default-deny below cannot mask a regression here)', () => {
+  assert.ok(LOCK_OR_SIDE_EFFECT_FN_RE.test("SELECT \"setval\"('some_seq', 1);"))
+  // Still true end-to-end via the full census too (defense-in-depth, not the discriminator).
   assert.ok(findUnsafeConstructs("SELECT \"setval\"('some_seq', 1);").length > 0)
 })
 
 test('SQL: static census catches a quoted-identifier dynamic-SQL-execution call — `"query_to_xml"(...)` (DYNAMIC_SQL_EXEC_FN_RE)', () => {
   assert.ok(findUnsafeConstructs('SELECT "query_to_xml"(\'DELETE FROM meta_records_trash WHERE 1=0\', true, false, \'\');').length > 0)
+})
+
+// ---------------------------------------------------------------------------
+// P3-3 gate fix (round 3): the GENERAL function-call default-deny — findDisallowedFunctionCalls.
+// ---------------------------------------------------------------------------
+
+test('SQL: general function-call default-deny catches lo_create(...) (large-object write; not pg_*-prefixed, so only this general check — not the pg_* allowlist, not LOCK_OR_SIDE_EFFECT_FN_RE — can see it)', () => {
+  assert.deepEqual(findDisallowedFunctionCalls('SELECT lo_create(0);'), ['lo_create'])
+  assert.ok(findUnsafeConstructs('SELECT lo_create(0);').length > 0)
+})
+
+test('SQL: general function-call default-deny catches lo_from_bytea(...) (large-object write via bytea content)', () => {
+  assert.deepEqual(findDisallowedFunctionCalls("SELECT lo_from_bytea(0, '\\x0102'::bytea);"), ['lo_from_bytea'])
+  assert.ok(findUnsafeConstructs("SELECT lo_from_bytea(0, '\\x0102'::bytea);").length > 0)
+})
+
+test('SQL: general function-call default-deny catches dblink_connect(...) (already named in LOCK_OR_SIDE_EFFECT_FN_RE; caught here too, independent of that enumeration)', () => {
+  assert.deepEqual(findDisallowedFunctionCalls("SELECT dblink_connect('o2probe', '');"), ['dblink_connect'])
+})
+
+test('SQL: general function-call default-deny is NOT vacuous — an ALLOWLISTED call, in the exact multi-call shape the real file uses, is genuinely permitted (positive control), while a non-allowlisted sibling call in the identical shape is flagged', () => {
+  assert.deepEqual(
+    findDisallowedFunctionCalls(
+      "SELECT count(*), max(x), min(x), btrim(y), hashtext(z), hashtextextended(z, 0), current_database(), current_schema() FROM t;",
+    ),
+    [],
+    'every one of the 8 allowlisted names must be permitted — this must not just be an empty file passing vacuously',
+  )
+  assert.deepEqual(findDisallowedFunctionCalls('SELECT length(x) FROM t;'), ['length'])
+})
+
+test('SQL: general function-call default-deny — SQL grammar keywords (AND/AS/IN/VALUES) that are followed by `(` are NOT mistaken for function calls', () => {
+  assert.deepEqual(findDisallowedFunctionCalls('SELECT 1 WHERE a = 1 AND (b = 2);'), [])
+  assert.deepEqual(findDisallowedFunctionCalls('SELECT x FROM t WHERE x IN (1, 2, 3);'), [])
+  assert.deepEqual(findDisallowedFunctionCalls('WITH v(x) AS (VALUES (1), (2)) SELECT * FROM v;'), [])
+})
+
+test('SQL: general function-call default-deny — a CTE name-with-column-list header (`WITH name(cols) AS (…)`) is NOT mistaken for a function call, but the identical name used as a REAL function call elsewhere in the same statement still is', () => {
+  assert.deepEqual(findDisallowedFunctionCalls('WITH subjects(kind, subject_id) AS (VALUES (1, 2)) SELECT count(*) FROM subjects;'), [])
+  // The same word, NOT preceded by WITH, IS treated as a function call.
+  assert.deepEqual(findDisallowedFunctionCalls('SELECT subjects() FROM t;'), ['subjects'])
+})
+
+test('SQL: general function-call default-deny — positive control derived from splitStatements over the REAL file: exactly the 8 documented names appear, nothing more (proves the allowlist is not padded with names the file never actually calls)', () => {
+  const found = new Set()
+  for (const stmt of splitStatements(sqlText)) {
+    for (const m of stmt.matchAll(FUNCTION_CALL_RE)) {
+      if (isCteColumnListHeader(stmt, m.index)) continue
+      const name = m[1].toLowerCase()
+      if (SQL_CLAUSE_KEYWORDS.has(name)) continue
+      if (name.startsWith('pg_')) continue
+      found.add(name)
+    }
+  }
+  assert.deepEqual([...found].sort(), [...ALLOWED_FUNCTION_CALLS].sort())
 })
 
 test('SQL: balanced parentheses per statement (parse-shape sanity)', () => {
@@ -1145,6 +1364,37 @@ function stripInvisibleMarkdown(text) {
   //    strip the markup, but keep whatever text sits BETWEEN an opening and closing tag
   //    (that text IS rendered and visible, e.g. `<b>OWNER-GATED</b>: …` must still gate).
   out = out.replace(/<[^>\n]+>/g, '')
+  // 5. P3-4 gate fix (round 3): a fenced code block's INFO STRING — the text on the same
+  //    line as the opening ``` /~~~ fence (e.g. "```bash OWNER-GATED"). No Markdown
+  //    renderer displays the info string as page content (GitHub and CommonMark both use
+  //    it only to select a syntax-highlighting language) — a sighted reader scanning the
+  //    rendered page sees a code block with a language badge, never the word
+  //    "OWNER-GATED", even though the marker sits on the very line that opens the block
+  //    where host commands live. Strips the trailing text on EVERY fence-DELIMITER line
+  //    matched (opening or closing) — deliberately not narrowed to "opening only", because
+  //    this function is used ONLY inside hasVisibleGateMarker (below), never to decide
+  //    whether a host verb is present: findUngatedHostCommands runs hostVerbOccurrences on
+  //    the block's RAW text, so over-stripping here can only ever remove an OWNER-GATED
+  //    marker (⇒ MORE offenders, the fail-closed direction), never a host command from
+  //    detection. A closing fence's trailing text is not meaningfully rendered either way,
+  //    so stripping it too costs nothing and needs no separate justification. The CODE
+  //    CONTENT lines between the fences are untouched and remain fully visible/scanned (a
+  //    real marker placed as actual fence-body content, e.g. a `# OWNER-GATED` shell
+  //    comment line, is genuinely rendered and must still gate — see the negative control
+  //    below).
+  out = out.replace(/^([ \t]{0,3}(?:```+|~~~+))[^\n]*/gm, '$1')
+  // 6. P3-4 gate fix (round 3): an inline link/image TITLE — `[text](url "title")` (also
+  //    the `'title'` and `(title)` forms CommonMark accepts). A title renders only as a
+  //    hover tooltip in the renderers that show it at all — GitHub's own renderer does not
+  //    display it even on hover — never as text a reader scanning the page sees. Strips
+  //    ONLY the title clause; the link's visible TEXT (`[text]`) and its destination are
+  //    left untouched (an ordinary link's visible text must still gate — see the negative
+  //    control below). Runs after the image strip above, so an image's title was already
+  //    removed along with the rest of the image syntax. Residual, disclosed rather than
+  //    claimed closed: a destination containing whitespace, an unescaped `)`/`(`, or the
+  //    `<url>` bracketed form is not matched here and its title would survive — narrow by
+  //    construction, not a general link-syntax parser.
+  out = out.replace(/(\]\([^()\s]*)\s+(?:"[^"]*"|'[^']*'|\([^)]*\))(\s*\))/g, '$1$2')
   return out
 }
 
@@ -1279,6 +1529,44 @@ test('runbook: negative controls for the round-2 invisible-marker fix — a REAL
   // over-stripping the tags' own inner content).
   const boldMarker = runbookText + '\n\n<b>OWNER-GATED</b>: run this. `ssh deploy@host verify` now.\n'
   assert.equal(findUngatedHostCommands(boldMarker).length, 0)
+})
+
+// P3-4 gate fix (round 3): two more invisible-by-construction Markdown constructs the
+// round-2 fix left open. One test per shape, matching the file's established convention.
+
+test('runbook: a marker hidden in a fenced code block\'s INFO STRING (` ```bash OWNER-GATED `) does NOT gate — no renderer displays text after the language tag, even though it sits on the very line opening the block the command lives in (P3-4 gate reproduction, round 3)', () => {
+  const attack = runbookText + '\n\n```bash OWNER-GATED\nssh deploy@host systemctl stop metasheet\n```\n'
+  const offenders = findUngatedHostCommands(attack)
+  assert.equal(offenders.length, 1)
+  assert.match(offenders[0], /ssh deploy@host systemctl stop metasheet/)
+})
+
+test('runbook: a marker hidden in an inline link TITLE (`[step](./x.md "OWNER-GATED")`) does NOT gate — a title renders only as a hover tooltip, if it renders at all (P3-4 gate reproduction, round 3)', () => {
+  const attack =
+    runbookText +
+    '\n\nSee the [rollback step](./notes.md "OWNER-GATED") first. `ssh deploy@host systemctl stop metasheet` now.\n'
+  const offenders = findUngatedHostCommands(attack)
+  assert.equal(offenders.length, 1)
+  assert.match(offenders[0], /ssh deploy@host systemctl stop metasheet/)
+})
+
+test('runbook: negative controls for the round-3 invisible-marker fix — a marker as the actual FIRST LINE of fence BODY content (not the info string) still gates, and a link TITLE with unrelated text does not block detection of a real marker stated separately', () => {
+  // A marker inside the fence's CONTENT (not its info-string line) is genuinely rendered
+  // — must still gate (discriminates the info-string strip from over-stripping the code
+  // block's own visible body).
+  const fenceBodyMarker = runbookText + '\n\n```bash\n# OWNER-GATED\nssh deploy@host systemctl stop metasheet\n```\n'
+  assert.equal(findUngatedHostCommands(fenceBodyMarker).length, 0)
+  // An unrelated link title sitting near a REAL, separately-stated visible marker must not
+  // consume it.
+  const titleNearby =
+    runbookText +
+    '\n\nOWNER-GATED: see the [rollback step](./notes.md "internal note") first. `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(titleNearby).length, 0)
+  // An ordinary link's visible TEXT (not its title) carrying the marker is genuinely
+  // rendered — must still gate (discriminates the title strip from over-stripping the
+  // link's own visible text portion).
+  const linkTextMarker = runbookText + '\n\nSee the [OWNER-GATED](./notes.md) step. `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(linkTextMarker).length, 0)
 })
 
 test('runbook: widened verb inventory — git push, gh pr merge, telnet, socat are each caught (P3-5 gate reproduction, round 2)', () => {
@@ -1637,13 +1925,18 @@ if (!DATABASE_URL) {
 //   1b. `current_setting('transaction_read_only')` — the EFFECTIVE per-transaction value
 //      that Postgres actually consults when deciding whether to refuse a write, distinct
 //      from the default new transactions inherit — must also still read 'on'. Checked
-//      separately from 1b/1, not merely inferred from it: empirically, for THIS attack
-//      (a disarm via `default_transaction_read_only`) the two always agree, because each
-//      of the file's un-batched top-level statements gets its own fresh implicit
-//      transaction, and a fresh transaction's effective value is seeded from the session
-//      default at the moment it starts. But that agreement is a property of THIS attack,
-//      not a proof that no future attack could touch one without the other, so both are
-//      checked independently rather than relying on the correlation to hold forever.
+//      separately from 1, not merely inferred from it, for the historical reason the two
+//      could in principle disagree: BEFORE the round-3 `BEGIN READ ONLY` wrap (see below),
+//      each of the file's top-level statements ran as its own fresh implicit transaction
+//      whose effective value was reseeded from the session default at the moment it
+//      started, so a disarm mid-file could — in principle, for a future attack shape, not
+//      any this file has found — move one without the other. AFTER the round-3 wrap, the
+//      whole file (including this canary) runs inside ONE already-started explicit
+//      read-only transaction, so `transaction_read_only` is fixed 'on' for its entire
+//      duration regardless of what `default_transaction_read_only` does — see the ROUND-3
+//      IMPACT note immediately below for what that means for THIS leg specifically (kept
+//      checked independently, not because it still catches anything today, but so the
+//      reasoning is not silently lost if the wrap is ever removed or narrowed).
 //   2. A canary write (CREATE TEMP TABLE + INSERT — confirmed empirically in this gate to
 //      raise the standard 25006 read_only_sql_transaction error under a genuinely
 //      read-only session, and to succeed silently when disarmed) is attempted inside a
@@ -1654,6 +1947,27 @@ if (!DATABASE_URL) {
 // 'O2_RO_GUARD_DISARMED', so a disarm is never mistaken for a collateral probe failure —
 // see the dedicated 'disarm' executionMode branch below, which asserts on that marker
 // specifically, not merely on a non-zero exit.
+//
+// P3-2 gate fix (round 3) IMPACT on legs 1b and 2, stated precisely rather than left
+// stale: runReadOnlySql now wraps the ENTIRE script in one explicit `BEGIN READ ONLY;`
+// transaction (see its own comment). `transaction_read_only` — the value leg 1b reads —
+// is FIXED for the lifetime of an already-started transaction and literally cannot become
+// anything other than 'on' once `BEGIN READ ONLY` has succeeded, no matter what happens to
+// `default_transaction_read_only` afterward; by the same mechanism, leg 2's write probe
+// can no longer succeed under ANY disarm shape (there is nothing left for it to prove —
+// the write is refused by the wrapping transaction, not by whatever the session default
+// currently says). So under THIS execution model, legs 1b and 2 are STRUCTURALLY INERT:
+// leg 1b always reads 'on' and leg 2's EXCEPTION WHEN branch always fires, for every
+// shape this file exercises, doctored or not. They are kept — not because they still
+// catch anything under the wrap, but as (a) a textual pin on the canary's own source
+// (see the hermetic pin test below, which still asserts their presence) so a future
+// change that removes or weakens the wrap does not silently lose this reasoning along
+// with it, and (b) documentation of the reasoning trail that justified the wrap in the
+// first place. Leg 1 (`default_transaction_read_only`) is the ONLY leg still empirically
+// load-bearing today — it is what fires for the plain, un-restored disarm shape (see
+// SET_CONFIG_DISARM_SHAPE's own test below) — because that GUC genuinely still changes,
+// mid-transaction, even though the EFFECTIVE `transaction_read_only` it would otherwise
+// seed does not.
 //
 // Investigated and closed, not merely assumed: can `transaction_read_only` (the effective
 // value) be flipped directly, via its OWN set_config call, independent of the default?
@@ -1698,9 +2012,61 @@ END;
 $o2_ro_invariant_canary$;
 `
 
-/** Run `sql` (full text) via psql against DATABASE_URL, in one session pinned
- *  default_transaction_read_only=on, ON_ERROR_STOP so any failing statement
- *  aborts the whole run non-zero. Returns { status, stdout, stderr }.
+// P3-2 gate fix (round 3): a BOUNDED disarm — `set_config(…,'off',…)` immediately
+// RESTORED (`set_config(…,'on',…)`) before the session ends — is invisible to the
+// end-of-session invariant canary above by construction: the canary reads the GUC state
+// only once, at the very end, and by then the restore has already put it back to 'on'.
+// Mutation-proven by the gate: deleting just the `set_config` literal from
+// LOCK_OR_SIDE_EFFECT_FN_RE makes a disarm-then-restore pass EVERY layer (static census
+// blind to the new spelling, canary blind because the window closed before it ran) — the
+// name-list entry was, until this fix, the ONLY thing catching this class, which is
+// exactly the enumerable dependency the canary was introduced to get away from.
+//
+// Relying on the SESSION-LEVEL `default_transaction_read_only` GUC (via the `-c 'SET
+// default_transaction_read_only = on;'` pre-command below) can never close this: the GUC
+// is, by definition, whatever the most recent `SET`/`set_config` said it was — a bounded
+// toggle is invisible to anything that only samples it, not something that watches it
+// continuously.
+//
+// Fix: wrap the ENTIRE script (pristine or doctored) in one EXPLICIT
+// `BEGIN READ ONLY; … COMMIT;` transaction. `transaction_read_only` — the EFFECTIVE
+// value Postgres actually consults when deciding whether to refuse a write — is fixed
+// for the lifetime of an already-started transaction and CANNOT be changed by a
+// mid-transaction `set_config('default_transaction_read_only', …)` call (verified
+// empirically — see mutationEvidence: inside `BEGIN READ ONLY`, `set_config(…,'off',…)`
+// itself still succeeds — it is not a data write — but a write attempted afterward, in
+// the SAME transaction, still errors 25006 `cannot execute … in a read-only
+// transaction`, regardless of what the session-level GUC now reads). So, INSIDE THIS
+// HARNESS (runReadOnlySql — the property this test file itself proves), a bounded
+// disarm-then-restore is made INERT, not merely detected after the fact: any write an
+// attacker attempts inside the disarmed window still fails at the moment it is
+// attempted — see the dedicated bounded-disarm test below, which is the mechanical proof
+// of this claim rather than an unverified comment.
+//
+// NOT claimed: that this closes the bounded-disarm class for an OPERATOR following the
+// runbook's own documented invocation (`psql "$DATABASE_URL" -f
+// scripts/ops/multitable-o2-observation.sql`, plain, no explicit transaction) — that
+// invocation has no `BEGIN READ ONLY` wrapper and relies solely on the session-level GUC
+// this file's own execution model has just demonstrated is insufficient for this class.
+// Hardening the operator invocation itself would mean changing the runbook (or the .sql
+// file's own "HOW TO RUN" header) to recommend the explicit-transaction form — outside
+// this test file's remit, and the runbook/SQL blobs are unmodified by this fix (both
+// remain byte-identical to `main`). This is a real, disclosed residual, not a closed gap.
+//
+// This does NOT retire the session-level `SET default_transaction_read_only = on;` (kept
+// below) or the end-of-session canary above — both remain independent, cheap
+// defense-in-depth layers (the canary in particular is still the ONLY thing that
+// catches a plain, un-restored disarm, since that shape touches no write the
+// transaction wrapper would ever see) — see the file's own defense-in-depth convention.
+// Verified empirically that every existing EVASION_SHAPES classification (`blocked` /
+// `blocked-incidental` / `not-blocked`) is UNCHANGED under this wrap, including
+// `lo_create`/`lo_from_bytea` (P3-3 below) staying `not-blocked` — large-object writes
+// are not gated by `transaction_read_only` either, wrapped or not.
+
+/** Run `sql` (full text) via psql against DATABASE_URL, inside one EXPLICIT
+ *  `BEGIN READ ONLY; … COMMIT;` transaction (P3-2 gate fix, round 3 — see above),
+ *  ON_ERROR_STOP so any failing statement aborts the whole run non-zero. Returns
+ *  { status, stdout, stderr }.
  *  P3-3 gate fix (round 2): the structural end-of-session invariant canary
  *  (RO_INVARIANT_CANARY_SQL) is appended to EVERY run, not just doctored ones — this is
  *  what makes it load-bearing for a disarm shape neither this list nor a future one names. */
@@ -1708,7 +2074,7 @@ function runReadOnlySql(sql) {
   const dir = mkdtempSync(join(tmpdir(), 'o2p3-ro-'))
   const file = join(dir, 'probe.sql')
   try {
-    writeFileSync(file, `${sql}\n${RO_INVARIANT_CANARY_SQL}\n`, 'utf8')
+    writeFileSync(file, `BEGIN READ ONLY;\n${sql}\n${RO_INVARIANT_CANARY_SQL}\nCOMMIT;\n`, 'utf8')
     const result = spawnSync(
       'psql',
       [DATABASE_URL, '-v', 'ON_ERROR_STOP=1', '--no-psqlrc', '-q', '-c', 'SET default_transaction_read_only = on;', '-f', file],
@@ -1849,13 +2215,45 @@ if (canRunExecutionLayer) {
       /O2_RO_GUARD_DISARMED/,
       `expected the failure to NAME the invariant violation explicitly (not a collateral probe failure elsewhere in the file); got exit ${result.status}, stderr:\n${result.stderr}`,
     )
-    // The specific text must be the GUC-state branch (checked first, so it is the one
-    // that actually fires for this shape) — not the write-succeeded branch, which exists
-    // as a second, independent check for a disarm that does NOT touch the GUC at all.
+    // The specific text must be the GUC-state branch — the ONLY one of the canary's three
+    // legs still reachable under the round-3 `BEGIN READ ONLY` wrap for this shape (see
+    // the ROUND-3 IMPACT note on RO_INVARIANT_CANARY_SQL above): the write-succeeded
+    // branch (leg 2) can no longer fire at all under the wrap, for any shape, so this is
+    // not "the branch that happens to fire first" among live alternatives — it is the
+    // only leg left standing for a disarm that does not itself attempt a write.
     assert.match(
       result.stderr,
       /default_transaction_read_only=off at end of session/i,
       'expected the canary to report the actual disarmed GUC state',
+    )
+  })
+
+  // P3-2 gate fix (round 3): the load-bearing execution-layer leg for the BOUNDED
+  // disarm-then-restore class — see BOUNDED_DISARM_WRITE_SHAPE's comment and
+  // runReadOnlySql's own comment for why this is closed by the explicit
+  // `BEGIN READ ONLY; … COMMIT;` wrap, not by the end-of-session canary (the restore
+  // already ran by the time the canary would check anything, so the canary is NOT the
+  // catch here — asserted below by its ABSENCE, not merely by exit status). Confirmed by
+  // the gate, and re-confirmed here: identical fragment, under the OLD (unwrapped,
+  // session-default-only) posture exits 0 — this test's whole point is that this run does
+  // NOT.
+  test(`EXECUTION: doctored copy with ${BOUNDED_DISARM_WRITE_SHAPE.name} is blocked at the WRITE itself (P3-2 round-3 gate reproduction)`, () => {
+    const doctored = `${sqlText}\n${BOUNDED_DISARM_WRITE_SHAPE.fragment}\n`
+    const result = runReadOnlySql(doctored)
+    assert.notEqual(
+      result.status,
+      0,
+      `expected the bounded disarm+write+restore chain to fail — the restore before session end must NOT make this shape invisible; stderr:\n${result.stderr}`,
+    )
+    assert.match(
+      result.stderr,
+      /cannot execute \S+.*in a read-only transaction/i,
+      `expected the WRITE line itself to be refused (SQLSTATE 25006 family) by the explicit read-only transaction wrap — NOT the end-of-session canary (the restore ran first, so the canary would stay silent); got exit ${result.status}, stderr:\n${result.stderr}`,
+    )
+    assert.doesNotMatch(
+      result.stderr,
+      /O2_RO_GUARD_DISARMED/,
+      'this must be caught by the transaction wrap itself, at the write, not by the end-of-session canary — a canary-named failure here would mean the restore silently defeated the earlier check and only the (session-scoped) GUC state saved this test, contrary to the fix being verified',
     )
   })
 }
