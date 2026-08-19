@@ -2405,6 +2405,18 @@ function residueFingerprint() {
         ' GROUP BY relkind ORDER BY relkind',
     ),
     roles: scalar('SELECT count(*) FROM pg_roles'),
+    // ABSOLUTE leg. The relkind/roles legs above are BASELINE-RELATIVE, which means residue that
+    // already existed when the run started is baselined IN — the final gate demonstrated a table,
+    // sequence, role and view created BEFORE a run and all four armed runs stayed green. Harmless
+    // on CI's fresh service database, but on a reused local database the leftovers of an earlier
+    // FAILED run would be silently accepted, which is precisely the state in which you most want
+    // this check to speak. Keeping one absolute assertion restores the leg the widening removed:
+    // no probe-shaped relation may exist at all, at baseline or at the end.
+    probeShaped: scalar(
+      "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace" +
+        " WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')" +
+        " AND (c.relname LIKE 'o2\\_%' ESCAPE '\\' OR c.relname LIKE 'ro\\_evasion\\_probe\\_%' ESCAPE '\\')",
+    ),
   }
 }
 
@@ -2605,6 +2617,12 @@ if (canRunExecutionLayer) {
     after.relations,
     RESIDUE_BASELINE.relations,
     `a relation survived the armed run (per-relkind counts moved: ${RESIDUE_BASELINE.relations} -> ${after.relations}) — a write shape reached the server, meaning a static guard regressed`,
+  )
+  assert.notEqual(after.probeShaped, null, 'could not measure probe-shaped relations — treat an unmeasurable residue check as a failure, not a pass')
+  assert.equal(
+    after.probeShaped,
+    '0',
+    `a probe-shaped relation exists after the armed run (count = ${after.probeShaped}) — ABSOLUTE leg: unlike the baseline-relative counts, this one also catches residue that was already present when the run started (e.g. left by an earlier failed run on a reused database)`,
   )
   assert.equal(
     after.roles,
