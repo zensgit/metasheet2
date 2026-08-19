@@ -13,8 +13,10 @@
  *   - directory/deprovision-ledger.ts (applyDirectoryDeprovisionCandidate)
  *   - directory/deprovision-evidence-api.ts (restoreDeprovisionEvent,
  *     compensateSupersededDenyGrant)
- *   - directory/directory-sync.ts   (unbindDirectoryAccount)
- *   - auth/dingtalk-oauth.ts        (createProvisionedUser via the test seam)
+ *   - directory/directory-sync.ts   (unbindDirectoryAccount, bindDirectoryAccount,
+ *     admitDirectoryAccountUser, syncDirectoryIntegration's local-apply — O2-A1)
+ *   - auth/dingtalk-oauth.ts        (createProvisionedUser via the test seam,
+ *     bindDingTalkIdentityToUser, unbindSelfManagedDingTalkIdentity — O2-A1)
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
