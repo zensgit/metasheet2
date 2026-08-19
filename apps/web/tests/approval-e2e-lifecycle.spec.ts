@@ -1703,8 +1703,10 @@ describe('Approval E2E Lifecycle', () => {
         expect.stringContaining('结束'),
       ])
       // legacy assigneeType/assigneeIds shape (the fixture graph predates assigneeSources) still
-      // resolves to a real summary, not "unconfigured".
-      expect(items[0].textContent).toContain('指定成员：user_finance')
+      // resolves to a real summary, not "unconfigured" — count-only, never the raw configured id
+      // (this is a requester-facing "what's next" surface, not an authoring tool; P3).
+      expect(items[0].textContent).toContain('指定成员（1 人）')
+      expect(items[0].textContent).not.toContain('user_finance')
       expect(items[1].textContent).toContain('流程结束')
       // Greyed via the dedicated CSS class (--future), not the current/highlighted one.
       expect(items[0].classList.contains('approval-detail__timeline-upcoming-item--future')).toBe(true)

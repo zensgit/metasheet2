@@ -108,14 +108,14 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
     expect(nodeAssigneeSourceSummary(node)).toBe('直属上级、部门主管')
   })
 
-  it('approval node with ONLY the legacy assigneeType/assigneeIds shape: still gets a real summary', () => {
+  it('approval node with ONLY the legacy assigneeType/assigneeIds shape: still gets a real summary — count-only, never the raw ids', () => {
     const node: ApprovalNode = {
       key: 'a2',
       type: 'approval',
       name: '财务审批',
       config: { assigneeType: 'user', assigneeIds: ['user_finance'] },
     }
-    expect(nodeAssigneeSourceSummary(node)).toBe('指定成员：user_finance')
+    expect(nodeAssigneeSourceSummary(node)).toBe('指定成员（1 人）')
 
     const roleNode: ApprovalNode = {
       key: 'a3',
@@ -123,7 +123,41 @@ describe('nodeAssigneeSourceSummary (node-level)', () => {
       name: '角色审批',
       config: { assigneeType: 'role', assigneeIds: ['role_manager', 'role_finance'] },
     }
-    expect(nodeAssigneeSourceSummary(roleNode)).toBe('指定角色：role_manager、role_finance')
+    expect(nodeAssigneeSourceSummary(roleNode)).toBe('指定角色（2 个）')
+  })
+
+  it('approval node with an assigneeSources static_user/static_role entry: count-only here too, even though assigneeSourceSummary itself joins raw ids for these two kinds', () => {
+    const userNode: ApprovalNode = {
+      key: 'a6',
+      type: 'approval',
+      name: '成员节点',
+      config: { assigneeSources: [{ kind: 'static_user', userIds: ['user_9', 'user_42'] }] },
+    }
+    const summary = nodeAssigneeSourceSummary(userNode)
+    expect(summary).toBe('指定用户（2 人）')
+    expect(summary).not.toContain('user_9')
+    expect(summary).not.toContain('user_42')
+
+    const roleNode2: ApprovalNode = {
+      key: 'a7',
+      type: 'approval',
+      name: '角色节点',
+      config: { assigneeSources: [{ kind: 'static_role', roleIds: ['role_9', 'role_42'] }] },
+    }
+    const roleSummary = nodeAssigneeSourceSummary(roleNode2)
+    expect(roleSummary).toBe('指定角色（2 个）')
+    expect(roleSummary).not.toContain('role_9')
+    expect(roleSummary).not.toContain('role_42')
+
+    // Empty-array edge: honest "（无）" placeholder, matching assigneeSourceSummary's own empty
+    // fallback wording — not "（0 人）".
+    const emptyNode: ApprovalNode = {
+      key: 'a8',
+      type: 'approval',
+      name: '空节点',
+      config: { assigneeSources: [{ kind: 'static_user', userIds: [] }] },
+    }
+    expect(nodeAssigneeSourceSummary(emptyNode)).toBe('指定用户（无）')
   })
 
   it('approval node with neither shape configured: falls back to unconfigured', () => {
