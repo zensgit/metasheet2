@@ -74,6 +74,12 @@ export default defineConfig({
       // wired as WHOLE FILES into .github/workflows/approval-realdb-node-operation-policy.yml.
       'tests/integration/approval-add-sign-honesty.db.test.ts',
       'tests/integration/approval-comment-required.db.test.ts',
+      // GET /api/approvals/:id/history guard alignment (rbacGuard('approvals', 'read'), matching
+      // the sibling GET /api/approvals/:id): the discriminating-negative + positive-control real-DB
+      // acceptance. Requires real PostgreSQL. Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-history-authz-guard.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
