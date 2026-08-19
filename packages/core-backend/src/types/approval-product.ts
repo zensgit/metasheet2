@@ -75,6 +75,21 @@ export interface EmptyAssigneeFallback {
   userIds?: string[]
   roleIds?: string[]
 }
+/**
+ * Lock-4 §2 F4-A (OD-L4-1(a)) — node-level 审批类型 (automatic decision). A CONFIG field on
+ * `type:'approval'`, NOT a new node type. Absent ≡ `'manual'` ≡ today's behavior (byte-stable for
+ * every existing graph).
+ *
+ * OD-L4-2(a) — RATIFIED verbatim: "auto_approve only, auto_reject deferred (parity residual
+ * tracked: the 审批类型 radio ships 人工/自动通过 only — no inert third option)". Unlike
+ * `NodeFieldAccess`'s declared-but-inert `readonly`/`editable` members (which the doc comment above
+ * that union explicitly says exist so the contract is forward-stable), §4 explicitly declines to
+ * repeat that pattern here: `'auto_reject'` is not a member of this union, so it cannot round-trip
+ * as an accepted value at all — `normalizeApprovalType` (ApprovalProductService.ts) rejects it (and
+ * every other off-enum string) at the publish/authoring choke, satisfying "must NOT be reachable —
+ * publish rejects it" without ever declaring a third, dormant option.
+ */
+export type ApprovalType = 'manual' | 'auto_approve'
 export const APPROVAL_ACTION_TYPES = [
   'approve',
   'reject',
@@ -229,6 +244,11 @@ export interface ApprovalNodeConfig {
    * JSON — no SQL migration.
    */
   approvalThreshold?: number
+  // Lock-4 F4-A (OD-L4-1(a)) — 审批类型. Absent ≡ 'manual' ≡ today's behavior. Admitted ONLY on
+  // `type:'approval'` (publish-time 400 elsewhere, ApprovalProductService.ts normalizeApprovalGraph)
+  // and rejected inside a parallel region in v1 (APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED) — a
+  // non-'manual' node MAY still be a condition-branch TARGET.
+  approvalType?: ApprovalType
   emptyAssigneePolicy?: EmptyAssigneePolicy
   // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
   // other policy value (including absent policy, which stays byte-identical to today). See
@@ -543,6 +563,16 @@ export interface ApprovalAssigneeResolutionMetadata {
    * id. The resolved `assigneeId` is already the delegatee; this is audit-trail only.
    */
   delegatedFrom?: string
+  /**
+   * Lock-4 F4-C — set when a same-person transfer (`autoApprovalPolicy.samePersonPolicy`)
+   * substituted this assignee. `resolvedFrom.kind` (above) keeps the ORIGINATING source kind
+   * unchanged (RATIFIED: "the transferred seat keeps the originating resolvedFrom.kind"); `from` is
+   * the requester id the seat was transferred away from (audit-trail only — the resolved
+   * `assigneeId` is already the manager/dept-head). Computed POST-delegation (after any
+   * `delegatedFrom` substitution above), matching the shipped `mergeWithRequester` cascade's own
+   * post-delegation comparison.
+   */
+  samePersonTransfer?: { from: string; policy: 'transfer_direct_manager' | 'transfer_dept_head' }
 }
 
 export interface ConditionNodeConfig {
@@ -607,15 +637,39 @@ export interface AutoApprovalPolicy {
   mergeAdjacentApprover?: boolean
   dedupeHistoricalApprover?: boolean
   actorMode?: AutoApprovalActorMode
+  /**
+   * Lock-4 §2 F4-C (OD-L4-4(a)) — 审批人=提交人 (same-person) policy, a NODE-level enum INSIDE this
+   * existing object (not a second vocabulary). Absent ≡ `'self_approve'` ≡ today's behavior when
+   * `mergeWithRequester` is off.
+   *
+   * `'auto_skip'` mapping to the shipped flag (RATIFIED, verbatim): "`mergeWithRequester:true` IS
+   * the 自动跳过 family… retained as the *implementation* of `'auto_skip'` and stays the persisted
+   * carrier for that value, so no existing graph changes shape." `normalizeAutoApprovalPolicy`
+   * (ApprovalProductService.ts) synthesizes `mergeWithRequester: true` whenever `samePersonPolicy ===
+   * 'auto_skip'` is normalized, so `evaluateAutoApprovalAssignment`'s `mergeWithRequester` arm stays
+   * UNCHANGED and produces byte-identical events (gate C-1) for either authored shape.
+   *
+   * `'transfer_direct_manager'` / `'transfer_dept_head'` resolve from the REQUESTER's frozen
+   * `managerId` / `deptHeadId` snapshot (`ApprovalDirectoryOrg.ts`) — no live directory read at
+   * dispatch (gate C-2). OD-L4-5(a): an absent transfer target means the seat is simply NOT
+   * produced — `emptyAssigneePolicy` then governs, and it must NEVER fall back to `'self_approve'`
+   * (gate C-3).
+   */
+  samePersonPolicy?: SamePersonPolicy
 }
 
 export type AutoApprovalActorMode = 'system' | 'original_approver'
 export type AutoApprovalPolicySource = 'node' | 'template'
+export type SamePersonPolicy = 'self_approve' | 'auto_skip' | 'transfer_direct_manager' | 'transfer_dept_head'
 export type AutoApprovalMergeReason =
   | 'auto-merge-requester'
   | 'auto-merge-adjacent'
   | 'auto-dedupe-historical'
-export type ApprovalAutoApprovalReason = 'empty-assignee' | AutoApprovalMergeReason
+// Lock-4 F4-A — 'auto-node-approve' is a NEW reason added HERE (the wider reason union), not to
+// `AutoApprovalMergeReason` (the narrower type `buildAutoApprovalEvent` is typed on, which drives
+// the requester/adjacent/historical MERGE cascade only): the F4-A executor short-circuit pushes its
+// event directly, bypassing that cascade entirely (it never runs `evaluateAutoApprovalAssignment`).
+export type ApprovalAutoApprovalReason = 'empty-assignee' | 'auto-node-approve' | AutoApprovalMergeReason
 
 export interface RuntimeGraph extends ApprovalGraph {
   policy: RuntimePolicy

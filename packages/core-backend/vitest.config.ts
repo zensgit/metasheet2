@@ -80,6 +80,20 @@ export default defineConfig({
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-history-authz-guard.db.test.ts',
+      // Lock-4 F4-A (node-level auto_approve, 审批类型) real-DB acceptance — gates A-1 (server door),
+      // A-2 (audit-row sentinel + byte-identical absent-config control), A-3 (dedupeHistoricalApprover
+      // exemption + the disclosed mergeAdjacentApprover-suppression side effect). DB-independent logic
+      // lives in tests/unit/approval-lock4-f4a-auto-decision.test.ts (not excluded — runs in the no-DB
+      // job). Excluded here so `describeIfDatabase` cannot skip-green this file; wired as a WHOLE FILE
+      // into .github/workflows/approval-realdb-lock4-p3a.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-lock4-f4a-auto-decision.db.test.ts',
+      // Lock-4 F4-C (same-person policy, 审批人=提交人) real-DB acceptance — gates C-1 (auto_skip
+      // byte-identical deep-equal), C-2 (frozen managerId, real directory mutation between two
+      // creates), C-3 (absent transfer target 400s, never falls back to self_approve). DB-independent
+      // logic lives in tests/unit/approval-lock4-f4c-same-person.test.ts. Excluded here for the same
+      // reason as the F4-A file immediately above; wired into the SAME
+      // .github/workflows/approval-realdb-lock4-p3a.yml lane.
+      'tests/integration/approval-lock4-f4c-same-person.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
