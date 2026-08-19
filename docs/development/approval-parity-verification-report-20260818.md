@@ -291,10 +291,10 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 
 | 切片 | PR | Reviewed SHA + 判定 | 合并 squash SHA |
 |---|---|---|---|
-| UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `44005ba8e1…` — CHANGES-REQUESTED（0/2/3/5）；12/12 变异全红 | `b296b4d6eb` |
-| UI-7 审批中心桌面主从面板 | #4948 | `3fe98e1f13…` — CHANGES-REQUESTED（1/6/5/1）；真 Chromium 布局测量 | `9f50cd46a3` |
+| UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `44005ba8e1…` — CHANGES-REQUESTED（0/2/3/5）；12/12 变异全红 → requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN** | `b296b4d6eb` |
+| UI-7 审批中心桌面主从面板 | #4948 | `3fe98e1f13…` — CHANGES-REQUESTED（1/6/5/1）；真 Chromium 布局测量 → requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN** | `9f50cd46a3` |
 
-> **⚠️ D-3 保留**：#4946 / #4948 闸门均 CHANGES-REQUESTED 且无 requalification 段，均已合并。如实记为「合并时闸门项未记录闭合」，不得写成「闸门 CLEAR」。
+> **⚠️ D-3（订正）**：#4946 / #4948 闸门均 CHANGES-REQUESTED，**原始合并**时未记录闭合——这半句形状事实原样成立：`gh api …/pulls/4946/reviews`、`…/pulls/4948/reviews` 仍为 0，两 PR 合入当时零记录评审。**但闭合本身已补跑**：一轮 requalify（20260819，reviewer-local，`/private/tmp/pr4948-requal-20260819.md`，未入库）在 main `d8ac22c989` 上逐条核对两 PR 的 gate-fix-round 请求，#4948 7/7、#4946 2/2（+ 一处撤回的失实声明）**全部 ADDRESSED-ON-MAIN**，两个判定均 **REQUALIFIED-CLEAN**（各留一条已披露 P3 残留，见 §5 V-5）。如实记为「合入时闸门项未记录闭合，requalify 已事后补跑并 CLEAR」；不得写成「合入时闸门 CLEAR」，也不得因 requalify 结果而抹去合入时零评审的事实。
 
 ---
 
@@ -365,7 +365,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 | **V-2** | 八个 FAIL 在 main 上仍活 | ✅ **DISCHARGED（8/8 FIXED，phase-B §2.4）**；phase-B 曾记的 FAIL-0 机械枚举守卫残留**亦已 DISCHARGED @ #5004 `6ace2e5a01`**（守卫落地，且当场抓到并闭合一个真实未接线套件 `approval-pack1a-lifecycle`）。**DRAFT 的 FAIL-1 运行时红在 phase-B 复核为已修（real Chromium 1 passed）** |
 | **V-3** | #4965 requalify NOT-CLEAR，合并后闭合无记录 | ✅ **DISCHARGED**（§3.5，两 floor 臂 mutation-proven at merged main） |
 | **V-4** | #4974 带 2 个未闭合 P2 合并 | **OPEN**（= D-2，合并时闸门项未记录闭合） |
-| **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | **OPEN**（= D-3，同上） |
+| **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | ✅ **DISCHARGED（requalify 侧）**：20260819 reviewer-local requalify（`/private/tmp/pr4948-requal-20260819.md`，未入库）在 main `d8ac22c989` 上逐条核对，两 PR 全部 requested changes ADDRESSED-ON-MAIN，判定均 **REQUALIFIED-CLEAN**（§3.10）。**process-gap 半边仍 OPEN**：合入当时两 PR 零记录评审（`gh api …/reviews` = 0）是独立于代码正确性的形状事实，requalify 不能倒填历史记录——**= D-3**，同上 |
 | **V-6** | `approval-web-guard` 无效窗口未定 | **OPEN**（§4.4） |
 | **V-7** | PPO 计数不自洽：§1 汇总 **63**，§15 第 4 条写「the discriminating-negative half of **33**」 | **OPEN**：**63 = 绿测试总行数**；**33 = 显式点名了所欠反例的子集**。本 FINAL 保留两个数并保留 V-7 为**未解决**（不静默塌缩成 33）；owner/后续版本机械重算 |
 | **V-8 / F10** | F10 / P0 完成度 | ✅ **DISCHARGED（挂载半边）**：F4 #4994 落地，F10 由必需 job 收集（§2.3 gate 5）；CORE-PARITY 仍 NO（owner UAT/签署/分支保护步） |

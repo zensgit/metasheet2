@@ -211,8 +211,8 @@ git show origin/main:docs/development/approval-lock<N>-*.md | grep -oE "OD-L<N>-
 | | P6-explanation `explanation`（L8-A） | #4974 | `4259d9fde8` | APPROVE-with-hardening（workflow enum: FIX-ROUND）@ `215e2cb570…`（0P1/**2P2 未闭合**/3P3/2NIT）（见 §6.4 D-2） | 见 §6.4 D-2 |
 | **P7** | **P7-R1 测试覆盖修复（FAIL-0/1/3/4/7）** | **#4984** | **`512f0df608`** | **APPROVE-with-hardening（MERGE-CLEAN after P2-1）@ 独立闸门 MD**（`/tmp/pr4984-p7r1-gate-20260818.md`）；含 249 文件有界机械扫描。**残留 P2-1**：9 个新接线真库套件里 6 个缺自身 anti-skip-green 哨兵（§5.8） | 见 §5.8 |
 | | **P7-R2 焦点环对比度 / harness 样式表 / 详情文案** | **#4981** | **`6488353bf8`** | **APPROVE-with-hardening @ `caa650d26c`**（0P1/3P2/3P3/2NIT）；含 M8（第二个 `<style>` 块绕过全部四条断言）（`/tmp/pr4981-p7r2-gate-20260818.md`） | 无 |
-| **UI** | UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `b296b4d6eb` | CHANGES-REQUESTED @ `44005ba8e1…`（0P1/2P2/3P3/5NIT）（见 §6.4 D-3） | 无 requalification MD |
-| | UI-7 审批中心桌面主从面板 | #4948 | `9f50cd46a3` | CHANGES-REQUESTED @ `3fe98e1f13…`（1P1/6P2/5P3/1NIT）（见 §6.4 D-3） | 无 requalification MD |
+| **UI** | UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `b296b4d6eb` | CHANGES-REQUESTED @ `44005ba8e1…`（0P1/2P2/3P3/5NIT）→ requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN**（见 §6.4 D-3） | 是（reviewer-local，未入库；合入时零记录评审的形状事实不变） |
+| | UI-7 审批中心桌面主从面板 | #4948 | `9f50cd46a3` | CHANGES-REQUESTED @ `3fe98e1f13…`（1P1/6P2/5P3/1NIT）→ requalified（20260819，reviewer-local）@ `d8ac22c989` = **REQUALIFIED-CLEAN**（见 §6.4 D-3） | 是（reviewer-local，未入库；合入时零记录评审的形状事实不变） |
 | **残留硬化** | **FAIL-0 机械枚举守卫 + I3 判别性反例 + pack1a 接线** | #5004 | `6ace2e5a01` | **MERGE-CLEAN — 0 P1 / 0 P2 @ `3f7ca76a39`**（opus 闸门）；guard 追踪真实 CI 接线且当场抓到真实未接线套件 | 不适用（test-only residual-hardening） |
 
 ### 3.2 P0 硬边界 — **DISCHARGED**（F4 #4994 落地）
@@ -388,14 +388,14 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | # | 事项 | 说明 |
 |---|---|---|
 | **D-2** | #4974（P6-explanation）带着 **2 个未闭合 P2** 合并（P2-1：`TemplateAuthoringView.vue` 4 个注册点无守卫，N-1 普查够不到活的编辑面板；P2-2：`explanation` 经 Lock-7 handler 字段写入门变成 `form_snapshot` 的键，与 A-1「absent from formSnapshot」冲突） | 来源无闭合记录 |
-| **D-3** | #4946 / #4948 闸门均 CHANGES-REQUESTED 且无 requalification 段，两 PR 均已合并 | 如实记为「合并时闸门项未记录闭合」；不得写成「闸门 CLEAR」 |
+| **D-3（订正）** | #4946 / #4948 闸门均 CHANGES-REQUESTED，原始合并时未记录闭合 | **requalify 已补跑**（20260819，reviewer-local，`/private/tmp/pr4948-requal-20260819.md`，未入库）：两 PR 各自的 gate-fix-round 请求逐条对照 **main @ `d8ac22c989`**（`b296b4d6eb`/`9f50cd46a3` 均为其祖先）核实，**全部 requested changes ADDRESSED-ON-MAIN**（#4948 1P1+6P2 共 7/7；#4946 2P2 + 一处已撤回的失实声明）——两个判定均为 **REQUALIFIED-CLEAN**（各自留一条已披露的 P3 残留：#4948 P1-01 只有 CSS 源钉、无 CI 接线的真浏览器 harness；#4946 P3-2「dud 全文评论 tab」被有意延后，不属必需变更集）。**但这不是合入时的闭合记录**：`gh api …/pulls/4946/reviews`、`…/pulls/4948/reviews` 仍为 0——两 PR 在合入当时确实**零记录评审**，Codex 指出的形状事实原样成立；requalify 只证明代码今天立得住，不能倒填一个历史上不存在的评审记录。不得写成「合入时闸门 CLEAR」。 |
 | **D-4** | #4939 / #4942 闸门 REQUEST-CHANGES，闸门 MD 内未执行修复轮（#4944 的在 ledger §4 有记录，#4939/#4942 没有） | 需补齐 #4939 / #4942 的修复轮证据 |
 | **D-6** | Lock-7 独立评审 P2 计数不一致：评审 MD 记 3 个 P2，ledger §4 记「2 P2」 | 确认第三个 P2 是被降级还是漏记 |
 | **D-7** | Lock-8 owner 块记「Independent review: (none recorded)」——九锁唯一无 ratify 前独立评审 | owner 裁：是否补一轮 |
 | **#4984 P2-1 / FAIL-0 枚举守卫** | 6 个新接线真库套件缺自身 anti-skip-green 哨兵；排除清单无机械枚举守卫 | ✅ **DISCHARGED @ #5004 `6ace2e5a01`**（机械枚举守卫 `approval-ci-coverage-enumeration.test.ts` 落地，闸门证实有牙且当场抓到真实未接线套件 `approval-pack1a-lifecycle`，§5.8） |
 | **#4995 残留** | G-6 gate 文本不可满足（owner 裁）；picker 跨命名空间元数据（已披露） | §5.9 |
 | **D-9** | 已合并 PR 的合并后 squash SHA 基本都未被重新过闸（闸门绑 pre-merge / requalified head） | 形状事实，不得塌缩成「闸门 CLEAR，已合并」 |
-| **D-10（新）** | **原始 user-ID 渲染残留** — **本次订正轮直接机械核实**（当前 head，静态代码读取）：`apps/web/src/views/approval/ApprovalDetailView.vue:731` 加签（P1-B）弹窗 chip 渲染 `{{ addSignUserLabels[uid] \|\| uid }}`；`:1960` 标签写入本身在 picker 返回的 `option.name` 缺失时也回退为 `option.id`——两处在缺名场景下都会把原始内部 user id 渲染给普通管理员看。**这与 §0/§5.10 中已由 #4981 修复的三个候选是不同位置**（那三个在 `assignmentDisplayLabel` / `formatFieldValue` 数组分支 / 节点变更占位符，均在 #4981 diff 中逐条可查）。**这两行是本次订正轮为核实而读的原始代码，非本报告自己的对抗闸门产出**：无变异、无浏览器证据、未做可达性分析。促成本行的是一轮 Codex REQUEST-CHANGES——但该复核的原文、轮次编号与具体日期不在本报告的核实范围内，此处不代其署名或标注日期。 | 需要新的修复 PR（fix PR: pending）；这是**代码工作，不是 owner 专属项** |
+| **D-10（二次订正）** | **原始 user-ID 渲染残留 — class 未闭合**。**member-ACTION 五处已修，落于 #5010（`44e6fe33ea`）**：pane 标签（`ApprovalCenterDetailPane.vue` `assigneeLabel()`）、减签选项（`ApprovalDetailView.vue` `reducibleAssignees`）、加签 chip（`ApprovalDetailView.vue` `onAddSignUserSelected()` + chip 模板回退——本次订正轮在当前 head `62dbc69c76` 机械核实：`:731` 现为 `{{ addSignUserLabels[uid] \|\| 成员 ${chipIndex+1} }}`，`:1975` 起 `onAddSignUserSelected` 只在 `option.name.trim()` 非空时才写入 label，不再回退 `option.id`，这正是 D-10 上一版所记的两处旧址）、picker 下拉（`ApprovalUserPicker.vue` `optionLabel()`）、节点摘要（`assigneeSource.ts` `nodeAssigneeSourceSummary`）。**但 raw-user-id-render 这一整类没有随之闭合**：一轮独立复核（转述；本次订正轮未见其逐字原文，无法署名或标注轮次/日期）在 #5010 的 gate 范围**之外**又发现更多面向查看者的残留点，本次订正轮已在当前 head（`62dbc69c76`）逐处机械核实其仍存在——`apps/web/src/views/approval/TemplateDetailView.vue:140`（`{{ visibilityScope.ids.join(', ') }}`，模板可见范围 ID；任何具备 `approvals:read` 的查看者可见，`canManageTemplates` 只门控其后的编辑按钮，不门控这行渲染本身）与 `:340`（`{{ (node.config as any).assigneeIds?.join(', ') }}`，节点级派单人 ID——同一文件里独立于 #5010 已修的 `assigneeSource.ts` 摘要的另一条代码路径）；`apps/web/src/views/approval/ApprovalNewView.vue:956`（`choiceOptionLabel()` 的自选下拉 `option.name?.trim() \|\| option.id`）。**外加一处 #5010 自身引入的可用性/安全残留**：减签 / 加签 / picker 三处的回退现在统一是「成员 N」序数——#5010 提交信息自陈 repo 内没有任何生产者会写 `assigneeName`（grep 已确认），所以这不是边缘情形而是**常规路径**：生产环境里这三处标签**永远**是序数，管理员无法仅凭标签判断「成员 3」对应哪个真实用户，存在**撤错审批人**的风险。#5010 提交信息称「the raw-user-id-render class...is closed across every surface found by the two-round adversarial gate」——这话在**该轮 gate 已找到的范围内**成立，但 gate 范围不等于这一类的全部范围，上面三处新址正是反例。后续切片（成员显示身份解析器 + 残留处置）**进行中**。**不得写「class closed」**。 | 需要新的修复 PR（**PART FIXED**：member-ACTION 五处已随 #5010 `44e6fe33ea` 闭合；class 本身仍 OPEN——3 处新址 + 「成员 N」身份不可辨识残留，后续切片 IN PROGRESS）；这是**代码工作，不是 owner 专属项** |
 
 ### 6.5 OD 勘误候选（汇总，逐条见 §7.4）
 
@@ -481,7 +481,7 @@ Lock-7 §2.7 把 D-5 read-scope 留作 OPEN 的 owner 问题；P4-B 闸门补充
   - **P3-A**（Lock-4 自动通过/拒绝、扩展空派单人兜底、离职兜底、`auto_reject` 等缺失语义，`NOT DRAFTED`）
   - **Lock-2 其余实现**（字段派生部门路由、部门/联系人字段类型；§L2-C 已由 K6 落地，其余 `NOT STARTED`）
   - **L5-B 后加签（`'after'`）运行时**（OD-L5-4/5，节点插入式后加签仍推迟）
-  - **原始 user-ID 渲染修复**（新增项，§6.4 D-10；一轮 Codex REQUEST-CHANGES 促成，本次订正轮直接机械核实了两处代码，与 §0/§5.10 中已由 #4981 修复的三个候选不是同一处；该 Codex 复核本身的原文/轮次/日期不在本报告核实范围内）
+  - **原始 user-ID 渲染残留（class 未闭合）**（§6.4 D-10；member-ACTION 五处已随 **#5010** `44e6fe33ea` 闭合——pane 标签 / 减签 / 加签 chip / picker 下拉 / 节点摘要；本次订正轮在当前 head `62dbc69c76` 机械核实 class 内仍有 **3 处新址**（`TemplateDetailView.vue:140`/`:340`、`ApprovalNewView.vue:956`）+ 一处 #5010 自身引入的「成员 N」身份不可辨识残留；促成新址发现的一轮独立复核为转述，本次订正轮未见其逐字原文/轮次/日期；与 §0/§5.10 中已由 #4981 修复的三个候选不是同一处）
 
   **上述五项都是代码工作，不是 owner 专属项。** owner 专属项单独集中于第 7 节，两者不得混为一谈。
 - 本 FINAL 新做的机械核实（均已在正文标注出处）：尾部六切片的合并 SHA 与闸门判定；派单人/字段/`ApprovalMode`/`nodeOperationPolicy` 的 union 与 registry 实测；F10 挂载与必需 job 收集；四个迁移枚举；run-list / vitest.config UNION 存活；V-3 闭合证据引用。
