@@ -24593,7 +24593,13 @@ async function loadSelfAttendanceRules(): Promise<void> {
   selfRulesLoading.value = true
   selfRulesError.value = null
   try {
-    const response = await apiFetch('/api/attendance/rules/me')
+    // SR-1 self-service contract: rules/me REJECTS subject-override headers (including
+    // the globally injected x-tenant-id) instead of ignoring them — subject and org come
+    // from the token alone. Human-tail finding 2026-08-19: real browsers with a tenant
+    // hint got a 400 banner here; synthetic traffic never sends the header.
+    const response = await apiFetch('/api/attendance/rules/me', {
+      omitHeaders: ['x-tenant-id', 'x-user-id', 'x-org-id', 'x-workspace-id', 'x-group-id'],
+    })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
       throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
