@@ -192,24 +192,27 @@ try {
   # try/catch contract instead so a successful apply ("Package deploy
   # complete" + health 200) reliably yields launcher exit 0 and a Last
   # Result of 0 in the outer scheduled task (#1526 follow-up).
-  # Splatted so the S6-A switch is forwarded ONLY when the operator moved it off the
-  # default. A launcher can be newer than the archive it is pointed at; the default
-  # 'auto' is also the staged helper's own default, so omitting it keeps an older
-  # staged apply working, while an explicit 'off' against a helper too old to honour
-  # it fails loudly instead of silently ignoring the operator.
-  $applyParameters = @{
-    InstallDeps = $InstallDeps
-    PackageArchive = $resolvedArchive
-    RootDir = $resolvedRoot
-    RunMigrations = $RunMigrations
-    StagingRoot = $stagingBase
-  }
+  # The S6-A switch is forwarded ONLY when the operator moved it off the default.
+  # A launcher can be newer than the archive it is pointed at; the default 'auto'
+  # is also the staged helper's own default, so omitting it keeps an older staged
+  # apply working, while an explicit 'off' against a helper too old to honour it
+  # fails loudly instead of silently ignoring the operator. The fixed named
+  # arguments below (in particular `-StagingRoot $stagingBase`) are a package-verify
+  # contract (multitable-onprem-package-verify.sh) — keep them literal; only the
+  # optional switch is appended via array splatting.
+  $s6aArtifactRootAclArguments = @()
   if ($S6aArtifactRootAcl -ne 'auto') {
-    $applyParameters['S6aArtifactRootAcl'] = $S6aArtifactRootAcl
+    $s6aArtifactRootAclArguments = @('-S6aArtifactRootAcl', $S6aArtifactRootAcl)
   }
 
   try {
-    & $stagedApply @applyParameters
+    & $stagedApply `
+      -RootDir $resolvedRoot `
+      -PackageArchive $resolvedArchive `
+      -StagingRoot $stagingBase `
+      -InstallDeps $InstallDeps `
+      -RunMigrations $RunMigrations `
+      @s6aArtifactRootAclArguments
     $launcherExit = 0
   }
   catch {
