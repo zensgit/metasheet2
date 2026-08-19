@@ -286,3 +286,81 @@ test('runbook: contains the ladder §4 no-40P01 link-in concurrent-write step fo
   assert.match(runbookText, /deadlocks.*delta.*=\s*0|deadlock delta.*0/i)
   assert.match(runbookText, /repeated for reset/i)
 })
+
+// ---------------------------------------------------------------------------
+// Workflow path-filter closed-world guard (gate #5018 NIT-1)
+// ---------------------------------------------------------------------------
+// The "every cited repo path exists" test above makes this kit red when any cited
+// file is renamed — but the kit's workflow only runs when a path in its `paths:`
+// filters changes. If a cited path is missing from the filters, the renaming PR
+// lands green and the kit goes stale-red on a later, unrelated PR. So: every
+// runbook-cited repo path must appear in BOTH trigger path filters, mechanically.
+
+const KIT_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/multitable-o2-observation-kit.yml')
+const kitWorkflowText = readFileSync(KIT_WORKFLOW_PATH, 'utf8')
+
+/** Every `- 'entry'` list under each `paths:` key, in file order (comments/blanks skipped). */
+function workflowPathSections(ymlText) {
+  const sections = []
+  const lines = ymlText.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*paths:\s*$/.test(lines[i])) continue
+    const entries = []
+    for (let j = i + 1; j < lines.length; j++) {
+      const entry = lines[j].match(/^\s*-\s*'([^']+)'\s*$/)
+      if (entry) {
+        entries.push(entry[1])
+        continue
+      }
+      if (/^\s*#/.test(lines[j])) continue
+      break
+    }
+    sections.push(entries)
+  }
+  return sections
+}
+
+/** Cited paths absent from any section, as `section#i: path` strings; [] = fully filtered. */
+function missingFilterEntries(ymlText, citedPaths) {
+  const sections = workflowPathSections(ymlText)
+  const missing = []
+  sections.forEach((entries, i) => {
+    for (const p of citedPaths) {
+      if (!entries.includes(p)) missing.push(`paths-section#${i + 1} (of ${sections.length}): ${p}`)
+    }
+  })
+  return missing
+}
+
+function runbookCitedPaths() {
+  // Deduplicated: the runbook may cite the same path in several sections.
+  return [...new Set([...runbookText.matchAll(/`((?:packages|scripts|docs|\.github)\/[^`\n]+)`/g)].map((m) => m[1]))]
+}
+
+test('workflow: every runbook-cited repo path is in BOTH trigger path filters (renames re-run the kit on the renaming PR)', () => {
+  const sections = workflowPathSections(kitWorkflowText)
+  // Anti-vacuity: the parser must find exactly the pull_request and push filters,
+  // each carrying at least the four kit files + five drift-guard sources.
+  assert.equal(sections.length, 2, `expected 2 paths: sections (pull_request + push), found ${sections.length}`)
+  for (const entries of sections) {
+    assert.ok(entries.length >= 9, `paths: section unexpectedly small (${entries.length} entries)`)
+  }
+  const cited = runbookCitedPaths()
+  assert.ok(cited.length >= 10, `expected ≥10 cited repo paths, found ${cited.length}`)
+  const missing = missingFilterEntries(kitWorkflowText, cited)
+  assert.deepEqual(missing, [], `runbook-cited paths missing from workflow path filters:\n${missing.join('\n')}`)
+})
+
+test('workflow filter guard is not vacuous: removing a cited path from one filter IS caught', () => {
+  const cited = runbookCitedPaths()
+  const victim = 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
+  // Anchor: the victim must genuinely be cited AND genuinely present before removal.
+  assert.ok(cited.includes(victim), 'victim path is no longer cited by the runbook')
+  assert.equal(missingFilterEntries(kitWorkflowText, cited).length, 0)
+  const doctoredLines = kitWorkflowText.split('\n')
+  const idx = doctoredLines.findIndex((l) => l.includes(`- '${victim}'`))
+  assert.ok(idx >= 0, 'victim path line not found in workflow')
+  doctoredLines.splice(idx, 1)
+  const missing = missingFilterEntries(doctoredLines.join('\n'), cited)
+  assert.deepEqual(missing, [`paths-section#1 (of 2): ${victim}`])
+})

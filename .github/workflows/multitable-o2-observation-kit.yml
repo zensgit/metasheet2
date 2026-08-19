@@ -25,6 +25,27 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
+      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
+      # this check on the renaming PR — not go stale-red on a later, unrelated one.
+      # A guard test pins this list to the runbook's citations mechanically.
+      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
+      - 'packages/core-backend/src/db/recovery-conflict.ts'
+      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
+      - 'packages/core-backend/src/routes/univer-meta.ts'
+      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
+      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
+      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
   push:
     branches: [main]
     paths:
@@ -37,6 +58,27 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
+      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
+      # this check on the renaming PR — not go stale-red on a later, unrelated one.
+      # A guard test pins this list to the runbook's citations mechanically.
+      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
+      - 'packages/core-backend/src/db/recovery-conflict.ts'
+      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
+      - 'packages/core-backend/src/routes/univer-meta.ts'
+      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
+      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
+      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
 
 permissions:
   contents: read
