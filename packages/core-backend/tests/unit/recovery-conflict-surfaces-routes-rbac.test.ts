@@ -72,6 +72,13 @@ import { rolesRouter } from '../../src/routes/roles'
 import { spreadsheetPermissionsRouter } from '../../src/routes/spreadsheet-permissions'
 import { permissionsRouter } from '../../src/routes/permissions'
 import { attendanceAdminRouter } from '../../src/routes/attendance-admin'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('recovery-conflict-surfaces-routes-rbac.test.ts')
 
 const UNIFORM_409_BODY = {
   ok: false,
@@ -159,6 +166,7 @@ describe('routes/roles.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('roles:create')
   })
 
   it('POST /api/roles: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
@@ -182,6 +190,7 @@ describe('routes/roles.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('roles:delete')
   })
 
   it('[recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the UPDATE → exact uniform retryable 409', async () => {
@@ -195,6 +204,7 @@ describe('routes/roles.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('roles:update')
   })
 
   it('PUT /api/roles/:id: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
@@ -224,6 +234,7 @@ describe('routes/spreadsheet-permissions.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('spreadsheet-permissions:grant')
   })
 
   it('grant: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
@@ -252,6 +263,7 @@ describe('routes/spreadsheet-permissions.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('spreadsheet-permissions:revoke')
   })
 })
 
@@ -267,6 +279,7 @@ describe('routes/permissions.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('permissions:grant')
   })
 
   it('grant: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
@@ -291,6 +304,7 @@ describe('routes/permissions.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('permissions:revoke')
   })
 
   it('revoke: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
@@ -315,6 +329,7 @@ describe('routes/permissions.ts', () => {
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('permissions:template-apply')
   })
 
   it('template apply: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
@@ -361,6 +376,7 @@ describe('routes/attendance-admin.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('attendance-admin:assign')
   })
 
   it('single role assign: non-40001 error → ORIGINAL 500 ROLE_ASSIGN_FAILED, exactly as before', async () => {
@@ -399,6 +415,7 @@ describe('routes/attendance-admin.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('attendance-admin:batch-assign')
   })
 
   it('[recovery-census:attendance-admin:unassign] single role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
@@ -425,6 +442,7 @@ describe('routes/attendance-admin.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('attendance-admin:unassign')
   })
 
   it('single role unassign: non-40001 error → ORIGINAL 500 ROLE_UNASSIGN_FAILED, exactly as before', async () => {
@@ -475,5 +493,6 @@ describe('routes/attendance-admin.ts', () => {
     )
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('attendance-admin:batch-unassign')
   })
 })

@@ -19,6 +19,13 @@ import {
   RecoveryConflictError,
 } from '../../src/db/recovery-conflict'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('recovery-conflict-activate-mapping.test.ts')
 
 function markerError(): Error & { code: string } {
   return Object.assign(new Error(RECOVERY_AUTHORITY_BUSY_MARKER), { code: '40001' })
@@ -31,6 +38,7 @@ describe('mapActivateError — O2-S2 recovery-conflict branch', () => {
       code: RECOVERY_CONFLICT_HTTP_CODE,
       message: RECOVERY_CONFLICT_HTTP_MESSAGE,
     })
+    census.record('admin-users:activate-mapping')
   })
 
   it('a raw marker 40001 leak maps to the same exact retryable 409', () => {

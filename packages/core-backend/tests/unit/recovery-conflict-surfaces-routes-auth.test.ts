@@ -120,6 +120,13 @@ import {
   RecoveryConflictError,
 } from '../../src/db/recovery-conflict'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('recovery-conflict-surfaces-routes-auth.test.ts')
 
 // The REAL class from the REAL module — the mock above replaces the module for the
 // route under test, so pull the actual constructor for a faithful injected error.
@@ -224,6 +231,7 @@ describe('POST /register — UserRoleAssignmentRecoveryBusyError surfaces as ret
     const res = await invokeRoute('post', '/register', { body })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('auth:register')
   })
 
   it('a raw marker 40001 leak also surfaces as the same retryable 409', async () => {
@@ -275,6 +283,7 @@ describe('POST /invite/accept — recovery conflict from the durable write surfa
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
+    census.record('auth:invite-accept')
   })
 
   it('a non-conflict write failure keeps the ORIGINAL 500 body, exactly', async () => {
@@ -347,6 +356,7 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       const res = await invokeRoute('post', '/dingtalk/unbind', { headers: AUTH_HEADERS })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      census.record('auth:dingtalk-unbind')
     })
 
     it('non-conflict failure keeps the ORIGINAL fail-closed 500, exactly', async () => {
@@ -392,6 +402,7 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      census.record('auth:dingtalk-callback')
     })
 
     function scriptActivateIntent(): void {
@@ -434,6 +445,7 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      census.record('auth:dingtalk-callback-activate-passthrough')
     })
 
     it('activate intent: a non-conflict activate failure keeps the ORIGINAL activate mapping (never the uniform 409)', async () => {
@@ -460,6 +472,7 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      census.record('auth:container-login')
     })
 
     it('non-conflict failure keeps the ORIGINAL container-login 500, exactly', async () => {

@@ -86,6 +86,13 @@ import {
   RecoveryConflictError,
 } from '../../src/db/recovery-conflict'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('recovery-conflict-surfaces-routes-admin-directory.test.ts')
 
 const EVENT_ID = '44444444-4444-4444-8444-444444444444'
 
@@ -177,6 +184,7 @@ describe('POST /deprovision/events/:eventId/restore — recovery conflict bounda
     const res = await invokeRestore({ mode: 'rehire' })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:deprovision-restore')
   })
 
   it('coded EVENT_NOT_FOUND keeps its ORIGINAL 404 mapping, exactly', async () => {
@@ -227,6 +235,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:compensate-deny')
   })
 
   it('compensate-orphan-deny: coded refusal keeps its ORIGINAL 400 mapping, exactly', async () => {
@@ -256,6 +265,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:sync')
   })
 
   it('synchronous sync: non-conflict failure keeps the ORIGINAL DIRECTORY_SYNC_FAILED 500, exactly', async () => {
@@ -286,6 +296,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:sync-async')
   })
 
   it('[recovery-census:admin-directory:bind] bind: named conflict from the bind write → exact uniform retryable 409', async () => {
@@ -296,6 +307,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:bind')
   })
 
   it('bind: non-conflict failure keeps the ORIGINAL DIRECTORY_BIND_FAILED mapping, exactly', async () => {
@@ -323,6 +335,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:admit-user')
   })
 
   it('[recovery-census:admin-directory:batch-bind] batch-bind: named conflict from a bind write → exact uniform retryable 409', async () => {
@@ -332,6 +345,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:batch-bind')
   })
 
   it('[recovery-census:admin-directory:batch-admit] batch-admit-users: named conflict from an admission write → exact uniform retryable 409', async () => {
@@ -341,6 +355,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:batch-admit')
   })
 
   it('[recovery-census:admin-directory:unbind] unbind: named conflict from the unbind write → exact uniform retryable 409', async () => {
@@ -351,6 +366,7 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:unbind')
   })
 
   it('[recovery-census:admin-directory:batch-unbind] batch-unbind: named conflict from an unbind write → exact uniform retryable 409', async () => {
@@ -360,5 +376,6 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     })
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    census.record('admin-directory:batch-unbind')
   })
 })
