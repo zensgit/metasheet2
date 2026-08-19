@@ -9,6 +9,11 @@
  * required-lane fixture-sync spec (attendance-selfservice-dashboard.spec.ts) compares
  * this array against the server source itself, so an 8th server key reds CI here
  * instead of silently re-opening the 400 banner for that hint type.
+ *
+ * Scope note: this mirrors the HEADER half of the server contract only. The server
+ * additionally rejects subject-override keys in query/body
+ * (ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS) — the single call site sends neither,
+ * so there is nothing to omit on that half.
  */
 export const ATTENDANCE_RULES_ME_OMIT_HEADERS: readonly string[] = Object.freeze([
   'x-user-id',
