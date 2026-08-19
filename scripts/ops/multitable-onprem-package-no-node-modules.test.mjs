@@ -534,3 +534,75 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('package build workflow runs this contract test and emits the paste-ready freeze block', () => {
+  // Normalised locally: a core.autocrlf=true checkout hands this file CRLF, and
+  // the ordering/roster assertions below are newline-anchored.
+  const workflow = packageWorkflow.replace(/\r\n/g, '\n')
+
+  const contractTestStep = workflow.indexOf(
+    'node --test scripts/ops/multitable-onprem-package-no-node-modules.test.mjs',
+  )
+  assert.ok(
+    contractTestStep > -1,
+    'the build lane must run this archive contract test, not leave it to plugin-tests.yml alone',
+  )
+
+  const freezeStep = workflow.indexOf('- name: Emit paste-ready freeze block')
+  const releaseStep = workflow.indexOf('- name: Publish GitHub Release')
+  assert.ok(freezeStep > -1, 'the build lane must emit the freeze block')
+  assert.ok(releaseStep > -1, 'the release step should still exist')
+  assert.ok(
+    contractTestStep < releaseStep && freezeStep < releaseStep,
+    'a regressed archive contract or an unbuildable freeze block must be caught BEFORE the release publishes',
+  )
+
+  // The digest is read out of the built package by the product's own verifier.
+  // A re-implementation here (or a bare sha256sum of the pins vector) would
+  // silently drift from sealed-export-package-provenance.cjs.
+  assert.match(
+    workflow,
+    /verifier\.verifySealedExportRuntimePackageProvenance\(\{\n\s*repoRoot: root,\n\s*\}\)/,
+    'packageProvenanceManifestDigest must come from the packaged provenance module',
+  )
+  assert.match(
+    workflow,
+    /console\.log\(result\.frozenManifestDigest\)/,
+    'the emitted digest must be the module\'s frozenManifestDigest',
+  )
+
+  // Exactly the eight fields #4708 / #4693 consume, in order, values-free.
+  const freezeBlockFields = workflow.match(/echo "serviceRuntimeSha=[\s\S]*?echo "externalWrite=false"/)
+  assert.ok(freezeBlockFields, 'the freeze block must be written as one contiguous emission')
+  const emitted = freezeBlockFields[0]
+    .split('\n')
+    .map((line) => line.trim().match(/^echo "([A-Za-z][A-Za-z0-9]*)=/))
+    .filter(Boolean)
+    .map((match) => match[1])
+  assert.deepEqual(emitted, [
+    'serviceRuntimeSha',
+    'releaseTag',
+    'packageFile',
+    'packageSha256',
+    'packageProvenanceManifestDigest',
+    'customerScope',
+    'sourceMode',
+    'externalWrite',
+  ])
+
+  assert.match(
+    workflow,
+    /resolved_release_tag="NOT_PUBLISHED"/,
+    'an unpublished build must emit the closed token, never an invented release tag',
+  )
+  assert.match(
+    workflow,
+    /echo "packageTgzSha256=\$\{tgz_sha256\}"/,
+    'the .tgz digest must also be emitted alongside the block',
+  )
+  assert.match(
+    workflow,
+    /output\/releases\/multitable-onprem\/freeze-block\.txt/,
+    'the freeze block must ship inside the uploaded artifact',
+  )
+})
