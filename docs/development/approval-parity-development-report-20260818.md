@@ -1,19 +1,19 @@
 # 审批对标程序 — 开发报告（FINAL，2026-08-18）
 
 **Status:** FINAL — **审批实现切片全部落地**。曾唯一在飞行的 K6 `#4993`（`form_field_user_manager` / `form_field_user_dept_head`，Lock-2 §L2-C）已于 **`ffa3a5f595`**（squash merge，2026-08-18T14:58:58Z）落地，闸门 **MERGE-CLEAN（0 P1）**；落地后派单人 union = **15 成员**（前后端逐字一致）。
-八个 P7 phase-A FAIL 已由 **P7 phase-B 在 fresh `origin/main` 复核 = 8/8 FIXED**（FAIL-0 = FIXED-with-named-residual，见 §5.8）。
+八个 P7 phase-A FAIL 已由 **P7 phase-B 在 fresh `origin/main` 复核 = 8/8 FIXED**（见 §5.8）；phase-B 曾记的 FAIL-0 枚举守卫残留与可执行的判别性反例债（I3）已由 **#5004（`6ace2e5a01`）DISCHARGED**。
 本文件**不 ratify 任何东西**，不授权运行时能力、租户 UAT、部署或 feature flag，**不是完成声明**。
-**所有剩余事项均为 owner 专属项 + 残留硬化项（第 7 节）**——无一个在飞行的实现切片。
+**所有剩余事项均为 owner 专属项（第 7 节）**——无一个在飞行的实现切片，无未 discharge 的可执行硬化项。
 
 | 锚点 | 值 |
 |---|---|
 | 仓库 | `zensgit/metasheet2` |
 | 撰写日期 | 2026-08-18 |
 | 程序起点（母锁落地） | `5b31cb4349` — `docs(approval): unify parity development program (#4935)` |
-| **审批程序当前 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions form_field_user_manager / form_field_user_dept_head (Lock-2 §L2-C) (#4993)`（= 当前 `origin/main` tip） |
-| **当前 `origin/main`** | `ffa3a5f595`（K6 = main tip）。K1（`6abd241925`）与 K6 之间落的两个提交（#4990 stock-prep docs、#4989 sealed-export S6-A）为非审批 |
+| **最后一个能力切片 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions … (Lock-2 §L2-C) (#4993)` |
+| **当前 `origin/main` tip** | `6ace2e5a01` — `test(approval): FAIL-0 enumeration guard + discriminating-negative discharge (#5004)`（**test-only residual-hardening**，不改任何能力面/union/计数；K6 与它之间 #5001–5003 为非审批） |
 | 程序基线（母锁 header 自陈） | `origin/main@d33a6a0fa120452b721ea76d449dfa1463727463` |
-| 已合并审批切片 | **44 个 PR**（12 文档锁 + 32 实现，逐条见 §3.1）。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..ffa3a5f595 \| grep -iE "approval"` 返回 **45** 行，其中 `f2ed020d1b` (#4970, `ci: add merge_group triggers …`) 是 CI 触发器改动而非程序切片 ⇒ **45 − 1 = 44**。从 git 枚举，非清单背诵 |
+| 已合并审批切片 | **45 个 PR** = 12 文档锁 + 32 能力实现 + **1 residual-hardening（#5004）**，逐条见 §3.1。枚举命令：`git log --first-parent --oneline 5b31cb4349~1..6ace2e5a01 \| grep -iE "approval"` 返回 **46** 行，其中 `f2ed020d1b` (#4970, CI 触发器) 非程序切片 ⇒ **46 − 1 = 45**。从 git 枚举，非清单背诵 |
 | Flags | **全程 OFF**，无一次改动（§1.4） |
 | 完成标签 | CORE-PARITY: **NO** · DATA-CLOSURE: **NO** · PRODUCT-FINAL: **NO**（三者均需 owner 签署，见 §7.2） |
 
@@ -213,6 +213,7 @@ git show origin/main:docs/development/approval-lock<N>-*.md | grep -oE "OD-L<N>-
 | | **P7-R2 焦点环对比度 / harness 样式表 / 详情文案** | **#4981** | **`6488353bf8`** | **APPROVE-with-hardening @ `caa650d26c`**（0P1/3P2/3P3/2NIT）；含 M8（第二个 `<style>` 块绕过全部四条断言）（`/tmp/pr4981-p7r2-gate-20260818.md`） | 无 |
 | **UI** | UI-6 详情标签锚点 + 审计派生记录表 | #4946 | `b296b4d6eb` | CHANGES-REQUESTED @ `44005ba8e1…`（0P1/2P2/3P3/5NIT）（见 §6.4 D-3） | 无 requalification MD |
 | | UI-7 审批中心桌面主从面板 | #4948 | `9f50cd46a3` | CHANGES-REQUESTED @ `3fe98e1f13…`（1P1/6P2/5P3/1NIT）（见 §6.4 D-3） | 无 requalification MD |
+| **残留硬化** | **FAIL-0 机械枚举守卫 + I3 判别性反例 + pack1a 接线** | #5004 | `6ace2e5a01` | **MERGE-CLEAN — 0 P1 / 0 P2 @ `3f7ca76a39`**（opus 闸门）；guard 追踪真实 CI 接线且当场抓到真实未接线套件 | 不适用（test-only residual-hardening） |
 
 ### 3.2 P0 硬边界 — **DISCHARGED**（F4 #4994 落地）
 
@@ -320,15 +321,15 @@ Lock-5 §0.1：`'before'` 只是审计元数据，两种模式都把会签人放
 ### 5.7 办理节点的惰性控件（母锁 M7 / Lock-3 §2.2 勘误）—— #4956，已修
 ledger §9 勘误：Lock-3 §2.2 曾称办理任务批量排除「falls out of §2.1 rather than needing new code」——该声明 FALSE（成员待办中心会对任何活跃待办席位加徽标/批量选中，无节点类型过滤 ⇒ 办理席位暴露惰性同意/驳回，违反 M7）。修复：P4-A / #4956 落地显式节点类型门（pending 列表 DTO `currentNodeType` + `isRowBatchSelectable` + pending 计数排除）。
 
-### 5.8 P7 phase-A 的八个 FAIL —— **P7 phase-B 复核 = 8/8 FIXED（FAIL-0 带具名残留）**
+### 5.8 P7 phase-A 的八个 FAIL —— **P7 phase-B 复核 = 8/8 FIXED（FAIL-0 残留其后由 #5004 DISCHARGED）**
 
 台账承重句逐字：「All seven are evidence-integrity / a11y defects. **None is a product-logic regression.** That distinction is load-bearing and is proven per finding, not asserted.」
 
-**P7 phase-B**（`scratchpad/p7-phaseB-evidence-20260818.md`，在 fresh `origin/main` = `6abd241925`、隔离 worktree + 全新专用 DB、real Chromium、Node 20.20.2）复核这八行：**8/8 FIXED**（7 个完全修复；**FAIL-0 = FIXED-with-named-residual**）。**re-verified 子集内零个新 FAIL**。下表「状态」列已按 phase-B 更新（其边界：PG 本地 15.17 vs CI 16，pnpm 10.33 vs CI 10.16.1，均记录为 delta；这是**子集**复核，非全 127 行矩阵重跑，见验证报告 §2.5 / V-1）。
+**P7 phase-B**（`scratchpad/p7-phaseB-evidence-20260818.md`，在 fresh `origin/main` = `6abd241925`、隔离 worktree + 全新专用 DB、real Chromium、Node 20.20.2）复核这八行：**8/8 FIXED**（7 个完全修复；FAIL-0 当时为 FIXED-with-named-residual，**该残留其后由 #5004 `6ace2e5a01` DISCHARGED，见下表**）。**re-verified 子集内零个新 FAIL**。下表「状态」列已按 phase-B 更新（其边界：PG 本地 15.17 vs CI 16，pnpm 10.33 vs CI 10.16.1，均记录为 delta；这是**子集**复核，非全 127 行矩阵重跑，见验证报告 §2.5 / V-1）。
 
 | # | 一句话 | 修复 PR | phase-B 复核状态（fresh `origin/main`） |
 |---|---|---|---|
-| **FAIL-0** | 父发现：四个审批面测试制品在零个 CI workflow 中执行 | #4984 `512f0df608` | **FIXED-with-named-residual**：四个具名实例全接线 + 另扫入 6 个此前未门控套件（双点接线）；**残留 = 无机械枚举守卫**（排除清单仍手工维护），下一个未接线的 spec 会复发——carried-forward 硬化项，**非活缺陷（无一复现）** |
+| **FAIL-0** | 父发现：四个审批面测试制品在零个 CI workflow 中执行 | #4984 `512f0df608` + **#5004 `6ace2e5a01`** | **FIXED，残留已 DISCHARGED**：#4984 把四具名实例 + 6 套件双点接线；**#5004 安装机械枚举守卫**（`approval-ci-coverage-enumeration.test.ts`，258 断言 + `approval-ci-coverage-allowlist.ts`），跨 4 层枚举并断言每个审批 spec 被某 CI 车道/白名单收集，居必需 test 车道、追踪真实接线、非自豁免；落地时当场抓到并闭合一个真实未接线套件 `approval-pack1a-lifecycle`。复发通道机械封死 |
 | FAIL-1 (P1) | `approval-inspector-keyboard.spec.ts` 在 main 上红——harness 挂载时抛异常 | #4984 | **FIXED**：real Chromium **1 passed (810ms)**；harness 导入当前 `ApprovalNodeConfigEditorApi` + 生产 CSS；`multitable-browser-verify.yml` path filter 已加宽（含 4 个 `apps/web/src/approvals/**`）——DRAFT 曾提的「#4944-源起运行时红」在 phase-B 复核为**已修** |
 | FAIL-2 (P2) | V-6 焦点环对比度：19 个画布控件 13 个低于 ≥3:1 | #4981 `6488353bf8` | **FIXED**：real Chromium 重测三视口 **19 PASS / 0 FAIL / 0 NO-RING**（viewport 4.95、toolbar 族 5.17） |
 | FAIL-3 (P2) | `approval-node-entry-epoch.test.ts` 在 main 上 100% 红，fixture 腐烂 | #4984 | **FIXED**：全新 `metasheet_p7b_epoch` DB（无 grant 残留）**5 passed / 1 skipped** |
@@ -337,7 +338,7 @@ ledger §9 勘误：Lock-3 §2.2 曾称办理任务批量排除「falls out of �
 | FAIL-6 (P3) | `handler` 是七种节点里唯一无 per-type 强调色 | #4981 | **FIXED（fix 选了一个 shape）**：`handler` 用 `--el-color-info`，致 4/7 类型（start/end/parallel/handler）共享 info 强调色——**owner shape 裁定项**（§7.8） |
 | FAIL-7 (P3) | `useApprovalBatchActions.spec.ts` 在零 workflow 执行 | #4984 | **FIXED**：进 `approval-web-guard.yml` + `run-required-web-tests.sh`；本地 4 passed；UNION 存活已核实 |
 
-**FAIL-0 的具名残留（carried-forward，owner/后续版本）**：#4984 手动做了普查（249 文件）并把四个具名实例 + 6 个此前未门控套件双点接线，但**没有安装一个机械枚举守卫**（一个断言「每个 DB-gated 审批 spec 都出现在某真库车道 / 无库排除集与车道集互补」的测试）。因此 **FAIL-0 类记为 FIXED-with-named-residual**：现无一复现，但复发通道未被机械封死。另 #4984 闸门的 P2-1（6/9 新套件缺自身 anti-skip 哨兵）是同一残留的另一面。**#4984 本身现有独立闸门 MD**（DRAFT 的「修复测试的 PR 没被独立审」闭环缺口已消除）。
+**FAIL-0 的具名残留 —— 已 DISCHARGED @ #5004（`6ace2e5a01`）**：#4984 手动做了普查（249 文件）并把四个具名实例 + 6 个此前未门控套件双点接线，但**没有安装机械枚举守卫**。**#5004（opus 闸门 MERGE-CLEAN 0 P1/0 P2）补上了它**：`approval-ci-coverage-enumeration.test.ts`（258 断言 + `approval-ci-coverage-allowlist.ts`）跨 4 层（`apps/web/tests`、`apps/web/verification`、`core-backend/tests/unit`、`.../integration`）枚举每个审批 spec/test 并断言其被某具名 CI 车道或显式注释白名单收集——闸门证实它在每层对真正未接线的 canary spec 变红、且在真实已接线文件被解除接线时变红（追踪真实 CI 接线，非静态 grep，非自豁免，居必需 test 车道）；**落地时当场抓到一个真实的未接线真库套件** `approval-pack1a-lifecycle.api.test.ts` 并两点接线（`vitest.config.ts` 排除 + 新 `approval-realdb-pack1a-lifecycle` 车道 + `EXPECT_DB` 哨兵）——是守卫有牙的证据。⇒ **FAIL-0 的复发通道机械封死；#4984 闸门 P2-1 的另一面亦随之消解。** #4984 本身有独立闸门 MD（DRAFT 的「修复测试的 PR 没被独立审」闭环缺口已消除）。
 
 ### 5.9 K1 的安全形状半边 —— #4995 两轮闸门，两个 P1 已闭合并 merged
 K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的 principal（P1 self-service bind）——修复轮移到 `ensurePlatformAdmin`（非管理员 BIND live-probe **403**）。Round-2 抓到同类新 P1 = **harness rot**（K1 给 `ApprovalNodeConfigEditorApi` 加了 5 个必填成员却没更新 `approval-inspector-keyboard-harness.ts`，令必需 `test (20.x)` 在 type-check 步红）——正是 #4984 的编译钉设计要抓的那类，当前 head 已含修复。
@@ -368,6 +369,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | **P7-R1 #4984 / P7-R2 #4981** | **LANDED**；八个 FAIL 修复全部在 main（phase-B 复核 8/8 FIXED，§5.8） |
 | **V-3（#4965 NOT-CLEAR-then-merged）** | **DISCHARGED**（§5.1） |
 | **K6 #4993（曾唯一在飞行实现切片）** | **LANDED @ `ffa3a5f595`**；派单人 union 15/15；对标派单人种类翻「已达」（§4） |
+| **#5004 residual-hardening（FAIL-0 枚举守卫 + I3 判别性反例 + pack1a 接线）** | **LANDED @ `6ace2e5a01`**（opus 闸门 MERGE-CLEAN 0 P1/0 P2）；DISCHARGE 了 FAIL-0 枚举守卫残留（§5.8）与可执行判别性反例债（验证报告 V-12）；捎带闭合一个真实未接线套件 |
 
 ### 6.3 未起草 / 未开始的切片（各带缺席证据）
 
@@ -390,7 +392,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | **D-4** | #4939 / #4942 闸门 REQUEST-CHANGES，闸门 MD 内未执行修复轮（#4944 的在 ledger §4 有记录，#4939/#4942 没有） | 需补齐 #4939 / #4942 的修复轮证据 |
 | **D-6** | Lock-7 独立评审 P2 计数不一致：评审 MD 记 3 个 P2，ledger §4 记「2 P2」 | 确认第三个 P2 是被降级还是漏记 |
 | **D-7** | Lock-8 owner 块记「Independent review: (none recorded)」——九锁唯一无 ratify 前独立评审 | owner 裁：是否补一轮 |
-| **#4984 P2-1 / FAIL-0 枚举守卫** | 6 个新接线真库套件缺自身 anti-skip-green 哨兵；排除清单无机械枚举守卫 | phase-B 复核 = **FIXED-with-named-residual**（无一复现，但复发通道未机械封死）——carried-forward 硬化项（§5.8） |
+| **#4984 P2-1 / FAIL-0 枚举守卫** | 6 个新接线真库套件缺自身 anti-skip-green 哨兵；排除清单无机械枚举守卫 | ✅ **DISCHARGED @ #5004 `6ace2e5a01`**（机械枚举守卫 `approval-ci-coverage-enumeration.test.ts` 落地，闸门证实有牙且当场抓到真实未接线套件 `approval-pack1a-lifecycle`，§5.8） |
 | **#4995 残留** | G-6 gate 文本不可满足（owner 裁）；picker 跨命名空间元数据（已披露） | §5.9 |
 | **D-9** | 已合并 PR 的合并后 squash SHA 基本都未被重新过闸（闸门绑 pre-merge / requalified head） | 形状事实，不得塌缩成「闸门 CLEAR，已合并」 |
 
@@ -431,10 +433,10 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 
 ### 7.3 DDL 部署顺序（**风险项，必须在部署前决定**）
 
-四个已合并迁移（§3.3）的**生产应用属于 owner 门控的平台 DDL 治理**。承重风险：
+四个已合并迁移（§3.3）的**生产应用属于 owner 门控的平台 DDL 治理**。承重风险与完整加载序、失败模式、部署前只读检查、回滚姿态，见**验证报告附录「DDL 部署序 runbook（owner/ops，授权 nothing）」**（primary-source 逐字核实四个迁移文件名）。要点：
 - **#4980 `zzzz20260818090000_add_policy_denied_action_to_approval_records.ts`**：CHECK 在测试里零承重（被 helper DDL bootstrap 覆盖）；**若迁移落后于镜像，一次被拒操作返回 500 而非 409** ⇒ **P5 部署顺序：迁移必须先于镜像**。
-- 其余三个（#4956 / #4961 / #4995）按平台 DDL 治理常规先于镜像。
-`zzzz` 排序陷阱：新列若落在 `zzzz` 表上，迁移文件名也必须 `zzzz` 前缀。
+- 其余三个（#4956 / #4961 / #4995）按平台 DDL 治理常规先于镜像；四个都只进不退（forward-only）。
+`zzzz` 排序陷阱：新列若落在 `zzzz` 表上，迁移文件名也必须 `zzzz` 前缀——四个此处都正确 `zzzz` 前缀且自洽。
 
 ### 7.4 OD 勘误候选裁定
 见 §6.5 表。Lock-3 §2.2 **已应用**；待裁：OD-L4-10(a) 后向重入边界、Lock-1 §K4 引用不精确、**OD-L7-4(a) read 轴「拒绝 vs OD-L7-4(c) 放宽」永久解**、**G-6 记为 UNSATISFIABLE-UNDER-(a)**、**OD-L5-4 后加签 `'after'` 运行时形状**、验收母本 **I14 行重新措辞**。
@@ -473,6 +475,6 @@ Lock-7 §2.7 把 D-5 read-scope 留作 OPEN 的 owner 问题；P4-B 闸门补充
 ## 8. 本报告自身的边界
 
 - 本报告是 FINAL 而非完成声明。它**不 ratify、不授权、不启用**任何东西。
-- **实现切片全部落地**（K6 #4993 = `ffa3a5f595` 为最后一个）。**无一个在飞行的实现切片**；剩余项全部 owner 专属（§7）+ 残留硬化项。
+- **实现切片全部落地**（K6 #4993 = `ffa3a5f595` 为最后一个能力切片；#5004 `6ace2e5a01` 为 test-only residual-hardening）。**无一个在飞行的实现切片，无未 discharge 的可执行硬化项**；剩余项全部 owner 专属（§7）。
 - 本 FINAL 新做的机械核实（均已在正文标注出处）：尾部六切片的合并 SHA 与闸门判定；派单人/字段/`ApprovalMode`/`nodeOperationPolicy` 的 union 与 registry 实测；F10 挂载与必需 job 收集；四个迁移枚举；run-list / vitest.config UNION 存活；V-3 闭合证据引用。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。

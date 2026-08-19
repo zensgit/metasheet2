@@ -1,15 +1,15 @@
 # 审批对标程序 — 验证报告（FINAL，2026-08-18）
 
 **Status:** FINAL — **审批实现切片全部落地**（曾唯一在飞行的 K6 `#4993` Lock-2 §L2-C 已于 `ffa3a5f595` 落地，闸门 MERGE-CLEAN 0 P1；落地后派单人 union = **15 成员**，前后端逐字一致）。
-**P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 带一个具名 carried-forward 残留）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
+**P7 phase-B**（§2.5）在 fresh `origin/main` 真复核了一个子集：**8/8 phase-A FAIL FIXED**（FAIL-0 的残留枚举守卫其后由 **#5004 `6ace2e5a01`** DISCHARGED）、**15/15 已落地特性判别检查 PASS**、**6/6 优越性 re-smoke PASS**、**子集内零个新 FAIL**——这是**子集**复核，非全 127 行矩阵重跑（V-1）。
 本文件**不是完成声明**，不 ratify 任何东西，不授权任何 flag、部署或 UAT。
 
 | 锚点 | 值 |
 |---|---|
 | 仓库 | `zensgit/metasheet2` |
 | 撰写日期 | 2026-08-18 |
-| **审批程序当前 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions (Lock-2 §L2-C) (#4993)`（= 当前 `origin/main` tip） |
-| **当前 `origin/main`** | `ffa3a5f595`（K6 = main tip；K1 `6abd241925` 与 K6 之间两个提交为非审批） |
+| **最后一个能力切片 head** | `ffa3a5f595` — `feat(approval): K6 — form-field contact extensions (Lock-2 §L2-C) (#4993)` |
+| **当前 `origin/main` tip** | `6ace2e5a01` — `test(approval): FAIL-0 enumeration guard + discriminating-negative discharge (#5004)`（**test-only residual-hardening**，不改任何能力面/union/计数；K6 与它之间的 #5001–5003 为非审批） |
 | **P7 phase-A 验证执行 SHA** | `680e93c018490b6d98cf7251fe431458c350afb5`（**≠ 当前 head**，见 §2.0） |
 | 治理设计权威 | `docs/development/approval-parity-master-design-lock-20260817.md`（RATIFIED，§9） |
 | 执行真相 | `docs/development/approval-parity-execution-ledger-20260817.md`（LIVING） |
@@ -71,7 +71,7 @@ Phase-A 台账用六级（`PASS` / `PASS-POSITIVE-ONLY` / `FAIL` / `NOT-YET-LAND
 
 ### 2.0 ⚠️ SHA 作用域声明（读本节前必读）
 
-Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`ffa3a5f595`**（#4993 K6），其间落了一整串审批提交。DRAFT 记的 9 行 `SUPERSEDED-BY-LANDING` 现在其承载切片**都已在 main**（末行 K6 是 phase-B 之后的新落地，phase-B verified SHA 为 `6abd241925`）：
+Phase-A 全部 127 行在 **`680e93c018`** 上执行。最后一个能力 head 是 **`ffa3a5f595`**（#4993 K6）、main tip 是 **`6ace2e5a01`**（#5004 test-only residual-hardening），其间落了一整串审批提交。DRAFT 记的 9 行 `SUPERSEDED-BY-LANDING` 现在其承载切片**都已在 main**（末行 K6 是 phase-B 之后的新落地，phase-B verified SHA 为 `6abd241925`）：
 
 | 落地提交 | PR | 影响的 Phase-A 行 | 现分层 |
 |---|---|---|---|
@@ -81,7 +81,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | `3335ccc435` | #4972 P1-C | I4/I5/I6/I12/I13、I9 timeout 半边、§10「ApprovalMode BE 4 vs FE 3」 | LANDED-VERIFY |
 | `d034b1f710` | #4980 P5 L5-A | **R7（操作策略）** | LANDED-VERIFY |
 | `6488353bf8` | #4981 P7-R2 | FAIL-2/5/6 | **FIXED**（phase-B §2.5） |
-| `512f0df608` | #4984 P7-R1 | FAIL-0/1/3/4/7 | **FIXED**（FAIL-0 = FIXED-with-named-residual，phase-B §2.5） |
+| `512f0df608` | #4984 P7-R1 | FAIL-0/1/3/4/7 | **FIXED**（FAIL-0 残留枚举守卫由 #5004 `6ace2e5a01` DISCHARGED，phase-B §2.5 / §2.4） |
 | `345a1f1c0e` | #4994 F4 | §3 gate 5 mount canary、F10 | **翻转**：mount 已达（§2.3 gate 5；phase-B 两侧闸复核 PASS） |
 | `6abd241925` | #4995 K1 | 派单人 union、I 族 roster 行 | **PASS**（phase-B §2.5 Part 2） |
 | `ffa3a5f595` | #4993 K6 | 派单人 union 13→15、I10/R12 absence-list | **§2.0 核实（15/15 union）**；闸门 MERGE-CLEAN 0 P1；phase-B 之后落地 |
@@ -156,7 +156,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 
 | # | 严重度 | 一句话 | 修复 PR（合并 SHA） | phase-B 复核状态（fresh `origin/main`） |
 |---|---|---|---|---|
-| **FAIL-0** | 父发现 | 四个审批面测试制品在零 CI workflow 执行 | #4984 `512f0df608` | **FIXED-with-named-residual**：四个具名实例全接线 + 6 个此前未门控套件双点接线；**残留 = 无机械枚举守卫**（排除清单手工维护，下一个未接线 spec 会复发）——carried-forward 硬化项，**非活缺陷（无一复现）**；与 #4984 闸门 P2-1 同一面 |
+| **FAIL-0** | 父发现 | 四个审批面测试制品在零 CI workflow 执行 | #4984 `512f0df608` + **#5004 `6ace2e5a01`** | **FIXED — 残留已 DISCHARGED**：#4984 把四具名实例 + 6 套件双点接线；**#5004 安装机械枚举守卫** `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts`（258 断言 + `approval-ci-coverage-allowlist.ts`），跨 4 层枚举每个审批 spec/test 并断言其被某具名 CI 车道或显式注释白名单收集；opus 闸门证实它在每层对真正未接线的 canary spec 变红、且在真实已接线文件被解除接线时变红（追踪真实 CI 接线，非静态 grep，非自豁免，居必需 test 车道）⇒ **phase-B 的「枚举守卫残留」已消除** |
 | FAIL-1 | P1 | `approval-inspector-keyboard.spec.ts` 在 main 红——harness 挂载抛异常 | #4984 | **FIXED**：real Chromium **1 passed (810ms)**；harness 导入当前 `ApprovalNodeConfigEditorApi` + 生产 CSS；path filter 加宽 4 个 `apps/web/src/approvals/**`。**DRAFT 曾提的「#4944-源起运行时红」在 phase-B 复核为已修** |
 | FAIL-2 | P2 | V-6 焦点环对比度 13/19 低于 ≥3:1 | #4981 `6488353bf8` | **FIXED**：real Chromium 重测三视口 **19 PASS / 0 FAIL / 0 NO-RING**（viewport 4.95、toolbar 族 5.17） |
 | FAIL-3 | P2 | `approval-node-entry-epoch.test.ts` 在 main 100% 红 | #4984 | **FIXED**：全新 `metasheet_p7b_epoch` DB **5 passed / 1 skipped** |
@@ -165,7 +165,7 @@ Phase-A 全部 127 行在 **`680e93c018`** 上执行。当前审批 head 是 **`
 | FAIL-6 | P3 | `handler` 无 per-type 强调色 | #4981 | **FIXED（fix 选了一个 shape）**：`handler` 用 `--el-color-info`，4/7 类型共享 info 强调色——**owner shape 裁定项**（§6.3 / 开发报告 §7.8） |
 | FAIL-7 | P3 | `useApprovalBatchActions.spec.ts` 在零 workflow 执行 | #4984 | **FIXED**：进 run-list + guard；本地 4 passed；UNION 存活已核（§4.5） |
 
-**✅ TAIL-PENDING V-2 —— DISCHARGED（8/8 FIXED），带一个具名 carried-forward 残留：** 八个 FAIL 的修复不仅合并进 main，且在 fresh `origin/main` 被 phase-B 逐行真复核为 FIXED（real Chromium / 全新 DB，defeat grant 残留 false-green）。**唯一残留** = FAIL-0 的机械枚举守卫（#4984 闸门 P2-1 的另一面）：现无一复现，但复发通道未被机械封死——记为 carried-forward 硬化项（owner/后续版本），**不是活缺陷**。边界：phase-B 是**子集**复核（8 FAIL + 15 特性 + 6 优越性），非全 127 行矩阵重跑（V-1）；且跑在本地 PG 15.17（V-14）。
+**✅ TAIL-PENDING V-2 —— DISCHARGED（8/8 FIXED），残留亦已消除：** 八个 FAIL 的修复不仅合并进 main，且在 fresh `origin/main` 被 phase-B 逐行真复核为 FIXED（real Chromium / 全新 DB，defeat grant 残留 false-green）。phase-B 曾记的**唯一残留** = FAIL-0 机械枚举守卫，**已由 #5004（`6ace2e5a01`，opus 闸门 MERGE-CLEAN 0 P1/0 P2）DISCHARGED**——机械枚举守卫落地并被证实有牙（且它在落地时**当场抓到并闭合一个真实的未接线套件** `approval-pack1a-lifecycle.api.test.ts`，两点接线进 `vitest.config.ts` 排除 + 新 `approval-realdb-pack1a-lifecycle` 车道 + `EXPECT_DB` 哨兵）。边界：phase-B 是**子集**复核（8 FAIL + 15 特性 + 6 优越性），非全 127 行矩阵重跑（V-1）；且跑在本地 PG 15.17（V-14）。
 
 #### FAIL-0 的机制（本次验证最有价值的发现，保留）
 四个制品，一个缺陷类：真库套件没从无库 vitest 配置排除 ⇒ 被必需无库 `test (20.x)` 收集并 `describeIfDatabase`-**skip-green**，且不在任何真库车道；浏览器/单测制品被 workflow 的 **path filter** 漏掉（打破它的 PR 改 `apps/web/src/approvals/**`，守卫车道只过滤 `apps/web/verification/**`）。skip-green 群体实测规模 **9422 passed / 1622 skipped**，跨 **650 / 185** 文件——**CI 里没有任何东西区分「会在具名真库车道被重跑」和「哪里都不跑」这两种 skipped**。台账自陈这四个**不是穷举**；#4984 做了一次有界机械扫描（`approval*` 命名的 111 web + 138 backend = **249 文件**），该扫描**已随 #4984 落地**——但因 P2-1，**类别记 LANDED-VERIFY 而非关闭**。
@@ -182,7 +182,7 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 
 | 组 | 行数 | PASS/FIXED | FAIL | carried-fwd | 说明 |
 |---|---|---|---|---|---|
-| Part 1 — 8 个 phase-A FAIL | 8 | **8 FIXED**（7 完全；FAIL-0 = FIXED-with-named-residual） | **0** | 1（FAIL-0 枚举守卫） | §2.4 |
+| Part 1 — 8 个 phase-A FAIL | 8 | **8 FIXED**（FAIL-0 残留其后由 #5004 DISCHARGED） | **0** | 0（枚举守卫已 DISCHARGED @ `6ace2e5a01`） | §2.4 |
 | Part 2 — 已落地特性判别检查 | 15 | **15 PASS** | **0** | 0 | P1-C×7（含 I12 coercion 分支**已删**、BE/FE `ApprovalMode` divergence CLOSED）+ K3 + L8-A + D-1（真库 values-free 400，read 轴 CLOSED）+ K1（union 13/13 @ phase-B SHA；K6 后 **15/15**，§2.0 核实）+ Lock-5 操作策略 choke + L6-A/P3-B + F4 两侧闸 |
 | Part 3 — 六项优越性 re-smoke | 6 | **6 PASS** | **0** | 0 | 全部仍可用；FWB 仅 code 半边（功能半边 owner-only） |
 | Part 4 — carried-forward（owner/env） | — | — | — | ~14 | 按设计未执行（§6.3/§6.4） |
@@ -190,7 +190,7 @@ Phase-B（`scratchpad/p7-phaseB-evidence-20260818.md`）是对 phase-A 里 `NOT-
 
 几处判别证据（逐字/锚点）：**I12** 的无守卫 coercion 分支在 `templateAuthoring.ts:707-715` **被删**（out-of-union `approvalMode` 强制 read-only，不再静默塌缩 `single`）；**§10** BE=FE `ApprovalMode` 均 4 成员（phase-A 点名的唯一 FE/BE divergence CLOSED）；**D-1** 真库「every access value on every non-write-capable node type is REJECTED with a typed values-free 400」，read 轴 CLOSED（`ApprovalProductService.ts:2582-2587`）；**F4** 两侧行为闸（`approvalTemplateAuthoring.spec.ts:3453` flag OFF 仅 legacy、Designer 2.0 完全缺席；`:3478` flag ON+hydrated 挂载、legacy 缺席），F10 pin **inverted-not-deleted**（`slots.spec.ts:1146-1155`）。**I10/R12 absence-list 已刷新**：FE 与 BE `ApprovalAssigneeSourceKind` 在 phase-B SHA 是**同一 13 成员 union**（resolver case-arm 奇偶未机械再确认——裸串 regex 不可靠，该行只落在实测到的两个事实上）；**K6 落地（`ffa3a5f595`）后为同一 15 成员 union**（本 FINAL §2.0 核实）；`sequential`（Lock-1 §K6）+ Lock-6 B–F 标识符仍缺。
 
-**这不推翻 §6.5 的 PASS-POSITIVE-ONLY 债**：phase-B 是子集复核，那 63 行绿测试所欠的判别性反例（33 显式点名子集）**没有**在 phase-B 构造——V-1 / V-12 仍 OPEN。
+**判别性反例债（V-12）—— actionable 部分由 #5004 CLEARED，但不等于 63/33 全清**：#5004 对所欠 work-list（约 10 项）做了 triage：**6 项已在此前切片 discharge + 3 项非债（F12 / R1 / R5——经复核不构成实际债）+ I3 是唯一真实缺口，已由 #5004 关闭 + 0 项 BLOCKED-ENV/NEEDS-FIXTURE**。I3 的判别性反例落地：`apps/web/tests/approval-template-authoring-approval-node-edit.test.ts` 钉 `templateAuthoring.ts:1244` 线性路径派单人 allowlist——一个 out-of-registry kind 强制 read-only，配 15-kind 穷举正控；opus 闸门证实它对自身变异 A/B 变红、对无关变异**不**变红（specific，非烟雾报警）。⇒ **可执行的判别性反例债已清**。**剩下的只是**：全 127 行矩阵重跑（V-1）+ 任何**确实需要组装应用**才能构造反例的 PASS-POSITIVE-ONLY 行（§6.4 BLOCKED-ENV / §6.5）——**不声称 63/33 全部 discharge**。
 
 ---
 
@@ -316,6 +316,7 @@ enforce_admins.enabled       = true
 | `approval-realdb-node-operation-policy.yml` | **否** | **Lock-5 L5-A 操作策略（#4980）** |
 | `approval-realdb-p7r1-coverage-repair.yml` | **否** | **P7-R1 孤儿真库套件（#4984）** |
 | `approval-realdb-acceptance.yml` → job `approval-realdb-k6-contact` | **否** | **K6 Lock-2 §L2-C 表单内联系人上级/部门负责人（#4993）**（`approval-form-contact-extensions.db.test.ts`；合并头绿） |
+| `approval-realdb-acceptance.yml` → job `approval-realdb-pack1a-lifecycle` | **否** | **通用审批生命周期验收（#5004 residual-hardening）**（`approval-pack1a-lifecycle.api.test.ts`——是枚举守卫落地时**当场抓到的真实未接线套件**，两点接线） |
 | `approval-template-policy-carrier-realdb.yml` | **否** | L6-P1 policy carrier |
 | `approval-browser-verify.yml` | **否** | F2 / F4 真 Chromium DataTransfer |
 | `approval-web-guard.yml` | **否** | 定向审批 FE helper/round-trip specs |
@@ -344,6 +345,8 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 
 ⇒ **合并列车没有静默去接线任何一个套件**。这是一个**真正的 DISCHARGE**：FAIL-0 那一类「守卫不守卫」在这轮四-PR 竞态里被防住了。（`approval-node-entry-epoch` / `approval-wp1-any-mode` 的**内容**是否在合并后 head 变绿仍属 V-2/V-1；此处只证明它们没有从收集面消失。）
 
+**此前这条 UNION 是手工核实的一次性证据；#5004（`6ace2e5a01`）把它变成机械守卫**：`approval-ci-coverage-enumeration.test.ts`（258 断言 + `approval-ci-coverage-allowlist.ts`）跨 4 层（`apps/web/tests`、`apps/web/verification`、`core-backend/tests/unit`、`.../integration`）枚举每个审批 spec/test 并断言其被某具名 CI 车道或显式注释白名单收集，居必需 test 车道、追踪真实 CI 接线、非自豁免。⇒ 下一次「加了 spec 却没接线」会**由 CI 构造性变红**，而不是等下一次手工普查。这正是 FAIL-0 的复发通道被机械封死。
+
 ---
 
 ## 5. TAIL-PENDING 行与它们的解除条件（FINAL 结算）
@@ -351,7 +354,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 | # | TAIL-PENDING 行 | 现状 |
 |---|---|---|
 | **V-1** | Phase-A 127 行**完整**矩阵未在当前 head 重跑 | **收窄，未全解**：phase-B（§2.5）已在 fresh `origin/main` 真复核**子集**（8 FAIL + 15 特性 + 6 优越性）；**其余行（含 63 个 PASS-POSITIVE-ONLY）仍 LANDED-VERIFY / PPO**，全 127 行重跑需精确部署 merged-main SHA + PG16 真库 + 组装应用（owner/后续版本） |
-| **V-2** | 八个 FAIL 在 main 上仍活 | ✅ **DISCHARGED（8/8 FIXED，phase-B §2.4）**，带一个 carried-forward 残留 = FAIL-0 机械枚举守卫（#4984 P2-1 的另一面，非活缺陷）。**DRAFT 的 FAIL-1 运行时红在 phase-B 复核为已修（real Chromium 1 passed）** |
+| **V-2** | 八个 FAIL 在 main 上仍活 | ✅ **DISCHARGED（8/8 FIXED，phase-B §2.4）**；phase-B 曾记的 FAIL-0 机械枚举守卫残留**亦已 DISCHARGED @ #5004 `6ace2e5a01`**（守卫落地，且当场抓到并闭合一个真实未接线套件 `approval-pack1a-lifecycle`）。**DRAFT 的 FAIL-1 运行时红在 phase-B 复核为已修（real Chromium 1 passed）** |
 | **V-3** | #4965 requalify NOT-CLEAR，合并后闭合无记录 | ✅ **DISCHARGED**（§3.5，两 floor 臂 mutation-proven at merged main） |
 | **V-4** | #4974 带 2 个未闭合 P2 合并 | **OPEN**（= D-2，合并时闸门项未记录闭合） |
 | **V-5** | #4946 / #4948 CHANGES-REQUESTED 无 requalification 合并 | **OPEN**（= D-3，同上） |
@@ -361,7 +364,7 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 | **V-9** | K1（`user_group`）、K6（`sequential`）未落地 | **K1 ✅ LANDED（#4995）**；**K6 slice #4993（Lock-2 §L2-C 字段派生 manager/dept-head）✅ LANDED @ `ffa3a5f595`**（闸门 MERGE-CLEAN 0 P1，union 13→15）；**仅 K6 = Lock-1 §K6 `sequential` 仍 OPEN**（母锁 §8 非目标） |
 | **V-10** | P5 #4980 + 堆叠 #4983 均 OPEN；R7 NOT-YET-LANDED；#4983 base 非 main | ✅ **DISCHARGED**：两 PR 合并（`d034b1f710` / `327ac6427b`）；R7 LANDED；#4983 retarget 到 main（§3.7） |
 | **V-11** | Lock-6 B–F 零命中 | **OPEN**（各自切片；L6-F1 v1 REJECTED 为惰性） |
-| **V-12** | 33 个 PASS-POSITIVE-ONLY 行所欠判别性反例（每行点名） | **OPEN**——本程序公开的最大一块验证债，主动标注非被发现（§6.5） |
+| **V-12** | 33 个 PASS-POSITIVE-ONLY 行所欠判别性反例（每行点名） | **actionable 部分 CLEARED（#5004）**：triage = 6 已 discharge + 3 非债（F12/R1/R5）+ I3 唯一真缺口已闭合（`approval-template-authoring-approval-node-edit.test.ts`，闸门证实 specific 非烟雾）+ 0 BLOCKED。**剩余** = V-1 全矩阵重跑 + 确需组装应用的 PPO 行（§2.5 / §6.5）；**不声称 63/33 全清** |
 | **V-13** | `approval-realdb-*` / `approval-browser-verify` 均非必需检查 | **OPEN（owner 动作）**：分支保护里加入（delta §7.1 item 8 = F4 合并前 owner 步，已合并但步仍未执行） |
 | **V-14** | PG 大版本差：Phase-A 127 行 + **phase-B 子集**均跑在本地 PG **15.17**，CI 用 `postgres:16` | **OPEN**（phase-B 亦记录本地 PG15；对照：#4983 闸门跑在本地 PG16 但只覆盖 P5-B；PG16 上重跑真库车道待办） |
 | **V-15** | #4984 尚未过独立对抗闸门 | ✅ **DISCHARGED**：#4984 现有独立闸门 MD（`/tmp/pr4984-p7r1-gate-20260818.md`，APPROVE-with-hardening (MERGE-CLEAN after P2-1)）；残留 = P2-1 本身（§2.4） |
@@ -390,6 +393,8 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 ### 6.5 PASS-POSITIVE-ONLY 的欠债（保留，最大一块公开验证债）
 63 行绿测试**没有**被写成 PASS。示例（原样）：F1 欠「neuter the allocator to a length-derived index and prove a duplicate-ID red」；R1 欠「distinguish "denied" from "denied for a different reason"（`notEqual` 族陷阱）」；R5 欠「an injected-failure probe I did not construct」；V4 欠「a constructed concurrent-restore race」；D2 欠「a constructed interleaving」。**这是被主动标注出来的，不是被发现的。**（源内 33 vs 63 不自洽 = V-7，未解决。）
 
+**#5004 的 triage 更新（诚实收窄，非全清）**：对所欠 work-list（约 10 项）逐项核，**6 项已在此前切片 discharge、3 项经复核为非债（F12/R1/R5）、I3 是唯一真实缺口且已由 #5004 关闭、0 项 BLOCKED-ENV/NEEDS-FIXTURE**——所以**可执行的判别性反例债已清**。**但这不等于 63/33 全部 discharge**：剩下的是全 127 行矩阵重跑（V-1）与任何**确实需要组装应用**才能构造反例的 PPO 行（§6.4 BLOCKED-ENV-1/2/9）。V-7 的 33-vs-63 计数不自洽仍未机械重算。
+
 ### 6.6 完成标签的当前值（母本 §0 / §12）
 
 | Claim | 当前值 |
@@ -407,6 +412,37 @@ F4 与 K1 两份闸门各自独立点名：#4994 / #4984 / #4983 同改 `run-req
 ## 7. 本报告自身的边界
 
 - 本报告是 FINAL 而非完成声明。它**没有**重跑 phase-A 的**完整** 127 行矩阵；§2.1–2.3 的判定绑 `680e93c018`，§2.0 逐条标出落地取代/翻转的行。**P7 phase-B（§2.5）在 fresh `origin/main` 真复核了一个子集**（8 FAIL + 15 特性 + 6 优越性），把这些行升为带证据的 FIXED/PASS；其余行仍 `LANDED-VERIFY` / `PASS-POSITIVE-ONLY`。
-- 本 FINAL **新做/纳入**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、**派单人 15**（K6 后）、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）；⑦ **P7 phase-B 子集复核（8/8 FAIL FIXED + 15/15 特性 + 6/6 优越性，§2.5）**。
+- 本 FINAL **新做/纳入**的机械核实：① 当前 head 必需检查集（9 条）；② 前后端 union 计数（`ApprovalMode` 4、**派单人 15**（K6 后）、字段类型 13、`nodeOperationPolicy` populate）；③ F10 挂载 + 必需 job 收集 + slots FLIPPED PIN；④ 本程序窗口迁移枚举（4 个）；⑤ **run-list / vitest.config UNION 存活**（§4.5）；⑥ V-3 闭合证据引用（§3.5）；⑦ **P7 phase-B 子集复核（8/8 FAIL FIXED + 15/15 特性 + 6/6 优越性，§2.5）**；⑧ **#5004（`6ace2e5a01`）落地事实核实**：FAIL-0 机械枚举守卫（`approval-ci-coverage-enumeration.test.ts` + `approval-ci-coverage-allowlist.ts`）、I3 判别性反例（`approval-template-authoring-approval-node-edit.test.ts`）、`approval-realdb-pack1a-lifecycle` 车道 + `vitest.config.ts` 排除、四个迁移文件名——均在 `origin/main` 上机械存在。
 - 本报告**不记录**任何私有发布前置条件的车道标识、状态、实现细节或私有证据（母锁 §0.2 披露纪律）。
 - 本报告**不 ratify、不授权、不启用**任何东西。所有 owner 事项集中在开发报告 §7。
+
+---
+
+## 附录：DDL 部署序 runbook（owner/ops，授权 nothing）
+
+**范围**：四个审批迁移已落 main（8/17–8/18），新审批镜像在**在线请求路径**上会向它们写。全部 `zzzz` 前缀、幂等。**授权 nothing，不启用任何 flag。**（迁移文件名已对 `origin/main` 逐字核实。）
+
+### (1) 必须在新镜像上线**之前**运行的迁移（按加载序）
+
+1. `zzzz20260817120000_add_handle_action_to_approval_records.ts` — 把 `approval_records_action_check` 从 14→15（加 `handle`）；新代码在办理完成时写 `action:'handle'`（Lock-3 §3）。
+2. `zzzz20260817130000_create_approval_form_field_revisions.ts` — 新表 `approval_form_field_revisions`（+idx）；新代码在办理事务内 INSERT before/after 行，读取用于 masked revision 面 + dedup `MAX(audit_record_id)`（Lock-7 OD-L7-6a）。
+3. `zzzz20260818090000_add_policy_denied_action_to_approval_records.ts` — **#4980，具名风险点**：把 15→16（加 `policy_denied`）；新代码在 §2.1 dispatch choke 上因操作策略拒绝而写它（Lock-5 §1.4 / OD-L5-9a）。
+4. `zzzz20260818120000_create_approval_usable_member_groups.ts` — 新 curated 绑定表（PK `(org_id,group_id)`+idx），**默认空**；新代码在 publish 时读（`assertUserGroupSourcesBoundToOrg`）用于 `user_group` 来源（Lock-1 §K1）。
+
+### (2) 镜像先上的失败模式
+
+- CHECK 放宽（#1、#3）→ INSERT 撞到尚未放宽的约束 → PG `23514 check_violation` → 写抛错；对 #4980，一个干净的 **409（策略拒绝）退化为 HTTP 500**（409→500）；`handle` 同样在完成时失败。
+- 建表（#2、#4）→ `42P01 undefined_table` → 500；对 #4，一个本应的 publish **400（悬挂/外键 `user_group` 绑定）退化为 500**。
+
+### (3) 部署前检查（只读）
+
+- `pnpm --filter core-backend run db:list` 查 pending；
+- 逐迁移名级门控：`pnpm --filter core-backend exec tsx src/db/migrate.ts --confirm <name>`（exit 0=applied，1=pending，2=unknown）。
+- **门**：四个都不得 Pending，且每个 `--confirm` 必须 exit 0，才能 promote 镜像。**`--latest` exit 0 不能证明某个具体迁移跑过**——用名级 `--confirm`。
+
+### (4) 回滚姿态
+
+- 镜像独立回滚；迁移**只进不退**。**四个全部保持 APPLIED，不要 `--rollback`。**
+- 两处 CHECK 放宽加的是**严格超集**成员（旧镜像从不发 `handle`/`policy_denied`，故放宽后的约束接受旧代码写的一切——在镜像之前先落安全，旧镜像回滚后留着也安全）。
+- 两处 CREATE TABLE 是**增量且在旧镜像下惰性**（`usable_member_groups` 在 admin 绑定前一直空；`form_field_revisions` 只由新代码写）。
+- **镜像回滚时不要回滚迁移**（会造成数据搁浅方向）：两处 CHECK 的 `down()` 会以 `NOT VALID` 重新收窄（保留既有行），但重新 promote 会 500 直到重新 apply；两处表的 `down()` 会 DROP 表（毁掉 revision 台账 + admin 绑定）——**只进不退**。要避免的搁浅场景是其**反面**（`zzzz` 排序陷阱）：镜像先于迁移。House SOP 成立：**先迁移，后 promote 镜像**；一个 `zzzz` 表的依赖列/约束也必须 `zzzz` 前缀——此处四个都正确 `zzzz` 前缀且自洽。
