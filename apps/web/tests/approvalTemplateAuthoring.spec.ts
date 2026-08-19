@@ -1147,6 +1147,31 @@ describe('approval template authoring helpers', () => {
     expect(reason).not.toBeNull()
     expect(reason).toContain('暂不支持')
   })
+
+  // T7/T8 — P2-1 fix: the LINEAR branch checked only top-level config keys, so a node carrying
+  // `autoApprovalPolicy.samePersonPolicy` (F4-C; not in `BACKEND_AUTO_APPROVAL_POLICY_KEYS`, so
+  // backend `normalizeAutoApprovalPolicy` silently re-synthesizes `mergeWithRequester:true` from it
+  // on every save) looked editable. The complex path already ran the nested
+  // `hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)` check (:1067); the
+  // linear path now runs the SAME check, so both editors agree.
+  it('T7: samePersonPolicy carrier forces the linear editor read-only (was wrongly editable)', () => {
+    const autoSkip = unsupportedTemplateAuthoringReason(
+      buildAutoApprovalTemplate({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' } as AutoApprovalPolicy),
+    )
+    expect(autoSkip).not.toBeNull()
+    expect(autoSkip).toContain('暂不支持')
+
+    const transfer = unsupportedTemplateAuthoringReason(
+      buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_direct_manager' } as AutoApprovalPolicy),
+    )
+    expect(transfer).not.toBeNull()
+  })
+
+  it('T8: a bare mergeWithRequester carrier (no samePersonPolicy) stays editable — negative control for T7', () => {
+    // Guards against a T7 fix that over-widens hasKeyOutside and traps the T3 baseline too.
+    const reason = unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    expect(reason).toBeNull()
+  })
 })
 
 describe('TemplateAuthoringView', () => {

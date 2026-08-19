@@ -199,6 +199,15 @@ describeIfDatabase('Lock-4 F4-C — same-person policy (审批人=提交人): se
     return result.rows as never
   }
 
+  // P2-3 fix: every C-1/C-2/C-3 fixture above uses `samePersonGraph`, whose same-person node is
+  // ALWAYS the first approval node — resolved at CREATE (`getEffectiveSamePersonPolicy`'s create
+  // call site, ApprovalProductService.ts :6981). The provider is wired at three MORE sites
+  // (adminJump :7568, timeout-jump :8131, dispatch/advance :8376); this helper drives the
+  // dispatch/advance path by actually approving a prior node.
+  async function act(token: string, instanceId: string, body: object): Promise<Response> {
+    return jsonRequest(baseUrl, `/api/approvals/${instanceId}/actions`, token, { method: 'POST', body })
+  }
+
   /**
    * Strip the fields that legitimately differ per-instance before a deep-equal:
    * `nodeEntryEpoch` (per-instance activation counter) and `requestNo` (the `action:'created'`
@@ -346,6 +355,108 @@ describeIfDatabase('Lock-4 F4-C — same-person policy (审批人=提交人): se
       [inst1.id, 'a1'],
     )
     expect(inst1Assignments.rows.map((r: { assignee_id: string }) => r.assignee_id)).toEqual([U_M1])
+  })
+
+  it('C-2 (P2-3 fix, dispatch-resolved): transfer_direct_manager resolves at DISPATCH — not just create — when the same-person node is the SECOND node, reached only after an ordinary prior node is approved', async () => {
+    const suffix = 'c2-dispatch'
+    const integrationId = (await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id) VALUES ($1, $2) RETURNING id`,
+      [`l4f4c-${TS}-${suffix}`, `l4f4c-corp-${TS}-${suffix}`],
+    )).rows[0].id
+    createdIntegrationIds.add(integrationId)
+
+    const deptId = (await query<{ id: string }>(
+      `INSERT INTO directory_departments (integration_id, external_department_id, name, is_active, raw)
+       VALUES ($1, $2, 'Eng', true, '{}'::jsonb) RETURNING id`,
+      [integrationId, `l4f4c-dept-${TS}-${suffix}`],
+    )).rows[0].id
+
+    const U_R = `l4f4c-ur-${TS}-${suffix}`
+    const U_M = `l4f4c-um-${TS}-${suffix}`
+    const U_OTHER = `l4f4c-uo-${TS}-${suffix}` // n1's ordinary approver — no directory presence needed
+    await query(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x'), ($3, $4, 'x')`, [
+      U_R, `${U_R}@example.test`, U_M, `${U_M}@example.test`,
+    ])
+    createdLocalUserIds.add(U_R)
+    createdLocalUserIds.add(U_M)
+
+    const accR = (await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, raw)
+       VALUES ($1, $2, $3, 'R', '{}'::jsonb) RETURNING id`,
+      [integrationId, `l4f4c-extR-${TS}-${suffix}`, `l4f4c-keyR-${TS}-${suffix}`],
+    )).rows[0].id
+    const accM = (await query<{ id: string }>(
+      `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, raw)
+       VALUES ($1, $2, $3, 'M', $4::jsonb) RETURNING id`,
+      [integrationId, `l4f4c-extM-${TS}-${suffix}`, `l4f4c-keyM-${TS}-${suffix}`, JSON.stringify({ leader_in_dept: [{ dept_id: `l4f4c-dept-${TS}-${suffix}`, leader: true }] })],
+    )).rows[0].id
+
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+       VALUES ($1, $2, 'linked', 'manual'), ($3, $4, 'linked', 'manual')`,
+      [accR, U_R, accM, U_M],
+    )
+    await query(
+      `INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_primary)
+       VALUES ($1, $2, true), ($3, $2, true)`,
+      [accR, deptId, accM],
+    )
+
+    const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
+    const requesterToken = await authToken(baseUrl, U_R)
+    await grantWrite(U_R)
+    const otherToken = await authToken(baseUrl, U_OTHER)
+
+    // n1 is an ORDINARY node (no same-person involvement) so a2 — the same-person node — is
+    // resolved ONLY when execution dispatches to it after n1 is approved, never at create.
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'n1', type: 'approval', config: { assigneeType: 'user', assigneeIds: [U_OTHER], approvalMode: 'single' } },
+        {
+          key: 'a2',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            approvalMode: 'single',
+            autoApprovalPolicy: { samePersonPolicy: 'transfer_direct_manager' },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'n1' },
+        { key: 'e2', source: 'n1', target: 'a2' },
+        { key: 'e3', source: 'a2', target: 'end' },
+      ],
+    }
+    const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+    const inst = await createApproval(requesterToken, templateId)
+    expect(inst.currentNodeKey).toBe('n1')
+    // At CREATE, a2 has not been dispatched to yet — nothing to assert about its seat here; this
+    // is exactly the gap M10b exposed (removing the 3 non-create provider sites left every
+    // samePersonGraph-based fixture, which resolves at create, green).
+
+    const advance = await act(otherToken, inst.id, { action: 'approve' })
+    expect(advance.status, await advance.clone().text()).toBe(200)
+    const advanceBody = (await advance.json()) as { status: string; currentNodeKey: string | null }
+    expect(advanceBody.status).toBe('pending')
+    expect(advanceBody.currentNodeKey).toBe('a2')
+
+    // The transfer fired AT DISPATCH: a2's seat is the manager, NOT the requester holding their
+    // own seat (which is precisely the outcome F4-C exists to prevent).
+    const a2Assignments = await pool().query(
+      'SELECT assignee_id, metadata FROM approval_assignments WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE',
+      [inst.id, 'a2'],
+    )
+    expect(a2Assignments.rows.map((r: { assignee_id: string }) => r.assignee_id)).toEqual([U_M])
+    const a2Metadata = a2Assignments.rows[0]?.metadata as Record<string, unknown> | null
+    expect((a2Metadata?.resolvedFrom as Record<string, unknown> | undefined)?.kind).toBe('requester')
+    expect(a2Metadata?.samePersonTransfer).toBeTruthy()
+
+    const finish = await act(await authToken(baseUrl, U_M), inst.id, { action: 'approve' })
+    expect(finish.status, await finish.clone().text()).toBe(200)
+    expect(((await finish.json()) as { status: string }).status).toBe('approved')
   })
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────

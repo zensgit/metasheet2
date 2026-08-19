@@ -310,7 +310,106 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
   // (and correctly does) skip when it doesn't match the actor filter.
   // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('A-3: dedupeHistoricalApprover DOES dedupe across an intervening auto_approve node (actor-filtered search skips the system sentinel and finds P\'s earlier approval)', async () => {
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  // P2-2 fix (gate 20260819): the ratified A-3 property — "after an auto_approve node, a later
+  // node assigned to any real user is NOT auto-approved by dedupeHistoricalApprover" with its
+  // control "a genuine human approval at that same position DOES trigger the dedup" — was never
+  // actually constructed below: the shipped pair below puts P's GENUINE approval BEFORE the auto
+  // node, so dedupeHistoricalApprover's actor-filtered search always has a real P-authored entry
+  // to walk back to regardless of the auto node's presence, and the "control" removes the auto
+  // node and asserts the SAME outcome — zero discriminating power. This pair makes the auto-node
+  // event the ONLY prior history entry (nothing else to dedupe against), which is the actual bar:
+  // the F4-A sentinel row carries no `originalApprover` / actor identity for P, so it must NOT be
+  // mistaken for a real P approval by the dedup search.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('A-3 (RATIFIED): dedupeHistoricalApprover does NOT auto-approve manual2 when the auto_approve node is the ONLY prior history entry (the sentinel carries no P identity to dedupe against)', async () => {
+    const suffix = 'a3-ratified'
+    const p = `l4-p-${TS}-${suffix}`
+    const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
+    const requesterId = `l4-req-${TS}-${suffix}`
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await grantWrite(requesterId)
+    const pTok = await authToken(baseUrl, p)
+
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'auto1', type: 'approval', config: { approvalType: 'auto_approve', approvalMode: 'single' } },
+        {
+          key: 'manual2',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [p],
+            approvalMode: 'single',
+            autoApprovalPolicy: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'auto1' },
+        { key: 'e2', source: 'auto1', target: 'manual2' },
+        { key: 'e3', source: 'manual2', target: 'end' },
+      ],
+    }
+    const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+    const inst = await createApproval(requesterToken, templateId)
+    // NOT auto-approved away: manual2 stays pending, seat held by P, requiring a genuine action.
+    expect(inst.status).toBe('pending')
+    expect(inst.currentNodeKey).toBe('manual2')
+    expect(inst.assignments.map((a) => a.assigneeId)).toEqual([p])
+
+    const finish = await act(pTok, inst.id, { action: 'approve' })
+    expect(finish.status, await finish.clone().text()).toBe(200)
+    expect(((await finish.json()) as { status: string }).status).toBe('approved')
+  })
+
+  it('CONTROL for RATIFIED A-3 — replacing auto1 with a node P GENUINELY approves DOES trigger dedupeHistoricalApprover at manual2 (the exemption is event-selected, not position-selected)', async () => {
+    const suffix = 'a3-ratified-ctl'
+    const p = `l4-p-${TS}-${suffix}`
+    const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
+    const requesterId = `l4-req-${TS}-${suffix}`
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await grantWrite(requesterId)
+    const pTok = await authToken(baseUrl, p)
+
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'manual1', type: 'approval', config: { assigneeType: 'user', assigneeIds: [p], approvalMode: 'single' } },
+        {
+          key: 'manual2',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [p],
+            approvalMode: 'single',
+            autoApprovalPolicy: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'manual1' },
+        { key: 'e2', source: 'manual1', target: 'manual2' },
+        { key: 'e3', source: 'manual2', target: 'end' },
+      ],
+    }
+    const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+    const inst = await createApproval(requesterToken, templateId)
+    expect(inst.currentNodeKey).toBe('manual1')
+
+    const afterFirst = await act(pTok, inst.id, { action: 'approve' })
+    expect(afterFirst.status, await afterFirst.clone().text()).toBe(200)
+    const afterFirstBody = (await afterFirst.json()) as { status: string; currentNodeKey: string | null }
+    // A GENUINE P approval at the same position DOES dedupe manual2 away in the same request.
+    expect(afterFirstBody.status).toBe('approved')
+    expect(afterFirstBody.currentNodeKey).toBeNull()
+  })
+
+  it('REGRESSION PIN (asymmetry, not A-3 acceptance): dedupeHistoricalApprover\'s actor-filtered search skips an intervening auto_approve sentinel and finds P\'s EARLIER genuine approval', async () => {
     const suffix = 'a3-dedupe'
     const p = `l4-p-${TS}-${suffix}`
     const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
@@ -352,7 +451,7 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
     expect(afterFirstBody.currentNodeKey).toBeNull()
   })
 
-  it('CONTROL for A-3 — WITHOUT the auto_approve node in between, dedupeHistoricalApprover produces the IDENTICAL outcome (auto2\'s presence makes no observable difference to this policy)', async () => {
+  it('REGRESSION PIN control — WITHOUT the auto_approve node in between, dedupeHistoricalApprover produces the IDENTICAL outcome (auto2\'s presence makes no observable difference to this policy; NOT an A-3 discriminator — see the RATIFIED pair above for that)', async () => {
     const suffix = 'a3-dedupe-ctl'
     const p = `l4-p-${TS}-${suffix}`
     const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
