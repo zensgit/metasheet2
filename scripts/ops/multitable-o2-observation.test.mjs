@@ -152,6 +152,38 @@ function stripComments(sql) {
       }
       continue
     }
+    // DOUBLE-QUOTED IDENTIFIER — `"x -- y"`. Round-5 gate P3-1: this branch did not exist, so a
+    // `--` inside an identifier read as a comment start and ERASED the rest of that line from
+    // every static predicate (heads, body census, function allowlist, and the backslash ban).
+    // The gate's shipped-code extraction:
+    //     RAW      : SELECT 1 AS "x -- " ; SELECT lo_create(0);
+    //     STRIPPED : SELECT 1 AS "x
+    //     HEADS: []   BACKSLASH: []
+    // — and it WRITES: under this file's own invocation it created a large object, and one armed
+    // suite run with the shape present took large objects 0 -> 21 while every layer stayed green.
+    // `lo_create` is precisely the family round 3 moved INTO the static census because the
+    // execution layer provably cannot see it, so this erasure put it back out of reach of layer 1.
+    // Same erasure class as the round-2 single-quote bug, one quoting syntax over; the fix is to
+    // mirror the branch above (`""` is the escape for a literal `"` inside an identifier).
+    if (sql[i] === '"') {
+      const start = i
+      out += '"'
+      i += 1
+      let closed = false
+      while (i < n) {
+        if (sql[i] === '"' && sql[i + 1] === '"') { out += '""'; i += 2; continue }
+        if (sql[i] === '"') { out += '"'; i += 1; closed = true; break }
+        out += sql[i]
+        i += 1
+      }
+      if (!closed) {
+        throw new Error(
+          `stripComments: unterminated quoted identifier starting at offset ${start} — refusing ` +
+            'to silently treat the rest of the file as identifier content (fail-toward-flagging)',
+        )
+      }
+      continue
+    }
     if (sql[i] === '$') {
       const m = DOLLAR_TAG_RE.exec(sql.slice(i))
       if (m) {
@@ -195,6 +227,22 @@ function splitStatements(sql) {
         if (stripped[i] === "'" && stripped[i + 1] === "'") { cur += "''"; i += 2; continue }
         cur += stripped[i]
         const closing = stripped[i] === "'"
+        i += 1
+        if (closing) break
+      }
+      continue
+    }
+    // Quoted identifier — a `;` inside `"…"` must not split a statement (round-5 gate P3-1's
+    // sibling: stripComments now preserves these spans, so the splitter has to respect them too,
+    // or a `;` inside an identifier would fragment the statement and hand the head census a
+    // bogus head token).
+    if (ch === '"') {
+      cur += ch
+      i += 1
+      while (i < n) {
+        if (stripped[i] === '"' && stripped[i + 1] === '"') { cur += '""'; i += 2; continue }
+        cur += stripped[i]
+        const closing = stripped[i] === '"'
         i += 1
         if (closing) break
       }
@@ -322,8 +370,9 @@ test("SQL: (documented residual, not a passing security assertion) an E-string's
 // on the same line as the statement it re-executes. Proven against a real database:
 //   SELECT 'CREA'||'TE TABLE o2_pwn_eol AS SELECT 1' \gexec
 // psql exits 0 and the table IS created, while a `/^[ \t]*\\/` line-leading test never fires.
-// Stripping comments first is what makes a whole-file backslash ban zero-false-positive here: the
-// pristine file's ONLY backslash lives in a comment (`-- loop (e.g. \watch 5) …`), and a backslash
+// Stripping comments first is what makes a whole-file backslash ban free to adopt TODAY — and note
+// this is a property of THIS FILE, not of the guard (round-5 gate NIT-1): the pristine file's ONLY
+// backslash lives in a comment (`-- loop (e.g. \watch 5) …`), and a backslash
 // has no legitimate use in this file's executable text — E-strings and dollar-quoting are already
 // banned above, so no escape syntax needs one. This is LOAD-BEARING for D4 and D5 (neither slipped
 // through any OTHER predicate in this file — see the negative-control test below, which disables
@@ -1535,6 +1584,13 @@ function stripInvisibleMarkdown(text) {
   //    offenders flagged), never remove a host command from hostVerbOccurrences' raw-text
   //    scan — see the negative controls below for the over-stripping check this widening
   //    itself needs (a real marker must still survive a real, unrelated multi-line tag).
+  // 4b. P3-2 gate fix (round 5): `<style>` and `<script>` CONTENT. Rule 4 correctly keeps text
+  //     BETWEEN tags because that text is normally rendered — but these two elements are the
+  //     exception: their contents are never page content (GitHub strips both elements entirely),
+  //     so `<style>/* OWNER-GATED */</style>` and `<script>// OWNER-GATED</script>` were
+  //     invisible markers that still gated. Runs BEFORE the generic tag strip, since afterwards
+  //     the element boundaries are gone and the content would look like ordinary text.
+  out = out.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
   out = out.replace(/<[^>]+>/g, '')
   // 5. P3-4 gate fix (round 3): a fenced code block's INFO STRING — the text on the same
   //    line as the opening ``` /~~~ fence (e.g. "```bash OWNER-GATED"). No Markdown
@@ -2095,6 +2151,10 @@ function psqlAvailable() {
 
 const canRunExecutionLayer = Boolean(DATABASE_URL) && psqlAvailable()
 
+/** Residue baseline, captured BEFORE any doctored probe executes. Compared at the very end of
+ *  the armed run (round-5 gate NIT-2). Null when the lane is not armed. */
+const RESIDUE_BASELINE = canRunExecutionLayer ? residueFingerprint() : null
+
 if (!DATABASE_URL) {
   test('EXECUTION-LAYER SKIPPED — no DATABASE_URL reachable', { skip: true }, () => {})
   // eslint-disable-next-line no-console
@@ -2317,6 +2377,25 @@ function runReadOnlySql(sql) {
   }
 }
 
+/** Scalar query against the real DB (armed lane only). Returns the trimmed single value, or
+ *  null when psql itself failed — callers must treat null as "could not measure", never as 0. */
+function scalar(sql) {
+  const r = spawnSync('psql', [DATABASE_URL, '-Atqc', sql], { encoding: 'utf8', timeout: 20000 })
+  return r.status === 0 ? (r.stdout || '').trim() : null
+}
+
+/** Residue fingerprint: artefacts a doctored write-probe would leave if a guard ever regressed.
+ *  Round-5 gate NIT-2: until now the "zero residue" claim was measured BY HAND, outside CI — and
+ *  the gate's own double-quote-erasure shape produced 21 large objects while the suite stayed
+ *  green. Measuring it INSIDE the suite is what makes the claim load-bearing rather than a
+ *  hand-checked anecdote (被触发≠被验证). */
+function residueFingerprint() {
+  return {
+    largeObjects: scalar('SELECT count(*) FROM pg_largeobject_metadata'),
+    probeTables: scalar("SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'o2\\_%' ESCAPE '\\'"),
+  }
+}
+
 /** Run `sql` normally (NOT read-only) — used only for defensive cleanup of any
  *  artefact a doctored probe might have left behind if a guard regressed. */
 function runCleanupSql(sql) {
@@ -2486,5 +2565,36 @@ if (canRunExecutionLayer) {
       /O2_RO_GUARD_DISARMED/,
       'this must be caught by the transaction wrap itself, at the write, not by the end-of-session canary — a canary-named failure here would mean the restore silently defeated the earlier check and only the (session-scoped) GUC state saved this test, contrary to the fix being verified',
     )
+  })
+}
+
+// ---------------------------------------------------------------------------
+// RESIDUE ASSERTION (armed lane only) — round-5 gate NIT-2.
+// The execution-layer probes deliberately EXECUTE doctored SQL against a real database. If a
+// static guard ever regresses, a write shape reaches the server and leaves artefacts behind.
+// Until now that was checked by hand after the run; the gate demonstrated a shape that left 21
+// large objects while every test stayed green. This test measures the fingerprint at the END of
+// the armed run and fails on ANY increase, so the "no residue" property is asserted by the suite
+// rather than asserted by a human afterwards.
+//
+// Baseline is captured lazily at first use (module load order across node:test files is not
+// something to rely on) and compared here. A null measurement means psql could not answer — that
+// is a FAILURE, never a silent pass (fail-toward-flagging), because "could not measure" and
+// "measured zero" must not look alike.
+if (canRunExecutionLayer) {
+  test('EXECUTION: the armed run leaves NO residue behind — large objects and o2_* probe tables are back at their pre-run counts (round-5 gate NIT-2: this was a hand-check outside CI until now)', () => {
+  const after = residueFingerprint()
+  assert.notEqual(after.largeObjects, null, 'could not measure pg_largeobject_metadata — treat an unmeasurable residue check as a failure, not a pass')
+  assert.notEqual(after.probeTables, null, 'could not measure information_schema.tables — treat an unmeasurable residue check as a failure, not a pass')
+  assert.equal(
+    after.probeTables,
+    '0',
+    `a probe table survived the armed run (o2_* count = ${after.probeTables}) — a write shape reached the server, meaning a static guard regressed`,
+  )
+  assert.equal(
+    after.largeObjects,
+    String(RESIDUE_BASELINE.largeObjects),
+    `large-object count moved during the armed run (${RESIDUE_BASELINE.largeObjects} -> ${after.largeObjects}) — the lo_* family reached the server`,
+  )
   })
 }
