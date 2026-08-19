@@ -7955,10 +7955,12 @@ export class ApprovalProductService {
    *   three now get the SAME evidence: an audit row per seat (`outcome: 'no_manager_resolved'` /
    *   `'target_is_requester'` / `'target_already_assignee'`) plus an operator warning, committed.
    *   Scope note: this parity is about manager-resolution outcomes specifically. It does NOT extend
-   *   to the P26 attendance-central boundary immediately above, which deliberately emits neither —
-   *   that branch ROLLBACKs before any manager is even resolved, on a table this method has no
-   *   business writing to for that request kind; the departed user's seat there is asserted
-   *   byte-identical by the P26 test, and the absence of a `reassign` row is itself the assertion.
+   *   to the P26 attendance-central boundary documented above (which runs AFTER the one-time
+   *   manager resolution above, per-instance, once the instance row is locked) — that branch
+   *   deliberately emits neither, because the fail-closed guard forbids this SYSTEM-actor writer
+   *   from mutating an attendance-central instance's assignments AT ALL on this discovery path, so
+   *   there is no seat-disposition outcome to record for it; the departed user's seat there is
+   *   asserted byte-identical by the P26 test, which also pins zero `reassign` rows on it.
    * - NOT parallel-restricted: unlike the SLA transfer (which hands the WHOLE node over and must
    *   therefore refuse an in-flight parallel region), this method only ever touches the departed
    *   user's OWN seat rows by `assignee_id` — it never deactivates a node wholesale — so a departed
@@ -8123,9 +8125,9 @@ export class ApprovalProductService {
         // instance's requester (a small-team org chart), and nothing else in this method excludes
         // that — self-approval-by-substitution is exactly the shape adversarial review looks for.
         // P2 (gate 20260819): this is a "leave in place" outcome exactly like the no-manager
-        // fail-closed branch below, so it gets the SAME evidence — one audit row per seat + an
-        // operator warning, COMMITted (not rolled back into silence). Without this, a departed
-        // user keeps an active seat with zero durable trace of why.
+        // fail-closed branch above (`if (!resolvedManagerId)`), so it gets the SAME evidence — one
+        // audit row per seat + an operator warning, COMMITted (not rolled back into silence).
+        // Without this, a departed user keeps an active seat with zero durable trace of why.
         const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
         const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
         if (requesterId && requesterId === resolvedManagerId) {
@@ -8143,7 +8145,7 @@ export class ApprovalProductService {
                 departureTransfer: true,
                 outcome: 'target_is_requester',
                 fromUserId: userId,
-                // Diagnostic-only, like `no_manager_resolved`'s own metadata below — the seat did
+                // Diagnostic-only, like `no_manager_resolved`'s own metadata above — the seat did
                 // NOT move to this user, so `targetUserId` (the `target_user_id` COLUMN, which the
                 // 'transferred' outcome uses to name the seat's actual new holder) is deliberately
                 // left unset here; a reader keying off that column alone must not conflate "who
