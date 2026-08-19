@@ -1709,7 +1709,7 @@ describe('admin-users routes', () => {
   // P23: same discriminator/mapping as the '/api/admin/users/:userId/roles/assign' coverage
   // above, exercised on the sibling delegated-role route (this is the route the P23 write-up
   // names directly — its user_roles write used to fall through to an unclassified 500 too).
-  it('maps a busy recovery authority lease to a retryable 409 on the delegated role-assign route', async () => {
+  it('[recovery-census:admin-users:delegated-role-action] maps a busy recovery authority lease to a retryable 409 on the delegated role-assign route', async () => {
     state.authUser = { id: 'admin-1', role: 'user' }
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
@@ -2585,7 +2585,7 @@ describe('admin-users routes', () => {
   // that (like every other error) to an unclassified 500 — mock the write throwing that exact
   // shape (no real trigger needed) and assert the route now maps it to a retryable 409 using
   // the SAME discriminator/code the multitable permission routes already use.
-  it('maps a busy recovery authority lease to a retryable 409 instead of an unclassified 500', async () => {
+  it('[recovery-census:admin-users:role-assign] [recovery-census:admin-users:busy-delegation] maps a busy recovery authority lease to a retryable 409 instead of an unclassified 500', async () => {
     rbacMocks.isAdmin
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
@@ -4317,4 +4317,138 @@ describe('admin-users routes', () => {
       }),
     )
   })
+
+// O2-A1 (census reachability): one discriminating behaviour leg PER
+// sendIfRecoveryAuthorityBusy writer call site that had none. Each leg drives the REAL
+// route until its recovery-authority write raises the marker 40001 and asserts the
+// retryable 409 — so `if (false && sendIfRecoveryAuthorityBusy(res, error))` at that
+// one site turns exactly its leg red (the error would fall through to the surface's
+// original *_FAILED 500 instead).
+describe('admin-users remaining recovery-authority-busy writer sites', () => {
+  function recoveryBusyError(): Error & { code: string } {
+    const error = new Error('METASHEET_RECOVERY_AUTHORITY_BUSY') as Error & { code: string }
+    error.code = '40001'
+    return error
+  }
+
+  const USER_ROW = {
+    id: 'user-1',
+    email: 'alpha@example.com',
+    name: 'Alpha',
+    role: 'user',
+    is_active: true,
+    is_admin: false,
+    last_login_at: null,
+    created_at: '2026-03-12T00:00:00.000Z',
+    updated_at: '2026-03-12T00:00:00.000Z',
+  }
+
+  function expectRetryable409(response: { statusCode: number; body: unknown }): void {
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+  }
+
+  it('[recovery-census:admin-users:member-group-action] member-group assign: busy lease on the membership write → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [USER_ROW] }) // fetchUserProfile
+      .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] }) // group lookup
+      .mockImplementationOnce(async () => {
+        throw recoveryBusyError() // INSERT INTO platform_member_group_members
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { groupId: 'group-1' },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('[recovery-census:admin-users:create-user] create user: busy lease on the users INSERT → retryable 409', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true) // ensurePlatformAdmin
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('INSERT INTO users (')) throw recoveryBusyError()
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expectRetryable409(response)
+  })
+
+  it('create user: a non-40001 insert failure keeps the ORIGINAL USER_CREATE_FAILED 500 (control)', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('INSERT INTO users (')) {
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).error.code).toBe('USER_CREATE_FAILED')
+  })
+
+  it('[recovery-census:admin-users:role-unassign] role unassign: busy lease on the user_roles DELETE → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [USER_ROW] }) // fetchUserProfile
+      .mockImplementationOnce(async () => {
+        throw recoveryBusyError() // DELETE FROM user_roles
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_admin' },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('[recovery-census:admin-users:status] status update: busy lease inside the access-graph lock transaction → retryable 409', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    // The transaction mock runs its handler against pgMocks.query; the FIRST in-txn
+    // query is lockUsersForAccessGraphWrite's FOR UPDATE read — the realistic point for
+    // the marker 40001 while recovery holds the per-subject lease.
+    pgMocks.query.mockImplementationOnce(async () => {
+      throw recoveryBusyError()
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/status', {
+      params: { userId: 'user-1' },
+      body: { isActive: false },
+    })
+
+    expectRetryable409(response)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+})
 })

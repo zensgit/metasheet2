@@ -25,7 +25,7 @@ function markerError(): Error & { code: string } {
 }
 
 describe('mapActivateError — O2-S2 recovery-conflict branch', () => {
-  it('the named RecoveryConflictError maps to the exact retryable 409', () => {
+  it('[recovery-census:admin-users:activate-mapping] the named RecoveryConflictError maps to the exact retryable 409', () => {
     expect(mapActivateError(new RecoveryConflictError(markerError()))).toEqual({
       status: 409,
       code: RECOVERY_CONFLICT_HTTP_CODE,

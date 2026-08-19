@@ -1,0 +1,55 @@
+name: Multitable O2 Observation Kit
+
+# Self-test for the O-2 enablement-ladder observation/drill kit. Hermetic, no
+# database, no secrets, no remote hosts — `node --test` directly against the
+# checked-out tree (same standalone shape as data-source-exposure-inventory.yml:
+# checkout + setup-node only, no pnpm install). The test proves the observation
+# SQL is read-only by construction, drift-guards its trigger/function/lock-key
+# literals against the authoritative migration, and enforces that every
+# host-reaching command in the drill runbook is marked OWNER-GATED. The
+# real-DB shape evidence (queries return the documented empty-baseline shapes
+# on a fresh migrated DB) is an authoring-time leg, not produced here.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multitable-o2-observation-kit.yml'
+      - 'scripts/ops/multitable-o2-observation.sql'
+      - 'scripts/ops/multitable-o2-observation.test.mjs'
+      - 'scripts/ops/multitable-o2-canary-drill.md'
+      # Drift-guard inputs: the test pins the observation queries' literals to
+      # these sources, so the PR that changes one of them re-runs this check
+      # instead of a later, unrelated PR going red.
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multitable-o2-observation-kit.yml'
+      - 'scripts/ops/multitable-o2-observation.sql'
+      - 'scripts/ops/multitable-o2-observation.test.mjs'
+      - 'scripts/ops/multitable-o2-canary-drill.md'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: observation-kit contract (read-only SQL census + runbook gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic observation-kit tests (no DB, no hosts)
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs
