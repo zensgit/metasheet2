@@ -182,4 +182,39 @@ describe('ApprovalUserPicker', () => {
     labels = Array.from(container!.querySelectorAll('option')).map((o) => o.textContent)
     expect(labels).toEqual(['Real Name · real@x.io'])
   })
+
+  // Discriminating negative (raw-id-exposure-fix follow-up, 20260819): `optionLabel()` used to
+  // fall back to the raw `option.id` whenever `option.name` was blank/absent -- the exact shape
+  // `searchApprovalDirectoryUsers` (api.ts) produces for a real backend directory record with a
+  // missing/non-string `name` (defaulted to `''`, not omitted, and not filtered out). Component-
+  // level coverage of the SAME defect the site-level `approval-e2e-lifecycle.spec.ts` negatives
+  // (加签/转交 dropdowns) exercise through ApprovalDetailView's wiring.
+  it('a directory user with no name never renders the raw id as option text (discriminating negative)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'user_9', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option'))
+    const labels = options.map((o) => o.textContent)
+    expect(labels).toEqual(['Alice · a@x.io', '成员 2'])
+    expect(labels.join('|')).not.toContain('user_9')
+    // The option VALUE (the real submit payload) is unaffected -- only the visible TEXT changed.
+    expect(options.map((o) => o.value)).toEqual(['u1', 'user_9'])
+  })
+
+  // Distinguishability: two nameless directory users must not collapse into one indistinguishable
+  // label -- an admin picking between them needs to be able to tell them apart.
+  it('two nameless directory users get mutually distinguishable ordinal labels', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'user_9', name: '', email: '' },
+      { id: 'user_42', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const labels = Array.from(container!.querySelectorAll('option')).map((o) => o.textContent)
+    expect(labels).toEqual(['成员 1', '成员 2'])
+    expect(new Set(labels).size).toBe(2)
+  })
 })

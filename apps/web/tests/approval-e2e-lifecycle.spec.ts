@@ -1393,6 +1393,55 @@ describe('Approval E2E Lifecycle', () => {
       // Values-free but still distinguishable — a stable ordinal, not a blank chip.
       expect(chips?.textContent?.trim()).toBe('成员 1')
     })
+
+    // Discriminating negative (raw-id-exposure-fix FOLLOW-UP, 20260819): ApprovalUserPicker's OWN
+    // `optionLabel()` used to fall back to the raw directory `option.id` for the DROPDOWN option
+    // text whenever `option.name` was blank -- one DOM layer ABOVE the add-sign chip label the two
+    // tests above already cover (that fix only touched `onAddSignUserSelected`'s stored label, not
+    // the picker's own dropdown). `user_9` (blank name) sits in the SAME directory fixture every
+    // other test in this describe block already uses. Neither dialog's placeholder here advertises
+    // id-based search (加签: "搜索并添加加签人"; 转交: "搜索并选择转交对象" -- see ApprovalDetailView.vue),
+    // so a raw id rendered as option TEXT on these two flows was a plain leak, not a documented
+    // search affordance.
+    it('the add-sign picker DROPDOWN never renders a raw id as option text, and stays distinguishable (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const options = Array.from(select.querySelectorAll('option'))
+      const labels = options.map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+      // The option VALUE (the real submit payload) is unaffected by the label fallback -- only
+      // the visible TEXT changed.
+      expect(options.map((o) => o.value)).toEqual(['user_2', 'user_3', 'user_4', 'user_9'])
+    })
+
+    it('the transfer picker DROPDOWN never renders a raw id as option text (same directory fixture, discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const transferBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '转交')
+      transferBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="转交审批"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+    })
   })
 
   // =========================================================================
